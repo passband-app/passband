@@ -12,20 +12,21 @@
 //! archives by removing a label and Outlook by moving to a folder, and a trait
 //! that spoke labels would force the second provider to pretend it has them.
 //!
-//! What crosses the seam is RFC822 bytes, which is why the MIME half of this
-//! module is provider-neutral: every builder in [`gmail`] that assembles a
-//! reply or a forward is reused verbatim by any transport that can post raw
-//! MIME.
+//! What crosses the seam is RFC822 bytes, so the construction of those bytes
+//! lives in [`mime`], which knows no provider at all: every builder that
+//! assembles a reply or a forward is reused verbatim by any transport that can
+//! post raw MIME.
 
 pub mod gmail;
+pub mod mime;
 
 use async_trait::async_trait;
 
-pub use gmail::{
-    ForwardAttachment, ForwardParts, ForwardedOriginal, GmailWriteClient, ParentHeaders,
-    ReplyParts, ReplyRecipients, build_forward_rfc822, build_references, build_reply_rfc822,
-    cc_excluding, default_recipient, derive_reply_recipients, forward_subject,
-    parse_forwarded_original, reply_subject,
+pub use gmail::GmailWriteClient;
+pub use mime::{
+    ForwardAttachment, ForwardParts, ForwardedOriginal, ParentHeaders, ReplyParts, ReplyRecipients,
+    build_forward_rfc822, build_references, build_reply_rfc822, cc_excluding, default_recipient,
+    derive_reply_recipients, forward_subject, parse_forwarded_original, reply_subject,
 };
 
 /// An error from a write operation: deliberately coarse and free of any

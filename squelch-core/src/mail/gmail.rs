@@ -478,14 +478,21 @@ impl<C: CredentialStore + ?Sized> GmailSource<C> {
 
     /// `format=metadata` with only To/Cc requested: headers, never bodies, so
     /// deep history costs one light call per sent message.
-    async fn metadata_recipients(&self, id: &str) -> Result<(GmailMessage, Vec<(String, Option<String>)>)> {
+    async fn metadata_recipients(
+        &self,
+        id: &str,
+    ) -> Result<(GmailMessage, Vec<(String, Option<String>)>)> {
         let url = format!(
             "{}/messages/{id}?format=metadata\
              &metadataHeaders=To&metadataHeaders=Cc",
             self.api_base
         );
         let msg: GmailMessage = self.get_json(&url).await?;
-        let headers = msg.payload.as_ref().map(|p| p.headers.clone()).unwrap_or_default();
+        let headers = msg
+            .payload
+            .as_ref()
+            .map(|p| p.headers.clone())
+            .unwrap_or_default();
         // Through mail-parser via header synthesis, so grouped lists, quoted
         // display names and RFC2047 encoding parse exactly as ingest does.
         let blob = synthesize_rfc822_headers(&headers);

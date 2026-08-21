@@ -25,9 +25,7 @@ use crate::mail::gmail::GmailSource;
 use crate::mail::{Cursor, MailSource, NewMessageRef};
 use crate::metrics::{RevisitVerdict, Stage1Verdict, Stage2Verdict, SyncMetrics};
 use crate::store::{ContactEntry, Stage2CapOverrides, Store, SyncState};
-use crate::sync::ingest::{
-    RawFetched, format_recipients, ingest_with_rules, is_robot_address,
-};
+use crate::sync::ingest::{RawFetched, format_recipients, ingest_with_rules, is_robot_address};
 use crate::triage::events;
 use crate::triage::extract::{self, CategoryExtractor, RowAction, banking, marketing, shipments};
 use crate::triage::stage1_llm::{self, HEURISTIC_ONLY};
@@ -582,7 +580,10 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 if addr.is_empty() || addr == self_addr || is_robot_address(&addr) {
                     continue;
                 }
-                let name = name.as_ref().map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+                let name = name
+                    .as_ref()
+                    .map(|n| n.trim().to_string())
+                    .filter(|n| !n.is_empty());
                 let entry = agg.entry(addr.clone()).or_insert_with(|| ContactEntry {
                     addr,
                     display_name: None,
@@ -2304,10 +2305,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         if self.source().provider() != "gmail" {
             return Ok(None);
         }
-        let Some(legacy) = self
-            .store
-            .sync_state(self.account_id, LEGACY_HISTORY_KEY)?
-        else {
+        let Some(legacy) = self.store.sync_state(self.account_id, LEGACY_HISTORY_KEY)? else {
             return Ok(None);
         };
         let adopted = legacy.last_uid.to_string();
@@ -2379,10 +2377,8 @@ mod tests {
     use super::*;
     use base64::Engine as _;
 
-    use crate::mail::gmail::{
-        LABEL_INBOX, LABEL_SENT, MessageHeader, synthesize_rfc822_headers,
-    };
     use crate::config::Stage1Config;
+    use crate::mail::gmail::{LABEL_INBOX, LABEL_SENT, MessageHeader, synthesize_rfc822_headers};
     use crate::store::SqliteStore;
     use crate::types::{Disposition, NewMessage, Tier, TriageAxis};
 
@@ -2856,16 +2852,9 @@ mod tests {
 
     // ---- base64url raw decode ---------------------------------------------
 
-
-
-
     // ---- history cursor advance -------------------------------------------
 
-
     // ---- 404 / expired-history fallback decision --------------------------
-
-
-
 
     // ---- header synthesis for metadata-only sent seeding ------------------
 
@@ -2908,10 +2897,7 @@ mod tests {
         assert!(!store.is_known_contact(acct, "me@example.com").unwrap());
     }
 
-
     // ---- internalDate parsing ---------------------------------------------
-
-
 
     // ---- ingest pipeline invariants (unchanged behavior) ------------------
 
@@ -3125,7 +3111,12 @@ mod tests {
         // position instead of not at all.
         let store = SqliteStore::open_in_memory().unwrap();
         let acct = store.ensure_account("me@example.com").unwrap();
-        assert!(store.sync_state(acct, LEGACY_HISTORY_KEY).unwrap().is_none());
+        assert!(
+            store
+                .sync_state(acct, LEGACY_HISTORY_KEY)
+                .unwrap()
+                .is_none()
+        );
 
         let big = (u32::MAX as u64) + 123_456;
         store
@@ -3141,8 +3132,6 @@ mod tests {
         let s = store.sync_state(acct, LEGACY_HISTORY_KEY).unwrap().unwrap();
         assert_eq!(s.last_uid, big);
     }
-
-
 
     // ---- the two-walk incremental poll, on the wire ------------------------
     //
@@ -3539,7 +3528,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(cursor_of(&store, acct), Some(500), "not dragged back to 100");
+        assert_eq!(
+            cursor_of(&store, acct),
+            Some(500),
+            "not dragged back to 100"
+        );
     }
 
     #[tokio::test]

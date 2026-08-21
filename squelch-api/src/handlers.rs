@@ -17,10 +17,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use squelch_core::CoreError;
 use squelch_core::config::{CACHE_READ_INPUT_MULT, CACHE_WRITE_INPUT_MULT};
+use squelch_core::mail::gmail::{decode_raw_b64url, parse_internal_date};
 use squelch_core::store::{
     ActionMessageRef, Draft, NewAuditEntry, SearchFilter, SitrepBand, SqliteStore, Store,
 };
-use squelch_core::mail::gmail::{decode_raw_b64url, parse_internal_date};
 use squelch_core::triage::llm::Usage;
 use squelch_core::triage::rule_infer;
 use squelch_core::types::{AccountId, AttentionStatus, Disposition, ShredStats, Tier, TriageAxis};
@@ -30,14 +30,14 @@ use std::time::Duration;
 use crate::error::ApiError;
 use std::sync::Arc;
 
-use crate::write::{GmailWriteClient, MailWriter};
-use crate::write::{
-    ForwardParts, ReplyParts, SentRef, WriteError, build_forward_rfc822,
-    build_references, build_reply_rfc822, cc_excluding, derive_reply_recipients, forward_subject,
-    parse_forwarded_original, reply_subject,
-};
 use crate::guard;
 use crate::state::ApiState;
+use crate::write::{
+    ForwardParts, ReplyParts, SentRef, WriteError, build_forward_rfc822, build_references,
+    build_reply_rfc822, cc_excluding, derive_reply_recipients, forward_subject,
+    parse_forwarded_original, reply_subject,
+};
+use crate::write::{GmailWriteClient, MailWriter};
 
 /// Default page size when `limit` is omitted, and the hard ceiling we clamp to.
 const DEFAULT_LIMIT: u32 = 50;

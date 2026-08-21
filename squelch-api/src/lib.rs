@@ -11,7 +11,6 @@ mod console;
 mod devices;
 mod error;
 mod events;
-pub mod write;
 pub mod guard;
 mod handlers;
 mod markdown;
@@ -19,6 +18,7 @@ mod pair;
 mod state;
 pub mod tracking;
 pub mod unsubscribe;
+pub mod write;
 
 pub use assistant::AssistantRelay;
 pub use auth::require_bearer;

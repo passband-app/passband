@@ -961,7 +961,10 @@ fn the_sync_cursor_round_trips_verbatim_and_is_scoped_per_account() {
 
     // Upsert, not insert: one cursor per key, overwritten in place.
     store.set_sync_cursor(acct, "cursor", "77").unwrap();
-    assert_eq!(store.sync_cursor(acct, "cursor").unwrap().as_deref(), Some("77"));
+    assert_eq!(
+        store.sync_cursor(acct, "cursor").unwrap().as_deref(),
+        Some("77")
+    );
     let rows: i64 = store
         .lock()
         .unwrap()
@@ -971,7 +974,10 @@ fn the_sync_cursor_round_trips_verbatim_and_is_scoped_per_account() {
 
     // Distinct keys coexist, and another account's cursor is not this one's.
     store.set_sync_cursor(acct, "other", "x").unwrap();
-    assert_eq!(store.sync_cursor(acct, "cursor").unwrap().as_deref(), Some("77"));
+    assert_eq!(
+        store.sync_cursor(acct, "cursor").unwrap().as_deref(),
+        Some("77")
+    );
     let other = store.ensure_account("other@example.com").unwrap();
     assert!(store.sync_cursor(other, "cursor").unwrap().is_none());
 }

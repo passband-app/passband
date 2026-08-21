@@ -938,3 +938,58 @@ fn inbox_unread_counts_round_trip_and_overwrite_one_row() {
     let other = store.ensure_account("other@example.com").unwrap();
     assert!(store.inbox_unread(other).unwrap().is_none());
 }
+
+// ---- Sync cursor + message-presence guard -----------------------------
+
+#[test]
+fn the_sync_cursor_round_trips_verbatim_and_is_scoped_per_account() {
+    let (store, acct) = store();
+
+    // Absent is absent: a first run must be able to tell "never synced" from
+    // any stored value, including one that looks empty.
+    assert!(store.sync_cursor(acct, "cursor").unwrap().is_none());
+
+    // VERBATIM is the whole contract. The value is provider-encoded — Gmail's
+    // decimal historyId here, but Graph stores a JSON blob of deltaLink URLs —
+    // and nothing between the write and the read may reshape it.
+    let graphish = r#"{"inbox":"https://graph.example/delta?$deltatoken=a%20b+c","sent":null}"#;
+    store.set_sync_cursor(acct, "cursor", graphish).unwrap();
+    assert_eq!(
+        store.sync_cursor(acct, "cursor").unwrap().as_deref(),
+        Some(graphish)
+    );
+
+    // Upsert, not insert: one cursor per key, overwritten in place.
+    store.set_sync_cursor(acct, "cursor", "77").unwrap();
+    assert_eq!(store.sync_cursor(acct, "cursor").unwrap().as_deref(), Some("77"));
+    let rows: i64 = store
+        .lock()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM sync_cursor", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 1, "one row per (account, key)");
+
+    // Distinct keys coexist, and another account's cursor is not this one's.
+    store.set_sync_cursor(acct, "other", "x").unwrap();
+    assert_eq!(store.sync_cursor(acct, "cursor").unwrap().as_deref(), Some("77"));
+    let other = store.ensure_account("other@example.com").unwrap();
+    assert!(store.sync_cursor(other, "cursor").unwrap().is_none());
+}
+
+#[test]
+fn has_message_answers_per_account_on_the_provider_id() {
+    let (store, acct) = store();
+    let now = Utc::now();
+    ingest_normal(&store, acct, "g-known", "t-known", Tier::Signal, 50, now);
+
+    // The skip guard the incremental walk consults before spending a MIME
+    // fetch on something already ingested.
+    assert!(store.has_message(acct, "g-known").unwrap());
+    assert!(!store.has_message(acct, "g-unknown").unwrap());
+
+    // Per account: the same provider id under another mailbox is not stored
+    // here. Gmail ids are per-mailbox anyway, but the answer must not leak
+    // across the account boundary the unique key is half of.
+    let other = store.ensure_account("other@example.com").unwrap();
+    assert!(!store.has_message(other, "g-known").unwrap());
+}

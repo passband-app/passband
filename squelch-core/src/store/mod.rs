@@ -1263,6 +1263,26 @@ pub trait Store: Send + Sync {
     fn set_sync_state(&self, account_id: AccountId, mailbox: &str, state: &SyncState)
     -> Result<()>;
 
+    /// Read this account's opaque sync cursor under `key`, if one is stored.
+    ///
+    /// The value is PROVIDER-ENCODED and must never be parsed outside the
+    /// transport that wrote it: Gmail stores a decimal historyId, Graph a JSON
+    /// object of per-folder deltaLinks. The engine round-trips it verbatim.
+    fn sync_cursor(&self, account_id: AccountId, key: &str) -> Result<Option<String>>;
+
+    /// Upsert this account's opaque sync cursor under `key`.
+    fn set_sync_cursor(&self, account_id: AccountId, key: &str, value: &str) -> Result<()>;
+
+    /// Whether a message with this PROVIDER-NATIVE id is already stored.
+    ///
+    /// The skip guard on incremental sync. Gmail's history walk reports a
+    /// message once, when it is added, so this is merely cheap there; Graph's
+    /// delta rounds re-report an item on ANY change — an `isRead` flip from the
+    /// user reading mail on their phone included — so without this the daemon
+    /// would re-download the full MIME of everything it has already ingested on
+    /// every poll.
+    fn has_message(&self, account_id: AccountId, provider_msg_id: &str) -> Result<bool>;
+
     /// The last Gmail INBOX unread counts the sync loop stored, or `None` when
     /// none were ever fetched (old DB, or every fetch so far has failed). `None`
     /// is NOT zero and callers must keep the distinction: zero unread is a real

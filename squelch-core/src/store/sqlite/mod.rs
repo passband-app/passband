@@ -745,6 +745,18 @@ impl Store for SqliteStore {
         self.set_sync_state(account_id, mailbox, state)
     }
 
+    fn sync_cursor(&self, account_id: AccountId, key: &str) -> Result<Option<String>> {
+        self.sync_cursor(account_id, key)
+    }
+
+    fn set_sync_cursor(&self, account_id: AccountId, key: &str, value: &str) -> Result<()> {
+        self.set_sync_cursor(account_id, key, value)
+    }
+
+    fn has_message(&self, account_id: AccountId, provider_msg_id: &str) -> Result<bool> {
+        self.has_message(account_id, provider_msg_id)
+    }
+
     fn inbox_unread(&self, account_id: AccountId) -> Result<Option<InboxUnread>> {
         self.inbox_unread(account_id)
     }

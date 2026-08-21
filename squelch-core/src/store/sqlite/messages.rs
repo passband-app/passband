@@ -775,6 +775,43 @@ impl SqliteStore {
         Ok(())
     }
 
+    pub(super) fn sync_cursor(&self, account_id: AccountId, key: &str) -> Result<Option<String>> {
+        let conn = self.lock()?;
+        let row = conn
+            .query_row(
+                "SELECT value FROM sync_cursor WHERE account_id=?1 AND key=?2",
+                params![account_id, key],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    pub(super) fn set_sync_cursor(
+        &self,
+        account_id: AccountId,
+        key: &str,
+        value: &str,
+    ) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO sync_cursor(account_id, key, value) VALUES(?1,?2,?3)
+             ON CONFLICT(account_id, key) DO UPDATE SET value=excluded.value",
+            params![account_id, key, value],
+        )?;
+        Ok(())
+    }
+
+    pub(super) fn has_message(&self, account_id: AccountId, provider_msg_id: &str) -> Result<bool> {
+        let conn = self.lock()?;
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE account_id=?1 AND gmail_msg_id=?2",
+            params![account_id, provider_msg_id],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
     pub(super) fn inbox_unread(&self, account_id: AccountId) -> Result<Option<InboxUnread>> {
         let conn = self.lock()?;
         conn.query_row(

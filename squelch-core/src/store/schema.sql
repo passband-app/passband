@@ -586,15 +586,34 @@ CREATE INDEX IF NOT EXISTS idx_triage_revisits_due
 CREATE INDEX IF NOT EXISTS idx_triage_revisits_msg
     ON triage_revisits(account_id, message_id);
 
--- Gmail sync cursor, keyed by a logical mailbox string. Exactly one row is
--- stored, keyed mailbox='history': uidvalidity is unused (0) and last_uid holds
--- the account's historyId (a u64 that fits SQLite's i64 INTEGER).
+-- LEGACY Gmail sync cursor plus the one-shot sweep flags, keyed by a logical
+-- mailbox string. The mailbox='history' row WAS the sync cursor: uidvalidity
+-- unused (0) and last_uid holding the account's historyId. That role moved to
+-- `sync_cursor` (below) when the transport grew a second provider, and the
+-- 'history' row now survives for ONE purpose: an install that predates the move
+-- adopts it as its opening cursor rather than re-backfilling its whole window.
+-- The other keys here ('sent_contacts', 'sent_recipients') are still live —
+-- they are completion flags, not cursors, and last_uid >= 1 means "done".
 CREATE TABLE IF NOT EXISTS sync_state (
     account_id  INTEGER NOT NULL,
     mailbox     TEXT NOT NULL,
     uidvalidity INTEGER NOT NULL,
     last_uid    INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(account_id, mailbox)
+);
+
+-- THE SYNC CURSOR, as an opaque provider-encoded string.
+--
+-- TEXT, not the INTEGER `sync_state` held, because a cursor is only ever
+-- round-tripped and providers do not agree on its shape: Gmail's is a decimal
+-- historyId, Microsoft Graph's is a per-folder set of deltaLink URLs. Nothing
+-- outside the provider's own transport may parse this value; the sync engine
+-- reads it, hands it back, and stores whatever it is given.
+CREATE TABLE IF NOT EXISTS sync_cursor (
+    account_id INTEGER NOT NULL,
+    key        TEXT NOT NULL,
+    value      TEXT NOT NULL,
+    PRIMARY KEY(account_id, key)
 );
 
 -- GMAIL-SIDE INBOX UNREAD COUNTS (labels/INBOX messagesUnread/threadsUnread),

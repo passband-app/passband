@@ -1,8 +1,13 @@
-//! Gmail WRITE operations — the ONLY write capability in squelch. Lives here,
-//! not in squelch-core, so the sync/triage core stays provably write-free.
-//! The write token is fetched PER REQUEST from a [`CredentialStore`] bound to
-//! [`CredentialKind::Write`], dropped when the call returns, and never reachable
-//! from a read path. Tokens, auth headers and bodies are NEVER logged.
+//! The Gmail write transport: `messages.modify`, `messages.send`,
+//! `messages.get`, behind [`MailWriter`].
+//!
+//! Everything in this file that assembles RFC822 — replies, forwards,
+//! recipient derivation, boundary selection — is PROVIDER-NEUTRAL and is
+//! re-exported from [`crate::write`] for any transport that can post raw MIME.
+//! Only the handful of request builders and [`GmailWriteClient`] itself speak
+//! Gmail.
+//!
+//! Tokens, auth headers and bodies are NEVER logged.
 
 use base64::Engine as _;
 // The per-part MIME accessors a forward reads (`content_id`,
@@ -19,32 +24,7 @@ use squelch_core::store::ActionMessageRef;
 use squelch_core::mail::gmail::{GMAIL_API_BASE, GmailMessage, LABEL_INBOX};
 use squelch_core::types::AccountId;
 
-/// An error from a write operation: deliberately coarse and free of any
-/// token/body content.
-#[derive(Debug)]
-pub enum WriteError {
-    /// No write credential is configured/stored (run `squelchd auth --write`).
-    MissingCredential(String),
-    /// The Gmail API returned a non-success status.
-    Api { status: u16, message: String },
-    /// A local/transport failure (network, serialization, credential store).
-    Transport(String),
-    /// The caller passed invalid input (e.g. empty send body).
-    Invalid(String),
-}
-
-impl std::fmt::Display for WriteError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            WriteError::MissingCredential(m) => write!(f, "{m}"),
-            WriteError::Api { status, message } => {
-                write!(f, "gmail api status {status}: {message}")
-            }
-            WriteError::Transport(m) => write!(f, "{m}"),
-            WriteError::Invalid(m) => write!(f, "{m}"),
-        }
-    }
-}
+use crate::write::{FetchedRaw, MailWriter, SentRef, WriteError};
 
 /// The modify JSON body. Empty arrays are still sent (harmless no-ops) so the
 /// shape is uniform.
@@ -553,27 +533,6 @@ pub fn cc_excluding(cc: &str, to: &str) -> String {
         .join(", ")
 }
 
-/// What `messages.send` echoed back about the message it created. Parsed
-/// leniently — both fields `None` on a `{}` response — because the send has
-/// ALREADY succeeded by the time this is built: a missing id costs us the local
-/// echo, never the request.
-#[derive(Debug, Default, Clone)]
-pub struct SentRef {
-    pub id: Option<String>,
-    pub thread_id: Option<String>,
-}
-
-/// One `format=raw` message as Gmail returns it: the base64url RFC822 body plus
-/// the ids/date it carries alongside. Decoding is the caller's job (core owns
-/// `decode_raw_b64url`).
-#[derive(Debug, Clone)]
-pub struct FetchedRaw {
-    pub raw_b64: String,
-    pub thread_id: Option<String>,
-    /// Milliseconds since epoch as a decimal string (Gmail's `internalDate`).
-    pub internal_date: Option<String>,
-}
-
 /// Executes Gmail write ops with a WRITE-bound credential store. The token is
 /// fetched per call and never retained.
 pub struct GmailWriteClient {
@@ -669,8 +628,12 @@ impl GmailWriteClient {
             .map_err(|e| WriteError::Transport(format!("gmail json decode: {e}")))
     }
 
+}
+
+#[async_trait::async_trait]
+impl MailWriter for GmailWriteClient {
     /// `messages.modify`: add/remove labels on a Gmail message.
-    pub async fn modify(
+    async fn modify(
         &self,
         gmail_msg_id: &str,
         add: &[String],
@@ -682,7 +645,7 @@ impl GmailWriteClient {
     }
 
     /// Archive: remove the INBOX label.
-    pub async fn archive(&self, gmail_msg_id: &str) -> Result<(), WriteError> {
+    async fn archive(&self, gmail_msg_id: &str) -> Result<(), WriteError> {
         self.modify(gmail_msg_id, &[], &[LABEL_INBOX.to_string()])
             .await
     }
@@ -691,7 +654,7 @@ impl GmailWriteClient {
     /// Trashed mail is recoverable for 30 days, and permanent delete requires
     /// the full `https://mail.google.com/` scope, which squelch never requests:
     /// the blast radius is capped by the OAuth scope, not by our restraint.
-    pub async fn trash(&self, gmail_msg_id: &str) -> Result<(), WriteError> {
+    async fn trash(&self, gmail_msg_id: &str) -> Result<(), WriteError> {
         let url = format!("{}/messages/{gmail_msg_id}/trash", self.base);
         self.post_json(&url, &serde_json::json!({}))
             .await
@@ -704,7 +667,7 @@ impl GmailWriteClient {
     /// ONE fetch serves both uses: a reply-all send threads and derives its
     /// audience from the same response, so asking for the address headers costs
     /// no extra round trip even when nobody wants them.
-    pub async fn parent_headers(&self, gmail_msg_id: &str) -> Result<ParentHeaders, WriteError> {
+    async fn parent_headers(&self, gmail_msg_id: &str) -> Result<ParentHeaders, WriteError> {
         let url = format!(
             "{}/messages/{gmail_msg_id}\
              ?format=metadata&metadataHeaders=Message-ID&metadataHeaders=References\
@@ -747,7 +710,7 @@ impl GmailWriteClient {
 
     /// `messages.send`: send a raw RFC822 message, optionally threaded. Returns
     /// what Gmail echoed about the created message (see [`SentRef`]).
-    pub async fn send(&self, raw: &[u8], thread_id: Option<&str>) -> Result<SentRef, WriteError> {
+    async fn send(&self, raw: &[u8], thread_id: Option<&str>) -> Result<SentRef, WriteError> {
         let url = format!("{}/messages/send", self.base);
         let body = send_body(raw, thread_id);
         let v = self.post_json(&url, &body).await?;
@@ -759,7 +722,7 @@ impl GmailWriteClient {
 
     /// Read a just-sent message with the WRITE token, to echo it into the local
     /// store: the read credential does not see Sent mail between polls.
-    pub async fn fetch_raw(&self, gmail_msg_id: &str) -> Result<FetchedRaw, WriteError> {
+    async fn fetch_raw(&self, gmail_msg_id: &str) -> Result<FetchedRaw, WriteError> {
         let url = format!("{}/messages/{gmail_msg_id}?format=raw", self.base);
         let msg: GmailMessage = self.get_json(&url).await?;
         Ok(FetchedRaw {
@@ -769,6 +732,7 @@ impl GmailWriteClient {
         })
     }
 }
+
 
 /// The default reply recipient: the original sender's address.
 pub fn default_recipient(msg: &ActionMessageRef) -> String {

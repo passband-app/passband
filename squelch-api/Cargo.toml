@@ -49,9 +49,9 @@ pulldown-cmark = { version = "0.13", default-features = false, features = ["html
 # both doors read a display name containing a comma the same way — splitting on
 # commas ourselves is what would produce a wrong (or attacker-chosen) audience.
 mail-parser = { workspace = true }
+# The MailWriter provider seam, and the stub CredentialStore its tests use.
+async-trait = { workspace = true }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
-# Implementing a stub CredentialStore in write-client tests.
-async-trait = { workspace = true }

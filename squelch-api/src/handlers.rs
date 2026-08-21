@@ -28,8 +28,11 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::error::ApiError;
-use crate::gmail_write::{
-    ForwardParts, GmailWriteClient, ReplyParts, SentRef, WriteError, build_forward_rfc822,
+use std::sync::Arc;
+
+use crate::write::{GmailWriteClient, MailWriter};
+use crate::write::{
+    ForwardParts, ReplyParts, SentRef, WriteError, build_forward_rfc822,
     build_references, build_reply_rfc822, cc_excluding, derive_reply_recipients, forward_subject,
     parse_forwarded_original, reply_subject,
 };
@@ -2071,14 +2074,19 @@ async fn resolve_sender_done(state: &ApiState, sender: &str) {
     .await;
 }
 
-/// Resolve the WRITE-bound gmail client, or 403 with a hint if none configured.
-fn write_client(state: &ApiState) -> Result<GmailWriteClient, ApiError> {
+/// Resolve the WRITE-bound mail writer, or 403 with a hint if none configured.
+///
+/// A trait object, not the concrete client: which provider this daemon writes
+/// to is decided once, here, and no action handler downstream can tell.
+fn write_client(state: &ApiState) -> Result<Arc<dyn MailWriter>, ApiError> {
     match state.write_creds() {
         Some(creds) => Ok(match state.write_api_base() {
-            Some(base) => {
-                GmailWriteClient::with_base(creds.clone(), state.account_id, base.to_string())
-            }
-            None => GmailWriteClient::new(creds.clone(), state.account_id),
+            Some(base) => Arc::new(GmailWriteClient::with_base(
+                creds.clone(),
+                state.account_id,
+                base.to_string(),
+            )),
+            None => Arc::new(GmailWriteClient::new(creds.clone(), state.account_id)),
         }),
         None => Err(ApiError::new(
             StatusCode::FORBIDDEN,
@@ -2137,7 +2145,7 @@ async fn guarded_action<F, Fut>(
     call: F,
 ) -> Result<(), ApiError>
 where
-    F: FnOnce(GmailWriteClient, ActionMessageRef) -> Fut,
+    F: FnOnce(Arc<dyn MailWriter>, ActionMessageRef) -> Fut,
     Fut: std::future::Future<Output = Result<(), WriteError>>,
 {
     let target = Some(message_id.to_string());
@@ -2278,7 +2286,7 @@ pub struct SendBody {
     /// the rest of its To/Cc minus this account. Requires
     /// `reply_to_message_id` — there is no audience to widen without a parent —
     /// and absent means today's single-recipient reply, so every existing caller
-    /// is unchanged. See [`crate::gmail_write::derive_reply_recipients`].
+    /// is unchanged. See [`crate::write::derive_reply_recipients`].
     #[serde(default)]
     reply_all: bool,
     /// Explicit subject (overrides the reply-derived subject).
@@ -2323,7 +2331,7 @@ pub struct SendBody {
 /// `ok:<local id>`.
 async fn echo_sent(
     state: &ApiState,
-    client: &GmailWriteClient,
+    client: &dyn MailWriter,
     target: Option<String>,
     sent: &SentRef,
 ) -> Option<i64> {
@@ -2615,7 +2623,7 @@ pub async fn action_send(
     };
 
     if let Some(original_id) = body.forward_of_message_id {
-        return forward_send(&state, &body, &client, target, original_id, matches).await;
+        return forward_send(&state, &body, client.as_ref(), target, original_id, matches).await;
     }
 
     let (parent, thread_id) = match body.reply_to_message_id {
@@ -2764,7 +2772,7 @@ pub async fn action_send(
             audit_action(&state, "send", target.clone(), &outcome).await;
             // The mail is away; everything below is bookkeeping that cannot fail
             // the request.
-            let echo_message_id = echo_sent(&state, &client, target, &sent).await;
+            let echo_message_id = echo_sent(&state, client.as_ref(), target, &sent).await;
             if let (Some((token, _)), Some(message_id)) = (&tracker, echo_message_id) {
                 link_tracker(&state, token, message_id).await;
             }
@@ -2821,7 +2829,7 @@ fn forward_raw_too_large(len: usize) -> bool {
 async fn forward_send(
     state: &ApiState,
     body: &SendBody,
-    client: &GmailWriteClient,
+    client: &dyn MailWriter,
     target: Option<String>,
     original_id: i64,
     note_kinds: Vec<&'static str>,

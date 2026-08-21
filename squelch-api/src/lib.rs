@@ -11,7 +11,7 @@ mod console;
 mod devices;
 mod error;
 mod events;
-pub mod gmail_write;
+pub mod write;
 pub mod guard;
 mod handlers;
 mod markdown;

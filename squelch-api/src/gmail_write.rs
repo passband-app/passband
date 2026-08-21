@@ -14,9 +14,9 @@ use serde_json::{Value, json};
 use squelch_core::credentials::CredentialStore;
 use squelch_core::store::ActionMessageRef;
 // The Gmail endpoint, the INBOX label and the Gmail-API response shapes are
-// defined once in core sync; the write path reuses them rather than re-deriving
-// its own copy. Archiving == removing `LABEL_INBOX`.
-use squelch_core::sync::{GMAIL_API_BASE, GmailMessage, LABEL_INBOX};
+// defined once in core's Gmail transport; the write path reuses them rather
+// than re-deriving its own copy. Archiving == removing `LABEL_INBOX`.
+use squelch_core::mail::gmail::{GMAIL_API_BASE, GmailMessage, LABEL_INBOX};
 use squelch_core::types::AccountId;
 
 /// An error from a write operation: deliberately coarse and free of any

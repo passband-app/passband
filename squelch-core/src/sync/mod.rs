@@ -1,9 +1,11 @@
-//! Gmail sync: REST + polling. REST, not IMAP — the read-only `gmail.readonly`
-//! scope works over REST and IMAP XOAUTH2 rejects it. First run backfills
-//! `backfill_days` of INBOX+SENT and records the `historyId`; after that
-//! `history.list` polls `messageAdded` under BOTH labels — INBOX for incoming
-//! mail, SENT for whatever the user wrote from another client — a 404 falling
-//! back to a full catch-up.
+//! The sync ENGINE: cadence, ingest, and the triage passes that refine what
+//! landed. The wire protocol lives behind [`MailSource`](crate::mail::MailSource)
+//! — see [`crate::mail`] for why the seam sits where it does.
+//!
+//! First run lists `backfill_days` of both mailboxes and takes a cursor; after
+//! that each tick asks the source what changed, with an expired cursor falling
+//! back to a fresh listing. Everything from the RFC822 bytes inward — sealing,
+//! Stage-1, Stage-2, the extractors, re-evaluation — is provider-blind.
 //! Tokens, headers and bodies are NEVER logged; ingest seals first (SECURITY.md).
 
 pub mod html;
@@ -14,18 +16,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use base64::Engine as _;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use reqwest::StatusCode;
-use serde::Deserialize;
 
 use crate::config::{Config, ResolvedLlm, Stage2Provider};
 use crate::credentials::CredentialStore;
 use crate::error::{CoreError, Result};
-use crate::metrics::{GmailErrorKind, RevisitVerdict, Stage1Verdict, Stage2Verdict, SyncMetrics};
+use crate::mail::gmail::GmailSource;
+use crate::mail::{Cursor, MailSource, NewMessageRef};
+use crate::metrics::{RevisitVerdict, Stage1Verdict, Stage2Verdict, SyncMetrics};
 use crate::store::{ContactEntry, Stage2CapOverrides, Store, SyncState};
 use crate::sync::ingest::{
-    RawFetched, collect_mailboxes, format_recipients, ingest_with_rules, is_robot_address,
+    RawFetched, format_recipients, ingest_with_rules, is_robot_address,
 };
 use crate::triage::events;
 use crate::triage::extract::{self, CategoryExtractor, RowAction, banking, marketing, shipments};
@@ -35,18 +36,14 @@ use crate::triage::{STALE_SKIP_MODEL, retriage_forced};
 use crate::triage::{Stage1RowAction, stage1_sealed_guard, stage2_sealed_guard};
 use crate::types::{AccountId, SenderRule, Sensitivity};
 
-/// Gmail REST base for the authenticated user. Fixed; not user-tunable. `pub`
-/// so squelch-api's write path targets the same host from one definition.
-pub const GMAIL_API_BASE: &str = "https://gmail.googleapis.com/gmail/v1/users/me";
+/// The `sync_cursor` row key for this account's opaque transport cursor.
+const CURSOR_KEY: &str = "cursor";
 
-/// The INBOX system label. `pub` because the write path archives by removing
-/// exactly this label.
-pub const LABEL_INBOX: &str = "INBOX";
-/// The SENT system label.
-const LABEL_SENT: &str = "SENT";
-
-/// The single `sync_state` row key for the REST engine's historyId cursor.
-const HISTORY_KEY: &str = "history";
+/// The PRE-SEAM `sync_state` row key the Gmail historyId used to live under.
+/// Read exactly once per install, by [`SyncEngine::load_cursor`], so a daemon
+/// upgrading into the two-provider world resumes from where it was instead of
+/// re-backfilling its whole window.
+const LEGACY_HISTORY_KEY: &str = "history";
 
 /// `sync_state` row key for the one-time Sent-contacts harvest's done flag
 /// (`last_uid >= 1` = complete; absent/0 = redo on next daemon start).
@@ -109,6 +106,17 @@ fn ship_stale_cutoff(now: DateTime<Utc>, carrier_max_age_days: u32) -> DateTime<
     now - ChronoDuration::days(carrier_max_age_days as i64)
 }
 
+/// Split a [`PollOutcome`](crate::mail::PollOutcome)'s refs into `(inbox,
+/// sent)`, preserving the
+/// source's order within each half.
+///
+/// The two halves are ingested SEPARATELY rather than as one list because they
+/// do not fail the same way: an inbox failure is the batch's failure, while a
+/// sent failure holds the cursor and waits for the next tick.
+fn split_by_mailbox(refs: Vec<NewMessageRef>) -> (Vec<NewMessageRef>, Vec<NewMessageRef>) {
+    refs.into_iter().partition(|r| !r.is_sent)
+}
+
 /// Reconnect / retry backoff bounds for the outer driver loop.
 const BACKOFF_START: Duration = Duration::from_secs(2);
 const BACKOFF_CAP: Duration = Duration::from_secs(5 * 60);
@@ -140,181 +148,6 @@ fn redact_sender(from_addr: &str) -> String {
         hex.push_str(&format!("{b:02x}"));
     }
     format!("sender#{hex}")
-}
-
-/// Decode a base64url (Gmail `format=raw`) payload into RFC822 bytes. Gmail
-/// usually omits padding; both padded and unpadded input are accepted. Errors
-/// are surfaced without content so one bad message can't poison the batch.
-pub fn decode_raw_b64url(s: &str) -> Result<Vec<u8>> {
-    // MEMORY GUARD: bound peak ingest memory ourselves rather than inheriting
-    // Gmail's ~50MB limit. b64 length upper-bounds the decoded size.
-    const MAX_RAW_BYTES: usize = 64 * 1024 * 1024;
-    let t = s.trim();
-    if t.len() / 4 * 3 > MAX_RAW_BYTES {
-        return Err(CoreError::InvalidInput(
-            "raw message exceeds the 64MB ingest bound".to_string(),
-        ));
-    }
-    // Try no-pad first (Gmail's usual shape), then the padded variant.
-    base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(t)
-        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(t))
-        .map_err(|e| CoreError::InvalidInput(format!("base64url decode failed: {e}")))
-}
-
-/// Decide whether the incremental poll can proceed or a fresh catch-up is
-/// required. `expired` reflects an HTTP 404 from `history.list` (Gmail drops
-/// history older than ~a week); a 0/absent `cursor` means first run. Pure, so
-/// the 404-fallback path is unit-testable without a network.
-pub fn history_poll_decision(cursor: Option<u64>, expired: bool) -> HistoryDecision {
-    match cursor {
-        Some(id) if id > 0 && !expired => HistoryDecision::Incremental(id),
-        _ => HistoryDecision::FullCatchUp,
-    }
-}
-
-/// The outcome of [`history_poll_decision`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HistoryDecision {
-    /// Poll `history.list` starting from this historyId.
-    Incremental(u64),
-    /// historyId is absent or expired: do a fresh backfill-window catch-up.
-    FullCatchUp,
-}
-
-/// Advance a historyId cursor to the max of itself and every `historyId`
-/// observed in a page — never backwards. Pure, so it is unit-testable.
-pub fn advance_history_cursor(current: u64, observed: impl IntoIterator<Item = u64>) -> u64 {
-    observed.into_iter().fold(current, u64::max)
-}
-
-/// Drop from `ids` every id also in `claimed`, preserving order. Used to hand the
-/// SENT batch only what the INBOX batch did NOT already ingest: a self-addressed
-/// message carries both labels, and the store's message upsert writes
-/// `is_sent = excluded.is_sent` on conflict, so re-ingesting it as sent would
-/// hide the visible copy. Pure, so the precedence rule is unit-testable.
-fn subtract_ids(ids: Vec<String>, claimed: &[String]) -> Vec<String> {
-    if claimed.is_empty() {
-        return ids;
-    }
-    let claimed: std::collections::HashSet<&str> = claimed.iter().map(|s| s.as_str()).collect();
-    ids.into_iter()
-        .filter(|id| !claimed.contains(id.as_str()))
-        .collect()
-}
-
-// ---- Gmail REST response shapes (only the fields we consume) ---------------
-// These model the GMAIL API's own JSON, never squelch's client-facing wire
-// contracts. squelch-api's write path deserializes the same Gmail resources, so
-// the shared ones are `pub` here and defined exactly once.
-
-#[derive(Debug, Deserialize)]
-struct MessageRef {
-    id: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ListMessagesResp {
-    #[serde(default)]
-    messages: Vec<MessageRef>,
-    #[serde(default)]
-    next_page_token: Option<String>,
-}
-
-/// A Gmail `users.messages.get` resource, across every format squelch asks for:
-/// `format=raw` fills `raw`, `format=metadata` fills `payload.headers`, and a
-/// field the requested format omits simply stays `None`/empty.
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GmailMessage {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub thread_id: Option<String>,
-    /// base64url of the full RFC822 message (present with `format=raw`).
-    #[serde(default)]
-    pub raw: Option<String>,
-    /// Milliseconds since epoch as a decimal string (Gmail's `internalDate`).
-    #[serde(default)]
-    pub internal_date: Option<String>,
-    /// MIME structure (present with `format=metadata`/`full`); squelch reads
-    /// only its headers.
-    #[serde(default)]
-    pub payload: Option<MessagePayload>,
-}
-
-/// The `payload` object of a Gmail message; only `headers` is consumed.
-#[derive(Debug, Default, Deserialize)]
-pub struct MessagePayload {
-    #[serde(default)]
-    pub headers: Vec<MessageHeader>,
-}
-
-/// A single Gmail `payload.headers[]` entry. Also what the contacts-seeding
-/// tests build to exercise header parsing via `synthesize_rfc822_headers`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct MessageHeader {
-    pub name: String,
-    pub value: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ProfileResp {
-    history_id: String,
-}
-
-/// A Gmail `users.labels.get` resource; only the unread pair is read, and both
-/// counters default to 0 because Gmail omits them on a label with nothing in it.
-///
-/// `id` is required for exactly that reason: with only defaulted fields, ANY
-/// 200 body — `{}`, an error envelope, some proxy's interstitial — would decode
-/// to a confident `(0, 0)` and overwrite real counts. Requiring the one field
-/// every label resource carries turns those bodies into decode errors, which
-/// the caller keeps its last known counts through.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct LabelResp {
-    /// Never read; its presence is the check.
-    #[allow(dead_code)]
-    id: String,
-    #[serde(default)]
-    messages_unread: i64,
-    #[serde(default)]
-    threads_unread: i64,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct HistoryListResp {
-    #[serde(default)]
-    history: Vec<HistoryRecord>,
-    #[serde(default)]
-    next_page_token: Option<String>,
-    /// The newest historyId as of this response.
-    #[serde(default)]
-    history_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct HistoryRecord {
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    messages_added: Vec<HistoryMessageAdded>,
-}
-
-#[derive(Debug, Deserialize)]
-struct HistoryMessageAdded {
-    message: MessageRef,
-}
-
-/// Parse a decimal string historyId; malformed input yields 0 (treated as
-/// "unknown", forcing a full catch-up rather than a panic).
-fn parse_history_id(s: &str) -> u64 {
-    s.trim().parse::<u64>().unwrap_or(0)
 }
 
 /// Which daily cap a budget-exhausted notice is about; each is rate-limited to
@@ -396,9 +229,13 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// via [`SyncEngine::with_metrics`], so an engine built anywhere (tests, the
     /// contacts harvest, `run`) still records rather than branching on absence.
     metrics: Arc<SyncMetrics>,
-    /// Gmail REST base for every call this engine makes. Always
-    /// [`GMAIL_API_BASE`] in production; the tests point it at a loopback mock so
-    /// the walk/cursor rules are asserted on the wire rather than on a struct.
+    /// Transport OVERRIDE; usually `None`, with [`SyncEngine::source`] building
+    /// a Gmail source from this engine's own credentials and metrics. Tests
+    /// install one pointed at a loopback mock so the walk/cursor rules are
+    /// asserted on the wire rather than on a struct.
+    source: Option<Arc<dyn MailSource>>,
+    /// Provider REST base for the transport this engine builds. Always the
+    /// provider's own in production; tests point it at a mock.
     api_base: String,
 }
 
@@ -447,7 +284,8 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             warn_days: std::sync::Mutex::new(WarnDays::default()),
             unread_warned: AtomicBool::new(false),
             metrics: SyncMetrics::new(),
-            api_base: GMAIL_API_BASE.to_string(),
+            source: None,
+            api_base: crate::mail::gmail::GMAIL_API_BASE.to_string(),
         }
     }
 
@@ -459,9 +297,9 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         self
     }
 
-    /// Point every Gmail call at `base` instead of [`GMAIL_API_BASE`]. Test-only:
-    /// a build that could be aimed at an arbitrary host would be a bearer-token
-    /// exfiltration primitive.
+    /// Point the transport at `base` instead of the provider's real host.
+    /// Test-only: a build that could be aimed at an arbitrary host would be a
+    /// bearer-token exfiltration primitive.
     #[cfg(test)]
     fn with_api_base(mut self, base: String) -> Self {
         self.api_base = base;
@@ -486,6 +324,27 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         self
     }
 
+    /// The EFFECTIVE transport for this call: the override, else a Gmail source
+    /// built from this engine's credentials, metrics and api base.
+    ///
+    /// Built per call rather than held, for the same reason
+    /// [`SyncEngine::embedder`] is resolved per tick: the builders that set
+    /// metrics and the api base run AFTER `new`, and a source captured in `new`
+    /// would hold the registry nobody scrapes. It is a handful of `Arc` clones
+    /// against a call that is about to do HTTP.
+    fn source(&self) -> Arc<dyn MailSource> {
+        if let Some(s) = &self.source {
+            return s.clone();
+        }
+        Arc::new(GmailSource::new(
+            self.http.clone(),
+            self.creds.clone(),
+            self.account_id,
+            self.metrics.clone(),
+            self.api_base.clone(),
+        ))
+    }
+
     /// The EFFECTIVE embedder for this tick: the override, else whatever is
     /// attached to the store RIGHT NOW — so an embedder attached in the
     /// background after startup is picked up without a restart. Until then this
@@ -494,84 +353,16 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         self.embedder.clone().or_else(|| self.store.embedder())
     }
 
-    /// Authenticated GET returning parsed JSON. A 404 surfaces as
-    /// [`CoreError::NotFound`] so callers can branch on it (the
-    /// expired-historyId fallback). Header and body are NEVER logged.
-    async fn get_json<T: for<'de> Deserialize<'de>>(&self, url: &str) -> Result<T> {
-        let resp = self.send_get(url).await?;
-        match resp.status() {
-            s if s.is_success() => resp
-                .json::<T>()
-                .await
-                .map_err(|e| CoreError::Other(anyhow::anyhow!("gmail json decode: {e}"))),
-            // NOT an error metric: this is the expired-historyId signal the
-            // caller recovers from with a catch-up, and counting a routine
-            // self-heal would make the errors family unalertable.
-            StatusCode::NOT_FOUND => Err(CoreError::NotFound),
-            s => {
-                // Classified HERE, the last place the status is typed AND the
-                // body is still readable: a 403 is a quota refusal or an
-                // authorization one depending only on the reason string Google
-                // puts in the body, and once this is an `anyhow` chain nothing
-                // downstream can tell them apart. The body is read for that one
-                // decision and never logged.
-                let body = resp.text().await.unwrap_or_default();
-                self.metrics
-                    .record_gmail_error(classify_gmail_status(s.as_u16(), &body));
-                Err(CoreError::Other(anyhow::anyhow!(
-                    "gmail api status {}",
-                    s.as_u16()
-                )))
-            }
-        }
-    }
-
-    /// Send a GET with a Bearer token, retrying once on 401 with a fresh token.
-    async fn send_get(&self, url: &str) -> Result<reqwest::Response> {
-        let token = self.token_for_request().await?;
-        let resp = self.bearer_get(url, &token.access_token).await?;
-        if resp.status() == StatusCode::UNAUTHORIZED {
-            // Redacted: the fact of a retry, never token/header content.
-            eprintln!("squelch: gmail 401; refreshing token and retrying once");
-            let token = self.token_for_request().await?;
-            return self.bearer_get(url, &token.access_token).await;
-        }
-        Ok(resp)
-    }
-
-    /// The access token for one Gmail call. A credential failure never reaches
-    /// a status code — the refresh exchange is what failed, `invalid_grant`
-    /// included — so it is counted as `auth` on the typed variant here rather
-    /// than string-matched out of an error chain later.
-    async fn token_for_request(&self) -> Result<crate::credentials::OAuthToken> {
-        self.creds.token(self.account_id).await.inspect_err(|e| {
-            if matches!(e, CoreError::Credential(_)) {
-                self.metrics.record_gmail_error(GmailErrorKind::Auth);
-            }
-        })
-    }
-
-    async fn bearer_get(&self, url: &str, access_token: &str) -> Result<reqwest::Response> {
-        self.http
-            .get(url)
-            .bearer_auth(access_token)
-            .send()
-            .await
-            .map_err(|e| {
-                // No status ever arrived: DNS, TLS, connect or the client's own
-                // timeout. Distinct from `http` because the fix is different.
-                self.metrics.record_gmail_error(GmailErrorKind::Network);
-                CoreError::Other(anyhow::anyhow!("gmail request: {e}"))
-            })
-    }
-
     /// One full lifecycle: backfill if needed (establishing the historyId), then
     /// poll until an error bubbles up (caller retries with backoff) or shutdown.
     async fn run_once(&self, shutdown: &mut tokio::sync::watch::Receiver<bool>) -> Result<()> {
-        eprintln!("squelch: gmail REST sync starting for <redacted account>");
+        eprintln!(
+            "squelch: {} sync starting for <redacted account>",
+            self.source().provider()
+        );
 
-        // First run (no history cursor) => full backfill + seed contacts.
-        let cursor = self.load_history_cursor()?;
+        // First run (no cursor) => full backfill + seed contacts.
+        let cursor = self.load_cursor()?;
         if cursor.is_none() {
             self.backfill().await?;
             // Stage-1, then Stage-2 over what Stage-1 escalated, then the
@@ -586,17 +377,19 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         self.poll_loop(shutdown).await
     }
 
-    /// First-run backfill: INBOX bodies over the window, then SENT headers to
-    /// seed contacts, then persist the account's current historyId.
+    /// First-run backfill: the whole window of both mailboxes, plus the cursor
+    /// the incremental walk starts from.
     async fn backfill(&self) -> Result<()> {
         let since = self.backfill_since();
+        let outcome = self
+            .source()
+            .initial_listing(self.config.sync.backfill_days)
+            .await?;
+        let (inbox, sent) = split_by_mailbox(outcome.new_messages);
 
-        // INBOX bodies.
-        let q = format!("newer_than:{}d", self.config.sync.backfill_days);
-        let inbox_ids = self.list_message_ids(LABEL_INBOX, Some(&q)).await?;
         // Backfill NEVER notifies (see `IngestOrigin`).
         let n = self
-            .fetch_raw_and_ingest(&inbox_ids, /* is_sent */ false, IngestOrigin::Backfill)
+            .fetch_and_ingest(&inbox, /* is_sent */ false, IngestOrigin::Backfill)
             .await?;
         eprintln!("squelch: backfilled {n} INBOX messages");
 
@@ -604,16 +397,13 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         // WROTE. Contacts still come from To/Cc; the row is stored neutral
         // (tier=noise, importance=0) and the is_sent exclusions keep it out of
         // triage/updates/search.
-        let sent_ids = self.list_message_ids(LABEL_SENT, Some(&q)).await?;
         let seeded = self
-            .fetch_raw_and_ingest(&sent_ids, /* is_sent */ true, IngestOrigin::Backfill)
+            .fetch_and_ingest(&sent, /* is_sent */ true, IngestOrigin::Backfill)
             .await?;
         eprintln!("squelch: backfilled {seeded} SENT messages (bodies for recall + contacts)");
 
-        // Establish the historyId cursor from the profile.
-        let history_id = self.fetch_profile_history_id().await?;
-        self.store_history_cursor(history_id)?;
-        eprintln!("squelch: history cursor established (backfill window from {since})");
+        self.store_cursor(&outcome.cursor)?;
+        eprintln!("squelch: sync cursor established (backfill window from {since})");
         Ok(())
     }
 
@@ -670,84 +460,41 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         }
     }
 
-    /// A single poll tick: consult the cursor, either run the incremental
-    /// history walk or (on absent/expired cursor) a fresh catch-up.
+    /// A single poll tick: ask the transport what changed since the cursor,
+    /// ingest it, and commit the cursor it hands back.
+    ///
+    /// A cursor the provider no longer honours ([`CoreError::NotFound`] — an
+    /// expired Gmail historyId, a Graph `resyncRequired`) falls back to a fresh
+    /// listing, which is also what a first poll with no stored cursor does.
     async fn poll_once(&self) -> Result<()> {
-        let cursor = self.load_history_cursor()?;
-        match history_poll_decision(cursor, false) {
-            HistoryDecision::Incremental(start) => {
-                match self.history_walk(start).await {
-                    Ok(()) => Ok(()),
-                    // Expired historyId (404): fall back to a fresh catch-up.
-                    Err(CoreError::NotFound) => {
-                        eprintln!("squelch: historyId expired; falling back to catch-up");
-                        self.catch_up().await
-                    }
-                    Err(e) => Err(e),
-                }
+        let Some(cursor) = self.load_cursor()? else {
+            return self.catch_up().await;
+        };
+        let outcome = match self.source().poll_changes(&cursor).await {
+            Ok(o) => o,
+            Err(CoreError::NotFound) => {
+                eprintln!("squelch: sync cursor expired; falling back to catch-up");
+                return self.catch_up().await;
             }
-            HistoryDecision::FullCatchUp => self.catch_up().await,
-        }
-    }
+            Err(e) => return Err(e),
+        };
 
-    /// One incremental poll: TWO label-filtered `history.list` walks from the
-    /// SAME start cursor, INBOX then SENT, with the cursor committed ONCE at the
-    /// end at the max historyId either walk observed.
-    ///
-    /// The SENT walk is what makes mail the user writes from Gmail web or their
-    /// phone land here at all: such a message never carries INBOX, so an
-    /// INBOX-only walk is blind to it, and the api's post-send echo covers only
-    /// what was sent through the daemon itself. Both walks start from the same
-    /// `start_history_id` because one Gmail cursor spans the whole mailbox.
-    ///
-    /// ORDER IS LOAD-BEARING. A self-addressed message carries both labels and so
-    /// appears in both walks, and the store's message upsert writes
-    /// `is_sent = excluded.is_sent` on conflict — last writer wins — so a SENT
-    /// copy landing second would flip the row to `is_sent = 1` and drop it out of
-    /// every band. The INBOX walk therefore runs FIRST and its ids are subtracted
-    /// from the SENT batch, making the visible copy authoritative no matter what
-    /// the conflict clause does.
-    ///
-    /// Propagates [`CoreError::NotFound`] on an expired historyId so the caller
-    /// can fall back to a catch-up.
-    async fn history_walk(&self, start_history_id: u64) -> Result<()> {
-        let (inbox_ids, inbox_cursor) = self
-            .history_walk_label(start_history_id, LABEL_INBOX)
-            .await?;
-        if !inbox_ids.is_empty() {
+        let (inbox, sent) = split_by_mailbox(outcome.new_messages);
+        if !inbox.is_empty() {
             let n = self
-                .fetch_raw_and_ingest(&inbox_ids, false, IngestOrigin::Incremental)
+                .fetch_and_ingest(&inbox, false, IngestOrigin::Incremental)
                 .await?;
             eprintln!("squelch: ingested {n} new INBOX messages");
         }
-
-        // The SENT half is best-effort AGAINST THE CURSOR: any failure holds the
-        // cursor where it is and returns, so the next poll re-walks both labels
-        // from the same start rather than stepping over INBOX history that the
-        // successful half already covered. Re-walking costs a few fetches and
-        // changes nothing: `UNIQUE(account_id, gmail_msg_id)` collapses the
-        // message rows and `UNIQUE(message_id)` on `events` collapses the
-        // notifications.
-        let (sent_ids, sent_cursor) =
-            match self.history_walk_label(start_history_id, LABEL_SENT).await {
-                Ok(v) => v,
-                // An expired historyId is not a SENT-specific failure: the cursor
-                // itself is gone and only a catch-up can recover it.
-                Err(CoreError::NotFound) => return Err(CoreError::NotFound),
-                Err(e) => {
-                    eprintln!("squelch: sent history walk failed ({e}); holding the cursor");
-                    return Ok(());
-                }
-            };
-
-        let sent_only = subtract_ids(sent_ids, &inbox_ids);
-        if !sent_only.is_empty() {
-            // `Incremental`, like the INBOX half: the silence guarantee for the
-            // user's own mail is NOT the origin but `events::worthy_kind`, which
-            // returns `None` for an `is_sent` row, and the 'n/a' stage markers
-            // ingest stamps, which keep it out of both LLM queues.
+        if !sent.is_empty() {
+            // Best-effort AGAINST THE CURSOR, matching the walk's own rule: a
+            // failure here holds position rather than stepping over history the
+            // INBOX half already covered. Re-walking costs a few fetches and
+            // changes nothing — `UNIQUE(account_id, gmail_msg_id)` collapses the
+            // message rows and `UNIQUE(message_id)` on `events` collapses the
+            // notifications.
             match self
-                .fetch_raw_and_ingest(&sent_only, true, IngestOrigin::Incremental)
+                .fetch_and_ingest(&sent, true, IngestOrigin::Incremental)
                 .await
             {
                 Ok(n) => eprintln!("squelch: ingested {n} new SENT messages"),
@@ -757,99 +504,44 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 }
             }
         }
-
-        self.store_history_cursor(advance_history_cursor(
-            start_history_id,
-            [inbox_cursor, sent_cursor],
-        ))?;
+        self.store_cursor(&outcome.cursor)?;
         Ok(())
     }
 
-    /// Walk `history.list` from `start_history_id` under ONE label filter,
-    /// returning the deduped `messageAdded` ids and the max historyId observed.
-    /// Persists nothing: the caller owns the single cursor commit that covers
-    /// every label. Propagates [`CoreError::NotFound`] on an expired historyId.
-    async fn history_walk_label(
-        &self,
-        start_history_id: u64,
-        label: &str,
-    ) -> Result<(Vec<String>, u64)> {
-        let mut cursor = start_history_id;
-        let mut page_token: Option<String> = None;
-        let mut new_ids: Vec<String> = Vec::new();
-
-        loop {
-            let mut url = format!(
-                "{}/history?startHistoryId={start_history_id}\
-                 &historyTypes=messageAdded&labelId={label}",
-                self.api_base
-            );
-            if let Some(tok) = &page_token {
-                url.push_str(&format!("&pageToken={tok}"));
-            }
-            let page: HistoryListResp = self.get_json(&url).await?;
-
-            // Advance the cursor from every observed historyId (records + the
-            // page-level newest id).
-            let observed = page
-                .history
-                .iter()
-                .filter_map(|r| r.id.as_deref().map(parse_history_id))
-                .chain(page.history_id.as_deref().map(parse_history_id));
-            cursor = advance_history_cursor(cursor, observed);
-
-            for rec in &page.history {
-                for added in &rec.messages_added {
-                    new_ids.push(added.message.id.clone());
-                }
-            }
-
-            match page.next_page_token {
-                Some(tok) => page_token = Some(tok),
-                None => break,
-            }
-        }
-
-        // Dedup ids (a message can appear across pages); order is irrelevant —
-        // dedup at the store keys on (account_id, gmail_msg_id).
-        new_ids.sort_unstable();
-        new_ids.dedup();
-        Ok((new_ids, cursor))
-    }
-
-    /// Fresh catch-up: re-run the backfill-window INBOX fetch, then the SENT
-    /// fetch over the same window (dedup makes both idempotent), and
-    /// re-establish the historyId. Used on first run's poll and on an
-    /// expired-history 404 — exactly the cases where the history walk cannot
-    /// account for the gap, so the sent half has to be re-listed too or mail the
-    /// user wrote from another client during it is lost for good.
+    /// Fresh catch-up: re-list the whole backfill window and re-establish the
+    /// cursor. Used on first run's poll and whenever the cursor expires —
+    /// exactly the cases where the incremental walk cannot account for the gap,
+    /// so the sent half has to be re-listed too or mail the user wrote from
+    /// another client during it is lost for good.
+    ///
+    /// Re-listing RE-INGESTS what is already stored, deliberately: that is the
+    /// documented recovery drill for anything baked at ingest (a sanitizer fix,
+    /// a charset fix, a new column), which is why no already-seen filter belongs
+    /// on this path.
     async fn catch_up(&self) -> Result<()> {
-        let q = format!("newer_than:{}d", self.config.sync.backfill_days);
-        let ids = self.list_message_ids(LABEL_INBOX, Some(&q)).await?;
+        let outcome = self
+            .source()
+            .initial_listing(self.config.sync.backfill_days)
+            .await?;
+        let (inbox, sent) = split_by_mailbox(outcome.new_messages);
+
         // A catch-up may carry genuinely new mail, so it is allowed to notify.
         // What keeps the whole-window re-scan from storming is the freshness
         // window in `triage::events` plus the one-event-per-message key.
         let n = self
-            .fetch_raw_and_ingest(&ids, false, IngestOrigin::Incremental)
+            .fetch_and_ingest(&inbox, false, IngestOrigin::Incremental)
             .await?;
         if n > 0 {
             eprintln!("squelch: catch-up ingested {n} INBOX messages");
         }
-
-        // INBOX first, and its ids subtracted, for the same reason the history
-        // walk orders itself that way: a self-addressed message is in both
-        // listings and its visible copy must win the unique-key race.
-        let sent_ids = self.list_message_ids(LABEL_SENT, Some(&q)).await?;
-        let sent_only = subtract_ids(sent_ids, &ids);
         let sent_n = self
-            .fetch_raw_and_ingest(&sent_only, true, IngestOrigin::Incremental)
+            .fetch_and_ingest(&sent, true, IngestOrigin::Incremental)
             .await?;
         if sent_n > 0 {
             eprintln!("squelch: catch-up ingested {sent_n} SENT messages");
         }
 
-        let history_id = self.fetch_profile_history_id().await?;
-        self.store_history_cursor(history_id)?;
+        self.store_cursor(&outcome.cursor)?;
         Ok(())
     }
 
@@ -857,8 +549,8 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
 
     /// ONE-TIME sweep of the ENTIRE Sent mailbox — no window — seeding the
     /// contacts table from every To/Cc the account has ever written to.
-    /// `format=metadata` with only To/Cc requested: headers, never bodies, so
-    /// deep history costs one light call per sent message. Merged with MAX
+    /// Headers, never bodies (the transport enforces that), so deep history
+    /// costs one light call per sent message. Merged with MAX
     /// semantics ([`Store::merge_harvested_contacts`]) so overlap with the
     /// ingest path's own seeding and an interrupted re-run cannot double-count.
     ///
@@ -875,68 +567,35 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             return Ok(());
         }
 
-        let ids = self.list_message_ids(LABEL_SENT, None).await?;
-        eprintln!(
-            "squelch: sent-contacts harvest scanning {} sent messages (headers only)",
-            ids.len()
-        );
+        let sent = self.source().list_sent_recipients().await?;
 
         let self_addr = self.account_email.trim().to_ascii_lowercase();
         // addr -> aggregate. Counting per message occurrence matches the ingest
         // path's per-send bump closely enough for ranking.
         let mut agg: std::collections::HashMap<String, ContactEntry> =
             std::collections::HashMap::new();
-        for (i, id) in ids.iter().enumerate() {
-            let url = format!(
-                "{}/messages/{id}?format=metadata\
-                 &metadataHeaders=To&metadataHeaders=Cc",
-                self.api_base
-            );
-            let msg: GmailMessage = self.get_json(&url).await?;
-            let sent_at = parse_internal_date(msg.internal_date.as_deref());
-            let headers = msg.payload.map(|p| p.headers).unwrap_or_default();
-            // Through mail-parser via header synthesis, so grouped lists, quoted
-            // display names and RFC2047 encoding parse exactly as ingest does.
-            let blob = synthesize_rfc822_headers(&headers);
-            let Some(parsed) = mail_parser::MessageParser::default().parse(blob.as_bytes()) else {
-                continue;
-            };
-            for list in [parsed.to(), parsed.cc()].into_iter().flatten() {
-                for mailbox in list.iter() {
-                    let Some(addr) = mailbox.address() else {
-                        continue;
-                    };
-                    let addr = addr.trim().to_ascii_lowercase();
-                    // Same gate as ingest seeding: never the account itself,
-                    // never robot/unsubscribe traffic.
-                    if addr.is_empty() || addr == self_addr || is_robot_address(&addr) {
-                        continue;
-                    }
-                    let name = mailbox
-                        .name()
-                        .map(|n| n.trim().to_string())
-                        .filter(|n| !n.is_empty());
-                    let entry = agg.entry(addr.clone()).or_insert_with(|| ContactEntry {
-                        addr,
-                        display_name: None,
-                        sent_count: 0,
-                        last_sent_at: None,
-                    });
-                    entry.sent_count += 1;
-                    if entry.display_name.is_none() {
-                        entry.display_name = name;
-                    }
-                    if sent_at > entry.last_sent_at {
-                        entry.last_sent_at = sent_at;
-                    }
+        for msg in &sent {
+            for (addr, name) in &msg.mailboxes {
+                let addr = addr.trim().to_ascii_lowercase();
+                // Same gate as ingest seeding: never the account itself, never
+                // robot/unsubscribe traffic.
+                if addr.is_empty() || addr == self_addr || is_robot_address(&addr) {
+                    continue;
                 }
-            }
-            if (i + 1) % 1000 == 0 {
-                eprintln!(
-                    "squelch: sent-contacts harvest {}/{} messages scanned",
-                    i + 1,
-                    ids.len()
-                );
+                let name = name.as_ref().map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+                let entry = agg.entry(addr.clone()).or_insert_with(|| ContactEntry {
+                    addr,
+                    display_name: None,
+                    sent_count: 0,
+                    last_sent_at: None,
+                });
+                entry.sent_count += 1;
+                if entry.display_name.is_none() {
+                    entry.display_name = name;
+                }
+                if msg.sent_at > entry.last_sent_at {
+                    entry.last_sent_at = msg.sent_at;
+                }
             }
         }
 
@@ -963,14 +622,14 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// ONE-TIME sweep filling `messages.to_addrs` on sent rows ingested before
     /// that column existed, so the human door's sent listing can show who each
     /// message went to instead of a blank. Same shape as
-    /// [`harvest_sent_contacts`](Self::harvest_sent_contacts): `format=metadata`
-    /// with only To/Cc requested (headers, never bodies) on the READ credential,
-    /// and a `sync_state` completion flag so it runs once per install.
+    /// [`harvest_sent_contacts`](Self::harvest_sent_contacts): recipients only
+    /// (headers, never bodies) on the READ credential, and a `sync_state`
+    /// completion flag so it runs once per install.
     ///
     /// BEST-EFFORT AND NON-FATAL by construction: it is spawned beside the sync
     /// loop, never inside it, and any error returns early with the flag UNSET, so
-    /// the next daemon start simply redoes whatever is still NULL. A message
-    /// Gmail no longer has (404) is not an error — it is written as "" ("looked,
+    /// the next daemon start simply redoes whatever is still NULL. A message the
+    /// provider no longer has is not an error — it is written as "" ("looked,
     /// nobody named"), which is what keeps one deleted message from re-queueing
     /// the whole pass forever.
     pub async fn backfill_sent_recipients(&self) -> Result<()> {
@@ -1002,33 +661,18 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             if pending.is_empty() {
                 break;
             }
+            let source = self.source();
             for row in &pending {
-                let url = format!(
-                    "{}/messages/{}?format=metadata\
-                     &metadataHeaders=To&metadataHeaders=Cc",
-                    self.api_base, row.gmail_msg_id
-                );
-                let msg: GmailMessage = match self.get_json(&url).await {
-                    Ok(msg) => msg,
+                let mailboxes = match source.fetch_recipients(&row.gmail_msg_id).await {
+                    Ok(m) => m,
                     // Gone upstream: record the absence rather than retrying it
                     // on every daemon start for the life of the install.
-                    Err(CoreError::NotFound) => GmailMessage::default(),
+                    Err(CoreError::NotFound) => Vec::new(),
                     Err(_) => {
                         skipped.push(row.message_id);
                         continue;
                     }
                 };
-                let headers = msg.payload.map(|p| p.headers).unwrap_or_default();
-                // Through mail-parser via header synthesis, so grouped lists,
-                // quoted display names and RFC2047 encoding render exactly as the
-                // ingest path renders them.
-                let blob = synthesize_rfc822_headers(&headers);
-                let mut mailboxes: Vec<(String, Option<String>)> = Vec::new();
-                if let Some(parsed) = mail_parser::MessageParser::default().parse(blob.as_bytes()) {
-                    for list in [parsed.to(), parsed.cc()].into_iter().flatten() {
-                        collect_mailboxes(list, &mut mailboxes);
-                    }
-                }
                 // EVERY row is written, "" included: the store predicate is
                 // `to_addrs IS NULL`, so a row left NULL would be handed back by
                 // the next batch query and loop forever.
@@ -1061,72 +705,48 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         Ok(())
     }
 
-    // ---- Gmail REST calls --------------------------------------------------
-
-    /// List all message ids under `label`, optionally narrowed by a Gmail search
-    /// `q`. Paginates fully.
-    async fn list_message_ids(&self, label: &str, q: Option<&str>) -> Result<Vec<String>> {
-        let mut ids = Vec::new();
-        let mut page_token: Option<String> = None;
-        loop {
-            let mut url = format!("{}/messages?labelIds={label}", self.api_base);
-            if let Some(q) = q {
-                url.push_str(&format!("&q={}", urlencode(q)));
-            }
-            if let Some(tok) = &page_token {
-                url.push_str(&format!("&pageToken={tok}"));
-            }
-            let page: ListMessagesResp = self.get_json(&url).await?;
-            ids.extend(page.messages.into_iter().map(|m| m.id));
-            match page.next_page_token {
-                Some(tok) => page_token = Some(tok),
-                None => break,
-            }
-        }
-        Ok(ids)
-    }
-
-    /// Fetch each id `format=raw`, base64url-decode to RFC822, and run through
-    /// the ingest pipeline. Sequential — rate limits are a non-issue at this
-    /// volume. Returns the count ingested.
-    async fn fetch_raw_and_ingest(
+    /// Fetch each ref's RFC822 bytes and run them through the ingest pipeline.
+    /// Sequential — rate limits are a non-issue at this volume. Returns the
+    /// count ingested.
+    ///
+    /// A message the transport cannot turn into bytes (no body, a decode
+    /// failure) is SKIPPED with a redacted line rather than failing the batch;
+    /// a transport error is not, because that is the whole batch's problem.
+    async fn fetch_and_ingest(
         &self,
-        ids: &[String],
+        refs: &[NewMessageRef],
         is_sent: bool,
         origin: IngestOrigin,
     ) -> Result<usize> {
-        if ids.is_empty() {
+        if refs.is_empty() {
             return Ok(0);
         }
+        let source = self.source();
         let rules = self.store.list_sender_rules(self.account_id)?;
         let now = Utc::now();
         let mut count = 0usize;
 
-        for id in ids {
-            let url = format!("{}/messages/{id}?format=raw", self.api_base);
-            let msg: GmailMessage = self.get_json(&url).await?;
-            let raw_b64 = match &msg.raw {
-                Some(r) => r,
-                None => continue, // nothing to ingest
-            };
-            let raw = match decode_raw_b64url(raw_b64) {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    // Redacted: id + error only, never content.
-                    eprintln!("squelch: skipping message (decode error): {e}");
+        for r in refs {
+            let msg = match source.fetch_raw(&r.id).await {
+                Ok(m) => m,
+                // Nothing to ingest, or bytes we could not decode. Redacted:
+                // the error only, never content.
+                Err(e @ CoreError::InvalidInput(_)) => {
+                    eprintln!("squelch: skipping message (unusable body): {e}");
                     continue;
                 }
+                Err(e) => return Err(e),
             };
             let fetched = RawFetched {
                 account_id: self.account_id,
                 gmail_msg_id: if msg.id.is_empty() {
-                    id.clone()
+                    r.id.clone()
                 } else {
                     msg.id.clone()
                 },
                 gmail_thread_id: msg.thread_id.clone(),
-                raw,
-                internal_date: parse_internal_date(msg.internal_date.as_deref()),
+                raw: msg.raw,
+                internal_date: msg.internal_date,
                 is_sent,
                 account_addr: self.account_email.clone(),
             };
@@ -2645,14 +2265,13 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// stands, no clearing and no zeroing, and the notice is printed once per
     /// failing streak rather than every poll.
     async fn refresh_inbox_unread(&self) {
-        let url = format!("{}/labels/{LABEL_INBOX}", self.api_base);
         // Both halves land in one Result so both go through the one latch:
         // whichever way this fails, it fails every 45s, and a branch that
         // printed on its own would be the branch that spams.
-        let outcome = match self.get_json::<LabelResp>(&url).await {
-            Ok(label) => self
+        let outcome = match self.source().unread_counts().await {
+            Ok((messages, threads)) => self
                 .store
-                .set_inbox_unread(self.account_id, label.messages_unread, label.threads_unread)
+                .set_inbox_unread(self.account_id, messages, threads)
                 .map_err(|e| format!("storing the inbox unread counts failed ({e})")),
             Err(e) => Err(format!("inbox unread count fetch failed ({e})")),
         };
@@ -2669,31 +2288,41 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         }
     }
 
-    /// `users.getProfile` -> the account's current historyId.
-    async fn fetch_profile_history_id(&self) -> Result<u64> {
-        let url = format!("{}/profile", self.api_base);
-        let profile: ProfileResp = self.get_json(&url).await?;
-        Ok(parse_history_id(&profile.history_id))
-    }
+    // ---- cursor persistence (sync_cursor, key='cursor') -------------------
 
-    // ---- historyId cursor persistence (sync_state, key='history') ----------
-
-    fn load_history_cursor(&self) -> Result<Option<u64>> {
-        Ok(self
+    /// This account's stored cursor, adopting the pre-seam Gmail row the first
+    /// time an upgraded install asks.
+    ///
+    /// WITHOUT THE ADOPTION an existing daemon would read "no cursor", re-list
+    /// its whole backfill window and re-ingest every message in it on the first
+    /// tick after the upgrade. The legacy row is Gmail's by construction —
+    /// nothing else ever wrote it — so only a Gmail transport may claim it.
+    fn load_cursor(&self) -> Result<Option<Cursor>> {
+        if let Some(c) = self.store.sync_cursor(self.account_id, CURSOR_KEY)? {
+            return Ok(Some(c));
+        }
+        if self.source().provider() != "gmail" {
+            return Ok(None);
+        }
+        let Some(legacy) = self
             .store
-            .sync_state(self.account_id, HISTORY_KEY)?
-            .map(|s| s.last_uid))
+            .sync_state(self.account_id, LEGACY_HISTORY_KEY)?
+        else {
+            return Ok(None);
+        };
+        let adopted = legacy.last_uid.to_string();
+        // Written forward so the adoption happens once; the legacy row is left
+        // where it is rather than deleted, because a rollback to a build that
+        // still reads it should find it intact.
+        self.store
+            .set_sync_cursor(self.account_id, CURSOR_KEY, &adopted)?;
+        eprintln!("squelch: adopted the existing gmail history cursor; not re-backfilling");
+        Ok(Some(adopted))
     }
 
-    fn store_history_cursor(&self, history_id: u64) -> Result<()> {
-        self.store.set_sync_state(
-            self.account_id,
-            HISTORY_KEY,
-            &SyncState {
-                uidvalidity: 0,
-                last_uid: history_id,
-            },
-        )
+    fn store_cursor(&self, cursor: &str) -> Result<()> {
+        self.store
+            .set_sync_cursor(self.account_id, CURSOR_KEY, cursor)
     }
 
     fn backfill_since(&self) -> DateTime<Utc> {
@@ -2743,94 +2372,16 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     }
 }
 
-/// Which [`GmailErrorKind`] a non-2xx Gmail response is.
-///
-/// 429 is unambiguous. 403 is NOT: Google returns it both for "you are asking
-/// too fast" and for "this credential may not do that", separated only by the
-/// `reason` in the JSON body. Everything else is `http`, which is the bucket
-/// that means "read the logs".
-fn classify_gmail_status(status: u16, body: &str) -> GmailErrorKind {
-    const QUOTA_REASONS: [&str; 4] = [
-        "ratelimitexceeded",
-        "userratelimitexceeded",
-        "quotaexceeded",
-        "dailylimitexceeded",
-    ];
-    match status {
-        401 => GmailErrorKind::Auth,
-        429 => GmailErrorKind::Quota,
-        // Bounded: an error body is a few hundred bytes, and the reason sits at
-        // the front of it. Never logged, only matched.
-        403 => {
-            let head: String = body.chars().take(2048).collect::<String>().to_lowercase();
-            if QUOTA_REASONS.iter().any(|r| head.contains(r)) {
-                GmailErrorKind::Quota
-            } else {
-                // A scope/permission 403 stays in `http`: it is rare, it is not
-                // a credential this daemon can refresh its way out of, and the
-                // stderr line already names it.
-                GmailErrorKind::Http
-            }
-        }
-        _ => GmailErrorKind::Http,
-    }
-}
-
-/// Minimal percent-encoding for a Gmail `q` value. Enough for `newer_than:Nd`
-/// and simple queries; arbitrary user queries are never built here.
-fn urlencode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b':' => {
-                out.push(b as char)
-            }
-            b' ' => out.push_str("%20"),
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}
-
-/// Gmail `internalDate` is milliseconds-since-epoch as a decimal string. `pub`
-/// so squelch-api's send-echo parses it from one definition.
-pub fn parse_internal_date(s: Option<&str>) -> Option<DateTime<Utc>> {
-    let ms: i64 = s?.trim().parse().ok()?;
-    DateTime::from_timestamp_millis(ms)
-}
-
-/// Rebuild a header-only RFC822 blob from Gmail metadata headers so mail-parser
-/// runs over it unchanged; the trailing blank line ends the header section
-/// (empty body). Used by the Sent-contacts harvest (`format=metadata` carries
-/// headers only) and the contacts-seeding tests.
-fn synthesize_rfc822_headers(headers: &[MessageHeader]) -> String {
-    let mut out = String::new();
-    for h in headers {
-        // HEADER INJECTION GUARD: Gmail names and values are single-line, but
-        // upstream is never trusted blindly — a CR/LF in either would splice a
-        // synthetic header into the blob.
-        if h.name.contains('\r')
-            || h.name.contains('\n')
-            || h.value.contains('\r')
-            || h.value.contains('\n')
-        {
-            continue;
-        }
-        out.push_str(&h.name);
-        out.push_str(": ");
-        out.push_str(&h.value);
-        out.push_str("\r\n");
-    }
-    out.push_str("\r\n");
-    out
-}
-
-/// Type alias helper so callers can name the concrete rule slice.
 pub type Rules = Vec<SenderRule>;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
+
+    use crate::mail::gmail::{
+        LABEL_INBOX, LABEL_SENT, MessageHeader, synthesize_rfc822_headers,
+    };
     use crate::config::Stage1Config;
     use crate::store::SqliteStore;
     use crate::types::{Disposition, NewMessage, Tier, TriageAxis};
@@ -2864,25 +2415,6 @@ mod tests {
         // Tracks the config rather than a constant, so raising the poller's
         // horizon widens the extractor's with it.
         assert_eq!(ship_stale_cutoff(now, 10), now - ChronoDuration::days(10));
-    }
-
-    /// The 403 split is the whole reason this classifier reads the body: Google
-    /// spends one status on "too fast" and on "not allowed", and only the reason
-    /// string tells them apart.
-    #[test]
-    fn gmail_status_classification_splits_403_on_the_reason() {
-        let quota_body = r#"{"error":{"errors":[{"reason":"userRateLimitExceeded"}]}}"#;
-        assert_eq!(
-            classify_gmail_status(403, quota_body),
-            GmailErrorKind::Quota
-        );
-        assert_eq!(
-            classify_gmail_status(403, r#"{"error":{"errors":[{"reason":"forbidden"}]}}"#),
-            GmailErrorKind::Http
-        );
-        assert_eq!(classify_gmail_status(429, ""), GmailErrorKind::Quota);
-        assert_eq!(classify_gmail_status(401, ""), GmailErrorKind::Auth);
-        assert_eq!(classify_gmail_status(500, ""), GmailErrorKind::Http);
     }
 
     /// Build a RawFetched from an RFC822 string, as the transport layer would.
@@ -3324,72 +2856,16 @@ mod tests {
 
     // ---- base64url raw decode ---------------------------------------------
 
-    #[test]
-    fn decode_raw_b64url_no_pad_round_trips() {
-        let eml = "From: a@b.com\r\nSubject: hi\r\n\r\nbody\r\n";
-        let enc = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(eml);
-        let out = decode_raw_b64url(&enc).unwrap();
-        assert_eq!(out, eml.as_bytes());
-    }
 
-    #[test]
-    fn decode_raw_b64url_accepts_padded_and_web_safe() {
-        // 4 bytes => 6 base64 chars + '==' padding; values force '-'/'_' web-safe.
-        let bytes: Vec<u8> = vec![0xfb, 0xff, 0xbf, 0xf0];
-        let padded = base64::engine::general_purpose::URL_SAFE.encode(&bytes);
-        assert!(padded.contains('='), "expected padding in this fixture");
-        assert!(
-            padded.contains('-') || padded.contains('_'),
-            "expected web-safe chars in this fixture"
-        );
-        let out = decode_raw_b64url(&padded).unwrap();
-        assert_eq!(out, bytes);
-    }
 
-    #[test]
-    fn decode_raw_b64url_rejects_garbage() {
-        assert!(decode_raw_b64url("!!!not base64!!!").is_err());
-    }
 
     // ---- history cursor advance -------------------------------------------
 
-    #[test]
-    fn advance_history_cursor_takes_max_never_regresses() {
-        assert_eq!(advance_history_cursor(100, [50, 75, 40]), 100);
-        assert_eq!(advance_history_cursor(100, [150, 120, 200]), 200);
-        assert_eq!(advance_history_cursor(0, std::iter::empty()), 0);
-        assert_eq!(advance_history_cursor(10, [10]), 10);
-    }
 
     // ---- 404 / expired-history fallback decision --------------------------
 
-    #[test]
-    fn history_decision_incremental_when_cursor_present_and_fresh() {
-        assert_eq!(
-            history_poll_decision(Some(4242), false),
-            HistoryDecision::Incremental(4242)
-        );
-    }
 
-    #[test]
-    fn history_decision_full_catchup_on_expired() {
-        assert_eq!(
-            history_poll_decision(Some(4242), true),
-            HistoryDecision::FullCatchUp
-        );
-    }
 
-    #[test]
-    fn history_decision_full_catchup_when_absent_or_zero() {
-        assert_eq!(
-            history_poll_decision(None, false),
-            HistoryDecision::FullCatchUp
-        );
-        assert_eq!(
-            history_poll_decision(Some(0), false),
-            HistoryDecision::FullCatchUp
-        );
-    }
 
     // ---- header synthesis for metadata-only sent seeding ------------------
 
@@ -3432,33 +2908,10 @@ mod tests {
         assert!(!store.is_known_contact(acct, "me@example.com").unwrap());
     }
 
-    #[test]
-    fn synthesize_headers_drops_injected_newlines() {
-        let headers = vec![MessageHeader {
-            name: "From".into(),
-            value: "x@y.com\r\nBcc: evil@z.com".into(),
-        }];
-        let raw = synthesize_rfc822_headers(&headers);
-        assert!(!raw.contains("Bcc"), "CRLF-injected header must be dropped");
-    }
 
     // ---- internalDate parsing ---------------------------------------------
 
-    #[test]
-    fn parse_internal_date_millis() {
-        // 2026-07-07T10:00:00Z = 1783591200000 ms.
-        let dt = parse_internal_date(Some("1783591200000")).unwrap();
-        assert_eq!(dt.timestamp(), 1783591200);
-        assert!(parse_internal_date(None).is_none());
-        assert!(parse_internal_date(Some("garbage")).is_none());
-    }
 
-    #[test]
-    fn parse_history_id_handles_bad_input() {
-        assert_eq!(parse_history_id("12345"), 12345);
-        assert_eq!(parse_history_id(""), 0);
-        assert_eq!(parse_history_id("not-a-number"), 0);
-    }
 
     // ---- ingest pipeline invariants (unchanged behavior) ------------------
 
@@ -3666,48 +3119,30 @@ mod tests {
     }
 
     #[test]
-    fn sync_state_round_trips_history_id() {
+    fn the_legacy_history_row_still_round_trips_a_large_history_id() {
+        // The pre-seam row an upgraded install adopts. It has to keep holding a
+        // historyId larger than u32::MAX, or the adoption resumes at the wrong
+        // position instead of not at all.
         let store = SqliteStore::open_in_memory().unwrap();
         let acct = store.ensure_account("me@example.com").unwrap();
-        assert!(store.sync_state(acct, HISTORY_KEY).unwrap().is_none());
+        assert!(store.sync_state(acct, LEGACY_HISTORY_KEY).unwrap().is_none());
 
-        // A historyId larger than u32::MAX, to prove the field holds it.
         let big = (u32::MAX as u64) + 123_456;
         store
             .set_sync_state(
                 acct,
-                HISTORY_KEY,
+                LEGACY_HISTORY_KEY,
                 &SyncState {
                     uidvalidity: 0,
                     last_uid: big,
                 },
             )
             .unwrap();
-        let s = store.sync_state(acct, HISTORY_KEY).unwrap().unwrap();
+        let s = store.sync_state(acct, LEGACY_HISTORY_KEY).unwrap().unwrap();
         assert_eq!(s.last_uid, big);
     }
 
-    #[test]
-    fn urlencode_escapes_spaces_and_reserved() {
-        assert_eq!(urlencode("newer_than:30d"), "newer_than:30d");
-        assert_eq!(urlencode("a b"), "a%20b");
-        assert_eq!(urlencode("x&y"), "x%26y");
-    }
 
-    #[test]
-    fn subtract_ids_drops_the_claimed_and_keeps_order() {
-        let claimed = vec!["b".to_string(), "d".to_string()];
-        let ids = vec!["a".into(), "b".into(), "c".into(), "d".into()];
-        assert_eq!(
-            subtract_ids(ids, &claimed),
-            vec!["a".to_string(), "c".into()]
-        );
-        // Nothing claimed: the batch passes through untouched.
-        assert_eq!(
-            subtract_ids(vec!["a".to_string()], &[]),
-            vec!["a".to_string()]
-        );
-    }
 
     // ---- the two-walk incremental poll, on the wire ------------------------
     //
@@ -3985,20 +3420,13 @@ mod tests {
         .with_api_base(base.to_string())
     }
 
-    /// Open an in-memory store with a live history cursor at `cursor`.
+    /// Open an in-memory store with a live sync cursor at `cursor`.
     fn store_at_cursor(cursor: Option<u64>) -> (Arc<SqliteStore>, AccountId) {
         let store = Arc::new(SqliteStore::open_in_memory().unwrap());
         let acct = store.ensure_account("me@example.com").unwrap();
         if let Some(c) = cursor {
             store
-                .set_sync_state(
-                    acct,
-                    HISTORY_KEY,
-                    &SyncState {
-                        uidvalidity: 0,
-                        last_uid: c,
-                    },
-                )
+                .set_sync_cursor(acct, CURSOR_KEY, &c.to_string())
                 .unwrap();
         }
         (store, acct)
@@ -4006,9 +3434,9 @@ mod tests {
 
     fn cursor_of(store: &SqliteStore, acct: AccountId) -> Option<u64> {
         store
-            .sync_state(acct, HISTORY_KEY)
+            .sync_cursor(acct, CURSOR_KEY)
             .unwrap()
-            .map(|s| s.last_uid)
+            .map(|c| c.parse().unwrap())
     }
 
     /// Mail the user WROTE, dated `at` so it is inside the freshness window —
@@ -4023,6 +3451,95 @@ mod tests {
              writing this from the phone app\r\n",
             at.to_rfc2822()
         )
+    }
+
+    #[tokio::test]
+    async fn an_upgraded_install_adopts_its_old_history_row_instead_of_re_backfilling() {
+        // THE UPGRADE CASE. Before the transport seam the cursor lived in
+        // `sync_state` under 'history'; a daemon that reads only `sync_cursor`
+        // would see "never synced", re-list its whole backfill window and
+        // re-ingest every message in it on the first tick after the upgrade.
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let acct = store.ensure_account("me@example.com").unwrap();
+        store
+            .set_sync_state(
+                acct,
+                LEGACY_HISTORY_KEY,
+                &SyncState {
+                    uidvalidity: 0,
+                    last_uid: 100,
+                },
+            )
+            .unwrap();
+        assert!(store.sync_cursor(acct, CURSOR_KEY).unwrap().is_none());
+
+        let g = MockGmail::default();
+        g.history(LABEL_INBOX, LabelHistory::added(150, &[(150, "g-new")]));
+        g.history(LABEL_SENT, LabelHistory::quiet(150));
+        g.body(
+            "g-new",
+            format!(
+                "From: Alice <alice@friends.com>\r\n\
+                 To: me@example.com\r\n\
+                 Subject: after the upgrade\r\n\
+                 Date: {}\r\n\
+                 \r\n\
+                 still here\r\n",
+                Utc::now().to_rfc2822()
+            ),
+        );
+        let base = serve_mock(g.clone()).await;
+
+        engine(store.clone(), acct, &base)
+            .poll_once()
+            .await
+            .unwrap();
+
+        // It WALKED from the adopted position rather than re-listing: a
+        // catch-up would have called `messages.list`, not `history.list`.
+        assert_eq!(g.calls("list:INBOX"), 0, "{:?}", g.seen());
+        assert_eq!(g.calls("history:INBOX"), 1, "{:?}", g.seen());
+        assert_eq!(cursor_of(&store, acct), Some(150));
+
+        // The legacy row is left intact, so a rollback to a build that still
+        // reads it finds it where it was.
+        assert_eq!(
+            store
+                .sync_state(acct, LEGACY_HISTORY_KEY)
+                .unwrap()
+                .map(|s| s.last_uid),
+            Some(100)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stored_cursor_wins_over_the_legacy_row() {
+        // Adoption is a ONE-TIME migration, not a fallback that keeps firing:
+        // once `sync_cursor` holds a position, the stale legacy row must never
+        // drag the walk backwards to it.
+        let (store, acct) = store_at_cursor(Some(500));
+        store
+            .set_sync_state(
+                acct,
+                LEGACY_HISTORY_KEY,
+                &SyncState {
+                    uidvalidity: 0,
+                    last_uid: 100,
+                },
+            )
+            .unwrap();
+
+        let g = MockGmail::default();
+        g.history(LABEL_INBOX, LabelHistory::quiet(500));
+        g.history(LABEL_SENT, LabelHistory::quiet(500));
+        let base = serve_mock(g.clone()).await;
+
+        engine(store.clone(), acct, &base)
+            .poll_once()
+            .await
+            .unwrap();
+
+        assert_eq!(cursor_of(&store, acct), Some(500), "not dragged back to 100");
     }
 
     #[tokio::test]

@@ -20,7 +20,7 @@ use squelch_core::config::{CACHE_READ_INPUT_MULT, CACHE_WRITE_INPUT_MULT};
 use squelch_core::store::{
     ActionMessageRef, Draft, NewAuditEntry, SearchFilter, SitrepBand, SqliteStore, Store,
 };
-use squelch_core::sync::{decode_raw_b64url, parse_internal_date};
+use squelch_core::mail::gmail::{decode_raw_b64url, parse_internal_date};
 use squelch_core::triage::llm::Usage;
 use squelch_core::triage::rule_infer;
 use squelch_core::types::{AccountId, AttentionStatus, Disposition, ShredStats, Tier, TriageAxis};

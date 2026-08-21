@@ -1,6 +1,7 @@
 # Outlook support: design + implementation plan
 
-Status: PLANNED (this doc is the spec; nothing below is implemented).
+Status: **P0 COMPLETE** (commits 1e1f779, 3fe1551, fd50c7f, cbe9730 on branch
+`outlook-support`; 2020 workspace tests green, clippy clean). P1-P5 planned.
 Scope: self-host daemon first (P0–P4). The hosted signup funnel (squelch-control)
 is P5 and gets its own design pass later.
 
@@ -275,7 +276,34 @@ MPN-verified — acceptable for self-host, revisit for hosted.
 
 Each phase = one reviewable PR-sized wave; commit per verified wave.
 
-### P0 — Extract the seams (pure refactor, zero behavior change)
+### P0 — Extract the seams — DONE
+
+Landed as four commits. What actually shipped, and where it differs from the
+sketch below:
+
+- `squelch-core/src/mail/{mod.rs,gmail.rs}` — `MailSource` + `GmailSource`. The
+  engine keeps cadence/ingest/triage and cursor PERSISTENCE; the source owns
+  listing, delta walking, raw fetching and cursor ENCODING.
+- `squelch-api/src/write/{mod.rs,gmail.rs,mime.rs}` — `MailWriter` +
+  `GmailWriteClient`, with the 2,200 provider-neutral RFC822 lines split into
+  `mime.rs`. `write_client()` returns `Arc<dyn MailWriter>`, so the provider is
+  chosen in exactly one place.
+- `sync_cursor` table + `Store::{sync_cursor,set_sync_cursor,has_message}`.
+  Legacy adoption of `sync_state('history')` is implemented and covered in both
+  directions (adopts once; a stored cursor is never dragged back). The adoption
+  test was mutation-checked — breaking the adoption fails it.
+- `RawMessage` carries the provider's OWN `id`, not just the requested one,
+  because Graph answers a mutable id with the immutable one.
+- `has_message` is LANDED BUT UNWIRED. The skip guard belongs on the
+  incremental path only and arrives in P2 — putting it on the initial listing
+  would break the documented re-ingest recovery drill.
+- Behavior change, deliberate: first-run backfill now subtracts inbox ids from
+  the sent batch the way catch-up always has, so a self-addressed message
+  backfills once as its visible copy instead of twice, ending hidden.
+
+Original scope, for reference:
+
+
 
 - `squelch-core/src/mail/{mod.rs,gmail.rs}`: trait + move the Gmail transport
   (`get_json`/`send_get`/`bearer_get`/`token_for_request`, `history_walk*`,

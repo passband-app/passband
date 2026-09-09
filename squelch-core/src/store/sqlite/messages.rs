@@ -69,13 +69,25 @@ fn bump_unsub_violation_conn(
 /// keeps a sent message's Bcc list through the INBOX sighting of the same
 /// message (a self-Cc, a note to self, a group echo): the received copy has no
 /// Bcc to offer and says `None` rather than `Some("")`.
+///
+/// `bcc_addrs` is additionally DROPPED FOR ANYTHING NOT SENT, in the VALUES
+/// clause so the gate covers the update too (`excluded` is the gated row). The
+/// ingest path already refuses to read a `Bcc:` header off received mail, where
+/// it is the sender's leak or a forgery — this is the store holding the same line
+/// against every other caller, present and future, the way
+/// `set_message_recipients` does for the backfill sweep. Gating on the INCOMING
+/// `is_sent` and not the stored one is what keeps a real Bcc through the sticky
+/// `is_sent` flip: the inbound sighting offers nothing here, so the COALESCE
+/// keeps what the sent copy wrote.
 fn upsert_message_conn(conn: &Connection, msg: &NewMessage) -> Result<i64> {
     conn.execute(
         "INSERT INTO messages(account_id, gmail_msg_id, thread_id, from_addr, from_name,
              subject, received_at, snippet, body, body_html, is_sent, to_addrs,
              cc_addrs, bcc_addrs,
              list_unsubscribe, list_unsub_one_click, auth_pass, is_spam)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,
+             CASE WHEN ?11 = 1 THEN ?14 ELSE NULL END,
+             ?15,?16,?17,?18)
          ON CONFLICT(account_id, gmail_msg_id) DO UPDATE SET
              thread_id=excluded.thread_id, from_addr=excluded.from_addr,
              from_name=excluded.from_name, subject=excluded.subject,

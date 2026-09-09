@@ -1195,6 +1195,45 @@ fn the_queue_reads_pre_split_sent_rows_again() {
     );
 }
 
+/// The same line the backfill writer holds, held against the INGEST writer: any
+/// caller can pass a Bcc for a received row, and the store's answer is NULL.
+#[test]
+fn the_upsert_refuses_a_bcc_on_received_mail() {
+    let (store, acct) = store();
+    let inbound = triaged(acct, "g-in", "t-in")
+        .bcc_addrs("leaked@example.com")
+        .seed(&store);
+    let sent_id = triaged(acct, "s-out", "t-out")
+        .is_sent(true)
+        .bcc_addrs("Ana <ana@example.com>")
+        .seed(&store);
+    let bcc_of = |id: i64| -> Option<String> {
+        store
+            .lock()
+            .unwrap()
+            .query_row("SELECT bcc_addrs FROM messages WHERE id=?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    };
+    assert_eq!(
+        bcc_of(inbound),
+        None,
+        "a Bcc header on inbound mail is never who it went to"
+    );
+    assert_eq!(bcc_of(sent_id).as_deref(), Some("Ana <ana@example.com>"));
+
+    // THE STICKY `is_sent` FLIP: the INBOX sighting of a self-addressed send pins
+    // `is_sent` to 0, and it must not take the blind list with it — that copy has
+    // no Bcc to offer, so the COALESCE keeps what the sent copy wrote.
+    triaged(acct, "s-out", "t-out").seed(&store);
+    assert_eq!(
+        bcc_of(sent_id).as_deref(),
+        Some("Ana <ana@example.com>"),
+        "a later inbound sighting has no opinion about the Bcc, and erases nothing"
+    );
+}
+
 #[test]
 fn a_bcc_is_never_kept_on_received_mail() {
     let (store, acct) = store();

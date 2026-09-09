@@ -47,14 +47,13 @@ use crate::metrics::{NotifyDecision, NotifyLane};
 use crate::store::{
     AttachmentBytes, BankingApplied, BlankBodyScan, ContactEntry, Device, DeviceToken, Draft,
     DraftFields, ExtractQueued, FtsQuery, HealScope, InboxUnread, IssuedDeviceToken, LeggedHit,
-    MailActivityDay, MarketingApplied, MarketingOffer, MessageOpen, MessageUnsub,
-    MintedPairingCode, MissingVector, NewAuditEntry, NewEvent, NewNotifyDecision,
+    MailActivityDay, MarketingApplied, MarketingOffer, MessageMissingRecipients, MessageOpen,
+    MessageUnsub, MintedPairingCode, MissingVector, NewAuditEntry, NewEvent, NewNotifyDecision,
     NotifyDecisionRow, RevisitQueued, SPAM_SYNCED_AT_KEY, SealedBody, SealedMessage,
     SearchDiagnostics, SearchFilter, SearchSort, SeedVerdict, SenderDigestRow, SenderEntry,
-    SenderHistory, SentMessage, SentMissingRecipients, SitrepBand, SpamScope, Stage1Applied,
-    Stage1Queued, Stage2Applied, Stage2CapOverrides, Stage2Queued, Stage2Usage, Stage2UsageDay,
-    Store, SyncState, TermDf, ThreadSibling, TrackedMessage, TriageDebug, TriagedMessage,
-    UsageTokens,
+    SenderHistory, SentMessage, SitrepBand, SpamScope, Stage1Applied, Stage1Queued, Stage2Applied,
+    Stage2CapOverrides, Stage2Queued, Stage2Usage, Stage2UsageDay, Store, SyncState, TermDf,
+    ThreadSibling, TrackedMessage, TriageDebug, TriagedMessage, UsageTokens,
 };
 use crate::types::{
     AccountId, AttachmentInfo, AttentionStatus, AttentionUpdate, AuditEntry, BandCounts, Banking,
@@ -966,12 +965,12 @@ impl Store for SqliteStore {
         self.sent_listing(account_id, limit, offset)
     }
 
-    fn sent_missing_recipients(
+    fn messages_missing_recipients(
         &self,
         account_id: AccountId,
         limit: u32,
-    ) -> Result<Vec<SentMissingRecipients>> {
-        self.sent_missing_recipients(account_id, limit)
+    ) -> Result<Vec<MessageMissingRecipients>> {
+        self.messages_missing_recipients(account_id, limit)
     }
 
     fn blank_body_messages(
@@ -983,13 +982,15 @@ impl Store for SqliteStore {
         self.blank_body_messages(account_id, before_id, limit)
     }
 
-    fn set_message_to_addrs(
+    fn set_message_recipients(
         &self,
         account_id: AccountId,
         message_id: i64,
         to_addrs: &str,
+        cc_addrs: &str,
+        bcc_addrs: &str,
     ) -> Result<bool> {
-        self.set_message_to_addrs(account_id, message_id, to_addrs)
+        self.set_message_recipients(account_id, message_id, to_addrs, cc_addrs, bcc_addrs)
     }
 
     fn append_audit(&self, account_id: AccountId, entry: &NewAuditEntry) -> Result<i64> {

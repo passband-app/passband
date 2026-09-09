@@ -286,6 +286,30 @@ pub struct ClientMessage {
     pub content: String,
     /// Sanitized HTML body; served ONLY here (GET /client/thread/{id}).
     pub html: Option<String>,
+    /// WHO ELSE WAS ON THIS MESSAGE: the To and Cc display lists as the headers
+    /// spelled them, comma-joined `Name <addr>`, and on the user's own sends the
+    /// Bcc list too.
+    ///
+    /// The reader named the sender and nobody else, which cannot tell a note
+    /// written to you apart from a broadcast you happen to be on — and "was I
+    /// the only one asked?" is a question threads get opened with.
+    ///
+    /// `None` is "we have never read this message's headers" (a row the
+    /// recipients backfill has not reached), `Some("")` is "read, and the header
+    /// named nobody"; the client draws neither. `bcc` is only ever `Some` on
+    /// mail the account sent — the store refuses to keep a `Bcc:` header on
+    /// received mail, where it is the sender's leak or a forgery.
+    ///
+    /// HUMAN DOOR ONLY, like `html` and `attachments`. The agent door's
+    /// [`SanitizedMessage`] carries no recipients at all: a display name is
+    /// attacker-written text, and the correspondent graph is not something /mcp
+    /// was handed (docs/SECURITY.md).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_addrs: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cc_addrs: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bcc_addrs: Option<String>,
     /// Attachment metadata (real attachments + cid-inline parts); always
     /// present, `[]` when there are none. Bytes come from
     /// GET /client/attachments/{id}. HUMAN-DOOR ONLY, like `html`.
@@ -835,12 +859,21 @@ pub struct NewMessage {
     /// verdict, never ours: it keeps the row out of every band, queue and search
     /// (see `messages.is_spam`) and off the LLM path entirely.
     pub is_spam: bool,
-    /// Display recipients (To + Cc) of SENT mail, comma-joined `Name <addr>`
-    /// (bare addr when the header carried no display name). `None` for received
-    /// mail, and `None` from any caller that did not parse the headers — the
-    /// upsert treats `None` as "no opinion" and keeps whatever is stored, so a
-    /// re-fetch can fill a row in without a later one blanking it.
+    /// Display recipients, ONE FIELD PER HEADER, comma-joined `Name <addr>`
+    /// (bare addr when the header carried no display name). `None` from any
+    /// caller that did not parse the headers — the upsert treats `None` as "no
+    /// opinion" and keeps whatever is stored, so a re-fetch can fill a row in
+    /// without a later one blanking it. `Some("")` is the different, deliberate
+    /// statement that the header named nobody.
+    ///
+    /// To and Cc are read off EVERY message, sent and received alike: the reader
+    /// shows them, and who else was on a message is half of what it means.
     pub to_addrs: Option<String>,
+    pub cc_addrs: Option<String>,
+    /// SENT MAIL'S ALONE. The store drops this for any row with `is_sent = 0`
+    /// whatever a caller passes, because on received mail a `Bcc:` header is the
+    /// sender's leak or a forgery, never "who this went to".
+    pub bcc_addrs: Option<String>,
     /// Raw `List-Unsubscribe` header value (comma-separated `<mailto:…>` /
     /// `<https:…>` entries). Consumed ONLY by the human door's unsubscribe
     /// endpoint; never crosses /mcp.
@@ -1136,8 +1169,8 @@ mod tests {
         assert!(old.blocked.is_none());
     }
 
-    /// The agent-door thread view carries no `html` and no `attachments` key —
-    /// structural absence, not runtime filtering.
+    /// The agent-door thread view carries no `html`, no `attachments` and no
+    /// recipients — structural absence, not runtime filtering.
     #[test]
     fn mcp_thread_view_json_has_no_html_key() {
         let tv = ThreadView {
@@ -1161,6 +1194,16 @@ mod tests {
             msg.get("attachments").is_none(),
             "MCP thread view must not carry attachments"
         );
+        // WHO ELSE WAS ON THE MAIL is human-door data: a recipient display name
+        // is a stranger's text, and the correspondent graph is not something the
+        // agent door was handed. There is no field here to filter — the type has
+        // none — and this asserts nobody adds one by flattening the two.
+        for key in ["to_addrs", "cc_addrs", "bcc_addrs"] {
+            assert!(
+                msg.get(key).is_none(),
+                "MCP thread view must not carry {key}"
+            );
+        }
         assert!(msg.get("content").is_some());
     }
 
@@ -1206,6 +1249,9 @@ mod tests {
                     auth_pass: Some(true),
                     is_sent: false,
                     is_spam: false,
+                    to_addrs: Some("Me <me@b.com>, \"Doe, Jane\" <jane@b.com>".into()),
+                    cc_addrs: Some("cc@b.com".into()),
+                    bcc_addrs: None,
                 },
                 ClientMessage {
                     id: 2,
@@ -1223,6 +1269,10 @@ mod tests {
                     auth_pass: None,
                     is_sent: true,
                     is_spam: false,
+                    // The user's own send: To read and empty, a Bcc list kept.
+                    to_addrs: Some(String::new()),
+                    cc_addrs: None,
+                    bcc_addrs: Some("blind@b.com".into()),
                 },
             ],
         };
@@ -1238,6 +1288,26 @@ mod tests {
         assert_eq!(
             v["messages"][0]["attachments"][0]["downloadable"],
             serde_json::json!(true)
+        );
+        // RECIPIENTS: present when read, and structurally ABSENT when never read
+        // — the same shape a daemon too old to know about them sends, which is
+        // what lets the client treat both as "nothing to draw".
+        assert_eq!(
+            v["messages"][0]["to_addrs"],
+            serde_json::json!("Me <me@b.com>, \"Doe, Jane\" <jane@b.com>")
+        );
+        assert_eq!(v["messages"][0]["cc_addrs"], serde_json::json!("cc@b.com"));
+        assert!(
+            v["messages"][0].get("bcc_addrs").is_none(),
+            "a Bcc nobody read must not serialize as an empty one"
+        );
+        // "" is read-and-named-nobody, which is NOT the same statement as absent
+        // and must survive the wire as itself.
+        assert_eq!(v["messages"][1]["to_addrs"], serde_json::json!(""));
+        assert!(v["messages"][1].get("cc_addrs").is_none());
+        assert_eq!(
+            v["messages"][1]["bcc_addrs"],
+            serde_json::json!("blind@b.com")
         );
         // content_id rides along on a cid-inline part and is structurally ABSENT
         // on a part that declared none — the same shape a pre-content_id daemon

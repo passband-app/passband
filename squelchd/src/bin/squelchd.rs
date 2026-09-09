@@ -2177,22 +2177,24 @@ fn cmd_serve(
 
         // One-time history sweeps on the read credential: the contacts harvest
         // seeding recipient autocomplete and the recipients backfill filling
-        // `to_addrs` on sent mail that predates the column (both headers-only),
-        // then the blank-body heal re-fetching mail stored with an empty text
-        // body beside a full HTML one (one raw GET per such message, and it
-        // hands each row back to triage). Staggered past the startup sync burst
-        // and run one after the other so they never contend for the same Gmail
-        // quota. Any of them failing just retries on the next daemon start —
-        // each done flag is only set on completion — and none can block the
-        // sync loop, which runs in its own task.
+        // To/Cc (and Bcc on the user's own sends) for every message that
+        // predates the per-header columns (both headers-only), then the
+        // blank-body heal re-fetching mail stored with an empty text body beside
+        // a full HTML one (one raw GET per such message, and it hands each row
+        // back to triage). Staggered past the startup sync burst and run one
+        // after the other so they never contend for the same Gmail quota. Any
+        // of them failing just retries on the next daemon start — each done
+        // flag is only set on completion — and none can block the sync loop,
+        // which runs in its own task.
         //
         // The stagger is measured from when that burst can actually START, which
         // is why this waits on the SAME embedder gate the first backfill does: on
         // a cold model cache the backfill now begins minutes into the run, and a
-        // sweep that is one metadata GET per Sent message (the heaviest Gmail
-        // consumer here) landing on top of a 30-day raw backfill on one
-        // credential is how a tenant earns a 429 — which bubbles out of
-        // `run_once` and bounces the whole sync lifecycle through backoff.
+        // sweep that is one metadata GET per STORED MESSAGE (the heaviest Gmail
+        // consumer here, and heavier since it stopped being Sent-only) landing on
+        // top of a 30-day raw backfill on one credential is how a tenant earns a
+        // 429 — which bubbles out of `run_once` and bounces the whole sync
+        // lifecycle through backoff. The sweep paces itself on top of that.
         {
             let store = store.clone();
             let email = email.clone();
@@ -2214,9 +2216,9 @@ fn cmd_serve(
                         "squelchd: sent-contacts harvest incomplete (retries next start): {e}"
                     );
                 }
-                if let Err(e) = engine.backfill_sent_recipients().await {
+                if let Err(e) = engine.backfill_recipients().await {
                     eprintln!(
-                        "squelchd: sent-recipients backfill incomplete (retries next start): {e}"
+                        "squelchd: recipients backfill incomplete (retries next start): {e}"
                     );
                 }
                 if let Err(e) = engine.heal_blank_bodies().await {

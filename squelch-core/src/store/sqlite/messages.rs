@@ -62,16 +62,20 @@ fn bump_unsub_violation_conn(
 /// sighting inside it. The SPAM walk runs last and subtracts what the other two
 /// already returned, so the clause is a backstop rather than the mechanism.
 ///
-/// `to_addrs` is the one column that PREFERS THE STORED VALUE over a NULL
-/// (`COALESCE(excluded, messages)`): only a sent-path ingest parses recipients,
-/// so a re-fetch that skips them — or an old row the backfill already filled —
-/// must not be blanked by the next writer that has no opinion.
+/// The three RECIPIENT columns are the ones that PREFER THE STORED VALUE over a
+/// NULL (`COALESCE(excluded, messages)`): not every writer parses headers, so a
+/// re-fetch that skips them — or an old row the backfill already filled — must
+/// not be blanked by the next writer that has no opinion. That is also what
+/// keeps a sent message's Bcc list through the INBOX sighting of the same
+/// message (a self-Cc, a note to self, a group echo): the received copy has no
+/// Bcc to offer and says `None` rather than `Some("")`.
 fn upsert_message_conn(conn: &Connection, msg: &NewMessage) -> Result<i64> {
     conn.execute(
         "INSERT INTO messages(account_id, gmail_msg_id, thread_id, from_addr, from_name,
              subject, received_at, snippet, body, body_html, is_sent, to_addrs,
+             cc_addrs, bcc_addrs,
              list_unsubscribe, list_unsub_one_click, auth_pass, is_spam)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
          ON CONFLICT(account_id, gmail_msg_id) DO UPDATE SET
              thread_id=excluded.thread_id, from_addr=excluded.from_addr,
              from_name=excluded.from_name, subject=excluded.subject,
@@ -79,6 +83,8 @@ fn upsert_message_conn(conn: &Connection, msg: &NewMessage) -> Result<i64> {
              body=excluded.body, body_html=excluded.body_html,
              is_sent=MIN(messages.is_sent, excluded.is_sent),
              to_addrs=COALESCE(excluded.to_addrs, messages.to_addrs),
+             cc_addrs=COALESCE(excluded.cc_addrs, messages.cc_addrs),
+             bcc_addrs=COALESCE(excluded.bcc_addrs, messages.bcc_addrs),
              list_unsubscribe=excluded.list_unsubscribe,
              list_unsub_one_click=excluded.list_unsub_one_click,
              auth_pass=excluded.auth_pass,
@@ -96,6 +102,8 @@ fn upsert_message_conn(conn: &Connection, msg: &NewMessage) -> Result<i64> {
             msg.body_html,
             msg.is_sent as i64,
             msg.to_addrs,
+            msg.cc_addrs,
+            msg.bcc_addrs,
             msg.list_unsubscribe,
             msg.list_unsub_one_click as i64,
             msg.auth_pass.map(|p| p as i64),
@@ -583,7 +591,7 @@ impl SqliteStore {
         let mut stmt = conn.prepare(
             "SELECT m.id, m.from_addr, m.from_name, m.received_at, m.body, m.body_html,
                     t.tier, t.deadline, t.status, t.one_line, m.auth_pass, m.subject,
-                    m.is_spam,
+                    m.is_spam, m.to_addrs, m.cc_addrs, m.bcc_addrs,
                     (m.is_sent = 1
                      OR (TRIM(COALESCE(m.from_addr, '')) != ''
                          AND LOWER(TRIM(COALESCE(m.from_addr, ''))) =
@@ -607,9 +615,20 @@ impl SqliteStore {
                     content: r.get(4)?,
                     html: r.get(5)?,
                     attachments: Vec::new(), // filled below, once `stmt` is gone
+                    // Per-header recipient lists, straight off the row. NULL
+                    // (never read) and "" (read, named nobody) stay distinct all
+                    // the way to the client, which draws neither but must not
+                    // turn one into the other.
+                    //
+                    // `bcc_addrs` needs no guard here: the store refuses to keep
+                    // a Bcc on a received row, so a NULL is what every one of
+                    // them holds.
+                    to_addrs: r.get(13)?,
+                    cc_addrs: r.get(14)?,
+                    bcc_addrs: r.get(15)?,
                     // The computed authorship bit above: a boolean expression
                     // guarded against NULL on both sides, so every row answers.
-                    is_sent: r.get::<_, i64>(13)? != 0,
+                    is_sent: r.get::<_, i64>(16)? != 0,
                     is_spam: r.get::<_, i64>(12)? != 0,
                     tier: r
                         .get::<_, Option<String>>(6)?
@@ -1255,12 +1274,16 @@ impl SqliteStore {
         let conn = self.lock()?;
         // Human-only outbox: pending and restricted mail remain readable.
         // Recipients and read receipts are scoped to the owning account.
+        // To, Cc and Bcc come back as ONE list here, unlike the reader: a sent
+        // row is one line answering "who did this go to", and the thread it
+        // opens onto says which header carried whom.
         let mut stmt = conn.prepare(
             "SELECT m.id, m.thread_id, COALESCE(m.to_addrs, ''), m.subject, m.snippet,
                     m.received_at,
                     (SELECT COUNT(*) FROM message_opens o
                      JOIN send_trackers st ON st.token = o.token
-                     WHERE st.account_id = m.account_id AND st.message_id = m.id) AS opens
+                     WHERE st.account_id = m.account_id AND st.message_id = m.id) AS opens,
+                    COALESCE(m.cc_addrs, ''), COALESCE(m.bcc_addrs, '')
              FROM messages m
              WHERE m.account_id = ?1
                AND m.is_sent = 1
@@ -1272,7 +1295,11 @@ impl SqliteStore {
                 Ok(SentMessage {
                     id: r.get(0)?,
                     thread_id: r.get(1)?,
-                    to: r.get(2)?,
+                    to: crate::sync::ingest::join_recipient_lists(&[
+                        &r.get::<_, String>(2)?,
+                        &r.get::<_, String>(7)?,
+                        &r.get::<_, String>(8)?,
+                    ]),
                     subject: r.get(3)?,
                     snippet: r.get(4)?,
                     // The stored string verbatim — this is the same RFC3339 the
@@ -1286,24 +1313,31 @@ impl SqliteStore {
         Ok(out)
     }
 
-    pub(super) fn sent_missing_recipients(
+    pub(super) fn messages_missing_recipients(
         &self,
         account_id: AccountId,
         limit: u32,
-    ) -> Result<Vec<SentMissingRecipients>> {
+    ) -> Result<Vec<MessageMissingRecipients>> {
         let conn = self.lock()?;
-        // The recipients-backfill queue: sent rows ingested before `to_addrs`
-        // existed. Newest first, so an interrupted pass has already covered the
-        // mail the user is most likely to look at.
+        // The recipients-backfill queue: every row nobody has read headers for
+        // under the per-header split. Newest first, so an interrupted pass has
+        // already covered the mail the user is most likely to look at.
+        //
+        // `cc_addrs IS NULL` IS THE PREDICATE, and `to_addrs IS NULL` would be
+        // the wrong one: sent rows have carried a `to_addrs` since before the
+        // split — one string with To, Cc and Bcc mashed together — and those
+        // rows are exactly the ones that need re-reading, or every address the
+        // user copied in renders as though they had been written to directly.
+        // `cc_addrs` arrives NULL on all of them and on every received row too.
         let mut stmt = conn.prepare(
             "SELECT id, gmail_msg_id FROM messages
-             WHERE account_id = ?1 AND is_sent = 1 AND to_addrs IS NULL
+             WHERE account_id = ?1 AND cc_addrs IS NULL
              ORDER BY received_at DESC, id DESC
              LIMIT ?2",
         )?;
         let out = stmt
             .query_map(params![account_id, limit as i64], |r| {
-                Ok(SentMissingRecipients {
+                Ok(MessageMissingRecipients {
                     message_id: r.get(0)?,
                     gmail_msg_id: r.get(1)?,
                 })
@@ -1368,34 +1402,54 @@ impl SqliteStore {
         Ok(scan)
     }
 
-    pub(super) fn set_message_to_addrs(
+    pub(super) fn set_message_recipients(
         &self,
         account_id: AccountId,
         message_id: i64,
         to_addrs: &str,
+        cc_addrs: &str,
+        bcc_addrs: &str,
     ) -> Result<bool> {
         let conn = self.lock()?;
-        // `is_sent = 1` in the predicate, not just in the caller: recipients are
-        // a property of mail the user SENT, and a backfill that ever pointed at
-        // an inbound row must write nothing rather than invent a "to" for it.
-        // Writing "" is meaningful — it takes the row out of the backfill queue
+        // BCC IS DROPPED FOR ANYTHING NOT SENT, here in SQL rather than only in
+        // the caller: a `Bcc:` header on received mail is the sender's leak or a
+        // forgery, and this is the one writer a network sweep drives. To and Cc
+        // are written on every row — the reader shows them for received mail
+        // too, which is the whole point of the sweep.
+        //
+        // Writing "" is meaningful: it takes the row out of the backfill queue
         // as "looked, and the headers named nobody".
         let n = conn.execute(
-            "UPDATE messages SET to_addrs = ?3
-             WHERE account_id = ?1 AND id = ?2 AND is_sent = 1",
-            params![account_id, message_id, to_addrs],
+            "UPDATE messages
+                SET to_addrs = ?3,
+                    cc_addrs = ?4,
+                    bcc_addrs = CASE WHEN is_sent = 1 THEN ?5 ELSE NULL END
+             WHERE account_id = ?1 AND id = ?2",
+            params![account_id, message_id, to_addrs, cc_addrs, bcc_addrs],
         )?;
-        // Keep the normalized index in step with the column it is derived from.
-        // Only when the UPDATE matched: a row this backfill declined to touch
-        // (not sent, not ours) must not gain recipients either.
-        //
-        // Parsed back OUT of the display string because that is all this path
-        // ever has — the sweep hands over a rendered header, not the mailboxes.
-        // The ingest path, which does have them, never comes through here.
-        if n > 0 {
-            let addrs = crate::sync::ingest::parse_stored_recipients(to_addrs);
+        if n == 0 {
+            return Ok(false);
+        }
+        // Keep the normalized index in step with the columns it is derived from,
+        // and ONLY FOR SENT MAIL: `message_recipients` is the sent index send
+        // group history joins against, and an inbound row in it would credit a
+        // group with mail it never received. Re-read from the row rather than
+        // trusted from the caller, for the same reason the Bcc gate is in SQL.
+        let is_sent: bool = conn.query_row(
+            "SELECT is_sent = 1 FROM messages WHERE account_id = ?1 AND id = ?2",
+            params![account_id, message_id],
+            |r| r.get(0),
+        )?;
+        if is_sent {
+            // Parsed back OUT of the display strings because that is all this
+            // path ever has — the sweep hands over rendered headers, not the
+            // mailboxes. The ingest path, which does have them, never comes
+            // through here.
+            let joined =
+                crate::sync::ingest::join_recipient_lists(&[to_addrs, cc_addrs, bcc_addrs]);
+            let addrs = crate::sync::ingest::parse_stored_recipients(&joined);
             Self::sync_message_recipients_conn(&conn, account_id, message_id, &addrs)?;
         }
-        Ok(n > 0)
+        Ok(true)
     }
 }

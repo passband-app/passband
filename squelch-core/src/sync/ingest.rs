@@ -307,6 +307,24 @@ pub fn parse_stored_recipients(to_addrs: &str) -> Vec<String> {
     out
 }
 
+/// Join several stored recipient display strings into one, skipping the empty
+/// ones so the result never carries a dangling or doubled separator.
+///
+/// The lists are stored per header and read back per header almost everywhere —
+/// the whole point of the split. The two callers here are the ones that ask a
+/// question no header answers: the sent listing ("who did this go to", one line,
+/// To and Cc and Bcc alike) and the `message_recipients` migration, which
+/// indexes the same union. Both then hand the result to a splitter, which is why
+/// this joins with the same `", "` [`format_recipients`] writes.
+pub fn join_recipient_lists(lists: &[&str]) -> String {
+    lists
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Heuristic: does `addr` look like a machine/robot address rather than a person?
 /// Used ONLY to filter recipient contact seeding, so mailto-unsubscribe traffic
 /// never becomes a "person I know" and pollutes triage. Combines local-part
@@ -921,19 +939,23 @@ pub fn ingest(
 ) -> TriagedMessage {
     let parsed = MessageParser::default().parse(&fetched.raw);
 
-    // Recipients (To + Cc) — only meaningful for Sent mail, where they become
-    // BOTH the contacts seed and the stored display recipients. Collected here
-    // while the parse is in hand. Received mail collects nothing, so `to_addrs`
-    // stays NULL on it.
-    let mut mailboxes: Vec<(String, Option<String>)> = Vec::new();
-    if fetched.is_sent
-        && let Some(m) = &parsed
-    {
+    // RECIPIENTS, one list per header, on EVERY message. A reader that names the
+    // sender and nobody else cannot tell a note written to you from a broadcast
+    // you happen to be on, so To and Cc are read off received mail too and
+    // stored beside the sent lists that predate them.
+    //
+    // Collected here while the parse is in hand — and kept SEPARATE, because the
+    // difference between being written to and being copied in is most of what a
+    // recipient list is for.
+    let mut to_mailboxes: Vec<(String, Option<String>)> = Vec::new();
+    let mut cc_mailboxes: Vec<(String, Option<String>)> = Vec::new();
+    let mut bcc_mailboxes: Vec<(String, Option<String>)> = Vec::new();
+    if let Some(m) = &parsed {
         if let Some(to) = m.to() {
-            collect_mailboxes(to, &mut mailboxes);
+            collect_mailboxes(to, &mut to_mailboxes);
         }
         if let Some(cc) = m.cc() {
-            collect_mailboxes(cc, &mut mailboxes);
+            collect_mailboxes(cc, &mut cc_mailboxes);
         }
         // BCC, on SENT MAIL ONLY. Gmail strips this header on delivery and keeps
         // it on the sender's own Sent copy, so this reads the blind copy list of
@@ -944,19 +966,39 @@ pub fn ingest(
         // to nobody, and `message_recipients` would have nothing to attribute a
         // bcc group send to.
         //
-        // The `is_sent` guard above is what keeps this honest. On received mail
-        // a `Bcc` header is at best the sender's leak and at worst forged, and
-        // in neither case is it "who this went to".
-        if let Some(bcc) = m.bcc() {
-            collect_mailboxes(bcc, &mut mailboxes);
+        // The `is_sent` guard is what keeps this honest. On received mail a
+        // `Bcc` header is at best the sender's leak and at worst forged, and in
+        // neither case is it "who this went to". The store's writer holds the
+        // same line in SQL, so this is a belt on top of that structural brace.
+        if fetched.is_sent
+            && let Some(bcc) = m.bcc()
+        {
+            collect_mailboxes(bcc, &mut bcc_mailboxes);
         }
     }
-    let to_addrs = format_recipients(&mailboxes);
+    let to_addrs = format_recipients(&to_mailboxes);
+    let cc_addrs = format_recipients(&cc_mailboxes);
+    let bcc_addrs = format_recipients(&bcc_mailboxes);
+
+    // EVERYONE THIS MESSAGE NAMED, as one list, for the two consumers that ask
+    // "who did this go to" rather than "which header were they on": the contacts
+    // seed and the `message_recipients` index.
+    //
+    // SENT MAIL ONLY, and that gate is load-bearing in BOTH directions. Seeding
+    // contacts from received mail would make every stranger Cc'd alongside the
+    // user a "person I know" and hand them triage's known-contact importance
+    // floor; and `message_recipients` is defined as the sent index that send
+    // group history joins against, so inbound rows in it would credit a group
+    // with mail it never received.
+    let mut mailboxes: Vec<(String, Option<String>)> = Vec::new();
+    if fetched.is_sent {
+        mailboxes.extend(to_mailboxes.iter().cloned());
+        mailboxes.extend(cc_mailboxes.iter().cloned());
+        mailboxes.extend(bcc_mailboxes.iter().cloned());
+    }
     // THE FAITHFUL RECIPIENT SET, taken here because `recipients` below is about
     // to be filtered down to contact-worthy addresses (self dropped, robots
-    // dropped) and this one must not be. It answers "who did this go to", the
-    // same question `to_addrs` answers, and feeds `message_recipients` — which
-    // send-group history joins against. A group whose member is `support@` or
+    // dropped) and this one must not be. A group whose member is `support@` or
     // the user's own address still received the mail.
     let recipient_addrs: Vec<String> = dedupe_lowercased(&mailboxes);
     let mut recipients: Vec<String> = mailboxes.into_iter().map(|(addr, _)| addr).collect();
@@ -1140,6 +1182,8 @@ pub fn ingest(
         is_sent: fetched.is_sent,
         is_spam: fetched.is_spam,
         to_addrs,
+        cc_addrs,
+        bcc_addrs,
         list_unsubscribe,
         list_unsub_one_click,
         auth_pass,
@@ -1533,11 +1577,11 @@ mod tests {
     }
 
     #[test]
-    fn sent_mail_stores_display_recipients_received_mail_stores_none() {
-        // The display string is To then Cc in header order, `Name <addr>` where a
-        // name exists and bare otherwise — and it is NOT filtered the way contact
-        // seeding is: `support@` is who this went to, whatever the contacts table
-        // thinks of it.
+    fn every_message_stores_its_display_recipients_one_column_per_header() {
+        // Each display string is its own header in header order, `Name <addr>`
+        // where a name exists and bare otherwise — and it is NOT filtered the way
+        // contact seeding is: `support@` is who this went to, whatever the
+        // contacts table thinks of it.
         let eml = "From: Me <me@example.com>\r\n\
                    To: Alice <alice@friends.com>, bob@friends.com\r\n\
                    Cc: unsubscribe@unsub.spmta.com\r\n\
@@ -1549,15 +1593,57 @@ mod tests {
         let t = ingest(&f, &Stage1Config::default(), Utc::now(), |_| false);
         assert_eq!(
             t.message.to_addrs.as_deref(),
-            Some("Alice <alice@friends.com>, bob@friends.com, unsubscribe@unsub.spmta.com")
+            Some("Alice <alice@friends.com>, bob@friends.com"),
+            "the Cc no longer rides along in the To line"
+        );
+        assert_eq!(
+            t.message.cc_addrs.as_deref(),
+            Some("unsubscribe@unsub.spmta.com")
         );
         // The contacts seed keeps its own, narrower rules.
         assert!(!t.recipients.iter().any(|r| r.contains("unsub")));
+        // The sent index keeps taking everyone, To and Cc alike.
+        assert!(
+            t.recipient_addrs
+                .contains(&"unsubscribe@unsub.spmta.com".to_string())
+        );
 
-        // Received mail has no "to" worth showing: the column stays NULL.
+        // RECEIVED MAIL READS THE SAME TWO HEADERS. Being copied in is not the
+        // same as being written to, and a reader that shows neither cannot tell
+        // a note from a broadcast.
         let f = raw(1, "g-recv", eml, /* is_sent */ false);
         let t = ingest(&f, &Stage1Config::default(), Utc::now(), |_| false);
-        assert_eq!(t.message.to_addrs, None);
+        assert_eq!(
+            t.message.to_addrs.as_deref(),
+            Some("Alice <alice@friends.com>, bob@friends.com")
+        );
+        assert_eq!(
+            t.message.cc_addrs.as_deref(),
+            Some("unsubscribe@unsub.spmta.com")
+        );
+        // But NOT the two sent-only derivations: contacts would make every
+        // stranger Cc'd alongside the user a "person I know", and the recipients
+        // index would credit a send group with mail it never received.
+        assert!(t.recipients.is_empty());
+        assert!(t.recipient_addrs.is_empty());
+    }
+
+    /// A header the message does not carry is `None` — "there was no such
+    /// header" — never `Some("")`, which is the backfill's "looked, nobody named"
+    /// and is what takes a row out of its queue.
+    #[test]
+    fn an_absent_header_is_none_rather_than_an_empty_list() {
+        let eml = "From: alice@friends.com\r\n\
+                   To: me@example.com\r\n\
+                   Subject: no cc here\r\n\
+                   Date: Mon, 7 Jul 2026 10:00:00 +0000\r\n\
+                   \r\n\
+                   hello\r\n";
+        let f = raw(1, "g-nocc", eml, /* is_sent */ false);
+        let t = ingest(&f, &Stage1Config::default(), Utc::now(), |_| false);
+        assert_eq!(t.message.to_addrs.as_deref(), Some("me@example.com"));
+        assert_eq!(t.message.cc_addrs, None);
+        assert_eq!(t.message.bcc_addrs, None);
     }
 
     /// Gmail keeps the `Bcc` header on the SENDER'S own Sent copy, and that copy
@@ -1574,19 +1660,22 @@ mod tests {
                    we closed the round\r\n";
         let f = raw(1, "g-bcc", eml, /* is_sent */ true);
         let t = ingest(&f, &Stage1Config::default(), Utc::now(), |_| false);
+        assert_eq!(t.message.to_addrs.as_deref(), Some("Me <me@example.com>"));
         assert_eq!(
-            t.message.to_addrs.as_deref(),
-            Some("Me <me@example.com>, Ann <ann@fund.com>, bo@fund.com"),
+            t.message.bcc_addrs.as_deref(),
+            Some("Ann <ann@fund.com>, bo@fund.com"),
             "the outbox must show who a blind blast actually reached"
         );
         assert!(t.recipient_addrs.contains(&"ann@fund.com".to_string()));
         assert!(t.recipient_addrs.contains(&"bo@fund.com".to_string()));
 
         // On RECEIVED mail a `Bcc` header is at best the sender's leak and at
-        // worst forged, and in neither case is it "who this went to".
+        // worst forged, and in neither case is it "who this went to". The To
+        // header on the same message is read like any other.
         let f = raw(1, "g-bcc-in", eml, /* is_sent */ false);
         let t = ingest(&f, &Stage1Config::default(), Utc::now(), |_| false);
-        assert_eq!(t.message.to_addrs, None);
+        assert_eq!(t.message.to_addrs.as_deref(), Some("Me <me@example.com>"));
+        assert_eq!(t.message.bcc_addrs, None);
         assert!(t.recipient_addrs.is_empty());
     }
 
@@ -2584,6 +2673,8 @@ mod tests {
                 is_sent: false,
                 is_spam: false,
                 to_addrs: None,
+                cc_addrs: None,
+                bcc_addrs: None,
                 list_unsubscribe: None,
                 list_unsub_one_click: false,
                 auth_pass: None,

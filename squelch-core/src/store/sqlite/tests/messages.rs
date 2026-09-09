@@ -1071,6 +1071,38 @@ fn human_sent_listing_includes_pending_and_restricted_rows() {
     assert_eq!(rows.len(), 4, "all four sent copies remain human-readable");
 }
 
+/// THE SENT ROW IS ONE LINE, so it names everyone the message reached whatever
+/// header carried them — the row has no room to say which, and the thread it
+/// opens onto does say it.
+#[test]
+fn sent_listing_joins_every_header_into_one_line() {
+    let (store, acct) = store();
+    let id = triaged(acct, "s-1", "t-1")
+        .is_sent(true)
+        .to_addrs("Ann <ann@x.com>")
+        .cc_addrs("cc@x.com")
+        .bcc_addrs("blind@x.com")
+        .received_at(Utc::now())
+        .seed(&store);
+
+    let rows = store.sent_listing(acct, 50, 0).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, id);
+    assert_eq!(rows[0].to, "Ann <ann@x.com>, cc@x.com, blind@x.com");
+
+    // An empty header contributes nothing — no dangling separator, no blank
+    // recipient for the row's splitter to name.
+    let bare = triaged(acct, "s-2", "t-2")
+        .is_sent(true)
+        .to_addrs("")
+        .cc_addrs("cc@x.com")
+        .received_at(Utc::now() + chrono::Duration::seconds(1))
+        .seed(&store);
+    let rows = store.sent_listing(acct, 50, 0).unwrap();
+    assert_eq!(rows[0].id, bare);
+    assert_eq!(rows[0].to, "cc@x.com");
+}
+
 #[test]
 fn sent_listing_is_account_scoped_and_reads_missing_recipients_as_empty() {
     let (store, acct) = store();
@@ -1101,42 +1133,130 @@ fn recipients_backfill_queue_drains_as_rows_are_filled() {
         .is_sent(true)
         .received_at(now)
         .seed(&store);
-    // Already filled, and received mail: neither is ever in the queue.
-    sent(&store, acct, "s-filled", "alice@friends.com", now);
-    triaged(acct, "g-in", "t-in").received_at(now).seed(&store);
+    // RECEIVED MAIL IS IN THE QUEUE TOO. The reader shows To and Cc on every
+    // message, so a mailbox of inbound history is most of what this pass is for.
+    let inbound = triaged(acct, "g-in", "t-in").received_at(now).seed(&store);
 
-    let queue = store.sent_missing_recipients(acct, 50).unwrap();
-    assert_eq!(queue.len(), 1);
-    assert_eq!(queue[0].message_id, pending);
-    assert_eq!(queue[0].gmail_msg_id, "s-pending");
+    let queue = store.messages_missing_recipients(acct, 50).unwrap();
+    assert_eq!(queue.len(), 2);
+    let ids: Vec<i64> = queue.iter().map(|r| r.message_id).collect();
+    assert!(ids.contains(&pending) && ids.contains(&inbound));
 
     // Writing "" ("looked, nobody named") is what takes a row OUT of the queue,
     // so one headerless message cannot re-queue the pass forever.
-    assert!(store.set_message_to_addrs(acct, pending, "").unwrap());
-    assert!(store.sent_missing_recipients(acct, 50).unwrap().is_empty());
-    assert_eq!(store.sent_listing(acct, 50, 0).unwrap().len(), 2);
+    assert!(
+        store
+            .set_message_recipients(acct, pending, "", "", "")
+            .unwrap()
+    );
+    assert!(
+        store
+            .set_message_recipients(acct, inbound, "me@x.com", "", "")
+            .unwrap()
+    );
+    assert!(
+        store
+            .messages_missing_recipients(acct, 50)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// A SENT ROW THAT PREDATES THE SPLIT is still a candidate: its `to_addrs` holds
+/// To, Cc and Bcc mashed into one string, and calling it done would render every
+/// address the user copied in as though it had been written to directly. That is
+/// why the queue reads `cc_addrs IS NULL` and not `to_addrs IS NULL`.
+#[test]
+fn the_queue_reads_pre_split_sent_rows_again() {
+    let (store, acct) = store();
+    // Exactly what the old sweep left behind: To and Cc in one column, no Cc
+    // column of its own.
+    let id = triaged(acct, "s-old", "t-old")
+        .is_sent(true)
+        .to_addrs("Ann <ann@x.com>, cc@x.com")
+        .received_at(Utc::now())
+        .seed(&store);
+
+    let queue = store.messages_missing_recipients(acct, 50).unwrap();
+    assert_eq!(queue.len(), 1, "a filled `to_addrs` is not a read Cc");
+    assert_eq!(queue[0].message_id, id);
+
+    // And once it IS re-read, the Cc leaves the To line.
+    assert!(
+        store
+            .set_message_recipients(acct, id, "Ann <ann@x.com>", "cc@x.com", "")
+            .unwrap()
+    );
+    assert!(
+        store
+            .messages_missing_recipients(acct, 50)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
-fn set_message_to_addrs_refuses_received_mail() {
+fn a_bcc_is_never_kept_on_received_mail() {
     let (store, acct) = store();
     let inbound = triaged(acct, "g-in", "t-in").seed(&store);
     assert!(
-        !store
-            .set_message_to_addrs(acct, inbound, "someone@example.com")
+        store
+            .set_message_recipients(acct, inbound, "me@x.com", "team@x.com", "leaked@x.com")
             .unwrap(),
-        "recipients are a property of mail the user SENT"
+        "To and Cc are read off received mail like any other"
     );
-    let stored: Option<String> = store
+    let (to, cc, bcc): (Option<String>, Option<String>, Option<String>) = store
         .lock()
         .unwrap()
         .query_row(
-            "SELECT to_addrs FROM messages WHERE id=?1",
+            "SELECT to_addrs, cc_addrs, bcc_addrs FROM messages WHERE id=?1",
+            [inbound],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(to.as_deref(), Some("me@x.com"));
+    assert_eq!(cc.as_deref(), Some("team@x.com"));
+    assert_eq!(
+        bcc, None,
+        "a Bcc header on inbound mail is the sender's leak or a forgery, never who it went to"
+    );
+    // And the sent-only index stays sent-only: an inbound row in it would credit
+    // a send group with mail it never received.
+    let indexed: i64 = store
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM message_recipients WHERE message_id=?1",
             [inbound],
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(stored, None);
+    assert_eq!(indexed, 0);
+}
+
+/// The sent index is fed from ALL THREE lists: a Cc'd or Bcc'd address received
+/// the mail exactly like a To'd one, and group history joins against this table.
+#[test]
+fn the_sent_index_takes_every_header() {
+    let (store, acct) = store();
+    let now = Utc::now();
+    let id = sent(&store, acct, "s-1", "alice@friends.com", now);
+    assert!(
+        store
+            .set_message_recipients(acct, id, "Ann <ann@x.com>", "cc@x.com", "blind@x.com")
+            .unwrap()
+    );
+    let mut indexed: Vec<String> = store
+        .lock()
+        .unwrap()
+        .prepare("SELECT addr FROM message_recipients WHERE message_id=?1")
+        .unwrap()
+        .query_map([id], |r| r.get(0))
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    indexed.sort();
+    assert_eq!(indexed, vec!["ann@x.com", "blind@x.com", "cc@x.com"]);
 }
 
 #[test]

@@ -17,6 +17,12 @@
 // three when it returns. Anything less is how a person ends up in To and Bcc at
 // once, which is not a blind copy of anything: their address is right there in
 // the header everyone can read, and the sender believed otherwise.
+//
+// THE READING SIDE lives here too (`RecipientLine`, `Recipients.reading`): the
+// reader shows the same three headers on mail that has already been sent, and it
+// has to split them by the same grammar the composer wrote them with. Two
+// splitters would eventually disagree about `"Doe, John" <j@x>`, and the two
+// halves of the app would name different people.
 
 import Foundation
 
@@ -179,5 +185,68 @@ struct Recipients: Sendable, Equatable {
         }
         addr = addr.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return addr.contains("@") ? addr : ""
+    }
+}
+
+// MARK: - the reading side
+
+/// ONE HEADER'S LINE as the reader draws it: the tokens the daemon's stored list
+/// split into, and the names to print for them.
+///
+/// `names` is index-for-index with `tokens`, so the pointer's full spelling and
+/// the readable line can never disagree about who is on the message.
+struct RecipientLine: Identifiable, Equatable, Sendable {
+    let slot: RecipientSlot
+    /// Each entry still in the `Name <addr>` shape `SenderID.parse` expects.
+    let tokens: [String]
+    /// Display name per token — a real display name where the header carried
+    /// one, the bare address otherwise, and "you" for the reader themselves.
+    let names: [String]
+
+    var id: String { slot.rawValue }
+    var label: String { slot.label }
+
+    /// The addresses spelled out, for the tooltip: the names are the readable
+    /// half, this is the half that says WHICH bob@ it was.
+    var full: String { "\(label): " + tokens.joined(separator: ", ") }
+}
+
+extension Recipients {
+    /// The lines to draw for one message, in header order, skipping the headers
+    /// that named nobody.
+    ///
+    /// `nil` and `""` both yield no line and are NOT the same statement upstream:
+    /// nil is "nobody has read this message's headers yet" (an old daemon, or one
+    /// whose recipients sweep has not walked back this far) and "" is "read, and
+    /// the header named nobody". The difference decides what the daemon does
+    /// next; down here they draw the same nothing.
+    ///
+    /// `me` is the account's own address, printed as "you" wherever it appears —
+    /// the reader knows they were on the mail, and their own address spelled out
+    /// among four others is the one name on the line carrying no information.
+    /// MAIN-ACTOR because the display-name memo is (`SenderCache`, which every
+    /// list in the app resolves names through). The one call site is a view body,
+    /// which is already there.
+    @MainActor
+    static func reading(to: String?, cc: String?, bcc: String?, me: String?) -> [RecipientLine] {
+        let mine = me?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        return RecipientSlot.allCases.compactMap { slot in
+            let raw: String? =
+                switch slot {
+                case .to: to
+                case .cc: cc
+                case .bcc: bcc
+                }
+            let tokens = split(raw ?? "")
+            guard !tokens.isEmpty else { return nil }
+            let names = tokens.map { token -> String in
+                // Compared on the BARE MAILBOX, which is what `key` is for: the
+                // same person is written `you@x.com`, `You <you@x.com>` and
+                // `YOU@X.COM` across three headers of the same message.
+                if !mine.isEmpty, key(token) == mine { return "you" }
+                return SenderCache.resolved(token).displayName
+            }
+            return RecipientLine(slot: slot, tokens: tokens, names: names)
+        }
     }
 }

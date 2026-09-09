@@ -28,6 +28,9 @@ struct RecipientsTests {
         removingIsIdempotent()
         countsAndSlots()
         aMovedAddressIsAFinishedRecipient()
+        readingSkipsHeadersThatNamedNobody()
+        readingNamesTheReaderYou()
+        readingKeepsNamesLinedUpWithAddresses()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -184,6 +187,57 @@ struct RecipientsTests {
         // what keeps it editable instead of being pilled out from under the
         // caret.
         equal(Recipients.key("bo").isEmpty, true, "a fragment is not finished")
+    }
+
+    // MARK: - the reading side
+
+    /// A header nobody was on draws no line, and the two ways of being on no
+    /// header — never read, and read and empty — draw the same nothing. (They
+    /// are NOT the same statement upstream: one is the daemon's backfill queue.)
+    static func readingSkipsHeadersThatNamedNobody() {
+        equal(
+            Recipients.reading(to: nil, cc: nil, bcc: nil, me: nil).count, 0,
+            "a daemon too old to send recipients draws the header it always drew")
+        equal(
+            Recipients.reading(to: "", cc: "  ,  ", bcc: nil, me: nil).count, 0,
+            "read-and-named-nobody draws nothing too")
+        let lines = Recipients.reading(
+            to: "a@x.test", cc: nil, bcc: "b@x.test", me: nil)
+        equal(lines.count, 2, "only the headers with somebody on them")
+        equal(lines.map(\.slot), [RecipientSlot.to, .bcc], "in header order")
+    }
+
+    /// The reader knows they were on the mail. Their own address spelled out
+    /// among four others is the one name on the line carrying no information —
+    /// and it has to be matched on the bare mailbox, because the same person is
+    /// written three ways across the headers of one message.
+    static func readingNamesTheReaderYou() {
+        let lines = Recipients.reading(
+            to: "You <ME@x.test>, Bob Smith <bob@y.test>",
+            cc: "me@x.test", bcc: nil, me: "me@x.test")
+        equal(lines[0].names, ["you", "Bob Smith"], "shouted and named, still you")
+        equal(lines[1].names, ["you"], "and again on the Cc")
+
+        // No account address yet (the first /client/stats has not landed): every
+        // address renders as itself. A missing greeting, not a wrong one.
+        let anon = Recipients.reading(
+            to: "You <me@x.test>", cc: nil, bcc: nil, me: nil)
+        equal(anon[0].names, ["You"], "without an account address, nobody is you")
+    }
+
+    /// THE TOOLTIP AND THE LINE MUST NOT DISAGREE. The names are the readable
+    /// half and the tokens are the half that says which bob@ it was, so they are
+    /// built index-for-index off one split — and that split is quote-aware, or a
+    /// lastname-first address book entry becomes two people who do not exist.
+    static func readingKeepsNamesLinedUpWithAddresses() {
+        let lines = Recipients.reading(
+            to: "\"Doe, John\" <j@x.test>, plain@y.test", cc: nil, bcc: nil, me: nil)
+        equal(lines.count, 1, "one header")
+        equal(lines[0].names, ["Doe, John", "plain@y.test"], "a name, then a bare address")
+        equal(lines[0].tokens.count, lines[0].names.count, "one name per token")
+        equal(
+            lines[0].full, "to: \"Doe, John\" <j@x.test>, plain@y.test",
+            "the pointer gets the addresses, spelled as the header spelled them")
     }
 
     // MARK: - assert

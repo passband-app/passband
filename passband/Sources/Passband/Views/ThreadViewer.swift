@@ -676,7 +676,8 @@ struct ThreadViewer: View {
                                 MessageCard(
                                     message: m, style: style, position: i,
                                     selected: i == index, ruled: i > 0,
-                                    opens: opens[m.id] ?? []
+                                    opens: opens[m.id] ?? [],
+                                    me: store.sitrep.stats?.account_email
                                 ) {
                                     index = i
                                 }
@@ -2176,6 +2177,11 @@ private struct MessageCard: View, Equatable {
     /// Recorded opens of this message, when it is one of the user's own tracked
     /// sends. Empty for everything else, which renders no mark.
     nonisolated let opens: [MessageOpen]
+    /// The account's own address, which the recipient lines render as "you".
+    /// Part of the comparison below because it arrives asynchronously (the first
+    /// `/client/stats` of the session), and a card that kept the older callback's
+    /// nil would go on spelling the reader's own address at them.
+    nonisolated let me: String?
     let onSelect: () -> Void
 
     /// The gutter the rules live in, which every body is inset by. Named
@@ -2190,6 +2196,7 @@ private struct MessageCard: View, Equatable {
     nonisolated static func == (a: MessageCard, b: MessageCard) -> Bool {
         a.message == b.message && a.style == b.style && a.position == b.position
             && a.selected == b.selected && a.ruled == b.ruled && a.opens == b.opens
+            && a.me == b.me
     }
 
     /// Which side of the conversation this is. Only the chat style asks.
@@ -2290,18 +2297,26 @@ private struct MessageCard: View, Equatable {
     // MARK: - the email card's header
 
     private var cardHeader: some View {
-        HStack(spacing: 9) {
-            // Click for the contact card, right-click to copy. On the loaded
-            // card only: the peek placeholder is a stand-in, not a person.
-            MessageSenderHeading(sender: message.senderString)
-                .contactCard(for: message.senderString)
-            Spacer(minLength: 8)
-            spamChip
-            attentionChip
-            ReadReceiptMark(opens: opens)
-            Text(Fmt.dateTime(message.received_at))
-                .font(Typo.num(11))
-                .foregroundStyle(Palette.inkFaintest)
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 9) {
+                // Click for the contact card, right-click to copy. On the loaded
+                // card only: the peek placeholder is a stand-in, not a person.
+                MessageSenderHeading(sender: message.senderString)
+                    .contactCard(for: message.senderString)
+                Spacer(minLength: 8)
+                spamChip
+                attentionChip
+                ReadReceiptMark(opens: opens)
+                Text(Fmt.dateTime(message.received_at))
+                    .font(Typo.num(11))
+                    .foregroundStyle(Palette.inkFaintest)
+            }
+            // WHO ELSE WAS ON IT, under the sender and indented past the avatar
+            // so the two read as one block: this message came FROM that person
+            // and went TO these. Renders nothing when the daemon sent no
+            // recipients, so an older daemon draws exactly the old header.
+            MessageRecipients(message: message, me: me, compact: false)
+                .padding(.leading, 33)
         }
     }
 
@@ -2314,23 +2329,31 @@ private struct MessageCard: View, Equatable {
     /// daemon (which draws everything as theirs), and the mark already no-ops on
     /// empty opens — a gate would only hide receipts the card shows.
     private var caption: some View {
-        HStack(spacing: 6) {
+        VStack(alignment: side, spacing: 1) {
             HStack(spacing: 6) {
-                if !mine {
-                    Avatar(sender: message.senderString, size: 17)
+                HStack(spacing: 6) {
+                    if !mine {
+                        Avatar(sender: message.senderString, size: 17)
+                    }
+                    Text(SenderCache.resolved(message.senderString).displayName)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Palette.inkDim)
+                        .lineLimit(1)
                 }
-                Text(SenderCache.resolved(message.senderString).displayName)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Palette.inkDim)
-                    .lineLimit(1)
+                .contactCard(for: message.senderString)
+                spamChip
+                attentionChip
+                ReadReceiptMark(opens: opens)
+                Text(captionTime)
+                    .font(Typo.num(10))
+                    .foregroundStyle(Palette.inkFaintest)
             }
-            .contactCard(for: message.senderString)
-            spamChip
-            attentionChip
-            ReadReceiptMark(opens: opens)
-            Text(captionTime)
-                .font(Typo.num(10))
-                .foregroundStyle(Palette.inkFaintest)
+            // THE SAME LINES A CARD GETS, one point smaller. A bubble is the
+            // narrower surface, so they are held to the bubble's own width
+            // rather than the column's — a recipient list that ran wider than
+            // the message it belongs to would read as the message.
+            MessageRecipients(message: message, me: me, compact: true)
+                .frame(maxWidth: ThreadViewer.bubbleWidth, alignment: .leading)
         }
     }
 

@@ -677,7 +677,14 @@ struct ThreadViewer: View {
                                     message: m, style: style, position: i,
                                     selected: i == index, ruled: i > 0,
                                     opens: opens[m.id] ?? [],
-                                    me: store.sitrep.stats?.account_email
+                                    me: store.sitrep.stats?.account_email,
+                                    // The message before this one IN THE THREAD,
+                                    // which is the order this stack is already in
+                                    // (oldest first). The first message has none,
+                                    // and gets no marks: "everyone here is new"
+                                    // is a claim, and nothing precedes it.
+                                    previousRecipients: i > 0
+                                        ? messages[i - 1].audience : nil
                                 ) {
                                     index = i
                                 }
@@ -2182,6 +2189,11 @@ private struct MessageCard: View, Equatable {
     /// `/client/stats` of the session), and a card that kept the older callback's
     /// nil would go on spelling the reader's own address at them.
     nonisolated let me: String?
+    /// The RECIPIENTS OF THE MESSAGE BEFORE THIS ONE, which is what makes the
+    /// block able to say somebody was added or quietly dropped. `nil` on the
+    /// first message of a thread and on any predecessor whose headers were never
+    /// read — see `MessageRecipients`.
+    nonisolated let previousRecipients: MessageAudience?
     let onSelect: () -> Void
 
     /// The gutter the rules live in, which every body is inset by. Named
@@ -2196,7 +2208,7 @@ private struct MessageCard: View, Equatable {
     nonisolated static func == (a: MessageCard, b: MessageCard) -> Bool {
         a.message == b.message && a.style == b.style && a.position == b.position
             && a.selected == b.selected && a.ruled == b.ruled && a.opens == b.opens
-            && a.me == b.me
+            && a.me == b.me && a.previousRecipients == b.previousRecipients
     }
 
     /// Which side of the conversation this is. Only the chat style asks.
@@ -2315,8 +2327,10 @@ private struct MessageCard: View, Equatable {
             // so the two read as one block: this message came FROM that person
             // and went TO these. Renders nothing when the daemon sent no
             // recipients, so an older daemon draws exactly the old header.
-            MessageRecipients(message: message, me: me, compact: false)
-                .padding(.leading, 33)
+            MessageRecipients(
+                message: message, previous: previousRecipients, me: me, compact: false
+            )
+            .padding(.leading, 25)
         }
     }
 
@@ -2348,12 +2362,15 @@ private struct MessageCard: View, Equatable {
                     .font(Typo.num(10))
                     .foregroundStyle(Palette.inkFaintest)
             }
-            // THE SAME LINES A CARD GETS, one point smaller. A bubble is the
-            // narrower surface, so they are held to the bubble's own width
-            // rather than the column's — a recipient list that ran wider than
-            // the message it belongs to would read as the message.
-            MessageRecipients(message: message, me: me, compact: true)
-                .frame(maxWidth: ThreadViewer.bubbleWidth, alignment: .leading)
+            // THE SAME LINES A CARD GETS, one point smaller, and hung from the
+            // same edge as the bubble under them: a block sitting under the
+            // user's own right-aligned bubble but pinned to the left of the
+            // column reads as somebody else's.
+            MessageRecipients(
+                message: message, previous: previousRecipients, me: me, compact: true,
+                edge: side
+            )
+            .frame(maxWidth: ThreadViewer.bubbleWidth, alignment: edge)
         }
     }
 

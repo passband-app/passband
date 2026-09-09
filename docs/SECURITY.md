@@ -257,6 +257,16 @@ The outbound guard scans text and message parts at send time; binary files are
 not scanned. Restricting external-agent access does not delete human drafts or
 their attachments.
 
+**Recipients and the contact card are human-door data.** To and Cc are stored
+for every message and Bcc only for the account's own sends. The store enforces
+the Bcc rule in SQL, because on received mail that header is a leak or a
+forgery. They ride on `ClientMessage` beside `html`; the agent door's
+`SanitizedMessage` has no recipient fields at all. `GET /client/person` (the
+reader's contact card) answers for one address at a time, excludes sealed mail
+from every count and list, and has no MCP counterpart. The contacts seed stays
+sent-only, so being copied in beside a stranger never earns them the
+known-contact floor.
+
 ## 4b. Provider spam
 
 **Invariant.** Mail the provider filed as spam is stored and readable on one

@@ -190,25 +190,98 @@ struct Recipients: Sendable, Equatable {
 
 // MARK: - the reading side
 
-/// ONE HEADER'S LINE as the reader draws it: the tokens the daemon's stored list
-/// split into, and the names to print for them.
-///
-/// `names` is index-for-index with `tokens`, so the pointer's full spelling and
-/// the readable line can never disagree about who is on the message.
+/// WHAT HAPPENED TO ONE PERSON between the previous message in a thread and this
+/// one. `present` is the ordinary case and carries no mark at all.
+enum RecipientMark: Sendable, Equatable {
+    /// On this message and on the one before it — or on the first message of a
+    /// thread, where there is nothing to have changed from.
+    case present
+    /// Brought into the conversation by this message.
+    case added
+    /// Dropped by this message: NOT a recipient of it, and shown anyway, on the
+    /// header they used to be on. A person quietly taken off a thread is the
+    /// change you most want to notice and the one nothing in a mail client ever
+    /// tells you about.
+    case removed
+}
+
+/// One addressee as the reader draws them.
+struct RecipientPerson: Identifiable, Equatable, Sendable {
+    /// `Name <addr>` as the header spelled it.
+    let token: String
+    /// The readable half: a display name, a bare address, or "you".
+    let name: String
+    let mark: RecipientMark
+
+    /// Unique WITHIN A LINE, which is all a ForEach here needs: one line never
+    /// holds the same mailbox twice (the same person cannot be a recipient and a
+    /// ghost of the same header).
+    var id: String { token }
+}
+
+/// One header's line: who is on it, and who left it.
 struct RecipientLine: Identifiable, Equatable, Sendable {
     let slot: RecipientSlot
-    /// Each entry still in the `Name <addr>` shape `SenderID.parse` expects.
-    let tokens: [String]
-    /// Display name per token — a real display name where the header carried
-    /// one, the bare address otherwise, and "you" for the reader themselves.
-    let names: [String]
+    let people: [RecipientPerson]
 
     var id: String { slot.rawValue }
     var label: String { slot.label }
 
-    /// The addresses spelled out, for the tooltip: the names are the readable
-    /// half, this is the half that says WHICH bob@ it was.
-    var full: String { "\(label): " + tokens.joined(separator: ", ") }
+    /// The addresses spelled out, for the pointer and for VoiceOver: the names
+    /// are the readable half, this is the half that says WHICH bob@ it was, and
+    /// it is the only place a mark is spelled in words.
+    var full: String {
+        let parts = people.map { person -> String in
+            switch person.mark {
+            case .present: person.token
+            case .added: "\(person.token) (added)"
+            case .removed: "\(person.token) (removed)"
+            }
+        }
+        return "\(label): " + parts.joined(separator: ", ")
+    }
+}
+
+/// EVERYONE ON ONE MESSAGE: who wrote it and who it named. The unit the reader
+/// diffs, because neither half answers "who is in this conversation" alone.
+///
+/// The sender is in here for a reason with teeth. A reply does not name its own
+/// author in its To, and the message it answers did not name its author either —
+/// so a diff over recipients alone reports the two most ordinary events in mail
+/// (Maya writes, Daniel replies) as Daniel leaving and Maya joining. Every thread
+/// would light up, and the mark would mean nothing by the second message.
+struct MessageAudience: Equatable, Sendable {
+    /// `Name <addr>` or a bare address, as the `From:` header spelled it.
+    let sender: String
+    let recipients: Recipients
+
+    /// Every bare mailbox on the message, sender included.
+    var keys: Set<String> {
+        var out = Set(recipients.all.map(Recipients.key).filter { !$0.isEmpty })
+        let from = Recipients.key(sender)
+        if !from.isEmpty { out.insert(from) }
+        return out
+    }
+}
+
+/// Every recipient line of one message, plus what changed since the last one.
+struct RecipientDigest: Equatable, Sendable {
+    let lines: [RecipientLine]
+    /// People actually addressed by this message — ghosts are not recipients of
+    /// it and are not counted as any.
+    let count: Int
+    let added: Int
+    let removed: Int
+
+    var isEmpty: Bool { lines.isEmpty }
+
+    /// WHETHER THIS MESSAGE MOVED THE ROOM. The reader opens the block on it,
+    /// because a change in who is listening is the one thing here worth
+    /// interrupting a read for — and it stays shut the rest of the time, which
+    /// is most of the time.
+    var changed: Bool { added > 0 || removed > 0 }
+
+    static let none = RecipientDigest(lines: [], count: 0, added: 0, removed: 0)
 }
 
 extension Recipients {
@@ -224,29 +297,70 @@ extension Recipients {
     /// `me` is the account's own address, printed as "you" wherever it appears —
     /// the reader knows they were on the mail, and their own address spelled out
     /// among four others is the one name on the line carrying no information.
-    /// MAIN-ACTOR because the display-name memo is (`SenderCache`, which every
-    /// list in the app resolves names through). The one call site is a view body,
-    /// which is already there.
+    ///
+    /// `previous` is the message BEFORE this one in the thread, and `nil` when
+    /// there is none or when its headers were never read. Nil means NO MARKS:
+    /// "everyone here is new" is a claim, and an unread predecessor is not
+    /// evidence for it.
     @MainActor
-    static func reading(to: String?, cc: String?, bcc: String?, me: String?) -> [RecipientLine] {
+    static func reading(
+        _ current: MessageAudience, me: String?, previous: MessageAudience? = nil
+    ) -> RecipientDigest {
         let mine = me?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-        return RecipientSlot.allCases.compactMap { slot in
-            let raw: String? =
-                switch slot {
-                case .to: to
-                case .cc: cc
-                case .bcc: bcc
-                }
-            let tokens = split(raw ?? "")
-            guard !tokens.isEmpty else { return nil }
-            let names = tokens.map { token -> String in
-                // Compared on the BARE MAILBOX, which is what `key` is for: the
-                // same person is written `you@x.com`, `You <you@x.com>` and
-                // `YOU@X.COM` across three headers of the same message.
-                if !mine.isEmpty, key(token) == mine { return "you" }
-                return SenderCache.resolved(token).displayName
-            }
-            return RecipientLine(slot: slot, tokens: tokens, names: names)
+        // Compared on the BARE MAILBOX, which is what `key` is for: the same
+        // person is written `you@x.com`, `You <you@x.com>` and `YOU@X.COM` across
+        // three headers of the same message.
+        func display(_ token: String) -> String {
+            if !mine.isEmpty, key(token) == mine { return "you" }
+            return SenderCache.resolved(token).displayName
         }
+        // ACROSS THE WHOLE MESSAGE, not per header: somebody moved from To to Cc
+        // is still in the conversation, and marking that as an addition and a
+        // removal would cry wolf on the one signal this exists for.
+        let here = current.keys
+        let before = previous?.keys
+
+        var added = 0
+        var removed = 0
+        var ghosted: Set<String> = []
+        var lines: [RecipientLine] = []
+        var count = 0
+
+        for slot in RecipientSlot.allCases {
+            var people: [RecipientPerson] = []
+            for token in current.recipients.tokens(slot) {
+                let mark: RecipientMark =
+                    if let before, !before.contains(key(token)) { .added } else { .present }
+                if mark == .added { added += 1 }
+                people.append(RecipientPerson(token: token, name: display(token), mark: mark))
+                count += 1
+            }
+            // The ghosts of this header: on the previous message, on no header of
+            // this one, and not its author. Deduped across slots so somebody who
+            // was in both To and Cc leaves one ghost rather than two.
+            //
+            // NEVER FROM A BCC, which is the other way this mark could cry wolf:
+            // a blind copy is invisible to every other recipient, so the next
+            // message in the thread cannot name them and never does. Ghosting
+            // them would report a removal on every thread the user ever blind-
+            // copied anyone on — and report it, of all places, to the one person
+            // who knows it did not happen.
+            guard slot != .bcc else {
+                if !people.isEmpty { lines.append(RecipientLine(slot: slot, people: people)) }
+                continue
+            }
+            for token in previous?.recipients.tokens(slot) ?? [] {
+                let k = key(token)
+                guard !k.isEmpty, !here.contains(k), !ghosted.contains(k) else { continue }
+                ghosted.insert(k)
+                removed += 1
+                people.append(
+                    RecipientPerson(token: token, name: display(token), mark: .removed))
+            }
+            if !people.isEmpty {
+                lines.append(RecipientLine(slot: slot, people: people))
+            }
+        }
+        return RecipientDigest(lines: lines, count: count, added: added, removed: removed)
     }
 }

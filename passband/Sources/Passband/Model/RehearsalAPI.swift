@@ -9,6 +9,9 @@ actor RehearsalAPI {
     private var referenceDate: Date
     private var rules: [SenderRule] = []
     private var nextRuleID = 1
+    /// Ids for the drafts the practice composer saves. Nothing is KEPT: GET
+    /// still lists none, so a practice draft never outlives the rehearsal.
+    private var nextDraftID = 1
     private var clearedShipments: Set<Int> = []
     private var statusOverrides: [Int: AttentionStatus] = [:]
     private var tierOverrides: [Int: Tier] = [:]
@@ -33,7 +36,7 @@ actor RehearsalAPI {
         mailbox.reset()
         self.accountEmail = accountEmail
         referenceDate = Date()
-        rules = []; nextRuleID = 1; clearedShipments = []
+        rules = []; nextRuleID = 1; nextDraftID = 1; clearedShipments = []
         statusOverrides = [:]; tierOverrides = [:]; importanceOverrides = [:]; reminders = [:]
     }
     func snapshot() -> OnboardingRehearsal { mailbox }
@@ -142,6 +145,11 @@ actor RehearsalAPI {
             data = try encode(SearchPage(items: hits, match_kind: "keyword", sort: query["sort"]))
         case ("GET", "/client/sealed"), ("GET", "/client/marketing"), ("GET", "/client/drafts"), ("GET", "/client/groups"), ("GET", "/client/unsubscribes"), ("GET", "/client/audit"), ("GET", "/client/triage-feedback"), ("GET", "/client/contacts"), ("GET", "/client/senders"):
             data = Data("[]".utf8)
+        case ("POST", "/client/drafts"):
+            // The by-id draft routes, stubbed so a practice composer's
+            // autosave answers like a daemon's rather than failing: the save
+            // is echoed with an id and then forgotten (see `nextDraftID`).
+            data = try practiceDraft(body, id: nil)
         case ("GET", "/client/sent"):
             data = try json(["items": []])
         case ("GET", "/client/invites"):
@@ -197,6 +205,9 @@ actor RehearsalAPI {
                     reminders[id] = nil
                     data = try json(["ok": true])
                 } else { throw unsupported() }
+            } else if components.count == 3, components[1] == "drafts", method == "PUT",
+                      let id = Int(components[2]) {
+                data = try practiceDraft(body, id: id)
             } else if components.count == 3, components[1] == "rules", let id = Int(components[2]) {
                 guard rules.contains(where: { $0.id == id }) else { throw missing() }
                 if method == "PUT" { data = try saveRule(body, id: id) }
@@ -207,6 +218,19 @@ actor RehearsalAPI {
             } else { throw unsupported() }
         }
         return (data, HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!)
+    }
+
+    /// A saved practice draft, echoed back as the daemon's `DraftView` would
+    /// be. `id` nil mints one (POST); an id is kept (PUT /{id}).
+    private func practiceDraft(_ body: [String: Any], id: Int?) throws -> Data {
+        let draftID = id ?? nextDraftID
+        if id == nil { nextDraftID += 1 }
+        let now = stamp()
+        return try encode(DraftView(
+            id: draftID, to: body["to"] as? String ?? "", cc: body["cc"] as? String,
+            bcc: body["bcc"] as? String, subject: body["subject"] as? String ?? "",
+            body: body["body"] as? String ?? "", created_at: now, updated_at: now,
+            attachments: []))
     }
 
     /// Fictional record facts use the same typed surface as real triage.

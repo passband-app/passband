@@ -487,8 +487,36 @@ enum AgentTools {
             return failure("missing body", summary: "draft failed")
         }
         let replyTo = int(input, "reply_to_message_id")
-        // THE DRAFT SLOT BELONGS TO THE PERSON. Drafts are keyed by
-        // (account, reply_to_message_id) — nil being THE one new-message slot —
+        let to = string(input, "to") ?? ""
+        let cc = string(input, "cc") ?? ""
+        let bcc = string(input, "bcc") ?? ""
+        let subject = string(input, "subject") ?? ""
+        if replyTo == nil {
+            // NEW MAIL, under the same three-way gate as `DraftSaver.save`, and
+            // for the same reason: with no stats verdict yet, the old nil-key
+            // PUT against a `drafts_v2` daemon would overwrite the person's
+            // newest draft, and the new route against an old daemon 404s.
+            guard let stats = AppStore.shared.sitrep.stats else {
+                return failure(
+                    "still connecting to the mail daemon; try again in a moment",
+                    summary: "draft failed")
+            }
+            if stats.drafts_v2 == true {
+                // A daemon that keeps many new-message drafts: this one is a
+                // row of its OWN, so it cannot land on anything the person
+                // typed and there is no slot to check first. (The old check
+                // refused whenever ANY new-message draft existed, which is now
+                // the normal state.)
+                let draft = try await APIClient.shared.createDraft(
+                    to: to, cc: cc, bcc: bcc, subject: subject, body: body)
+                return ok(
+                    row(["draft_id": draft.id, "reply_to_message_id": draft.reply_to_message_id]),
+                    summary: "saved a draft")
+            }
+        }
+        // THE DRAFT SLOT BELONGS TO THE PERSON. Replies (and, on an older
+        // daemon, new mail) are keyed by (account, reply_to_message_id), nil
+        // being that daemon's one new-message slot,
         // and the PUT is an upsert, the same row the composers autosave into.
         // Writing over a half-composed message destroys it on screen AND on the
         // server, and there is no undo for a lost draft. The agent may fill an
@@ -511,9 +539,7 @@ enum AgentTools {
                 summary: "a draft already exists there")
         }
         let draft = try await APIClient.shared.putDraft(
-            replyToMessageId: replyTo, to: string(input, "to") ?? "",
-            cc: string(input, "cc") ?? "", bcc: string(input, "bcc") ?? "",
-            subject: string(input, "subject") ?? "", body: body)
+            replyToMessageId: replyTo, to: to, cc: cc, bcc: bcc, subject: subject, body: body)
         return ok(
             row(["draft_id": draft.id, "reply_to_message_id": draft.reply_to_message_id]),
             summary: "saved a draft")

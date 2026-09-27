@@ -79,6 +79,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Analytics.screen(AppStore.shared.activeView.rawValue)
     }
 
+    /// ⌘Q INSIDE A SEND HOLD. TEMPORARY: this goes away once the send hold
+    /// moves into the daemon. Until then a held send lives only in memory for
+    /// its five seconds, so it is parked as a draft through the account
+    /// switch's own `parkHeldSends` and quit waits for that save, BOUNDED so an
+    /// unreachable daemon cannot wedge quit. Sparkle's install path ends in
+    /// `NSApp.terminate` and simply waits here too.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        MainActor.assumeIsolated {
+            guard AppStore.shared.hasHeldSends else { return .terminateNow }
+            AppStore.shared.parkHeldSends(quitting: true)
+            Task { @MainActor in
+                // Whichever lands first answers; a reply of `true` ends the
+                // process, so the loser never gets to answer twice.
+                let bound = Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(3))
+                    if !Task.isCancelled { NSApp.reply(toApplicationShouldTerminate: true) }
+                }
+                await DraftSaver.shared.settle()
+                bound.cancel()
+                NSApp.reply(toApplicationShouldTerminate: true)
+            }
+            return .terminateLater
+        }
+    }
+
     // FALSE, because the app is a notifier: terminating on last-window-close
     // would drop the event stream, so the notification the window was closed to
     // wait for would never arrive. ⌘Q and the app menu still quit.

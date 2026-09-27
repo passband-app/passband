@@ -9,8 +9,10 @@
 // failure costs is the restore.
 //
 // Two slots, saved independently — the pane composer and the reader's inline
-// reply are two live drafts at once, keyed differently server-side (nil vs. the
-// parent message id), so they debounce and flush on their own timers.
+// reply are two live drafts at once, keyed differently server-side (the parent
+// message id for a reply; the row's own id for new mail on a `drafts_v2`
+// daemon, or the one nil-key slot on an older one), so they debounce and flush
+// on their own timers.
 
 import Foundation
 
@@ -51,6 +53,23 @@ final class DraftSaver {
     /// anything still going out?", which is the only question `settle` asks.
     private var flushes: [Int: Task<Void, Never>] = [:]
     private var nextFlush = 0
+    /// THE ID EACH COMPOSER'S LAST SAVE CAME BACK WITH, keyed by
+    /// `ComposeState.id`, and read by every save in preference to the id its
+    /// captured state carries.
+    ///
+    /// The hole it closes: a save captures its state BEFORE it waits out the
+    /// slot's previous save (`write`), so save B can read a slot whose
+    /// `draftId` save A has not stamped yet. On a `drafts_v2` daemon a nil id
+    /// means "create", and B would mint a SECOND row of the same mail. A
+    /// flush and a `saveDetached` have it worse: their slot is already empty,
+    /// so re-reading it cannot help. This map is written the moment A's
+    /// answer lands, whatever the slot holds by then, so B sees it after the
+    /// wait.
+    ///
+    /// Double Optional, like `AppStore.detachedDrafts`: `.some(nil)` is a
+    /// blank-delete's answer, and it has to WIN over a stale id, or the next
+    /// save edits a deleted row, 404s, and the text is gone.
+    private var resolved: [UUID: Int?] = [:]
 
     private init() {}
 
@@ -62,6 +81,7 @@ final class DraftSaver {
         pending[slot]?.cancel()
         pending[slot] = nil
         touched.remove(slot)
+        pruneResolved()
     }
 
     /// One field of one composer changed. Called from the composers' binding
@@ -142,6 +162,37 @@ final class DraftSaver {
         pending[slot]?.cancel()
         pending[slot] = nil
         touched.remove(slot)
+        pruneResolved()
+    }
+
+    /// The id this composer's draft row has as far as this saver knows: a save
+    /// that landed after the slot last changed wins over the slot's copy. For
+    /// the store's "is this row the one on screen" test, which must not miss a
+    /// composer whose first save came back a moment ago.
+    func currentDraftId(of state: ComposeState) -> Int? {
+        resolved[state.id] ?? state.draftId
+    }
+
+    /// Whether a composer holds anything worth keeping, by the SAME test the
+    /// autosave uses to decide between saving and discarding (see `save` for
+    /// why each field counts). One helper so the "kept in drafts" toast can
+    /// never promise a row the saver just declined to write.
+    static func hasContent(_ state: ComposeState) -> Bool {
+        !(state.recipients == state.seededRecipients && state.subject.trimmed.isEmpty
+            && Prefs.shared.isBodyUntouched(state.body) && state.stagedAttachmentIds.isEmpty)
+    }
+
+    /// Drop the `resolved` entries nobody can read any more. Only when NOTHING
+    /// is on the wire or queued behind it: every save still pending captured a
+    /// state from before its id landed, and pruning under it would reopen the
+    /// exact race the map exists to close. Idle, the only states left to save
+    /// are the ones in the slots (which carry their adopted ids) and held sends
+    /// (which carry theirs through `AppStore.detachedDrafts`), so the live slot
+    /// identities are all that must survive.
+    private func pruneResolved() {
+        guard flushes.isEmpty, inflight.isEmpty, !resolved.isEmpty else { return }
+        let live = Set([store.compose?.id, store.inlineReply?.id].compactMap { $0 })
+        resolved = resolved.filter { live.contains($0.key) }
     }
 
     /// Save a composer that no longer sits in any slot: a held send being
@@ -205,39 +256,127 @@ final class DraftSaver {
         // AND SO IS A FILE: a draft holding nothing but an attachment is a
         // draft of that attachment, and discarding it would let the sweep take
         // the file with it.
-        let blank =
-            state.recipients == state.seededRecipients && state.subject.trimmed.isEmpty
-            && Prefs.shared.isBodyUntouched(state.body) && state.stagedAttachmentIds.isEmpty
-        if blank {
+        //
+        // The test itself is `hasContent`, shared with the close toast.
+        //
+        // THE ID, after the wait in `write`: whatever this composer's previous
+        // save came back with beats the one captured in `state`. See
+        // `resolved`.
+        let draftId = resolved[state.id] ?? state.draftId
+        if !Self.hasContent(state) {
             // EMPTIED, not composed: a draft cleared back to nothing is discarded
             // rather than saved as a blank row that would restore as one. With no
             // id yet there was never a row, so there is nothing to discard either.
-            guard let id = state.draftId else { return }
+            guard let id = draftId else { return }
             try? await APIClient.shared.deleteDraft(id)
             adopt(nil, slot: slot, key: state.id)
             return
         }
+        let payload = DraftPayload(state)
         do {
-            let saved = try await APIClient.shared.putDraft(
-                replyToMessageId: state.replyToMessageId, to: state.to, cc: state.cc,
-                bcc: state.bcc, subject: state.subject,
-                // WITHOUT the markers of files that are not staged: a
-                // composer closed mid-upload flushes here, its file goes to
-                // the sweep, and a restored body pointing at a part that
-                // does not exist would be a marker nobody can remove from
-                // the tray. Once the upload lands, the save it arms writes
-                // the marker back.
-                body: ComposeMarkers.bodyWithoutUnstaged(state.body, state.attachments),
-                // The files that have finished staging: the draft's claim on
-                // them is what keeps them past the sweep. One still uploading
-                // is claimed by the save its landing arms.
-                attachmentIds: state.stagedAttachmentIds)
+            let saved: DraftView
+            if let parent = payload.replyToMessageId {
+                // A REPLY is keyed by its parent on every daemon, old or new:
+                // same route, same row, no capability question to ask.
+                saved = try await APIClient.shared.putDraft(
+                    replyToMessageId: parent, to: payload.to, cc: payload.cc, bcc: payload.bcc,
+                    subject: payload.subject, body: payload.body,
+                    attachmentIds: payload.attachmentIds)
+            } else if let stats = store.sitrep.stats {
+                if stats.drafts_v2 == true {
+                    // Many new-message drafts, told apart by id. The first save
+                    // mints the row; every later one edits it.
+                    saved = try await saveNew(id: draftId, payload)
+                } else {
+                    // An older daemon's ONE new-message slot, keyed nil. Exactly
+                    // the write this client always made there.
+                    saved = try await APIClient.shared.putDraft(
+                        replyToMessageId: nil, to: payload.to, cc: payload.cc, bcc: payload.bcc,
+                        subject: payload.subject, body: payload.body,
+                        attachmentIds: payload.attachmentIds)
+                }
+            } else {
+                // NO VERDICT YET: /client/stats has not landed (the launch and
+                // account-switch window `AppStore.forwardingAvailable` also
+                // waits out). Neither write is safe blind. The old nil-key PUT
+                // on a `drafts_v2` daemon hits its compat rule and OVERWRITES
+                // the newest existing draft with this one; the new routes on an
+                // old daemon 404. So nothing is written, and `touched` stays
+                // set on the debounce path: the next keystroke or the close
+                // flush retries once the stats are in.
+                return
+            }
             adopt(saved.id, slot: slot, key: state.id)
         } catch {
             // Silent, always. A 404 here is a parent sealed since the composer
             // opened — the draft is deliberately unsavable, and the reader is told
             // nothing because there is nothing for them to do about it.
         }
+    }
+
+    /// EVERYTHING A DRAFT HOLDS, and the only place a save reads a composer's
+    /// fields from. A CLOSED LIST: the words (to, cc, bcc, subject, body), the
+    /// files that finished staging, and the reply/forward key that says which
+    /// row they belong to.
+    ///
+    /// A draft saves WORDS, NEVER INTENTS. Nothing that says what should HAPPEN
+    /// to the mail belongs here: not a scheduled "send at", not the tracker
+    /// switch, not a guard override, not a group's send mode. A draft is
+    /// reopened and read by a person before anything is done with it, and an
+    /// intent restored from a row would act without that read (a future
+    /// `ComposeState.sendAt` depends on this list staying closed). Widening it
+    /// is a design change, not a field addition.
+    struct DraftPayload {
+        let replyToMessageId: Int?
+        let forwardOfMessageId: Int?
+        let to: String
+        let cc: String
+        let bcc: String
+        let subject: String
+        let body: String
+        let attachmentIds: [Int]
+
+        init(_ state: ComposeState) {
+            replyToMessageId = state.replyToMessageId
+            forwardOfMessageId = state.forwardOfMessageId
+            to = state.to
+            cc = state.cc
+            bcc = state.bcc
+            subject = state.subject
+            // WITHOUT the markers of files that are not staged: a composer
+            // closed mid-upload flushes here, its file goes to the sweep, and a
+            // restored body pointing at a part that does not exist would be a
+            // marker nobody can remove from the tray. Once the upload lands,
+            // the save it arms writes the marker back.
+            body = ComposeMarkers.bodyWithoutUnstaged(state.body, state.attachments)
+            // The files that have finished staging: the draft's claim on them
+            // is what keeps them past the sweep. One still uploading is
+            // claimed by the save its landing arms.
+            attachmentIds = state.stagedAttachmentIds
+        }
+    }
+
+    /// A `drafts_v2` new-message save: edit the row by id, or mint one.
+    ///
+    /// A 404 on the edit means the row is gone out from under a live composer
+    /// (discarded from another window, or by a send that did not take this
+    /// composer with it). The text on screen is the only copy left, so it is
+    /// written as a fresh row rather than dropped: a lost draft has no undo,
+    /// and a resurrected one costs a delete.
+    private func saveNew(id: Int?, _ payload: DraftPayload) async throws -> DraftView {
+        if let id {
+            do {
+                return try await APIClient.shared.updateDraft(
+                    id: id, to: payload.to, cc: payload.cc, bcc: payload.bcc,
+                    subject: payload.subject, body: payload.body,
+                    attachmentIds: payload.attachmentIds)
+            } catch let error as APIError where error.kind == .notFound {
+                // Fall through to the create below.
+            }
+        }
+        return try await APIClient.shared.createDraft(
+            to: payload.to, cc: payload.cc, bcc: payload.bcc, subject: payload.subject,
+            body: payload.body, attachmentIds: payload.attachmentIds)
     }
 
     /// Write the server's id back into the slot — the thing `send` needs so a
@@ -260,7 +399,12 @@ final class DraftSaver {
     /// emptied, and its id is exactly the one the held send must carry, or
     /// the daemon keeps the draft of mail that went out. So a miss is handed
     /// to the store, which matches it by the same identity.
+    ///
+    /// AND FIRST, unconditionally: `resolved`, whatever the slot holds now, so
+    /// a save already queued behind this one reads the answer instead of the
+    /// id it captured before it existed.
     private func adopt(_ id: Int?, slot: Slot, key: UUID) {
+        resolved[key] = .some(id)
         switch slot {
         case .compose:
             guard var next = store.compose, next.id == key else {

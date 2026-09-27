@@ -872,25 +872,64 @@ actor APIClient {
 
     // MARK: - drafts
 
-    /// Every draft this account holds. At most one per reply target plus one
-    /// new-message draft, enforced server-side, and a draft whose parent has since
-    /// been sealed is already filtered out — so what comes back is exactly what
-    /// can be restored.
+    /// Every draft this account holds: at most one per reply target (and, on a
+    /// `drafts_v2` daemon, per forwarded message), plus the new-message drafts,
+    /// which are one on an older daemon and any number on a newer one.
+    ///
+    /// NOT filtered for sealed parents. The daemon lists what the human door
+    /// saved, and it lets the human save a draft against a restricted parent
+    /// on purpose (pinned by the daemon test
+    /// `human_can_save_draft_for_restricted_parent_but_unknown_still_fails`),
+    /// so a row here is not a promise its parent is still readable.
     func listDrafts() async throws -> [DraftView] { try await get("/client/drafts") }
 
-    /// Upsert by KEY: `replyToMessageId` (nil = the new-message slot) names the
+    /// Upsert by KEY: `replyToMessageId` or `forwardOfMessageId` names the
     /// draft, so a second PUT edits the same row rather than making another. A
     /// sealed or unknown parent is a 404 and stores nothing.
+    ///
+    /// BOTH nil is the OLD new-message slot. On a `drafts_v2` daemon it edits
+    /// the NEWEST new-message row (the compat rule that keeps an older app
+    /// working), so a current client must never send it there; plain new mail
+    /// goes through `createDraft` / `updateDraft` instead. See `DraftSaver.save`.
     @discardableResult
     func putDraft(
-        replyToMessageId: Int?, to: String, cc: String = "", bcc: String = "", subject: String,
-        body: String, attachmentIds: [Int] = []
+        replyToMessageId: Int?, forwardOfMessageId: Int? = nil, to: String, cc: String = "",
+        bcc: String = "", subject: String, body: String, attachmentIds: [Int] = []
     ) async throws -> DraftView {
         try await put(
             "/client/drafts",
             body: DraftBody(
-                reply_to_message_id: replyToMessageId, to: to, cc: cc, bcc: bcc, subject: subject,
-                body: body, attachment_ids: attachmentIds))
+                reply_to_message_id: replyToMessageId, forward_of_message_id: forwardOfMessageId,
+                to: to, cc: cc, bcc: bcc, subject: subject, body: body,
+                attachment_ids: attachmentIds))
+    }
+
+    /// Mint a NEW new-message draft (`drafts_v2` daemons only). Every call is
+    /// another row, so the caller adopts the returned id and edits by it from
+    /// then on; creating twice for one composer is the duplicate the saver's
+    /// `resolved` map exists to prevent.
+    func createDraft(
+        to: String, cc: String = "", bcc: String = "", subject: String, body: String,
+        attachmentIds: [Int] = []
+    ) async throws -> DraftView {
+        try await post(
+            "/client/drafts",
+            body: NewDraftBody(
+                to: to, cc: cc, bcc: bcc, subject: subject, body: body,
+                attachment_ids: attachmentIds))
+    }
+
+    /// Edit one new-message draft by id (`drafts_v2` daemons only). An unknown
+    /// id and another account's are the same 404, like `deleteDraft`.
+    func updateDraft(
+        id: Int, to: String, cc: String = "", bcc: String = "", subject: String, body: String,
+        attachmentIds: [Int] = []
+    ) async throws -> DraftView {
+        try await put(
+            "/client/drafts/\(id)",
+            body: NewDraftBody(
+                to: to, cc: cc, bcc: bcc, subject: subject, body: body,
+                attachment_ids: attachmentIds))
     }
 
     /// Discard one draft. Another account's id and an unknown id are the same 404.

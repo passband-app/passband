@@ -151,10 +151,15 @@ struct SealedEventTests {
     // MARK: - the routing
 
     static func sealedRoutesToTheAuthSignal() {
-        for kind in ["otp", "password_reset", "magic_link", "login_alert", "verification"] {
+        for kind in [
+            "otp", "password_reset", "magic_link", "login_alert", "security_alert", "verification",
+        ] {
             guard let e = decode(frame(sealedKind: kind)) else {
                 expect(false, "\(kind) decodes")
                 continue
+            }
+            if case .unknown = e.sealed_kind {
+                expect(false, "\(kind) decodes to a KNOWN kind")
             }
             guard case .authSignal = EventBanner.routing(for: e) else {
                 expect(false, "a \(kind) event is an auth signal, not a thread banner")

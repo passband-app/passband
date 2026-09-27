@@ -59,6 +59,11 @@ struct EmailWebView: View {
     /// collapses to nothing and the quoted-history chip stands alone; the
     /// alternative is a blank white box that says the mail is broken.
     @State private var empty = false
+    /// The document's own background, for the tail. Mail brings its own page
+    /// colour — a grey newsletter page with a white card in it is common —
+    /// and a white tail under a grey bubble is a white tail under a grey
+    /// bubble. White until the document says otherwise.
+    @State private var background: Color = .white
     @State private var optedIn = false
     @State private var hasQuoted = false
     @State private var quotedHidden = true
@@ -262,13 +267,17 @@ struct EmailWebView: View {
             .frame(maxWidth: displayWidth)
             .frame(height: empty ? 0 : displayHeight)
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            // The speech tail, on the DOCUMENT's outer bottom corner: the
-            // frame's page is hardcoded #fff (EmailFrame.document), so white is
-            // this bubble's fill in either theme. Mounted in both styles and
-            // merely clear in a card, so a style flip changes no identity.
-            .overlay(alignment: mine ? .bottomTrailing : .bottomLeading) {
+            // The speech tail, on the DOCUMENT's outer bottom corner, in the
+            // document's own page colour. BEHIND the frame, not over it: the
+            // tail's solid span reaches well inside the bubble to bury the
+            // clipped corner, and the document is opaque, so from behind only
+            // the poke ever shows — over the frame the span showed as a
+            // block of the wrong colour on any mail whose page is not white.
+            // Mounted in both styles and merely clear in a card, so a style
+            // flip changes no identity.
+            .background(alignment: mine ? .bottomTrailing : .bottomLeading) {
                 BubbleTail(mine: mine)
-                    .fill(Color.white)
+                    .fill(background)
                     .frame(width: 12, height: 12)
                     .offset(x: mine ? BubbleTail.poke : -BubbleTail.poke)
                     .opacity(bubble && !empty ? 1 : 0)
@@ -382,6 +391,7 @@ struct EmailWebView: View {
         // measures either, so a frame deferring to that pass would otherwise
         // never learn them.
         empty = m.empty
+        if let page = m.background { background = page }
         if bubble, m.width > 0 {
             width = m.width
             if let cacheKey { FrameHeights.shared.setHugWidth(cacheKey, m.width) }
@@ -725,14 +735,30 @@ enum EmailFrame {
               return img.getClientRects().length > 0;
             });
           }
+          // The page colour the tail should be: the body's, unless the sender
+          // left ours (white) on the body and painted the html element.
+          function pageBackground() {
+            var b = document.body, h = document.documentElement;
+            var bg = b ? getComputedStyle(b).backgroundColor : '';
+            if ((!bg || bg === 'rgba(0, 0, 0, 0)' || bg === 'transparent') && h) {
+              bg = getComputedStyle(h).backgroundColor;
+            }
+            return bg || '';
+          }
           function measurement() {
-            return { height: contentHeight(), width: contentWidth(), empty: contentEmpty() };
+            return {
+              height: contentHeight(), width: contentWidth(), empty: contentEmpty(),
+              background: pageBackground()
+            };
           }
           function measure() {
             var m = measurement();
             if (m.height > 0 && Math.abs(m.height - last) > 1) {
               last = m.height;
-              send({ kind: 'height', value: m.height, width: m.width, empty: m.empty });
+              send({
+                kind: 'height', value: m.height, width: m.width, empty: m.empty,
+                background: m.background
+              });
             }
           }
           // THE SAME NUMBER, ASKED FOR RATHER THAN SENT. A frame being
@@ -1116,6 +1142,9 @@ struct FrameMeasurement: Equatable, Sendable {
     var height: CGFloat
     var width: CGFloat
     var empty: Bool
+    /// The page's computed background, or nil when it was not a plain colour
+    /// (a gradient, an image, nothing reported). The tail is drawn in it.
+    var background: Color?
 
     /// From a script message or an `evaluateJavaScript` result — a dictionary
     /// with NSNumber values either way. nil for anything that is not a
@@ -1129,6 +1158,23 @@ struct FrameMeasurement: Equatable, Sendable {
         self.height = CGFloat(height)
         self.width = CGFloat((dict["width"] as? NSNumber)?.doubleValue ?? 0)
         self.empty = (dict["empty"] as? Bool) ?? false
+        self.background = Self.color(css: dict["background"] as? String)
+    }
+
+    /// `rgb(r, g, b)` / `rgba(r, g, b, a)` as `getComputedStyle` spells a
+    /// colour, to a Color. Anything else — transparent, a keyword, nothing —
+    /// is nil, and the caller keeps what it had.
+    static func color(css: String?) -> Color? {
+        guard let css, let open = css.firstIndex(of: "("), let close = css.lastIndex(of: ")"),
+            css.hasPrefix("rgb")
+        else { return nil }
+        let parts = css[css.index(after: open)..<close]
+            .split(whereSeparator: { $0 == "," || $0 == " " || $0 == "/" })
+            .compactMap { Double($0) }
+        guard parts.count >= 3 else { return nil }
+        if parts.count >= 4, parts[3] == 0 { return nil }
+        return Color(
+            .sRGB, red: parts[0] / 255, green: parts[1] / 255, blue: parts[2] / 255, opacity: 1)
     }
 }
 

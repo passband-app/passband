@@ -2414,7 +2414,10 @@ private struct MessageCard: View, Equatable {
                                 ? Color.clear
                                 : mine ? Palette.accentSoft : Palette.hairline)
                 )
-                .overlay(alignment: mine ? .bottomTrailing : .bottomLeading) {
+                // BEHIND the bubble, not over it: the tail's solid span reaches
+                // well inside the bubble to bury the corner, and over the
+                // bubble it would sit on the last line of text.
+                .background(alignment: mine ? .bottomTrailing : .bottomLeading) {
                     tail(mine ? Palette.accentSoft : Palette.hairline)
                 }
         }

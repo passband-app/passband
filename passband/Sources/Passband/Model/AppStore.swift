@@ -3336,6 +3336,9 @@ final class AppStore {
             inlineReply = state
             DraftSaver.shared.noteChange(.inlineReply)
         } else if compose.map(isBlankComposer) ?? true {
+            // Back into the pane's strip, so the side panel goes for the same
+            // reason `openCompose` closes it: the two cannot share the strip.
+            if sideView.isOpen { closeSide() }
             compose = state
             DraftSaver.shared.noteChange(.compose)
         } else {

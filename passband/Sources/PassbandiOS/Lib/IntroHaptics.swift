@@ -112,7 +112,7 @@ final class IntroHaptics {
     /// Long enough that the loop's repeat is not a rhythm anybody picks out.
     static let noiseDuration: TimeInterval = 4
     /// The sine's rate, and a loop of exactly `sineCycles` of it.
-    static let sineHz = 1.6
+    static let sineHz = 0.8
     static let sineCycles = 12.0
 
     /// Static's range: the loop's transient strengths, its spacing, and its

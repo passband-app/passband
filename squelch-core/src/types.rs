@@ -1047,19 +1047,21 @@ pub enum RetriageBlockReason {
 
 impl RetriageProgress {
     /// Why this run is stalled, from sync health the store cannot see.
+    /// `sync_ok` is false only once Gmail sync has actually failed (see
+    /// `SyncMetrics::sync_failing`), never merely because no poll has run yet.
     /// Precedence follows cause: no triage runs at all without a healthy poll,
     /// then a provider cooldown holds every job, then the budget parks some.
     /// `None` when there is no unfinished run.
     pub fn blocked_by(
         &self,
-        poll_ok: bool,
+        sync_ok: bool,
         next_retry_at: Option<DateTime<Utc>>,
         cooldown_until: Option<DateTime<Utc>>,
     ) -> Option<RetriageBlocked> {
         if self.total <= self.done {
             return None;
         }
-        if !poll_ok {
+        if !sync_ok {
             return Some(RetriageBlocked {
                 reason: RetriageBlockReason::WaitingForSync,
                 until: next_retry_at,

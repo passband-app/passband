@@ -490,7 +490,7 @@ pub async fn retriage_progress(
     if let Some(metrics) = state.sync_metrics() {
         let at = |unix: Option<i64>| unix.and_then(|t| DateTime::from_timestamp(t, 0));
         progress.blocked = progress.blocked_by(
-            metrics.poll_ok(),
+            !metrics.sync_failing(),
             at(metrics.sync_next_retry_at()),
             at(metrics.triage_cooldown_until()),
         );
@@ -2503,7 +2503,7 @@ pub async fn get_stats(State(state): State<ApiState>) -> Result<impl IntoRespons
             let usage = store.stage2_usage_today(account_id, &day)?;
             let unread = store.inbox_unread(account_id)?;
             let email = store.account_email(account_id)?;
-            let jobs = store.triage_job_counts(account_id)?;
+            let jobs = store.triage_waiting_counts(account_id, Utc::now())?;
             let parked = store.triage_budget_parked(account_id)?;
             Ok((stats, usage, unread, email, jobs, parked))
         })
@@ -2642,11 +2642,14 @@ fn rfc3339(unix: i64) -> Option<String> {
 }
 
 /// `sync{ok, last_success_at?, error?, next_retry_at?, consecutive_failures}`.
-/// `error` and `next_retry_at` describe the CURRENT outage, so both are left
-/// out while the poll is healthy: an error from a side call (the spam tab,
-/// the unread count) is not a sync failure.
+/// `ok` is false only after a lifecycle has FAILED and before the next good
+/// poll: a first-run backfill or a restart has not polled yet and is not an
+/// outage. `error` and `next_retry_at` describe the CURRENT outage, so both
+/// are left out while sync is ok: an error from a side call (the spam tab,
+/// the unread count) is not a sync failure. `next_retry_at` is also absent
+/// while the retry is running.
 fn sync_block(metrics: &squelch_core::metrics::SyncMetrics) -> serde_json::Value {
-    let ok = metrics.poll_ok();
+    let ok = !metrics.sync_failing();
     let mut sync = json!({
         "ok": ok,
         "consecutive_failures": metrics.sync_consecutive_failures(),
@@ -2678,7 +2681,7 @@ fn triage_block(
     (parked, resumes_at): (u64, Option<DateTime<Utc>>),
 ) -> serde_json::Value {
     let mut triage = json!({
-        "waiting_for_sync": !metrics.poll_ok(),
+        "waiting_for_sync": metrics.sync_failing(),
         "queued": queued,
         "leased": leased,
         "budget_parked": parked,

@@ -135,6 +135,8 @@ run_suite retriage-run \
   Sources/Passband/Model/SubjectText.swift \
   Sources/Passband/Model/WireTypes.swift \
   Sources/Passband/Model/SyncStatus.swift \
+  Sources/Passband/Lib/Format.swift \
+  Sources/Passband/Lib/AsyncMemo.swift \
   Sources/Passband/Model/RetriageRun.swift \
   Tests/RetriageRunTests.swift
 

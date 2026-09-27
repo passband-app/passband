@@ -1103,6 +1103,12 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         let inbox_ids = self
             .list_message_ids_capped(LABEL_INBOX, Some(&q), None, GmailRetry::CatchUp)
             .await?;
+        // THE FIRST RUN IS PROGRESS, not an outage. It runs for many minutes
+        // before the first poll, and without a denominator the client could
+        // only say "not synced yet" over it. Reported on the catch-up pair,
+        // which is what it is from outside: a known amount of mail arriving.
+        let _guard = CatchUpGuard(&self.metrics);
+        self.metrics.catchup_begin(inbox_ids.len() as u64);
         // Backfill NEVER notifies (see `IngestOrigin`).
         let n = self
             .fetch_raw_and_ingest(
@@ -1121,6 +1127,8 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         let sent_ids = self
             .list_message_ids_capped(LABEL_SENT, Some(&q), None, GmailRetry::CatchUp)
             .await?;
+        self.metrics
+            .catchup_begin_extend(inbox_ids.len() as u64 + sent_ids.len() as u64);
         let seeded = self
             .fetch_raw_and_ingest(
                 &sent_ids,
@@ -2562,6 +2570,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 return Ok(());
             }
             let mut cancel = shutdown.clone();
+            self.metrics.note_lifecycle_start();
             let result = tokio::select! {
                 result = self.run_once(&mut shutdown) => result,
                 _ = cancel.wait_for(|stopped| *stopped) => return Ok(()),
@@ -4166,6 +4175,88 @@ mod tests {
 
         stop.send(true).unwrap();
         tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    /// THE FIRST RUN READS AS PROGRESS. Onboarding's backfill runs for minutes
+    /// before the first poll; it must report a done/total pair and must not
+    /// read as a failing sync while it does.
+    #[tokio::test]
+    async fn the_first_backfill_reports_progress_not_an_outage() {
+        let g = MockGmail::default();
+        g.listing(LABEL_INBOX, &["a", "b"]);
+        g.body("a", alert_eml(Utc::now()));
+        g.body("b", alert_eml(Utc::now()));
+        g.slow_body("b", Duration::from_secs(2));
+        g.history(LABEL_INBOX, LabelHistory::quiet(1));
+        g.history(LABEL_SENT, LabelHistory::quiet(1));
+        g.profile(1);
+        let base = serve_mock(g.clone()).await;
+        let (store, acct) = store_at_cursor(None);
+        let metrics = SyncMetrics::new();
+        let e = engine(store, acct, &base).with_metrics(metrics.clone());
+        let (stop, rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(async move { e.run(rx).await });
+
+        wait_for(5, "the backfill to fetch the first message", || {
+            metrics.catchup_progress() == Some((1, 2))
+        })
+        .await;
+        assert!(!metrics.poll_ok(), "no poll has run yet");
+        assert!(!metrics.sync_failing(), "and that is not an outage");
+
+        wait_for(10, "the first poll", || metrics.poll_ok()).await;
+        assert_eq!(metrics.catchup_progress(), None, "the pair clears after");
+
+        stop.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    /// A RETRY IN PROGRESS HAS NO "NEXT TRY". After a failed lifecycle the
+    /// scheduled retry time must clear once the retry starts, so a long
+    /// recovery (here, the backfill running again) does not keep reporting a
+    /// retry time that has passed.
+    #[tokio::test]
+    async fn the_scheduled_retry_clears_when_the_retry_starts() {
+        let g = MockGmail::default();
+        g.listing(LABEL_INBOX, &["a", "b"]);
+        g.body("a", alert_eml(Utc::now()));
+        g.body("b", alert_eml(Utc::now()));
+        // The first lifecycle dies on `a`; the retry stalls on `b`.
+        g.0.lock()
+            .unwrap()
+            .errors
+            .insert("a".into(), [(500, "backendError".into())].into());
+        g.slow_body("b", Duration::from_secs(3));
+        let base = serve_mock(g.clone()).await;
+        let (store, acct) = store_at_cursor(None);
+        let metrics = SyncMetrics::new();
+        let e = engine(store, acct, &base).with_metrics(metrics.clone());
+        let (stop, rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(async move { e.run(rx).await });
+
+        wait_for(5, "the first failure", || metrics.sync_failing()).await;
+        wait_for(5, "the retry to reach `b`", || g.calls("get:a") >= 2).await;
+        wait_for(2, "the retry's progress", || {
+            metrics.catchup_progress() == Some((1, 2))
+        })
+        .await;
+        assert_eq!(
+            metrics.sync_next_retry_at(),
+            None,
+            "the retry is running, it is not scheduled"
+        );
+        assert!(metrics.sync_failing(), "still failing until a poll lands");
+
+        stop.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), task)
             .await
             .unwrap()
             .unwrap()

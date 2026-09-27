@@ -483,6 +483,23 @@ impl SyncMetrics {
         self.sync_next_retry_unix.store(at, Ordering::Relaxed);
     }
 
+    /// `run()` is starting a lifecycle, so the retry it scheduled is no longer
+    /// in the future: it is happening now. Left standing, the old time reads
+    /// as "next try at 12:05" at 12:40, in the middle of a half-hour catch-up
+    /// that Gmail is answering perfectly well.
+    pub fn note_lifecycle_start(&self) {
+        self.sync_next_retry_unix.store(0, Ordering::Relaxed);
+    }
+
+    /// GMAIL SYNC HAS ACTUALLY FAILED: a lifecycle ended in an error and no
+    /// poll has succeeded since. Not merely "no poll yet": a first-run backfill
+    /// runs for many minutes before its first poll, and so does every restart,
+    /// and neither is an outage. This is what the client door reports as
+    /// `sync.ok == false` and `triage.waiting_for_sync`.
+    pub fn sync_failing(&self) -> bool {
+        !self.poll_ok() && self.sync_consecutive_failures() > 0
+    }
+
     /// The triage worker is holding off the model provider until `until`
     /// (unix seconds). Only ever moves later, like the engine's own cooldown.
     pub fn note_triage_cooldown(&self, until: i64) {
@@ -2293,6 +2310,33 @@ mod sync_health_tests {
         m.record_sync_error();
         assert!(!m.poll_ok());
         assert_eq!(m.sync_consecutive_failures(), 1);
+    }
+
+    /// NO POLL YET IS NOT AN OUTAGE. A fresh daemon (first-run backfill, or a
+    /// restart before its first poll) has not polled and has not failed, and
+    /// must not read as failing; one failed lifecycle does, until a poll lands.
+    #[test]
+    fn sync_is_failing_only_after_a_lifecycle_failed() {
+        let m = SyncMetrics::new();
+        assert!(!m.poll_ok());
+        assert!(!m.sync_failing(), "not polled yet is not failing");
+        m.record_sync_error();
+        assert!(m.sync_failing());
+        m.note_poll_ok();
+        assert!(!m.sync_failing());
+    }
+
+    /// The scheduled retry goes away once the retry is under way.
+    #[test]
+    fn a_lifecycle_start_clears_the_scheduled_retry() {
+        let m = SyncMetrics::new();
+        m.record_gmail_error_reason(GmailErrorKind::Quota, "RATE_LIMIT_EXCEEDED");
+        m.record_sync_error();
+        m.note_sync_retry_at(4_000_000_000);
+        m.note_lifecycle_start();
+        assert_eq!(m.sync_next_retry_at(), None);
+        assert!(m.sync_failing(), "still failing until a poll succeeds");
+        assert!(m.sync_last_error().is_some());
     }
 
     /// A failure with no Gmail reason of its own still names a closed constant.

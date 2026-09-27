@@ -25,9 +25,10 @@ enum SyncStatus: Equatable, Sendable {
     case throttled(nextTry: Date?, reason: String, waiting: Int)
     /// Any other Gmail failure: `kind` is `http`, `network` or `auth`.
     case gmailError(kind: String, reason: String, nextTry: Date?, waiting: Int)
-    /// The daemon is re-walking the mailbox; triage is queued behind it.
+    /// The daemon is fetching a known amount of mail: the first-run backfill,
+    /// or a re-walk of the mailbox after an outage.
     case catchingUp(done: Int, total: Int)
-    /// No poll has succeeded yet, so triage has not started.
+    /// Gmail sync failed and no poll has succeeded since, so triage is held.
     case waitingForSync(waiting: Int)
     /// The model provider failed; triage is holding off until `until`.
     case coolingDown(until: Date?, waiting: Int)
@@ -37,10 +38,13 @@ enum SyncStatus: Equatable, Sendable {
     case healthy
 
     /// Fold the client's knowledge into one status. Precedence: daemon
-    /// unreachable > Gmail sign-in dead > Gmail throttling > other Gmail error >
-    /// catch-up > triage blocked (waiting for sync, cooling down, budget) >
+    /// unreachable > Gmail sign-in dead > catch-up > Gmail throttling > other
+    /// Gmail error > triage blocked (waiting for sync, cooling down, budget) >
     /// healthy. Each outranks the next because it is the REASON the next one
-    /// cannot move.
+    /// cannot move, with one exception: a catch-up in progress outranks the
+    /// error. The daemon only reports one while Gmail is answering it, and the
+    /// error it still carries is from the lifecycle that failed BEFORE this
+    /// one, which is exactly the recovery from a rate limit.
     static func derive(
         daemonDown: Bool, stats: StoreStats?, now: Date = Date(),
         date: (String?) -> Date?
@@ -49,6 +53,9 @@ enum SyncStatus: Equatable, Sendable {
         guard let stats else { return .healthy }
         if stats.gmail?.connected == false { return .disconnected }
         let waiting = max(stats.triage?.queued ?? 0, 0) + max(stats.triage?.leased ?? 0, 0)
+        if let c = stats.catch_up, c.total > 0 {
+            return .catchingUp(done: c.done, total: c.total)
+        }
         if let sync = stats.sync, !sync.ok, let error = sync.error {
             let next = date(sync.next_retry_at)
             if error.kind == "quota" {
@@ -57,13 +64,10 @@ enum SyncStatus: Equatable, Sendable {
             return .gmailError(
                 kind: error.kind, reason: error.reason, nextTry: next, waiting: waiting)
         }
-        if let c = stats.catch_up, c.total > 0 {
-            return .catchingUp(done: c.done, total: c.total)
-        }
         if let triage = stats.triage {
-            // Only when there is work waiting: a daemon that has just started
-            // and has nothing queued is not blocking anything, and a banner for
-            // the few seconds before its first poll would be noise.
+            // Only when there is work waiting. `queued` counts emails owed a
+            // verdict NOW (the daemon leaves scheduled revisits out), so zero
+            // really means nothing is being held up.
             if triage.waiting_for_sync && waiting > 0 {
                 return .waitingForSync(waiting: waiting)
             }
@@ -76,6 +80,29 @@ enum SyncStatus: Equatable, Sendable {
             }
         }
         return .healthy
+    }
+
+    /// The "synced 4m ago" stamp both platforms show, and whether it earns the
+    /// warning tint. When the daemon reports `sync`, the stamp is ITS last
+    /// Gmail sync, tinted while sync is failing: the app polling a daemon that
+    /// cannot reach Gmail is not a sync. An older daemon has no `sync` block,
+    /// and then the app's own poll (or the last surfaced row) stands in.
+    static func syncedStamp(
+        stats: StoreStats?, clientRefresh: Date?, now: Date = Date(),
+        date: (String?) -> Date?
+    ) -> (text: String, warn: Bool) {
+        func label(_ last: Date) -> String {
+            let age = Fmt.relAge(last, now: now)
+            return (age.isEmpty || age == "now") ? "synced just now" : "synced \(age) ago"
+        }
+        if let sync = stats?.sync {
+            // No sync yet: a first run (or a restart) that has not failed is
+            // on its way, and the stamp says so rather than raising a flag.
+            let first = sync.ok ? "first sync in progress\u{2026}" : "not synced yet"
+            return (date(sync.last_success_at).map(label) ?? first, !sync.ok)
+        }
+        let last = clientRefresh ?? date(stats?.last_surfaced_at)
+        return (last.map(label) ?? "waiting for the first sync\u{2026}", false)
     }
 
     // MARK: - copy

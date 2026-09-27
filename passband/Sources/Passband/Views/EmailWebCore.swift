@@ -943,6 +943,12 @@ final class EmailFrameCoordinator: NSObject {
     /// Verified across documents up to 16,842 points not to move an ordinary
     /// body by a single point.
     ///
+    /// `pre` wraps because the body is `overflow:hidden`: a plain-text message
+    /// sent as one `<pre>` (Google Cloud Support does this) otherwise runs a
+    /// paragraph off the right edge and it is simply gone. `overflow-wrap`
+    /// alone does nothing there, since `white-space:pre` never offers a break.
+    /// `!important` because the same senders also write it inline.
+    ///
     /// It does NOT cover `vh` units, which resolve against the viewport no
     /// matter what html and body are told to be. Those are bounded on the host
     /// side instead — see EmailWebView's sizing phases.
@@ -975,6 +981,7 @@ final class EmailFrameCoordinator: NSObject {
             img{max-width:100%;height:auto;}\
             a{color:#2b7fd4;}\
             table{max-width:100%;}\
+            pre{white-space:pre-wrap!important;}\
             blockquote{margin:8px 0;padding-left:10px;border-left:2px solid #d8dee6;color:#555;}\
             </style>\
             </head><body>\(html)</body></html>

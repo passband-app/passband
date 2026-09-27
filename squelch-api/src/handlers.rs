@@ -3338,6 +3338,12 @@ fn write_error(e: &WriteError) -> ApiError {
             "write credential not configured; run `squelchd auth --write`",
         ),
         WriteError::Invalid(m) => ApiError::bad_request(m.clone()),
+        // Nothing reached Gmail: the mailbox is in a quota hold. 503 so the
+        // app reads it as "not now" rather than "Gmail rejected this".
+        WriteError::Paced { retry_in_secs } => ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("Gmail is pacing this mailbox. Try again in {retry_in_secs}s."),
+        ),
         WriteError::Api { .. } | WriteError::Transport(_) => {
             ApiError::new(StatusCode::BAD_GATEWAY, "gmail request failed")
         }

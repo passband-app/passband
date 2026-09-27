@@ -9,17 +9,72 @@ struct OnboardingIntroView: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.scenePhase) private var scenePhase
     @State private var page = 0
+    @State private var backgrounded = false
 
     private var organized: Bool { page > 0 }
 
     var body: some View {
-        if !SquelchScene.shared.isUnavailable {
-            squelchLayout
-        } else {
-            cardLayout
+        // A ZStack, not a Group: a Group hands its modifiers to each branch,
+        // so a fallback swap mid-intro would fire onDisappear/onAppear and
+        // replay the opening burst.
+        ZStack {
+            if !SquelchScene.shared.isUnavailable {
+                squelchLayout
+            } else {
+                cardLayout
+            }
         }
+        #if os(iOS)
+            // THE PHONE PAGES BY HAND. No continue button and no skip: the
+            // whole screen is the control, a swipe left moves on and a swipe
+            // right goes back, and the hint at the bottom says so. Each beat is
+            // also felt, for as long as it is on screen (IntroHaptics): static
+            // while the squelch is open, a steady sine once it closes.
+            .contentShape(Rectangle())
+            // Simultaneous, so the card fallback's ScrollView keeps its pan.
+            .simultaneousGesture(pageSwipe)
+            .onAppear { IntroHaptics.shared.switchOn() }
+            .onDisappear { IntroHaptics.shared.shutdown() }
+            // Only a real trip to the background stops the engine. Pulling
+            // down Control Center is inactive -> active and stops nothing, and
+            // resuming there would cut the opening burst for no reason.
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .background { backgrounded = true }
+                if phase == .active, backgrounded {
+                    backgrounded = false
+                    IntroHaptics.shared.resume()
+                }
+            }
+            .onChange(of: page) { _, now in
+                if now == 1 { IntroHaptics.shared.sine() } else { IntroHaptics.shared.noise() }
+            }
+        #endif
     }
+
+    private func advance() {
+        if page == 1 { onContinue() } else { page += 1 }
+    }
+
+    #if os(iOS)
+        /// Horizontal, decisive, and judged on where the fling was headed as
+        /// much as where it stopped, so a quick flick counts as readily as a
+        /// long drag. A mostly vertical drag is not a page turn.
+        private var pageSwipe: some Gesture {
+            DragGesture(minimumDistance: 24)
+                .onEnded { value in
+                    let dx = value.translation.width, dy = value.translation.height
+                    let aimed = value.predictedEndTranslation.width
+                    guard abs(dx) > abs(dy) * 1.2 else { return }
+                    if dx < -50 || aimed < -140 {
+                        advance()
+                    } else if (dx > 50 || aimed > 140), page > 0 {
+                        page -= 1
+                    }
+                }
+        }
+    #endif
 
     /// The radio beats: raw noise pours through a dormant gate, then the
     /// continue button closes the squelch and only the passband comes out.
@@ -49,7 +104,13 @@ struct OnboardingIntroView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     masthead
                         .modifier(IntroEntrance(delay: 0, distance: 4))
+                    // Narrow is the phone (the Mac window floors at 980pt).
+                    // Split evenly with the spacer below, the leftover height
+                    // set the story down on the crest of the nearest bands,
+                    // where the body line was unreadable; capped, it stays in
+                    // the dark sky the top gradient keeps for it.
                     Spacer(minLength: 24)
+                        .frame(maxHeight: wide ? .infinity : 40)
                     story(wide: wide)
                         .frame(maxWidth: wide ? 480 : .infinity, alignment: .leading)
                     Spacer(minLength: wide ? 24 : 260)
@@ -204,13 +265,28 @@ struct OnboardingIntroView: View {
             .accessibilityLabel("Introduction, step \(page + 1) of 2")
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.28), value: page)
 
-            if organized {
-                Button("Back") { page -= 1 }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(Palette.inkDim)
-            }
+            // The phone goes back by swiping right; only the Mac needs a button.
+            #if os(macOS)
+                if organized {
+                    Button("Back") { page -= 1 }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Palette.inkDim)
+                }
+            #endif
 
             Spacer(minLength: 0)
+            #if os(iOS)
+                SwipeHint(text: organized ? "Swipe to begin" : "Swipe for a little breathing room")
+                    // VoiceOver cannot flick the page, so the hint is where
+                    // that gesture lives for it.
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(organized ? "Begin" : "Next")
+                    .accessibilityHint(organized ? continueHint : "")
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityAction { advance() }
+                    // And the swipe back, for the same reason.
+                    .accessibilityAction(named: "Back") { if page > 0 { page -= 1 } }
+            #else
             Button("Skip intro", action: onContinue)
                 .buttonStyle(.plain)
                 .font(.system(size: 11))
@@ -232,10 +308,50 @@ struct OnboardingIntroView: View {
             .buttonStyle(.borderedProminent)
             .tint(Palette.accent)
             .keyboardShortcut(.defaultAction)
+            #endif
         }
         .padding(.bottom, 24)
     }
 }
+
+#if os(iOS)
+    /// Where the continue button is on the Mac: a line of copy and a run of
+    /// chevrons that keep drifting right, pointing at where the next page is.
+    /// It is a hint, not a target; the gesture is the whole screen.
+    private struct SwipeHint: View {
+        let text: String
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+        var body: some View {
+            HStack(spacing: 8) {
+                Text(text)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Palette.ink.opacity(0.8))
+                TimelineView(.animation(paused: reduceMotion)) { context in
+                    let t = context.date.timeIntervalSinceReferenceDate
+                    HStack(spacing: -1) {
+                        ForEach(0..<3) { i in
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 14, weight: .bold))
+                                .opacity(reduceMotion ? 0.8 : Self.pulse(t, index: i))
+                        }
+                    }
+                    // Ink, not the accent: the nearest bands are accent blue,
+                    // and a blue crest over blue waves could not be seen.
+                    .foregroundStyle(Palette.ink)
+                }
+            }
+            .padding(.vertical, 10)
+        }
+
+        /// A crest that travels left to right across the three chevrons,
+        /// once every 1.6s.
+        private static func pulse(_ t: TimeInterval, index: Int) -> Double {
+            let phase = (t / 1.6).truncatingRemainder(dividingBy: 1) * 4 - Double(index)
+            return 0.25 + 0.75 * max(0, 1 - abs(phase - 0.5) * 1.6)
+        }
+    }
+#endif
 
 /// The scene's own backdrop color, so the scrim behind the copy melts into it
 /// rather than tinting it.

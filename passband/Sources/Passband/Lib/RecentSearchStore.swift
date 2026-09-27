@@ -54,6 +54,19 @@ final class RecentSearchStore {
         UserDefaults.standard.set(next, forKey: key)
     }
 
+    /// Put a submitted search in the ring, which is the one rule both shells
+    /// follow: SUBMITTED MEANS FETCHED AND ACTED ON. Callers are the gestures
+    /// that act on results (opening a hit on either shell, expanding the Mac's
+    /// panel); this decides what is recorded. THE FETCHED TERM, never the live
+    /// field text: mid-edit those are two different strings, and only one was
+    /// answered (docs/SEARCH.md §4.2). A nil fetched query (the fetch failed,
+    /// or the tap beat it home) is not a search anybody has seen the results
+    /// of, so nothing is written.
+    func remember(_ session: SearchSession) {
+        guard let term = session.fetchedQuery else { return }
+        record(term)
+    }
+
     /// Forget the lot. Search terms are the reader's own words about their own
     /// mail, so the list that keeps them has to have a way out that is not
     /// "delete the app" — the button is in the empty state's own header, beside

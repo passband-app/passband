@@ -2073,6 +2073,105 @@ async fn an_archive_books_against_the_mailbox_gmail_budget() {
     );
 }
 
+fn archive_app(
+    base: String,
+    budget: Arc<squelch_core::gmail_budget::GmailBudget>,
+) -> (axum::Router, i64) {
+    let (state, store, acct) = state_with(|store, acct| {
+        let m = store
+            .upsert_message(&msg(acct, "gmail-paced", "t1", "hi", "body"))
+            .unwrap();
+        store
+            .set_triage(
+                m,
+                acct,
+                80,
+                Tier::Signal,
+                Sensitivity::Normal,
+                None,
+                "",
+                "",
+                None,
+            )
+            .unwrap();
+    });
+    let message_id = store.search(acct, "hi", 10, 0).unwrap()[0].id;
+    let app = router(
+        state
+            .with_write_test_harness(Arc::new(StubCreds), base)
+            .with_gmail_budget(budget),
+    );
+    (app, message_id)
+}
+
+/// A quota refusal on a WRITE (a send is the most expensive call there is)
+/// slows the mailbox's shared budget, so the sync loop backs off too.
+#[tokio::test]
+async fn a_quota_refused_archive_slows_the_mailbox_budget() {
+    use squelch_core::config::GmailQuotaProfile;
+    use squelch_core::gmail_budget::GmailBudget;
+    use std::time::Duration;
+
+    let (base, handle) = mock_gmail_seq(vec![(
+        403,
+        r#"{"error":{"details":[{"reason":"RATE_LIMIT_EXCEEDED"}]}}"#.to_string(),
+    )])
+    .await;
+    let budget = Arc::new(
+        GmailBudget::with_unit(GmailQuotaProfile::Standard, Duration::from_micros(10))
+            .with_adaptation(Duration::ZERO, Duration::from_secs(3600)),
+    );
+    let (app, message_id) = archive_app(base, budget.clone());
+    let resp = app
+        .oneshot(authed_json(
+            "POST",
+            "/client/actions/archive",
+            serde_json::json!({ "message_id": message_id, "confirm": true }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(resp.status(), StatusCode::OK);
+    handle.await.unwrap();
+    assert_eq!(budget.unit(), Duration::from_micros(20));
+}
+
+/// During a refusal hold a human's archive is answered at once with 503 and
+/// when to retry, and nothing is sent to Gmail: it must not sit out a
+/// one-minute hold while the app's 15 s request timeout calls it failed.
+#[tokio::test]
+async fn an_archive_during_a_quota_hold_is_told_to_retry_without_sending() {
+    use squelch_core::config::GmailQuotaProfile;
+    use squelch_core::gmail_budget::GmailBudget;
+    use std::time::{Duration, Instant};
+
+    let (base, _handle) = mock_gmail(1).await;
+    let budget = Arc::new(
+        GmailBudget::with_unit(GmailQuotaProfile::Standard, Duration::ZERO)
+            .with_adaptation(Duration::from_secs(60), Duration::from_secs(3600)),
+    );
+    budget.note_quota_refusal(None);
+    let (app, message_id) = archive_app(base, budget);
+    let started = Instant::now();
+    let resp = app
+        .oneshot(authed_json(
+            "POST",
+            "/client/actions/archive",
+            serde_json::json!({ "message_id": message_id, "confirm": true }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "must answer at once, not wait out the hold"
+    );
+    let body = body_json(resp).await;
+    assert!(
+        body.to_string().contains("Try again in"),
+        "the app should be told when to retry: {body}"
+    );
+}
+
 #[tokio::test]
 async fn human_can_archive_restricted_mail() {
     let (base, handle) = mock_gmail(1).await;

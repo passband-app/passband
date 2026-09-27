@@ -15,21 +15,9 @@
 import AppKit
 import SwiftUI
 
-enum Zoom {
-    /// Safari's ladder, trimmed. Fixed steps rather than a free multiplier so
-    /// ⌘0 and a few presses always land back on the same numbers.
-    static let steps: [Double] = [0.75, 0.85, 1.0, 1.1, 1.25, 1.5, 1.75]
-
-    /// The layout's own floor (see PassbandApp's `minWidth`/`minHeight`), in
-    /// logical points. The window's floor is this times the zoom.
-    static let minLogicalSize = CGSize(width: 980, height: 640)
-
-    /// Snap a stored value onto the ladder, so a hand-edited default or a
-    /// retired step can never leave the shell at some off-grid scale.
-    static func clamp(_ value: Double) -> Double {
-        steps.min(by: { abs($0 - value) < abs($1 - value) }) ?? 1
-    }
-
+// The ladder itself (steps, clamp, the logical floor) is platform-neutral and
+// lives in Lib/ZoomSteps.swift, because Prefs reads it on the phone too.
+extension Zoom {
     /// The largest step whose logical floor still fits the screen the window
     /// is on. Past it, the window could not be made big enough to hold the
     /// layout, and AppKit would push it off the display to try.

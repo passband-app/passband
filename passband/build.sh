@@ -38,6 +38,17 @@ SPARKLE_DIR="vendor/Sparkle"
 MARKETING_VERSION="${MARKETING_VERSION:-$(cat VERSION)}"
 BUILD_NUMBER="${BUILD_NUMBER:-$(git rev-list --count HEAD 2>/dev/null || echo 1)}"
 
+# Which branch this build came from, shown next to the sitrep label so a desk
+# with three dev builds open can tell which one is testing which feature. Only
+# dev builds carry it: a release build is by definition what shipped, and
+# `main` is the default so it is not worth a label. Detached HEAD ("HEAD") is
+# treated as no branch. Overridable so a build cut from an exported tree can
+# name itself.
+BUILD_BRANCH="${BUILD_BRANCH-$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)}"
+case "$MODE:$BUILD_BRANCH" in
+  release:*|*:main|*:HEAD) BUILD_BRANCH="" ;;
+esac
+
 SWIFT_FLAGS=(
   -target arm64-apple-macosx26.0
   -swift-version 6
@@ -61,7 +72,7 @@ case "$MODE" in
   *)       SWIFT_FLAGS+=(-Onone -g) ;;
 esac
 
-echo "==> compiling ($MODE) v$MARKETING_VERSION build $BUILD_NUMBER"
+echo "==> compiling ($MODE) v$MARKETING_VERSION build $BUILD_NUMBER"${BUILD_BRANCH:+ [$BUILD_BRANCH]}
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
@@ -82,6 +93,7 @@ sed -e 's/\$(EXECUTABLE_NAME)/Passband/g' \
     -e 's/\$(PRODUCT_NAME)/Passband/g' \
     -e "s/\\\$(MARKETING_VERSION)/$MARKETING_VERSION/g" \
     -e "s/\\\$(CURRENT_PROJECT_VERSION)/$BUILD_NUMBER/g" \
+    -e "s|\\\$(PASSBAND_BUILD_BRANCH)|$BUILD_BRANCH|g" \
     -e 's/\$(MACOSX_DEPLOYMENT_TARGET)/26.0/g' \
     "$SRC_DIR/Info.plist" > "$APP/Contents/Info.plist"
 

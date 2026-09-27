@@ -36,12 +36,11 @@
 // your mail and is holding (MobileRecordsView's bar carries the key now, dot and
 // all).
 //
-// WITH ONE EXCEPTION, AND IT IS THE TOP OF THIS COLUMN. A code that just landed
-// is not a lookup — you are standing at a login form holding the phone the code
-// is on — so it does not wait behind a glyph on another tab. It raises a card
-// ABOVE the hero, reveals from there, and disappears when it goes stale. That
-// card is the only thing on this screen allowed to outrank the greeting, and it
-// is allowed because it is the one thing here that expires.
+// WITH ONE EXCEPTION. A code that just landed is not a lookup — you are
+// standing at a login form holding the phone the code is on — so it does not
+// wait behind a glyph on another tab. It raises AuthCodeModal over the whole
+// shell (MobileRootView, off `store.authQueue`), the same modal the Mac stacks
+// in its action layer, wherever you happen to be.
 
 import SwiftUI
 

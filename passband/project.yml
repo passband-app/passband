@@ -89,12 +89,14 @@ targets:
           - "Passband.entitlements"
           # The macOS app shell: NSApplicationDelegate, the window, the menu
           # commands. PassbandiOSApp is its twin. RoutedHeader/RoutedHost live
-          # in RootView.swift, which is why the three routed views below cannot
-          # come over yet.
+          # in RootView.swift, which is why the two routed views at the bottom
+          # of this list (AuthView, UsageView) cannot come over yet. Zoom's
+          # AppKit verbs live here too; its ladder is Lib/ZoomSteps.swift.
           - "App/**"
           # The guided practice inbox is a Mac lesson over the Mac shell (it
-          # places its card past the sidebar rail). The phone will get its
-          # own guide; until then its onboarding is the live summary alone.
+          # places its card past the sidebar rail). The phone has no tour at
+          # all, by choice: its onboarding is the cold open (OnboardingIntroView,
+          # inside ConnectView) and then the live app.
           - "Views/PracticeProductTour.swift"
           # Sparkle. iOS has no sideloaded updater; the App Store is the updater.
           - "Model/Updater.swift"
@@ -116,13 +118,15 @@ targets:
           # Sources/PassbandiOS/Views/MarkdownTextViewiOS.swift, which declares
           # `MarkdownTextView` under the same name so no composer forks.
           - "Views/MarkdownTextView.swift"
-          # Needs ComposePane's ComposeSummaryRow.
+          # The Mac's floating ask/search bar. The phone's twin is the search
+          # tab's field plus Sources/PassbandiOS/Views/MobileAgentView.swift.
           - "Views/AskBar.swift"
-          # Needs AskBar. Otherwise portable — the palettes and the tour overlay
-          # it hosts all compile here already, and its TOAST half is re-laid-out
-          # for a thumb (over the tab bar, undo as a button) in
-          # Sources/PassbandiOS/Views/MobileToastHost.swift, off the same
-          # store.toasts / store.undos state.
+          # Needs AskBar. Everything else it mounts compiles here, and each
+          # piece is either mounted by MobileShell (MobileRootView.swift) on
+          # the same store flags or deliberately absent: the TOASTS are re-laid
+          # out for a thumb in MobileToastHost; the rule editor and the code
+          # modal are mounted as-is; the tour overlay, What's New and the
+          # re-triage confirm/modal have NO phone mount.
           - "Views/ActionLayer.swift"
           # --- phase 4: the remaining destinations ------------------------
           # The rail is the Mac's navigation model; the phone's is the tab bar.

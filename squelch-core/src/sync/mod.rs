@@ -20,9 +20,10 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use reqwest::StatusCode;
 use serde::Deserialize;
 
-use crate::config::{Config, GmailQuotaProfile, ResolvedLlm, Stage2Provider};
+use crate::config::{Config, ResolvedLlm, Stage2Provider};
 use crate::credentials::CredentialStore;
 use crate::error::{CoreError, Result};
+use crate::gmail_budget::{GmailBudget, gmail_path};
 use crate::metrics::{GmailErrorKind, SyncMetrics};
 use crate::store::{ContactEntry, SPAM_SYNCED_AT_KEY, Store, SyncState, TriagedMessage};
 use crate::sync::ingest::{
@@ -601,8 +602,11 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     account_email: String,
     config: Config,
     http: reqwest::Client,
-    gmail_next_request: tokio::sync::Mutex<tokio::time::Instant>,
-    gmail_unit_spacing: Duration,
+    /// The mailbox's Gmail quota budget, shared with every other caller for
+    /// the same account (see [`crate::gmail_budget`]). An engine built without
+    /// [`Self::with_gmail_budget`] gets its own, which is only right when it is
+    /// the only Gmail caller in the process.
+    gmail_budget: Arc<GmailBudget>,
     gmail_quota_backoff: Duration,
     /// LLM key + provider + endpoint URL, resolved once at startup. `None`
     /// disables LLM triage gracefully: rows stay queued, one stderr notice,
@@ -752,11 +756,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                  sync continues)"
             );
         }
-        // Leave 20% headroom; charge each method by its own cost, not as a raw fetch.
-        let gmail_unit_spacing = match config.sync.gmail_quota_profile {
-            GmailQuotaProfile::Standard => Duration::from_micros(12_500),
-            GmailQuotaProfile::Legacy => Duration::from_millis(5),
-        };
+        let gmail_budget = Arc::new(GmailBudget::new(config.sync.gmail_quota_profile));
         Self {
             store,
             creds,
@@ -764,8 +764,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             account_email,
             config,
             http,
-            gmail_next_request: tokio::sync::Mutex::new(tokio::time::Instant::now()),
-            gmail_unit_spacing,
+            gmail_budget,
             gmail_quota_backoff: Duration::from_secs(1),
             stage2_llm,
             embedder: None,
@@ -789,6 +788,14 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     /// Without it the engine still counts, into a registry nobody scrapes.
     pub fn with_metrics(mut self, metrics: Arc<SyncMetrics>) -> Self {
         self.metrics = metrics;
+        self
+    }
+
+    /// Share the mailbox's [`GmailBudget`] with every other Gmail caller for
+    /// this account. Create ONE per account at startup; two engines on one
+    /// mailbox with a budget each is how a tenant asked for 160% of its quota.
+    pub fn with_gmail_budget(mut self, budget: Arc<GmailBudget>) -> Self {
+        self.gmail_budget = budget;
         self
     }
 
@@ -961,8 +968,9 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             {
                 self.metrics.record_gmail_quota_retry();
                 eprintln!(
-                    "squelch: Gmail quota limit ({}); pausing {}s, then retrying the same request (catch-up position retained)",
+                    "squelch: Gmail quota limit ({}{}); pausing {}s, then retrying the same request (catch-up position retained)",
                     gmail_error_reason(&body),
+                    gmail_quota_limit_note(&body),
                     delay.as_secs()
                 );
                 tokio::time::sleep(delay).await;
@@ -971,9 +979,10 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             }
             self.metrics.record_gmail_error(kind);
             return Err(CoreError::Other(anyhow::anyhow!(
-                "gmail api status {} (reason: {})",
+                "gmail api status {} (reason: {}{})",
                 status.as_u16(),
-                gmail_error_reason(&body)
+                gmail_error_reason(&body),
+                gmail_quota_limit_note(&body)
             )));
         }
         unreachable!("the final attempt returns")
@@ -1014,21 +1023,11 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     }
 
     async fn bearer_get(&self, url: &str, access_token: &str) -> Result<reqwest::Response> {
-        // Serialize admission, including concurrent callers and 401 retries.
-        // Set the next slot from NOW so idle time never accumulates a burst.
-        {
-            let mut next = self.gmail_next_request.lock().await;
-            tokio::time::sleep_until(*next).await;
-            let path = url
-                .strip_prefix(&self.api_base)
-                .unwrap_or(url)
-                .split('?')
-                .next()
-                .unwrap_or_default();
-            *next = tokio::time::Instant::now()
-                + self.gmail_unit_spacing
-                    * gmail_method_cost(self.config.sync.gmail_quota_profile, path);
-        }
+        // Admission is the mailbox's, not this engine's: every caller for the
+        // account books against the same budget, 401 retries included.
+        self.gmail_budget
+            .admit("GET", gmail_path(url, &self.api_base))
+            .await;
         self.http
             .get(url)
             .bearer_auth(access_token)
@@ -2618,19 +2617,6 @@ fn gmail_quota_delay(backoff: Duration, retry_after: Option<Duration>) -> Option
     )
 }
 
-fn gmail_method_cost(profile: GmailQuotaProfile, path: &str) -> u32 {
-    match path {
-        "/profile" => 1,
-        "/history" => 2,
-        "/messages" => 5,
-        p if p.starts_with("/labels/") => 1,
-        _ => match profile {
-            GmailQuotaProfile::Standard => 20,
-            GmailQuotaProfile::Legacy => 5,
-        },
-    }
-}
-
 /// Retry-After accepts seconds or an HTTP date. Never retry before it elapses.
 fn gmail_retry_after(value: &str) -> Option<Duration> {
     if let Ok(seconds) = value.parse::<u64>() {
@@ -2715,6 +2701,36 @@ fn gmail_error_reason(body: &str) -> &'static str {
     "unavailable"
 }
 
+/// Which quota Google says was exceeded, as `, limit: <name>`, or empty.
+///
+/// A `RATE_LIMIT_EXCEEDED` alone does not say whether the per-user or the
+/// per-project budget ran out, and the per-user one is the limit the Cloud
+/// console cannot chart. `google.rpc.ErrorInfo` names it in
+/// `metadata.quota_limit` (falling back to `quota_metric`). Only an identifier
+/// is emitted: ASCII letters, digits and `_./-`, at most 96 bytes, or nothing.
+fn gmail_quota_limit_note(body: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return String::new();
+    };
+    let Some(entries) = value["error"]["details"].as_array() else {
+        return String::new();
+    };
+    for entry in entries {
+        for key in ["quota_limit", "quota_metric"] {
+            if let Some(name) = entry["metadata"][key].as_str()
+                && !name.is_empty()
+                && name.len() <= 96
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'/' | b'-'))
+            {
+                return format!(", limit: {name}");
+            }
+        }
+    }
+    String::new()
+}
+
 /// Minimal percent-encoding for a Gmail `q` value. Enough for `newer_than:Nd`
 /// and simple queries; arbitrary user queries are never built here.
 fn urlencode(s: &str) -> String {
@@ -2774,6 +2790,27 @@ mod tests {
     use crate::store::SpamScope;
     use crate::store::SqliteStore;
     use crate::types::{Disposition, NewMessage, Tier};
+
+    #[test]
+    fn gmail_quota_limit_note_names_the_limit_and_nothing_else() {
+        let per_user = r#"{"error":{"details":[{"reason":"RATE_LIMIT_EXCEEDED","metadata":{"quota_limit":"UnitsPerMinutePerUser","quota_metric":"gmail.googleapis.com/default_units","consumer":"projects/1"}}]}}"#;
+        assert_eq!(
+            gmail_quota_limit_note(per_user),
+            ", limit: UnitsPerMinutePerUser"
+        );
+        let metric_only = r#"{"error":{"details":[{"metadata":{"quota_metric":"gmail.googleapis.com/default_units"}}]}}"#;
+        assert_eq!(
+            gmail_quota_limit_note(metric_only),
+            ", limit: gmail.googleapis.com/default_units"
+        );
+        for body in [
+            r#"{"error":{"details":[{"metadata":{"quota_limit":"has spaces and private words"}}]}}"#,
+            r#"{"error":{"errors":[{"reason":"userRateLimitExceeded"}]}}"#,
+            "not json",
+        ] {
+            assert_eq!(gmail_quota_limit_note(body), "");
+        }
+    }
 
     #[test]
     fn gmail_error_reason_reports_known_reasons_without_freeform_content() {
@@ -3755,7 +3792,10 @@ mod tests {
             config,
         )
         .with_api_base(base.to_string());
-        engine.gmail_unit_spacing = Duration::ZERO;
+        engine.gmail_budget = Arc::new(GmailBudget::with_unit(
+            crate::config::GmailQuotaProfile::Standard,
+            Duration::ZERO,
+        ));
         engine
     }
 
@@ -3943,25 +3983,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn gmail_pacing_uses_method_cost_and_project_profile() {
-        for (profile, unit, raw_cost) in [
-            (
-                GmailQuotaProfile::Standard,
-                Duration::from_micros(12_500),
-                20,
-            ),
-            (GmailQuotaProfile::Legacy, Duration::from_millis(5), 5),
-        ] {
-            assert_eq!(gmail_method_cost(profile, "/messages/a"), raw_cost);
-            assert_eq!(gmail_method_cost(profile, "/messages"), 5);
-            assert_eq!(gmail_method_cost(profile, "/history"), 2);
-            assert_eq!(gmail_method_cost(profile, "/labels/INBOX"), 1);
-            assert_eq!(gmail_method_cost(profile, "/profile"), 1);
-            assert!(unit * gmail_method_cost(profile, "/labels/INBOX") < Duration::from_millis(20));
-        }
-    }
-
     #[tokio::test]
     async fn gmail_permission_error_does_not_retry() {
         let g = MockGmail::default();
@@ -3986,7 +4007,10 @@ mod tests {
         let base = serve_mock(g.clone()).await;
         let (store, acct) = store_at_cursor(Some(1));
         let mut e = engine(store, acct, &base);
-        e.gmail_unit_spacing = Duration::from_millis(10);
+        e.gmail_budget = Arc::new(GmailBudget::with_unit(
+            crate::config::GmailQuotaProfile::Standard,
+            Duration::from_millis(10),
+        ));
         let started = tokio::time::Instant::now();
         let url = format!("{base}/profile");
         let (a, b) = tokio::join!(e.get_json::<Value>(&url), e.get_json::<Value>(&url));

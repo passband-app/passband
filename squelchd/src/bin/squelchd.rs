@@ -1995,6 +1995,13 @@ fn cmd_serve(
     // ONE registry for the process: the sync engine writes it, the metrics door
     // reads it. Built here so both sides get the same Arc.
     let sync_metrics = squelch_core::metrics::SyncMetrics::new();
+    // ONE Gmail quota budget for this mailbox, handed to every Gmail caller:
+    // the sync engine, the one-time sweeps engine, and the write door. Each
+    // used to pace itself, so together they could ask for more than the
+    // per-user limit (see squelch_core::gmail_budget).
+    let gmail_budget = std::sync::Arc::new(squelch_core::gmail_budget::GmailBudget::new(
+        config.sync.gmail_quota_profile,
+    ));
 
     // Same shape, different question: the startup path below flips these and
     // the metrics door's `/healthz` reads them. See [`Readiness`] for which
@@ -2041,6 +2048,7 @@ fn cmd_serve(
         // "is this mailbox still connected" from live state rather than from a
         // copy taken at boot.
         .with_sync_metrics(sync_metrics.clone())
+        .with_gmail_budget(gmail_budget.clone())
         .with_event_notifier(event_tx);
     // Carrier polling is BYOK, so the no-poller path is the common one and is
     // spelled out rather than left implicit: the door still serves
@@ -2134,6 +2142,7 @@ fn cmd_serve(
             let refresh = refresh.clone();
             let creds = sync_creds.clone();
             let sync_metrics = sync_metrics.clone();
+            let sync_budget = gmail_budget.clone();
             // Taken before the spawn and dropped by the task, so readiness
             // tracks the engine and not the intention to start one.
             let sync_running = readiness.sync_started();
@@ -2141,6 +2150,7 @@ fn cmd_serve(
             tokio::spawn(async move {
                 let _sync_running = sync_running;
                 SyncEngine::new(store, creds, account_id, email, config)
+                    .with_gmail_budget(sync_budget)
                     .with_refresh(refresh)
                     .with_spam_refresh(spam_refresh)
                     .with_metrics(sync_metrics)
@@ -2174,6 +2184,7 @@ fn cmd_serve(
             let config = config.clone();
             let creds = sync_creds.clone();
             let sweep_metrics = sync_metrics.clone();
+            let sweep_budget = gmail_budget.clone();
             let mut embedder_gate = readiness.embedder_gate();
             tokio::spawn(async move {
                 wait_for_embedder_gate(&mut embedder_gate).await;
@@ -2181,7 +2192,8 @@ fn cmd_serve(
                 // The same metrics the sync loop reports into, so a Gmail
                 // refusal during a sweep lands on the same panel and alert.
                 let engine = SyncEngine::new(store, creds, account_id, email, config)
-                    .with_metrics(sweep_metrics);
+                    .with_metrics(sweep_metrics)
+                    .with_gmail_budget(sweep_budget);
                 if let Err(e) = engine.harvest_sent_contacts().await {
                     eprintln!(
                         "squelchd: sent-contacts harvest incomplete (retries next start): {e}"

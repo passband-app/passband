@@ -781,6 +781,10 @@ pub struct GmailWriteClient {
     http: reqwest::Client,
     /// API base URL. Overridable in tests only; production uses Gmail's.
     base: String,
+    /// The mailbox's shared Gmail quota budget (see
+    /// [`squelch_core::gmail_budget`]). `None` only where no daemon built one:
+    /// tests, and a door with no sync engine beside it.
+    budget: Option<std::sync::Arc<squelch_core::gmail_budget::GmailBudget>>,
 }
 
 impl GmailWriteClient {
@@ -804,6 +808,29 @@ impl GmailWriteClient {
             account_id,
             http,
             base,
+            budget: None,
+        }
+    }
+
+    /// Book every request against the mailbox's shared Gmail budget, the one
+    /// the sync engines draw from, so a send or an archive during a catch-up
+    /// cannot push the user over Gmail's per-minute limit.
+    pub fn with_budget(
+        mut self,
+        budget: Option<std::sync::Arc<squelch_core::gmail_budget::GmailBudget>>,
+    ) -> Self {
+        self.budget = budget;
+        self
+    }
+
+    async fn admit(&self, method: &str, url: &str) {
+        if let Some(budget) = &self.budget {
+            budget
+                .admit(
+                    method,
+                    squelch_core::gmail_budget::gmail_path(url, &self.base),
+                )
+                .await;
         }
     }
 
@@ -835,6 +862,7 @@ impl GmailWriteClient {
         timeout: Option<std::time::Duration>,
     ) -> Result<Value, WriteError> {
         let token = self.write_token().await?;
+        self.admit("POST", url).await;
         let mut req = self.http.post(url).bearer_auth(&token).json(body);
         if let Some(timeout) = timeout {
             req = req.timeout(timeout);
@@ -861,6 +889,7 @@ impl GmailWriteClient {
     /// Never logs the token or the response.
     async fn get_json<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T, WriteError> {
         let token = self.write_token().await?;
+        self.admit("GET", url).await;
         let resp = self
             .http
             .get(url)

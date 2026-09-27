@@ -137,3 +137,74 @@ struct ReconnectAccountPrompt: View {
         ])
     }
 }
+
+/// THE SAME SLOT, for every other reason new mail is not arriving or not being
+/// sorted: Gmail rate-limiting the mailbox, Gmail erroring, a catch-up, or
+/// triage held by a failed sync, a provider cooldown or a spent budget.
+///
+/// Same posture as the disconnected banner (not dismissible, not a modal) and
+/// the same styling, so the two read as one family. The difference is that
+/// nothing here is the human's to fix, so it says what to expect and when,
+/// with real numbers, and offers no button.
+///
+/// The raw reason code (`RATE_LIMIT_EXCEEDED`) is for whoever is debugging: it
+/// rides in the hover text always, and on screen only in developer mode.
+struct SyncStatusBanner: View {
+    @Environment(Prefs.self) private var prefs
+    let status: SyncStatus
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 11) {
+            Image(systemName: symbol)
+                .foregroundStyle(tone)
+                .font(.system(size: 14, weight: .semibold))
+                .padding(.top, 1)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(status.headline)
+                    .font(Typo.zoneTitle)
+                    .foregroundStyle(Palette.ink)
+                // Re-rendered by the poller every 10s, so "Next try at 12:05"
+                // flips to "Trying again now" without a timer of its own.
+                Text(status.detail())
+                    .font(Typo.rowSub)
+                    .foregroundStyle(Palette.inkDim)
+                    .fixedSize(horizontal: false, vertical: true)
+                if prefs.developerMode, let raw = status.rawReason {
+                    Text(verbatim: raw)
+                        .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                        .foregroundStyle(Palette.inkFaint)
+                        .textSelection(.enabled)
+                }
+            }
+
+            Spacer(minLength: 8)
+        }
+        .padding(.horizontal, 13)
+        .padding(.vertical, 10)
+        .background(
+            status.isWarning ? Palette.warnSoft : Palette.accentSoft,
+            in: RoundedRectangle(cornerRadius: 9)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 9)
+                .strokeBorder(tone.opacity(0.30), lineWidth: 1)
+        )
+        .help(status.rawReason.map { "Gmail reported: \($0)" } ?? "")
+        // One announcement for a screen reader, not four fragments.
+        .accessibilityElement(children: .combine)
+    }
+
+    private var tone: Color { status.isWarning ? Palette.warn : Palette.accent }
+
+    private var symbol: String {
+        switch status {
+        case .throttled: return "hourglass"
+        case .gmailError(let kind, _, _, _):
+            return kind == "network" ? "wifi.exclamationmark" : "exclamationmark.triangle.fill"
+        case .catchingUp: return "arrow.down.circle"
+        case .budgetPaused: return "pause.circle"
+        default: return "clock"
+        }
+    }
+}

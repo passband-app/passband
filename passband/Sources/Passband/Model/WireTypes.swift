@@ -958,6 +958,12 @@ struct StoreStats: Codable, Sendable, Hashable {
     /// A mailbox catch-up in flight. ABSENT is the normal state; presence is
     /// the explanation for a triage queue that is not moving.
     var catch_up: CatchUpProgress?
+    /// Whether Gmail sync is working right now, and if not why and when it
+    /// tries again. ABSENT on an older daemon or a door without a metrics
+    /// registry; nil means "we do not know", never "healthy". See `SyncStatus`.
+    var sync: SyncHealth?
+    /// Whether triage can run and how much work it has. Same absence rule.
+    var triage: TriageHealth?
     /// Whether `attachment_ids` on a send and on a draft mean anything here.
     /// ABSENT on a daemon too old to stage files, and absence reads as no —
     /// the same silent-failure shape as `forwarding`: an old daemon ignores
@@ -975,6 +981,45 @@ struct StoreStats: Codable, Sendable, Hashable {
 struct CatchUpProgress: Codable, Sendable, Hashable {
     var done: Int
     var total: Int
+}
+
+/// Gmail sync health off /client/stats. `gmail.connected` answers only "is
+/// the credential alive"; a mailbox Gmail is rate-limiting has a good
+/// credential and still syncs nothing, and this is where that shows.
+struct SyncHealth: Codable, Sendable, Hashable {
+    /// The last poll succeeded and no failure has followed.
+    var ok: Bool
+    /// RFC3339, the daemon's last successful Gmail poll. THE source for
+    /// "synced 4m ago": the client's own poll of the daemon is not a sync.
+    var last_success_at: String?
+    /// Why the current outage is happening. Present only while `ok` is false.
+    var error: SyncErrorInfo?
+    /// RFC3339, when the daemon tries Gmail again. Only while `ok` is false.
+    var next_retry_at: String?
+    var consecutive_failures: Int?
+}
+
+struct SyncErrorInfo: Codable, Sendable, Hashable {
+    /// `auth`, `quota`, `http` or `network`.
+    var kind: String
+    /// A closed constant such as `RATE_LIMIT_EXCEEDED`. For hover text and
+    /// developer mode ONLY: it is a code, not a sentence.
+    var reason: String
+    var at: String?
+}
+
+/// Triage worker state off /client/stats.
+struct TriageHealth: Codable, Sendable, Hashable {
+    /// Triage spends nothing until a Gmail poll succeeds.
+    var waiting_for_sync: Bool
+    /// RFC3339, the end of a model-provider cooldown, when one is in force.
+    var cooldown_until: String?
+    /// Jobs waiting for, and currently running through, triage.
+    var queued: Int
+    var leased: Int
+    /// Jobs parked on a spent daily budget, and when the first resumes.
+    var budget_parked: Int
+    var budget_resumes_at: String?
 }
 
 /// The daemon's answer to "is this mailbox still connected".
@@ -1514,6 +1559,17 @@ struct RetriageProgress: Codable, Sendable, Hashable {
     /// an older daemon does not send them; absent reads as "not paused".
     var budget_parked: Int?
     var budget_resumes_at: String?
+    /// Why an unfinished run is not moving, when something outside the queue
+    /// holds it. Absent on an older daemon and whenever the run can progress.
+    var blocked: RetriageBlocked?
+}
+
+struct RetriageBlocked: Codable, Sendable, Hashable {
+    /// `waiting_for_sync`, `provider_cooldown` or `budget`. A String and not an
+    /// enum so a reason a newer daemon adds decodes instead of failing the poll.
+    var reason: String
+    /// RFC3339, when the blocker is expected to lift, if anyone knows.
+    var until: String?
 }
 
 struct ShredStats: Codable, Sendable, Hashable {

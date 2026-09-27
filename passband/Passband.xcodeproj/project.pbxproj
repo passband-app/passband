@@ -12,6 +12,7 @@
 		022DB1DE5C307F7EFF36AFE5 /* ActionLayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B11AE47A064BB58DD81A6DB /* ActionLayer.swift */; };
 		0271C8CF8F2DDC03C1DEF095 /* Opener.swift in Sources */ = {isa = PBXBuildFile; fileRef = 070286D5016F78C93DC49070 /* Opener.swift */; };
 		02A2C5770523B244425499D5 /* MobileSitrepView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E61AF9A237CA524B89126810 /* MobileSitrepView.swift */; };
+		03D3C89A6C13B4790A876F6D /* IntroHaptics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BEFFF28230357ABC4413CD4 /* IntroHaptics.swift */; };
 		063C1CF09D6E7CE57C547486 /* Markdown.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE74212A3CE62E8F28EC8D7E /* Markdown.swift */; };
 		06446149C2DA163DC24198B3 /* SearchPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = CCA8E532F2FEA435195F174B /* SearchPreview.swift */; };
 		06A25AF5C7267CEFDF3A17E1 /* AgentConnect.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4C3328B6DF9AFEF4D1FAF7B /* AgentConnect.swift */; };
@@ -528,6 +529,7 @@
 		99CB7E94EB2C7C52575AF7A8 /* RemindPalette.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemindPalette.swift; sourceTree = "<group>"; };
 		9AC75F572A768A3A2EEB001F /* Reading.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Reading.swift; sourceTree = "<group>"; };
 		9B11AE47A064BB58DD81A6DB /* ActionLayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActionLayer.swift; sourceTree = "<group>"; };
+		9BEFFF28230357ABC4413CD4 /* IntroHaptics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntroHaptics.swift; sourceTree = "<group>"; };
 		9C4011E6AF1CD8193898F627 /* SearchLanePrompt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchLanePrompt.swift; sourceTree = "<group>"; };
 		9C92A36DDD1B4FF9A1BD99B0 /* ThreadStyleLedger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadStyleLedger.swift; sourceTree = "<group>"; };
 		9C9C77BCE41A573ED04E49AA /* CidImages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CidImages.swift; sourceTree = "<group>"; };
@@ -859,6 +861,7 @@
 			isa = PBXGroup;
 			children = (
 				1DBFA0EDE4D57FC2CB095671 /* Haptics.swift */,
+				9BEFFF28230357ABC4413CD4 /* IntroHaptics.swift */,
 			);
 			path = Lib;
 			sourceTree = "<group>";
@@ -1378,6 +1381,7 @@
 				837D6250A05319ED273F3C1F /* ImageStore.swift in Sources */,
 				B2EE10EBD8C634AC7069FB8B /* ImageWarmer.swift in Sources */,
 				3F3CDF4B6911349A9481A225 /* InlineReply.swift in Sources */,
+				03D3C89A6C13B4790A876F6D /* IntroHaptics.swift in Sources */,
 				EE3332829811091CAA50A0C0 /* JSONValue.swift in Sources */,
 				4D086E1491D67B05B2626B90 /* KeyDispatch.swift in Sources */,
 				BF8200741E7C70B75C705CF5 /* Keychain.swift in Sources */,

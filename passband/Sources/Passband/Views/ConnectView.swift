@@ -272,15 +272,31 @@ struct ConnectView: View {
             }
         }
         // The phone's screen margin. On the Mac the card is a fixed measure
-        // floating in a large window and needs none.
+        // floating in a large window and needs none. NOT around the intro,
+        // which is a full-bleed scene: inside the gutter it showed a strip of
+        // canvas down each edge.
         #if !os(macOS)
-            .padding(.horizontal, 16)
+            .padding(.horizontal, onIntro ? 0 : 16)
         #endif
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .overlay(alignment: .bottomTrailing) {
-            SetupThemeToggle()
-                .padding(20)
+            // On the phone the theme is a login-page setting: the intro is
+            // the scene and its swipe, with nothing in the corner to aim at.
+            #if os(iOS)
+                if !onIntro {
+                    SetupThemeToggle()
+                        .padding(20)
+                }
+            #else
+                SetupThemeToggle()
+                    .padding(20)
+            #endif
         }
+    }
+
+    private var onIntro: Bool {
+        if case .introduction = effectiveGateStep { return true }
+        return false
     }
 
     private var connectCard: some View {

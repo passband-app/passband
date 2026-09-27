@@ -87,8 +87,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `NSApp.terminate` and simply waits here too.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         MainActor.assumeIsolated {
-            guard AppStore.shared.hasHeldSends else { return .terminateNow }
-            AppStore.shared.parkHeldSends(quitting: true)
+            let store = AppStore.shared
+            // An OPEN composer that was typed into gets its last save too:
+            // `flush` is a no-op for an untouched one, so a quit with nothing
+            // new to keep still terminates at once. Both are flushed before
+            // the test, so neither is skipped by a short-circuit.
+            let pane = DraftSaver.shared.flush(.compose, store.compose)
+            let inline = DraftSaver.shared.flush(.inlineReply, store.inlineReply)
+            guard store.hasHeldSends || pane || inline else { return .terminateNow }
+            if store.hasHeldSends { store.parkHeldSends(quitting: true) }
             Task { @MainActor in
                 // Whichever lands first answers; a reply of `true` ends the
                 // process, so the loser never gets to answer twice.

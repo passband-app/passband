@@ -14,9 +14,17 @@
 // picker pushes `.modal` and registers its bindings on appear, AFTER the
 // composer's own `.modal` set, and dispatch walks the newest set first, so
 // its Escape wins while it is up and the composer's is back the moment it
-// unmounts. The bindings opt into input: the composer's text view keeps first
-// responder behind a popover, and a picker whose arrows went to the body
-// underneath would be a picker you cannot drive.
+// unmounts.
+//
+// FOCUS: left alone, the composer's text view keeps first responder behind
+// a popover, so a letter typed with the picker open lands in the body
+// underneath. The picker takes focus itself on appear (`pickerFocused`),
+// which makes the popover's window key and moves first responder off the
+// body. The bindings still opt into input, as a backstop: should the focus
+// ever fail to take, a picker whose arrows went to the body would be a
+// picker you cannot drive. That is also why Backspace/Delete decline (see
+// `bindings`) on an inert row or an empty list: with the body possibly
+// still listening, a keystroke the picker cannot use must reach it.
 
 import SwiftUI
 
@@ -28,6 +36,15 @@ struct DraftsPicker: View {
 
     @State private var cursor = 0
     @State private var loaded = false
+    /// The rows' real height, measured. A ScrollView has no height of its
+    /// own, so under only a `maxHeight` the Mac popover sized itself to the
+    /// first frame (the loading note) and never grew when the rows arrived:
+    /// one row, half of it clipped. The scroller gets this height outright,
+    /// capped, and scrolls only past the cap.
+    @State private var listHeight: CGFloat = 0
+    /// Set on appear, so the popover takes the keyboard from the composer's
+    /// body; see the header.
+    @FocusState private var pickerFocused: Bool
 
     /// Newest first, by the edit rather than the creation: the draft you
     /// touched last is the one you are most likely back for.
@@ -75,8 +92,14 @@ struct DraftsPicker: View {
                         }
                         .padding(.horizontal, 5)
                         .padding(.bottom, 5)
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
+                            listHeight = $0
+                        }
                     }
-                    .frame(maxHeight: 340)
+                    #if os(macOS)
+                    // Floor for the first frame, before the measure lands.
+                    .frame(height: min(max(listHeight, 44), 340))
+                    #endif
                     .onChange(of: cursor) { _, next in
                         guard rows.indices.contains(next) else { return }
                         proxy.scrollTo(rows[next].id)
@@ -86,6 +109,10 @@ struct DraftsPicker: View {
         }
         #if os(macOS)
             .frame(width: 420)
+            .focusable()
+            .focusEffectDisabled()
+            .focused($pickerFocused)
+            .onAppear { pickerFocused = true }
         #else
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .presentationDetents([.medium, .large])
@@ -145,18 +172,21 @@ struct DraftsPicker: View {
             KeyBinding("ArrowUp", "previous draft", allowInInput: true) {
                 if let next = step(from: cursor, by: -1, in: rows) { cursor = next }
             },
+            // DECLINED, not swallowed, on no row or an inert one (the draft
+            // this composer is editing): the key then goes on to whatever
+            // else wants it rather than vanishing into a no-op.
             KeyBinding(declining: "Enter", "open draft", allowInInput: true) {
-                guard let current else { return false }
+                guard let current, !store.isInert(current) else { return false }
                 open(current)
                 return true
             },
             KeyBinding(declining: "Backspace", "delete draft", allowInInput: true) {
-                guard let current else { return false }
+                guard let current, !store.isInert(current) else { return false }
                 delete(current)
                 return true
             },
             KeyBinding(declining: "Delete", "delete draft", allowInInput: true) {
-                guard let current else { return false }
+                guard let current, !store.isInert(current) else { return false }
                 delete(current)
                 return true
             },

@@ -94,8 +94,8 @@ final class DraftSaver {
         // never even marked touched: a flush is gated on that mark, and an
         // untouched slot cannot be talked into a save by any exit path. While
         // there is no verdict yet the mark IS set, like new mail's: `save`
-        // writes nothing then, and the next keystroke or the close flush
-        // retries once the stats say which daemon this is.
+        // waits (bounded) for the stats to say which daemon this is before it
+        // picks a route, so the keystroke is not lost to the launch window.
         guard !(state(of: slot).map(forwardRefused) ?? false) else { return }
         touched.insert(slot)
         pending[slot]?.cancel()
@@ -120,25 +120,31 @@ final class DraftSaver {
 
     /// A closing composer's LAST save, fire-and-forget: the caller is about to
     /// clear the slot, so the values are passed in rather than read back.
-    func flush(_ slot: Slot, _ state: ComposeState?) {
+    ///
+    /// Returns whether a write was QUEUED, so the close toast ("kept in
+    /// drafts") only promises a row something is actually going to write.
+    /// Queued is not landed: the write itself stays silent (see the header).
+    @discardableResult
+    func flush(_ slot: Slot, _ state: ComposeState?) -> Bool {
         pending[slot]?.cancel()
         pending[slot] = nil
         // Nothing typed => nothing to write. `remove` both tests and clears, so a
         // second exit path firing on the same close cannot double-save.
-        guard touched.remove(slot) != nil, let state else { return }
+        guard touched.remove(slot) != nil, let state else { return false }
         // Forwards do not autosave on an old daemon — see `save`. Unreachable
         // while `noteChange` refuses to mark them touched there, and kept
         // because a flush takes the state from the CALLER: the day something
         // hands this a forward it did not type into, the answer must still be
         // no. (`save` asks again at the write, for the stats that land between
         // this flush and its turn on the wire.)
-        guard !forwardRefused(state) else { return }
+        guard !forwardRefused(state) else { return false }
         let ticket = nextFlush
         nextFlush &+= 1
         flushes[ticket] = Task { [weak self] in
             await self?.write(slot, state)
             self?.flushes[ticket] = nil
         }
+        return true
     }
 
     /// Wait until nothing this saver started is still on the wire.
@@ -201,7 +207,7 @@ final class DraftSaver {
 
     /// Whether this composer is a forward the daemon is KNOWN to be unable to
     /// keep: stats in, and no `drafts_v2`. Nil stats is not a refusal (see
-    /// `noteChange`); `save` itself writes nothing until the verdict lands.
+    /// `noteChange`); `save` itself waits for the verdict before writing.
     private func forwardRefused(_ state: ComposeState) -> Bool {
         guard state.forwardOfMessageId != nil, let stats = store.sitrep.stats else { return false }
         return stats.drafts_v2 != true
@@ -246,7 +252,16 @@ final class DraftSaver {
 
     private func write(_ slot: Slot, _ state: ComposeState) async {
         // Wait out the slot's previous save — see `inflight`.
-        if let running = inflight[slot] { await running.value }
+        //
+        // A LOOP, not one wait: two writers can queue behind the same save A
+        // (a debounce and a flush, say). One `if` resumes them both when A
+        // ends, and both would then go out together, racing two creates (two
+        // rows of one mail) or two updates landing out of order. Looping
+        // re-checks after every wake: the first to resume finds the slot free
+        // and stores its task below with no suspension in between (this is
+        // MainActor, so nothing else runs there), and the second then finds
+        // THAT task and waits again.
+        while let running = inflight[slot] { await running.value }
         let task = Task { await save(slot, state) }
         inflight[slot] = task
         await task.value
@@ -270,9 +285,14 @@ final class DraftSaver {
         // forward is the cheaper failure: the original is still in the
         // mailbox, one `f` away.
         //
-        // With NO VERDICT yet (stats not in) nothing is written either, for
-        // the same reason as new mail below; `touched` stays set and the next
-        // keystroke or the close flush retries.
+        // With NO VERDICT yet (stats not in) the save first waits for one;
+        // see `awaitVerdict`.
+        //
+        // ONLY a forward or plain new mail asks the question: a reply's
+        // route is the same on every daemon, so it never waits.
+        if payloadNeedsVerdict(state), store.sitrep.stats == nil {
+            guard await awaitVerdict() else { return }
+        }
         if state.forwardOfMessageId != nil, store.sitrep.stats?.drafts_v2 != true { return }
         // A body that is only the seeded signature counts as blank: saving it
         // would mint a draft of nothing, and every later `c` would restore it.
@@ -337,14 +357,11 @@ final class DraftSaver {
                         attachmentIds: payload.attachmentIds)
                 }
             } else {
-                // NO VERDICT YET: /client/stats has not landed (the launch and
-                // account-switch window `AppStore.forwardingAvailable` also
-                // waits out). Neither write is safe blind. The old nil-key PUT
-                // on a `drafts_v2` daemon hits its compat rule and OVERWRITES
-                // the newest existing draft with this one; the new routes on an
-                // old daemon 404. So nothing is written, and `touched` stays
-                // set on the debounce path: the next keystroke or the close
-                // flush retries once the stats are in.
+                // STILL NO VERDICT after `awaitVerdict`'s bound. Neither write
+                // is safe blind (see there), so this save gives up. On the
+                // debounce path `touched` is still set and the close flush
+                // tries again; a flush or a parked send that gets here is
+                // lost, which is the price of never overwriting another draft.
                 return
             }
             adopt(saved.id, slot: slot, key: state.id)
@@ -353,6 +370,50 @@ final class DraftSaver {
             // opened — the draft is deliberately unsavable, and the reader is told
             // nothing because there is nothing for them to do about it.
         }
+    }
+
+    /// Whether this save's ROUTE depends on which daemon this is: plain new
+    /// mail (v2 create/update by id vs. the old nil-key slot) and a forward
+    /// (saved on v2, refused on older). A reply's route is the same on every
+    /// daemon.
+    private func payloadNeedsVerdict(_ state: ComposeState) -> Bool {
+        state.replyToMessageId == nil
+    }
+
+    /// How long a save waits for `/client/stats` before giving up. Long enough
+    /// to cover a slow launch or account switch; short enough that `settle`
+    /// (which an account switch awaits) is not held hostage by a daemon that
+    /// never answers.
+    private static let verdictWait: Duration = .seconds(10)
+
+    /// WAIT FOR THE DAEMON'S VERDICT (`/client/stats`), bounded. True once
+    /// the stats are in; false on timeout, or when the account changed
+    /// underneath (the store's epoch moved), in which case NOTHING may be
+    /// written: the PUT would be built against the NEW account's daemon.
+    ///
+    /// Why wait rather than skip: a flush clears `touched` before it gets
+    /// here, and a parked send has no slot at all, so "the next keystroke
+    /// retries" is not true for them. A composer closed in the first second
+    /// after launch, before the first stats land, would otherwise lose its
+    /// mail. And why not write blind: the old nil-key PUT on a `drafts_v2`
+    /// daemon hits its compat rule and OVERWRITES the newest existing draft;
+    /// the new routes on an old daemon 404. Polled, because the stats have no
+    /// change hook to await, and a tenth of a second is nothing next to a
+    /// human closing a composer.
+    private func awaitVerdict() async -> Bool {
+        let epoch = store.epoch
+        let deadline = ContinuousClock.now + Self.verdictWait
+        while store.sitrep.stats == nil {
+            guard ContinuousClock.now < deadline else { return false }
+            try? await Task.sleep(for: .milliseconds(100))
+            guard store.epoch == epoch else { return false }
+            // The switch stops the poller BEFORE it flushes and waits on this
+            // saver (`performSwitch` steps 4 and 5), and the old account's
+            // stats are never coming once it has: waiting out the bound there
+            // would hold the switch for ten seconds and lose the mail anyway.
+            guard SitrepPoller.shared.isPolling else { return false }
+        }
+        return true
     }
 
     /// EVERYTHING A DRAFT HOLDS, and the only place a save reads a composer's

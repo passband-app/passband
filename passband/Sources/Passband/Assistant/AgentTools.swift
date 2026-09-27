@@ -481,6 +481,12 @@ enum AgentTools {
         return !domain.contains("*")
     }
 
+    /// New-message drafts the assistant has created this app session, and the
+    /// most it may; see `saveDraft`. Process-lifetime on purpose: a restart
+    /// is a person's act, and an account switch is not a reason to allow more.
+    @MainActor private static var newDraftsCreated = 0
+    private static let newDraftCap = 3
+
     @MainActor
     private static func saveDraft(_ input: [String: JSONValue]) async throws -> ToolOutcome {
         guard let body = string(input, "body") else {
@@ -507,8 +513,21 @@ enum AgentTools {
                 // typed and there is no slot to check first. (The old check
                 // refused whenever ANY new-message draft existed, which is now
                 // the normal state.)
+                //
+                // CAPPED instead, because nothing else bounds it: every call
+                // mints a fresh row, so a prompt-injected loop ("save a draft
+                // for each of these...") would bury the person's picker in
+                // mail nobody asked for. Three per app session is more than a
+                // real conversation needs; past it, the person decides.
+                guard newDraftsCreated < newDraftCap else {
+                    return failure(
+                        "\(newDraftCap) drafts already saved this session; ask the user to send "
+                            + "or discard one",
+                        summary: "draft failed")
+                }
                 let draft = try await APIClient.shared.createDraft(
                     to: to, cc: cc, bcc: bcc, subject: subject, body: body)
+                newDraftsCreated += 1
                 return ok(
                     row(["draft_id": draft.id, "reply_to_message_id": draft.reply_to_message_id]),
                     summary: "saved a draft")

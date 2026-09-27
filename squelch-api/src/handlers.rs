@@ -3142,7 +3142,8 @@ pub(crate) fn write_client(state: &ApiState) -> Result<GmailWriteClient, ApiErro
                 GmailWriteClient::with_base(creds.clone(), state.account_id, base.to_string())
             }
             None => GmailWriteClient::new(creds.clone(), state.account_id),
-        }),
+        }
+        .with_budget(state.gmail_budget().cloned())),
         None => Err(ApiError::new(
             StatusCode::FORBIDDEN,
             "write credential not configured; run `squelchd auth --write`",

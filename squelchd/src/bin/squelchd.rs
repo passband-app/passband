@@ -418,6 +418,22 @@ fn load_config(cli: &Cli) -> (Config, Stage2CapSources) {
 }
 
 /// The READ-bound credential store for the sync engine, per configured backend.
+/// Every sync engine `serve` builds for the mailbox is built here, so none can
+/// exist without the mailbox's one Gmail budget. `SyncEngine::new` alone gives
+/// an engine a PRIVATE budget, which is right for `squelchd run` (the only Gmail
+/// caller in its process) and wrong here: the sync loop and the sweeps engine
+/// each pacing alone asked Gmail for up to 160% of the user's limit (#263).
+fn mailbox_engine(
+    store: Arc<SqliteStore>,
+    creds: Arc<dyn CredentialStore>,
+    account_id: AccountId,
+    email: String,
+    config: Config,
+    budget: &Arc<squelch_core::gmail_budget::GmailBudget>,
+) -> SyncEngine<SqliteStore, dyn CredentialStore> {
+    SyncEngine::new(store, creds, account_id, email, config).with_gmail_budget(budget.clone())
+}
+
 fn make_credential_store(
     backend: CredentialBackend,
     account_id: AccountId,
@@ -1995,6 +2011,13 @@ fn cmd_serve(
     // ONE registry for the process: the sync engine writes it, the metrics door
     // reads it. Built here so both sides get the same Arc.
     let sync_metrics = squelch_core::metrics::SyncMetrics::new();
+    // ONE Gmail quota budget for this mailbox, handed to every Gmail caller:
+    // the sync engine, the one-time sweeps engine, and the write door. Each
+    // used to pace itself, so together they could ask for more than the
+    // per-user limit (see squelch_core::gmail_budget).
+    let gmail_budget = std::sync::Arc::new(squelch_core::gmail_budget::GmailBudget::new(
+        config.sync.gmail_quota_profile,
+    ));
 
     // Same shape, different question: the startup path below flips these and
     // the metrics door's `/healthz` reads them. See [`Readiness`] for which
@@ -2041,6 +2064,7 @@ fn cmd_serve(
         // "is this mailbox still connected" from live state rather than from a
         // copy taken at boot.
         .with_sync_metrics(sync_metrics.clone())
+        .with_gmail_budget(gmail_budget.clone())
         .with_event_notifier(event_tx);
     // Carrier polling is BYOK, so the no-poller path is the common one and is
     // spelled out rather than left implicit: the door still serves
@@ -2134,13 +2158,14 @@ fn cmd_serve(
             let refresh = refresh.clone();
             let creds = sync_creds.clone();
             let sync_metrics = sync_metrics.clone();
+            let sync_budget = gmail_budget.clone();
             // Taken before the spawn and dropped by the task, so readiness
             // tracks the engine and not the intention to start one.
             let sync_running = readiness.sync_started();
             let embedder_gate = readiness.embedder_gate();
             tokio::spawn(async move {
                 let _sync_running = sync_running;
-                SyncEngine::new(store, creds, account_id, email, config)
+                mailbox_engine(store, creds, account_id, email, config, &sync_budget)
                     .with_refresh(refresh)
                     .with_spam_refresh(spam_refresh)
                     .with_metrics(sync_metrics)
@@ -2174,14 +2199,16 @@ fn cmd_serve(
             let config = config.clone();
             let creds = sync_creds.clone();
             let sweep_metrics = sync_metrics.clone();
+            let sweep_budget = gmail_budget.clone();
             let mut embedder_gate = readiness.embedder_gate();
             tokio::spawn(async move {
                 wait_for_embedder_gate(&mut embedder_gate).await;
                 tokio::time::sleep(std::time::Duration::from_secs(180)).await;
                 // The same metrics the sync loop reports into, so a Gmail
                 // refusal during a sweep lands on the same panel and alert.
-                let engine = SyncEngine::new(store, creds, account_id, email, config)
-                    .with_metrics(sweep_metrics);
+                let engine =
+                    mailbox_engine(store, creds, account_id, email, config, &sweep_budget)
+                        .with_metrics(sweep_metrics);
                 if let Err(e) = engine.harvest_sent_contacts().await {
                     eprintln!(
                         "squelchd: sent-contacts harvest incomplete (retries next start): {e}"
@@ -3244,6 +3271,47 @@ mod tests {
             bind: Some("not-an-addr".to_string()),
         };
         assert!(resolve_bind(&args).is_err());
+    }
+
+    /// Two engines built for one mailbox hold ONE Gmail budget. The sync loop
+    /// and the sweeps engine both come from `mailbox_engine`; if either went
+    /// back to `SyncEngine::new`'s private budget, the mailbox would be paced
+    /// twice over again (#263).
+    #[test]
+    fn mailbox_engines_share_one_gmail_budget() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("in-memory store"));
+        let account_id = store.ensure_account("me@localhost").expect("account");
+        let creds: Arc<dyn CredentialStore> = Arc::new(FileCredentialStore::new(
+            account_id,
+            "me@localhost".into(),
+            PathBuf::from("/nonexistent/credentials.json"),
+            OAuthClientConfig {
+                client_id: "test".into(),
+                client_secret: "test".into(),
+            },
+        ));
+        let budget = Arc::new(squelch_core::gmail_budget::GmailBudget::new(
+            Default::default(),
+        ));
+        let config = Config::default();
+        let sync = mailbox_engine(
+            store.clone(),
+            creds.clone(),
+            account_id,
+            "me@localhost".into(),
+            config.clone(),
+            &budget,
+        );
+        let sweeps = mailbox_engine(
+            store,
+            creds,
+            account_id,
+            "me@localhost".into(),
+            config,
+            &budget,
+        );
+        assert!(Arc::ptr_eq(sync.gmail_budget(), &budget));
+        assert!(Arc::ptr_eq(sweeps.gmail_budget(), &budget));
     }
 
     /// Both doors are mounted: `/client/stats` is bearer-gated (401, not 404)

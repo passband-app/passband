@@ -2012,6 +2012,67 @@ async fn archive_success_audits_ok_and_hits_gmail() {
     assert_eq!(audit[0].detail.as_deref(), Some("ok"));
 }
 
+/// THE WIRING, not the pacer: an archive through the real handler books its
+/// Gmail cost against the budget the daemon handed ApiState, the same one the
+/// sync engines draw from. Two budgets per mailbox is how a tenant asked Gmail
+/// for 160% of its per-user limit (#263); drop `.with_budget` in
+/// `write_client` or the `admit` in the write client and this fails.
+#[tokio::test]
+async fn an_archive_books_against_the_mailbox_gmail_budget() {
+    use squelch_core::config::GmailQuotaProfile;
+    use squelch_core::gmail_budget::GmailBudget;
+    use std::time::{Duration, Instant};
+
+    let (base, handle) = mock_gmail(1).await;
+    // 10 ms a unit: modify costs 5, so the archive books 50 ms.
+    let budget = Arc::new(GmailBudget::with_unit(
+        GmailQuotaProfile::Standard,
+        Duration::from_millis(10),
+    ));
+    let (state, store, acct) = state_with(|store, acct| {
+        let m = store
+            .upsert_message(&msg(acct, "gmail-budget", "t1", "hi", "body"))
+            .unwrap();
+        store
+            .set_triage(
+                m,
+                acct,
+                80,
+                Tier::Signal,
+                Sensitivity::Normal,
+                None,
+                "",
+                "",
+                None,
+            )
+            .unwrap();
+    });
+    let app = router(
+        state
+            .with_write_test_harness(Arc::new(StubCreds), base)
+            .with_gmail_budget(budget.clone()),
+    );
+    let message_id = store.search(acct, "hi", 10, 0).unwrap()[0].id;
+    let resp = app
+        .oneshot(authed_json(
+            "POST",
+            "/client/actions/archive",
+            serde_json::json!({ "message_id": message_id, "confirm": true }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    handle.await.unwrap();
+
+    // The sync side's next request has to wait out what the archive booked.
+    let started = Instant::now();
+    budget.admit("GET", "/profile").await;
+    assert!(
+        started.elapsed() >= Duration::from_millis(25),
+        "the archive did not book against the shared budget"
+    );
+}
+
 #[tokio::test]
 async fn human_can_archive_restricted_mail() {
     let (base, handle) = mock_gmail(1).await;

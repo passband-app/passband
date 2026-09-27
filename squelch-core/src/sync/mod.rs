@@ -799,6 +799,11 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         self
     }
 
+    /// The budget this engine books its Gmail requests against.
+    pub fn gmail_budget(&self) -> &Arc<GmailBudget> {
+        &self.gmail_budget
+    }
+
     /// Point every Gmail call at `base` instead of [`GMAIL_API_BASE`]. Test-only:
     /// a build that could be aimed at an arbitrary host would be a bearer-token
     /// exfiltration primitive.
@@ -4010,6 +4015,28 @@ mod tests {
                 .is_err()
         );
         assert_eq!(g.calls("get:a"), 1);
+    }
+
+    /// An engine handed a shared budget books its Gmail requests against IT,
+    /// not a private one: after one request, another holder of the same
+    /// budget has to wait. If `with_gmail_budget` stopped taking effect, the
+    /// sweeps engine and the sync loop would each pace alone again (#263).
+    #[tokio::test]
+    async fn an_engine_books_against_the_budget_it_was_given() {
+        let g = MockGmail::default();
+        let base = serve_mock(g.clone()).await;
+        let (store, acct) = store_at_cursor(Some(1));
+        // 10 ms a unit; a message read costs 20, so one read books 200 ms.
+        let shared = Arc::new(GmailBudget::with_unit(
+            crate::config::GmailQuotaProfile::Standard,
+            Duration::from_millis(10),
+        ));
+        let e = engine(store, acct, &base).with_gmail_budget(shared.clone());
+        assert!(Arc::ptr_eq(e.gmail_budget(), &shared));
+        let _ = e.get_json::<Value>(&format!("{base}/messages/a")).await;
+        let started = tokio::time::Instant::now();
+        shared.admit("GET", "/profile").await;
+        assert!(started.elapsed() >= Duration::from_millis(150));
     }
 
     #[tokio::test]

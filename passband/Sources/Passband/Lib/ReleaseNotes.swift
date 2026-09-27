@@ -110,25 +110,6 @@ enum ReleaseNotes {
     /// THE TABLE. Newest first, and the only place a release note is written.
     static let all: [ReleaseNote] = [
         ReleaseNote(
-            version: "0.0.9",
-            date: "2026-09-27",
-            headline: "Passband tells you when gmail is the problem.",
-            items: [
-                ReleaseItem(.app, "Clear status when gmail sync is stuck, and when it tries again"),
-                ReleaseItem(.app, "The synced time is the last real gmail sync"),
-                ReleaseItem(.app, "No more \"all clear\" when your mail hasn't been sorted yet"),
-                ReleaseItem(.app, "Re-triage shows what it's waiting on"),
-                ReleaseItem(.app, "Auth page badge counts the sign-in alerts that need a decision"),
-                ReleaseItem(.app, "Reconnect tells you which address to pick before opening Google"),
-                ReleaseItem(.app, "Long plain-text emails wrap instead of running off the edge"),
-                ReleaseItem(.app, "Forwarding from search no longer stacks two panes"),
-                ReleaseItem(.app, "The onboarding calendar lesson works on a second run"),
-                ReleaseItem(.daemon, "Stays under gmail's per-user rate limit"),
-                ReleaseItem(.daemon, "Sign-in alerts go to the Auth page, not FYE"),
-                ReleaseItem(.daemon, "Reports sync and triage health to the app"),
-                ReleaseItem(.daemon, "Various bug fixes"),
-            ]),
-        ReleaseNote(
             version: "0.0.8",
             date: "2026-09-25",
             headline: "Biggest update by far. Now we're a real product?",

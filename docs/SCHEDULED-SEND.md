@@ -1,0 +1,228 @@
+# Scheduled send
+
+Compose a mail, pick a time, and the daemon sends it then. The mail waits in
+the daemon, not the client, so a closed laptop (local daemon) or a closed
+lid anywhere (hosted daemon) does not lose it.
+
+Locked 2026-09-26. §2 through §5 are the contract the build waves carry.
+
+## 1. Why not drafts
+
+`drafts` allows ONE new-message draft per account and one per reply target,
+and stores none of forward id, group, tracker, or reply-all. A queue of
+scheduled mails is many rows of the full send request, so it is its own
+table. Drafts stay what they are: the composer's autosave.
+
+## 2. Data
+
+### `scheduled_sends`
+
+HUMAN-DOOR ONLY, like `drafts` and `outbound_attachments`: served on
+`/client/scheduled`, never synced, never visible on `/mcp`. A new table, so a
+plain `CREATE TABLE IF NOT EXISTS` in `schema.sql` (no migrate.rs column).
+
+| column | notes |
+|---|---|
+| `id` | INTEGER PRIMARY KEY |
+| `account_id` | the daemon's one account |
+| `request` | TEXT, the `SendBody` JSON exactly as `POST /client/actions/send` would have taken it, `confirm` forced true, `draft_id` stripped (see §3) |
+| `send_at` | TEXT RFC3339 UTC |
+| `state` | `scheduled` / `sending` / `sent` / `failed` / `cancelled` |
+| `lease_until` | TEXT, set while `sending` |
+| `attempts` | INTEGER, default 0 |
+| `last_error` | TEXT, redacted reason (never content) |
+| `message_id_header` | TEXT, the `Message-ID` minted at schedule time, e.g. `<uuid@passband>` |
+| `sent_message_id` | INTEGER, local echo id once sent |
+| `sent_thread_id` | TEXT |
+| `created_at`, `updated_at` | TEXT |
+
+Index: `(account_id, state, send_at)`.
+
+`request` is JSON rather than columns so that every field `SendBody` grows
+later is scheduled for free, and so the worker deserializes and calls the
+same function the handler calls with zero mapping code. The listing handler
+deserializes to expose `to`, `subject`, `reply_to_message_id`,
+`forward_of_message_id` to the client.
+
+### `outbound_attachments.scheduled_send_id`
+
+New nullable column (migrate.rs, `add_column_if_missing`), a second claim
+beside `draft_id`. The 24h unclaimed sweep skips rows with either claim.
+Scheduling moves the claim from the draft to the row; the send consumes the
+files exactly as today (`discard_sent_attachments`); cancel releases them
+back to unclaimed (they then follow the composer's normal lifetime because
+the cancelled request is reopened in the composer and re-autosaved).
+
+## 3. Scheduling (the request)
+
+`POST /client/scheduled` body = `SendBody` + `send_at`.
+
+At schedule time the daemon does everything `action_send` does BEFORE the
+Gmail call, because the user is present to answer:
+
+1. Same validation order as `action_send` (confirm, not both reply and
+   forward, non-empty body, forward needs `to`, `reply_all` needs a parent,
+   no unresolved `#group`, no group on reply/forward).
+2. `send_at` must be in the future, else 400 (a past date is a client bug,
+   same rule as reminders). Also `send_at` at most 1 year out.
+3. Every `attachment_ids` entry resolves, else 400 `rejected:attachment_missing`.
+4. The outbound guard runs on `body` NOW. A verdict is a 422 exactly as on a
+   send; `override_guard: true` persists in `request` and the fire path does
+   NOT re-scan (content is frozen, the answer would be the same).
+5. `write_client` must exist, else 403 (no point queueing a mail that can
+   never go out).
+6. Mint `message_id_header`.
+7. Insert the row `scheduled`; move attachment claims; delete `draft_id` if
+   given (the draft is consumed by scheduling, not by sending: from here the
+   row IS the composition).
+8. Audit `schedule` with ids only.
+
+Response `201 {"id", "send_at"}`.
+
+Group `individual` fan-out is refused for v1 (`400 rejected:group_fanout`);
+`to`/`bcc` mode groups are fine because the composer already expanded them.
+
+## 4. Firing (the worker)
+
+`run_scheduled_send_pass(&ApiState)`, exported from squelch-api and spawned
+in squelchd beside the shredder, because it needs the WRITE credential and
+the sync engine is read-credential-bound by invariant. Ticks every 10s,
+honors the shutdown watch. The tick is the clock: no timer per row, so a
+restart costs punctuality and never a mail.
+
+Per tick:
+
+1. **Recover** rows in `sending` whose `lease_until` has passed (a crash
+   mid-send). Search Gmail on the write token for `rfc822msgid:<header>`.
+   Found: mark `sent`, echo it. Not found: back to `scheduled` (retry).
+   This is why the daemon mints the Message-ID: it is the only thing that
+   makes "did it go out?" answerable after a crash, and it is the whole
+   double-send defense.
+2. **Claim** one due row atomically:
+   `UPDATE ... SET state='sending', lease_until=now+120s, attempts=attempts+1
+   WHERE id = (SELECT id ... WHERE state='scheduled' AND send_at <= now
+   ORDER BY send_at LIMIT 1) RETURNING *`. Loop until none.
+3. **Send** through `perform_send(state, body, Some(message_id_header))`,
+   the core pulled out of `action_send` (see §7). Recipients, subject and
+   threading derive from the parent at fire time, as today.
+4. **Settle**: success → `sent`, `sent_message_id`/`sent_thread_id` from the
+   echo, audit `send` with `detail=scheduled:<id>`. Failure → if
+   `attempts < 3`, back to `scheduled` with `send_at` pushed by
+   `2^attempts` minutes and `last_error`; else `failed`. A 403 (write
+   credential gone) is a failure like any other; the row waits for a retry
+   and the user sees "didn't send" plus the reason.
+
+Late is fine. A laptop that slept through 9:00 sends at wake. The response
+to "was it very late?" is the Sent row's time, not a refusal. A cap is a
+follow-up if it ever bites.
+
+`build_reply_rfc822` gains an optional `message_id` on `ReplyParts`; absent
+= today's byte-identical output. The write client gains one method:
+`find_by_rfc822_msgid(&str) -> Option<gmail id>`.
+
+## 5. The rest of the door
+
+| route | does |
+|---|---|
+| `GET /client/scheduled` | rows in `scheduled`/`sending`/`failed`, oldest `send_at` first, with `to`, `subject`, `reply_to_message_id`, `forward_of_message_id`, `send_at`, `state`, `last_error`, `attempts`, `attachment_count` |
+| `DELETE /client/scheduled/{id}` | `scheduled` or `failed` → `cancelled`, releases attachment claims, returns the full `request` so the client can reopen it in the composer. A `sending` row is 409 (it is in Gmail's hands) |
+| `POST /client/scheduled/{id}/now` | `scheduled`/`failed` → `send_at = now`; the next tick sends it. 202 |
+| `/client/stats` | gains `scheduled_send: true`. The client hides every schedule door without it (same trap as `compose_attachments`: an old daemon must not 404 a click) |
+
+Rows in `sent` and `cancelled` are swept after 7 days.
+
+No SSE: the `events` table is UNIQUE per `message_id` and a scheduled mail
+has none until it is sent. The client polls the listing on the 10s sitrep
+tick behind the usual 5s TTL. A newly `failed` row toasts once per app run.
+
+## 6. Client
+
+### Composer (Mac footer, InlineReply header line, iOS header)
+
+The **cancel button is gone**. Esc closes, and the footer stops saying it.
+
+A **clock** joins attach and track on the left: those three are "how this
+mail goes out." Clicking it opens a time palette built on `RemindTimes`:
+typed natural language ("tomorrow 9am", "monday", "in 2h") plus a pinned
+list of picks, every row showing its absolute time, re-pinned if a pick has
+gone by. Picking a time:
+
+- the clock becomes a chip `Tue 9:00 ×`. `×` clears it.
+- the Send verb reads `schedule ⌘↵`. Same key. The button says what it does.
+- `send anyway ⌘⇧↵` (guard verdict showing) becomes `schedule anyway`.
+
+⌘↵ with a time set POSTs `/client/scheduled` immediately, closes the
+composer, and toasts "scheduled for Tue 9:00" with undo. Undo = DELETE and
+reopen the composer with the returned request and the time still set. There
+is no 5s hold for a scheduled mail: it is cancellable from Sent any time.
+
+A 422 guard verdict or a 4xx reopens the composer exactly as a failed send
+does (`putBack`).
+
+`ComposeState.sendAt: Date?` is the only new state. `DraftSaver` does not
+persist it (a draft is an autosave of words, not an intent). Account switch
+clears it with the composer.
+
+iOS: the clock sits beside Send in the header. Long-press on Send as a
+second door is a follow-up.
+
+### Sent
+
+Scheduled rows sit **pinned on top of Sent**, above the newest sent mail,
+in a group headed "scheduled" (hidden when empty). Each row: to, subject,
+and the fire time as "Tue 9:00 · in 3h". A `failed` row shows "didn't send"
+in `Palette.danger` with the reason. Keys on a scheduled row:
+
+- Enter / click: pull it back into the composer (DELETE + open with the
+  request and time). The row disappears; ⌘↵ in the composer reschedules.
+- `s` (or the row's "send now" verb): `POST .../now`.
+- `x` / delete: cancel outright, toast with undo (undo = re-POST the
+  returned request).
+
+Rows are `ScheduledRow`, a sibling of `SentRow`; j/k walk both groups as one
+list. The Sent refresh fetches both listings in one `refreshSent`.
+
+## 7. Daemon refactor that comes first
+
+`action_send` today is one axum handler that validates, guards, resolves the
+write client, builds RFC822, sends, and settles. Split it:
+
+- `validate_send(&SendBody) -> Result<(), ApiError>` (the ordered checks)
+- `perform_send(state, body: &SendBody, message_id: Option<&str>) -> Result<SendOutcome, SendFailure>`
+  (write client → derive → render → build → `client.send` → `finish_send`)
+- `action_send` = validate → guard → perform. Byte-identical behavior.
+
+`group_send::run`/`send_one` is the existing precedent for sending outside a
+request.
+
+## 8. Invariants
+
+- `account_id` on every query; the daemon is one account, but `store_call`
+  still injects it.
+- Never log or audit `request` content: ids, states, reasons only.
+- `/mcp` never sees `scheduled_sends` or its attachments (two-door).
+- The guard runs at schedule time and its `override_guard` is honored at
+  fire time; nothing re-scans.
+- Exactly-once: a row is sent only from `sending` under a lease, and
+  recovery answers via the minted Message-ID before any retry.
+- Sealed/read-only tenants: scheduling needs the write credential at
+  schedule time (403), and the worker treats a missing credential as a
+  retryable failure, never a silent drop.
+
+## 9. Phasing
+
+1. **Daemon**: §7 refactor (byte-identical, tests green), then table + store
+   fns + attachment claim, routes, worker with recovery, stats gate. Tests:
+   claim atomicity, lease expiry recovery both branches, retry backoff,
+   cancel releases claims, sweep, guard at schedule time.
+2. **Mac client**: clock + chip + palette, verb flip, POST + undo toast,
+   Sent pinned group with three verbs, failed toast. Seen on screen.
+3. **Follow-up PR, immediately after**: undo-send moves onto the outbox.
+   `sendWithUndo` becomes `POST /client/scheduled` with `send_at = now + 5s`
+   and undo = DELETE + `putBack`. Kills the memory-only `heldSends`, and
+   with it the Cmd-Q-inside-the-hold silent drop, `parkHeldSends`, and the
+   epoch guard. The worker tick would need to drop to ~2s for the hold to
+   feel like 5s; or the client POSTs with `now` and the row carries a
+   `not_before` the worker honors. Decide then.
+4. Later: iOS long-press on Send, a very-late cap, daemon roll + release
+   note (the stats gate makes either ship order safe).

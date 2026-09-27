@@ -19,23 +19,18 @@
 
 import SwiftUI
 
-/// The hosted control plane, and the two doors it opens.
+/// The hosted control plane's one door from the app.
 ///
-/// SIGN IN is for somebody whose mailbox already exists: Google names them, the
-/// control plane finds the daemon that mailbox owns, and the browser comes back
-/// with a `passband://pair` link. No invite code anywhere in it, because an
-/// invite provisions a tenant and this person's tenant is already running.
-///
-/// SIGN UP is the invite-code form, and it is the only place a code is asked
-/// for. Both actions share the connection chooser and open their browser route.
+/// SIGN IN is the only hosted action, for newcomers too: Google names them, the
+/// control plane looks for the daemon that mailbox owns, and the browser comes
+/// back with a `passband://pair` link. Somebody with no mailbox yet is told so
+/// on that same page and handed the signup form from there, so the app never
+/// has to ask "do you have an account?" before it knows the answer.
 private enum Hosted {
     // Send the rendered appearance, including a resolved system preference.
     // The account site preserves this choice through OAuth and pairing (#214).
     static func signIn(theme: ColorScheme) -> String {
         "https://signup.passband.app/app/auth?theme=\(theme == .dark ? "dark" : "light")"
-    }
-    static func signUp(theme: ColorScheme) -> String {
-        "https://signup.passband.app?theme=\(theme == .dark ? "dark" : "light")"
     }
 }
 
@@ -810,9 +805,11 @@ struct ConnectView: View {
     }
 }
 
-/// One connection choice: hosted login/signup, with self-hosting secondary.
+/// The sign-in gate, set on the intro's own stage: the same scene behind it,
+/// the same masthead and type, so finishing the intro changes the words and
+/// nothing else. One hosted door, sign in with Gmail, with self-hosting as the
+/// quieter way in beneath it.
 private struct WelcomeGate: View {
-    @Environment(\.colorScheme) private var colorScheme
     /// Present only when the gate is up because a saved connection could
     /// not be restored: the retry belongs on this screen too, since back
     /// from the form lands here.
@@ -820,93 +817,102 @@ private struct WelcomeGate: View {
     var retrying = false
     let login: () -> Void
     let selfHostedLogin: () -> Void
-    @State private var browserOpened = false
 
     var body: some View {
+        GeometryReader { geometry in
+            let wide = geometry.size.width >= 820
+            ZStack(alignment: .topLeading) {
+                if SquelchScene.shared.isUnavailable {
+                    IntroFallbackGlow()
+                } else {
+                    // Engaged: the intro's last beat left the squelch closed,
+                    // and this screen picks up exactly there.
+                    IntroSceneBackdrop(engaged: true, wide: wide)
+                }
+                VStack(alignment: .leading, spacing: 0) {
+                    IntroWordmark()
+                        .modifier(IntroEntrance(delay: 0, distance: 4))
+                    Spacer(minLength: 24)
+                    content(wide: wide)
+                        .frame(maxWidth: wide ? 440 : .infinity, alignment: .leading)
+                    Spacer(minLength: 24)
+                }
+                .padding(wide ? 44 : 24)
+            }
+        }
+    }
+
+    private func content(wide: Bool) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("Welcome to Passband.")
-                .font(Typo.serif(40, weight: .medium))
-                .foregroundStyle(Palette.ink)
-            Text("Log in to your account or get started.")
+            VStack(alignment: .leading, spacing: 18) {
+                Text("One last step.")
+                    .font(Typo.serif(wide ? 33 : 27))
+                    .foregroundStyle(Palette.inkDim)
+                    .modifier(IntroEntrance(delay: 0.04))
+                Text("Bring your inbox.")
+                    .font(Typo.hero(wide ? 49 : 36))
+                    .foregroundStyle(Palette.ink)
+                    .modifier(IntroEntrance(delay: 0.14))
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
+
+            Text("Sign in with the Google account whose mail you want Passband to sort. New here? The same button gets you set up.")
                 .font(.system(size: 15))
                 .foregroundStyle(Palette.inkDim)
-                .padding(.top, 8)
+                .lineSpacing(5)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 22)
+                .modifier(IntroEntrance(delay: 0.24))
 
-            HStack(spacing: 14) {
-                RouteOption(symbol: "person.crop.circle", title: "Log in", action: login)
-                RouteOption(symbol: "person.badge.plus", title: "Sign up") {
-                    browserOpened = true
-                    Opener.open(Hosted.signUp(theme: colorScheme))
+            VStack(alignment: .leading, spacing: 12) {
+                Button(action: login) {
+                    HStack(spacing: 9) {
+                        Image(systemName: "envelope.fill")
+                        Text("Sign in with Gmail")
+                        Spacer(minLength: 0)
+                        Image(systemName: "arrow.right")
+                    }
+                    .font(.system(size: 14, weight: .semibold))
+                    .padding(.vertical, 9)
+                    .padding(.horizontal, 8)
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Palette.accent)
+                .keyboardShortcut(.defaultAction)
+
+                Button(action: selfHostedLogin) {
+                    HStack(spacing: 9) {
+                        Image(systemName: "server.rack")
+                        Text("Use a self-hosted server")
+                        Spacer(minLength: 0)
+                    }
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Palette.inkDim)
+                    .padding(.vertical, 10)
+                    .padding(.horizontal, 16)
+                    .frame(maxWidth: .infinity)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .background(RoundedRectangle(cornerRadius: 10).fill(Palette.canvas.opacity(0.3)))
+                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
+
+                if let retrySaved {
+                    Button(retrying ? "Trying saved connection…" : "Try saved connection again", action: retrySaved)
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Palette.inkDim)
+                        .disabled(retrying)
+                        .padding(.top, 6)
                 }
             }
-            .padding(.top, 30)
-
-            Button(action: selfHostedLogin) {
-                Text("Self-hosted login")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(Palette.inkDim)
-                    .frame(maxWidth: .infinity, minHeight: 42)
-                    .contentShape(Rectangle())
-            }
-                .buttonStyle(.plain)
-                .background(RoundedRectangle(cornerRadius: 12).fill(Palette.canvas.opacity(0.3)))
-                .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Palette.hairline, lineWidth: 0.5))
-                .padding(.top, 14)
-
-            if browserOpened {
-                Text("Continue in your browser. You’ll return here when you’re ready.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(Palette.inkDim)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.top, 10)
-            }
-
-            if let retrySaved {
-                Button(retrying ? "Trying saved connection…" : "Try saved connection again", action: retrySaved)
-                    .buttonStyle(.plain)
-                    .font(.system(size: 12))
-                    .foregroundStyle(Palette.inkDim)
-                    .disabled(retrying)
-                    .padding(.top, 18)
-            }
+            .frame(maxWidth: 340, alignment: .leading)
+            .padding(.top, 32)
+            .modifier(IntroEntrance(delay: 0.32))
         }
-        .padding(34)
-        #if os(macOS)
-            .frame(width: 600)
-        #else
-            .frame(maxWidth: 600)
-        #endif
-        .passbandGlass(.chrome, cornerRadius: 24, tint: Palette.glassTint.opacity(0.35))
-        .shadow(color: .black.opacity(0.3), radius: 50, y: 24)
-    }
-}
-
-private struct RouteOption: View {
-    let symbol: String
-    let title: String
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 11) {
-                Image(systemName: symbol)
-                    .font(.system(size: 21, weight: .medium))
-                    .foregroundStyle(Palette.accent)
-                    .frame(width: 30)
-                Text(title)
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(Palette.ink)
-                    .fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: 0)
-            }
-            .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
-            .padding(.horizontal, 15)
-            .padding(.vertical, 8)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .background(RoundedRectangle(cornerRadius: 16).fill(Palette.canvas.opacity(0.62)))
-        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(Palette.hairline, lineWidth: 0.75))
     }
 }
 

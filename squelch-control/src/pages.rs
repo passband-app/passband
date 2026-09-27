@@ -823,6 +823,27 @@ pub fn console_problem_with_link(
     )
 }
 
+/// The app login's answer for a Google account with no mailbox here, WITH the
+/// way forward on it: the app has one "sign in with Gmail" door for everybody,
+/// so a newcomer arrives here, and this is where they learn to sign up.
+///
+/// The link is the signup form at this deployment's own root, never anything a
+/// caller named. Not an oracle for the same reason the page itself is not: only
+/// the person who just proved they hold this Google account can read it.
+pub fn app_no_tenant(heading: &str, detail: &str) -> Response {
+    page(
+        StatusCode::NOT_FOUND,
+        heading,
+        &format!(
+            r#"<h1>{heading}</h1>
+<p>{detail}</p>
+<p><a class="button" href="/">Sign up for Passband</a></p>"#,
+            heading = escape_html(heading),
+            detail = escape_html(detail),
+        ),
+    )
+}
+
 /// The admin door: one field, and nothing that describes what is behind it.
 ///
 /// Anybody can ask for `/admin`, so this page says as little as a page can. It

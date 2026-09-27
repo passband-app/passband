@@ -8,7 +8,6 @@ struct OnboardingIntroView: View {
     var continueHint = "Continue to account connection"
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.colorScheme) private var colorScheme
     @State private var page = 0
 
     private var organized: Bool { page > 0 }
@@ -28,24 +27,7 @@ struct OnboardingIntroView: View {
         GeometryReader { geometry in
             let wide = geometry.size.width >= 820
             ZStack(alignment: .topLeading) {
-                SquelchSceneView(engaged: organized)
-                    .ignoresSafeArea()
-                LinearGradient(
-                    stops: [
-                        .init(color: IntroNight.backdrop.opacity(0.92), location: 0),
-                        .init(color: IntroNight.backdrop.opacity(0.6), location: wide ? 0.32 : 0.4),
-                        .init(color: .clear, location: wide ? 0.62 : 0.75),
-                    ],
-                    startPoint: wide ? .leading : .top,
-                    endPoint: wide ? .trailing : .bottom)
-                    .ignoresSafeArea()
-                    .allowsHitTesting(false)
-                // Keeps the controls legible over the nearest, brightest bands.
-                LinearGradient(
-                    colors: [.clear, IntroNight.backdrop.opacity(0.85)],
-                    startPoint: UnitPoint(x: 0.5, y: 0.72), endPoint: .bottom)
-                    .ignoresSafeArea()
-                    .allowsHitTesting(false)
+                IntroSceneBackdrop(engaged: organized, wide: wide)
                 VStack(alignment: .leading, spacing: 0) {
                     masthead
                         .modifier(IntroEntrance(delay: 0, distance: 4))
@@ -92,27 +74,12 @@ struct OnboardingIntroView: View {
                 .frame(maxWidth: .infinity)
             }
         }
-        .background {
-            RadialGradient(
-                colors: [Palette.accentSoft.opacity(0.65), .clear],
-                center: .trailing, startRadius: 10, endRadius: 650)
-                .allowsHitTesting(false)
-        }
+        .background { IntroFallbackGlow() }
     }
 
     private var masthead: some View {
         HStack {
-            HStack(spacing: 9) {
-                if let mark = colorScheme == .dark ? IntroBrand.lightMark : IntroBrand.mark {
-                    mark.resizable()
-                        .scaledToFit()
-                        .frame(width: 42, height: 24)
-                        .accessibilityHidden(true)
-                }
-                Text("passband")
-                    .font(Typo.serif(24, weight: .medium))
-            }
-            .foregroundStyle(Palette.ink)
+            IntroWordmark()
             Spacer()
             if RehearsalMode.launchedStandalone {
                 DemoAppearancePicker()
@@ -243,9 +210,69 @@ private enum IntroNight {
     static let backdrop = SquelchSceneView.backdrop
 }
 
+/// The squelch scene with the scrims that keep copy legible over it. Shared by
+/// the intro and the sign-in gate after it, so leaving the intro changes the
+/// words on screen and nothing behind them.
+struct IntroSceneBackdrop: View {
+    let engaged: Bool
+    let wide: Bool
+
+    var body: some View {
+        ZStack {
+            SquelchSceneView(engaged: engaged)
+                .ignoresSafeArea()
+            LinearGradient(
+                stops: [
+                    .init(color: IntroNight.backdrop.opacity(0.92), location: 0),
+                    .init(color: IntroNight.backdrop.opacity(0.6), location: wide ? 0.32 : 0.4),
+                    .init(color: .clear, location: wide ? 0.62 : 0.75),
+                ],
+                startPoint: wide ? .leading : .top,
+                endPoint: wide ? .trailing : .bottom)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+            // Keeps the controls legible over the nearest, brightest bands.
+            LinearGradient(
+                colors: [.clear, IntroNight.backdrop.opacity(0.85)],
+                startPoint: UnitPoint(x: 0.5, y: 0.72), endPoint: .bottom)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+        }
+    }
+}
+
+/// The backdrop when Metal is unavailable: an accent glow from the trailing edge.
+struct IntroFallbackGlow: View {
+    var body: some View {
+        RadialGradient(
+            colors: [Palette.accentSoft.opacity(0.65), .clear],
+            center: .trailing, startRadius: 10, endRadius: 650)
+            .allowsHitTesting(false)
+    }
+}
+
+/// The mark and the name, as the intro's masthead sets them.
+struct IntroWordmark: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        HStack(spacing: 9) {
+            if let mark = colorScheme == .dark ? IntroBrand.lightMark : IntroBrand.mark {
+                mark.resizable()
+                    .scaledToFit()
+                    .frame(width: 42, height: 24)
+                    .accessibilityHidden(true)
+            }
+            Text("passband")
+                .font(Typo.serif(24, weight: .medium))
+        }
+        .foregroundStyle(Palette.ink)
+    }
+}
+
 /// A single quiet entrance per view identity. No timers or repeating motion;
 /// leaving a beat cancels its task, and Reduce Motion renders it immediately.
-private struct IntroEntrance: ViewModifier {
+struct IntroEntrance: ViewModifier {
     let delay: Double
     var distance: CGFloat = 7
 

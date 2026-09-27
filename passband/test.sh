@@ -134,6 +134,7 @@ run_suite compose-attachments \
 run_suite retriage-run \
   Sources/Passband/Model/SubjectText.swift \
   Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Model/SyncStatus.swift \
   Sources/Passband/Model/RetriageRun.swift \
   Tests/RetriageRunTests.swift
 
@@ -224,6 +225,17 @@ run_suite gmail-health \
   Sources/Passband/Lib/Format.swift \
   Sources/Passband/Lib/AsyncMemo.swift \
   Tests/GmailHealthTests.swift
+
+# The one derived sync/triage status and its copy. A rate-limited mailbox once
+# read as "synced just now" and "You're all clear."; the precedence and the
+# empty-hero rule are what stop that, so they are asserted.
+run_suite sync-status \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/SyncStatus.swift \
+  Sources/Passband/Lib/Format.swift \
+  Sources/Passband/Lib/AsyncMemo.swift \
+  Tests/SyncStatusTests.swift
 
 # The due-today count, which is now the app icon's badge as well as the sitrep's
 # headline. It gets a suite because of the badge specifically: a sentence on a

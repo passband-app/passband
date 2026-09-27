@@ -188,7 +188,10 @@ struct MobileSitrepView: View {
         if total > 0 {
             return "\(Self.spell(total)) item\(total == 1 ? "" : "s") on your plate."
         }
-        return "You're all clear."
+        // Only "all clear" when triage has actually run; the footnote says why.
+        return store.syncStatus.emptyHero(
+            queued: store.triageWaiting, lastSync: store.daemonLastSync)?.title
+            ?? "You're all clear."
     }
 
     // MARK: - for your eyes
@@ -264,6 +267,12 @@ struct MobileSitrepView: View {
                 .font(Typo.micro)
                 .foregroundStyle(Palette.warn)
                 .frame(maxWidth: .infinity, alignment: .leading)
+        } else if let line = store.syncStatus.oneLine() {
+            // The same derived status the Mac's banner shows, in one line.
+            Label(line, systemImage: "clock")
+                .font(Typo.micro)
+                .foregroundStyle(store.syncStatus.isWarning ? Palette.warn : Palette.inkFaint)
+                .frame(maxWidth: .infinity, alignment: .leading)
         } else {
             Text(syncedLabel)
                 .font(Typo.micro)
@@ -273,8 +282,11 @@ struct MobileSitrepView: View {
     }
 
     /// "synced 4m ago" / "synced just now" — never the nonsense "synced now ago".
+    /// The daemon's own Gmail sync time when it says, the app's poll otherwise.
     private var syncedLabel: String {
-        guard let last = store.lastRefresh else { return "waiting for the first sync…" }
+        guard let last = store.daemonLastSync ?? store.lastRefresh else {
+            return "waiting for the first sync…"
+        }
         let age = Fmt.relAge(last)
         return (age.isEmpty || age == "now") ? "synced just now" : "synced \(age) ago"
     }

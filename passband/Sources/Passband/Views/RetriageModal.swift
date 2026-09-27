@@ -23,6 +23,7 @@ struct RetriageModal: View {
                 header
                 counter
                 bar
+                if run.watching { steps }
                 footer
             }
         }
@@ -41,7 +42,7 @@ struct RetriageModal: View {
             Image(systemName: "arrow.trianglehead.2.clockwise")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(Palette.accent)
-                .symbolEffect(.rotate, isActive: run.watching && !run.paused)
+                .symbolEffect(.rotate, isActive: run.watching && !run.paused && run.blocked == nil)
             Text(title)
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(Palette.ink)
@@ -57,6 +58,11 @@ struct RetriageModal: View {
         // telling somebody the counter is stuck while the daemon is visibly
         // working is the wrong half of the truth.
         if store.catchUp != nil { return "Waiting for your mailbox" }
+        // A step the daemon says is blocked is the reason, so it leads.
+        if run.blocked?.reason == "waiting_for_sync" || store.syncStatus.blocksSync {
+            return "Re-triage waiting for Gmail"
+        }
+        if run.blocked?.reason == "provider_cooldown" { return "Re-triage paused for a moment" }
         // Same reasoning: a spent budget is WHY the counter stopped.
         if run.paused { return "Re-triage paused" }
         if run.stalled { return "Re-triage: not moving" }
@@ -131,11 +137,11 @@ struct RetriageModal: View {
                     + "finishes, and this re-triage is queued behind it, not lost.",
                 tone: Palette.inkFaintest)
             closeButton("Close")
-        } else if run.paused {
+        } else if run.paused || run.blocked != nil {
+            // The step above already says why and until when.
             note(
-                RetriageRun.pauseNote(resumesAt: Fmt.date(run.resumesAt))
-                    + " It carries on by itself; closing this stops the watching, not the run.",
-                tone: Palette.warn)
+                "It carries on by itself; closing this stops the watching, not the run.",
+                tone: Palette.inkFaintest)
             closeButton("Close")
         } else if run.stalled {
             // Still polling — the run may simply be behind a slow cycle — but
@@ -150,6 +156,56 @@ struct RetriageModal: View {
             note(
                 "the board is unavailable until this finishes, because every tier "
                     + "on it is about to change.", tone: Palette.inkFaintest)
+        }
+    }
+
+    /// Gmail sync, the triage queue, and the count, in the order the run waits
+    /// on them. A blocked step is the one line in the modal worth reading.
+    private var steps: some View {
+        let list = run.steps(
+            sync: store.syncStatus, triage: store.sitrep.stats?.triage, date: Fmt.date)
+        return VStack(alignment: .leading, spacing: 7) {
+            ForEach(Array(list.enumerated()), id: \.offset) { _, step in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: Self.symbol(step.state))
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Self.tone(step.state))
+                        .frame(width: 14)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(step.title)
+                            .font(Typo.rowSub)
+                            .foregroundStyle(
+                                step.state == .waiting ? Palette.inkFaint : Palette.ink)
+                        if let detail = step.detail {
+                            Text(detail)
+                                .font(Typo.micro)
+                                .foregroundStyle(
+                                    step.state == .blocked ? Palette.warn : Palette.inkFaint)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+        .help(store.syncStatus.rawReason.map { "Gmail reported: \($0)" } ?? "")
+    }
+
+    private static func symbol(_ state: RetriageStep.State) -> String {
+        switch state {
+        case .done: return "checkmark.circle.fill"
+        case .active: return "circle.dotted"
+        case .blocked: return "pause.circle.fill"
+        case .waiting: return "circle"
+        }
+    }
+
+    private static func tone(_ state: RetriageStep.State) -> Color {
+        switch state {
+        case .done: return Palette.positive
+        case .active: return Palette.accent
+        case .blocked: return Palette.warn
+        case .waiting: return Palette.inkFaintest
         }
     }
 

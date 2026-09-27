@@ -65,7 +65,12 @@ struct RetriageRun: Sendable, Equatable {
         stalled = now.timeIntervalSince(lastAdvance) > Self.stallSeconds
         parked = max(p.budget_parked ?? 0, 0)
         resumesAt = parked > 0 ? p.budget_resumes_at : nil
+        blocked = finished ? nil : p.blocked
     }
+
+    /// What the daemon says is holding the run (Gmail sync failing, a provider
+    /// cooldown, a spent budget), or nil. Absent on an older daemon.
+    var blocked: RetriageBlocked?
 
     /// Some of the run is waiting on tomorrow's budget.
     var paused: Bool { counted && parked > 0 && !finished }
@@ -103,11 +108,114 @@ struct RetriageRun: Sendable, Equatable {
     /// Whether to offer the way out. A live, moving run does NOT — that is the
     /// whole point of the modal — but a run nobody can watch or that has stopped
     /// moving must never be a window the user cannot get back.
-    var canClose: Bool { !watching || stalled || paused }
+    ///
+    /// A BLOCKED run opens it at once too: a run held by a failed Gmail sync can
+    /// sit for hours, and the daemon has told us so, so there is nothing to wait
+    /// out before offering the door.
+    var canClose: Bool { !watching || stalled || paused || blocked != nil }
 
     /// 0...1 for the bar, and a full bar only for a run that really finished.
     var fraction: Double {
         guard counted, total > 0 else { return 0 }
         return Double(done) / Double(total)
+    }
+}
+
+// MARK: - the three steps
+
+/// Where a re-triage is, as the three things it waits on in order: Gmail sync,
+/// the triage queue, and the count of rows done. A step that is BLOCKED says why
+/// and until when, which is what the single bar could never say: "not moving"
+/// and "waiting for Gmail until 12:05" were the same screen.
+struct RetriageStep: Equatable, Sendable {
+    enum State: Equatable, Sendable { case done, active, blocked, waiting }
+    var title: String
+    var detail: String?
+    var state: State
+}
+
+extension RetriageRun {
+    /// The three steps, from this run, the derived sync status and the stats
+    /// triage block. Pure, so the precedence is asserted in the suite.
+    func steps(
+        sync: SyncStatus, triage: TriageHealth?, now: Date = Date(),
+        calendar: Calendar = .current, locale: Locale = .current,
+        date: (String?) -> Date?
+    ) -> [RetriageStep] {
+        let at = { (d: Date?) in SyncStatus.when(d, now: now, calendar: calendar, locale: locale) }
+        let retry = { (d: Date?) -> String? in
+            at(d).map { $0 == "now" ? "Trying again now." : "Next try \($0)." }
+        }
+        let joined = { (parts: [String?]) in parts.compactMap { $0 }.joined(separator: " ") }
+
+        // 1. Gmail sync.
+        var syncStep = RetriageStep(title: "Gmail sync", detail: "Up to date", state: .done)
+        switch sync {
+        case .unreachable:
+            syncStep = .init(
+                title: "Gmail sync", detail: "Passband cannot reach its server.", state: .blocked)
+        case .disconnected:
+            syncStep = .init(
+                title: "Gmail sync", detail: "Reconnect Gmail to continue.", state: .blocked)
+        case .throttled(let next, _, _), .gmailError(_, _, let next, _):
+            syncStep = .init(
+                title: "Gmail sync", detail: joined([sync.headline + ".", retry(next)]),
+                state: .blocked)
+        case .catchingUp(let done, let total):
+            syncStep = .init(
+                title: "Gmail sync",
+                detail: "Catching up: \(done.formatted()) of \(total.formatted()) messages",
+                state: .active)
+        case .waitingForSync:
+            syncStep = .init(
+                title: "Gmail sync",
+                detail: joined(["Waiting for Gmail to answer.", retry(date(blocked?.until))]),
+                state: .blocked)
+        default:
+            if blocked?.reason == "waiting_for_sync" {
+                syncStep = .init(
+                    title: "Gmail sync",
+                    detail: joined(["Waiting for Gmail to answer.", retry(date(blocked?.until))]),
+                    state: .blocked)
+            }
+        }
+        let syncDone = syncStep.state == .done
+
+        // 2. The triage queue.
+        let counts = triage.map {
+            "\($0.queued.formatted()) queued, \($0.leased.formatted()) running"
+        }
+        var queue = RetriageStep(title: "Triage queue", detail: counts, state: .active)
+        if finished {
+            queue = .init(title: "Triage queue", detail: "Empty", state: .done)
+        } else if !syncDone {
+            queue = .init(
+                title: "Triage queue",
+                detail: joined([counts.map { $0 + "." }, "Starts once Gmail sync succeeds."]),
+                state: .waiting)
+        } else if blocked?.reason == "provider_cooldown" {
+            queue = .init(
+                title: "Triage queue",
+                detail: joined([
+                    "The sorting service had a problem.",
+                    at(date(blocked?.until)).map { "Resumes \($0)." },
+                ]),
+                state: .blocked)
+        } else if paused || blocked?.reason == "budget" {
+            let resume = date(resumesAt ?? blocked?.until)
+            queue = .init(
+                title: "Triage queue",
+                detail: Self.pauseNote(
+                    resumesAt: resume, now: now, calendar: calendar, locale: locale),
+                state: .blocked)
+        }
+
+        // 3. The count.
+        let tally = counted ? "\(done.formatted()) of \(total.formatted()) emails" : nil
+        let last: RetriageStep.State =
+            finished ? .done : (queue.state == .active ? .active : .waiting)
+        return [
+            syncStep, queue, RetriageStep(title: "Re-triaged", detail: tally, state: last),
+        ]
     }
 }

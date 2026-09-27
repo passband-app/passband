@@ -111,6 +111,12 @@ struct SitrepView: View {
                 GmailDisconnectedBanner()
                     .padding(.horizontal, 28)
                     .padding(.top, 14)
+            } else if case let status = store.syncStatus, status.showsBanner {
+                // Throttled, erroring, catching up, or triage held: the same
+                // slot, because it answers the same question.
+                SyncStatusBanner(status: status)
+                    .padding(.horizontal, 28)
+                    .padding(.top, 14)
             }
             // THE HERO STAYS PUT. It sits above BOTH columns, so it cannot scroll
             // with one of them and hold still for the other; and "one item needs
@@ -121,7 +127,10 @@ struct SitrepView: View {
             // where scrolling content NEVER renders — without it the fade tail
             // touches the headline. The fade zone itself is the matching top
             // padding inside each scroll view's content.
-            DashHero(standing: store.sitrep.standing)
+            DashHero(
+                standing: store.sitrep.standing,
+                empty: store.syncStatus.emptyHero(
+                    queued: store.triageWaiting, lastSync: store.daemonLastSync))
                 .padding(.horizontal, 28)
                 .padding(.bottom, 18)
 
@@ -670,6 +679,9 @@ struct GreetingLine: View {
 /// it reads as voice rather than decoration.
 private struct DashHero: View {
     let standing: [AttentionUpdate]
+    /// What to say over an empty board when it is empty because triage has
+    /// not run (see `SyncStatus.emptyHero`). Nil lets "You're all clear." stand.
+    var empty: (title: String, note: String)? = nil
 
     private static let smallWords = [
         "Zero", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine",
@@ -691,8 +703,12 @@ private struct DashHero: View {
         if total > 0 {
             return "\(Self.spell(total)) item\(total == 1 ? "" : "s") on your plate."
         }
-        return "You're all clear."
+        // An empty board is only "all clear" when triage has actually run.
+        return empty?.title ?? "You're all clear."
     }
+
+    /// The reason under an empty-board headline, only when there is one.
+    private var note: String? { standing.isEmpty ? empty?.note : nil }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -702,6 +718,12 @@ private struct DashHero: View {
                 .foregroundStyle(Palette.ink)
                 .lineSpacing(-2)
                 .fixedSize(horizontal: false, vertical: true)
+            if let note {
+                Text(note)
+                    .font(Typo.rowSub)
+                    .foregroundStyle(Palette.inkDim)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .padding(.top, 4)
         .padding(.bottom, 2)
@@ -956,7 +978,10 @@ private struct StatusStrip: View {
     var body: some View {
         HStack(spacing: 9) {
             if !RehearsalMode.isEnabled {
-            ChromeChip(tone: Palette.inkDim, help: "check for new mail now") {
+            ChromeChip(
+                tone: store.sitrep.stats?.sync?.ok == false ? Palette.warn : Palette.inkDim,
+                help: "check for new mail now"
+            ) {
                 guard !refreshing else { return }
                 refreshing = true
                 Task {
@@ -988,7 +1013,17 @@ private struct StatusStrip: View {
     }
 
     /// "synced 4m ago" / "synced just now" — never the nonsense "synced now ago".
+    ///
+    /// THE DAEMON'S GMAIL SYNC when it says, not this app's poll of the daemon:
+    /// the app polling a daemon that cannot reach Gmail is not a sync, and
+    /// reading it as one is how a throttled mailbox said "synced just now" for
+    /// days. An older daemon has no `sync` block, and then the old source stands.
     private var syncedLabel: String {
+        if store.sitrep.stats?.sync != nil {
+            guard let last = store.daemonLastSync else { return "not synced yet" }
+            let age = Fmt.relAge(last)
+            return (age.isEmpty || age == "now") ? "synced just now" : "synced \(age) ago"
+        }
         let age =
             store.lastRefresh.map { Fmt.relAge($0) }
             ?? Fmt.relAge(store.sitrep.stats?.last_surfaced_at)

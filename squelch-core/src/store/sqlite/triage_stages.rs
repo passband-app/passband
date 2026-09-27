@@ -427,6 +427,8 @@ impl SqliteStore {
             started_at: parse(started_at),
             budget_parked: parked,
             budget_resumes_at: parse(resumes_at),
+            // The store cannot see sync health; the HTTP door fills this in.
+            blocked: None,
         })
     }
 

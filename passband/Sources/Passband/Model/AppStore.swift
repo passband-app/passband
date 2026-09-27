@@ -3440,6 +3440,26 @@ final class AppStore {
     /// and holds the lock these formatters need; this is read every render.
     var gmailDisconnectedSince: Date? { Fmt.date(sitrep.stats?.gmail?.disconnected_since) }
 
+    // MARK: - sync status
+
+    /// THE one answer to "is Passband working": daemon reachability, Gmail
+    /// credential, Gmail throttling or errors, catch-up and triage blockers,
+    /// in that precedence. Every surface that talks about sync health reads
+    /// this rather than re-deriving it. See Model/SyncStatus.swift.
+    var syncStatus: SyncStatus {
+        SyncStatus.derive(daemonDown: daemonDown, stats: sitrep.stats, date: Fmt.date)
+    }
+
+    /// When the DAEMON last heard from Gmail. Nil on a daemon too old to say,
+    /// and then callers fall back to the client's own poll time.
+    var daemonLastSync: Date? { Fmt.date(sitrep.stats?.sync?.last_success_at) }
+
+    /// Jobs waiting for, or running through, triage right now. 0 when unknown.
+    var triageWaiting: Int {
+        guard let t = sitrep.stats?.triage else { return 0 }
+        return max(t.queued, 0) + max(t.leased, 0)
+    }
+
 
     // MARK: - invite sharing
 

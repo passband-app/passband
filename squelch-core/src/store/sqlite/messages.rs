@@ -1184,6 +1184,8 @@ impl SqliteStore {
         // answers whether the agent door may read the mail, not whether it is
         // auth. An informational sign-in alert is readable (`allowed`) and is
         // still exactly what the Auth page's decision rail exists for.
+        // Done (archived from the Auth page, or marked done anywhere) leaves the
+        // list: it is how the page and its rail badge let go of dealt-with mail.
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
             "SELECT m.id, m.account_id, m.thread_id, m.from_addr, m.subject,
@@ -1193,6 +1195,7 @@ impl SqliteStore {
              LEFT JOIN agent_message_state s ON s.message_id=m.id AND s.account_id=m.account_id
              LEFT JOIN agent_message_decisions d ON d.message_id=m.id AND d.account_id=m.account_id
              WHERE m.account_id = ?1 AND (json_array_length(COALESCE(d.decision_json,'{}'),'$.auth.kinds')>0 OR (s.message_id IS NULL AND t.sensitivity='sealed'))
+               AND COALESCE(t.status,'new')!='done'
              ORDER BY m.received_at DESC",
         )?;
         let out = stmt

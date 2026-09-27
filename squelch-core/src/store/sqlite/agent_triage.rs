@@ -2814,6 +2814,47 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(fye_threads(&store), vec!["two".to_string()]);
+        // The legacy /client/updates Standing band (iOS, the assistant's
+        // get_updates tool) and its tier label must agree with the v2 feed.
+        let standing = |store: &SqliteStore| {
+            let mut threads = store
+                .human_agent_updates(
+                    1,
+                    &AgentInventoryQuery {
+                        since: Utc::now() - chrono::Duration::days(30),
+                        min_importance: None,
+                        status: None,
+                        band: Some(crate::store::SitrepBand::Standing),
+                        pending_reminders: false,
+                        spam: crate::store::SpamScope::Exclude,
+                        ranking: RankingConfig::default(),
+                    },
+                )
+                .unwrap()
+                .into_iter()
+                .map(|item| item.update.thread_id)
+                .collect::<Vec<_>>();
+            threads.sort();
+            threads
+        };
+        assert_eq!(standing(&store), vec!["two".to_string()]);
+        let all = store
+            .human_agent_updates(
+                1,
+                &AgentInventoryQuery {
+                    since: Utc::now() - chrono::Duration::days(30),
+                    min_importance: None,
+                    status: None,
+                    band: None,
+                    pending_reminders: false,
+                    spam: crate::store::SpamScope::Exclude,
+                    ranking: RankingConfig::default(),
+                },
+            )
+            .unwrap();
+        let tier_of = |id: i64| all.iter().find(|u| u.update.id == id).unwrap().update.tier;
+        assert_eq!(tier_of(1), crate::types::Tier::Noise);
+        assert_eq!(tier_of(2), crate::types::Tier::Signal);
         let sealed = store.sealed_messages(1).unwrap();
         assert_eq!(sealed.len(), 1);
         assert_eq!(sealed[0].id, 1);
@@ -2831,6 +2872,17 @@ mod tests {
         let mut pinned = fye_threads(&store);
         pinned.sort();
         assert_eq!(pinned, vec!["one".to_string(), "two".to_string()]);
+        assert_eq!(standing(&store), pinned);
+
+        // Archiving resolves the row to done, and done auth mail leaves the
+        // Auth list (and so the badge), while an explicit reveal still works.
+        store
+            .lock()
+            .unwrap()
+            .execute("UPDATE triage SET status='done' WHERE message_id=1", [])
+            .unwrap();
+        assert!(store.sealed_messages(1).unwrap().is_empty());
+        assert!(store.sealed_body(1, 1).is_ok());
     }
 
     #[test]
@@ -4457,7 +4509,13 @@ fn human_inventory(
         if query.pending_reminders && row.reminder.is_none() {
             continue;
         }
-        let selected = attention.as_ref().is_some_and(|a| a.show_in_fye);
+        // Same rule as the `fye` list in `list_items_with_query`: auth mail
+        // lives on the Auth page, so the model's FYE pick does not count for
+        // it unless the human pinned the thread.
+        let wants_fye = attention.as_ref().is_some_and(|a| a.show_in_fye);
+        let is_auth = decision.as_ref().is_some_and(|d| d.auth.is_auth());
+        let selected = wants_fye
+            && (!is_auth || thread_fye_override(conn, account, &row.thread)? == Some(true));
         let is_standing = ((selected && row.representative == Some(row.id))
             || row.reminded.is_some())
             && thread_fye_override(conn, account, &row.thread)? != Some(false);

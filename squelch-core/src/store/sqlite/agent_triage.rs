@@ -936,6 +936,24 @@ fn finish(
     Ok(())
 }
 
+/// [`SqliteStore::triage_waiting_counts`]. Pinned to the account's ready index:
+/// without ANALYZE the planner prefers the re-triage progress index on
+/// `account_id` alone and walks every job the account ever had, under the
+/// store mutex, on every `/client/stats`.
+pub(crate) const TRIAGE_WAITING_SQL: &str = "SELECT
+       COUNT(DISTINCT CASE WHEN state='queued' AND (available_at<=?2 OR last_error IS NOT NULL)
+                           THEN message_id END),
+       COUNT(DISTINCT CASE WHEN state='leased' THEN message_id END)
+     FROM agent_triage_jobs INDEXED BY idx_agent_jobs_account_ready
+     WHERE account_id=?1 AND state IN ('queued','leased') AND kind IN ('triage','access')
+       AND trigger NOT LIKE 'revisit:%'";
+
+/// [`SqliteStore::triage_budget_parked`], pinned for the same reason.
+pub(crate) const TRIAGE_BUDGET_PARKED_SQL: &str = "SELECT COUNT(*), MIN(available_at)
+     FROM agent_triage_jobs INDEXED BY idx_agent_jobs_account_ready
+     WHERE account_id=?1 AND state='queued' AND kind IN ('triage','access')
+       AND last_error='daily_budget_exhausted' AND available_at>?2";
+
 impl SqliteStore {
     /// Fixed-cardinality scrape counts, scoped to one account. Delayed retries
     /// remain queued; leases remain leased until reclaimed by a worker.
@@ -956,6 +974,29 @@ impl SqliteStore {
         Ok(counts)
     }
 
+    /// EMAILS WAITING FOR TRIAGE, for the client door: `[queued, running]` as
+    /// DISTINCT messages, not jobs. [`Self::triage_job_counts`] is the scrape
+    /// gauge and counts every queued job, which on a healthy idle mailbox is
+    /// mostly scheduled revisits sitting up to 400 days out; a user-facing
+    /// count built on it never reaches zero, so "You're all clear." never
+    /// shows. Queued here means work that is owed now: due already, or pushed
+    /// back by the worker itself (a retry, a provider cooldown, a spent daily
+    /// budget, all of which set `last_error`). A revisit is never owed now; it
+    /// is the model asking to look again later.
+    pub fn triage_waiting_counts(
+        &self,
+        account_id: AccountId,
+        now: DateTime<Utc>,
+    ) -> Result<[u64; 2]> {
+        let conn = self.lock()?;
+        let (queued, leased): (u64, u64) = conn.query_row(
+            TRIAGE_WAITING_SQL,
+            params![account_id, now.to_rfc3339()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok([queued, leased])
+    }
+
     /// Queued triage/access jobs the worker parked because a daily budget ran
     /// out, and the earliest time one becomes claimable again. Across ALL
     /// queued work, not only a re-triage: the stats door uses it to say "paused
@@ -966,9 +1007,7 @@ impl SqliteStore {
     ) -> Result<(u64, Option<DateTime<Utc>>)> {
         let conn = self.lock()?;
         let (parked, resumes_at): (u64, Option<String>) = conn.query_row(
-            "SELECT COUNT(*), MIN(available_at) FROM agent_triage_jobs
-             WHERE account_id=?1 AND state='queued' AND kind IN ('triage','access')
-               AND last_error='daily_budget_exhausted' AND available_at>?2",
+            TRIAGE_BUDGET_PARKED_SQL,
             params![account_id, Utc::now().to_rfc3339()],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
@@ -2337,6 +2376,96 @@ mod tests {
         assert_eq!(store.triage_job_counts(1).unwrap(), [1, 1]);
         assert_eq!(store.triage_job_counts(2).unwrap(), [1, 0]);
         assert_eq!(store.triage_job_counts(99).unwrap(), [0, 0]);
+    }
+
+    /// The client's "emails waiting" count: distinct messages with work owed
+    /// NOW. Scheduled revisits (on by default, queued up to 400 days out) and
+    /// never-tried future work must not count, or an idle healthy mailbox
+    /// never reads as clear.
+    #[test]
+    fn triage_waiting_counts_only_work_owed_now_per_message() {
+        let store = fixture();
+        let now = Utc::now();
+        assert_eq!(store.triage_waiting_counts(1, now).unwrap(), [0, 0]);
+        {
+            let conn = store.lock().unwrap();
+            let past = "2000-01-01T00:00:00Z";
+            let future = "2099-01-01T00:00:00Z";
+            for (message, kind, state, trigger, at, error) in [
+                // Due: counts once per message, however many jobs it has.
+                (1, "triage", "queued", "arrival", past, None),
+                (1, "access", "queued", "access", past, None),
+                // Pushed back by the worker: still owed.
+                (
+                    2,
+                    "triage",
+                    "queued",
+                    "retriage",
+                    future,
+                    Some("provider_cooldown"),
+                ),
+                // A scheduled revisit, due or not: never owed now.
+                (
+                    3,
+                    "triage",
+                    "queued",
+                    "revisit:2099-01-01T00:00:00Z",
+                    future,
+                    None,
+                ),
+                (
+                    4,
+                    "triage",
+                    "queued",
+                    "revisit:2000-01-01T00:00:00Z",
+                    past,
+                    None,
+                ),
+                // Future work nobody has tried yet.
+                (5, "triage", "queued", "arrival", future, None),
+                // Running.
+                (6, "triage", "leased", "arrival", past, None),
+                // Other kinds and finished work.
+                (7, "notification", "queued", "n", past, None),
+                (8, "triage", "completed", "arrival", past, None),
+            ] {
+                conn.execute(
+                    "INSERT INTO agent_triage_jobs
+                    (account_id,message_id,kind,trigger,input_revision,state,available_at,last_error)
+                    VALUES(1,?1,?2,?3,1,?4,?5,?6)",
+                    params![message, kind, trigger, state, at, error],
+                )
+                .unwrap();
+            }
+        }
+        assert_eq!(store.triage_waiting_counts(1, now).unwrap(), [2, 1]);
+        assert_eq!(store.triage_waiting_counts(2, now).unwrap(), [0, 0]);
+    }
+
+    /// Both stats reads SEARCH the account's ready index, never scan the jobs
+    /// table or settle for `account_id` alone. Measured: 20 ms at 300k rows on
+    /// the progress index, ~0.5 ms on this one, per `/client/stats`.
+    #[test]
+    fn stats_queue_reads_use_the_account_ready_index() {
+        let store = fixture();
+        let conn = store.lock().unwrap();
+        for sql in [TRIAGE_WAITING_SQL, TRIAGE_BUDGET_PARKED_SQL] {
+            let plan = conn
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap()
+                .query_map(params![1, Utc::now().to_rfc3339()], |r| {
+                    r.get::<_, String>(3)
+                })
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap()
+                .join("\n");
+            assert!(
+                plan.contains("INDEX idx_agent_jobs_account_ready (account_id=? AND state=?"),
+                "{plan}"
+            );
+            assert!(!plan.contains("SCAN"), "{plan}");
+        }
     }
 
     #[test]

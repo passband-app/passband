@@ -218,3 +218,56 @@ async fn agent_search_fills_results_after_pending_leading_matches() {
     assert_eq!(body["items"].as_array().unwrap().len(), 1);
     assert_eq!(body["items"][0]["id"], id);
 }
+
+/// A HEALTHY IDLE MAILBOX READS AS CLEAR. A verdict that asks to look again
+/// in three days leaves a queued revisit job behind (revisits are on by
+/// default), and `/client/stats` must not count it as an email waiting for
+/// triage, or the app says "Sorting your mail." forever.
+#[tokio::test]
+async fn stats_do_not_count_a_scheduled_revisit_as_waiting() {
+    let (state, store, acct) = state_with(|_, _| {});
+    let id = store
+        .upsert_message(&msg(acct, "g-rv", "t-rv", "Invoice", "Due next week"))
+        .unwrap();
+    store.enqueue_agent_triage(acct, id, "test", false).unwrap();
+    let job = store
+        .claim_agent_job(acct, "triage", Utc::now(), 60)
+        .unwrap()
+        .unwrap();
+    let context = store.load_agent_context(&job).unwrap();
+    let decision = MessageDecision {
+        kinds: vec![EmailKind::Receipt],
+        destinations: vec![MessageDestination::Reading],
+        summary: "An invoice".into(),
+        reason: "Look again when it is due".into(),
+        revisit: Some(RevisitRequest {
+            at: Utc::now() + chrono::Duration::days(3),
+            reason: "due date".into(),
+        }),
+        ..Default::default()
+    };
+    assert_eq!(
+        store
+            .commit_agent_decision(
+                &job,
+                &context,
+                &decision,
+                std::slice::from_ref(&context.message.source)
+            )
+            .unwrap(),
+        AgentCommitOutcome::Applied
+    );
+    assert_eq!(
+        store.triage_job_counts(acct).unwrap(),
+        [1, 0],
+        "the fixture left a queued revisit behind"
+    );
+
+    let metrics = squelch_core::metrics::SyncMetrics::new();
+    metrics.note_poll_ok();
+    let app = squelch_api::router(state.with_sync_metrics(metrics));
+    let resp = app.oneshot(authed("GET", "/client/stats")).await.unwrap();
+    let json = body_json(resp).await;
+    assert_eq!(json["triage"]["queued"], 0, "{}", json["triage"]);
+    assert_eq!(json["triage"]["leased"], 0);
+}

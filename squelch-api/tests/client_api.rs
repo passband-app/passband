@@ -8597,7 +8597,9 @@ async fn stats_report_a_throttled_mailbox_and_the_triage_waiting_on_it() {
 
     let triage = &json["triage"];
     assert_eq!(triage["waiting_for_sync"], serde_json::json!(true));
-    let [queued, leased] = store.triage_job_counts(acct).unwrap();
+    let [queued, leased] = store
+        .triage_waiting_counts(acct, chrono::Utc::now())
+        .unwrap();
     assert!(queued > 0, "the fixture queued work");
     assert_eq!(triage["queued"], queued);
     assert_eq!(triage["leased"], leased);
@@ -8619,6 +8621,53 @@ async fn stats_report_a_throttled_mailbox_and_the_triage_waiting_on_it() {
     assert!(sync["last_success_at"].is_string());
     assert_eq!(json["triage"]["waiting_for_sync"], serde_json::json!(false));
     assert!(json["triage"]["cooldown_until"].is_string());
+}
+
+/// A FRESH DAEMON IS NOT AN OUTAGE. Before the first poll (onboarding's
+/// backfill, any restart) nothing has failed, so `sync.ok` is true and triage
+/// is not "waiting for sync"; the backfill shows up as `catch_up` progress.
+#[tokio::test]
+async fn stats_do_not_report_an_outage_before_anything_failed() {
+    use squelch_core::metrics::SyncMetrics;
+    let (state, _store, _acct) = state_with(|_, _| {});
+    let metrics = SyncMetrics::new();
+    metrics.catchup_begin(40);
+    metrics.catchup_step();
+    let app = router(state.with_sync_metrics(metrics.clone()));
+    let resp = app.oneshot(authed("GET", "/client/stats")).await.unwrap();
+    let json = body_json(resp).await;
+    assert!(!metrics.poll_ok(), "no poll has run");
+    assert_eq!(json["sync"]["ok"], serde_json::json!(true));
+    assert!(json["sync"].get("error").is_none());
+    assert_eq!(json["triage"]["waiting_for_sync"], serde_json::json!(false));
+    assert_eq!(
+        json["catch_up"],
+        serde_json::json!({"done": 1, "total": 40})
+    );
+}
+
+/// A SIDE-CALL ERROR IS NOT A SYNC OUTAGE. With sync healthy, an error the
+/// spam tab or unread count recorded (and any stray retry stamp) stays out
+/// of `sync`: `error` and `next_retry_at` describe a current outage only.
+#[tokio::test]
+async fn stats_hide_a_side_call_error_while_sync_is_healthy() {
+    use squelch_core::metrics::{GmailErrorKind, SyncMetrics};
+    let (state, _store, _acct) = state_with(|_, _| {});
+    let metrics = SyncMetrics::new();
+    metrics.record_gmail_error_reason(GmailErrorKind::Quota, "RATE_LIMIT_EXCEEDED");
+    metrics.record_sync_error();
+    metrics.note_poll_ok();
+    // After the good poll: a side call fails and a retry time is left over.
+    metrics.record_gmail_error_reason(GmailErrorKind::Http, "backendError");
+    metrics.note_sync_retry_at(chrono::Utc::now().timestamp() + 60);
+    assert!(metrics.sync_last_error().is_some());
+    let app = router(state.with_sync_metrics(metrics));
+    let resp = app.oneshot(authed("GET", "/client/stats")).await.unwrap();
+    let json = body_json(resp).await;
+    let sync = &json["sync"];
+    assert_eq!(sync["ok"], serde_json::json!(true));
+    assert!(sync.get("error").is_none(), "{sync}");
+    assert!(sync.get("next_retry_at").is_none(), "{sync}");
 }
 
 /// Seed one Stage-1-decided row a re-triage will pick up.
@@ -8673,7 +8722,20 @@ async fn retriage_progress_names_what_is_holding_the_run() {
         .unwrap();
     assert_eq!(body_json(resp).await["reset"], 1);
 
-    // Nothing has polled yet: triage is waiting for Gmail.
+    // Nothing has polled yet, and nothing has failed: a fresh daemon is not
+    // blocked on Gmail, whatever `poll_ok` says.
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", "/client/retriage"))
+        .await
+        .unwrap();
+    assert!(
+        body_json(resp).await.get("blocked").is_none(),
+        "not polled yet is not waiting for sync"
+    );
+
+    // A lifecycle fails: triage is waiting for Gmail.
+    metrics.record_sync_error();
     let retry = chrono::Utc::now().timestamp() + 60;
     metrics.note_sync_retry_at(retry);
     let resp = app

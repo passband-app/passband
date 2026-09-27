@@ -228,7 +228,13 @@ struct SearchView: View {
             }
         }
         .keyBindings(.modal, bindings)
-        .onAppear { focused = true }
+        // `/` mounts this panel mid-keystroke, and focus set in the pass that
+        // mounts the field lands before the field is in the window, so the
+        // caret never arrives. One turn later it does (SettingsView's editor
+        // hit the same thing). The request counter covers `/` over a panel
+        // that is already open, where there is no `onAppear` to fire.
+        .onAppear { focusField() }
+        .onChange(of: store.searchFocusRequest) { focusField() }
         .onChange(of: store.search.query) { _, query in
             store.search.index = -1
             if query.trimmed.isEmpty {
@@ -264,6 +270,10 @@ struct SearchView: View {
                    String(prefs.searchIncludeRelated), String(store.search.revision)]) {
             await runSearch()
         }
+    }
+
+    private func focusField() {
+        DispatchQueue.main.async { focused = true }
     }
 
     private var askAgentButton: some View {

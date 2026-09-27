@@ -791,8 +791,14 @@ final class AppStore {
     /// Its own session rather than a mode on the chat's, because the two are
     /// genuinely different conversations: the chat is a thread of questions
     /// somebody typed, the lane is one search being narrowed, and merging them
-    /// would put a search the reader never spoke into the ⌘K transcript.
+    /// would put a search the reader never spoke into the ⌘K transcript. The
+    /// one crossing is the band's own expand button, which is the reader
+    /// asking for exactly that (see `expandSearchLaneToChat`).
     let searchLane = AssistantSession(lane: .search)
+    /// Bumped every time something asks for the search field's caret. A
+    /// counter, not a flag: `/` over a panel that is already open changes
+    /// nothing else the field could watch, and it must still take focus.
+    var searchFocusRequest = 0
     var shortcutsOpen = false
     /// The first-run tour. Held here for the same reason the assistant is: it
     /// outlives every view it draws itself in, and the trigger that starts it
@@ -2680,6 +2686,24 @@ final class AppStore {
         // Search starts wide; the strip remains available beside an open email.
         search.expanded = true
         sideView = .search
+        searchFocusRequest &+= 1
+    }
+
+    /// The band can say one line; the chat can say everything. Offered once
+    /// the lane has answered and while the ⌘K chat is not mid-run, since the
+    /// handoff replaces whatever the chat was holding.
+    var canExpandSearchLane: Bool {
+        !searchLane.running && !preparingSearchEvidence && !assistant.running
+            && !searchLane.transcript.isEmpty
+    }
+
+    /// CONTINUE THE DEEPER SEARCH IN ⌘K. The chat takes a copy of the lane's
+    /// conversation, so a follow-up there is a real follow-up, and the search
+    /// panel stays as it was underneath for Esc to come back to.
+    func expandSearchLaneToChat() {
+        guard canExpandSearchLane else { return }
+        assistant.adopt(searchLane)
+        askBarOpen = true
     }
 
     private var searchEvidenceTask: Task<Void, Never>?

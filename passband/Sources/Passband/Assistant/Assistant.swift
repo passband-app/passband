@@ -695,6 +695,24 @@ final class AssistantSession {
         streamTick = 0
     }
 
+    /// TAKE OVER ANOTHER SESSION'S CONVERSATION, replacing this one. Only
+    /// between runs on both sides: a live loop owns its history and parked
+    /// continuations, and neither can change hands mid-turn.
+    ///
+    /// Safe across lanes in the one direction it is used (search into chat):
+    /// the search lane's tools are a subset of the chat's, so every tool_use in
+    /// the copied history names a tool the chat still offers, and the lane's
+    /// hits live in its system prompt rather than in the history.
+    func adopt(_ other: AssistantSession) {
+        guard !running, !other.running else { return }
+        clear()
+        transcript = other.transcript
+        history = other.history
+        askedThreadIds = other.askedThreadIds
+        rollbackMark = history.count
+        nextItemId = other.nextItemId
+    }
+
     /// How often this conversation has been narrowed, for the panel to show
     /// without keeping a second counter of its own.
     var refinementCount: Int { refinements.count }

@@ -92,8 +92,28 @@ struct DeeperSearchBand: View {
                     .foregroundStyle(Palette.inkFaint)
                     .help("Held where it was. It picks up from there, nothing is lost.")
             }
-
+            // THE WAY OUT OF THE ONE-LINE ANSWER. The band is kept thin on
+            // purpose; somebody who wants the whole answer, or to ask a
+            // follow-up, takes the conversation to ⌘K, where it has room.
+            if search.laneStarted && !session.transcript.isEmpty {
+                Button { store.expandSearchLaneToChat() } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Palette.inkFaint)
+                        .frame(width: 18, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(!store.canExpandSearchLane)
+                .help(expandHelp)
+            }
         }
+    }
+
+    private var expandHelp: String {
+        if session.running { return "Continue in chat once the agent finishes." }
+        if store.assistant.running { return "The chat is busy answering something else." }
+        return "Continue in chat: the full answer, and room for follow-ups."
     }
 
     // MARK: - the lane's own rows

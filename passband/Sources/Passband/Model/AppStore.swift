@@ -812,6 +812,23 @@ final class AppStore {
     var authRings: [AuthRing] = []
     /// Newest-first queue of code-modal entries (only otp/verification).
     var authQueue: [AuthCodeEntry] = []
+    /// Bumped by `requestAuthPage` for the phone, which has no routed Auth
+    /// page for `setView(.auth)` to reach: its shell watches this and opens the
+    /// login-codes page behind the Quick Look tab's key. A counter rather than
+    /// a flag so a second tap on the same kind of banner still lands.
+    private(set) var authPageRequests = 0
+
+    /// "Show me the auth mail", from a notification tap. The Mac routes to
+    /// its Auth page; the phone opens its login-codes page (see
+    /// `authPageRequests`).
+    func requestAuthPage() {
+        #if os(macOS)
+            setView(.auth)
+        #else
+            closeThread()
+            authPageRequests &+= 1
+        #endif
+    }
 
     // MARK: read tracking
     /// The daemon's tracking answer, fetched once on connect. nil = never

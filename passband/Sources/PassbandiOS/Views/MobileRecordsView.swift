@@ -21,10 +21,10 @@
 // SO THE MATERIAL SPLIT FROM THE URGENCY. What the key opens is a lookup — the
 // sign-in alert from Tuesday, the reset you half remember asking for — and a
 // lookup is exactly what this tab is for, one tap off the bar with a dot on it
-// when something has landed. The one case that is a RACE does not come through
-// here at all: a code-kind message inside the live window raises its own card at
-// the top of the sitrep and reveals from there, so the most urgent row on the
-// phone is still the cheapest one to reach.
+// when something has landed, and where an auth notification tap lands
+// (`AppStore.requestAuthPage`). The one case that is a RACE does not come
+// through here at all: a fresh code raises AuthCodeModal over the whole shell,
+// so the most urgent row on the phone is still the cheapest one to reach.
 //
 // A Mac can pin all of this beside the work surface and a phone cannot, so what
 // is one glance there is one tab here. Tapping a row opens the underlying email
@@ -35,6 +35,9 @@ import SwiftUI
 
 struct MobileRecordsView: View {
     @Environment(AppStore.self) private var store
+    /// The login-codes push, owned by the shell so a notification tap can open
+    /// it from any tab (see `AppStore.requestAuthPage`).
+    @Binding var showAuth: Bool
 
     /// Is there a sealed message young enough to still be worth racing to? The
     /// window and the test both belong to MobileAuthView, which is the surface
@@ -77,8 +80,8 @@ struct MobileRecordsView: View {
         // is a door.
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                NavigationLink {
-                    MobileAuthView()
+                Button {
+                    showAuth = true
                 } label: {
                     // A DOT WHEN SOMETHING JUST LANDED. Behind a glyph the codes
                     // are invisible, and something arriving while you were
@@ -107,6 +110,7 @@ struct MobileRecordsView: View {
             }
             .sharedBackgroundVisibility(.hidden)
         }
+        .navigationDestination(isPresented: $showAuth) { MobileAuthView() }
         // Both halves, because a record can arrive either way: the zones come
         // from the zones fetch, and the resolution that MOVED a mail into one of
         // them rides the sitrep pull. Pulling only the zones would leave the

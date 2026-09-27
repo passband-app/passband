@@ -145,6 +145,7 @@ private struct MobileLoadingGate: View {
 private struct MobileShell: View {
     @Environment(AppStore.self) private var store
     @State private var tab: MobileTab = .sitrep
+    @State private var showAuth = false
 
     // No `@Bindable` shadow here: every modal below is presented off a derived
     // Binding that funnels dismissal through the store's own close verb, so
@@ -164,7 +165,7 @@ private struct MobileShell: View {
             // put away — which is the opposite of a surface you check in passing.
             Tab("Quick Look", systemImage: "square.grid.2x2", value: MobileTab.records) {
                 NavigationStack {
-                    MobileRecordsView()
+                    MobileRecordsView(showAuth: $showAuth)
                         .threadDestination(active: tab == .records)
                 }
                 .tabSlide(.records, selection: tab)
@@ -218,6 +219,12 @@ private struct MobileShell: View {
         // the way up: a mail list is a reading surface first. Every tab here is a
         // real ScrollView or List, so all of them drive it.
         .tabBarMinimizeBehavior(.onScrollDown)
+        // An auth notification tap: the Mac's routed Auth page is, here, the
+        // login-codes page behind the Quick Look key.
+        .onChange(of: store.authPageRequests) {
+            tab = .records
+            showAuth = true
+        }
         // Toasts ride ABOVE the tab bar, where the Mac's stack rides above the
         // rail. The offset clears the bar at rest; when the bar minimizes on
         // scroll the stack simply sits a little higher than it needs to, which is

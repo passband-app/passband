@@ -197,7 +197,7 @@ final class IntroHaptics {
     }
 
     /// One continuous, soft event whose intensity traces a sine, trough to
-    /// trough, so the loop joins where the wave is quietest.
+    /// trough, so the loop joins where the wave is quietest (quiet, not off).
     private static func sinePattern() -> CHHapticPattern? {
         let hz = sineHz
         let d = sineCycles / hz
@@ -215,7 +215,9 @@ final class IntroHaptics {
         let step = 1.0 / (hz * 16)
         let samples = stride(from: 0.0, through: d + step / 2, by: step).map { t -> (TimeInterval, Float) in
             let wave = 0.5 + 0.5 * sin(2 * .pi * hz * t - .pi / 2)
-            return (t, Float(0.1 + 0.8 * wave))
+            // Never still: 0.2 at the trough (felt, where 0.1 was not) up to
+            // full at the crest.
+            return (t, Float(0.2 + 0.8 * wave))
         }
         var curves: [CHHapticParameterCurve] = []
         var i = 0

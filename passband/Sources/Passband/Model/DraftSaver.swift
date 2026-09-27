@@ -10,7 +10,8 @@
 //
 // Two slots, saved independently — the pane composer and the reader's inline
 // reply are two live drafts at once, keyed differently server-side (the parent
-// message id for a reply; the row's own id for new mail on a `drafts_v2`
+// message id for a reply; the forwarded message's id for a forward, on a
+// `drafts_v2` daemon only; the row's own id for new mail on a `drafts_v2`
 // daemon, or the one nil-key slot on an older one), so they debounce and flush
 // on their own timers.
 
@@ -88,11 +89,14 @@ final class DraftSaver {
     /// setters — the single funnel every edit passes through, so there is no way
     /// to type into a draft without arming its save.
     func noteChange(_ slot: Slot) {
-        // A FORWARD IS NEVER AUTOSAVED — see `save`. Refused at the door rather
-        // than at the write, so the slot is never even marked touched: a flush
-        // is gated on that mark, and an untouched slot cannot be talked into a
-        // save by any exit path.
-        guard state(of: slot)?.forwardOfMessageId == nil else { return }
+        // A FORWARD ON A DAEMON KNOWN TO BE OLD IS NEVER AUTOSAVED — see
+        // `save`. Refused at the door rather than at the write, so the slot is
+        // never even marked touched: a flush is gated on that mark, and an
+        // untouched slot cannot be talked into a save by any exit path. While
+        // there is no verdict yet the mark IS set, like new mail's: `save`
+        // writes nothing then, and the next keystroke or the close flush
+        // retries once the stats say which daemon this is.
+        guard !(state(of: slot).map(forwardRefused) ?? false) else { return }
         touched.insert(slot)
         pending[slot]?.cancel()
         pending[slot] = Task { [weak self] in
@@ -122,11 +126,13 @@ final class DraftSaver {
         // Nothing typed => nothing to write. `remove` both tests and clears, so a
         // second exit path firing on the same close cannot double-save.
         guard touched.remove(slot) != nil, let state else { return }
-        // Forwards do not autosave — see `save`. Unreachable while `noteChange`
-        // refuses to mark them touched, and kept because a flush takes the
-        // state from the CALLER: the day something hands this a forward it did
-        // not type into, the answer must still be no.
-        guard state.forwardOfMessageId == nil else { return }
+        // Forwards do not autosave on an old daemon — see `save`. Unreachable
+        // while `noteChange` refuses to mark them touched there, and kept
+        // because a flush takes the state from the CALLER: the day something
+        // hands this a forward it did not type into, the answer must still be
+        // no. (`save` asks again at the write, for the stats that land between
+        // this flush and its turn on the wire.)
+        guard !forwardRefused(state) else { return }
         let ticket = nextFlush
         nextFlush &+= 1
         flushes[ticket] = Task { [weak self] in
@@ -177,9 +183,28 @@ final class DraftSaver {
     /// autosave uses to decide between saving and discarding (see `save` for
     /// why each field counts). One helper so the "kept in drafts" toast can
     /// never promise a row the saver just declined to write.
+    ///
+    /// A FORWARD opens already titled (`Fwd: <original>`), so its subject
+    /// counts as blank while it still reads exactly as seeded, or is cleared.
+    /// Testing "is the subject empty" would make every forward composed, and
+    /// every `f` that was opened, typed into and emptied again would save a
+    /// row holding nothing but the title it opened with.
     static func hasContent(_ state: ComposeState) -> Bool {
-        !(state.recipients == state.seededRecipients && state.subject.trimmed.isEmpty
+        let subject = state.subject.trimmed
+        let blankSubject =
+            subject.isEmpty
+            || (state.forwardOfMessageId != nil
+                && subject == ComposeCopy.forwardSubject(state.forwardedSubject ?? ""))
+        return !(state.recipients == state.seededRecipients && blankSubject
             && Prefs.shared.isBodyUntouched(state.body) && state.stagedAttachmentIds.isEmpty)
+    }
+
+    /// Whether this composer is a forward the daemon is KNOWN to be unable to
+    /// keep: stats in, and no `drafts_v2`. Nil stats is not a refusal (see
+    /// `noteChange`); `save` itself writes nothing until the verdict lands.
+    private func forwardRefused(_ state: ComposeState) -> Bool {
+        guard state.forwardOfMessageId != nil, let stats = store.sitrep.stats else { return false }
+        return stats.drafts_v2 != true
     }
 
     /// Drop the `resolved` entries nobody can read any more. Only when NOTHING
@@ -199,8 +224,8 @@ final class DraftSaver {
     /// PARKED as a draft because it cannot go out (an account switch during its
     /// hold, or nowhere left to reopen it). No touched test, because the
     /// sender pressed send on it, which is as composed as mail gets. Tracked
-    /// with the flushes, so `settle` waits for it. A forward still is not
-    /// saved; see `save`.
+    /// with the flushes, so `settle` waits for it. A forward is saved only on
+    /// a `drafts_v2` daemon; see `save`.
     func saveDetached(_ slot: Slot, _ state: ComposeState) {
         let ticket = nextFlush
         nextFlush &+= 1
@@ -231,17 +256,24 @@ final class DraftSaver {
     }
 
     private func save(_ slot: Slot, _ state: ComposeState) async {
-        // A FORWARD IS NEVER SAVED. THE reason, stated once here because every
-        // other guard in this file points at it: `PUT /client/drafts` has no
-        // field for the forwarded message, and the row it writes is keyed by
-        // `reply_to_message_id` — which a forward leaves nil, exactly like a
-        // plain new message. So an autosaved forward would come back as the
-        // account's one new-message draft on the next `c`, wearing its
+        // A FORWARD IS SAVED ONLY ON A `drafts_v2` DAEMON, keyed by the message
+        // it forwards, one row per forwarded message like a reply's. THE
+        // reason, stated once here because every other guard in this file
+        // points at it: only that daemon's draft row has a field for the
+        // forwarded message (`forward_of_message_id`). An older one's
+        // `PUT /client/drafts` drops the field it does not know and keys the
+        // row by `reply_to_message_id`, which a forward leaves nil, exactly
+        // like a plain new message. So a forward saved there would come back
+        // as the account's one new-message draft on the next `c`, wearing its
         // "Fwd: …" subject with the original it was forwarding silently gone,
         // and the reader would send a quote of nothing. Losing an unsent
-        // forward is the cheaper failure: the original is still in the mailbox,
-        // one `f` away.
-        guard state.forwardOfMessageId == nil else { return }
+        // forward is the cheaper failure: the original is still in the
+        // mailbox, one `f` away.
+        //
+        // With NO VERDICT yet (stats not in) nothing is written either, for
+        // the same reason as new mail below; `touched` stays set and the next
+        // keystroke or the close flush retries.
+        if state.forwardOfMessageId != nil, store.sitrep.stats?.drafts_v2 != true { return }
         // A body that is only the seeded signature counts as blank: saving it
         // would mint a draft of nothing, and every later `c` would restore it.
         //
@@ -282,6 +314,15 @@ final class DraftSaver {
                     replyToMessageId: parent, to: payload.to, cc: payload.cc, bcc: payload.bcc,
                     subject: payload.subject, body: payload.body,
                     attachmentIds: payload.attachmentIds)
+            } else if let original = payload.forwardOfMessageId {
+                // A FORWARD, keyed by its original (the gate at the top already
+                // settled that this daemon has the field). Upserted by key like
+                // a reply, so no id to adopt first and no create to race: `f`
+                // on the same message twice is the same row.
+                saved = try await APIClient.shared.putDraft(
+                    replyToMessageId: nil, forwardOfMessageId: original, to: payload.to,
+                    cc: payload.cc, bcc: payload.bcc, subject: payload.subject,
+                    body: payload.body, attachmentIds: payload.attachmentIds)
             } else if let stats = store.sitrep.stats {
                 if stats.drafts_v2 == true {
                     // Many new-message drafts, told apart by id. The first save

@@ -394,9 +394,14 @@ struct IntroWordmark: View {
 /// The column is centered in a scroll view rather than between spacers: a long
 /// form (an error, an open disclosure) in a short window has to scroll, and
 /// spacers inside a scroll view never grow.
-struct IntroStage<Content: View>: View {
+struct IntroStage<Content: View, Footer: View>: View {
     var columnWidth: CGFloat = 440
     @ViewBuilder var content: (_ wide: Bool) -> Content
+    /// On a phone, pinned to the bottom of the screen where a thumb rests,
+    /// clear of the theme toggle's corner. A step with nothing to pin passes
+    /// EmptyView; a wide window never shows it, and the step draws its own
+    /// actions inline instead.
+    @ViewBuilder var footer: (_ wide: Bool) -> Footer
 
     var body: some View {
         GeometryReader { geometry in
@@ -434,10 +439,20 @@ struct IntroStage<Content: View>: View {
                         // and keeps the centered column beside the scene.
                         .padding(.top, wide ? 0 : 24)
                         .frame(
-                            maxWidth: .infinity, minHeight: geometry.size.height,
+                            maxWidth: .infinity, minHeight: wide ? geometry.size.height : 0,
                             alignment: wide ? .leading : .topLeading)
                 }
                 .scrollBounceBehavior(.basedOnSize)
+                // An inset, not an overlay, so a column made tall by large
+                // text scrolls above the pinned actions instead of under them.
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    if !wide {
+                        footer(wide)
+                            .padding(.horizontal, inset)
+                            // The theme toggle's corner: 20pt in, ~36pt tall.
+                            .padding(.bottom, 68)
+                    }
+                }
                 IntroWordmark()
                     .modifier(IntroEntrance(delay: 0, distance: 4))
                     .padding(inset)
@@ -463,6 +478,12 @@ private struct ColumnScrim: View {
             }
             .padding(.vertical, -56)
             .allowsHitTesting(false)
+    }
+}
+
+extension IntroStage where Footer == EmptyView {
+    init(columnWidth: CGFloat = 440, @ViewBuilder content: @escaping (_ wide: Bool) -> Content) {
+        self.init(columnWidth: columnWidth, content: content, footer: { _ in EmptyView() })
     }
 }
 

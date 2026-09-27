@@ -305,7 +305,33 @@ struct ConnectView: View {
     /// per step would remount the squelch renderer on every Back and blank it
     /// to the flat backdrop while it faded in again.
     private var loginSteps: some View {
-        IntroStage(columnWidth: stepColumnWidth) { wide in stepColumn(wide: wide) }
+        IntroStage(columnWidth: stepColumnWidth) { wide in
+            stepColumn(wide: wide)
+        } footer: { _ in
+            // On a phone the welcome screen's sign-in buttons sit at the
+            // bottom, in reach of the thumb; its copy stays at the top.
+            if case .welcome = effectiveGateStep {
+                WelcomeActions(
+                    retrySaved: savedRetry, retrying: retryingSavedConnection,
+                    login: signIn, selfHostedLogin: selfHost, maxWidth: .infinity)
+                    .modifier(IntroEntrance(delay: 0.32))
+            }
+        }
+    }
+
+    private func signIn() {
+        url = ""
+        mode = .pair
+        arrivedViaPairLink = false
+        signInOpened = true
+        gateStep = .credentials(.hosted)
+        Opener.open(Hosted.signIn(theme: colorScheme))
+    }
+
+    private func selfHost() {
+        url = "http://127.0.0.1:8848"
+        mode = .pair
+        gateStep = .credentials(.selfHosted)
     }
 
     /// The guide's command lines want more measure than a form does.
@@ -324,19 +350,8 @@ struct ConnectView: View {
                 wide: wide,
                 retrySaved: savedRetry,
                 retrying: retryingSavedConnection,
-                login: {
-                    url = ""
-                    mode = .pair
-                    arrivedViaPairLink = false
-                    signInOpened = true
-                    gateStep = .credentials(.hosted)
-                    Opener.open(Hosted.signIn(theme: colorScheme))
-                },
-                selfHostedLogin: {
-                    url = "http://127.0.0.1:8848"
-                    mode = .pair
-                    gateStep = .credentials(.selfHosted)
-                })
+                login: signIn,
+                selfHostedLogin: selfHost)
         case .selfHostGuide:
             SelfHostGuide(
                 wide: wide,
@@ -1099,53 +1114,74 @@ private struct WelcomeGate: View {
                 .padding(.top, 22)
                 .modifier(IntroEntrance(delay: 0.24))
 
-            VStack(alignment: .leading, spacing: 12) {
-                Button(action: login) {
-                    HStack(spacing: 9) {
-                        Image(systemName: "envelope.fill")
-                        Text("Sign in with Gmail")
-                        Spacer(minLength: 0)
-                        Image(systemName: "arrow.right")
-                    }
-                    .font(.system(size: 14, weight: .semibold))
-                    .padding(.vertical, 9)
-                    .padding(.horizontal, 8)
-                    .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(Palette.accent)
-                .keyboardShortcut(.defaultAction)
-
-                Button(action: selfHostedLogin) {
-                    HStack(spacing: 9) {
-                        Image(systemName: "server.rack")
-                        Text("Use a self-hosted server")
-                        Spacer(minLength: 0)
-                    }
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(Palette.inkDim)
-                    .padding(.vertical, 10)
-                    .padding(.horizontal, 16)
-                    .frame(maxWidth: .infinity)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .background(RoundedRectangle(cornerRadius: 10).fill(Palette.canvas.opacity(0.3)))
-                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
-
-                if let retrySaved {
-                    Button(retrying ? "Trying saved connection…" : "Try saved connection again", action: retrySaved)
-                        .buttonStyle(.plain)
-                        .font(.system(size: 12))
-                        .foregroundStyle(Palette.inkDim)
-                        .disabled(retrying)
-                        .padding(.top, 6)
-                }
+            // Inline in a window; on a phone they are the stage's footer,
+            // pinned to the bottom (ConnectView.loginSteps).
+            if wide {
+                WelcomeActions(
+                    retrySaved: retrySaved, retrying: retrying,
+                    login: login, selfHostedLogin: selfHostedLogin)
+                    .padding(.top, 32)
+                    .modifier(IntroEntrance(delay: 0.32))
             }
-            .frame(maxWidth: 340, alignment: .leading)
-            .padding(.top, 32)
-            .modifier(IntroEntrance(delay: 0.32))
         }
+    }
+}
+
+/// The welcome screen's two doors: Sign in with Gmail, and self-hosting as the
+/// quieter option beneath it.
+private struct WelcomeActions: View {
+    var retrySaved: (() -> Void)? = nil
+    var retrying = false
+    let login: () -> Void
+    let selfHostedLogin: () -> Void
+    /// A column's measure in a window; the full width of a phone's footer.
+    var maxWidth: CGFloat = 340
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Button(action: login) {
+                HStack(spacing: 9) {
+                    Image(systemName: "envelope.fill")
+                    Text("Sign in with Gmail")
+                    Spacer(minLength: 0)
+                    Image(systemName: "arrow.right")
+                }
+                .font(.system(size: 14, weight: .semibold))
+                .padding(.vertical, 9)
+                .padding(.horizontal, 8)
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Palette.accent)
+            .keyboardShortcut(.defaultAction)
+
+            Button(action: selfHostedLogin) {
+                HStack(spacing: 9) {
+                    Image(systemName: "server.rack")
+                    Text("Use a self-hosted server")
+                    Spacer(minLength: 0)
+                }
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Palette.inkDim)
+                .padding(.vertical, 10)
+                .padding(.horizontal, 16)
+                .frame(maxWidth: .infinity)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Palette.canvas.opacity(0.3)))
+            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
+
+            if let retrySaved {
+                Button(retrying ? "Trying saved connection…" : "Try saved connection again", action: retrySaved)
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Palette.inkDim)
+                    .disabled(retrying)
+                    .padding(.top, 6)
+            }
+        }
+        .frame(maxWidth: maxWidth, alignment: .leading)
     }
 }
 

@@ -946,6 +946,11 @@ final class AppStore {
         closeOverlaysForPractice()
         RehearsalMode.setEnabled(true)
         await RehearsalAPI.shared.reset(accountEmail: accountEmail)
+        // The fixture's calendar items keep the same ids from session to
+        // session, and the zone retires an item a day after it was first
+        // shown. Without this, a second run more than a day after the first
+        // starts the calendar lesson over an empty card.
+        CalendarVisibility.shared.forget(account: CalendarVisibility.practiceAccount)
         settings = ConnectionSettings(serverURL: "https://rehearsal.invalid", apiToken: "practice")
         connError = nil
         connStatus = .connected

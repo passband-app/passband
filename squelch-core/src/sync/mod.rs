@@ -2724,7 +2724,16 @@ fn gmail_quota_limit_note(body: &str) -> String {
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'/' | b'-'))
             {
-                return format!(", limit: {name}");
+                // What Google says it enforces, so a log line settles whether
+                // this project really is on the 6,000-unit standard model.
+                let value = entry["metadata"]["quota_limit_value"]
+                    .as_str()
+                    .filter(|v| {
+                        !v.is_empty() && v.len() <= 12 && v.bytes().all(|b| b.is_ascii_digit())
+                    })
+                    .map(|v| format!(" = {v}"))
+                    .unwrap_or_default();
+                return format!(", limit: {name}{value}");
             }
         }
     }
@@ -2793,11 +2802,13 @@ mod tests {
 
     #[test]
     fn gmail_quota_limit_note_names_the_limit_and_nothing_else() {
-        let per_user = r#"{"error":{"details":[{"reason":"RATE_LIMIT_EXCEEDED","metadata":{"quota_limit":"UnitsPerMinutePerUser","quota_metric":"gmail.googleapis.com/default_units","consumer":"projects/1"}}]}}"#;
+        let per_user = r#"{"error":{"details":[{"reason":"RATE_LIMIT_EXCEEDED","metadata":{"quota_limit":"UnitsPerMinutePerUser","quota_limit_value":"6000","quota_metric":"gmail.googleapis.com/default_units","consumer":"projects/1"}}]}}"#;
         assert_eq!(
             gmail_quota_limit_note(per_user),
-            ", limit: UnitsPerMinutePerUser"
+            ", limit: UnitsPerMinutePerUser = 6000"
         );
+        let odd_value = r#"{"error":{"details":[{"metadata":{"quota_limit":"PerUser","quota_limit_value":"lots"}}]}}"#;
+        assert_eq!(gmail_quota_limit_note(odd_value), ", limit: PerUser");
         let metric_only = r#"{"error":{"details":[{"metadata":{"quota_metric":"gmail.googleapis.com/default_units"}}]}}"#;
         assert_eq!(
             gmail_quota_limit_note(metric_only),

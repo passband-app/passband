@@ -49,7 +49,13 @@ struct OnboardingIntroView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     masthead
                         .modifier(IntroEntrance(delay: 0, distance: 4))
+                    // Narrow is the phone (the Mac window floors at 980pt).
+                    // Split evenly with the spacer below, the leftover height
+                    // set the story down on the crest of the nearest bands,
+                    // where the body line was unreadable; capped, it stays in
+                    // the dark sky the top gradient keeps for it.
                     Spacer(minLength: 24)
+                        .frame(maxHeight: wide ? .infinity : 40)
                     story(wide: wide)
                         .frame(maxWidth: wide ? 480 : .infinity, alignment: .leading)
                     Spacer(minLength: wide ? 24 : 260)

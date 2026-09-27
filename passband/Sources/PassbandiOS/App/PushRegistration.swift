@@ -43,6 +43,12 @@ final class PushRegistration {
         let settings = await center.notificationSettings()
         switch settings.authorizationStatus {
         case .notDetermined:
+            // NOT BEFORE THERE IS A MAILBOX. Launch and every foregrounding
+            // call this, so on a fresh install the dialog used to land on top
+            // of the cold open, asking to notify about mail from an account
+            // that does not exist yet. Every path that connects one calls
+            // back in here, which is where the question makes sense.
+            guard !AccountManager.shared.accounts.isEmpty else { return }
             guard (try? await center.requestAuthorization(options: Self.wanted)) == true else {
                 return
             }

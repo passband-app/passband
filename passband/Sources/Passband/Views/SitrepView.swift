@@ -264,6 +264,14 @@ struct SitrepView: View {
 
     // MARK: - masthead
 
+    /// The branch a dev build was cut from, or nil for release builds, builds
+    /// from main, and anything that never went through build.sh.
+    private static let buildBranch: String? = {
+        let raw = Bundle.main.infoDictionary?["PassbandBuildBranch"] as? String ?? ""
+        let branch = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return branch.isEmpty ? nil : branch
+    }()
+
     private var masthead: some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             HStack(alignment: .firstTextBaseline, spacing: 7) {
@@ -274,6 +282,21 @@ struct SitrepView: View {
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaintest)
                     .textCase(.uppercase)
+                if let branch = Self.buildBranch {
+                    // Dev builds only: which branch this binary came from, so
+                    // a desk with several test builds open can tell them
+                    // apart. Mono and tinted so it reads as a build stamp,
+                    // not product copy. Release builds and main leave the
+                    // plist key empty (see build.sh) and get nothing.
+                    Text(branch)
+                        .font(Typo.mono(10, weight: .medium))
+                        .foregroundStyle(Palette.warn)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Palette.warnSoft, in: Capsule())
+                        .help("Built from branch \(branch)")
+                        .accessibilityLabel("Development build from branch \(branch)")
+                }
             }
             Spacer(minLength: 12)
             IngestIndicator()

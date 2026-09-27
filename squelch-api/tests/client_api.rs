@@ -2073,6 +2073,105 @@ async fn an_archive_books_against_the_mailbox_gmail_budget() {
     );
 }
 
+fn archive_app(
+    base: String,
+    budget: Arc<squelch_core::gmail_budget::GmailBudget>,
+) -> (axum::Router, i64) {
+    let (state, store, acct) = state_with(|store, acct| {
+        let m = store
+            .upsert_message(&msg(acct, "gmail-paced", "t1", "hi", "body"))
+            .unwrap();
+        store
+            .set_triage(
+                m,
+                acct,
+                80,
+                Tier::Signal,
+                Sensitivity::Normal,
+                None,
+                "",
+                "",
+                None,
+            )
+            .unwrap();
+    });
+    let message_id = store.search(acct, "hi", 10, 0).unwrap()[0].id;
+    let app = router(
+        state
+            .with_write_test_harness(Arc::new(StubCreds), base)
+            .with_gmail_budget(budget),
+    );
+    (app, message_id)
+}
+
+/// A quota refusal on a WRITE (a send is the most expensive call there is)
+/// slows the mailbox's shared budget, so the sync loop backs off too.
+#[tokio::test]
+async fn a_quota_refused_archive_slows_the_mailbox_budget() {
+    use squelch_core::config::GmailQuotaProfile;
+    use squelch_core::gmail_budget::GmailBudget;
+    use std::time::Duration;
+
+    let (base, handle) = mock_gmail_seq(vec![(
+        403,
+        r#"{"error":{"details":[{"reason":"RATE_LIMIT_EXCEEDED"}]}}"#.to_string(),
+    )])
+    .await;
+    let budget = Arc::new(
+        GmailBudget::with_unit(GmailQuotaProfile::Standard, Duration::from_micros(10))
+            .with_adaptation(Duration::ZERO, Duration::from_secs(3600)),
+    );
+    let (app, message_id) = archive_app(base, budget.clone());
+    let resp = app
+        .oneshot(authed_json(
+            "POST",
+            "/client/actions/archive",
+            serde_json::json!({ "message_id": message_id, "confirm": true }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(resp.status(), StatusCode::OK);
+    handle.await.unwrap();
+    assert_eq!(budget.unit(), Duration::from_micros(20));
+}
+
+/// During a refusal hold a human's archive is answered at once with 503 and
+/// when to retry, and nothing is sent to Gmail: it must not sit out a
+/// one-minute hold while the app's 15 s request timeout calls it failed.
+#[tokio::test]
+async fn an_archive_during_a_quota_hold_is_told_to_retry_without_sending() {
+    use squelch_core::config::GmailQuotaProfile;
+    use squelch_core::gmail_budget::GmailBudget;
+    use std::time::{Duration, Instant};
+
+    let (base, _handle) = mock_gmail(1).await;
+    let budget = Arc::new(
+        GmailBudget::with_unit(GmailQuotaProfile::Standard, Duration::ZERO)
+            .with_adaptation(Duration::from_secs(60), Duration::from_secs(3600)),
+    );
+    budget.note_quota_refusal(None);
+    let (app, message_id) = archive_app(base, budget);
+    let started = Instant::now();
+    let resp = app
+        .oneshot(authed_json(
+            "POST",
+            "/client/actions/archive",
+            serde_json::json!({ "message_id": message_id, "confirm": true }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "must answer at once, not wait out the hold"
+    );
+    let body = body_json(resp).await;
+    assert!(
+        body.to_string().contains("Try again in"),
+        "the app should be told when to retry: {body}"
+    );
+}
+
 #[tokio::test]
 async fn human_can_archive_restricted_mail() {
     let (base, handle) = mock_gmail(1).await;
@@ -10444,4 +10543,234 @@ async fn grouped_recall_expands_without_repeating_hits_or_returning_done_early()
             "every recalled hit should be served in {mode}"
         );
     }
+}
+
+// --- GET /client/rules/suggest ----------------------------------------------
+
+/// One inbound message from `from` with `subject`, triaged at `sensitivity`.
+fn seed_suggest_msg(
+    store: &SqliteStore,
+    acct: i64,
+    gmail: &str,
+    from: &str,
+    subject: &str,
+    sensitivity: Sensitivity,
+) {
+    let mut m = msg(acct, gmail, gmail, subject, "body");
+    m.from_addr = from.to_string();
+    let id = store.upsert_message(&m).unwrap();
+    let kind = (sensitivity == Sensitivity::Sealed).then_some(SealedKind::Otp);
+    store
+        .set_triage(id, acct, 10, Tier::Noise, sensitivity, kind, "", "", None)
+        .unwrap();
+}
+
+/// A state whose rule suggester points at a mock answering `suggestion`.
+async fn app_with_rule_suggestion(
+    suggestion: &'static str,
+    seed: impl FnOnce(&SqliteStore, i64),
+) -> Harness {
+    let body = format!(
+        r#"{{"content":[{{"type":"text","text":"{{\"suggestion\":\"{suggestion}\"}}"}}],"stop_reason":"end_turn","usage":{{"input_tokens":40,"output_tokens":6}}}}"#
+    );
+    app_with_suggest_body(body, seed).await
+}
+
+/// The suggester wired to a mock that answers every request with `body`.
+async fn app_with_suggest_body(body: String, seed: impl FnOnce(&SqliteStore, i64)) -> Harness {
+    use squelch_core::config::Stage2Provider;
+    use squelch_core::triage::rule_suggest::RuleSuggestClient;
+
+    let url = spawn_classifier_mock(200, body).await;
+    let (state, store, acct) = state_with(seed);
+    let state = state.with_rule_suggestion(Some(RuleSuggestClient::new(
+        reqwest::Client::new(),
+        url,
+        "sk-test",
+        Stage2Provider::Anthropic,
+        "claude-haiku-4-5",
+        None,
+    )));
+    Harness {
+        app: router(state),
+        store,
+        acct,
+    }
+}
+
+fn usage_categories(store: &SqliteStore, acct: i64) -> Vec<String> {
+    store
+        .list_usage_by_category(acct, 30)
+        .unwrap()
+        .into_iter()
+        .map(|(c, _)| c)
+        .collect()
+}
+
+#[tokio::test]
+async fn rule_suggestion_is_cleaned_and_billed_to_its_own_category() {
+    let Harness { app, store, acct } =
+        app_with_rule_suggestion("only order confirmations.", |store, acct| {
+            for (g, s) in [("g1", "Your order shipped"), ("g2", "New in the store")] {
+                seed_suggest_msg(store, acct, g, "news@shop.com", s, Sensitivity::Normal);
+            }
+        })
+        .await;
+
+    let resp = app
+        .oneshot(authed("GET", "/client/rules/suggest?sender=News@Shop.com"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["suggestion"], "only order confirmations");
+    assert_eq!(
+        usage_categories(&store, acct),
+        vec!["rule_suggest".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn rule_suggestion_is_null_without_a_model_or_without_history() {
+    // No suggester on the default harness.
+    let Harness { app, .. } = harness(|store, acct| {
+        for g in ["g1", "g2", "g3"] {
+            seed_suggest_msg(store, acct, g, "a@b.com", "hi", Sensitivity::Normal);
+        }
+    });
+    let resp = app
+        .oneshot(authed("GET", "/client/rules/suggest?sender=a@b.com"))
+        .await
+        .unwrap();
+    assert_eq!(body_json(resp).await["suggestion"], Value::Null);
+
+    // A suggester, but one message is not a pattern: no call, no spend.
+    let Harness { app, store, acct } = app_with_rule_suggestion("mute them", |store, acct| {
+        seed_suggest_msg(store, acct, "g1", "a@b.com", "hi", Sensitivity::Normal);
+    })
+    .await;
+    let resp = app
+        .oneshot(authed("GET", "/client/rules/suggest?sender=a@b.com"))
+        .await
+        .unwrap();
+    assert_eq!(body_json(resp).await["suggestion"], Value::Null);
+    assert!(usage_categories(&store, acct).is_empty());
+}
+
+#[tokio::test]
+async fn sealed_mail_never_reaches_the_rule_suggester() {
+    // The digest IS the suggester's input, so a sealed subject absent from it
+    // cannot reach the model. Two sealed rows alone must not even clear the
+    // history floor.
+    let Harness { app, store, acct } = app_with_rule_suggestion("mute them", |store, acct| {
+        seed_suggest_msg(
+            store,
+            acct,
+            "g1",
+            "bank@b.com",
+            "code 111",
+            Sensitivity::Sealed,
+        );
+        seed_suggest_msg(
+            store,
+            acct,
+            "g2",
+            "bank@b.com",
+            "code 222",
+            Sensitivity::Sealed,
+        );
+        seed_suggest_msg(
+            store,
+            acct,
+            "g3",
+            "bank@b.com",
+            "statement",
+            Sensitivity::Normal,
+        );
+    })
+    .await;
+    let digest = store.sender_rule_digest(acct, "bank@b.com", 15).unwrap();
+    assert_eq!(
+        digest
+            .iter()
+            .map(|r| r.subject.as_str())
+            .collect::<Vec<_>>(),
+        vec!["statement"]
+    );
+    let resp = app
+        .oneshot(authed("GET", "/client/rules/suggest?sender=bank@b.com"))
+        .await
+        .unwrap();
+    assert_eq!(body_json(resp).await["suggestion"], Value::Null);
+    assert!(usage_categories(&store, acct).is_empty());
+}
+
+#[tokio::test]
+async fn rule_suggestion_rejects_an_empty_sender_with_or_without_a_model() {
+    let Harness { app, .. } = harness(|_, _| {});
+    let resp = app
+        .oneshot(authed("GET", "/client/rules/suggest?sender=%20"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "no model");
+
+    let Harness { app, .. } = app_with_rule_suggestion("mute them", |_, _| {}).await;
+    let resp = app
+        .oneshot(authed("GET", "/client/rules/suggest?sender=%20"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "with a model");
+}
+
+#[tokio::test]
+async fn rule_suggestion_stops_spending_at_the_daily_cap() {
+    use squelch_core::store::UsageTokens;
+    use squelch_core::triage::rule_suggest::DAILY_CAP;
+
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let Harness { app, store, acct } = app_with_rule_suggestion("mute them", |store, acct| {
+        for g in ["g1", "g2", "g3"] {
+            seed_suggest_msg(store, acct, g, "a@b.com", "hi", Sensitivity::Normal);
+        }
+        for _ in 0..DAILY_CAP {
+            store
+                .extract_bump_usage(acct, &today, "rule_suggest", UsageTokens::default())
+                .unwrap();
+        }
+    })
+    .await;
+    let resp = app
+        .oneshot(authed("GET", "/client/rules/suggest?sender=a@b.com"))
+        .await
+        .unwrap();
+    assert_eq!(body_json(resp).await["suggestion"], Value::Null);
+    let calls: u64 = store
+        .list_usage_by_category(acct, 1)
+        .unwrap()
+        .into_iter()
+        .flat_map(|(_, days)| days)
+        .map(|d| d.calls)
+        .sum();
+    assert_eq!(calls, u64::from(DAILY_CAP), "no call past the cap");
+}
+
+#[tokio::test]
+async fn a_garbled_suggestion_is_null_but_still_billed() {
+    // The provider answered and charged for it; the answer just does not parse.
+    let body = r#"{"content":[{"type":"text","text":"not json"}],"stop_reason":"end_turn","usage":{"input_tokens":40,"output_tokens":6}}"#.to_string();
+    let Harness { app, store, acct } = app_with_suggest_body(body, |store, acct| {
+        for g in ["g1", "g2"] {
+            seed_suggest_msg(store, acct, g, "a@b.com", "hi", Sensitivity::Normal);
+        }
+    })
+    .await;
+    let resp = app
+        .oneshot(authed("GET", "/client/rules/suggest?sender=a@b.com"))
+        .await
+        .unwrap();
+    assert_eq!(body_json(resp).await["suggestion"], Value::Null);
+    assert_eq!(
+        usage_categories(&store, acct),
+        vec!["rule_suggest".to_string()]
+    );
 }

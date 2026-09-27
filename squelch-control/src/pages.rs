@@ -614,7 +614,7 @@ pub fn success(
 <p class="alt">Need the app? <a href="{download}">Download Passband</a>.</p>
 <details>
 <summary>Button did nothing? Connect manually</summary>
-<p>Open Passband, choose hosted, and enter your server and pairing code.</p>
+<p>Open Passband, press Sign in with Gmail, and enter this server and pairing code in the form it shows. You can close the browser tab that opens.</p>
 <p><code>{url}</code></p>
 <p><span class="code">{code}</span></p>
 <p>The code works once and expires in {minutes} minutes. Keep it private.
@@ -672,7 +672,7 @@ pub fn app_signed_in(
 <p class="alt">Need the app? <a href="{download}">Download Passband</a>.</p>
 <details>
 <summary>Button did nothing? Connect manually</summary>
-<p>Open Passband, choose hosted, and enter your server and pairing code.</p>
+<p>Open Passband, press Sign in with Gmail, and enter this server and pairing code in the form it shows. You can close the browser tab that opens.</p>
 <p><code>{url}</code></p>
 <p><span class="code">{code}</span></p>
 <p>The code works once and expires in {minutes} minutes. Keep it private.
@@ -819,6 +819,27 @@ pub fn console_problem_with_link(
             heading = escape_html(heading),
             detail = escape_html(detail),
             url = escape_html(console_url),
+        ),
+    )
+}
+
+/// The app login's answer for a Google account with no mailbox here, WITH the
+/// way forward on it: the app has one "sign in with Gmail" door for everybody,
+/// so a newcomer arrives here, and this is where they learn to sign up.
+///
+/// The link is the signup form at this deployment's own root, never anything a
+/// caller named. Not an oracle for the same reason the page itself is not: only
+/// the person who just proved they hold this Google account can read it.
+pub fn app_no_tenant(heading: &str, detail: &str) -> Response {
+    page(
+        StatusCode::NOT_FOUND,
+        heading,
+        &format!(
+            r#"<h1>{heading}</h1>
+<p>{detail}</p>
+<p><a class="button" href="/">Sign up for Passband</a></p>"#,
+            heading = escape_html(heading),
+            detail = escape_html(detail),
         ),
     )
 }

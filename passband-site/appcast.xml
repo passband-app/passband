@@ -7,6 +7,15 @@
         <title>Passband</title>
         <link>https://passband.app/appcast.xml</link>
         <item>
+            <title>0.0.9</title>
+            <pubDate>Sun, 27 Sep 2026 06:01:40 +0000</pubDate>
+            <sparkle:version>1207</sparkle:version>
+            <sparkle:shortVersionString>0.0.9</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://passband.app/download/Passband-0.0.9.zip" length="8274783" type="application/octet-stream" sparkle:edSignature="q6kUgXOi2IdAzh1kprD2wZYBg1agf9flQCBijj27cJM063cvpHx3Uxs6H+aTor4UtgdRL22JSybnL8PTk0PFDw=="/>
+        </item>
+        <item>
             <title>0.0.8</title>
             <pubDate>Sun, 27 Sep 2026 00:12:07 +0000</pubDate>
             <sparkle:version>1149</sparkle:version>
@@ -23,15 +32,6 @@
             <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
             <enclosure url="https://passband.app/download/Passband-0.0.7.zip" length="7207332" type="application/octet-stream" sparkle:edSignature="R11d4GRR5IfsTrny/oBD2Iil5z6q7Q3SSy26sPuBtvMr7K8pQyjagzrRFkl7vLhml2PyDOEbl9OGWh+uDXkfBw=="/>
-        </item>
-        <item>
-            <title>0.0.6</title>
-            <pubDate>Fri, 28 Aug 2026 03:54:00 +0000</pubDate>
-            <sparkle:version>856</sparkle:version>
-            <sparkle:shortVersionString>0.0.6</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://passband.app/download/Passband-0.0.6.zip" length="6901068" type="application/octet-stream" sparkle:edSignature="M01aMYKj0a7uRuVfHPFztFwxurZctU/XlIdC5vi2kBN5C6n+I3oxnN4ySaqzmuxZdw3h6t4yJERa/8WHFk4hCg=="/>
         </item>
     </channel>
 </rss>

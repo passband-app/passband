@@ -119,10 +119,8 @@ struct SearchView: View {
     /// a nil result; an empty field clears it too, so the resting panel says
     /// nothing rather than "no matches." at a question nobody asked.
     private var answered: Bool {
-        store.search.fetchedQuery == store.search.query.trimmed
-            && store.search.fetchedSort == prefs.searchSort
-            && store.search.fetchedRelated == prefs.searchIncludeRelated
-            && store.search.fetchedRevision == store.search.revision
+        store.search.answers(
+            store.search.query.trimmed, sort: prefs.searchSort, related: prefs.searchIncludeRelated)
     }
 
     var body: some View {
@@ -447,14 +445,11 @@ struct SearchView: View {
         store.openThread(hit.thread_id)
     }
 
-    /// Put a submitted query in the ring. THE FETCHED TERM, never the live
-    /// field text: what earns a place here is a search that came back and was
-    /// acted on, and mid-edit those are two different strings (docs/SEARCH.md
-    /// §4.2). A nil fetched query — the fetch failed, or Enter beat it home —
-    /// is not a search anybody has seen the results of, so nothing is written.
+    /// Put a submitted query in the ring. What counts as submitted, and which
+    /// string is written, is `RecentSearchStore.remember`'s: the phone's Search
+    /// tab records through the same call, so the two shells cannot disagree.
     private func remember() {
-        guard let term = store.search.fetchedQuery else { return }
-        RecentSearchStore.shared.record(term)
+        RecentSearchStore.shared.remember(store.search)
     }
 
     /// Forget the list, and let go of it as well: the armed row is one of the
@@ -520,14 +515,13 @@ struct SearchView: View {
         // predecessor used to rely on someone else covering (backspace inside
         // the debounce window lands here). The CURRENT task owns the flag now;
         // see the cancelled exits below.
-        guard term != store.search.fetchedQuery || sort != store.search.fetchedSort
-            || related != store.search.fetchedRelated || revision != store.search.fetchedRevision else {
+        guard !store.search.answers(term, sort: sort, related: related) else {
             loading = false
             return
         }
         loading = true
         // Debounce: a fresh keystroke cancels this task before the request.
-        try? await Task.sleep(for: .milliseconds(220))
+        try? await Task.sleep(for: SearchFetch.debounce)
         // A CANCELLED TASK WRITES NOTHING. Its replacement has already set
         // `loading = true` for the keystroke that superseded it, and the two
         // resumptions are not ordered — clearing the flag here is how
@@ -537,12 +531,10 @@ struct SearchView: View {
         // used to be covering for).
         guard !Task.isCancelled else { return }
         do {
-            // PARTIAL, because this fetch fires while somebody is still typing:
-            // the trailing token is matched as a prefix, so "wif" finds "wifi"
-            // instead of nothing. The agent's own searches never ask for it.
-            let page = try await APIClient.shared.search(
-                term, limit: 50, mode: related ? .hybrid : .keyword, sort: sort,
-                partial: true, unfinishedFirst: true)
+            // PARTIAL, mode by preference, unfinished first and snippets
+            // cleaned: all of that is `SearchFetch`, shared with the phone. The
+            // agent's own searches never go through it.
+            let page = try await SearchFetch.page(term, sort: sort, related: related)
             // AND AGAIN AFTER THE AWAIT, which the iOS twin has always done
             // (`MobileSearchView`). A response landing in the window between
             // `task(id:)` cancelling this task and URLSession noticing resolves
@@ -553,11 +545,7 @@ struct SearchView: View {
             // words to it as a "refinement".
             guard !Task.isCancelled, term == store.search.query.trimmed,
                   revision == store.search.revision, related == prefs.searchIncludeRelated else { return }
-            store.search.hits = page.items.map { hit in
-                var hit = hit
-                hit.displaySnippet = SearchPreview.clean(hit.snippet)
-                return hit
-            }
+            store.search.hits = page.items
             store.search.diagnostics = page.diagnostics
             store.search.nextCursor = page.next_cursor
             // Fresh results land un-armed: Enter straight from the bar means
@@ -658,9 +646,7 @@ struct SearchView: View {
         loadingMore = true
         defer { loadingMore = false }
         do {
-            let page = try await APIClient.shared.search(
-                term, limit: 50, cursor: cursor, mode: related ? .hybrid : .keyword, sort: sort,
-                partial: true, unfinishedFirst: true)
+            let page = try await SearchFetch.page(term, cursor: cursor, sort: sort, related: related)
             guard term == store.search.fetchedQuery, store.search.nextCursor == cursor,
                   sort == store.search.fetchedSort, sort == prefs.searchSort,
                   related == store.search.fetchedRelated, related == prefs.searchIncludeRelated,
@@ -673,8 +659,6 @@ struct SearchView: View {
             // break the ForEach.
             var seen = Set(store.search.hits.map(\.id))
             for hit in page.items where seen.insert(hit.id).inserted {
-                var hit = hit
-                hit.displaySnippet = SearchPreview.clean(hit.snippet)
                 store.search.hits.append(hit)
             }
             store.search.nextCursor = page.next_cursor

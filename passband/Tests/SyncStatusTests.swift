@@ -21,6 +21,7 @@ struct SyncStatusTests {
         triageBlockedStates()
         startupIsNotAnAlarm()
         heroNeverLiesAboutAnEmptyBoard()
+        syncedStampIsTheDaemons()
         retriageBlockedDecodes()
         copyRules()
 
@@ -79,20 +80,27 @@ struct SyncStatusTests {
         equal(derive(all), .disconnected, "a dead credential outranks throttling")
         let noAuth = [throttledSync, "\"catch_up\":{\"done\":1,\"total\":9}", triage(queued: 5, waiting: true)]
             .joined(separator: ",")
-        if case .throttled(_, let reason, let waiting) = derive(noAuth) {
+        // THE RECOVERY: the retry is re-walking the mailbox and Gmail is
+        // answering it. The error is from the lifecycle before; the catch-up
+        // is what is happening now.
+        equal(
+            derive(noAuth), .catchingUp(done: 1, total: 9),
+            "a catch-up in progress outranks the error it is recovering from")
+        if case .throttled(_, let reason, let waiting) = derive(
+            throttledSync + "," + triage(queued: 5, waiting: true))
+        {
             equal(reason, "RATE_LIMIT_EXCEEDED", "the reason rides along")
             equal(waiting, 5, "with the queue size")
         } else {
-            expect(false, "throttling outranks catch-up and triage")
+            expect(false, "throttling outranks triage")
         }
         let network =
-            "\"sync\":{\"ok\":false,\"error\":{\"kind\":\"network\",\"reason\":\"no_response\"}},"
-            + "\"catch_up\":{\"done\":1,\"total\":9}"
+            "\"sync\":{\"ok\":false,\"error\":{\"kind\":\"network\",\"reason\":\"no_response\"}}"
         if case .gmailError(let kind, _, let next, _) = derive(network) {
             equal(kind, "network", "other errors keep their kind")
             expect(next == nil, "no retry time when the daemon gave none")
         } else {
-            expect(false, "a gmail error outranks a catch-up")
+            expect(false, "a gmail error is reported")
         }
         equal(
             derive("\"catch_up\":{\"done\":1,\"total\":9}," + triage(queued: 5, waiting: true)),
@@ -154,9 +162,19 @@ struct SyncStatusTests {
     }
 
     static func startupIsNotAnAlarm() {
+        // What a daemon before its first poll actually sends: nothing has
+        // failed, so sync is ok and triage is not waiting for it.
+        let fresh = "\"sync\":{\"ok\":true,\"consecutive_failures\":0},"
         equal(
-            derive("\"sync\":{\"ok\":false,\"consecutive_failures\":0}," + triage(queued: 0, waiting: true)),
-            .healthy, "a daemon before its first poll with nothing queued blocks nothing")
+            derive(fresh + triage(queued: 5)), .healthy,
+            "a fresh daemon with work queued is sorting, not blocked")
+        equal(
+            derive(fresh + "\"catch_up\":{\"done\":40,\"total\":900}," + triage(queued: 5)),
+            .catchingUp(done: 40, total: 900), "the first backfill reads as progress")
+        // A failed lifecycle holding up nothing is not worth a banner.
+        equal(
+            derive("\"sync\":{\"ok\":false,\"consecutive_failures\":1}," + triage(queued: 0, waiting: true)),
+            .healthy, "waiting for sync with nothing queued blocks nothing")
     }
 
     static func heroNeverLiesAboutAnEmptyBoard() {
@@ -176,6 +194,30 @@ struct SyncStatusTests {
         equal(
             SyncStatus.healthy.emptyHero(queued: 3, lastSync: now, now: now)?.title,
             "Sorting your mail.", "healthy with work queued says it is sorting")
+    }
+
+    /// Both platforms' "synced" stamp: the daemon's Gmail sync when it says,
+    /// never the app's own poll dressed up as one, tinted while sync fails.
+    static func syncedStampIsTheDaemons() {
+        let stamp = { (extra: String, refresh: Date?) in
+            SyncStatus.syncedStamp(
+                stats: stats(extra), clientRefresh: refresh, now: now, date: Fmt.date)
+        }
+        let failing = stamp(
+            "\"sync\":{\"ok\":false,\"consecutive_failures\":1,\"last_success_at\":\"\(iso(-7200))\"}",
+            now)
+        equal(failing.text, "synced 2h ago", "the daemon's stamp, not the app's poll")
+        expect(failing.warn, "a stale stamp while sync fails is tinted")
+        let never = stamp("\"sync\":{\"ok\":false,\"consecutive_failures\":1}", now)
+        equal(never.text, "not synced yet", "no daemon sync is not 'just now'")
+        let healthy = stamp(
+            "\"sync\":{\"ok\":true,\"consecutive_failures\":0,\"last_success_at\":\"\(iso(-30))\"}",
+            nil)
+        equal(healthy.text, "synced just now", "healthy")
+        expect(!healthy.warn, "and untinted")
+        let old = stamp("", now.addingTimeInterval(-300))
+        equal(old.text, "synced 5m ago", "an older daemon falls back to the app's poll")
+        expect(!old.warn, "with no tint")
     }
 
     static func retriageBlockedDecodes() {

@@ -274,20 +274,13 @@ struct MobileSitrepView: View {
                 .foregroundStyle(store.syncStatus.isWarning ? Palette.warn : Palette.inkFaint)
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else {
-            Text(syncedLabel)
+            // The same stamp and tint as the Mac's status strip.
+            let stamp = SyncStatus.syncedStamp(
+                stats: store.sitrep.stats, clientRefresh: store.lastRefresh, date: Fmt.date)
+            Text(stamp.text)
                 .font(Typo.micro)
-                .foregroundStyle(Palette.inkFaintest)
+                .foregroundStyle(stamp.warn ? Palette.warn : Palette.inkFaintest)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
-    }
-
-    /// "synced 4m ago" / "synced just now" — never the nonsense "synced now ago".
-    /// The daemon's own Gmail sync time when it says, the app's poll otherwise.
-    private var syncedLabel: String {
-        guard let last = store.daemonLastSync ?? store.lastRefresh else {
-            return "waiting for the first sync…"
-        }
-        let age = Fmt.relAge(last)
-        return (age.isEmpty || age == "now") ? "synced just now" : "synced \(age) ago"
     }
 }

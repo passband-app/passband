@@ -979,7 +979,7 @@ private struct StatusStrip: View {
         HStack(spacing: 9) {
             if !RehearsalMode.isEnabled {
             ChromeChip(
-                tone: store.sitrep.stats?.sync?.ok == false ? Palette.warn : Palette.inkDim,
+                tone: stamp.warn ? Palette.warn : Palette.inkDim,
                 help: "check for new mail now"
             ) {
                 guard !refreshing else { return }
@@ -993,7 +993,7 @@ private struct StatusStrip: View {
                     Image(systemName: "arrow.clockwise")
                         .font(.system(size: 10, weight: .semibold))
                         .symbolEffect(.rotate, isActive: refreshing)
-                    Text(syncedLabel)
+                    Text(stamp.text)
                 }
                 .font(Typo.micro)
             }
@@ -1012,22 +1012,10 @@ private struct StatusStrip: View {
         .padding(.top, 2)
     }
 
-    /// "synced 4m ago" / "synced just now" — never the nonsense "synced now ago".
-    ///
-    /// THE DAEMON'S GMAIL SYNC when it says, not this app's poll of the daemon:
-    /// the app polling a daemon that cannot reach Gmail is not a sync, and
-    /// reading it as one is how a throttled mailbox said "synced just now" for
-    /// days. An older daemon has no `sync` block, and then the old source stands.
-    private var syncedLabel: String {
-        if store.sitrep.stats?.sync != nil {
-            guard let last = store.daemonLastSync else { return "not synced yet" }
-            let age = Fmt.relAge(last)
-            return (age.isEmpty || age == "now") ? "synced just now" : "synced \(age) ago"
-        }
-        let age =
-            store.lastRefresh.map { Fmt.relAge($0) }
-            ?? Fmt.relAge(store.sitrep.stats?.last_surfaced_at)
-        return (age.isEmpty || age == "now") ? "synced just now" : "synced \(age) ago"
+    /// Shared with the phone's footnote: see `SyncStatus.syncedStamp`.
+    private var stamp: (text: String, warn: Bool) {
+        SyncStatus.syncedStamp(
+            stats: store.sitrep.stats, clientRefresh: store.lastRefresh, date: Fmt.date)
     }
 }
 

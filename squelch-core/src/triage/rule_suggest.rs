@@ -29,10 +29,17 @@ use crate::triage::text::{Untrusted, neutralize, truncate_trimmed};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-/// Wall-clock budget for one suggestion, request included. The card is already
-/// open and the owner may be typing; a suggestion that lands after they have
-/// started is dropped by the client anyway, so there is no point waiting long.
-const SUGGEST_BUDGET: Duration = Duration::from_secs(6);
+/// Per-request timeout. The card is already open and the owner may be typing;
+/// a suggestion that lands after they have started is dropped by the client
+/// anyway, so there is no point waiting long.
+const SUGGEST_TIMEOUT: Duration = Duration::from_secs(6);
+/// The outer backstop over the whole call. Headroom over [`SUGGEST_TIMEOUT`] so
+/// the request's own timeout (which still reports usage when the provider
+/// answered) wins the ordinary race; this only catches a hang past it.
+const SUGGEST_BUDGET: Duration = Duration::from_secs(8);
+/// Per-account-per-day ceiling on suggestion calls. A runaway guard, not a
+/// working budget: nobody opens the rule card this often by hand.
+pub const DAILY_CAP: u32 = 300;
 const SUGGEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 
 /// Below this many messages there is no pattern to read, only a guess, so no
@@ -208,7 +215,7 @@ impl RuleSuggestClient {
         let resolved = cfg.stage2.resolve_llm()?;
         // Redirects refused: the key rides every request (see rule_infer).
         let http = reqwest::Client::builder()
-            .timeout(SUGGEST_BUDGET)
+            .timeout(SUGGEST_TIMEOUT)
             .connect_timeout(SUGGEST_CONNECT_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -265,6 +272,10 @@ pub async fn suggest_at(
 /// Suggest a rule sentence, with the usage the call spent. INFALLIBLE and
 /// BOUNDED: every non-answer is `None` within [`SUGGEST_BUDGET`], and too
 /// little history skips the call entirely.
+///
+/// The usage rides back on EVERY outcome the provider reported it for, a
+/// refusal or a garbled answer included: those tokens were spent, and the
+/// caller bills whatever comes back.
 pub async fn suggest_rule(
     client: &RuleSuggestClient,
     input: &SuggestInput<'_>,
@@ -274,16 +285,20 @@ pub async fn suggest_rule(
     }
     match tokio::time::timeout(SUGGEST_BUDGET, suggest_at(client, input)).await {
         Ok(Ok(LlmOutcome::Ok(suggestion, usage))) => (suggestion, usage),
-        Ok(Ok(LlmOutcome::Refused(_))) => (None, None),
-        Ok(Ok(LlmOutcome::Failed(kind, _))) => {
+        Ok(Ok(LlmOutcome::Refused(usage))) => (None, usage),
+        Ok(Ok(LlmOutcome::Failed(kind, usage))) => {
             eprintln!("squelch: rule suggestion failed ({kind})");
-            (None, None)
+            (None, usage)
         }
         Ok(Err(e)) => {
             eprintln!("squelch: rule suggestion errored ({e})");
             (None, None)
         }
-        Err(_) => (None, None),
+        Err(_) => {
+            let secs = SUGGEST_BUDGET.as_secs();
+            eprintln!("squelch: rule suggestion exceeded its {secs}s budget");
+            (None, None)
+        }
     }
 }
 

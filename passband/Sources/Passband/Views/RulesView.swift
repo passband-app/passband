@@ -389,6 +389,9 @@ struct RuleEditor: View {
     /// taken with tab. Tune mode only; nil until (and unless) one arrives.
     /// It is SHOWN, never saved on its own: the owner takes it and saves it.
     @State private var suggestion: String?
+    /// Whether the suggestion was ever actually on screen: it arrived while the
+    /// field was still empty. One that lands behind typing was never offered.
+    @State private var suggestionShown = false
     @FocusState private var focusedField: FocusTarget?
 
     private enum FocusTarget { case pattern, want }
@@ -467,20 +470,19 @@ struct RuleEditor: View {
                 cycle(-1)
                 return true
             },
-            // ⌘-chorded because the want field owns every bare letter, and the
-            // hint row below teaches it.
+            // ⌘-chorded because the want field owns every bare letter. Taught
+            // by the advanced toggle's tooltip, not the footer, which keeps
+            // only the keys every save goes through.
             KeyBinding("d", "advanced", meta: true, allowInInput: true) { toggleAdvanced() },
             // BOTH SPELLINGS SAVE. Bare Enter is this card's own convention and
-            // the hint row has taught it since the card existed. ⌘Enter is the
+            // the footer teaches it. ⌘Enter is the
             // one every OTHER multi-line surface in the app uses — the group
             // editor, the composer, the inline reply — so a hand arriving from
             // any of them tries it first and, until now, got nothing. They
             // coexist because dispatch matches `meta` exactly in both
             // directions, so neither binding can answer for the other.
-            KeyBinding("Enter", "save rule", allowInInput: true) { Task { await save() } },
-            KeyBinding("Enter", "save rule", meta: true, allowInInput: true) {
-                Task { await save() }
-            },
+            KeyBinding("Enter", "save rule", allowInInput: true) { submit() },
+            KeyBinding("Enter", "save rule", meta: true, allowInInput: true) { submit() },
         ])
         .onAppear {
             // The want text is the rule, so it takes focus everywhere except
@@ -570,6 +572,15 @@ struct RuleEditor: View {
         want.isEmpty ? suggestion : nil
     }
 
+    /// Enter on an empty field with a suggestion showing reads as "yes, that",
+    /// so it takes the suggestion into the field instead of silently refusing
+    /// to save nothing. It does not save it: the second Enter does, after the
+    /// sentence has been in the field where it can be read and edited.
+    private func submit() {
+        if acceptSuggestion(requireFocus: false) { return }
+        Task { await save() }
+    }
+
     /// Put the suggestion in the field. From the keyboard only while the want
     /// field has focus, so tab in the pattern field keeps its own meaning.
     private func acceptSuggestion(requireFocus: Bool = true) -> Bool {
@@ -587,6 +598,7 @@ struct RuleEditor: View {
             sender: SenderID.address(sender))
         else { return }
         withAnimation(Motion.disclose) { suggestion = answer }
+        if want.isEmpty { suggestionShown = true }
     }
 
     private var wantLabel: String {
@@ -684,7 +696,7 @@ struct RuleEditor: View {
             } else {
                 #if os(macOS)
                     HStack(spacing: 10) {
-                        KeyHint("↵", "save")
+                        KeyHint("↵", offered == nil ? "save" : "use suggestion")
                         KeyHint("⌥↵", "new line")
                         // Tab takes a suggestion first; teach whichever it does.
                         if offered == nil, advanced { KeyHint("tab", "outcome") }
@@ -814,8 +826,8 @@ struct RuleEditor: View {
     private var subtitle: some View {
         switch mode {
         case .tune:
-            Text("from \(request.sender ?? "")")
-                .font(Typo.micro).foregroundStyle(Palette.inkFaintest)
+            // Unreachable: tune mode has a sender, and the header leads with it.
+            EmptyView()
         case .edit:
             Text("editing \(request.rule?.match_pattern ?? "")")
                 .font(Typo.micro).foregroundStyle(Palette.inkFaintest)
@@ -866,8 +878,8 @@ struct RuleEditor: View {
             var properties: [String: Any] = [
                 "has_want": !want.trimmed.isEmpty,
                 "edit": request.rule != nil,
-                "suggested": suggestion != nil,
-                "from_suggestion": suggestion != nil && want.trimmed == suggestion,
+                "suggested": suggestionShown,
+                "from_suggestion": suggestionShown && want.trimmed == suggestion,
             ]
             if let resolved { properties["disposition"] = resolved.rawValue }
             Analytics.capture("rule_created", properties)

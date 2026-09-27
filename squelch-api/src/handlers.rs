@@ -1929,21 +1929,40 @@ pub async fn suggest_rule(
     State(state): State<ApiState>,
     Query(params): Query<SuggestRuleQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
+    // Validated before anything else, so a client bug answers the same 400
+    // whether or not this daemon has a model.
     let sender = params.sender.trim().to_lowercase();
+    if sender.is_empty() {
+        return Err(ApiError::bad_request("sender must not be empty"));
+    }
     let none = || (no_store(), Json(serde_json::json!({ "suggestion": null })));
     let Some(client) = state.rule_suggest.clone() else {
         return Ok(none());
     };
-    if sender.is_empty() {
-        return Err(ApiError::bad_request("sender must not be empty"));
-    }
     let addr = sender.clone();
-    let (history, rules) = store_call(&state, move |store, account_id| {
+    let digest = store_call(&state, move |store, account_id| {
+        // The runaway guard: past the day's cap the route answers null
+        // without spending. Read from the same ledger the calls bill into.
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        let spent: u64 = store
+            .list_usage_by_category(account_id, 1)?
+            .into_iter()
+            .filter(|(c, _)| c == squelch_core::metrics::RULE_SUGGEST_USAGE_CATEGORY)
+            .flat_map(|(_, days)| days)
+            .filter(|d| d.day == today)
+            .map(|d| d.calls)
+            .sum();
+        if spent >= u64::from(rule_suggest::DAILY_CAP) {
+            return Ok(None);
+        }
         let history = store.sender_rule_digest(account_id, &addr, rule_suggest::HISTORY_LIMIT)?;
         let rules = store.list_sender_rules(account_id)?;
-        Ok((history, rules))
+        Ok(Some((history, rules)))
     })
     .await?;
+    let Some((history, rules)) = digest else {
+        return Ok(none());
+    };
     let existing: Vec<String> = rules
         .into_iter()
         .filter(|r| {

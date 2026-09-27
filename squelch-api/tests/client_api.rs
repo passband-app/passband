@@ -10471,12 +10471,17 @@ async fn app_with_rule_suggestion(
     suggestion: &'static str,
     seed: impl FnOnce(&SqliteStore, i64),
 ) -> Harness {
-    use squelch_core::config::Stage2Provider;
-    use squelch_core::triage::rule_suggest::RuleSuggestClient;
-
     let body = format!(
         r#"{{"content":[{{"type":"text","text":"{{\"suggestion\":\"{suggestion}\"}}"}}],"stop_reason":"end_turn","usage":{{"input_tokens":40,"output_tokens":6}}}}"#
     );
+    app_with_suggest_body(body, seed).await
+}
+
+/// The suggester wired to a mock that answers every request with `body`.
+async fn app_with_suggest_body(body: String, seed: impl FnOnce(&SqliteStore, i64)) -> Harness {
+    use squelch_core::config::Stage2Provider;
+    use squelch_core::triage::rule_suggest::RuleSuggestClient;
+
     let url = spawn_classifier_mock(200, body).await;
     let (state, store, acct) = state_with(seed);
     let state = state.with_rule_suggestion(Some(RuleSuggestClient::new(
@@ -10599,4 +10604,74 @@ async fn sealed_mail_never_reaches_the_rule_suggester() {
         .unwrap();
     assert_eq!(body_json(resp).await["suggestion"], Value::Null);
     assert!(usage_categories(&store, acct).is_empty());
+}
+
+#[tokio::test]
+async fn rule_suggestion_rejects_an_empty_sender_with_or_without_a_model() {
+    let Harness { app, .. } = harness(|_, _| {});
+    let resp = app
+        .oneshot(authed("GET", "/client/rules/suggest?sender=%20"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "no model");
+
+    let Harness { app, .. } = app_with_rule_suggestion("mute them", |_, _| {}).await;
+    let resp = app
+        .oneshot(authed("GET", "/client/rules/suggest?sender=%20"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "with a model");
+}
+
+#[tokio::test]
+async fn rule_suggestion_stops_spending_at_the_daily_cap() {
+    use squelch_core::store::UsageTokens;
+    use squelch_core::triage::rule_suggest::DAILY_CAP;
+
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let Harness { app, store, acct } = app_with_rule_suggestion("mute them", |store, acct| {
+        for g in ["g1", "g2", "g3"] {
+            seed_suggest_msg(store, acct, g, "a@b.com", "hi", Sensitivity::Normal);
+        }
+        for _ in 0..DAILY_CAP {
+            store
+                .extract_bump_usage(acct, &today, "rule_suggest", UsageTokens::default())
+                .unwrap();
+        }
+    })
+    .await;
+    let resp = app
+        .oneshot(authed("GET", "/client/rules/suggest?sender=a@b.com"))
+        .await
+        .unwrap();
+    assert_eq!(body_json(resp).await["suggestion"], Value::Null);
+    let calls: u64 = store
+        .list_usage_by_category(acct, 1)
+        .unwrap()
+        .into_iter()
+        .flat_map(|(_, days)| days)
+        .map(|d| d.calls)
+        .sum();
+    assert_eq!(calls, u64::from(DAILY_CAP), "no call past the cap");
+}
+
+#[tokio::test]
+async fn a_garbled_suggestion_is_null_but_still_billed() {
+    // The provider answered and charged for it; the answer just does not parse.
+    let body = r#"{"content":[{"type":"text","text":"not json"}],"stop_reason":"end_turn","usage":{"input_tokens":40,"output_tokens":6}}"#.to_string();
+    let Harness { app, store, acct } = app_with_suggest_body(body, |store, acct| {
+        for g in ["g1", "g2"] {
+            seed_suggest_msg(store, acct, g, "a@b.com", "hi", Sensitivity::Normal);
+        }
+    })
+    .await;
+    let resp = app
+        .oneshot(authed("GET", "/client/rules/suggest?sender=a@b.com"))
+        .await
+        .unwrap();
+    assert_eq!(body_json(resp).await["suggestion"], Value::Null);
+    assert_eq!(
+        usage_categories(&store, acct),
+        vec!["rule_suggest".to_string()]
+    );
 }

@@ -2443,8 +2443,9 @@ mod tests {
     }
 
     /// Both stats reads SEARCH the account's ready index, never scan the jobs
-    /// table or settle for `account_id` alone. Measured: 20 ms at 300k rows on
-    /// the progress index, ~0.5 ms on this one, per `/client/stats`.
+    /// table or settle for `account_id` alone. Unpinned, the planner (no
+    /// ANALYZE here) picks the re-triage progress index on `account_id` only:
+    /// the #266 review measured 20 ms at 300k rows per `/client/stats`.
     #[test]
     fn stats_queue_reads_use_the_account_ready_index() {
         let store = fixture();

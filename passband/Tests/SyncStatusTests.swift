@@ -210,6 +210,9 @@ struct SyncStatusTests {
         expect(failing.warn, "a stale stamp while sync fails is tinted")
         let never = stamp("\"sync\":{\"ok\":false,\"consecutive_failures\":1}", now)
         equal(never.text, "not synced yet", "no daemon sync is not 'just now'")
+        let first = stamp("\"sync\":{\"ok\":true,\"consecutive_failures\":0}", now)
+        equal(first.text, "first sync in progress\u{2026}", "a first run says it is on its way")
+        expect(!first.warn, "untinted: nothing has failed")
         let healthy = stamp(
             "\"sync\":{\"ok\":true,\"consecutive_failures\":0,\"last_success_at\":\"\(iso(-30))\"}",
             nil)

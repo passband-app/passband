@@ -96,8 +96,10 @@ enum SyncStatus: Equatable, Sendable {
             return (age.isEmpty || age == "now") ? "synced just now" : "synced \(age) ago"
         }
         if let sync = stats?.sync {
-            let text = date(sync.last_success_at).map(label) ?? "not synced yet"
-            return (text, !sync.ok)
+            // No sync yet: a first run (or a restart) that has not failed is
+            // on its way, and the stamp says so rather than raising a flag.
+            let first = sync.ok ? "first sync in progress\u{2026}" : "not synced yet"
+            return (date(sync.last_success_at).map(label) ?? first, !sync.ok)
         }
         let last = clientRefresh ?? date(stats?.last_surfaced_at)
         return (last.map(label) ?? "waiting for the first sync\u{2026}", false)

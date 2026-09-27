@@ -161,6 +161,11 @@ struct ComposePane: View {
                 // editing the match out) and puts the override in a footer of
                 // its own: sending through the guard stays a wide, deliberate
                 // target rather than a chip in the corner.
+                //
+                // ATTACH RIDES BESIDE IT, because the footer it has on the Mac
+                // is not here. The inline reply already offers it on a phone;
+                // a new message that could not take a file was the odd one out.
+                AttachButton(slot: .compose)
                 Button("send") { send(override: false) }
                     .buttonStyle(.glassProminent)
                     .tint(Palette.accent)
@@ -291,7 +296,8 @@ struct ComposePane: View {
         // mid-word. One statement per verb: the button, with its key beside it.
         HStack(spacing: 8) {
             // THE MESSAGE OPTIONS, DESKTOP ONLY. The phone renders this bar
-            // only for a blocked send (see the call site): the tracker switch
+            // only for a blocked send (see the call site), and its attach
+            // chip lives in the header beside send instead: the tracker switch
             // is what a phone would have to give the row for, and one switch
             // nobody came here to touch is not worth a strip of chrome between
             // the editor and the keyboard. A phone that wants the pixel changes

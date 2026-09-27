@@ -78,6 +78,7 @@ struct ConnectView: View {
 
     @State private var mode: ConnectMode = .pair
     @State private var gateStep: ConnectGateStep = .introduction
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var url = "http://127.0.0.1:8848"
     @State private var code = ""
     @State private var deviceName = Pairing.defaultDeviceName()
@@ -236,46 +237,103 @@ struct ConnectView: View {
 
     private var gateBody: some View {
         ZStack {
-            switch effectiveGateStep {
-            case .introduction:
-                OnboardingIntroView { gateStep = .welcome }
-            case .welcome:
-                WelcomeGate(
-                    retrySaved: savedRetry,
-                    retrying: retryingSavedConnection,
-                    login: {
-                        url = ""
-                        mode = .pair
-                        arrivedViaPairLink = false
-                        gateStep = .credentials(.hosted)
-                        Opener.open(Hosted.signIn(theme: colorScheme))
-                    },
-                    selfHostedLogin: {
-                        url = "http://127.0.0.1:8848"
-                        mode = .pair
-                        gateStep = .credentials(.selfHosted)
-                    })
-            case .selfHostGuide:
-                SelfHostGuide(
-                    back: { gateStep = .welcome },
-                    continueToForm: {
-                        mode = .pair
-                        gateStep = .credentials(.selfHosted)
-                    })
-            case .credentials:
-                IntroStage { wide in formColumn(wide: wide) }
+            if onIntro {
+                OnboardingIntroView { finishIntro() }
+                    .transition(introExit)
+            } else {
+                // No screen margin here: every login step is an IntroStage,
+                // full-bleed like the intro, with its own inset.
+                loginSteps
+                    .transition(loginEntrance)
             }
         }
-        // The phone's screen margin. On the Mac the card is a fixed measure
-        // floating in a large window and needs none.
-        #if !os(macOS)
-            .padding(.horizontal, 16)
-        #endif
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .overlay(alignment: .bottomTrailing) {
-            SetupThemeToggle()
-                .padding(20)
+            // On the phone the theme is a login-page setting: the intro is
+            // the scene and its swipe, with nothing in the corner to aim at.
+            #if os(iOS)
+                if !onIntro {
+                    SetupThemeToggle()
+                        .padding(20)
+                        .transition(.opacity)
+                }
+            #else
+                SetupThemeToggle()
+                    .padding(20)
+            #endif
         }
+    }
+
+    /// Leaving the intro. On the phone it is ANIMATED, carrying on from the
+    /// swipe that ended it: the scene recedes (a little smaller, drifting the
+    /// way the finger went, fading) while the login screen comes in from the
+    /// right, the two overlapping for half a second. The Mac still cuts.
+    private func finishIntro() {
+        #if os(iOS)
+            withAnimation(reduceMotion ? .easeInOut(duration: 0.3) : .smooth(duration: 0.6)) {
+                gateStep = .welcome
+            }
+        #else
+            gateStep = .welcome
+        #endif
+    }
+
+    private var introExit: AnyTransition {
+        #if os(iOS)
+            reduceMotion
+                ? .opacity
+                : .opacity.combined(with: .scale(scale: 0.92)).combined(with: .offset(x: -60))
+        #else
+            .identity
+        #endif
+    }
+
+    private var loginEntrance: AnyTransition {
+        #if os(iOS)
+            reduceMotion ? .opacity : .opacity.combined(with: .offset(x: 48))
+        #else
+            .identity
+        #endif
+    }
+
+    /// Everything after the intro. Moves between these are not animated, so
+    /// this keeps one identity and only enters and leaves as a whole.
+    @ViewBuilder
+    private var loginSteps: some View {
+        switch effectiveGateStep {
+        case .introduction:
+            EmptyView()
+        case .welcome:
+            WelcomeGate(
+                retrySaved: savedRetry,
+                retrying: retryingSavedConnection,
+                login: {
+                    url = ""
+                    mode = .pair
+                    arrivedViaPairLink = false
+                    gateStep = .credentials(.hosted)
+                    Opener.open(Hosted.signIn(theme: colorScheme))
+                },
+                selfHostedLogin: {
+                    url = "http://127.0.0.1:8848"
+                    mode = .pair
+                    gateStep = .credentials(.selfHosted)
+                })
+        case .selfHostGuide:
+            SelfHostGuide(
+                back: { gateStep = .welcome },
+                continueToForm: {
+                    mode = .pair
+                    gateStep = .credentials(.selfHosted)
+                })
+        case .credentials:
+            IntroStage { wide in formColumn(wide: wide) }
+        }
+    }
+
+    private var onIntro: Bool {
+        if case .introduction = effectiveGateStep { return true }
+        return false
     }
 
     /// The Add Account sheet's form: the same column as the gate's, worn as a

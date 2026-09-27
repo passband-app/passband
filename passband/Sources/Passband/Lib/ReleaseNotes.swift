@@ -110,6 +110,26 @@ enum ReleaseNotes {
     /// THE TABLE. Newest first, and the only place a release note is written.
     static let all: [ReleaseNote] = [
         ReleaseNote(
+            version: "0.0.10",
+            date: "2026-09-27",
+            headline: "The iPhone catches up.",
+            items: [
+                ReleaseItem(.app, "Visual Improvements"),
+                ReleaseItem(.app, "Email subheaders are displayed better"),
+                ReleaseItem(.app, "Search experience tuning"),
+                ReleaseItem(.app, "Bug Fixes"),
+                ReleaseItem(.ios, "New intro"),
+                ReleaseItem(.ios, "Attach files to emails"),
+                ReleaseItem(.ios, "Undo send for 5s"),
+                ReleaseItem(.ios, "Search remembers recent searches and finds partial matches"),
+                ReleaseItem(.ios, "\"Newsletters\" is now named \"Reading\""),
+                ReleaseItem(.ios, "Chat-style emails are bubbles"),
+                ReleaseItem(.ios, "Notifications show a readable name and your login code"),
+                ReleaseItem(.ios, "Tapping a login-code notification opens your codes"),
+                ReleaseItem(.ios, "Settings overhaul"),
+                ReleaseItem(.daemon, "Suggests a rule for a sender from how you treat their mail"),
+            ]),
+        ReleaseNote(
             version: "0.0.8",
             date: "2026-09-25",
             headline: "Biggest update by far. Now we're a real product?",

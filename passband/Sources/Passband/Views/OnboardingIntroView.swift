@@ -30,7 +30,7 @@ struct OnboardingIntroView: View {
             // while the squelch is open, a steady sine once it closes.
             .contentShape(Rectangle())
             .gesture(pageSwipe)
-            .onAppear { IntroHaptics.shared.noise() }
+            .onAppear { IntroHaptics.shared.switchOn() }
             .onDisappear { IntroHaptics.shared.stop() }
             .onChange(of: scenePhase) { _, phase in
                 if phase == .active { IntroHaptics.shared.resume() }

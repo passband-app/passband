@@ -111,9 +111,11 @@ final class IntroHaptics {
 
     /// Long enough that the loop's repeat is not a rhythm anybody picks out.
     static let noiseDuration: TimeInterval = 4
-    /// The sine's rate, and a loop of exactly `sineCycles` of it.
-    static let sineHz = 0.8
-    static let sineCycles = 12.0
+    /// The sine's rate (2s trough to crest), and a loop of exactly
+    /// `sineCycles` of it. The loop is one continuous event, which Core Haptics
+    /// caps at 30s, so cycles × period has to stay under that.
+    static let sineHz = 0.25
+    static let sineCycles = 6.0
 
     /// Static's range: the loop's transient strengths, its spacing, and its
     /// rumble. The burst decays onto exactly these, so the handover is felt as
@@ -208,7 +210,9 @@ final class IntroHaptics {
             relativeTime: 0, duration: d)
         // A curve holds at most 16 control points, so the wave is sampled into
         // consecutive curves, each timed from its own start.
-        let step = 1.0 / (hz * 8)
+        // Sixteen points a wave: the curve ramps linearly between them, and at
+        // this rate fewer would be felt as steps.
+        let step = 1.0 / (hz * 16)
         let samples = stride(from: 0.0, through: d + step / 2, by: step).map { t -> (TimeInterval, Float) in
             let wave = 0.5 + 0.5 * sin(2 * .pi * hz * t - .pi / 2)
             return (t, Float(0.1 + 0.8 * wave))

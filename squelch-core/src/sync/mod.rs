@@ -950,6 +950,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             let resp = self.send_get(url).await?;
             let status = resp.status();
             if status.is_success() {
+                self.gmail_budget.note_success();
                 return resp
                     .json::<T>()
                     .await
@@ -965,6 +966,11 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 .and_then(gmail_retry_after);
             let body = resp.text().await.unwrap_or_default();
             let kind = classify_gmail_status(status.as_u16(), &body);
+            // Google's refusal sets the pace for the whole mailbox: every
+            // caller holding this budget (sweeps and write door included) is
+            // held for the pause and comes back slower. See GmailBudget.
+            let slowed = matches!(kind, GmailErrorKind::Quota)
+                .then(|| self.gmail_budget.note_quota_refusal(retry_after));
             let delay = gmail_quota_delay(backoff, retry_after);
             if matches!(kind, GmailErrorKind::Quota)
                 && retry == GmailRetry::CatchUp
@@ -972,11 +978,13 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 && let Some(delay) = delay
             {
                 self.metrics.record_gmail_quota_retry();
+                let (hold, unit) = slowed.unwrap_or_default();
                 eprintln!(
-                    "squelch: Gmail quota limit ({}{}); pausing {}s, then retrying the same request (catch-up position retained)",
+                    "squelch: Gmail quota limit ({}{}); holding this mailbox's Gmail calls {}s, then retrying the same request at {:.0}% of the starting rate (catch-up position retained)",
                     gmail_error_reason(&body),
                     gmail_quota_limit_note(&body),
-                    delay.as_secs()
+                    hold.max(delay).as_secs(),
+                    self.gmail_budget.rate_percent(unit)
                 );
                 tokio::time::sleep(delay).await;
                 backoff = (backoff * 2).min(GMAIL_QUOTA_RETRY_CAP);
@@ -3834,10 +3842,12 @@ mod tests {
             config,
         )
         .with_api_base(base.to_string());
-        engine.gmail_budget = Arc::new(GmailBudget::with_unit(
-            crate::config::GmailQuotaProfile::Standard,
-            Duration::ZERO,
-        ));
+        // Unpaced, and no refusal pause: a quota test must not sit through
+        // production's one-minute hold.
+        engine.gmail_budget = Arc::new(
+            GmailBudget::with_unit(crate::config::GmailQuotaProfile::Standard, Duration::ZERO)
+                .with_adaptation(Duration::ZERO, Duration::ZERO),
+        );
         engine
     }
 
@@ -4022,6 +4032,45 @@ mod tests {
         assert_eq!(
             gmail_quota_delay(Duration::from_secs(1), gmail_retry_after(&future)),
             None
+        );
+    }
+
+    /// Google's quota refusal slows the MAILBOX, not just this request: the
+    /// shared budget comes back at half the rate, so the sweeps engine and
+    /// the write door slow down with the sync loop. A permission refusal is
+    /// not a quota signal and leaves the pace alone.
+    #[tokio::test]
+    async fn a_quota_refusal_slows_the_shared_budget() {
+        let g = MockGmail::default();
+        g.0.lock()
+            .unwrap()
+            .errors
+            .insert("a".into(), [(403, "RATE_LIMIT_EXCEEDED".into())].into());
+        g.0.lock().unwrap().errors.insert(
+            "b".into(),
+            [(403, "ACCESS_TOKEN_SCOPE_INSUFFICIENT".into())].into(),
+        );
+        let base = serve_mock(g.clone()).await;
+        let (store, acct) = store_at_cursor(Some(1));
+        let shared = Arc::new(
+            GmailBudget::with_unit(
+                crate::config::GmailQuotaProfile::Standard,
+                Duration::from_micros(10),
+            )
+            .with_adaptation(Duration::ZERO, Duration::from_secs(3600)),
+        );
+        let e = engine(store, acct, &base).with_gmail_budget(shared.clone());
+        let _ = e.get_json::<Value>(&format!("{base}/messages/b")).await;
+        assert_eq!(
+            shared.unit(),
+            Duration::from_micros(10),
+            "a permission 403 is not quota"
+        );
+        let _ = e.get_json::<Value>(&format!("{base}/messages/a")).await;
+        assert_eq!(
+            shared.unit(),
+            Duration::from_micros(20),
+            "a quota 403 halves the rate"
         );
     }
 

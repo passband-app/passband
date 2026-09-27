@@ -27,8 +27,9 @@ struct AskBar: View {
     /// Rendered markdown, kept across body evaluations — see MarkdownCache.
     @State private var rendered = MarkdownCache()
 
-    /// The conversation outlives this view — see AppStore.assistant.
-    private var session: AssistantSession { store.assistant }
+    /// The conversation outlives this view — see AppStore.assistant. While the
+    /// bar is watching a deeper search finish, it is that lane instead.
+    private var session: AssistantSession { store.askBarSession }
 
     /// The email behind the bar, as the agent should hear about it — nil when
     /// the bar was opened from a list. The summary lands a beat after the
@@ -83,7 +84,13 @@ struct AskBar: View {
         .keyBindings(.modal, [
             KeyBinding("Escape", "close", allowInInput: true) { onClose() }
         ])
-        .onAppear { focused = true }
+        .onAppear {
+            focused = true
+            store.finishLaneHandoff()
+        }
+        // A watched deeper search that finishes becomes the chat, so the
+        // follow-up field under it starts working.
+        .onChange(of: store.searchLane.running) { store.finishLaneHandoff() }
         // STRUCTURE ONLY. Animating anything that changes per token would smear
         // the streaming text; the count changes once per row.
         .animation(.smooth(duration: 0.25), value: session.transcript.count)
@@ -122,7 +129,7 @@ struct AskBar: View {
             Spacer()
             if !session.transcript.isEmpty {
                 Button {
-                    session.clear()
+                    store.newAskChat()
                     focused = true
                 } label: {
                     HStack(spacing: 4) {

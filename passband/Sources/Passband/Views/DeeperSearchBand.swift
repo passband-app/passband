@@ -96,7 +96,7 @@ struct DeeperSearchBand: View {
             // purpose; somebody who wants the whole answer, or to ask a
             // follow-up, takes the conversation to ⌘K, where it has room.
             if search.laneStarted && !session.transcript.isEmpty {
-                Button { store.expandSearchLaneToChat() } label: {
+                Button { store.openSearchLaneInChat() } label: {
                     Image(systemName: "arrow.up.left.and.arrow.down.right")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(Palette.inkFaint)
@@ -104,16 +104,15 @@ struct DeeperSearchBand: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .disabled(!store.canExpandSearchLane)
+                .disabled(store.assistant.running)
                 .help(expandHelp)
             }
         }
     }
 
     private var expandHelp: String {
-        if session.running { return "Continue in chat once the agent finishes." }
         if store.assistant.running { return "The chat is busy answering something else." }
-        return "Continue in chat: the full answer, and room for follow-ups."
+        return "Continue in chat: the full answer, and room for follow-ups. ⌘Return"
     }
 
     // MARK: - the lane's own rows

@@ -777,7 +777,18 @@ final class AppStore {
     var ruleEditor: RuleEditorRequest?
     var groupEditor: GroupEditorRequest?
     var processModeOpen = false
-    var askBarOpen = false
+    var askBarOpen = false {
+        // Every way the bar closes ends the watch: it is a view of the lane
+        // for as long as this one opening lasts, never a mode ⌘K reopens into.
+        didSet { if !askBarOpen { askBarWatchesLane = false } }
+    }
+    /// THE BAR IS SHOWING THE SEARCH LANE, LIVE. ⌘↩ over a lane that is still
+    /// answering cannot hand the conversation over (a running loop owns its
+    /// history), so the bar draws the lane itself until the run ends and then
+    /// `finishLaneHandoff` moves it into the chat, where follow-ups can go.
+    private(set) var askBarWatchesLane = false
+    /// The session the ⌘K bar draws: the chat, or the lane it is watching.
+    var askBarSession: AssistantSession { askBarWatchesLane ? searchLane : assistant }
     /// The ⌘K agent's conversation, HELD HERE rather than in AskBar: the modal
     /// is conditionally mounted, so a view-owned session would be torn down —
     /// mid-answer — every time the bar closed. Living in the store, the
@@ -2706,11 +2717,51 @@ final class AppStore {
         askBarOpen = true
     }
 
+    /// Whether ⌘↩ in search means "open what the lane said" rather than "ask".
+    var searchLaneHasConversation: Bool {
+        search.laneStarted && !searchLane.transcript.isEmpty
+    }
+
+    /// ⌘↩ WITH A CONVERSATION ALREADY GOING: show it rather than start another.
+    /// Idle, it is the expand button. Still answering, the bar watches the lane
+    /// and takes it over when the run ends. A busy ⌘K chat is left alone, since
+    /// either route would end with this replacing it mid-answer.
+    func openSearchLaneInChat() {
+        guard searchLaneHasConversation, !assistant.running else { return }
+        if searchLane.running {
+            askBarOpen = true
+            askBarWatchesLane = true
+        } else {
+            expandSearchLaneToChat()
+        }
+    }
+
+    /// The watched lane has finished: the chat takes the conversation over.
+    /// Called by the bar whenever the lane's run state settles, so a no-op
+    /// unless it is watching and the run really is over.
+    func finishLaneHandoff() {
+        guard askBarWatchesLane, !searchLane.running else { return }
+        askBarWatchesLane = false
+        assistant.adopt(searchLane)
+    }
+
+    /// ⌘⇧K and the bar's own button. Ends a watch first, so "new chat" can
+    /// never clear the search lane it happened to be showing.
+    func newAskChat() {
+        askBarWatchesLane = false
+        assistant.clear()
+        askBarOpen = true
+    }
+
     private var searchEvidenceTask: Task<Void, Never>?
     var preparingSearchEvidence: Bool { searchEvidenceTask != nil }
 
     /// Run the words currently in the field, even before keyword results arrive.
     func requestDeeperSearch() {
+        if searchLaneHasConversation {
+            openSearchLaneInChat()
+            return
+        }
         guard DeeperSearchPolicy.canRequest(query: search.query,
             choice: Prefs.shared.deeperSearch, running: searchLane.running || preparingSearchEvidence) else { return }
         resetSearchLane(keepingVerdict: true)

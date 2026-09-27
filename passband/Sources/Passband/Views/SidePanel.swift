@@ -276,22 +276,33 @@ struct SearchView: View {
         DispatchQueue.main.async { focused = true }
     }
 
+    /// ONE BUTTON, TWO VERBS, the same two ⌘↩ has: with a conversation going
+    /// it opens that conversation in ⌘K (see `openSearchLaneInChat`), and
+    /// before one it asks.
     private var askAgentButton: some View {
-        Button { store.requestDeeperSearch() } label: {
+        let opens = store.searchLaneHasConversation
+        return Button { store.requestDeeperSearch() } label: {
             HStack(spacing: 5) {
-                Image(systemName: "sparkles")
-                Text((store.searchLane.running || store.preparingSearchEvidence) ? "Searching…" : "Ask agent")
+                Image(systemName: opens ? "arrow.up.left.and.arrow.down.right" : "sparkles")
+                Text(opens ? "Open in chat"
+                    : (store.searchLane.running || store.preparingSearchEvidence) ? "Searching…" : "Ask agent")
                 if store.search.expanded { Kbd("⌘↩") }
             }
             .font(.system(size: 12, weight: .medium))
         }
         .buttonStyle(.plain)
         .foregroundStyle(Palette.accentInk)
-        .disabled(!DeeperSearchPolicy.canRequest(query: store.search.query,
-            choice: prefs.deeperSearch, running: store.searchLane.running || store.preparingSearchEvidence))
-        .help(prefs.deeperSearch == .off
-            ? "Enable deeper search in Settings to use the agent."
-            : "Ask the agent to search and read your mail. ⌘Return")
+        .disabled(opens
+            ? store.assistant.running
+            : !DeeperSearchPolicy.canRequest(query: store.search.query,
+                choice: prefs.deeperSearch, running: store.searchLane.running || store.preparingSearchEvidence))
+        .help(opens
+            ? (store.assistant.running
+                ? "The chat is busy answering something else."
+                : "Open this conversation in chat for the full answer and follow-ups. ⌘Return")
+            : prefs.deeperSearch == .off
+                ? "Enable deeper search in Settings to use the agent."
+                : "Ask the agent to search and read your mail. ⌘Return")
     }
 
     /// The hits themselves, extracted so the strip (band above) and the

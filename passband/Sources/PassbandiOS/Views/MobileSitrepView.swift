@@ -77,7 +77,6 @@ struct MobileSitrepView: View {
                     senders: Reading.prune(
                         store.zones.reading, resolved: store.resolvedIds),
                     cursor: cursor)
-                AgentRecordsZone()
                 footnote
             }
             .padding(.horizontal, 16)

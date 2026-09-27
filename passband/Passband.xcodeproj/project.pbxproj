@@ -105,6 +105,7 @@
 		45E3185440F05D41CF616B8D /* SitrepWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B7D3E42C4E6495943239602 /* SitrepWindow.swift */; };
 		462F8657C4CD7BAA224F5CDD /* NeedToday.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F65DF255404CE32FC4AD8CF /* NeedToday.swift */; };
 		4836A3C84F0310D8E5E60FCB /* UpdateVerbs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6895E072B54D7FEA646D6903 /* UpdateVerbs.swift */; };
+		4844BB010D4C2DFAD56727F5 /* ZoomSteps.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04968C0C118F8D82036B5293 /* ZoomSteps.swift */; };
 		4A484A26530C0131828B0A16 /* Loadable.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A74374DEAEE21CDF9A5067D /* Loadable.swift */; };
 		4A6FA53C127DAD99FB5AF300 /* SenderIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4C2C545E14D926E28E48DE6 /* SenderIdentity.swift */; };
 		4AC6AF18555B3DB2FE69CC91 /* ConnectionHealth.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FCD987D800267801D7B4DFE /* ConnectionHealth.swift */; };
@@ -189,6 +190,7 @@
 		7DC8CE09FEAF828333CCBF18 /* RecentSearchRing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 949E0180F1D5B2769F394945 /* RecentSearchRing.swift */; };
 		7F21E797FE1F0BCC24754007 /* AttachmentTray.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD9028BBB8ECDE62A486B41B /* AttachmentTray.swift */; };
 		7F575E0848A8BD54AF622141 /* Glass.swift in Sources */ = {isa = PBXBuildFile; fileRef = 50EA4F5B8A98576A0355A528 /* Glass.swift */; };
+		7F7E9564A2FD9B4B4169D26B /* ZoomSteps.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04968C0C118F8D82036B5293 /* ZoomSteps.swift */; };
 		7FE470A247D27B7BDD2059A8 /* AttachmentTray.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD9028BBB8ECDE62A486B41B /* AttachmentTray.swift */; };
 		811AE61DFEA4A6D99E9AFE40 /* SitrepPoller.swift in Sources */ = {isa = PBXBuildFile; fileRef = A31EE886D87910F0348A94AB /* SitrepPoller.swift */; };
 		81B5932453A50D4974259435 /* GroupPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0119D99E10BB97CC572DCA69 /* GroupPicker.swift */; };
@@ -408,6 +410,7 @@
 /* Begin PBXFileReference section */
 		00D13052ED3A4D60224B1B18 /* MainWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainWindow.swift; sourceTree = "<group>"; };
 		0119D99E10BB97CC572DCA69 /* GroupPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GroupPicker.swift; sourceTree = "<group>"; };
+		04968C0C118F8D82036B5293 /* ZoomSteps.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZoomSteps.swift; sourceTree = "<group>"; };
 		05270E444AAA1678F50EC0F0 /* ImageSchemeHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageSchemeHandler.swift; sourceTree = "<group>"; };
 		06A50E65F84872DFA0504B96 /* DraftSaver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DraftSaver.swift; sourceTree = "<group>"; };
 		06AB2FB92191FC4913C38FFF /* ThreadMinimap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadMinimap.swift; sourceTree = "<group>"; };
@@ -767,6 +770,7 @@
 				EEFA34554013DFB615774309 /* Trackers.swift */,
 				74A0D0F666787312F4991788 /* TriageTargets.swift */,
 				380A6F03DF41EB8ACAACDBFC /* UsageSeries.swift */,
+				04968C0C118F8D82036B5293 /* ZoomSteps.swift */,
 			);
 			path = Lib;
 			sourceTree = "<group>";
@@ -1296,6 +1300,7 @@
 				CF34A69E15DFE9980A622162 /* WhatsNewCard.swift in Sources */,
 				6F3982A3598CCC296C35C2E6 /* WireTypes.swift in Sources */,
 				126B9D58B8378EDF351CDE33 /* Zoom.swift in Sources */,
+				7F7E9564A2FD9B4B4169D26B /* ZoomSteps.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1469,6 +1474,7 @@
 				0A10F1733FF17A416C100485 /* WhatsNew.swift in Sources */,
 				F7F2772B8DCFEA19D81F022E /* WhatsNewCard.swift in Sources */,
 				B91230E83D52E90A46495F77 /* WireTypes.swift in Sources */,
+				4844BB010D4C2DFAD56727F5 /* ZoomSteps.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

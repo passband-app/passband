@@ -608,6 +608,9 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// the only Gmail caller in the process.
     gmail_budget: Arc<GmailBudget>,
     gmail_quota_backoff: Duration,
+    /// The longest a catch-up request sleeps on its own between quota retries
+    /// ([`GMAIL_QUOTA_RETRY_CAP`]; a field so a test can shrink it).
+    gmail_quota_retry_cap: Duration,
     /// LLM key + provider + endpoint URL, resolved once at startup. `None`
     /// disables LLM triage gracefully: rows stay queued, one stderr notice,
     /// sync continues. The key is never logged.
@@ -766,6 +769,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             http,
             gmail_budget,
             gmail_quota_backoff: Duration::from_secs(1),
+            gmail_quota_retry_cap: GMAIL_QUOTA_RETRY_CAP,
             stage2_llm,
             embedder: None,
             embedder_gate: None,
@@ -971,7 +975,16 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             // held for the pause and comes back slower. See GmailBudget.
             let slowed = matches!(kind, GmailErrorKind::Quota)
                 .then(|| self.gmail_budget.note_quota_refusal(retry_after));
-            let delay = gmail_quota_delay(backoff, retry_after);
+            // When the budget took the refusal, IT does the waiting: every
+            // admission is held until the hold ends. So a Retry-After past
+            // this call's own sleep cap no longer has to end the request (and
+            // restart a 799-message catch-up) unless the hold is hours long.
+            let delay = gmail_quota_delay(backoff, retry_after, self.gmail_quota_retry_cap).or(
+                match slowed {
+                    Some((hold, _)) if hold <= CATCHUP_HOLD_CAP => Some(Duration::ZERO),
+                    _ => None,
+                },
+            );
             if matches!(kind, GmailErrorKind::Quota)
                 && retry == GmailRetry::CatchUp
                 && attempt < GMAIL_QUOTA_RETRIES
@@ -987,7 +1000,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                     self.gmail_budget.rate_percent(unit)
                 );
                 tokio::time::sleep(delay).await;
-                backoff = (backoff * 2).min(GMAIL_QUOTA_RETRY_CAP);
+                backoff = (backoff * 2).min(self.gmail_quota_retry_cap);
                 continue;
             }
             self.metrics
@@ -2643,18 +2656,23 @@ enum GmailRetry {
 const GMAIL_QUOTA_RETRIES: usize = 2;
 const GMAIL_QUOTA_RETRY_CAP: Duration = Duration::from_secs(30);
 
-fn gmail_quota_delay(backoff: Duration, retry_after: Option<Duration>) -> Option<Duration> {
+fn gmail_quota_delay(
+    backoff: Duration,
+    retry_after: Option<Duration>,
+    cap: Duration,
+) -> Option<Duration> {
     // A longer server instruction ends this call. Do not sleep unboundedly or
     // truncate the instruction and retry earlier than Gmail allows.
-    if retry_after.is_some_and(|delay| delay > GMAIL_QUOTA_RETRY_CAP) {
+    if retry_after.is_some_and(|delay| delay > cap) {
         return None;
     }
-    Some(
-        backoff
-            .min(GMAIL_QUOTA_RETRY_CAP)
-            .max(retry_after.unwrap_or_default()),
-    )
+    Some(backoff.min(cap).max(retry_after.unwrap_or_default()))
 }
+
+/// The longest budget hold a catch-up request waits out in place. Past it
+/// (Google asking for hours: a daily limit, not a rolling minute) the request
+/// ends and the lifecycle's own backoff takes over, as before.
+const CATCHUP_HOLD_CAP: Duration = Duration::from_secs(300);
 
 /// Retry-After accepts seconds or an HTTP date. Never retry before it elapses.
 fn gmail_retry_after(value: &str) -> Option<Duration> {
@@ -2676,30 +2694,12 @@ fn gmail_retry_after(value: &str) -> Option<Duration> {
 /// `reason` in the JSON body. Everything else is `http`, which is the bucket
 /// that means "read the logs".
 fn classify_gmail_status(status: u16, body: &str) -> GmailErrorKind {
-    const QUOTA_REASONS: [&str; 6] = [
-        "rate_limit_exceeded",
-        "quota_exceeded",
-        "ratelimitexceeded",
-        "userratelimitexceeded",
-        "quotaexceeded",
-        "dailylimitexceeded",
-    ];
     match status {
         401 => GmailErrorKind::Auth,
-        429 => GmailErrorKind::Quota,
-        // Bounded: an error body is a few hundred bytes, and the reason sits at
-        // the front of it. Never logged, only matched.
-        403 => {
-            let head: String = body.chars().take(2048).collect::<String>().to_lowercase();
-            if QUOTA_REASONS.iter().any(|r| head.contains(r)) {
-                GmailErrorKind::Quota
-            } else {
-                // A scope/permission 403 stays in `http`: it is rare, it is not
-                // a credential this daemon can refresh its way out of, and the
-                // stderr line already names it.
-                GmailErrorKind::Http
-            }
-        }
+        // A scope/permission 403 stays in `http`: it is rare, it is not a
+        // credential this daemon can refresh its way out of, and the stderr
+        // line already names it. The quota test is shared with the write door.
+        _ if crate::gmail_budget::is_quota_refusal(status, body) => GmailErrorKind::Quota,
         _ => GmailErrorKind::Http,
     }
 }
@@ -4016,21 +4016,33 @@ mod tests {
     #[test]
     fn gmail_quota_sleep_budget_is_bounded() {
         assert_eq!(
-            gmail_quota_delay(Duration::from_secs(1), Some(Duration::from_secs(20))),
+            gmail_quota_delay(
+                Duration::from_secs(1),
+                Some(Duration::from_secs(20)),
+                GMAIL_QUOTA_RETRY_CAP
+            ),
             Some(Duration::from_secs(20))
         );
         assert_eq!(
-            gmail_quota_delay(Duration::from_secs(500), None),
+            gmail_quota_delay(Duration::from_secs(500), None, GMAIL_QUOTA_RETRY_CAP),
             Some(Duration::from_secs(30))
         );
         assert_eq!(
-            gmail_quota_delay(Duration::from_secs(1), Some(Duration::from_secs(31))),
+            gmail_quota_delay(
+                Duration::from_secs(1),
+                Some(Duration::from_secs(31)),
+                GMAIL_QUOTA_RETRY_CAP
+            ),
             None
         );
         assert!(GMAIL_QUOTA_RETRY_CAP * GMAIL_QUOTA_RETRIES as u32 <= Duration::from_secs(60));
         let future = (Utc::now() + chrono::Duration::hours(1)).to_rfc2822();
         assert_eq!(
-            gmail_quota_delay(Duration::from_secs(1), gmail_retry_after(&future)),
+            gmail_quota_delay(
+                Duration::from_secs(1),
+                gmail_retry_after(&future),
+                GMAIL_QUOTA_RETRY_CAP
+            ),
             None
         );
     }
@@ -4072,6 +4084,60 @@ mod tests {
             Duration::from_micros(20),
             "a quota 403 halves the rate"
         );
+    }
+
+    /// A success through the ENGINE lets the shared budget recover; without
+    /// it production would stay slowed until the daemon restarts.
+    #[tokio::test]
+    async fn an_engine_success_lets_the_budget_recover() {
+        let g = MockGmail::default();
+        let base = serve_mock(g.clone()).await;
+        let (store, acct) = store_at_cursor(Some(1));
+        let shared = Arc::new(
+            GmailBudget::with_unit(
+                crate::config::GmailQuotaProfile::Standard,
+                Duration::from_micros(10),
+            )
+            .with_adaptation(Duration::ZERO, Duration::ZERO),
+        );
+        shared.note_quota_refusal(None);
+        assert_eq!(shared.unit(), Duration::from_micros(20));
+        let e = engine(store, acct, &base).with_gmail_budget(shared.clone());
+        e.get_json::<Value>(&format!("{base}/profile"))
+            .await
+            .unwrap();
+        assert_eq!(shared.unit(), Duration::from_micros(18));
+    }
+
+    /// Google asks for longer than the catch-up's own sleep cap, but the
+    /// budget is doing the waiting now: the request retries after the hold
+    /// instead of failing and restarting the whole catch-up.
+    #[tokio::test]
+    async fn a_catch_up_retries_through_a_hold_longer_than_its_sleep_cap() {
+        let g = MockGmail::default();
+        g.body("a", sent_eml(Utc::now(), "a@example.com", "a"));
+        {
+            let mut state = g.0.lock().unwrap();
+            state
+                .errors
+                .insert("a".into(), [(429, "RATE_LIMIT_EXCEEDED".into())].into());
+            state.retry_after = Some("2".into());
+        }
+        let base = serve_mock(g.clone()).await;
+        let (store, acct) = store_at_cursor(Some(1));
+        let mut e = engine(store, acct, &base);
+        e.gmail_quota_retry_cap = Duration::from_millis(500);
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            e.get_json_with_retry::<Value>(&format!("{base}/messages/a"), GmailRetry::CatchUp),
+        )
+        .await
+        .expect("the hold is seconds, not forever");
+        assert!(
+            result.is_ok(),
+            "the catch-up request should survive the hold"
+        );
+        assert_eq!(g.calls("get:a"), 2);
     }
 
     #[tokio::test]

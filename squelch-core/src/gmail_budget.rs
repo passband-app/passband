@@ -75,6 +75,10 @@ struct Pace {
     unit: Duration,
     /// Since when the mailbox has gone unrefused; recovery counts from here.
     calm_since: Instant,
+    /// The end of the current refusal hold. Refusals that land inside it are
+    /// the same event (other requests already in flight when Google tripped)
+    /// and extend the hold without halving the rate again.
+    held_until: Instant,
 }
 
 impl GmailBudget {
@@ -101,6 +105,7 @@ impl GmailBudget {
                 next: now,
                 unit,
                 calm_since: now,
+                held_until: now,
             }),
         }
     }
@@ -144,14 +149,43 @@ impl GmailBudget {
     /// for the log line.
     pub fn note_quota_refusal(&self, retry_after: Option<Duration>) -> (Duration, Duration) {
         let hold = self.pause.max(retry_after.unwrap_or_default());
-        let until = Instant::now() + hold;
+        let now = Instant::now();
+        let until = now + hold;
         let mut pace = self.pace();
-        pace.unit = (pace.unit * 2).min(self.max);
-        if until > pace.next {
-            pace.next = until;
+        // One trip, one halving: a refusal inside a hold is another request
+        // that was already in flight, not a second signal.
+        if now >= pace.held_until {
+            pace.unit = (pace.unit * 2).min(self.max);
         }
-        pace.calm_since = until;
+        pace.held_until = pace.held_until.max(until);
+        pace.next = pace.next.max(until);
+        pace.calm_since = pace.held_until;
         (hold, pace.unit)
+    }
+
+    /// [`Self::admit`], but give up after `max_wait` and say how long the wait
+    /// would have been. For the write door: a human's send must not sit for a
+    /// minute behind a refusal hold while the app's request times out, so it
+    /// is told to try again instead. A cancelled wait books nothing.
+    pub async fn admit_within(
+        &self,
+        method: &str,
+        path: &str,
+        max_wait: Duration,
+    ) -> Result<(), Duration> {
+        // A hold that plainly outlasts the bound answers now, not after it.
+        let known_wait = self.pace().next.saturating_duration_since(Instant::now());
+        if known_wait > max_wait {
+            return Err(known_wait);
+        }
+        match tokio::time::timeout(max_wait, self.admit(method, path)).await {
+            Ok(()) => Ok(()),
+            Err(_) => Err(self
+                .pace()
+                .next
+                .saturating_duration_since(Instant::now())
+                .max(Duration::from_secs(1))),
+        }
     }
 
     /// Google answered. After a full recovery interval with no refusal, speed
@@ -184,6 +218,29 @@ impl GmailBudget {
     /// The current pacing unit, for tests, logs and diagnostics.
     pub fn unit(&self) -> Duration {
         self.pace().unit
+    }
+}
+
+/// Whether a non-2xx Gmail response is a QUOTA refusal. 429 always is. 403 is
+/// ambiguous: Google returns it both for "asking too fast" and for "this
+/// credential may not do that", told apart only by the reason in the body.
+/// Bounded and case-folded; the body is only matched, never logged.
+pub fn is_quota_refusal(status: u16, body: &str) -> bool {
+    const QUOTA_REASONS: [&str; 6] = [
+        "rate_limit_exceeded",
+        "quota_exceeded",
+        "ratelimitexceeded",
+        "userratelimitexceeded",
+        "quotaexceeded",
+        "dailylimitexceeded",
+    ];
+    match status {
+        429 => true,
+        403 => {
+            let head: String = body.chars().take(2048).collect::<String>().to_lowercase();
+            QUOTA_REASONS.iter().any(|r| head.contains(r))
+        }
+        _ => false,
     }
 }
 
@@ -318,6 +375,76 @@ mod tests {
             waited >= Duration::from_millis(100),
             "waited only {waited:?}"
         );
+    }
+
+    /// Two requests were in flight when Google tripped: both come back
+    /// refused, but that is one event and must cost one halving, not two.
+    #[test]
+    fn refusals_inside_one_hold_halve_the_rate_once() {
+        let b = GmailBudget::with_unit(GmailQuotaProfile::Standard, Duration::from_millis(1))
+            .with_adaptation(Duration::from_secs(60), Duration::from_secs(3600));
+        b.note_quota_refusal(None);
+        b.note_quota_refusal(None);
+        b.note_quota_refusal(None);
+        assert_eq!(b.unit(), Duration::from_millis(2));
+    }
+
+    /// Recovery counts from the END of the hold. Without that, the first
+    /// success after a hold on a long-lived budget would speed straight back
+    /// up, because the old calm window is already long past.
+    #[tokio::test]
+    async fn recovery_counts_from_the_end_of_the_hold() {
+        let b = GmailBudget::with_unit(GmailQuotaProfile::Standard, Duration::from_millis(10))
+            .with_adaptation(Duration::from_millis(200), Duration::from_millis(30));
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        b.note_quota_refusal(None);
+        b.note_success();
+        assert_eq!(
+            b.unit(),
+            Duration::from_millis(20),
+            "no speed-up during the hold"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bounded_wait_gives_up_and_says_how_long() {
+        let b = GmailBudget::with_unit(GmailQuotaProfile::Standard, Duration::ZERO)
+            .with_adaptation(Duration::from_secs(60), Duration::from_secs(3600));
+        b.note_quota_refusal(None);
+        let started = Instant::now();
+        let wait = b
+            .admit_within("POST", "/messages/send", Duration::from_millis(50))
+            .await
+            .expect_err("a 60 s hold outlasts a 50 ms bound");
+        assert!(
+            started.elapsed() < Duration::from_millis(20),
+            "a known long hold answers at once"
+        );
+        assert!(wait >= Duration::from_secs(55), "reported {wait:?}");
+        // Nothing was booked by the abandoned wait.
+        assert!(
+            b.admit_within("GET", "/profile", Duration::from_millis(10))
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn quota_refusals_are_told_apart_from_permission_refusals() {
+        assert!(is_quota_refusal(429, ""));
+        assert!(is_quota_refusal(
+            403,
+            r#"{"error":{"details":[{"reason":"RATE_LIMIT_EXCEEDED"}]}}"#
+        ));
+        assert!(is_quota_refusal(
+            403,
+            r#"{"error":{"errors":[{"reason":"userRateLimitExceeded"}]}}"#
+        ));
+        assert!(!is_quota_refusal(
+            403,
+            r#"{"error":{"details":[{"reason":"ACCESS_TOKEN_SCOPE_INSUFFICIENT"}]}}"#
+        ));
+        assert!(!is_quota_refusal(500, "rateLimitExceeded"));
     }
 
     #[test]

@@ -31,6 +31,10 @@ pub enum WriteError {
     Transport(String),
     /// The caller passed invalid input (e.g. empty send body).
     Invalid(String),
+    /// The mailbox's Gmail budget is holding every call after a quota refusal,
+    /// longer than a human's request should wait. Nothing was sent; try again
+    /// in about this many seconds.
+    Paced { retry_in_secs: u64 },
 }
 
 impl std::fmt::Display for WriteError {
@@ -42,6 +46,10 @@ impl std::fmt::Display for WriteError {
             }
             WriteError::Transport(m) => write!(f, "{m}"),
             WriteError::Invalid(m) => write!(f, "{m}"),
+            WriteError::Paced { retry_in_secs } => write!(
+                f,
+                "Gmail is pacing this mailbox; try again in {retry_in_secs}s"
+            ),
         }
     }
 }
@@ -773,6 +781,10 @@ pub struct FetchedRaw {
     pub internal_date: Option<String>,
 }
 
+/// The longest a write-door request waits for the mailbox's Gmail budget.
+/// Comfortably inside the app's 15 s idle timeout.
+const WRITE_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Executes Gmail write ops with a WRITE-bound credential store. The token is
 /// fetched per call and never retained.
 pub struct GmailWriteClient {
@@ -823,15 +835,55 @@ impl GmailWriteClient {
         self
     }
 
-    async fn admit(&self, method: &str, url: &str) {
-        if let Some(budget) = &self.budget {
-            budget
-                .admit(
-                    method,
-                    squelch_core::gmail_budget::gmail_path(url, &self.base),
-                )
-                .await;
+    /// Wait for the mailbox's Gmail budget, but never longer than
+    /// [`WRITE_MAX_WAIT`]: the app gives a request 15 s of silence before it
+    /// calls it failed, and a send that waits out a one-minute refusal hold
+    /// would be reported failed and then, possibly, go out anyway. Better to
+    /// send nothing and say when to try again.
+    async fn admit(&self, method: &str, url: &str) -> Result<(), WriteError> {
+        let Some(budget) = &self.budget else {
+            return Ok(());
+        };
+        budget
+            .admit_within(
+                method,
+                squelch_core::gmail_budget::gmail_path(url, &self.base),
+                WRITE_MAX_WAIT,
+            )
+            .await
+            .map_err(|wait| WriteError::Paced {
+                retry_in_secs: wait.as_secs().max(1),
+            })
+    }
+
+    /// Tell the shared budget how Google answered, so a refusal on a send (the
+    /// most expensive call) slows the sync loop too, and returns the
+    /// non-success as an error without echoing Google's body.
+    async fn settle(&self, resp: reqwest::Response) -> Result<reqwest::Response, WriteError> {
+        let status = resp.status();
+        if status.is_success() {
+            if let Some(budget) = &self.budget {
+                budget.note_success();
+            }
+            return Ok(resp);
         }
+        let retry_after = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(std::time::Duration::from_secs);
+        let body = resp.text().await.unwrap_or_default();
+        if let Some(budget) = &self.budget
+            && squelch_core::gmail_budget::is_quota_refusal(status.as_u16(), &body)
+        {
+            budget.note_quota_refusal(retry_after);
+        }
+        // Never echo the upstream body (it may carry request context).
+        Err(WriteError::Api {
+            status: status.as_u16(),
+            message: "request rejected".into(),
+        })
     }
 
     /// Fetch a fresh write access token; an absent/failed credential is
@@ -862,7 +914,7 @@ impl GmailWriteClient {
         timeout: Option<std::time::Duration>,
     ) -> Result<Value, WriteError> {
         let token = self.write_token().await?;
-        self.admit("POST", url).await;
+        self.admit("POST", url).await?;
         let mut req = self.http.post(url).bearer_auth(&token).json(body);
         if let Some(timeout) = timeout {
             req = req.timeout(timeout);
@@ -871,25 +923,18 @@ impl GmailWriteClient {
             .send()
             .await
             .map_err(|e| WriteError::Transport(format!("gmail request failed: {e}")))?;
-        let status = resp.status();
-        if status.is_success() {
-            resp.json::<Value>()
-                .await
-                .map_err(|e| WriteError::Transport(format!("gmail json decode: {e}")))
-        } else {
-            // Never echo the upstream body (it may carry request context).
-            Err(WriteError::Api {
-                status: status.as_u16(),
-                message: "request rejected".into(),
-            })
-        }
+        self.settle(resp)
+            .await?
+            .json::<Value>()
+            .await
+            .map_err(|e| WriteError::Transport(format!("gmail json decode: {e}")))
     }
 
     /// GET a JSON body with the write bearer token (gmail.modify grants read).
     /// Never logs the token or the response.
     async fn get_json<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T, WriteError> {
         let token = self.write_token().await?;
-        self.admit("GET", url).await;
+        self.admit("GET", url).await?;
         let resp = self
             .http
             .get(url)
@@ -897,15 +942,9 @@ impl GmailWriteClient {
             .send()
             .await
             .map_err(|e| WriteError::Transport(format!("gmail request failed: {e}")))?;
-        let status = resp.status();
-        if !status.is_success() {
-            // Never echo the upstream body (it may carry request context).
-            return Err(WriteError::Api {
-                status: status.as_u16(),
-                message: "request rejected".into(),
-            });
-        }
-        resp.json::<T>()
+        self.settle(resp)
+            .await?
+            .json::<T>()
             .await
             .map_err(|e| WriteError::Transport(format!("gmail json decode: {e}")))
     }

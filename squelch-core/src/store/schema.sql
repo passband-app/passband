@@ -1037,8 +1037,12 @@ CREATE INDEX IF NOT EXISTS idx_devices_account ON devices(account_id);
 -- thinking, not mail the agent door was handed (two-door invariant).
 --
 -- Uniqueness is PARTIAL indexes rather than UNIQUE(account_id,
--- reply_to_message_id), so the key only binds rows that carry it. There is NO
--- index over the NULL key any more: new-message drafts are many by design.
+-- reply_to_message_id), so the key only binds rows that carry it. The NULL key
+-- is NOT unique any more: new-message drafts are many by design. Its index
+-- (`idx_drafts_new`) keeps the old name on purpose, as a ROLLBACK GUARD: an
+-- older binary's `CREATE UNIQUE INDEX IF NOT EXISTS idx_drafts_new` checks
+-- only the name, so it is a no-op instead of a UNIQUE violation on every open
+-- (see migrate.rs).
 -- The forward key's index (`idx_drafts_forward`) is created in migrate.rs, NOT
 -- here: this file runs before `migrate`, and on an existing DB the index would
 -- name a column that does not exist yet.
@@ -1063,6 +1067,8 @@ CREATE TABLE IF NOT EXISTS drafts (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_drafts_reply
     ON drafts(account_id, reply_to_message_id) WHERE reply_to_message_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_drafts_new
+    ON drafts(account_id) WHERE reply_to_message_id IS NULL;
 
 -- FILES STAGED FOR A SEND. The composer uploads each file the moment it is
 -- attached (POST /client/compose/attachments) and the row waits here, bytes

@@ -608,7 +608,10 @@ pub enum DraftKey {
     /// OLD-CLIENT COMPATIBILITY for a key-less `PUT /client/drafts`: the newest
     /// new-message draft (neither key set) is edited, created when there is
     /// none. From an app that predates many drafts, that is exactly the old
-    /// single-slot behaviour.
+    /// single-slot behaviour. MIXED-VERSION COST: an older app edits whichever
+    /// keyless plain draft is newest, possibly one a newer app has open
+    /// elsewhere; last writer wins, rows never pile up. Kept short by shipping
+    /// the app with the daemon.
     NewLatest,
 }
 

@@ -307,23 +307,36 @@ fn keyless_latest_edits_the_newest_new_message_draft_and_creates_when_none() {
         .upsert_draft(acct, DraftKey::NewCreate, fields("", "two", "2"), t(2))
         .unwrap()
         .unwrap();
-    // The old app's key-less save lands on the NEWEST new-message row.
+    // A forward NEWER than every plain row: its reply key is NULL too, so only
+    // the forward predicate keeps an old app's save off it.
+    let forward = store
+        .upsert_draft(acct, DraftKey::Forward(9), fields("", "Fwd", "f"), t(3))
+        .unwrap()
+        .unwrap();
+    // The old app's key-less save lands on the NEWEST PLAIN new-message row.
     let edited = store
         .upsert_draft(
             acct,
             DraftKey::NewLatest,
             fields("", "two", "2 again"),
-            t(3),
+            t(4),
         )
         .unwrap()
         .unwrap();
     assert_eq!(edited.id, second.id);
     assert_eq!(edited.created_at, t(2));
+    assert!(edited.forward_of_message_id.is_none());
     assert_eq!(
         store.draft_by_id(acct, first.id).unwrap().unwrap().body,
         "1"
     );
-    assert_eq!(store.list_drafts(acct).unwrap().len(), 3);
+    let fwd = store.draft_by_id(acct, forward.id).unwrap().unwrap();
+    assert_eq!(
+        fwd.body, "f",
+        "the newer forward is never the keyless target"
+    );
+    assert_eq!(fwd.updated_at, t(3));
+    assert_eq!(store.list_drafts(acct).unwrap().len(), 4);
 }
 
 #[test]

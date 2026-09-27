@@ -28,9 +28,10 @@ const META_COLS: &str = "id, filename, mime, size_bytes, content_id";
 /// THE "is claimed" predicate over an `outbound_attachments` row, spelled once.
 /// A claimed row belongs to something that will send it (today only a draft)
 /// and is never swept for age or re-claimed by another owner; `NOT ({CLAIMED})`
-/// is the unclaimed state an upload starts in. A second claim column (say a
-/// scheduled send's) is a change to THIS line only: every sweep and claim
-/// query formats it in rather than spelling its own `draft_id IS NULL`.
+/// is the unclaimed state an upload starts in. Changing this constant covers
+/// the claim path and the unclaimed arm of [`sweep`]; a second claim column
+/// (say a scheduled send's) ALSO needs its own orphan arm in `sweep` (rows
+/// whose referent is gone).
 pub(super) const CLAIMED: &str = "draft_id IS NOT NULL";
 
 /// Drop this account's leftovers: unclaimed rows past the TTL, and rows

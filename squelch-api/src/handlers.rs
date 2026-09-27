@@ -966,7 +966,7 @@ pub async fn delete_compose_attachment(
     })
     .await?;
     if deleted {
-        Ok(Json(json!({ "status": "deleted", "id": id })))
+        Ok((no_store(), Json(json!({ "status": "deleted", "id": id }))))
     } else {
         Err(ApiError::not_found())
     }
@@ -2388,7 +2388,7 @@ pub async fn delete_draft(
     })
     .await?;
     if deleted {
-        Ok(Json(json!({ "status": "deleted", "id": id })))
+        Ok((no_store(), Json(json!({ "status": "deleted", "id": id }))))
     } else {
         Err(ApiError::not_found())
     }

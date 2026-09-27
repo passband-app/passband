@@ -1813,8 +1813,14 @@ fn init_upgrades_a_single_slot_drafts_table_to_many_drafts_and_forwards() {
     // single-slot `idx_drafts_new`, with its one new-message draft saved. Going
     // through `init` (schema.sql THEN migrate) is the point: an index on the
     // new column in schema.sql would fail right here, before migrate ran.
+    //
+    // A FILE, not memory: the second `init` below has to reopen the same DB.
     register_vec_extension();
-    let conn = Connection::open_in_memory().unwrap();
+    let dir = std::env::temp_dir().join(format!("squelch-drafts-many-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("drafts.db");
+    let _ = std::fs::remove_file(&path);
+    let conn = Connection::open(&path).unwrap();
     conn.execute_batch(
         "CREATE TABLE drafts(
              id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL,
@@ -1836,14 +1842,11 @@ fn init_upgrades_a_single_slot_drafts_table_to_many_drafts_and_forwards() {
     assert_eq!(acct, 1, "the fixture's row belongs to the first account");
     {
         let conn = store.lock().unwrap();
-        let old_index: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_drafts_new'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(old_index, 0, "the single-slot index is dropped");
+        assert_eq!(
+            idx_drafts_new_unique(&conn),
+            Some(false),
+            "the single-slot index is replaced by a NON-unique one of the same name"
+        );
         // Two MORE nil-keyed rows now insert beside the pre-existing one.
         for _ in 0..2 {
             conn.execute(
@@ -1877,4 +1880,61 @@ fn init_upgrades_a_single_slot_drafts_table_to_many_drafts_and_forwards() {
     assert!(old.reply_to_message_id.is_none() && old.forward_of_message_id.is_none());
     // Migrating again is a no-op.
     migrate(&store.lock().unwrap()).unwrap();
+    // And so is a whole second open of the same file, with three keyless rows.
+    drop(store);
+    let store = SqliteStore::init(Connection::open(&path).unwrap()).unwrap();
+    assert_eq!(
+        idx_drafts_new_unique(&store.lock().unwrap()),
+        Some(false),
+        "a re-open leaves the guard index non-unique"
+    );
+    assert_eq!(store.list_drafts(acct).unwrap().len(), 4);
+    drop(store);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `Some(unique)` for `idx_drafts_new`, `None` when there is no such index.
+fn idx_drafts_new_unique(conn: &Connection) -> Option<bool> {
+    conn.query_row(
+        "SELECT \"unique\" FROM pragma_index_list('drafts') WHERE name = 'idx_drafts_new'",
+        [],
+        |r| r.get::<_, i64>(0),
+    )
+    .optional()
+    .unwrap()
+    .map(|u| u == 1)
+}
+
+#[test]
+fn an_older_binarys_unique_drafts_index_create_is_a_no_op_after_many_drafts() {
+    // ROLLBACK: an older daemon's schema.sql runs this exact statement on every
+    // open. Once a user holds two keyless drafts it must not fail, or the old
+    // binary cannot open the DB at all. It is a no-op only because the new
+    // schema keeps an index of the same NAME (IF NOT EXISTS checks nothing else).
+    let store = SqliteStore::open_in_memory().unwrap();
+    let acct = store.ensure_account("me@example.com").unwrap();
+    store
+        .upsert_draft(
+            acct,
+            DraftKey::NewCreate,
+            DraftFields::default(),
+            Utc::now(),
+        )
+        .unwrap();
+    store
+        .upsert_draft(
+            acct,
+            DraftKey::NewCreate,
+            DraftFields::default(),
+            Utc::now(),
+        )
+        .unwrap();
+    let conn = store.lock().unwrap();
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_drafts_new
+             ON drafts(account_id) WHERE reply_to_message_id IS NULL",
+        [],
+    )
+    .expect("the old binary's create is a no-op, not a UNIQUE violation");
+    assert_eq!(idx_drafts_new_unique(&conn), Some(false));
 }

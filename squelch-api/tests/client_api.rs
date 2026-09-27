@@ -7726,13 +7726,27 @@ async fn keyless_put_edits_the_newest_new_message_draft_for_old_apps() {
         serde_json::json!({ "body": "newer" }),
     )
     .await;
+    // A forward saved AFTER both: the newest row, and never the keyless target.
+    let forward = put_draft(
+        &app,
+        serde_json::json!({ "forward_of_message_id": parent, "body": "fwd" }),
+    )
+    .await;
     let edited = put_draft(&app, serde_json::json!({ "body": "old app typed" })).await;
-    assert_eq!(edited["id"], newer["id"], "the NEWEST new-message row");
+    assert_eq!(
+        edited["id"], newer["id"],
+        "the NEWEST PLAIN new-message row"
+    );
+    assert!(edited["forward_of_message_id"].is_null());
     let all = list_drafts(&app).await;
     let all = all.as_array().unwrap();
-    assert_eq!(all.len(), 3);
+    assert_eq!(all.len(), 4);
     let old_row = all.iter().find(|d| d["id"] == older["id"]).unwrap();
     assert_eq!(old_row["body"], "older", "the older draft is untouched");
+    let fwd_row = all.iter().find(|d| d["id"] == forward["id"]).unwrap();
+    assert_eq!(fwd_row["body"], "fwd", "the forward draft is untouched");
+    let new_row = all.iter().find(|d| d["id"] == newer["id"]).unwrap();
+    assert_eq!(new_row["body"], "old app typed");
 }
 
 #[tokio::test]

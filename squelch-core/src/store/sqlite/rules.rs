@@ -2,6 +2,26 @@
 
 use super::*;
 
+/// A sender's recent non-sealed inbound mail with what became of it.
+///
+/// `INDEXED BY` ON PURPOSE. Without `sqlite_stat1` (which a daemon never
+/// writes) the planner reads `ORDER BY received_at DESC LIMIT` as a reason to
+/// walk `idx_messages_received` newest-first across the WHOLE account, under the
+/// store mutex, until it happens on enough of this sender's rows. The seek on
+/// the NOCASE sender index plus a sort of one sender's mail is the cheap plan,
+/// and pinning it means a missing index is a loud prepare error, not a silent
+/// walk. `tests::attention::rule_digest_seeks_the_nocase_sender_index` pins it.
+pub(crate) const SENDER_RULE_DIGEST_SQL: &str =
+    "SELECT m.subject, t.tier, t.status, t.opened_at IS NOT NULL
+     FROM messages m INDEXED BY idx_messages_from_nocase
+     JOIN triage t ON t.message_id = m.id
+     WHERE m.account_id = ?1
+       AND m.from_addr = ?2 COLLATE NOCASE
+       AND m.is_sent = 0 AND m.is_spam = 0
+       AND t.sensitivity = 'normal'
+     ORDER BY m.received_at DESC
+     LIMIT ?3";
+
 /// Validate a sender-rule write, on the path of every door. A FILTERED rule with
 /// an empty `want_text` is a contradiction (there is no standing instruction to
 /// filter by): Stage-2 would get no instruction to evaluate, so the rule would
@@ -211,6 +231,27 @@ impl SqliteStore {
                     disposition: Disposition::parse(&r.get::<_, String>(4)?)
                         .unwrap_or(Disposition::Surface),
                     updated_at: dt(r, 5)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(out)
+    }
+
+    pub(super) fn sender_rule_digest(
+        &self,
+        account_id: AccountId,
+        from_addr: &str,
+        limit: usize,
+    ) -> Result<Vec<SenderDigestRow>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(SENDER_RULE_DIGEST_SQL)?;
+        let out = stmt
+            .query_map(params![account_id, from_addr, limit as i64], |r| {
+                Ok(SenderDigestRow {
+                    subject: r.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                    tier: r.get(1)?,
+                    status: r.get(2)?,
+                    opened: r.get(3)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;

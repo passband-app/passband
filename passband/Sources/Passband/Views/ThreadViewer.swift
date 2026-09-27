@@ -2470,13 +2470,22 @@ struct BubbleTail: Shape {
     /// How far the point pokes past the bubble's edge; the view's offset uses
     /// the same number so the shape's idea of "the edge" is where the edge is.
     static let poke: CGFloat = 7
+    /// How far past its own box the solid inner span reaches, up the bubble's
+    /// edge and along its bottom. The bubble's corner is `.continuous`, and a
+    /// continuous radius-10 corner runs some fifteen points along EACH edge,
+    /// not ten: a span that stopped at the box (twelve up, five in) left the
+    /// last of the curve showing as a notch above the tail and a sliver under
+    /// the bubble beside it. A path may draw outside its rect, so the span is
+    /// simply bigger — all of it inside the bubble, where fill meets fill.
+    static let reach: CGFloat = 14
 
     var mine: Bool
 
     func path(in rect: CGRect) -> Path {
         let edge = rect.maxX - Self.poke
         var p = Path()
-        p.move(to: CGPoint(x: 0, y: 0))
+        p.move(to: CGPoint(x: -Self.reach, y: -Self.reach))
+        p.addLine(to: CGPoint(x: edge, y: -Self.reach))
         p.addLine(to: CGPoint(x: edge, y: 0))
         // Leaves the edge heading DOWN (control barely outboard), then bends
         // out to the point — the vertical tangent is what makes the bubble's
@@ -2487,6 +2496,7 @@ struct BubbleTail: Shape {
         p.addQuadCurve(
             to: CGPoint(x: 0, y: rect.maxY),
             control: CGPoint(x: edge * 0.8, y: rect.maxY))
+        p.addLine(to: CGPoint(x: -Self.reach, y: rect.maxY))
         p.closeSubpath()
         guard !mine else { return p }
         return p.applying(

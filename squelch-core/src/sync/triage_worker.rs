@@ -515,6 +515,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             );
             self.agent_retry_after
                 .fetch_max(until.timestamp(), Ordering::Relaxed);
+            self.metrics.note_triage_cooldown(until.timestamp());
             let _ = self.store.defer_agent_job(job, until, &error.kind);
             self.metrics.record_agent(AgentVerdict::Retryable);
         } else {

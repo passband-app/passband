@@ -1017,11 +1017,122 @@ pub struct RetriageProgress {
     /// when `budget_parked` is 0.
     #[serde(default)]
     pub budget_resumes_at: Option<DateTime<Utc>>,
+    /// Why an unfinished run is not moving right now, when something outside
+    /// the queue is holding it. Absent while the run can progress (or there is
+    /// no run), and from any door that cannot see sync health.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked: Option<RetriageBlocked>,
+}
+
+/// What is holding an unfinished re-triage, and until when if anyone knows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetriageBlocked {
+    pub reason: RetriageBlockReason,
+    /// When the blocker is expected to lift: the next Gmail retry, the end of
+    /// the provider cooldown, or the budget reset. `None` when not known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetriageBlockReason {
+    /// Triage spends nothing until a Gmail poll succeeds.
+    WaitingForSync,
+    /// The model provider failed and the worker is holding off.
+    ProviderCooldown,
+    /// A daily triage budget ran out; parked jobs resume at the reset.
+    Budget,
+}
+
+impl RetriageProgress {
+    /// Why this run is stalled, from sync health the store cannot see.
+    /// Precedence follows cause: no triage runs at all without a healthy poll,
+    /// then a provider cooldown holds every job, then the budget parks some.
+    /// `None` when there is no unfinished run.
+    pub fn blocked_by(
+        &self,
+        poll_ok: bool,
+        next_retry_at: Option<DateTime<Utc>>,
+        cooldown_until: Option<DateTime<Utc>>,
+    ) -> Option<RetriageBlocked> {
+        if self.total <= self.done {
+            return None;
+        }
+        if !poll_ok {
+            return Some(RetriageBlocked {
+                reason: RetriageBlockReason::WaitingForSync,
+                until: next_retry_at,
+            });
+        }
+        if let Some(until) = cooldown_until {
+            return Some(RetriageBlocked {
+                reason: RetriageBlockReason::ProviderCooldown,
+                until: Some(until),
+            });
+        }
+        if self.budget_parked > 0 {
+            return Some(RetriageBlocked {
+                reason: RetriageBlockReason::Budget,
+                until: self.budget_resumes_at,
+            });
+        }
+        None
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn progress(total: i64, done: i64, parked: i64) -> RetriageProgress {
+        RetriageProgress {
+            total,
+            done,
+            started_at: None,
+            budget_parked: parked,
+            budget_resumes_at: (parked > 0).then(|| DateTime::from_timestamp(3_000, 0).unwrap()),
+            blocked: None,
+        }
+    }
+
+    #[test]
+    fn retriage_blocked_names_the_cause_in_precedence_order() {
+        let retry = DateTime::from_timestamp(1_000, 0);
+        let cool = DateTime::from_timestamp(2_000, 0);
+        let resume = DateTime::from_timestamp(3_000, 0);
+        // No run, or a finished one: nothing is blocked, whatever sync says.
+        assert_eq!(progress(0, 0, 0).blocked_by(false, retry, cool), None);
+        assert_eq!(progress(5, 5, 0).blocked_by(false, retry, cool), None);
+        // Gmail down outranks everything: triage cannot even start.
+        let b = progress(5, 1, 2).blocked_by(false, retry, cool).unwrap();
+        assert_eq!(b.reason, RetriageBlockReason::WaitingForSync);
+        assert_eq!(b.until, retry);
+        let b = progress(5, 1, 2).blocked_by(true, None, cool).unwrap();
+        assert_eq!(b.reason, RetriageBlockReason::ProviderCooldown);
+        assert_eq!(b.until, cool);
+        let b = progress(5, 1, 2).blocked_by(true, None, None).unwrap();
+        assert_eq!(b.reason, RetriageBlockReason::Budget);
+        assert_eq!(b.until, resume);
+        assert_eq!(progress(5, 1, 0).blocked_by(true, None, None), None);
+    }
+
+    #[test]
+    fn retriage_blocked_is_additive_on_the_wire() {
+        let json = serde_json::to_value(progress(5, 1, 0)).unwrap();
+        assert!(json.get("blocked").is_none(), "absent, not null: {json}");
+        let mut p = progress(5, 1, 0);
+        p.blocked = p.blocked_by(false, None, None);
+        let json = serde_json::to_value(&p).unwrap();
+        assert_eq!(
+            json["blocked"],
+            serde_json::json!({"reason": "waiting_for_sync"})
+        );
+        // An old payload without the key still decodes.
+        let old: RetriageProgress =
+            serde_json::from_str(r#"{"total":1,"done":0,"started_at":null}"#).unwrap();
+        assert!(old.blocked.is_none());
+    }
 
     /// The agent-door thread view carries no `html` and no `attachments` key —
     /// structural absence, not runtime filtering.

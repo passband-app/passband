@@ -982,7 +982,8 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 backoff = (backoff * 2).min(GMAIL_QUOTA_RETRY_CAP);
                 continue;
             }
-            self.metrics.record_gmail_error(kind);
+            self.metrics
+                .record_gmail_error_reason(kind, gmail_error_reason(&body));
             return Err(CoreError::Other(anyhow::anyhow!(
                 "gmail api status {} (reason: {}{})",
                 status.as_u16(),
@@ -1233,7 +1234,10 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             // always meant to mean, and stamping it from the refine lane would
             // let a wedged Gmail credential keep looking healthy for as long as
             // there were queued rows left to classify.
-            self.metrics.stamp_sync_success();
+            //
+            // `note_poll_ok` also ends the failure streak and clears the last
+            // error, so the client stops reporting an outage that is over.
+            self.metrics.note_poll_ok();
 
             // A refresh poke that arrives mid-poll is not lost: `Notify` stores
             // one permit, so the next `notified()` returns at once and the loop
@@ -2576,10 +2580,17 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                     // a Stage-1 and a Stage-2 unit of a DAY-scoped cap on classify
                     // calls that were cancelled one Gmail round trip later. See
                     // the `poll_healthy` field.
-                    self.poll_healthy.store(false, Ordering::Relaxed);
+                    //
+                    // A lifecycle that polled successfully before failing starts
+                    // the backoff over: without this, one bad hour a week ago
+                    // left every later hiccup waiting the full five minutes.
+                    let polled_ok = self.poll_healthy.swap(false, Ordering::Relaxed);
+                    backoff = lifecycle_backoff(backoff, polled_ok);
                     if *shutdown.borrow() {
                         return Ok(());
                     }
+                    self.metrics
+                        .note_sync_retry_at(Utc::now().timestamp() + backoff.as_secs() as i64);
                     // Error strings from this crate never carry secrets.
                     eprintln!(
                         "squelch: sync error ({e}); retrying in {}s",
@@ -2596,6 +2607,12 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             }
         }
     }
+}
+
+/// The wait before the next lifecycle: back to [`BACKOFF_START`] when the one
+/// that just failed had polled successfully first, otherwise the running value.
+fn lifecycle_backoff(current: Duration, polled_ok: bool) -> Duration {
+    if polled_ok { BACKOFF_START } else { current }
 }
 
 /// Only backfills/catch-up retain a request across quota pauses. Poll helpers,
@@ -4084,6 +4101,81 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(g.calls("get:a"), 1);
+    }
+
+    /// Poll `cond` every 10ms until it holds, or panic after `secs`.
+    async fn wait_for(secs: u64, what: &str, cond: impl Fn() -> bool) {
+        tokio::time::timeout(Duration::from_secs(secs), async {
+            while !cond() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+    }
+
+    /// THE OUTAGE ENDS WHEN GMAIL ANSWERS. A failing poll grows the streak and
+    /// the backoff; the first successful poll must zero the streak, clear the
+    /// error and the scheduled retry, and the NEXT failure must start the
+    /// backoff over at `BACKOFF_START` rather than where the old outage left it.
+    #[tokio::test]
+    async fn a_successful_poll_resets_the_failure_streak_and_the_backoff() {
+        let g = MockGmail::default();
+        g.history(LABEL_INBOX, LabelHistory::broken());
+        let base = serve_mock(g.clone()).await;
+        let (store, acct) = store_at_cursor(Some(1));
+        let mut config = Config::default();
+        config.sync.poll_secs = 1;
+        let metrics = SyncMetrics::new();
+        let e = engine_with_config(store, acct, &base, config).with_metrics(metrics.clone());
+        let (stop, rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(async move { e.run(rx).await });
+
+        // Two failed lifecycles: the second waits twice as long as the first.
+        wait_for(10, "two failures", || {
+            metrics.sync_consecutive_failures() >= 2
+        })
+        .await;
+        assert!(!metrics.poll_ok());
+        let error = metrics.sync_last_error().expect("the failure is recorded");
+        assert_eq!(error.kind, GmailErrorKind::Http);
+        let retry_in =
+            metrics.sync_next_retry_at().expect("a retry is scheduled") - Utc::now().timestamp();
+        assert!(retry_in >= 3, "the backoff doubled to 4s, got {retry_in}s");
+
+        // Gmail recovers.
+        g.history(LABEL_INBOX, LabelHistory::quiet(1));
+        wait_for(10, "a healthy poll", || metrics.poll_ok()).await;
+        assert_eq!(metrics.sync_consecutive_failures(), 0, "the streak is over");
+        assert_eq!(metrics.sync_last_error(), None);
+        assert_eq!(metrics.sync_next_retry_at(), None);
+
+        // And breaks again: the wait starts over, it does not resume at 8s.
+        g.history(LABEL_INBOX, LabelHistory::broken());
+        wait_for(10, "the next failure", || !metrics.poll_ok()).await;
+        wait_for(2, "the retry to be scheduled", || {
+            metrics.sync_next_retry_at().is_some()
+        })
+        .await;
+        let retry_in = metrics.sync_next_retry_at().unwrap() - Utc::now().timestamp();
+        assert!(
+            retry_in <= BACKOFF_START.as_secs() as i64,
+            "backoff restarts after a healthy poll, got {retry_in}s"
+        );
+        assert_eq!(metrics.sync_consecutive_failures(), 1);
+
+        stop.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[test]
+    fn lifecycle_backoff_restarts_only_after_a_healthy_poll() {
+        assert_eq!(lifecycle_backoff(BACKOFF_CAP, true), BACKOFF_START);
+        assert_eq!(lifecycle_backoff(BACKOFF_CAP, false), BACKOFF_CAP);
     }
 
     #[test]

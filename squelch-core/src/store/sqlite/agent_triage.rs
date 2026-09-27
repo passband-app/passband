@@ -955,6 +955,29 @@ impl SqliteStore {
         }
         Ok(counts)
     }
+
+    /// Queued triage/access jobs the worker parked because a daily budget ran
+    /// out, and the earliest time one becomes claimable again. Across ALL
+    /// queued work, not only a re-triage: the stats door uses it to say "paused
+    /// until tomorrow" rather than letting a parked queue read as stuck.
+    pub fn triage_budget_parked(
+        &self,
+        account_id: AccountId,
+    ) -> Result<(u64, Option<DateTime<Utc>>)> {
+        let conn = self.lock()?;
+        let (parked, resumes_at): (u64, Option<String>) = conn.query_row(
+            "SELECT COUNT(*), MIN(available_at) FROM agent_triage_jobs
+             WHERE account_id=?1 AND state='queued' AND kind IN ('triage','access')
+               AND last_error='daily_budget_exhausted' AND available_at>?2",
+            params![account_id, Utc::now().to_rfc3339()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let resumes_at = resumes_at
+            .as_deref()
+            .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
+            .map(|at| at.with_timezone(&Utc));
+        Ok((parked, resumes_at))
+    }
 }
 
 impl AgentTriageStore for SqliteStore {
@@ -2309,6 +2332,79 @@ mod tests {
         assert_eq!(store.triage_job_counts(1).unwrap(), [1, 1]);
         assert_eq!(store.triage_job_counts(2).unwrap(), [1, 0]);
         assert_eq!(store.triage_job_counts(99).unwrap(), [0, 0]);
+    }
+
+    #[test]
+    fn triage_budget_parked_counts_only_future_budget_deferrals() {
+        let store = fixture();
+        assert_eq!(store.triage_budget_parked(1).unwrap(), (0, None));
+        {
+            let conn = store.lock().unwrap();
+            for (account, message, kind, state, error, at) in [
+                (
+                    1,
+                    1,
+                    "triage",
+                    "queued",
+                    "daily_budget_exhausted",
+                    "2099-01-02T00:00:00Z",
+                ),
+                (
+                    1,
+                    2,
+                    "access",
+                    "queued",
+                    "daily_budget_exhausted",
+                    "2099-01-01T00:00:00Z",
+                ),
+                // Already claimable again: not parked.
+                (
+                    1,
+                    3,
+                    "triage",
+                    "queued",
+                    "daily_budget_exhausted",
+                    "2000-01-01T00:00:00Z",
+                ),
+                // Parked for a different reason.
+                (
+                    1,
+                    4,
+                    "triage",
+                    "queued",
+                    "provider_cooldown",
+                    "2099-01-01T00:00:00Z",
+                ),
+                (
+                    1,
+                    5,
+                    "notification",
+                    "queued",
+                    "daily_budget_exhausted",
+                    "2099-01-01T00:00:00Z",
+                ),
+                (
+                    2,
+                    6,
+                    "triage",
+                    "queued",
+                    "daily_budget_exhausted",
+                    "2099-01-01T00:00:00Z",
+                ),
+            ] {
+                conn.execute(
+                    "INSERT INTO agent_triage_jobs
+                    (account_id,message_id,kind,trigger,input_revision,state,available_at,last_error)
+                    VALUES(?1,?2,?3,'t',1,?4,?5,?6)",
+                    params![account, message, kind, state, at, error],
+                )
+                .unwrap();
+            }
+        }
+        let (parked, resumes) = store.triage_budget_parked(1).unwrap();
+        assert_eq!(parked, 2);
+        assert_eq!(resumes.unwrap().to_rfc3339(), "2099-01-01T00:00:00+00:00");
+        assert_eq!(store.triage_budget_parked(2).unwrap().0, 1);
     }
 
     pub(super) fn decision(id: i64) -> MessageDecision {

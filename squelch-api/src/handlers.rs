@@ -475,13 +475,27 @@ pub async fn retriage(
 /// `done` is derived from the QUEUE PREDICATES themselves rather than from a
 /// marker, which is what keeps an escalated row counted as unfinished until
 /// Stage-2 has actually had it.
+///
+/// `blocked` says why an unfinished run is not moving (Gmail sync failing, a
+/// provider cooldown, a spent budget), so the modal can say so instead of
+/// sitting on a bar that never fills. Omitted from a door that cannot see sync
+/// health, and whenever nothing is holding the run.
 pub async fn retriage_progress(
     State(state): State<ApiState>,
 ) -> Result<impl IntoResponse, ApiError> {
-    query(&state, move |store, account_id| {
+    let mut progress = store_call(&state, move |store, account_id| {
         store.retriage_progress(account_id)
     })
-    .await
+    .await?;
+    if let Some(metrics) = state.sync_metrics() {
+        let at = |unix: Option<i64>| unix.and_then(|t| DateTime::from_timestamp(t, 0));
+        progress.blocked = progress.blocked_by(
+            metrics.poll_ok(),
+            at(metrics.sync_next_retry_at()),
+            at(metrics.triage_cooldown_until()),
+        );
+    }
+    Ok(Json(progress))
 }
 
 // --- GET /client/triage-debug/{message_id} (developer tool) ------------------
@@ -2483,14 +2497,17 @@ pub async fn get_stats(State(state): State<ApiState>) -> Result<impl IntoRespons
     let day = Utc::now().format("%Y-%m-%d").to_string();
     // Band counts run under the same default window as the lists they head.
     let bands_since = Utc::now() - chrono::Duration::days(DEFAULT_UPDATES_WINDOW_DAYS);
-    let (stats, usage, unread, email) = store_call(&state, move |store, account_id| {
-        let stats = store.stats(account_id, bands_since)?;
-        let usage = store.stage2_usage_today(account_id, &day)?;
-        let unread = store.inbox_unread(account_id)?;
-        let email = store.account_email(account_id)?;
-        Ok((stats, usage, unread, email))
-    })
-    .await?;
+    let (stats, usage, unread, email, jobs, parked) =
+        store_call(&state, move |store, account_id| {
+            let stats = store.stats(account_id, bands_since)?;
+            let usage = store.stage2_usage_today(account_id, &day)?;
+            let unread = store.inbox_unread(account_id)?;
+            let email = store.account_email(account_id)?;
+            let jobs = store.triage_job_counts(account_id)?;
+            let parked = store.triage_budget_parked(account_id)?;
+            Ok((stats, usage, unread, email, jobs, parked))
+        })
+        .await?;
 
     // tokens/1e6 * per-MTok price, over input+output plus the prompt-cache
     // split (write 1.25x / read 0.1x of the input price). Switching the model
@@ -2582,6 +2599,16 @@ pub async fn get_stats(State(state): State<ApiState>) -> Result<impl IntoRespons
     if let Some((done, total)) = state.sync_metrics().and_then(|m| m.catchup_progress()) {
         body["catch_up"] = json!({ "done": done, "total": total });
     }
+    // IS GMAIL SYNC WORKING, and is triage running. `gmail.connected` answers
+    // only "is the credential alive"; a mailbox Gmail is rate-limiting has a
+    // perfectly good credential and still syncs nothing, and triage spends
+    // nothing until a poll succeeds. Until these two blocks the app said
+    // "synced just now" and "You're all clear." over that. OMITTED when this
+    // door has no metrics handle, for the same reason `gmail` is.
+    if let Some(metrics) = state.sync_metrics() {
+        body["sync"] = sync_block(metrics);
+        body["triage"] = triage_block(metrics, jobs, parked);
+    }
     // Capability flag for the app: whether /client/assistant/messages will
     // relay (hosted, gateway configured) or 404 (self-host, BYOK in the app).
     // Always present so a client reads an answer, not absence.
@@ -2608,6 +2635,61 @@ pub async fn get_stats(State(state): State<ApiState>) -> Result<impl IntoRespons
     // client gates the attach affordances on this.
     body["compose_attachments"] = json!(true);
     Ok(Json(body))
+}
+
+fn rfc3339(unix: i64) -> Option<String> {
+    DateTime::from_timestamp(unix, 0).map(|at| at.to_rfc3339())
+}
+
+/// `sync{ok, last_success_at?, error?, next_retry_at?, consecutive_failures}`.
+/// `error` and `next_retry_at` describe the CURRENT outage, so both are left
+/// out while the poll is healthy: an error from a side call (the spam tab,
+/// the unread count) is not a sync failure.
+fn sync_block(metrics: &squelch_core::metrics::SyncMetrics) -> serde_json::Value {
+    let ok = metrics.poll_ok();
+    let mut sync = json!({
+        "ok": ok,
+        "consecutive_failures": metrics.sync_consecutive_failures(),
+    });
+    if let Some(at) = metrics.sync_last_success().and_then(rfc3339) {
+        sync["last_success_at"] = json!(at);
+    }
+    if !ok {
+        if let Some(error) = metrics.sync_last_error() {
+            sync["error"] = json!({
+                "kind": error.kind.label(),
+                "reason": error.reason,
+                "at": rfc3339(error.at),
+            });
+        }
+        if let Some(at) = metrics.sync_next_retry_at().and_then(rfc3339) {
+            sync["next_retry_at"] = json!(at);
+        }
+    }
+    sync
+}
+
+/// `triage{waiting_for_sync, cooldown_until?, queued, leased, budget_parked,
+/// budget_resumes_at?}`: whether the triage worker can run, and how much work
+/// it has.
+fn triage_block(
+    metrics: &squelch_core::metrics::SyncMetrics,
+    [queued, leased]: [u64; 2],
+    (parked, resumes_at): (u64, Option<DateTime<Utc>>),
+) -> serde_json::Value {
+    let mut triage = json!({
+        "waiting_for_sync": !metrics.poll_ok(),
+        "queued": queued,
+        "leased": leased,
+        "budget_parked": parked,
+    });
+    if let Some(at) = metrics.triage_cooldown_until().and_then(rfc3339) {
+        triage["cooldown_until"] = json!(at);
+    }
+    if let Some(at) = resumes_at {
+        triage["budget_resumes_at"] = json!(at.to_rfc3339());
+    }
+    triage
 }
 
 // --- GET /client/usage -------------------------------------------------------

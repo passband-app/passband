@@ -220,10 +220,13 @@ private struct MobileShell: View {
         // real ScrollView or List, so all of them drive it.
         .tabBarMinimizeBehavior(.onScrollDown)
         // An auth notification tap: the Mac's routed Auth page is, here, the
-        // login-codes page behind the Quick Look key.
-        .onChange(of: store.authPageRequests) {
+        // login-codes page behind the Quick Look key. `initial` because a tap
+        // that launched the app set the flag before this view existed.
+        .onChange(of: store.pendingAuthPage, initial: true) { _, pending in
+            guard pending else { return }
             tab = .records
             showAuth = true
+            store.consumeAuthPage()
         }
         // Toasts ride ABOVE the tab bar, where the Mac's stack rides above the
         // rail. The offset clears the bar at rest; when the bar minimizes on

@@ -35,10 +35,6 @@ The iPhone catches up.
 - Tapping a login-code notification opens your codes
 - Settings overhaul
 
-### Daemon
-
-- Suggests a rule for a sender from how you treat their mail
-
 ## 0.0.8 (2026-09-25)
 
 Biggest update by far. Now we're a real product?

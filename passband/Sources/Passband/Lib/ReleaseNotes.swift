@@ -127,7 +127,6 @@ enum ReleaseNotes {
                 ReleaseItem(.ios, "Notifications show a readable name and your login code"),
                 ReleaseItem(.ios, "Tapping a login-code notification opens your codes"),
                 ReleaseItem(.ios, "Settings overhaul"),
-                ReleaseItem(.daemon, "Suggests a rule for a sender from how you treat their mail"),
             ]),
         ReleaseNote(
             version: "0.0.8",

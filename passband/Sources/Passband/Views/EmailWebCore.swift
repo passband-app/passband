@@ -694,6 +694,45 @@ enum EmailFrame {
             return [];
           }
 
+          // ---- full-bleed mail -------------------------------------------
+          // A newsletter paints its own page: one wrapper (a table, a div)
+          // with an opaque background, as wide as the body. Our padding
+          // around that is a ring of OUR page colour around THEIR page —
+          // white around grey. So when the visible content is nothing but
+          // such wrappers, the body gives up its padding and takes their
+          // colour, and the tail follows (pageBackground reads the body).
+          // Runs once, before the first measurement, so the frame is sized
+          // to what it will show. Text mail has text at the top level or a
+          // transparent wrapper, and keeps its padding.
+          function opaque(bg) {
+            return bg && bg !== 'transparent' && bg !== 'rgba(0, 0, 0, 0)';
+          }
+          function adoptFullBleed() {
+            var b = document.body;
+            if (!b) return;
+            var kids = Array.prototype.filter.call(b.childNodes, function (n) {
+              if (n.nodeType === 3) return (n.textContent || '').trim().length > 0;
+              if (n.nodeType !== 1) return false;
+              if (n.tagName === 'STYLE' || n.tagName === 'SCRIPT') return false;
+              return n.getClientRects().length > 0;
+            });
+            if (!kids.length) return;
+            var first = kids[0];
+            if (first.nodeType !== 1) return;
+            var bg = getComputedStyle(first).backgroundColor;
+            if (!opaque(bg)) return;
+            for (var i = 1; i < kids.length; i++) {
+              var k = kids[i];
+              if (k.nodeType !== 1 || getComputedStyle(k).backgroundColor !== bg) return;
+            }
+            var cs = getComputedStyle(b);
+            var inner = b.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+            if (inner <= 0 || first.getBoundingClientRect().width < inner * 0.95) return;
+            b.style.padding = '0';
+            b.style.backgroundColor = bg;
+          }
+          adoptFullBleed();
+
           var quoteNodes = findQuoteNodes();
           window.__passbandSetQuotes = function (collapsed) {
             for (var i = 0; i < quoteNodes.length; i++) {

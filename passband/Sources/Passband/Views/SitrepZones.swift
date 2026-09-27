@@ -12,7 +12,7 @@ import SwiftUI
 struct CalendarZone: View {
     @Environment(AppStore.self) private var store
     private var accountScope: String {
-        RehearsalMode.isEnabled ? "practice" : AccountManager.shared.activeId?.uuidString ?? "disconnected"
+        RehearsalMode.isEnabled ? CalendarVisibility.practiceAccount : AccountManager.shared.activeId?.uuidString ?? "disconnected"
     }
 
     var body: some View {

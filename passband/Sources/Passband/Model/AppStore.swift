@@ -946,6 +946,11 @@ final class AppStore {
         closeOverlaysForPractice()
         RehearsalMode.setEnabled(true)
         await RehearsalAPI.shared.reset(accountEmail: accountEmail)
+        // The fixture's calendar items keep the same ids from session to
+        // session, and the zone retires an item a day after it was first
+        // shown. Without this, a second run more than a day after the first
+        // starts the calendar lesson over an empty card.
+        CalendarVisibility.shared.forget(account: CalendarVisibility.practiceAccount)
         settings = ConnectionSettings(serverURL: "https://rehearsal.invalid", apiToken: "practice")
         connError = nil
         connStatus = .connected
@@ -1943,6 +1948,7 @@ final class AppStore {
             || triageFix != nil || remindTarget != nil || ruleEditor != nil
             || groupEditor != nil
             || !authQueue.isEmpty || retriage != nil || retriageAsk != nil
+            || reconnectAsk != nil
             || tour.wantsBlur || whatsNew.active
     }
 
@@ -2813,6 +2819,11 @@ final class AppStore {
         }
         // Whatever it opened with is what "untouched" means for the autosave.
         next.seededRecipients = next.recipients
+        // The side panel and the composer both claim the window's right-hand
+        // strip, and the panel draws ABOVE the composer: left open, the two
+        // stack in one place and the reader insets past both. Writing wins, so
+        // the panel goes (held, not lost: see `closeSide`).
+        if sideView.isOpen { closeSide() }
         compose = next
         DraftSaver.shared.noteOpened(.compose)
         Analytics.capture("compose_opened", ["kind": next.analyticsKind])
@@ -2999,6 +3010,9 @@ final class AppStore {
     /// asked for.
     func openInlineReply(replyTo messageId: Int, replyAll: Bool = false) {
         guard inlineReply == nil else { return }
+        // Same rule as the pane composer: a reply gets the whole reader, not
+        // the sliver left beside an open search strip.
+        if sideView.isOpen { closeSide() }
         inlineReply = ComposeState(
             replyToMessageId: messageId, body: Prefs.shared.signatureSeed,
             includeTracker: trackingDefault, replyAll: replyAll)
@@ -3322,6 +3336,9 @@ final class AppStore {
             inlineReply = state
             DraftSaver.shared.noteChange(.inlineReply)
         } else if compose.map(isBlankComposer) ?? true {
+            // Back into the pane's strip, so the side panel goes for the same
+            // reason `openCompose` closes it: the two cannot share the strip.
+            if sideView.isOpen { closeSide() }
             compose = state
             DraftSaver.shared.noteChange(.compose)
         } else {
@@ -3379,6 +3396,38 @@ final class AppStore {
     var gmailReconnectURL: String? {
         guard let raw = sitrep.stats?.gmail?.reconnect_url, Opener.isHTTP(raw) else { return nil }
         return raw
+    }
+
+    /// A reconnect the human has pressed, parked on "which Google account".
+    ///
+    /// Google's account chooser lists every account signed in to the browser,
+    /// and nothing on it says which one this mailbox is. Pick the wrong one and
+    /// the consent succeeds for a mailbox Passband is not serving, so the
+    /// banner stays up and it looks like reconnecting does not work. One line
+    /// naming the address before the browser opens is the whole fix.
+    var reconnectAsk: ReconnectAsk?
+
+    struct ReconnectAsk: Hashable {
+        let url: String
+        let email: String
+    }
+
+    /// The banner's Reconnect. Asks first when the daemon told us the address;
+    /// on a daemon too old to say, there is nothing true to put in the dialog,
+    /// so it opens the link exactly as it did before.
+    func askReconnect() {
+        guard let url = gmailReconnectURL else { return }
+        let email = sitrep.stats?.account_email?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !email.isEmpty else { return Opener.open(url) }
+        reconnectAsk = ReconnectAsk(url: url, email: email)
+    }
+
+    func cancelReconnectAsk() { reconnectAsk = nil }
+
+    func confirmReconnect() {
+        guard let ask = reconnectAsk else { return }
+        reconnectAsk = nil
+        Opener.open(ask.url)
     }
 
     /// How long the mailbox has been dark, for the banner's subtitle.

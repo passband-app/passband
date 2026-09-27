@@ -481,6 +481,23 @@ enum EmailFrame {
     @MainActor
     static let sharedDataStore: WKWebsiteDataStore = .nonPersistent()
 
+    /// Every email frame answers `prefers-color-scheme: light`, whatever the
+    /// app's appearance. The canvas `document` paints is ALWAYS white, and a
+    /// frame that inherited dark mode would fire the sender's dark stylesheet
+    /// on top of it. Greptile's is the case that caught it: its dark rules turn
+    /// the copy #FEFEFE and darken only `body`, while the inline #FEFEFE on
+    /// its wrapper div stays put, so the whole message was white on white. The
+    /// measuring frame gets the same pin, because the dark rules can also swap
+    /// which logo is displayed and so change the height.
+    @MainActor
+    static func pinLightAppearance(_ view: WKWebView) {
+        #if os(macOS)
+            view.appearance = NSAppearance(named: .aqua)
+        #else
+            view.overrideUserInterfaceStyle = .light
+        #endif
+    }
+
     /// A configuration with all five layers wired, plus the relay that will be
     /// the built frame's permanent hinge. Returned together because the relay is
     /// registered INTO the configuration — a frame cannot be handed one later.
@@ -926,6 +943,12 @@ final class EmailFrameCoordinator: NSObject {
     /// Verified across documents up to 16,842 points not to move an ordinary
     /// body by a single point.
     ///
+    /// `pre` wraps because the body is `overflow:hidden`: a plain-text message
+    /// sent as one `<pre>` (Google Cloud Support does this) otherwise runs a
+    /// paragraph off the right edge and it is simply gone. `overflow-wrap`
+    /// alone does nothing there, since `white-space:pre` never offers a break.
+    /// `!important` because the same senders also write it inline.
+    ///
     /// It does NOT cover `vh` units, which resolve against the viewport no
     /// matter what html and body are told to be. Those are bounded on the host
     /// side instead — see EmailWebView's sizing phases.
@@ -958,6 +981,7 @@ final class EmailFrameCoordinator: NSObject {
             img{max-width:100%;height:auto;}\
             a{color:#2b7fd4;}\
             table{max-width:100%;}\
+            pre{white-space:pre-wrap!important;}\
             blockquote{margin:8px 0;padding-left:10px;border-left:2px solid #d8dee6;color:#555;}\
             </style>\
             </head><body>\(html)</body></html>

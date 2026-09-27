@@ -548,15 +548,18 @@ struct EmailWebView: View {
                 "\(prepared.trackers) tracking pixel\(prepared.trackers == 1 ? "" : "s") left in place: you have emailed this sender, so they may see that you opened this"
             )
         } else if prepared.trackers > 0 {
+            // A FOOTNOTE, not a badge. This is the normal case — nearly every
+            // commercial mail carries a pixel and nearly every one is
+            // stripped — and a green capsule over every bubble was the reader
+            // being congratulated for the default. Same faint ink as the
+            // topline caption beside it; the help text carries the detail.
             Label(
                 "\(prepared.trackers) tracker\(prepared.trackers == 1 ? "" : "s") blocked",
                 systemImage: "eye.slash"
             )
             .font(Typo.micro)
-            .foregroundStyle(Palette.positive)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 4)
-            .glassCapsule(tint: Palette.positiveSoft, interactive: false)
+            .foregroundStyle(Palette.inkFaint)
+            .padding(.horizontal, 2)
             .help(
                 "tracking pixels removed before render; links open externally and no referrer is ever sent"
             )

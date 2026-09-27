@@ -24,6 +24,7 @@ pub mod receipt_match;
 pub mod revisit;
 pub mod router;
 pub mod rule_infer;
+pub mod rule_suggest;
 pub mod rules;
 pub mod shipment;
 pub mod stage1_llm;

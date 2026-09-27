@@ -385,6 +385,13 @@ struct RuleEditor: View {
     /// Rules whose match_pattern already covers `request.sender`; nil until the
     /// fetch settles, so "none yet" is never claimed before we know.
     @State private var inEffect: [SenderRule]?
+    /// A small model's guess at the sentence, shown as the placeholder and
+    /// taken with tab. Tune mode only; nil until (and unless) one arrives.
+    /// It is SHOWN, never saved on its own: the owner takes it and saves it.
+    @State private var suggestion: String?
+    /// Whether the suggestion was ever actually on screen: it arrived while the
+    /// field was still empty. One that lands behind typing was never offered.
+    @State private var suggestionShown = false
     @FocusState private var focusedField: FocusTarget?
 
     private enum FocusTarget { case pattern, want }
@@ -436,7 +443,6 @@ struct RuleEditor: View {
                 header
                 alreadyInEffect
                 wantField
-                appliesTo
                 advancedSection
 
                 if let error {
@@ -449,10 +455,12 @@ struct RuleEditor: View {
         .keyContext(.modal)
         .keyBindings(.modal, [
             KeyBinding("Escape", "cancel", allowInInput: true) { onClose() },
-            // Tab only means something while the override is on screen. With
-            // advanced closed it DECLINES, so the key falls through to AppKit
-            // and moves focus the way it does in every other card.
-            KeyBinding(declining: "Tab", "cycle disposition", allowInInput: true) {
+            // Tab takes a suggestion while one is on offer in the empty field.
+            // Otherwise it only means something while the override is on
+            // screen; with advanced closed it DECLINES, so the key falls
+            // through to AppKit and moves focus the way it does in every card.
+            KeyBinding(declining: "Tab", "use suggestion / cycle disposition", allowInInput: true) {
+                if acceptSuggestion() { return true }
                 guard advanced else { return false }
                 cycle(1)
                 return true
@@ -462,20 +470,19 @@ struct RuleEditor: View {
                 cycle(-1)
                 return true
             },
-            // ⌘-chorded because the want field owns every bare letter, and the
-            // hint row below teaches it.
+            // ⌘-chorded because the want field owns every bare letter. Taught
+            // by the advanced toggle's tooltip, not the footer, which keeps
+            // only the keys every save goes through.
             KeyBinding("d", "advanced", meta: true, allowInInput: true) { toggleAdvanced() },
             // BOTH SPELLINGS SAVE. Bare Enter is this card's own convention and
-            // the hint row has taught it since the card existed. ⌘Enter is the
+            // the footer teaches it. ⌘Enter is the
             // one every OTHER multi-line surface in the app uses — the group
             // editor, the composer, the inline reply — so a hand arriving from
             // any of them tries it first and, until now, got nothing. They
             // coexist because dispatch matches `meta` exactly in both
             // directions, so neither binding can answer for the other.
-            KeyBinding("Enter", "save rule", allowInInput: true) { Task { await save() } },
-            KeyBinding("Enter", "save rule", meta: true, allowInInput: true) {
-                Task { await save() }
-            },
+            KeyBinding("Enter", "save rule", allowInInput: true) { submit() },
+            KeyBinding("Enter", "save rule", meta: true, allowInInput: true) { submit() },
         ])
         .onAppear {
             // The want text is the rule, so it takes focus everywhere except
@@ -484,39 +491,40 @@ struct RuleEditor: View {
             focusedField = mode == .create ? .pattern : .want
         }
         .task { await loadInEffect() }
+        .task { await loadSuggestion() }
     }
 
-    /// Title plus WHO the rule is about. The sender is email-derived, so it is
-    /// rendered as Text only, never as markup.
+    /// WHO the rule is about. In tune mode the sender IS the title, so there is
+    /// no eyebrow over it; edit and create have no sender to lead with and get
+    /// a plain title instead. The sender is email-derived, so it is rendered as
+    /// Text only, never as markup.
+    @ViewBuilder
     private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(Typo.sectionLabel)
-                .foregroundStyle(Palette.ink)
-                .textCase(.uppercase)
-            if let sender = request.sender {
-                HStack(spacing: 8) {
-                    Avatar(sender: sender, size: 26)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(SenderCache.resolved(sender).displayName)
-                            .font(Typo.row)
-                            .foregroundStyle(Palette.ink)
+        if let sender = request.sender {
+            let resolved = SenderCache.resolved(sender)
+            HStack(spacing: 10) {
+                Avatar(sender: sender, size: 30)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(resolved.displayName)
+                        .font(Typo.zoneTitle)
+                        .foregroundStyle(Palette.ink)
+                        .lineLimit(1)
+                    if resolved.displayName.lowercased() != SenderID.address(sender) {
+                        Text(SenderID.address(sender))
+                            .font(Typo.rowSub)
+                            .foregroundStyle(Palette.inkFaint)
                             .lineLimit(1)
-                        if SenderCache.resolved(sender).displayName.lowercased()
-                            != SenderID.address(sender)
-                        {
-                            Text(SenderID.address(sender))
-                                .font(Typo.mono(10))
-                                .foregroundStyle(Palette.inkFaintest)
-                                .lineLimit(1)
-                        }
                     }
                 }
-            } else {
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(Typo.zoneTitle)
+                    .foregroundStyle(Palette.ink)
                 subtitle
             }
         }
-        .padding(.bottom, 2)
     }
 
     /// The rule itself, in the user's own words, and now the ONLY question on
@@ -526,48 +534,75 @@ struct RuleEditor: View {
     /// purpose, since a card that only ever showed "i dont care about X" would
     /// teach people this box is a mute button.
     private var wantField: some View {
-        Field(label: wantLabel) {
-            TextField(
-                "in plain english. e.g. always show these, or: only order confirmations, or: i dont care about the approval emails",
-                text: $want, axis: .vertical
-            )
-            .textFieldStyle(.plain)
-            .lineLimit(2...5)
-            .focused($focusedField, equals: .want)
+        VStack(alignment: .leading, spacing: 7) {
+            // The one question on the card, so it reads at body size rather than
+            // as a faint field caption.
+            Text(wantLabel)
+                .font(Typo.row)
+                .foregroundStyle(Palette.inkDim)
+            HStack(alignment: .top, spacing: 8) {
+                TextField(
+                    "", text: $want,
+                    prompt: Text(offered ?? "e.g. only order confirmations, or: always show these"),
+                    axis: .vertical
+                )
+                .textFieldStyle(.plain)
+                .lineLimit(2...5)
+                .focused($focusedField, equals: .want)
+                if offered != nil {
+                    // The key on a Mac, a tap target on a phone; both take it.
+                    Button { _ = acceptSuggestion(requireFocus: false) } label: {
+                        #if os(macOS)
+                            Kbd("tab")
+                        #else
+                            Text("use").font(Typo.micro).foregroundStyle(Palette.accent)
+                        #endif
+                    }
+                    .buttonStyle(.plain)
+                    .help("use this suggestion")
+                    .transition(.opacity)
+                }
+            }
+            .fieldWell()
         }
+    }
+
+    /// The suggestion, while it is still on offer: the field is empty.
+    private var offered: String? {
+        want.isEmpty ? suggestion : nil
+    }
+
+    /// Enter on an empty field with a suggestion showing reads as "yes, that",
+    /// so it takes the suggestion into the field instead of silently refusing
+    /// to save nothing. It does not save it: the second Enter does, after the
+    /// sentence has been in the field where it can be read and edited.
+    private func submit() {
+        if acceptSuggestion(requireFocus: false) { return }
+        Task { await save() }
+    }
+
+    /// Put the suggestion in the field. From the keyboard only while the want
+    /// field has focus, so tab in the pattern field keeps its own meaning.
+    private func acceptSuggestion(requireFocus: Bool = true) -> Bool {
+        guard let offered, !requireFocus || focusedField == .want else { return false }
+        want = offered
+        focusedField = .want
+        return true
+    }
+
+    /// Best-effort, like the in-effect strip: no model, an old daemon, a slow
+    /// answer or no pattern all leave the generic example in place.
+    private func loadSuggestion() async {
+        guard mode == .tune, let sender = request.sender, want.isEmpty else { return }
+        guard let answer = try? await APIClient.shared.suggestRule(
+            sender: SenderID.address(sender))
+        else { return }
+        withAnimation(Motion.disclose) { suggestion = answer }
+        if want.isEmpty { suggestionShown = true }
     }
 
     private var wantLabel: String {
         mode == .tune ? "what do you want from this sender?" : "what do you want?"
-    }
-
-    /// The two things the card decided FOR you, both dim and neither editable
-    /// here: the glob it derived, and where the outcome is coming from. Visible
-    /// because nothing about a rule should be a surprise; demoted because
-    /// neither one is the question being asked.
-    @ViewBuilder
-    private var appliesTo: some View {
-        if !advanced {
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 5) {
-                    Text("applies to").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
-                    Text(pattern)
-                        .font(Typo.mono(10))
-                        .foregroundStyle(Palette.inkFaint)
-                        .lineLimit(1)
-                    Spacer()
-                }
-                Text(outcomeNote)
-                    .font(Typo.micro)
-                    .foregroundStyle(Palette.inkFaintest)
-            }
-        }
-    }
-
-    /// Where the disposition is coming from, said once, in the collapsed card.
-    private var outcomeNote: String {
-        guard let disposition else { return "the outcome is read from what you wrote." }
-        return "outcome: \(disposition.label) · change it under advanced"
     }
 
     /// The override. Lives in advanced because the honest default is now "let
@@ -598,32 +633,43 @@ struct RuleEditor: View {
         return options
     }
 
-    /// The cancel button doubles as the Escape hint on a Mac; a phone dismisses
-    /// by tapping off the card and has no key to name.
-    private var cancelLabel: String {
-        #if os(macOS)
-            "esc cancel"
-        #else
-            "cancel"
-        #endif
-    }
-
+    /// WHO the rule covers and the way into overriding it, on one dim line
+    /// under the field. The glob is visible because nothing about a rule should
+    /// be a surprise, and demoted because it is not the question being asked.
+    /// An override the caller already chose shows here too, so a collapsed
+    /// card never hides what it is about to save.
     @ViewBuilder
     private var advancedSection: some View {
-        Button(action: toggleAdvanced) {
-            HStack(spacing: 5) {
-                Image(systemName: advanced ? "chevron.down" : "chevron.right")
-                    .font(.system(size: 8, weight: .semibold))
-                Text("advanced").font(Typo.micro)
-                #if os(macOS)
-                    Kbd("⌘d")
-                #endif
-                Spacer()
+        HStack(spacing: 6) {
+            if !advanced {
+                Text("applies to").foregroundStyle(Palette.inkFaintest)
+                Text(pattern)
+                    .font(Typo.mono(10))
+                    .foregroundStyle(Palette.inkFaint)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if let disposition {
+                    Text("· \(disposition.label)").foregroundStyle(Palette.inkFaint)
+                }
             }
-            .foregroundStyle(Palette.inkFaint)
-            .contentShape(Rectangle())
+            Spacer(minLength: 8)
+            Button(action: toggleAdvanced) {
+                HStack(spacing: 4) {
+                    Text("advanced")
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 8, weight: .semibold))
+                        .rotationEffect(.degrees(advanced ? 180 : 0))
+                }
+                .foregroundStyle(Palette.inkFaint)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            #if os(macOS)
+                .help("⌘D")
+            #endif
         }
-        .buttonStyle(.plain)
+        .font(Typo.micro)
+        .padding(.top, -4)
 
         if advanced {
             Field(label: "match pattern") {
@@ -637,44 +683,42 @@ struct RuleEditor: View {
         }
     }
 
+    /// One row: the keys on the left (Mac only — a phone has none of them),
+    /// the buttons on the right. A reason save is shut takes the hints' place
+    /// rather than stacking another line on the card.
     private var footer: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            // A row of keycaps for four keys a phone does not have. The editor is
-            // reachable there now (tune is a row swipe), so the hints are fenced
-            // rather than shown as instructions nobody can follow.
-            #if os(macOS)
-                HStack(spacing: 4) {
-                    // Taught only while it does something: tab is a focus key
-                    // everywhere else in the app.
-                    if advanced {
-                        KeyHint("tab", "disposition")
-                        Text("·").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
+        HStack(spacing: 8) {
+            if let blocked {
+                Text(blocked)
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.warn)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                #if os(macOS)
+                    HStack(spacing: 10) {
+                        KeyHint("↵", offered == nil ? "save" : "use suggestion")
+                        KeyHint("⌥↵", "new line")
+                        // Tab takes a suggestion first; teach whichever it does.
+                        if offered == nil, advanced { KeyHint("tab", "outcome") }
                     }
-                    KeyHint("⌘d", "advanced")
-                    Text("·").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
-                    KeyHint("⌥↵", "new line")
-                    Text("·").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
-                    KeyHint(["↵", "⌘↵"], "save")
-                    Spacer()
-                }
-            #endif
-            HStack(spacing: 8) {
-                if let blocked {
-                    Text(blocked)
-                        .font(Typo.micro)
-                        .foregroundStyle(Palette.warn)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: 8)
-                Button(cancelLabel, action: onClose).buttonStyle(.glass)
-                Button(saving ? "saving…" : (mode == .edit ? "update rule" : "save rule")) {
-                    Task { await save() }
-                }
-                .buttonStyle(.glassProminent)
-                .tint(Palette.accent)
-                .disabled(saving || blocked != nil)
+                #endif
             }
+            Spacer(minLength: 8)
+            Button("cancel", action: onClose).buttonStyle(.glass)
+            Button(saving ? "saving…" : (mode == .edit ? "update rule" : "save rule")) {
+                Task { await save() }
+            }
+            .buttonStyle(.glassProminent)
+            .tint(Palette.accent)
+            .disabled(saving || !canSave)
         }
+        .padding(.top, 4)
+    }
+
+    /// An empty want on auto is the resting state of a fresh card, not a
+    /// mistake, so it shuts save without a warning under your cursor.
+    private var canSave: Bool {
+        blocked == nil && !(want.trimmed.isEmpty && disposition == nil)
     }
 
     /// Why save is shut, in the user's terms, or nil when it is open. Checked
@@ -692,7 +736,6 @@ struct RuleEditor: View {
             if disposition == .filtered {
                 return "filter needs a line saying what you do or do not want"
             }
-            if disposition == nil { return "say what you want in plain english" }
         }
         return nil
     }
@@ -713,43 +756,59 @@ struct RuleEditor: View {
     @ViewBuilder
     private var alreadyInEffect: some View {
         if mode == .tune, let inEffect, !inEffect.isEmpty {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("already in effect")
-                    .font(Typo.sectionLabel)
-                    .foregroundStyle(Palette.inkFaint)
-                    .textCase(.uppercase)
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 4) {
-                        ForEach(inEffect) { rule in
-                            HStack(spacing: 9) {
-                                Chip(
-                                    text: rule.disposition.label,
-                                    tone: rule.disposition.tone, filled: true
-                                )
-                                .frame(width: 54, alignment: .leading)
-                                Text(rule.match_pattern)
-                                    .font(Typo.mono(11))
-                                    .foregroundStyle(Palette.ink)
-                                    .lineLimit(1)
-                                Text(rule.want_text.isEmpty ? "·" : rule.want_text)
-                                    .font(Typo.micro)
-                                    .foregroundStyle(
-                                        rule.want_text.isEmpty
-                                            ? Palette.inkFaintest : Palette.inkDim
-                                    )
-                                    .lineLimit(1)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .help(rule.want_text)
-                            }
+            VStack(alignment: .leading, spacing: 6) {
+                FieldLabel(inEffect.count == 1 ? "current rule" : "current rules")
+                // Sized to its rows up to three; past that it scrolls so a
+                // sender with a pile of rules cannot push the field off the card.
+                // A ScrollView always takes every point it is offered, which is
+                // why it only appears once it has something to scroll.
+                if inEffect.count > 3 {
+                    ScrollView { inEffectRows(inEffect) }.frame(height: 96)
+                } else {
+                    inEffectRows(inEffect)
+                }
+            }
+        }
+    }
+
+    /// The rule's own sentence leads, because that is what the owner wrote and
+    /// will recognise. The glob only shows when it is not the one this card
+    /// would write, since otherwise it repeats the sender's address.
+    private func inEffectRows(_ rules: [SenderRule]) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(rules.enumerated()), id: \.element.id) { i, rule in
+                if i > 0 { Hairline() }
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Chip(text: rule.disposition.label, tone: rule.disposition.tone, filled: true)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(rule.want_text.isEmpty ? "no description" : rule.want_text)
+                            .font(Typo.rowSub)
+                            .foregroundStyle(
+                                rule.want_text.isEmpty ? Palette.inkFaintest : Palette.ink
+                            )
+                            .lineLimit(2)
+                            .help(rule.want_text)
+                        if rule.match_pattern != pattern {
+                            Text(rule.match_pattern)
+                                .font(Typo.mono(10))
+                                .foregroundStyle(Palette.inkFaint)
+                                .lineLimit(1)
                         }
                     }
+                    Spacer(minLength: 0)
                 }
-                // A sender with a pile of rules must not push the field that
-                // writes the next one off the card.
-                .frame(maxHeight: 66)
+                .padding(.vertical, 7)
+                .padding(.horizontal, 10)
             }
-            .padding(.bottom, 2)
         }
+        .background(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(Palette.canvas.opacity(0.3))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .strokeBorder(Palette.hairline, lineWidth: 0.75)
+        )
     }
 
     /// Best-effort: a failed lookup leaves the strip absent rather than claiming
@@ -767,8 +826,8 @@ struct RuleEditor: View {
     private var subtitle: some View {
         switch mode {
         case .tune:
-            Text("from \(request.sender ?? "")")
-                .font(Typo.micro).foregroundStyle(Palette.inkFaintest)
+            // Unreachable: tune mode has a sender, and the header leads with it.
+            EmptyView()
         case .edit:
             Text("editing \(request.rule?.match_pattern ?? "")")
                 .font(Typo.micro).foregroundStyle(Palette.inkFaintest)
@@ -798,7 +857,7 @@ struct RuleEditor: View {
     /// what the toast and the analytics report, because the client no longer
     /// knows it up front.
     private func save() async {
-        guard !saving, blocked == nil else { return }
+        guard !saving, canSave else { return }
         let body = CreateRuleBody(
             match_pattern: pattern.trimmed, want: want.trimmed, disposition: disposition)
         // Practice uses this same save path with the local fixture transport;
@@ -819,6 +878,8 @@ struct RuleEditor: View {
             var properties: [String: Any] = [
                 "has_want": !want.trimmed.isEmpty,
                 "edit": request.rule != nil,
+                "suggested": suggestionShown,
+                "from_suggestion": suggestionShown && want.trimmed == suggestion,
             ]
             if let resolved { properties["disposition"] = resolved.rawValue }
             Analytics.capture("rule_created", properties)

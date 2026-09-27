@@ -23,6 +23,7 @@ use squelch_core::store::{
 use squelch_core::sync::{LABEL_INBOX, LABEL_SPAM, decode_raw_b64url, parse_internal_date};
 use squelch_core::triage::llm::Usage;
 use squelch_core::triage::rule_infer;
+use squelch_core::triage::rule_suggest;
 use squelch_core::types::{
     AccountId, AttentionStatus, Disposition, GroupMode, ShredStats, Tier, TriageAxis,
 };
@@ -1913,6 +1914,93 @@ fn may_resolve_sender_mail(resolved: &ResolvedDisposition, sweep: bool) -> bool 
     sweep && resolved.explicit && resolved.disposition == Disposition::Squelch
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SuggestRuleQuery {
+    sender: String,
+}
+
+/// GET /client/rules/suggest?sender=addr: the sentence the owner might write
+/// about this sender, for the rule card to offer as a placeholder. Always 200;
+/// `suggestion` is null when there is no model, too little history, or no
+/// clear pattern. It is only ever SHOWN: the owner accepts it with tab and
+/// saves it themselves, and its disposition is then inferred from the owner's
+/// sentence like any other. See [`squelch_core::triage::rule_suggest`].
+pub async fn suggest_rule(
+    State(state): State<ApiState>,
+    Query(params): Query<SuggestRuleQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    // Validated before anything else, so a client bug answers the same 400
+    // whether or not this daemon has a model.
+    let sender = params.sender.trim().to_lowercase();
+    if sender.is_empty() {
+        return Err(ApiError::bad_request("sender must not be empty"));
+    }
+    let none = || (no_store(), Json(serde_json::json!({ "suggestion": null })));
+    let Some(client) = state.rule_suggest.clone() else {
+        return Ok(none());
+    };
+    let addr = sender.clone();
+    let digest = store_call(&state, move |store, account_id| {
+        // The runaway guard: past the day's cap the route answers null
+        // without spending. Read from the same ledger the calls bill into.
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        let spent: u64 = store
+            .list_usage_by_category(account_id, 1)?
+            .into_iter()
+            .filter(|(c, _)| c == squelch_core::metrics::RULE_SUGGEST_USAGE_CATEGORY)
+            .flat_map(|(_, days)| days)
+            .filter(|d| d.day == today)
+            .map(|d| d.calls)
+            .sum();
+        if spent >= u64::from(rule_suggest::DAILY_CAP) {
+            return Ok(None);
+        }
+        let history = store.sender_rule_digest(account_id, &addr, rule_suggest::HISTORY_LIMIT)?;
+        let rules = store.list_sender_rules(account_id)?;
+        Ok(Some((history, rules)))
+    })
+    .await?;
+    let Some((history, rules)) = digest else {
+        return Ok(none());
+    };
+    let existing: Vec<String> = rules
+        .into_iter()
+        .filter(|r| {
+            !r.want_text.trim().is_empty()
+                && squelch_core::triage::rules::glob_match(&r.match_pattern, &sender)
+        })
+        .map(|r| r.want_text)
+        .collect();
+    let (suggestion, usage) = rule_suggest::suggest_rule(
+        &client,
+        &rule_suggest::SuggestInput {
+            from_addr: &sender,
+            existing_rules: &existing,
+            history: &history,
+        },
+    )
+    .await;
+    if let Some(u) = usage {
+        let _ = store_call(&state, move |store, account_id| {
+            let day = Utc::now().format("%Y-%m-%d").to_string();
+            if let Err(e) = store.extract_bump_usage(
+                account_id,
+                &day,
+                squelch_core::metrics::RULE_SUGGEST_USAGE_CATEGORY,
+                u.into(),
+            ) {
+                eprintln!("squelch: rule suggestion usage ledger bump failed ({e})");
+            }
+            Ok(())
+        })
+        .await;
+    }
+    Ok((
+        no_store(),
+        Json(serde_json::json!({ "suggestion": suggestion })),
+    ))
+}
+
 pub async fn create_rule(
     State(state): State<ApiState>,
     Json(body): Json<CreateRuleBody>,
@@ -2855,9 +2943,7 @@ pub async fn get_usage(
                 state.stage2_price_in_per_mtok,
                 state.stage2_price_out_per_mtok,
             )
-        } else if name == squelch_core::metrics::NOTIFY_USAGE_CATEGORY
-            || name == squelch_core::triage::access::USAGE_CATEGORY
-        {
+        } else if squelch_core::metrics::runs_notify_model(name) {
             (
                 state.notify_model.as_ref(),
                 state.notify_price_in_per_mtok,

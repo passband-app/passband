@@ -1264,6 +1264,19 @@ pub fn usage_from_ledger(rows: Vec<(String, Vec<Stage2UsageDay>)>) -> Vec<LlmCat
 /// 25x by falling through to the Stage-1 arm.
 pub const NOTIFY_USAGE_CATEGORY: &str = "notify";
 
+/// The rule card's suggested sentence. Runs the notify model, so it is priced
+/// at notify rates; see [`runs_notify_model`].
+pub const RULE_SUGGEST_USAGE_CATEGORY: &str = "rule_suggest";
+
+/// Does this ledger category run [`crate::config::NotifyConfig::model`]? The
+/// ONE list both cost estimators consult, so a small-model category cannot be
+/// priced as small in one and as Stage-1 in the other.
+pub fn runs_notify_model(category: &str) -> bool {
+    category == NOTIFY_USAGE_CATEGORY
+        || category == RULE_SUGGEST_USAGE_CATEGORY
+        || category == crate::triage::access::USAGE_CATEGORY
+}
+
 /// Estimated spend for a ledger rollup, costed exactly as `/client/usage` does.
 /// THREE arms, not two: `stage2` runs the capable model and its prices,
 /// [`NOTIFY_USAGE_CATEGORY`] runs the small notify model and ITS prices, and
@@ -1285,7 +1298,7 @@ pub fn estimate_cost_usd(usage: &[LlmCategoryUsage], config: &Config) -> f64 {
                     config.stage2.price_in_per_mtok,
                     config.stage2.price_out_per_mtok,
                 )
-            } else if u.category == NOTIFY_USAGE_CATEGORY {
+            } else if runs_notify_model(&u.category) {
                 (
                     config.notify.price_in_per_mtok,
                     config.notify.price_out_per_mtok,
@@ -2148,6 +2161,17 @@ mod tests {
             (estimate_cost_usd(&one_mtok_in(NOTIFY_USAGE_CATEGORY), &config) - expected).abs()
                 < 1e-9
         );
+        // Every category that runs the notify model is priced the same way:
+        // the rule suggester and the agent-access check both ride it.
+        for category in [
+            RULE_SUGGEST_USAGE_CATEGORY,
+            crate::triage::access::USAGE_CATEGORY,
+        ] {
+            assert!(
+                (estimate_cost_usd(&one_mtok_in(category), &config) - expected).abs() < 1e-9,
+                "{category} is priced as the notify model"
+            );
+        }
         // And it is genuinely a different number from the arm it would have
         // fallen through to, so this test cannot pass by coincidence.
         assert!(

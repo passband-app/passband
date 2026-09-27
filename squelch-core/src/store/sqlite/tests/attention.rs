@@ -1785,3 +1785,39 @@ fn activity_and_stats_project_current_agent_decisions_and_keep_pending_separate(
         "projection must not need a legacy verdict write"
     );
 }
+
+/// The rule suggester's sender digest SEEKS the NOCASE sender index instead of
+/// walking the account newest-first. Pinned by plan, like the probes above, and
+/// the canary is louder here: the statement names its index, so dropping it
+/// must make the prepare fail rather than quietly degrade.
+#[test]
+fn rule_digest_seeks_the_nocase_sender_index() {
+    use super::super::rules::SENDER_RULE_DIGEST_SQL;
+
+    let (store, _acct) = store();
+    let conn = store.lock().unwrap();
+    let mut stmt = conn
+        .prepare(&format!("EXPLAIN QUERY PLAN {SENDER_RULE_DIGEST_SQL}"))
+        .unwrap();
+    let nulls = vec![rusqlite::types::Value::Null; stmt.parameter_count()];
+    let plan: Vec<String> = stmt
+        .query_map(rusqlite::params_from_iter(nulls), |r| r.get::<_, String>(3))
+        .unwrap()
+        .map(|line| line.unwrap())
+        .collect();
+    drop(stmt);
+    assert!(
+        plan.iter().any(
+            |l| l.starts_with("SEARCH m USING INDEX idx_messages_from_nocase")
+                && l.contains("from_addr=?")
+        ),
+        "the digest walked instead of seeking\n{plan:#?}"
+    );
+
+    conn.execute_batch("DROP INDEX idx_messages_from_nocase;")
+        .unwrap();
+    assert!(
+        conn.prepare(SENDER_RULE_DIGEST_SQL).is_err(),
+        "INDEXED BY no longer names the index it depends on"
+    );
+}

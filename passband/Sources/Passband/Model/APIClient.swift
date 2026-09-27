@@ -571,6 +571,15 @@ actor APIClient {
 
     func listRules() async throws -> [SenderRule] { try await get("/client/rules") }
 
+    /// A small model's guess at the rule the owner might write about `sender`,
+    /// or nil. Only ever shown as a placeholder: the owner takes it with tab.
+    /// A daemon too old for the route 404s, which the caller reads as none.
+    func suggestRule(sender: String) async throws -> String? {
+        let answer: RuleSuggestion = try await get(
+            "/client/rules/suggest", query: ["sender": sender])
+        return answer.suggestion
+    }
+
     @discardableResult
     func createRule(_ body: CreateRuleBody) async throws -> CreatedRule {
         try await post("/client/rules", body: body)

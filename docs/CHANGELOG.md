@@ -12,6 +12,29 @@ updates itself, the phone comes through TestFlight, and the daemon is
 rolled onto hosted accounts or pulled as an image on a self-host box,
 so every note says which one it landed in.
 
+## 0.0.9 (2026-09-27)
+
+Passband tells you when gmail is the problem.
+
+### Mac
+
+- Clear status when gmail sync is stuck, and when it tries again
+- The synced time is the last real gmail sync
+- No more "all clear" when your mail hasn't been sorted yet
+- Re-triage shows what it's waiting on
+- Auth page badge counts the sign-in alerts that need a decision
+- Reconnect tells you which address to pick before opening Google
+- Long plain-text emails wrap instead of running off the edge
+- Forwarding from search no longer stacks two panes
+- The onboarding calendar lesson works on a second run
+
+### Daemon
+
+- Stays under gmail's per-user rate limit
+- Sign-in alerts go to the Auth page, not FYE
+- Reports sync and triage health to the app
+- Various bug fixes
+
 ## 0.0.8 (2026-09-25)
 
 Biggest update by far. Now we're a real product?

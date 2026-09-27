@@ -228,7 +228,13 @@ struct SearchView: View {
             }
         }
         .keyBindings(.modal, bindings)
-        .onAppear { focused = true }
+        // `/` mounts this panel mid-keystroke, and focus set in the pass that
+        // mounts the field lands before the field is in the window, so the
+        // caret never arrives. One turn later it does (SettingsView's editor
+        // hit the same thing). The request counter covers `/` over a panel
+        // that is already open, where there is no `onAppear` to fire.
+        .onAppear { focusField() }
+        .onChange(of: store.searchFocusRequest) { focusField() }
         .onChange(of: store.search.query) { _, query in
             store.search.index = -1
             if query.trimmed.isEmpty {
@@ -266,22 +272,37 @@ struct SearchView: View {
         }
     }
 
+    private func focusField() {
+        DispatchQueue.main.async { focused = true }
+    }
+
+    /// ONE BUTTON, TWO VERBS, the same two ⌘↩ has: with a conversation going
+    /// it opens that conversation in ⌘K (see `openSearchLaneInChat`), and
+    /// before one it asks.
     private var askAgentButton: some View {
-        Button { store.requestDeeperSearch() } label: {
+        let opens = store.searchLaneHasConversation
+        return Button { store.requestDeeperSearch() } label: {
             HStack(spacing: 5) {
-                Image(systemName: "sparkles")
-                Text((store.searchLane.running || store.preparingSearchEvidence) ? "Searching…" : "Ask agent")
+                Image(systemName: opens ? "arrow.up.left.and.arrow.down.right" : "sparkles")
+                Text(opens ? "Open in chat"
+                    : (store.searchLane.running || store.preparingSearchEvidence) ? "Searching…" : "Ask agent")
                 if store.search.expanded { Kbd("⌘↩") }
             }
             .font(.system(size: 12, weight: .medium))
         }
         .buttonStyle(.plain)
         .foregroundStyle(Palette.accentInk)
-        .disabled(!DeeperSearchPolicy.canRequest(query: store.search.query,
-            choice: prefs.deeperSearch, running: store.searchLane.running || store.preparingSearchEvidence))
-        .help(prefs.deeperSearch == .off
-            ? "Enable deeper search in Settings to use the agent."
-            : "Ask the agent to search and read your mail. ⌘Return")
+        .disabled(opens
+            ? !store.canOpenSearchLaneInChat
+            : !DeeperSearchPolicy.canRequest(query: store.search.query,
+                choice: prefs.deeperSearch, running: store.searchLane.running || store.preparingSearchEvidence))
+        .help(opens
+            ? (!store.canOpenSearchLaneInChat
+                ? "The chat is busy answering something else."
+                : "Open this conversation in chat for the full answer and follow-ups. ⌘Return")
+            : prefs.deeperSearch == .off
+                ? "Enable deeper search in Settings to use the agent."
+                : "Ask the agent to search and read your mail. ⌘Return")
     }
 
     /// The hits themselves, extracted so the strip (band above) and the

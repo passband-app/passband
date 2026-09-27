@@ -229,10 +229,7 @@ struct PassbandCommands: Commands {
             Button("Ask Your Inbox…") { store.askBarOpen = true }
                 .keyboardShortcut("k", modifiers: [.command])
                 .disabled(blocked)
-            Button("New Ask Chat") {
-                store.assistant.clear()
-                store.askBarOpen = true
-            }
+            Button("New Ask Chat") { store.newAskChat() }
             .keyboardShortcut("k", modifiers: [.command, .shift])
             .disabled(blocked)
             Button("Search…") { store.openSearch() }

@@ -812,6 +812,30 @@ final class AppStore {
     var authRings: [AuthRing] = []
     /// Newest-first queue of code-modal entries (only otp/verification).
     var authQueue: [AuthCodeEntry] = []
+    /// Set by `requestAuthPage` on the phone, which has no routed Auth page
+    /// for `setView(.auth)` to reach: its shell opens the login-codes page
+    /// behind the Quick Look key, then clears this (`consumeAuthPage`). A
+    /// pending FLAG, read on the shell's first appearance as well as on
+    /// change, because a tap that launched the app is drained the moment
+    /// `connStatus` turns `.connected`, before the shell exists to see a
+    /// change happen.
+    private(set) var pendingAuthPage = false
+
+    /// "Show me the auth mail", from a notification tap. The Mac routes to
+    /// its Auth page; the phone opens its login-codes page (see
+    /// `pendingAuthPage`). A sheet that is up (a draft, say) stays up: the
+    /// page opens behind it rather than a tap discarding someone's work.
+    func requestAuthPage() {
+        #if os(macOS)
+            setView(.auth)
+        #else
+            closeThread()
+            pendingAuthPage = true
+        #endif
+    }
+
+    /// The phone's shell has opened the page `requestAuthPage` asked for.
+    func consumeAuthPage() { pendingAuthPage = false }
 
     // MARK: read tracking
     /// The daemon's tracking answer, fetched once on connect. nil = never

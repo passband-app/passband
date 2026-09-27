@@ -354,11 +354,9 @@ final class Notifier {
                 }
             }
         case .auth:
-            // The routed page on the Mac. The phone's tab bar owns its own
-            // navigation and has no Auth tab yet, so there this sets a view
-            // nothing renders — exactly what `openThread` already does on that
-            // shell, and it starts working the day the tab arrives.
-            AppStore.shared.setView(.auth)
+            // The routed Auth page on the Mac; on the phone, the login-codes
+            // page behind the Quick Look tab's key.
+            AppStore.shared.requestAuthPage()
         }
     }
 }

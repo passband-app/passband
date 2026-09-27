@@ -842,6 +842,13 @@ fn list_shipments_conn(
         if cleared || silent {
             continue;
         }
+        // An order placeholder is the human rail's view of a trackless record.
+        // The agent door serves that record itself, off the decision.
+        if door == Door::Agent
+            && crate::triage::order_link::is_order_placeholder(&shipment.tracking_number)
+        {
+            continue;
+        }
         // The agent door serves only rows every contributing mail allows,
         // judged through the same cache the merchant and link checks use.
         if door == Door::Agent

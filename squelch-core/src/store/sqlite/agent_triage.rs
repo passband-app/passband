@@ -1570,6 +1570,7 @@ impl AgentTriageStore for SqliteStore {
         super::agent_deliveries::reconcile(
             &tx,
             job.account_id,
+            job.message_id,
             current.previous_decision.as_ref(),
             decision,
         )?;

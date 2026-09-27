@@ -491,6 +491,27 @@ Staged orders are not currently served on either door. They exist so that the
 shipment you eventually see is named "Anker USB-C charger" instead of "your
 package", and so that a future orders view has something to read.
 
+### Order placeholders: `ordered` with no number
+
+A delivery record that says `ordered` and carries no usable tracking number
+(an order confirmation, Amazon Subscribe & Save's "Review your upcoming
+delivery") still gets a row, so the rail can show it. Its `tracking_number` is
+a synthetic identity that no real number can collide with (real ones are
+uppercase `[A-Z0-9]`): `order:<merchant key>:<order key>` when the record names
+a merchant and an order ref, else `order:#<message id>/<record index>`. Its
+carrier is `amazon` or `unknown`, so the poller never asks about it, and the
+agent door skips it (it serves the record off the decision instead).
+
+A placeholder is **retired** when mail at least as new, about the same
+merchant + order ref, carries a record that is not itself a placeholder: a
+tracked label, or a trackless shipped or delivered notice. The row is deleted
+rather than grouped, so it can never pin an order's card at "ordered". A
+placeholder with no order ref (Subscribe & Save prints none) cannot be retired
+that way and leaves through the ordinary silence window.
+
+Trackless records with any other status (Amazon's own "Shipped:" and
+"Delivered:" mail) still project nothing. They only retire placeholders.
+
 ### Names, merchants and one card per order
 
 Since the triage-agent rewrite, packages are written by `reconcile`

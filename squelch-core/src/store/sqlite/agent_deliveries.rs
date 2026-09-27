@@ -8,14 +8,91 @@ use crate::triage::decision::{MessageDecision, RecordProposal};
 use crate::triage::extract::shipments::sanitize_tracking_number;
 use std::collections::BTreeSet;
 
-fn tracking_numbers(decision: &MessageDecision) -> impl Iterator<Item = String> {
-    decision.records.iter().filter_map(|record| match record {
-        RecordProposal::Delivery {
-            tracking_number: Some(number),
+/// The row one delivery record projects to, as `(identity, carrier)`, or
+/// `None` when it projects to nothing.
+///
+/// A record with a usable tracking number from a carrier we recognise is a
+/// package, keyed by its number. A record with NO usable number that says
+/// `ordered` is an ORDER PLACEHOLDER (see
+/// [`ORDER_PLACEHOLDER`](crate::triage::order_link::ORDER_PLACEHOLDER)):
+/// keyed by its first order ref under its merchant when it has both, else by
+/// the record itself. Its carrier is only ever `amazon` or `unknown`, which is
+/// what keeps the poller off it. A trackless shipped or delivered record still
+/// projects nothing; it only retires placeholders (see `reconcile`).
+///
+/// `merchant` and `refs` arrive sanitized.
+fn project(
+    message: i64,
+    index: usize,
+    carrier: Option<&str>,
+    tracking_number: Option<&str>,
+    status: &str,
+    merchant: Option<&str>,
+    refs: &[String],
+) -> Option<(String, String)> {
+    use crate::triage::order_link::{message_order_placeholder, order_placeholder};
+    if let Some(number) = sanitize_tracking_number(tracking_number, None) {
+        return match carrier {
+            Some(c @ ("ups" | "usps" | "fedex" | "dhl" | "amazon")) => {
+                Some((number, c.to_string()))
+            }
+            _ => None,
+        };
+    }
+    if status != "ordered" {
+        return None;
+    }
+    let key = merchant
+        .zip(refs.first())
+        .and_then(|(m, r)| order_placeholder(m, r))
+        .unwrap_or_else(|| message_order_placeholder(message, index));
+    let carrier = if carrier == Some("amazon") {
+        "amazon"
+    } else {
+        "unknown"
+    };
+    Some((key, carrier.to_string()))
+}
+
+/// Every row identity a decision's delivery records touch: each tracking
+/// number (whatever its carrier, so a carrier change still retracts), each
+/// placeholder, and the placeholder of every merchant + ref it carries, so a
+/// later shipped or delivered mail revisits the order row it retires.
+fn identities(message: i64, decision: &MessageDecision) -> Vec<String> {
+    use crate::triage::order_link::{order_placeholder, sanitize_merchant, sanitize_order_refs};
+    let mut out = Vec::new();
+    for (index, record) in decision.records.iter().enumerate() {
+        let RecordProposal::Delivery {
+            carrier,
+            tracking_number,
+            status,
+            merchant,
+            order_refs,
             ..
-        } => sanitize_tracking_number(Some(number), None),
-        _ => None,
-    })
+        } = record
+        else {
+            continue;
+        };
+        let merchant = sanitize_merchant(merchant.as_deref());
+        let refs = sanitize_order_refs(order_refs);
+        out.extend(sanitize_tracking_number(tracking_number.as_deref(), None));
+        out.extend(
+            project(
+                message,
+                index,
+                carrier.as_deref(),
+                tracking_number.as_deref(),
+                status,
+                merchant.as_deref(),
+                &refs,
+            )
+            .map(|(key, _)| key),
+        );
+        if let Some(m) = merchant.as_deref() {
+            out.extend(refs.iter().filter_map(|r| order_placeholder(m, r)));
+        }
+    }
+    out
 }
 
 /// Write what the newest retained mail about a package says onto its row. ONE
@@ -223,19 +300,30 @@ fn record_identity(
     Ok(())
 }
 
+/// Rebuild every `shipments` row `message`'s old and new decision touch from
+/// all retained decisions.
+///
+/// ORDER PLACEHOLDERS are retired, not merely left behind: once any other
+/// mail at least as new carries the same merchant + order ref in a record
+/// that is not itself a placeholder (a ship notice, a delivery notice, a
+/// tracked label), the purchase has moved on and the "ordered" row goes. A
+/// placeholder never pins an order's card at "ordered" after it shipped.
 pub(super) fn reconcile(
     conn: &Connection,
     account: AccountId,
+    message: i64,
     previous: Option<&MessageDecision>,
     current: &MessageDecision,
 ) -> Result<()> {
     use crate::triage::order_link::{
-        sanitize_agent_item_name, sanitize_merchant, sanitize_order_refs,
+        is_order_placeholder, order_placeholder, sanitize_agent_item_name, sanitize_merchant,
+        sanitize_order_refs,
     };
+    use std::collections::HashMap;
     let affected: BTreeSet<String> = previous
         .into_iter()
-        .flat_map(tracking_numbers)
-        .chain(tracking_numbers(current))
+        .flat_map(|d| identities(message, d))
+        .chain(identities(message, current))
         .collect();
     if affected.is_empty() {
         return Ok(());
@@ -256,29 +344,53 @@ pub(super) fn reconcile(
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let mut proposals = Vec::new();
+    // Placeholder identity -> the newest (received, message) of a non-placeholder
+    // record carrying that merchant + ref: what retires an order row.
+    let mut moved_on: HashMap<String, (DateTime<Utc>, i64)> = HashMap::new();
     for (message, encoded, received, subject) in decisions {
         let decision: MessageDecision =
             serde_json::from_str(&encoded).map_err(|e| CoreError::Other(e.into()))?;
-        for record in decision.records {
+        for (index, record) in decision.records.into_iter().enumerate() {
             if let RecordProposal::Delivery {
-                carrier: Some(carrier),
-                tracking_number: Some(number),
+                carrier,
+                tracking_number,
                 status,
                 item_name,
                 merchant,
                 order_refs,
                 ..
             } = record
-                && let Some(number) = sanitize_tracking_number(Some(&number), None)
-                && affected.contains(&number)
-                && matches!(
-                    carrier.as_str(),
-                    "ups" | "usps" | "fedex" | "dhl" | "amazon"
-                )
-                && let Some(status) = crate::triage::ShipmentStatus::parse(&status)
             {
                 let merchant = sanitize_merchant(merchant.as_deref());
                 let order_refs = sanitize_order_refs(&order_refs);
+                let projected = project(
+                    message,
+                    index,
+                    carrier.as_deref(),
+                    tracking_number.as_deref(),
+                    &status,
+                    merchant.as_deref(),
+                    &order_refs,
+                );
+                if !projected
+                    .as_ref()
+                    .is_some_and(|(key, _)| is_order_placeholder(key))
+                    && let Some(m) = merchant.as_deref()
+                {
+                    for key in order_refs.iter().filter_map(|r| order_placeholder(m, r)) {
+                        // Decisions arrive newest first: the first sighting wins.
+                        moved_on.entry(key).or_insert((received, message));
+                    }
+                }
+                let Some((number, carrier)) = projected else {
+                    continue;
+                };
+                if !affected.contains(&number) {
+                    continue;
+                }
+                let Some(status) = crate::triage::ShipmentStatus::parse(&status) else {
+                    continue;
+                };
                 let item_name = sanitize_agent_item_name(
                     item_name.as_deref(),
                     &subject,
@@ -303,6 +415,21 @@ pub(super) fn reconcile(
             }
         }
     }
+    // A retired placeholder has no proposal left, so the loop below deletes
+    // its row like any other retraction.
+    proposals.retain(|p| {
+        if !is_order_placeholder(&p.info.tracking_number) {
+            return true;
+        }
+        let Some(m) = p.merchant.as_deref() else {
+            return true;
+        };
+        !p.order_refs
+            .iter()
+            .filter_map(|r| order_placeholder(m, r))
+            .filter_map(|key| moved_on.get(&key))
+            .any(|&(at, by)| by != p.message && at >= p.received)
+    });
     for number in affected {
         let existing: Option<i64> = conn
             .query_row(
@@ -521,7 +648,7 @@ mod tests {
                 params![old, Utc::now().to_rfc3339()],
             )
             .unwrap();
-            reconcile(&tx, 1, None, &decision).unwrap();
+            reconcile(&tx, 1, 1, None, &decision).unwrap();
             tx.commit().unwrap();
         }
         // A NEW decision about the same package re-reads the old one too.
@@ -1118,7 +1245,7 @@ mod tests {
              VALUES(1,?1,1,?2,?3) ON CONFLICT(account_id,message_id) DO UPDATE SET decision_json=excluded.decision_json",
             params![id,serde_json::to_string(current).unwrap(),Utc::now().to_rfc3339()],
         ).unwrap();
-        reconcile(&tx, 1, previous, current).unwrap();
+        reconcile(&tx, 1, id, previous, current).unwrap();
         tx.commit().unwrap();
     }
 
@@ -1566,5 +1693,208 @@ mod tests {
             .unwrap();
         assert_eq!(records, 2);
         assert_eq!(shipments, 0);
+    }
+
+    fn trackless(
+        status: &str,
+        carrier: Option<&str>,
+        item: Option<&str>,
+        merchant: Option<&str>,
+        refs: &[&str],
+    ) -> MessageDecision {
+        MessageDecision {
+            records: vec![RecordProposal::Delivery {
+                carrier: carrier.map(str::to_string),
+                tracking_number: None,
+                status: status.into(),
+                item_name: item.map(str::to_string),
+                merchant: merchant.map(str::to_string),
+                order_refs: refs.iter().map(|r| r.to_string()).collect(),
+                evidence: vec![],
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn row_count(store: &SqliteStore) -> i64 {
+        store
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM shipments", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// Amazon Subscribe & Save's "Review your upcoming delivery": no carrier,
+    /// no tracking number, no order number. It used to project nothing and so
+    /// never reached the rail.
+    #[test]
+    fn a_trackless_ordered_record_is_an_unpolled_card_the_agent_door_skips() {
+        let store = fixture();
+        let sns = trackless(
+            "ordered",
+            None,
+            Some("Monster Energy Zero Ultra"),
+            Some("Amazon"),
+            &[],
+        );
+        write(&store, 1, None, &sns);
+        let rows = listed(&store);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, "ordered");
+        assert_eq!(rows[0].carrier, "unknown");
+        assert_eq!(rows[0].item_name, "Monster Energy Zero Ultra");
+        assert_eq!(rows[0].tracking_url, None);
+        assert!(!pollable(&store, rows[0].id));
+        // The agent door serves a readable package, but not the placeholder:
+        // it reads the trackless record off the decision instead.
+        write(&store, 2, None, &delivery("1Z999AA10123456784", "shipped"));
+        for id in [1, 2] {
+            store
+                .lock()
+                .unwrap()
+                .execute(
+                    "INSERT INTO agent_message_state(account_id,message_id,content_snapshot,revision,access)
+                     VALUES(1,?1,'',1,'allowed')",
+                    [id],
+                )
+                .unwrap();
+        }
+        let served: Vec<String> = store
+            .external_shipments(1, true)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.tracking_number)
+            .collect();
+        assert_eq!(served, ["1Z999AA10123456784"]);
+        // Retracting the record retracts the card.
+        write(&store, 1, Some(&sns), &MessageDecision::default());
+        assert_eq!(row_count(&store), 1);
+    }
+
+    /// Only `ordered` gets a placeholder: a trackless ship or delivery notice
+    /// still projects nothing, and a carrier the record names is never used to
+    /// poll a placeholder.
+    #[test]
+    fn only_ordered_trackless_records_get_a_placeholder() {
+        let store = fixture();
+        write(
+            &store,
+            1,
+            None,
+            &trackless("shipped", Some("amazon"), None, Some("Amazon"), &["113-1"]),
+        );
+        assert_eq!(row_count(&store), 0);
+        write(
+            &store,
+            2,
+            None,
+            &trackless("ordered", Some("ups"), None, Some("Shop"), &["9"]),
+        );
+        let rows = listed(&store);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].carrier, "unknown");
+        assert!(!pollable(&store, rows[0].id));
+    }
+
+    /// Two confirmations of one order are one card, keyed by merchant + ref.
+    #[test]
+    fn one_order_is_one_placeholder() {
+        let store = fixture();
+        let ordered = trackless("ordered", Some("amazon"), None, Some("Amazon"), &["113-1"]);
+        write(&store, 1, None, &ordered);
+        write(&store, 2, None, &ordered);
+        let rows = listed(&store);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].carrier, "amazon");
+        // Retracting one keeps the order the other still states.
+        write(&store, 2, Some(&ordered), &MessageDecision::default());
+        assert_eq!(row_count(&store), 1);
+    }
+
+    /// Once newer mail about the same order says it shipped (with or without
+    /// a number), the "ordered" row goes: it must never pin the order's card
+    /// at ordered, or outlive the delivery by the whole silence window.
+    #[test]
+    fn newer_mail_about_the_order_retires_its_placeholder() {
+        let store = fixture();
+        write(
+            &store,
+            1,
+            None,
+            &trackless(
+                "ordered",
+                Some("amazon"),
+                Some("Pants"),
+                Some("Amazon"),
+                &["113-1"],
+            ),
+        );
+        write(
+            &store,
+            2,
+            None,
+            &trackless(
+                "delivered",
+                Some("amazon"),
+                None,
+                Some("AMAZON"),
+                &["#113-1"],
+            ),
+        );
+        assert_eq!(row_count(&store), 0);
+
+        // A tracked label for the order retires it too, leaving only the package.
+        let store = fixture();
+        write(
+            &store,
+            1,
+            None,
+            &trackless("ordered", None, Some("Pants"), Some("Amazon"), &["113-1"]),
+        );
+        write(
+            &store,
+            2,
+            None,
+            &named(
+                "1Z999AA10123456784",
+                "shipped",
+                None,
+                Some("Amazon"),
+                &["113-1"],
+            ),
+        );
+        let rows = listed(&store);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tracking_number, "1Z999AA10123456784");
+        assert!(rows[0].legs.is_empty());
+    }
+
+    /// OLDER mail about the order is not news: a re-decided ship notice from
+    /// before the confirmation leaves the placeholder alone, and so does
+    /// another store's order carrying the same number.
+    #[test]
+    fn older_or_foreign_mail_does_not_retire_a_placeholder() {
+        let store = fixture();
+        write(
+            &store,
+            2,
+            None,
+            &trackless("ordered", None, None, Some("Amazon"), &["113-1"]),
+        );
+        write(
+            &store,
+            1,
+            None,
+            &trackless("shipped", None, None, Some("Amazon"), &["113-1"]),
+        );
+        assert_eq!(row_count(&store), 1);
+        add_message(&store, 3, "Shipped", chrono::Duration::zero());
+        write(
+            &store,
+            3,
+            None,
+            &trackless("shipped", None, None, Some("Bill's Exhausts"), &["113-1"]),
+        );
+        assert_eq!(row_count(&store), 1);
     }
 }

@@ -36,6 +36,34 @@ pub fn order_key(order_ref: &str) -> String {
         .collect()
 }
 
+/// The `tracking_number` prefix of an ORDER PLACEHOLDER: a `shipments` row for
+/// a purchase the mail has announced but no carrier has a number for yet (an
+/// order confirmation, a Subscribe & Save "review your upcoming delivery").
+/// Real numbers are sanitized to uppercase `[A-Z0-9]`, so no real number can
+/// ever carry this lowercase prefix. Placeholders are never polled (their
+/// carrier is `amazon` or `unknown`) and never served on the agent door.
+pub const ORDER_PLACEHOLDER: &str = "order:";
+
+pub fn is_order_placeholder(tracking_number: &str) -> bool {
+    tracking_number.starts_with(ORDER_PLACEHOLDER)
+}
+
+/// The placeholder identity of one order: `order:<merchant key>:<order key>`.
+/// Neither key can contain `:` (both are alphanumeric), so this never collides
+/// with another order or with [`message_order_placeholder`]'s `#` form.
+pub fn order_placeholder(merchant: &str, order_ref: &str) -> Option<String> {
+    let (m, o) = (merchant_key(merchant), order_key(order_ref));
+    (!m.is_empty() && !o.is_empty()).then(|| format!("{ORDER_PLACEHOLDER}{m}:{o}"))
+}
+
+/// The placeholder identity of an order the mail printed no number for: the
+/// `index`th delivery record of `message`. It can only ever be retired by
+/// that message's own decision changing, and otherwise ages out through the
+/// listing's silence window.
+pub fn message_order_placeholder(message: i64, index: usize) -> String {
+    format!("{ORDER_PLACEHOLDER}#{message}/{index}")
+}
+
 /// Carrier names, as merchant keys. A carrier delivers the box; it did not sell
 /// it. Amazon is deliberately absent: it is both, and "Amazon" is a real store.
 const CARRIER_KEYS: &[&str] = &[

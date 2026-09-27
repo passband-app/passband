@@ -1576,7 +1576,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.0.8;
+				MARKETING_VERSION = 0.0.9;
 				PRODUCT_BUNDLE_IDENTIFIER = app.passband.client;
 				PRODUCT_NAME = Passband;
 				SDKROOT = macosx;
@@ -1723,7 +1723,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.0.8;
+				MARKETING_VERSION = 0.0.9;
 				PRODUCT_BUNDLE_IDENTIFIER = app.passband.client;
 				PRODUCT_NAME = Passband;
 				SDKROOT = macosx;

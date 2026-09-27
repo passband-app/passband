@@ -112,6 +112,10 @@ struct ConnectView: View {
     /// waiting for the press the link will never make for the user.
     @State private var linkArmed = false
     @State private var arrivedViaPairLink = false
+    /// This gate opened the browser sign in. A hosted form reached any other
+    /// way (a saved hosted account that failed to restore) has no tab to
+    /// point at, and must not say it does.
+    @State private var signInOpened = false
     @State private var showingPairingDetails = false
     /// The gate was mounted because a saved connection could not be restored,
     /// at launch or after the practice inbox. Fixed at mount: the retry it offers is about
@@ -296,21 +300,36 @@ struct ConnectView: View {
         #endif
     }
 
-    /// Everything after the intro. Moves between these are not animated, so
-    /// this keeps one identity and only enters and leaves as a whole.
-    @ViewBuilder
+    /// Everything after the intro, on ONE stage. Moves between these are not
+    /// animated, so this keeps one identity and only enters and leaves as a
+    /// whole — and so does the scene behind it: only the column swaps. A stage
+    /// per step would remount the squelch renderer on every Back and blank it
+    /// to the flat backdrop while it faded in again.
     private var loginSteps: some View {
+        IntroStage(columnWidth: stepColumnWidth) { wide in stepColumn(wide: wide) }
+    }
+
+    /// The guide's command lines want more measure than a form does.
+    private var stepColumnWidth: CGFloat {
+        if case .selfHostGuide = effectiveGateStep { return 520 }
+        return 440
+    }
+
+    @ViewBuilder
+    private func stepColumn(wide: Bool) -> some View {
         switch effectiveGateStep {
         case .introduction:
             EmptyView()
         case .welcome:
             WelcomeGate(
+                wide: wide,
                 retrySaved: savedRetry,
                 retrying: retryingSavedConnection,
                 login: {
                     url = ""
                     mode = .pair
                     arrivedViaPairLink = false
+                    signInOpened = true
                     gateStep = .credentials(.hosted)
                     Opener.open(Hosted.signIn(theme: colorScheme))
                 },
@@ -321,13 +340,14 @@ struct ConnectView: View {
                 })
         case .selfHostGuide:
             SelfHostGuide(
+                wide: wide,
                 back: { gateStep = .welcome },
                 continueToForm: {
                     mode = .pair
                     gateStep = .credentials(.selfHosted)
                 })
         case .credentials:
-            IntroStage { wide in formColumn(wide: wide) }
+            formColumn(wide: wide)
         }
     }
 
@@ -358,7 +378,6 @@ struct ConnectView: View {
     private func formColumn(wide: Bool) -> some View {
             VStack(spacing: 0) {
                 header(wide: wide)
-                    .modifier(IntroEntrance(delay: purpose == .gate ? 0.04 : 0))
                 credentialContent
 
                 if let errorText {
@@ -397,6 +416,7 @@ struct ConnectView: View {
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.bottom, 28)
+            .modifier(IntroEntrance(delay: 0.04))
         } else {
             VStack(alignment: .leading, spacing: 4) {
                 Text(headerTitle)
@@ -433,7 +453,7 @@ struct ConnectView: View {
         guard purpose == .gate else { return "add account" }
         if arrivedViaPairLink { return "Make yourself at home." }
         switch hostingChoice {
-        case .hosted: return "Finish in your browser."
+        case .hosted: return signInOpened ? "Finish in your browser." : "Reconnect your account."
         case .selfHosted: return "Connect your server."
         case nil: return "Pair this device."
         }
@@ -445,7 +465,9 @@ struct ConnectView: View {
         }
         switch hostingChoice {
         case .hosted:
-            return "Sign in with Google in the tab that just opened. If Passband doesn’t come back on its own, enter the server URL and pairing code from that page."
+            return signInOpened
+                ? "Sign in with Google in the tab that just opened. If Passband doesn’t come back on its own, enter the server URL and pairing code from that page."
+                : "Sign in with Gmail again to pick up where you left off, or enter your server URL and a pairing code below."
         case .selfHosted:
             return "Run squelchd pair on your server, then enter what it prints."
         case nil:
@@ -459,13 +481,13 @@ struct ConnectView: View {
         } else if arrivedViaPairLink && mode == .pair {
             linkedPairForm
         } else {
-            if purpose == .addAccount || hostingChoice == .selfHosted {
-                GlassSegmented(
-                    options: [(ConnectMode.pair, "pair with code"), (.token, "api token")],
-                    selection: modeBinding)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.bottom, 16)
-            }
+            // Only the sheet reaches here (the gate has its rig), and adding a
+            // daemon offers both ways in.
+            GlassSegmented(
+                options: [(ConnectMode.pair, "pair with code"), (.token, "api token")],
+                selection: modeBinding)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.bottom, 16)
             switch mode {
             case .pair: pairForm
             case .token: tokenForm
@@ -490,7 +512,7 @@ struct ConnectView: View {
                     selection: modeBinding)
                     .padding(.bottom, 14)
             }
-            ConnectRig(lit: focus != nil) {
+            ConnectRig(lit: rigHasFocus(linked: linked)) {
                 if linked {
                     RigSlot(label: "device", focused: focus == .device) {
                         TextField("This Mac", text: $deviceName)
@@ -554,6 +576,17 @@ struct ConnectView: View {
         }
     }
 
+    /// Whether the focused control is one of the rig's own. The linked form's
+    /// pairing details sit below the rig and share `focus`, and editing them
+    /// should not light an instrument they are not part of.
+    private func rigHasFocus(linked: Bool) -> Bool {
+        switch focus {
+        case .device, .name, .submit: return true
+        case .url, .code, .token: return !linked
+        case nil: return false
+        }
+    }
+
     /// The submit, set into the rig's last row: no ground or shell of its own,
     /// divided off by one hairline, lit in the accent when it can be pressed.
     private var rigSubmit: some View {
@@ -611,7 +644,10 @@ struct ConnectView: View {
     /// The gate's quiet way out, beside whatever second chance this route has.
     @ViewBuilder private var gateSecondaryAction: some View {
         if hostingChoice == .hosted {
-            Button("Open sign in again") { Opener.open(Hosted.signIn(theme: colorScheme)) }
+            Button(signInOpened ? "Open sign in again" : "Sign in with Gmail") {
+                signInOpened = true
+                Opener.open(Hosted.signIn(theme: colorScheme))
+            }
                 .buttonStyle(.plain)
                 .font(.system(size: 12))
                 .foregroundStyle(Palette.inkDim)
@@ -772,29 +808,7 @@ struct ConnectView: View {
                     .onSubmit { focus = .code }
             }
             VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 5) {
-                    FieldLabel("pairing code")
-                    if hostingChoice == .selfHosted {
-                        Button { pairingHelp = true } label: {
-                            Image(systemName: "questionmark.circle")
-                                .font(.system(size: 11))
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(Palette.inkFaint)
-                        .popover(isPresented: $pairingHelp) {
-                            VStack(alignment: .leading, spacing: 10) {
-                                Text("Run this on the machine hosting squelchd:")
-                                    .font(.system(size: 12))
-                                Text("squelchd pair")
-                                    .font(Typo.mono(13))
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 7)
-                                    .background(RoundedRectangle(cornerRadius: 8).fill(Palette.canvas))
-                            }
-                            .padding(16)
-                        }
-                    }
-                }
+                FieldLabel("pairing code")
                 TextField("XXXX-XXXX", text: codeBinding)
                     .textFieldStyle(.plain)
                     // Monospaced so a code read off a terminal lines up with
@@ -1053,6 +1067,7 @@ struct ConnectView: View {
 /// nothing else. One hosted door, sign in with Gmail, with self-hosting as the
 /// quieter way in beneath it.
 private struct WelcomeGate: View {
+    let wide: Bool
     /// Present only when the gate is up because a saved connection could
     /// not be restored: the retry belongs on this screen too, since back
     /// from the form lands here.
@@ -1062,10 +1077,6 @@ private struct WelcomeGate: View {
     let selfHostedLogin: () -> Void
 
     var body: some View {
-        IntroStage { wide in content(wide: wide) }
-    }
-
-    private func content(wide: Bool) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 18) {
                 Text("One last step.")
@@ -1143,11 +1154,11 @@ private struct WelcomeGate: View {
 /// daemon to a pairing code, with copyable commands and an explicit handoff to
 /// the form once the server is running.
 private struct SelfHostGuide: View {
+    let wide: Bool
     let back: () -> Void
     let continueToForm: () -> Void
 
     var body: some View {
-        IntroStage(columnWidth: 520) { wide in
             VStack(alignment: .leading, spacing: 0) {
                 VStack(alignment: .leading, spacing: 16) {
                     Text("Set up your server.")
@@ -1209,7 +1220,6 @@ private struct SelfHostGuide: View {
                 }
                 .padding(.top, 28)
             }
-        }
     }
 }
 

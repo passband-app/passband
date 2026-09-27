@@ -614,7 +614,7 @@ pub fn success(
 <p class="alt">Need the app? <a href="{download}">Download Passband</a>.</p>
 <details>
 <summary>Button did nothing? Connect manually</summary>
-<p>Open Passband, choose hosted, and enter your server and pairing code.</p>
+<p>Open Passband, press Sign in with Gmail, and enter this server and pairing code in the form it shows. You can close the browser tab that opens.</p>
 <p><code>{url}</code></p>
 <p><span class="code">{code}</span></p>
 <p>The code works once and expires in {minutes} minutes. Keep it private.
@@ -672,7 +672,7 @@ pub fn app_signed_in(
 <p class="alt">Need the app? <a href="{download}">Download Passband</a>.</p>
 <details>
 <summary>Button did nothing? Connect manually</summary>
-<p>Open Passband, choose hosted, and enter your server and pairing code.</p>
+<p>Open Passband, press Sign in with Gmail, and enter this server and pairing code in the form it shows. You can close the browser tab that opens.</p>
 <p><code>{url}</code></p>
 <p><span class="code">{code}</span></p>
 <p>The code works once and expires in {minutes} minutes. Keep it private.

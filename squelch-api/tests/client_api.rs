@@ -10445,3 +10445,158 @@ async fn grouped_recall_expands_without_repeating_hits_or_returning_done_early()
         );
     }
 }
+
+// --- GET /client/rules/suggest ----------------------------------------------
+
+/// One inbound message from `from` with `subject`, triaged at `sensitivity`.
+fn seed_suggest_msg(
+    store: &SqliteStore,
+    acct: i64,
+    gmail: &str,
+    from: &str,
+    subject: &str,
+    sensitivity: Sensitivity,
+) {
+    let mut m = msg(acct, gmail, gmail, subject, "body");
+    m.from_addr = from.to_string();
+    let id = store.upsert_message(&m).unwrap();
+    let kind = (sensitivity == Sensitivity::Sealed).then_some(SealedKind::Otp);
+    store
+        .set_triage(id, acct, 10, Tier::Noise, sensitivity, kind, "", "", None)
+        .unwrap();
+}
+
+/// A state whose rule suggester points at a mock answering `suggestion`.
+async fn app_with_rule_suggestion(
+    suggestion: &'static str,
+    seed: impl FnOnce(&SqliteStore, i64),
+) -> Harness {
+    use squelch_core::config::Stage2Provider;
+    use squelch_core::triage::rule_suggest::RuleSuggestClient;
+
+    let body = format!(
+        r#"{{"content":[{{"type":"text","text":"{{\"suggestion\":\"{suggestion}\"}}"}}],"stop_reason":"end_turn","usage":{{"input_tokens":40,"output_tokens":6}}}}"#
+    );
+    let url = spawn_classifier_mock(200, body).await;
+    let (state, store, acct) = state_with(seed);
+    let state = state.with_rule_suggestion(Some(RuleSuggestClient::new(
+        reqwest::Client::new(),
+        url,
+        "sk-test",
+        Stage2Provider::Anthropic,
+        "claude-haiku-4-5",
+        None,
+    )));
+    Harness {
+        app: router(state),
+        store,
+        acct,
+    }
+}
+
+fn usage_categories(store: &SqliteStore, acct: i64) -> Vec<String> {
+    store
+        .list_usage_by_category(acct, 30)
+        .unwrap()
+        .into_iter()
+        .map(|(c, _)| c)
+        .collect()
+}
+
+#[tokio::test]
+async fn rule_suggestion_is_cleaned_and_billed_to_its_own_category() {
+    let Harness { app, store, acct } =
+        app_with_rule_suggestion("only order confirmations.", |store, acct| {
+            for (g, s) in [("g1", "Your order shipped"), ("g2", "New in the store")] {
+                seed_suggest_msg(store, acct, g, "news@shop.com", s, Sensitivity::Normal);
+            }
+        })
+        .await;
+
+    let resp = app
+        .oneshot(authed("GET", "/client/rules/suggest?sender=News@Shop.com"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["suggestion"], "only order confirmations");
+    assert_eq!(
+        usage_categories(&store, acct),
+        vec!["rule_suggest".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn rule_suggestion_is_null_without_a_model_or_without_history() {
+    // No suggester on the default harness.
+    let Harness { app, .. } = harness(|store, acct| {
+        for g in ["g1", "g2", "g3"] {
+            seed_suggest_msg(store, acct, g, "a@b.com", "hi", Sensitivity::Normal);
+        }
+    });
+    let resp = app
+        .oneshot(authed("GET", "/client/rules/suggest?sender=a@b.com"))
+        .await
+        .unwrap();
+    assert_eq!(body_json(resp).await["suggestion"], Value::Null);
+
+    // A suggester, but one message is not a pattern: no call, no spend.
+    let Harness { app, store, acct } = app_with_rule_suggestion("mute them", |store, acct| {
+        seed_suggest_msg(store, acct, "g1", "a@b.com", "hi", Sensitivity::Normal);
+    })
+    .await;
+    let resp = app
+        .oneshot(authed("GET", "/client/rules/suggest?sender=a@b.com"))
+        .await
+        .unwrap();
+    assert_eq!(body_json(resp).await["suggestion"], Value::Null);
+    assert!(usage_categories(&store, acct).is_empty());
+}
+
+#[tokio::test]
+async fn sealed_mail_never_reaches_the_rule_suggester() {
+    // The digest IS the suggester's input, so a sealed subject absent from it
+    // cannot reach the model. Two sealed rows alone must not even clear the
+    // history floor.
+    let Harness { app, store, acct } = app_with_rule_suggestion("mute them", |store, acct| {
+        seed_suggest_msg(
+            store,
+            acct,
+            "g1",
+            "bank@b.com",
+            "code 111",
+            Sensitivity::Sealed,
+        );
+        seed_suggest_msg(
+            store,
+            acct,
+            "g2",
+            "bank@b.com",
+            "code 222",
+            Sensitivity::Sealed,
+        );
+        seed_suggest_msg(
+            store,
+            acct,
+            "g3",
+            "bank@b.com",
+            "statement",
+            Sensitivity::Normal,
+        );
+    })
+    .await;
+    let digest = store.sender_rule_digest(acct, "bank@b.com", 15).unwrap();
+    assert_eq!(
+        digest
+            .iter()
+            .map(|r| r.subject.as_str())
+            .collect::<Vec<_>>(),
+        vec!["statement"]
+    );
+    let resp = app
+        .oneshot(authed("GET", "/client/rules/suggest?sender=bank@b.com"))
+        .await
+        .unwrap();
+    assert_eq!(body_json(resp).await["suggestion"], Value::Null);
+    assert!(usage_categories(&store, acct).is_empty());
+}

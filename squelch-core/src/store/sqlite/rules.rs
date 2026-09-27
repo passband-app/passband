@@ -217,6 +217,37 @@ impl SqliteStore {
         Ok(out)
     }
 
+    pub(super) fn sender_rule_digest(
+        &self,
+        account_id: AccountId,
+        from_addr: &str,
+        limit: usize,
+    ) -> Result<Vec<SenderDigestRow>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT m.subject, t.tier, t.status, t.opened_at IS NOT NULL
+             FROM messages m
+             JOIN triage t ON t.message_id = m.id
+             WHERE m.account_id = ?1
+               AND m.from_addr = ?2 COLLATE NOCASE
+               AND m.is_sent = 0 AND m.is_spam = 0
+               AND t.sensitivity = 'normal'
+             ORDER BY m.received_at DESC
+             LIMIT ?3",
+        )?;
+        let out = stmt
+            .query_map(params![account_id, from_addr, limit as i64], |r| {
+                Ok(SenderDigestRow {
+                    subject: r.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                    tier: r.get(1)?,
+                    status: r.get(2)?,
+                    opened: r.get(3)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(out)
+    }
+
     pub(super) fn delete_sender_rule(&self, account_id: AccountId, id: i64) -> Result<bool> {
         let mut connection = self.lock()?;
         let conn = connection.transaction()?;

@@ -8,6 +8,7 @@ use squelch_core::credentials::{
 };
 use squelch_core::store::SqliteStore;
 use squelch_core::triage::rule_infer::RuleInferClient;
+use squelch_core::triage::rule_suggest::RuleSuggestClient;
 use squelch_core::types::AccountId;
 
 /// State threaded through every `/client/*` handler and the auth middleware.
@@ -162,6 +163,11 @@ pub struct ApiState {
     /// inference resolves to `filtered`, which is the safe default. HUMAN DOOR
     /// ONLY, like every other rule write.
     pub(crate) rule_infer: Option<Arc<RuleInferClient>>,
+    /// The small model that suggests a rule sentence for the rule card. It
+    /// reads the sender's recent subjects, so its output is only ever SHOWN,
+    /// never saved on its own. `None` (no key, every test harness) means no
+    /// suggestions. See [`squelch_core::triage::rule_suggest`].
+    pub(crate) rule_suggest: Option<RuleSuggestClient>,
     /// The hosted assistant relay: forwards the Passband app's Anthropic-shaped
     /// streaming request to the gateway with a daemon-held credential. `None`
     /// (no gateway + assistant key configured, and every test harness) means
@@ -387,6 +393,7 @@ impl ApiState {
                 ConsoleRateLimiter::per_minute(crate::console::CONSOLE_SIGNIN_REQUESTS_PER_MINUTE),
             )),
             rule_infer: None,
+            rule_suggest: None,
             assistant: None,
             sharing: None,
             shipment_poll: None,
@@ -612,6 +619,13 @@ impl ApiState {
     /// [`squelch_core::triage::rule_infer`].
     pub fn with_rule_inference(mut self, client: Option<RuleInferClient>) -> Self {
         self.rule_infer = client.map(Arc::new);
+        self
+    }
+
+    /// Attach the rule suggester. `None` keeps `/client/rules/suggest` answering
+    /// null.
+    pub fn with_rule_suggestion(mut self, client: Option<RuleSuggestClient>) -> Self {
+        self.rule_suggest = client;
         self
     }
 
@@ -865,6 +879,9 @@ impl ApiState {
             // stages resolve and the Stage-1 model; no key => `None` => rules
             // that omit a disposition are stored filtered.
             .with_rule_inference(RuleInferClient::from_config(cfg))
+            // The rule card's suggestion rides the same key and the NOTIFY
+            // model, the one small model the daemon already runs and prices.
+            .with_rule_suggestion(RuleSuggestClient::from_config(cfg))
             // The assistant relay resolves only when BOTH the gateway base URL
             // and the assistant key are present; anything less is `None` and
             // the route 404s (see `Stage2Config::resolve_assistant`).

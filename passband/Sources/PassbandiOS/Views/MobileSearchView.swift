@@ -23,8 +23,8 @@
 // deliberate tap, so unlike everything else here it DOES send.
 //
 // WHAT IT SHARES WITH THE MAC'S PANEL, and does not re-implement: the fetch
-// itself (`SearchFetch`: partial matching, the "include related" mode, the
-// unfinished-first order and the cleaned excerpts), the "is this the answer"
+// itself (`SearchFetch`: partial matching, the unfinished-first order and the
+// cleaned excerpts), the "is this the answer"
 // test (`SearchSession.answers`), and the recent-searches ring with its one
 // recording rule (`RecentSearchStore.remember`). What is drawn with them is the
 // phone's own: one column, rows sized for a thumb, the system search field.
@@ -41,6 +41,13 @@ import SwiftUI
 struct MobileSearchView: View {
     @Environment(AppStore.self) private var store
     @Environment(Prefs.self) private var prefs
+
+    /// ALWAYS HYBRID HERE, unlike the Mac. The Mac panel types in keyword
+    /// mode (`prefs.searchIncludeRelated`, off by default) because it keeps
+    /// embedding off the first-result path and gets meaning back from its
+    /// deeper-search lane (docs/SEARCH.md). The phone has no such lane, so
+    /// keyword-only would simply lose every related hit it has always had.
+    private static let related = true
 
     @State private var loading = false
     /// A page append is in flight. SEPARATE from `loading`: that one blanks the
@@ -77,7 +84,7 @@ struct MobileSearchView: View {
     /// `fetchedQuery != nil` alone means only that SOME query was once
     /// answered.
     private var answered: Bool {
-        store.search.answers(term, sort: prefs.searchSort, related: prefs.searchIncludeRelated)
+        store.search.answers(term, sort: prefs.searchSort, related: Self.related)
     }
 
     /// The remembered queries, newest first. Read through the store rather than
@@ -118,7 +125,7 @@ struct MobileSearchView: View {
             // for the next keystroke. An array because `task(id:)` needs one
             // Equatable value.
             .task(id: [store.search.query, prefs.searchSort.rawValue,
-                       String(prefs.searchIncludeRelated), String(store.search.revision)]) {
+                       String(store.search.revision)]) {
                 await runSearch()
             }
             // Return is the send, and only in agent mode: under four spaces it
@@ -176,13 +183,16 @@ struct MobileSearchView: View {
             // error has to ride above them rather than replace them — see
             // the empty state, which carries the same line when there is
             // nothing underneath it to keep.
-            if let error = store.search.error {
-                BandNote(error).plainRow()
-            } else if loading {
+            //
+            // A search in flight outranks the last one's error: typing again
+            // after a failure should read "searching…", not the old failure.
+            if loading {
                 // A refetch leaves the read hits on screen — replacing them
                 // with a word would blank the list on every keystroke past
                 // the debounce — so the new search says so from above them.
                 BandNote("searching…").plainRow()
+            } else if let error = store.search.error {
+                BandNote(error).plainRow()
             }
             ForEach(Array(hits.enumerated()), id: \.element.id) { i, hit in
                 // The Done / Not done split the Mac draws, from the same
@@ -424,7 +434,7 @@ struct MobileSearchView: View {
         // next visit instead of silently doing nothing until the reader edits
         // their query. Read at fetch time, not captured on mount.
         let sort = prefs.searchSort
-        let related = prefs.searchIncludeRelated
+        let related = Self.related
         let revision = store.search.revision
         // CLEARS `loading` on the way out: this is the path a cancelled
         // predecessor used to rely on someone else covering. The CURRENT task
@@ -448,7 +458,7 @@ struct MobileSearchView: View {
             // is no longer in the field — the `answers` guard above would then
             // refuse to fetch the term that IS.
             guard !Task.isCancelled, term == query, revision == store.search.revision,
-                  related == prefs.searchIncludeRelated else { return }
+                  related == Self.related else { return }
             store.search.hits = page.items
             store.search.diagnostics = page.diagnostics
             store.search.nextCursor = page.next_cursor

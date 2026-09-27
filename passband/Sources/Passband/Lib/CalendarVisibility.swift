@@ -7,16 +7,32 @@ final class CalendarVisibility {
     static let lifetime: TimeInterval = 24 * 3600
     private let defaults: UserDefaults
 
+    /// The scope the practice inbox stamps under. Its item ids are fixed
+    /// fixtures, so without `forget` a stamp from one session would hide the
+    /// same events from every session that starts more than a day later.
+    static let practiceAccount = "practice"
+
     init(defaults: UserDefaults = .standard) { self.defaults = defaults }
 
     private func key(account: String, item: Int) -> String {
-        "passband.calendar.firstSeen.\(account).\(item)"
+        "\(Self.prefix)\(account).\(item)"
     }
+    private static let prefix = "passband.calendar.firstSeen."
 
     func markSeen(account: String, item: Int, now: Date = Date()) {
         let key = key(account: account, item: item)
         guard defaults.object(forKey: key) == nil else { return }
         defaults.set(now.timeIntervalSince1970, forKey: key)
+    }
+
+    /// Drop every first-viewing stamp under one account, so its items start
+    /// their timer again the next time they are shown. The practice inbox
+    /// calls this on entry: every session is a fresh mailbox.
+    func forget(account: String) {
+        let scope = "\(Self.prefix)\(account)."
+        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(scope) {
+            defaults.removeObject(forKey: key)
+        }
     }
 
     /// SupportedTime may carry a local wall time and a separate IANA zone.

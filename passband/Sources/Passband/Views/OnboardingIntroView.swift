@@ -9,6 +9,7 @@ struct OnboardingIntroView: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.scenePhase) private var scenePhase
     @State private var page = 0
 
     private var organized: Bool { page > 0 }
@@ -25,12 +26,15 @@ struct OnboardingIntroView: View {
             // THE PHONE PAGES BY HAND. No continue button and no skip: the
             // whole screen is the control, a swipe left moves on and a swipe
             // right goes back, and the hint at the bottom says so. Each beat is
-            // also felt (IntroHaptics): static while the squelch is open, one
-            // settling sine wave the moment it closes.
+            // also felt, for as long as it is on screen (IntroHaptics): static
+            // while the squelch is open, a steady sine once it closes.
             .contentShape(Rectangle())
             .gesture(pageSwipe)
             .onAppear { IntroHaptics.shared.noise() }
             .onDisappear { IntroHaptics.shared.stop() }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active { IntroHaptics.shared.resume() }
+            }
             .onChange(of: page) { _, now in
                 if now == 1 { IntroHaptics.shared.sine() } else { IntroHaptics.shared.noise() }
             }

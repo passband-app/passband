@@ -1,12 +1,13 @@
 // The cold open, felt. The first beat of the intro is a radio with the squelch
 // open, all noise; the swipe closes the squelch and only the passband comes
 // through. The screen draws that (Views/Squelch), and the hand gets the same
-// two beats: static on the first page, then one clean sine wave that settles
-// out over about as long as the picture takes to.
+// two beats: static for as long as the first page is up, then a steady sine
+// wave for as long as the second is.
 //
-// THE NOISE IS A BURST, NOT A LOOP. It plays as the scene fades in (and again
-// on a swipe back to it), then stops: a phone that buzzed for as long as
-// somebody took to read a sentence would be a phone they put down.
+// BOTH LOOP, seamlessly. The noise is random with no envelope, so where it
+// repeats cannot be felt; the sine is a whole number of cycles that starts and
+// ends in a trough, so the seam lands in the quiet. The system stops the engine
+// when the app backgrounds, so the intro replays its beat on return (`resume`).
 //
 // Core Haptics rather than UIFeedbackGenerator, because neither beat is an
 // impact: the static is dozens of jittered transients over a low rumble, and
@@ -21,26 +22,39 @@ final class IntroHaptics {
     static let shared = IntroHaptics()
 
     private var engine: CHHapticEngine?
-    private var player: CHHapticPatternPlayer?
+    private var player: CHHapticAdvancedPatternPlayer?
+    private var current: Beat?
+
+    private enum Beat { case noise, sine }
 
     private init() {}
 
-    /// The open squelch: ~2.5s of static, fading in and out.
-    func noise() { play(Self.noisePattern()) }
+    /// The open squelch: static, until told otherwise.
+    func noise() { play(.noise) }
 
-    /// The squelch closing: a sine wave that starts full and settles.
-    func sine() { play(Self.sinePattern()) }
+    /// The squelch closed: a steady sine, until told otherwise.
+    func sine() { play(.sine) }
+
+    /// Back from the background, where the system stopped the engine and the
+    /// player with it: pick the beat up again.
+    func resume() {
+        if let current { play(current) }
+    }
 
     func stop() {
         try? player?.stop(atTime: CHHapticTimeImmediate)
         player = nil
+        current = nil
     }
 
-    private func play(_ pattern: CHHapticPattern?) {
+    private func play(_ beat: Beat) {
+        let pattern = beat == .noise ? Self.noisePattern() : Self.sinePattern()
         guard let pattern, let engine = readyEngine() else { return }
         stop()
+        current = beat
         do {
-            let next = try engine.makePlayer(with: pattern)
+            let next = try engine.makeAdvancedPlayer(with: pattern)
+            next.loopEnabled = true
             try next.start(atTime: CHHapticTimeImmediate)
             player = next
         } catch {
@@ -52,11 +66,16 @@ final class IntroHaptics {
         guard CHHapticEngine.capabilitiesForHardware().supportsHaptics else { return nil }
         if engine == nil {
             guard let made = try? CHHapticEngine() else { return nil }
-            // The system stops the engine when the app backgrounds or audio is
-            // interrupted; the next beat restarts it, so nothing is held open.
+            // The system stops the engine when the app backgrounds; `resume`
+            // (and every new beat) starts it again.
             made.playsHapticsOnly = true
-            made.isAutoShutdownEnabled = true
-            made.resetHandler = { [weak made] in try? made?.start() }
+            // No auto-shutdown: a looping player keeps the engine busy anyway,
+            // and a shutdown between beats would cost the next one a cold start.
+            // A reset (the haptic server restarting) invalidates every player,
+            // the looping one included, so the beat is started over.
+            made.resetHandler = {
+                Task { @MainActor in IntroHaptics.shared.resume() }
+            }
             engine = made
         }
         try? engine?.start()
@@ -65,27 +84,25 @@ final class IntroHaptics {
 
     // MARK: - patterns
 
-    static let noiseDuration: TimeInterval = 2.5
-    static let sineDuration: TimeInterval = 1.8
+    /// Long enough that the loop's repeat is not a rhythm anybody picks out.
+    static let noiseDuration: TimeInterval = 4
+    /// The sine's rate, and a loop of exactly `sineCycles` of it.
+    static let sineHz = 1.6
+    static let sineCycles = 12.0
 
-    /// Static: jittered transients over a faint rumble, under an envelope so it
-    /// swells in and dies away rather than switching on and off.
+    /// Static: jittered transients over a faint rumble, flat, so it loops
+    /// without a seam.
     private static func noisePattern() -> CHHapticPattern? {
         var rng = SystemRandomNumberGenerator()
         var events: [CHHapticEvent] = []
         let d = noiseDuration
-        func envelope(_ t: TimeInterval) -> Float {
-            let rise = min(1, t / 0.5), fall = min(1, (d - t) / 0.8)
-            return Float(max(0, min(rise, fall)))
-        }
         var t = 0.0
         while t < d {
-            let e = envelope(t)
             events.append(
                 CHHapticEvent(
                     eventType: .hapticTransient,
                     parameters: [
-                        .init(parameterID: .hapticIntensity, value: e * .random(in: 0.12...0.55, using: &rng)),
+                        .init(parameterID: .hapticIntensity, value: .random(in: 0.12...0.5, using: &rng)),
                         .init(parameterID: .hapticSharpness, value: .random(in: 0.35...1.0, using: &rng)),
                     ],
                     relativeTime: t))
@@ -95,25 +112,18 @@ final class IntroHaptics {
             CHHapticEvent(
                 eventType: .hapticContinuous,
                 parameters: [
-                    .init(parameterID: .hapticIntensity, value: 0.14),
+                    .init(parameterID: .hapticIntensity, value: 0.12),
                     .init(parameterID: .hapticSharpness, value: 0.6),
                 ],
                 relativeTime: 0, duration: d))
-        // The rumble follows the same envelope.
-        let rumble = CHHapticParameterCurve(
-            parameterID: .hapticIntensityControl,
-            controlPoints: stride(from: 0.0, through: d, by: d / 8).map {
-                .init(relativeTime: $0, value: envelope($0))
-            },
-            relativeTime: 0)
-        return try? CHHapticPattern(events: events, parameterCurves: [rumble])
+        return try? CHHapticPattern(events: events, parameters: [])
     }
 
-    /// One continuous, soft event whose intensity traces a sine that decays
-    /// toward stillness: the passband, and then quiet.
+    /// One continuous, soft event whose intensity traces a sine, trough to
+    /// trough, so the loop joins where the wave is quietest.
     private static func sinePattern() -> CHHapticPattern? {
-        let d = sineDuration
-        let hz = 2.6
+        let hz = sineHz
+        let d = sineCycles / hz
         let event = CHHapticEvent(
             eventType: .hapticContinuous,
             parameters: [
@@ -124,14 +134,13 @@ final class IntroHaptics {
         // A curve holds at most 16 control points, so the wave is sampled into
         // consecutive curves, each timed from its own start.
         let step = 1.0 / (hz * 8)
-        let samples = stride(from: 0.0, through: d, by: step).map { t -> (TimeInterval, Float) in
-            let decay = exp(-t * 1.4)
+        let samples = stride(from: 0.0, through: d + step / 2, by: step).map { t -> (TimeInterval, Float) in
             let wave = 0.5 + 0.5 * sin(2 * .pi * hz * t - .pi / 2)
-            return (t, Float(0.08 + 0.92 * wave * decay))
+            return (t, Float(0.1 + 0.8 * wave))
         }
         var curves: [CHHapticParameterCurve] = []
         var i = 0
-        while i < samples.count {
+        while i < samples.count - 1 {
             let chunk = samples[i..<min(i + 16, samples.count)]
             let start = chunk.first!.0
             curves.append(

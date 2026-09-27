@@ -311,19 +311,28 @@ struct EmailWebView: View {
             // slowest CDN. Measurement fires at document end, before images.
             .opacity(measured ? 1 : 0)
 
-            if hasQuoted {
-                Button {
-                    quotedHidden.toggle()
-                } label: {
-                    Text(quotedHidden ? "··· show quoted history" : "hide quoted history")
-                        .font(Typo.micro)
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 3)
+            // Under the mail: the quoted-history toggle and the tracker
+            // footnote, on one line when both are here. Conditional as a
+            // whole, or an empty row would still cost the stack's spacing.
+            if hasQuoted || (prepared.trackers > 0 && !prepared.trackersAllowed) {
+              HStack(spacing: 10) {
+                if hasQuoted {
+                    Button {
+                        quotedHidden.toggle()
+                    } label: {
+                        Text(quotedHidden ? "··· show quoted history" : "hide quoted history")
+                            .font(Typo.micro)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 3)
+                    }
+                    // Text-on-hover like the header actions: the only control
+                    // INSIDE the reading surface, where a glass pill reads as
+                    // chrome.
+                    .buttonStyle(.textAction)
+                    .help("the quoted reply chain below this message")
                 }
-                // Text-on-hover like the header actions: the only control INSIDE
-                // the reading surface, where a glass pill reads as chrome.
-                .buttonStyle(.textAction)
-                .help("the quoted reply chain below this message")
+                trackerNote
+              }
             }
         }
         .onAppear {
@@ -413,7 +422,9 @@ struct EmailWebView: View {
         // never learn them.
         empty = m.empty
         if let page = m.background { background = page }
-        if bubble, m.width > 0 {
+        // A floor under the hug: nothing this narrow is a message, so a
+        // report like that is a document mid-layout, not a size.
+        if bubble, m.width >= 40 {
             width = m.width
             if let cacheKey { FrameHeights.shared.setHugWidth(cacheKey, m.width) }
         }
@@ -547,12 +558,19 @@ struct EmailWebView: View {
             .help(
                 "\(prepared.trackers) tracking pixel\(prepared.trackers == 1 ? "" : "s") left in place: you have emailed this sender, so they may see that you opened this"
             )
-        } else if prepared.trackers > 0 {
-            // A FOOTNOTE, not a badge. This is the normal case — nearly every
-            // commercial mail carries a pixel and nearly every one is
-            // stripped — and a green capsule over every bubble was the reader
-            // being congratulated for the default. Same faint ink as the
-            // topline caption beside it; the help text carries the detail.
+        }
+    }
+
+    /// A FOOTNOTE UNDER THE MAIL, not a badge over it. This is the normal case
+    /// — nearly every commercial mail carries a pixel and nearly every one is
+    /// stripped — and a green capsule over every bubble was the reader being
+    /// congratulated for the default. Faint, small, and after the mail, where
+    /// a note about how it was rendered belongs; the help text carries the
+    /// detail. The two things that DO warrant attention before reading — the
+    /// remote-images offer and pixels left in for a known sender — stay above.
+    @ViewBuilder
+    private var trackerNote: some View {
+        if prepared.trackers > 0, !prepared.trackersAllowed {
             Label(
                 "\(prepared.trackers) tracker\(prepared.trackers == 1 ? "" : "s") blocked",
                 systemImage: "eye.slash"
@@ -756,6 +774,23 @@ enum EmailFrame {
             b.style.backgroundColor = bg;
           }
           adoptFullBleed();
+
+          // ---- hug or fill ---------------------------------------------
+          // A bubble document hugs its content (body.hug, EmailFrame) ONLY
+          // when the content can say how wide it is: plain prose, a few
+          // inline images. Tables and percentage widths answer with nothing,
+          // and anything already overflowing sideways is wider than it says.
+          // Those fill the measure — which is what a 600px newsletter was
+          // designed for anyway. Decided once, before the first measurement,
+          // so the frame is never narrowed on a bad answer.
+          function decideHug() {
+            var b = document.body;
+            if (!b || !b.classList.contains('hug')) return;
+            var complex = document.querySelector(
+              'table, center, [width$="%"], [style*="%"], iframe');
+            if (complex || b.scrollWidth > b.clientWidth + 1) b.classList.remove('hug');
+          }
+          decideHug();
 
           var quoteNodes = findQuoteNodes();
           window.__passbandSetQuotes = function (collapsed) {
@@ -1179,7 +1214,7 @@ final class EmailFrameCoordinator: NSObject {
             pre{white-space:pre-wrap!important;}\
             blockquote{margin:8px 0;padding-left:10px;border-left:2px solid #d8dee6;color:#555;}\
             </style>\
-            </head><body>\(html)</body></html>
+            </head><body\(bubble ? " class=\"hug\"" : "")>\(html)</body></html>
             """
     }
 
@@ -1192,9 +1227,15 @@ final class EmailFrameCoordinator: NSObject {
     /// across, 9 down) and is only as wide as what is in it: `fit-content` is
     /// min(the widest line, the frame), border-box so the cap includes the
     /// padding. A one-line reply hugs; a newsletter's 600px table fills.
+    ///
+    /// THE HUG IS A CLASS, so the measuring script can take it away: a body
+    /// built from `width="100%"` tables and percentage-width images answers
+    /// the question "how wide do you want to be" with nothing (percentages
+    /// contribute zero to an intrinsic width), and a frame narrowed to that
+    /// answer caps the document at it for good. Such a document fills.
     nonisolated private static let bubbleBody =
-        "body{padding:9px 12px;box-sizing:border-box;"
-        + "width:-webkit-fit-content;width:fit-content;max-width:100%;}"
+        "body{padding:9px 12px;box-sizing:border-box;}"
+        + "body.hug{width:-webkit-fit-content;width:fit-content;max-width:100%;}"
 }
 
 /// THE LINE AHEAD OF THE DOCUMENT. A sanitized body very often opens with

@@ -11,11 +11,15 @@ struct OnboardingIntroView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
     @State private var page = 0
+    @State private var backgrounded = false
 
     private var organized: Bool { page > 0 }
 
     var body: some View {
-        Group {
+        // A ZStack, not a Group: a Group hands its modifiers to each branch,
+        // so a fallback swap mid-intro would fire onDisappear/onAppear and
+        // replay the opening burst.
+        ZStack {
             if !SquelchScene.shared.isUnavailable {
                 squelchLayout
             } else {
@@ -29,11 +33,19 @@ struct OnboardingIntroView: View {
             // also felt, for as long as it is on screen (IntroHaptics): static
             // while the squelch is open, a steady sine once it closes.
             .contentShape(Rectangle())
-            .gesture(pageSwipe)
+            // Simultaneous, so the card fallback's ScrollView keeps its pan.
+            .simultaneousGesture(pageSwipe)
             .onAppear { IntroHaptics.shared.switchOn() }
-            .onDisappear { IntroHaptics.shared.stop() }
+            .onDisappear { IntroHaptics.shared.shutdown() }
+            // Only a real trip to the background stops the engine. Pulling
+            // down Control Center is inactive -> active and stops nothing, and
+            // resuming there would cut the opening burst for no reason.
             .onChange(of: scenePhase) { _, phase in
-                if phase == .active { IntroHaptics.shared.resume() }
+                if phase == .background { backgrounded = true }
+                if phase == .active, backgrounded {
+                    backgrounded = false
+                    IntroHaptics.shared.resume()
+                }
             }
             .onChange(of: page) { _, now in
                 if now == 1 { IntroHaptics.shared.sine() } else { IntroHaptics.shared.noise() }

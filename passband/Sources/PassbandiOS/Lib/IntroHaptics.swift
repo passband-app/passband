@@ -60,6 +60,14 @@ final class IntroHaptics {
         if let current { play(current) }
     }
 
+    /// The intro is gone: stop, and let the engine go too, rather than keep
+    /// it running idle behind the login screen.
+    func shutdown() {
+        stop()
+        engine?.stop()
+        engine = nil
+    }
+
     func stop() {
         try? burstPlayer?.stop(atTime: CHHapticTimeImmediate)
         burstPlayer = nil

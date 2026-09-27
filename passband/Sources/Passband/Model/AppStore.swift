@@ -2819,6 +2819,11 @@ final class AppStore {
         }
         // Whatever it opened with is what "untouched" means for the autosave.
         next.seededRecipients = next.recipients
+        // The side panel and the composer both claim the window's right-hand
+        // strip, and the panel draws ABOVE the composer: left open, the two
+        // stack in one place and the reader insets past both. Writing wins, so
+        // the panel goes (held, not lost: see `closeSide`).
+        if sideView.isOpen { closeSide() }
         compose = next
         DraftSaver.shared.noteOpened(.compose)
         Analytics.capture("compose_opened", ["kind": next.analyticsKind])
@@ -3005,6 +3010,9 @@ final class AppStore {
     /// asked for.
     func openInlineReply(replyTo messageId: Int, replyAll: Bool = false) {
         guard inlineReply == nil else { return }
+        // Same rule as the pane composer: a reply gets the whole reader, not
+        // the sliver left beside an open search strip.
+        if sideView.isOpen { closeSide() }
         inlineReply = ComposeState(
             replyToMessageId: messageId, body: Prefs.shared.signatureSeed,
             includeTracker: trackingDefault, replyAll: replyAll)
@@ -3328,6 +3336,9 @@ final class AppStore {
             inlineReply = state
             DraftSaver.shared.noteChange(.inlineReply)
         } else if compose.map(isBlankComposer) ?? true {
+            // Back into the pane's strip, so the side panel goes for the same
+            // reason `openCompose` closes it: the two cannot share the strip.
+            if sideView.isOpen { closeSide() }
             compose = state
             DraftSaver.shared.noteChange(.compose)
         } else {

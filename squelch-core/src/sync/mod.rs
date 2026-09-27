@@ -20,9 +20,10 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use reqwest::StatusCode;
 use serde::Deserialize;
 
-use crate::config::{Config, GmailQuotaProfile, ResolvedLlm, Stage2Provider};
+use crate::config::{Config, ResolvedLlm, Stage2Provider};
 use crate::credentials::CredentialStore;
 use crate::error::{CoreError, Result};
+use crate::gmail_budget::{GmailBudget, gmail_path};
 use crate::metrics::{GmailErrorKind, SyncMetrics};
 use crate::store::{ContactEntry, SPAM_SYNCED_AT_KEY, Store, SyncState, TriagedMessage};
 use crate::sync::ingest::{
@@ -601,8 +602,11 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     account_email: String,
     config: Config,
     http: reqwest::Client,
-    gmail_next_request: tokio::sync::Mutex<tokio::time::Instant>,
-    gmail_unit_spacing: Duration,
+    /// The mailbox's Gmail quota budget, shared with every other caller for
+    /// the same account (see [`crate::gmail_budget`]). An engine built without
+    /// [`Self::with_gmail_budget`] gets its own, which is only right when it is
+    /// the only Gmail caller in the process.
+    gmail_budget: Arc<GmailBudget>,
     gmail_quota_backoff: Duration,
     /// LLM key + provider + endpoint URL, resolved once at startup. `None`
     /// disables LLM triage gracefully: rows stay queued, one stderr notice,
@@ -752,11 +756,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                  sync continues)"
             );
         }
-        // Leave 20% headroom; charge each method by its own cost, not as a raw fetch.
-        let gmail_unit_spacing = match config.sync.gmail_quota_profile {
-            GmailQuotaProfile::Standard => Duration::from_micros(12_500),
-            GmailQuotaProfile::Legacy => Duration::from_millis(5),
-        };
+        let gmail_budget = Arc::new(GmailBudget::new(config.sync.gmail_quota_profile));
         Self {
             store,
             creds,
@@ -764,8 +764,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             account_email,
             config,
             http,
-            gmail_next_request: tokio::sync::Mutex::new(tokio::time::Instant::now()),
-            gmail_unit_spacing,
+            gmail_budget,
             gmail_quota_backoff: Duration::from_secs(1),
             stage2_llm,
             embedder: None,
@@ -790,6 +789,19 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     pub fn with_metrics(mut self, metrics: Arc<SyncMetrics>) -> Self {
         self.metrics = metrics;
         self
+    }
+
+    /// Share the mailbox's [`GmailBudget`] with every other Gmail caller for
+    /// this account. Create ONE per account at startup; two engines on one
+    /// mailbox with a budget each is how a tenant asked for 160% of its quota.
+    pub fn with_gmail_budget(mut self, budget: Arc<GmailBudget>) -> Self {
+        self.gmail_budget = budget;
+        self
+    }
+
+    /// The budget this engine books its Gmail requests against.
+    pub fn gmail_budget(&self) -> &Arc<GmailBudget> {
+        &self.gmail_budget
     }
 
     /// Point every Gmail call at `base` instead of [`GMAIL_API_BASE`]. Test-only:
@@ -961,19 +973,22 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             {
                 self.metrics.record_gmail_quota_retry();
                 eprintln!(
-                    "squelch: Gmail quota limit ({}); pausing {}s, then retrying the same request (catch-up position retained)",
+                    "squelch: Gmail quota limit ({}{}); pausing {}s, then retrying the same request (catch-up position retained)",
                     gmail_error_reason(&body),
+                    gmail_quota_limit_note(&body),
                     delay.as_secs()
                 );
                 tokio::time::sleep(delay).await;
                 backoff = (backoff * 2).min(GMAIL_QUOTA_RETRY_CAP);
                 continue;
             }
-            self.metrics.record_gmail_error(kind);
+            self.metrics
+                .record_gmail_error_reason(kind, gmail_error_reason(&body));
             return Err(CoreError::Other(anyhow::anyhow!(
-                "gmail api status {} (reason: {})",
+                "gmail api status {} (reason: {}{})",
                 status.as_u16(),
-                gmail_error_reason(&body)
+                gmail_error_reason(&body),
+                gmail_quota_limit_note(&body)
             )));
         }
         unreachable!("the final attempt returns")
@@ -1014,21 +1029,11 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     }
 
     async fn bearer_get(&self, url: &str, access_token: &str) -> Result<reqwest::Response> {
-        // Serialize admission, including concurrent callers and 401 retries.
-        // Set the next slot from NOW so idle time never accumulates a burst.
-        {
-            let mut next = self.gmail_next_request.lock().await;
-            tokio::time::sleep_until(*next).await;
-            let path = url
-                .strip_prefix(&self.api_base)
-                .unwrap_or(url)
-                .split('?')
-                .next()
-                .unwrap_or_default();
-            *next = tokio::time::Instant::now()
-                + self.gmail_unit_spacing
-                    * gmail_method_cost(self.config.sync.gmail_quota_profile, path);
-        }
+        // Admission is the mailbox's, not this engine's: every caller for the
+        // account books against the same budget, 401 retries included.
+        self.gmail_budget
+            .admit("GET", gmail_path(url, &self.api_base))
+            .await;
         self.http
             .get(url)
             .bearer_auth(access_token)
@@ -1098,6 +1103,12 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         let inbox_ids = self
             .list_message_ids_capped(LABEL_INBOX, Some(&q), None, GmailRetry::CatchUp)
             .await?;
+        // THE FIRST RUN IS PROGRESS, not an outage. It runs for many minutes
+        // before the first poll, and without a denominator the client could
+        // only say "not synced yet" over it. Reported on the catch-up pair,
+        // which is what it is from outside: a known amount of mail arriving.
+        let _guard = CatchUpGuard(&self.metrics);
+        self.metrics.catchup_begin(inbox_ids.len() as u64);
         // Backfill NEVER notifies (see `IngestOrigin`).
         let n = self
             .fetch_raw_and_ingest(
@@ -1116,6 +1127,8 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         let sent_ids = self
             .list_message_ids_capped(LABEL_SENT, Some(&q), None, GmailRetry::CatchUp)
             .await?;
+        self.metrics
+            .catchup_begin_extend(inbox_ids.len() as u64 + sent_ids.len() as u64);
         let seeded = self
             .fetch_raw_and_ingest(
                 &sent_ids,
@@ -1229,7 +1242,10 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             // always meant to mean, and stamping it from the refine lane would
             // let a wedged Gmail credential keep looking healthy for as long as
             // there were queued rows left to classify.
-            self.metrics.stamp_sync_success();
+            //
+            // `note_poll_ok` also ends the failure streak and clears the last
+            // error, so the client stops reporting an outage that is over.
+            self.metrics.note_poll_ok();
 
             // A refresh poke that arrives mid-poll is not lost: `Notify` stores
             // one permit, so the next `notified()` returns at once and the loop
@@ -2554,6 +2570,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 return Ok(());
             }
             let mut cancel = shutdown.clone();
+            self.metrics.note_lifecycle_start();
             let result = tokio::select! {
                 result = self.run_once(&mut shutdown) => result,
                 _ = cancel.wait_for(|stopped| *stopped) => return Ok(()),
@@ -2572,10 +2589,17 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                     // a Stage-1 and a Stage-2 unit of a DAY-scoped cap on classify
                     // calls that were cancelled one Gmail round trip later. See
                     // the `poll_healthy` field.
-                    self.poll_healthy.store(false, Ordering::Relaxed);
+                    //
+                    // A lifecycle that polled successfully before failing starts
+                    // the backoff over: without this, one bad hour a week ago
+                    // left every later hiccup waiting the full five minutes.
+                    let polled_ok = self.poll_healthy.swap(false, Ordering::Relaxed);
+                    backoff = lifecycle_backoff(backoff, polled_ok);
                     if *shutdown.borrow() {
                         return Ok(());
                     }
+                    self.metrics
+                        .note_sync_retry_at(Utc::now().timestamp() + backoff.as_secs() as i64);
                     // Error strings from this crate never carry secrets.
                     eprintln!(
                         "squelch: sync error ({e}); retrying in {}s",
@@ -2592,6 +2616,12 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             }
         }
     }
+}
+
+/// The wait before the next lifecycle: back to [`BACKOFF_START`] when the one
+/// that just failed had polled successfully first, otherwise the running value.
+fn lifecycle_backoff(current: Duration, polled_ok: bool) -> Duration {
+    if polled_ok { BACKOFF_START } else { current }
 }
 
 /// Only backfills/catch-up retain a request across quota pauses. Poll helpers,
@@ -2616,19 +2646,6 @@ fn gmail_quota_delay(backoff: Duration, retry_after: Option<Duration>) -> Option
             .min(GMAIL_QUOTA_RETRY_CAP)
             .max(retry_after.unwrap_or_default()),
     )
-}
-
-fn gmail_method_cost(profile: GmailQuotaProfile, path: &str) -> u32 {
-    match path {
-        "/profile" => 1,
-        "/history" => 2,
-        "/messages" => 5,
-        p if p.starts_with("/labels/") => 1,
-        _ => match profile {
-            GmailQuotaProfile::Standard => 20,
-            GmailQuotaProfile::Legacy => 5,
-        },
-    }
 }
 
 /// Retry-After accepts seconds or an HTTP date. Never retry before it elapses.
@@ -2715,6 +2732,45 @@ fn gmail_error_reason(body: &str) -> &'static str {
     "unavailable"
 }
 
+/// Which quota Google says was exceeded, as `, limit: <name>`, or empty.
+///
+/// A `RATE_LIMIT_EXCEEDED` alone does not say whether the per-user or the
+/// per-project budget ran out, and the per-user one is the limit the Cloud
+/// console cannot chart. `google.rpc.ErrorInfo` names it in
+/// `metadata.quota_limit` (falling back to `quota_metric`). Only an identifier
+/// is emitted: ASCII letters, digits and `_./-`, at most 96 bytes, or nothing.
+fn gmail_quota_limit_note(body: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return String::new();
+    };
+    let Some(entries) = value["error"]["details"].as_array() else {
+        return String::new();
+    };
+    for entry in entries {
+        for key in ["quota_limit", "quota_metric"] {
+            if let Some(name) = entry["metadata"][key].as_str()
+                && !name.is_empty()
+                && name.len() <= 96
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'/' | b'-'))
+            {
+                // What Google says it enforces, so a log line settles whether
+                // this project really is on the 6,000-unit standard model.
+                let value = entry["metadata"]["quota_limit_value"]
+                    .as_str()
+                    .filter(|v| {
+                        !v.is_empty() && v.len() <= 12 && v.bytes().all(|b| b.is_ascii_digit())
+                    })
+                    .map(|v| format!(" = {v}"))
+                    .unwrap_or_default();
+                return format!(", limit: {name}{value}");
+            }
+        }
+    }
+    String::new()
+}
+
 /// Minimal percent-encoding for a Gmail `q` value. Enough for `newer_than:Nd`
 /// and simple queries; arbitrary user queries are never built here.
 fn urlencode(s: &str) -> String {
@@ -2774,6 +2830,29 @@ mod tests {
     use crate::store::SpamScope;
     use crate::store::SqliteStore;
     use crate::types::{Disposition, NewMessage, Tier};
+
+    #[test]
+    fn gmail_quota_limit_note_names_the_limit_and_nothing_else() {
+        let per_user = r#"{"error":{"details":[{"reason":"RATE_LIMIT_EXCEEDED","metadata":{"quota_limit":"UnitsPerMinutePerUser","quota_limit_value":"6000","quota_metric":"gmail.googleapis.com/default_units","consumer":"projects/1"}}]}}"#;
+        assert_eq!(
+            gmail_quota_limit_note(per_user),
+            ", limit: UnitsPerMinutePerUser = 6000"
+        );
+        let odd_value = r#"{"error":{"details":[{"metadata":{"quota_limit":"PerUser","quota_limit_value":"lots"}}]}}"#;
+        assert_eq!(gmail_quota_limit_note(odd_value), ", limit: PerUser");
+        let metric_only = r#"{"error":{"details":[{"metadata":{"quota_metric":"gmail.googleapis.com/default_units"}}]}}"#;
+        assert_eq!(
+            gmail_quota_limit_note(metric_only),
+            ", limit: gmail.googleapis.com/default_units"
+        );
+        for body in [
+            r#"{"error":{"details":[{"metadata":{"quota_limit":"has spaces and private words"}}]}}"#,
+            r#"{"error":{"errors":[{"reason":"userRateLimitExceeded"}]}}"#,
+            "not json",
+        ] {
+            assert_eq!(gmail_quota_limit_note(body), "");
+        }
+    }
 
     #[test]
     fn gmail_error_reason_reports_known_reasons_without_freeform_content() {
@@ -3755,7 +3834,10 @@ mod tests {
             config,
         )
         .with_api_base(base.to_string());
-        engine.gmail_unit_spacing = Duration::ZERO;
+        engine.gmail_budget = Arc::new(GmailBudget::with_unit(
+            crate::config::GmailQuotaProfile::Standard,
+            Duration::ZERO,
+        ));
         engine
     }
 
@@ -3943,25 +4025,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn gmail_pacing_uses_method_cost_and_project_profile() {
-        for (profile, unit, raw_cost) in [
-            (
-                GmailQuotaProfile::Standard,
-                Duration::from_micros(12_500),
-                20,
-            ),
-            (GmailQuotaProfile::Legacy, Duration::from_millis(5), 5),
-        ] {
-            assert_eq!(gmail_method_cost(profile, "/messages/a"), raw_cost);
-            assert_eq!(gmail_method_cost(profile, "/messages"), 5);
-            assert_eq!(gmail_method_cost(profile, "/history"), 2);
-            assert_eq!(gmail_method_cost(profile, "/labels/INBOX"), 1);
-            assert_eq!(gmail_method_cost(profile, "/profile"), 1);
-            assert!(unit * gmail_method_cost(profile, "/labels/INBOX") < Duration::from_millis(20));
-        }
-    }
-
     #[tokio::test]
     async fn gmail_permission_error_does_not_retry() {
         let g = MockGmail::default();
@@ -3980,13 +4043,38 @@ mod tests {
         assert_eq!(g.calls("get:a"), 1);
     }
 
+    /// An engine handed a shared budget books its Gmail requests against IT,
+    /// not a private one: after one request, another holder of the same
+    /// budget has to wait. If `with_gmail_budget` stopped taking effect, the
+    /// sweeps engine and the sync loop would each pace alone again (#263).
+    #[tokio::test]
+    async fn an_engine_books_against_the_budget_it_was_given() {
+        let g = MockGmail::default();
+        let base = serve_mock(g.clone()).await;
+        let (store, acct) = store_at_cursor(Some(1));
+        // 10 ms a unit; a message read costs 20, so one read books 200 ms.
+        let shared = Arc::new(GmailBudget::with_unit(
+            crate::config::GmailQuotaProfile::Standard,
+            Duration::from_millis(10),
+        ));
+        let e = engine(store, acct, &base).with_gmail_budget(shared.clone());
+        assert!(Arc::ptr_eq(e.gmail_budget(), &shared));
+        let _ = e.get_json::<Value>(&format!("{base}/messages/a")).await;
+        let started = tokio::time::Instant::now();
+        shared.admit("GET", "/profile").await;
+        assert!(started.elapsed() >= Duration::from_millis(150));
+    }
+
     #[tokio::test]
     async fn gmail_requests_are_paced() {
         let g = MockGmail::default();
         let base = serve_mock(g.clone()).await;
         let (store, acct) = store_at_cursor(Some(1));
         let mut e = engine(store, acct, &base);
-        e.gmail_unit_spacing = Duration::from_millis(10);
+        e.gmail_budget = Arc::new(GmailBudget::with_unit(
+            crate::config::GmailQuotaProfile::Standard,
+            Duration::from_millis(10),
+        ));
         let started = tokio::time::Instant::now();
         let url = format!("{base}/profile");
         let (a, b) = tokio::join!(e.get_json::<Value>(&url), e.get_json::<Value>(&url));
@@ -4022,6 +4110,163 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(g.calls("get:a"), 1);
+    }
+
+    /// Poll `cond` every 10ms until it holds, or panic after `secs`.
+    async fn wait_for(secs: u64, what: &str, cond: impl Fn() -> bool) {
+        tokio::time::timeout(Duration::from_secs(secs), async {
+            while !cond() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+    }
+
+    /// THE OUTAGE ENDS WHEN GMAIL ANSWERS. A failing poll grows the streak and
+    /// the backoff; the first successful poll must zero the streak, clear the
+    /// error and the scheduled retry, and the NEXT failure must start the
+    /// backoff over at `BACKOFF_START` rather than where the old outage left it.
+    #[tokio::test]
+    async fn a_successful_poll_resets_the_failure_streak_and_the_backoff() {
+        let g = MockGmail::default();
+        g.history(LABEL_INBOX, LabelHistory::broken());
+        let base = serve_mock(g.clone()).await;
+        let (store, acct) = store_at_cursor(Some(1));
+        let mut config = Config::default();
+        config.sync.poll_secs = 1;
+        let metrics = SyncMetrics::new();
+        let e = engine_with_config(store, acct, &base, config).with_metrics(metrics.clone());
+        let (stop, rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(async move { e.run(rx).await });
+
+        // Two failed lifecycles: the second waits twice as long as the first.
+        wait_for(10, "two failures", || {
+            metrics.sync_consecutive_failures() >= 2
+        })
+        .await;
+        assert!(!metrics.poll_ok());
+        let error = metrics.sync_last_error().expect("the failure is recorded");
+        assert_eq!(error.kind, GmailErrorKind::Http);
+        let retry_in =
+            metrics.sync_next_retry_at().expect("a retry is scheduled") - Utc::now().timestamp();
+        assert!(retry_in >= 3, "the backoff doubled to 4s, got {retry_in}s");
+
+        // Gmail recovers.
+        g.history(LABEL_INBOX, LabelHistory::quiet(1));
+        wait_for(10, "a healthy poll", || metrics.poll_ok()).await;
+        assert_eq!(metrics.sync_consecutive_failures(), 0, "the streak is over");
+        assert_eq!(metrics.sync_last_error(), None);
+        assert_eq!(metrics.sync_next_retry_at(), None);
+
+        // And breaks again: the wait starts over, it does not resume at 8s.
+        g.history(LABEL_INBOX, LabelHistory::broken());
+        wait_for(10, "the next failure", || !metrics.poll_ok()).await;
+        wait_for(2, "the retry to be scheduled", || {
+            metrics.sync_next_retry_at().is_some()
+        })
+        .await;
+        let retry_in = metrics.sync_next_retry_at().unwrap() - Utc::now().timestamp();
+        assert!(
+            retry_in <= BACKOFF_START.as_secs() as i64,
+            "backoff restarts after a healthy poll, got {retry_in}s"
+        );
+        assert_eq!(metrics.sync_consecutive_failures(), 1);
+
+        stop.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    /// THE FIRST RUN READS AS PROGRESS. Onboarding's backfill runs for minutes
+    /// before the first poll; it must report a done/total pair and must not
+    /// read as a failing sync while it does.
+    #[tokio::test]
+    async fn the_first_backfill_reports_progress_not_an_outage() {
+        let g = MockGmail::default();
+        g.listing(LABEL_INBOX, &["a", "b"]);
+        g.body("a", alert_eml(Utc::now()));
+        g.body("b", alert_eml(Utc::now()));
+        g.slow_body("b", Duration::from_secs(2));
+        g.history(LABEL_INBOX, LabelHistory::quiet(1));
+        g.history(LABEL_SENT, LabelHistory::quiet(1));
+        g.profile(1);
+        let base = serve_mock(g.clone()).await;
+        let (store, acct) = store_at_cursor(None);
+        let metrics = SyncMetrics::new();
+        let e = engine(store, acct, &base).with_metrics(metrics.clone());
+        let (stop, rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(async move { e.run(rx).await });
+
+        wait_for(5, "the backfill to fetch the first message", || {
+            metrics.catchup_progress() == Some((1, 2))
+        })
+        .await;
+        assert!(!metrics.poll_ok(), "no poll has run yet");
+        assert!(!metrics.sync_failing(), "and that is not an outage");
+
+        wait_for(10, "the first poll", || metrics.poll_ok()).await;
+        assert_eq!(metrics.catchup_progress(), None, "the pair clears after");
+
+        stop.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    /// A RETRY IN PROGRESS HAS NO "NEXT TRY". After a failed lifecycle the
+    /// scheduled retry time must clear once the retry starts, so a long
+    /// recovery (here, the backfill running again) does not keep reporting a
+    /// retry time that has passed.
+    #[tokio::test]
+    async fn the_scheduled_retry_clears_when_the_retry_starts() {
+        let g = MockGmail::default();
+        g.listing(LABEL_INBOX, &["a", "b"]);
+        g.body("a", alert_eml(Utc::now()));
+        g.body("b", alert_eml(Utc::now()));
+        // The first lifecycle dies on `a`; the retry stalls on `b`.
+        g.0.lock()
+            .unwrap()
+            .errors
+            .insert("a".into(), [(500, "backendError".into())].into());
+        g.slow_body("b", Duration::from_secs(3));
+        let base = serve_mock(g.clone()).await;
+        let (store, acct) = store_at_cursor(None);
+        let metrics = SyncMetrics::new();
+        let e = engine(store, acct, &base).with_metrics(metrics.clone());
+        let (stop, rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(async move { e.run(rx).await });
+
+        wait_for(5, "the first failure", || metrics.sync_failing()).await;
+        wait_for(5, "the retry to reach `b`", || g.calls("get:a") >= 2).await;
+        wait_for(2, "the retry's progress", || {
+            metrics.catchup_progress() == Some((1, 2))
+        })
+        .await;
+        assert_eq!(
+            metrics.sync_next_retry_at(),
+            None,
+            "the retry is running, it is not scheduled"
+        );
+        assert!(metrics.sync_failing(), "still failing until a poll lands");
+
+        stop.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[test]
+    fn lifecycle_backoff_restarts_only_after_a_healthy_poll() {
+        assert_eq!(lifecycle_backoff(BACKOFF_CAP, true), BACKOFF_START);
+        assert_eq!(lifecycle_backoff(BACKOFF_CAP, false), BACKOFF_CAP);
     }
 
     #[test]

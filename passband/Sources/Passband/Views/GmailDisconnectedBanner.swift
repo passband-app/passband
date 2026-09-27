@@ -20,7 +20,8 @@
 // half that does not.
 //
 // TWO ENDINGS, because two products end here. A hosted mailbox re-consents
-// through the control plane and the button opens it. A self-host one is
+// through the control plane and the button opens it, after one dialog naming
+// the address to pick in Google's chooser. A self-host one is
 // repaired with `squelchd auth` at a shell, which is not a link anything can
 // offer, so it gets the sentence instead of the button. The daemon decides
 // which by whether it sent a `reconnect_url`; the app never guesses.
@@ -55,8 +56,8 @@ struct GmailDisconnectedBanner: View {
 
             Spacer(minLength: 8)
 
-            if let link = store.gmailReconnectURL {
-                Button("Reconnect") { Opener.open(link) }
+            if store.gmailReconnectURL != nil {
+                Button("Reconnect") { store.askReconnect() }
                     .controlSize(.small)
             }
         }
@@ -90,4 +91,120 @@ struct GmailDisconnectedBanner: View {
         f.unitsStyle = .full
         return f
     }()
+}
+
+/// Which Google account to pick, said before the browser opens. Google's
+/// chooser lists every account signed in there and none of them is marked as
+/// this mailbox; the wrong pick consents for somebody else's mail and leaves
+/// the banner up. See `AppStore.reconnectAsk`.
+struct ReconnectAccountPrompt: View {
+    @Environment(AppStore.self) private var store
+    let ask: AppStore.ReconnectAsk
+
+    var body: some View {
+        OverlayScrim(onDismiss: { store.cancelReconnectAsk() }) {
+            ModalCard(width: 400) {
+                Text("Be sure to select this email address")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Palette.ink)
+                // Email-derived, so plain Text and never markup.
+                Text(verbatim: ask.email)
+                    .font(.system(size: 13, weight: .medium, design: .monospaced))
+                    .foregroundStyle(Palette.ink)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(Palette.warnSoft, in: RoundedRectangle(cornerRadius: 7))
+                Text("Google will show every account signed in to your browser. Choosing a different one will not reconnect this mailbox.")
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.inkFaint)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                HStack(spacing: 8) {
+                    Spacer(minLength: 0)
+                    Button("Cancel") { store.cancelReconnectAsk() }
+                        .buttonStyle(.glass)
+                    Button("Continue to Google") { store.confirmReconnect() }
+                        .buttonStyle(.glassProminent)
+                }
+            }
+        }
+        .keyContext(.modal)
+        .keyBindings(.modal, [
+            KeyBinding("Escape", "cancel", allowInInput: true) { store.cancelReconnectAsk() },
+            KeyBinding("Enter", "continue", allowInInput: true) { store.confirmReconnect() },
+        ])
+    }
+}
+
+/// THE SAME SLOT, for every other reason new mail is not arriving or not being
+/// sorted: Gmail rate-limiting the mailbox, Gmail erroring, a catch-up, or
+/// triage held by a failed sync, a provider cooldown or a spent budget.
+///
+/// Same posture as the disconnected banner (not dismissible, not a modal) and
+/// the same styling, so the two read as one family. The difference is that
+/// nothing here is the human's to fix, so it says what to expect and when,
+/// with real numbers, and offers no button.
+///
+/// The raw reason code (`RATE_LIMIT_EXCEEDED`) is for whoever is debugging: it
+/// rides in the hover text always, and on screen only in developer mode.
+struct SyncStatusBanner: View {
+    @Environment(Prefs.self) private var prefs
+    let status: SyncStatus
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 11) {
+            Image(systemName: symbol)
+                .foregroundStyle(tone)
+                .font(.system(size: 14, weight: .semibold))
+                .padding(.top, 1)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(status.headline)
+                    .font(Typo.zoneTitle)
+                    .foregroundStyle(Palette.ink)
+                // Re-rendered by the poller every 10s, so "Next try at 12:05"
+                // flips to "Trying again now" without a timer of its own.
+                Text(status.detail())
+                    .font(Typo.rowSub)
+                    .foregroundStyle(Palette.inkDim)
+                    .fixedSize(horizontal: false, vertical: true)
+                if prefs.developerMode, let raw = status.rawReason {
+                    Text(verbatim: raw)
+                        .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                        .foregroundStyle(Palette.inkFaint)
+                        .textSelection(.enabled)
+                }
+            }
+
+            Spacer(minLength: 8)
+        }
+        .padding(.horizontal, 13)
+        .padding(.vertical, 10)
+        .background(
+            status.isWarning ? Palette.warnSoft : Palette.accentSoft,
+            in: RoundedRectangle(cornerRadius: 9)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 9)
+                .strokeBorder(tone.opacity(0.30), lineWidth: 1)
+        )
+        .help(status.rawReason.map { "Gmail reported: \($0)" } ?? "")
+        // One announcement for a screen reader, not four fragments.
+        .accessibilityElement(children: .combine)
+    }
+
+    private var tone: Color { status.isWarning ? Palette.warn : Palette.accent }
+
+    private var symbol: String {
+        switch status {
+        case .throttled: return "hourglass"
+        case .gmailError(let kind, _, _, _):
+            return kind == "network" ? "wifi.exclamationmark" : "exclamationmark.triangle.fill"
+        case .catchingUp: return "arrow.down.circle"
+        case .budgetPaused: return "pause.circle"
+        default: return "clock"
+        }
+    }
 }

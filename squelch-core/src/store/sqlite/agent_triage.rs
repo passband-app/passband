@@ -936,6 +936,24 @@ fn finish(
     Ok(())
 }
 
+/// [`SqliteStore::triage_waiting_counts`]. Pinned to the account's ready index:
+/// without ANALYZE the planner prefers the re-triage progress index on
+/// `account_id` alone and walks every job the account ever had, under the
+/// store mutex, on every `/client/stats`.
+pub(crate) const TRIAGE_WAITING_SQL: &str = "SELECT
+       COUNT(DISTINCT CASE WHEN state='queued' AND (available_at<=?2 OR last_error IS NOT NULL)
+                           THEN message_id END),
+       COUNT(DISTINCT CASE WHEN state='leased' THEN message_id END)
+     FROM agent_triage_jobs INDEXED BY idx_agent_jobs_account_ready
+     WHERE account_id=?1 AND state IN ('queued','leased') AND kind IN ('triage','access')
+       AND trigger NOT LIKE 'revisit:%'";
+
+/// [`SqliteStore::triage_budget_parked`], pinned for the same reason.
+pub(crate) const TRIAGE_BUDGET_PARKED_SQL: &str = "SELECT COUNT(*), MIN(available_at)
+     FROM agent_triage_jobs INDEXED BY idx_agent_jobs_account_ready
+     WHERE account_id=?1 AND state='queued' AND kind IN ('triage','access')
+       AND last_error='daily_budget_exhausted' AND available_at>?2";
+
 impl SqliteStore {
     /// Fixed-cardinality scrape counts, scoped to one account. Delayed retries
     /// remain queued; leases remain leased until reclaimed by a worker.
@@ -954,6 +972,50 @@ impl SqliteStore {
             counts[usize::from(state == "leased")] = count;
         }
         Ok(counts)
+    }
+
+    /// EMAILS WAITING FOR TRIAGE, for the client door: `[queued, running]` as
+    /// DISTINCT messages, not jobs. [`Self::triage_job_counts`] is the scrape
+    /// gauge and counts every queued job, which on a healthy idle mailbox is
+    /// mostly scheduled revisits sitting up to 400 days out; a user-facing
+    /// count built on it never reaches zero, so "You're all clear." never
+    /// shows. Queued here means work that is owed now: due already, or pushed
+    /// back by the worker itself (a retry, a provider cooldown, a spent daily
+    /// budget, all of which set `last_error`). A revisit is never owed now; it
+    /// is the model asking to look again later.
+    pub fn triage_waiting_counts(
+        &self,
+        account_id: AccountId,
+        now: DateTime<Utc>,
+    ) -> Result<[u64; 2]> {
+        let conn = self.lock()?;
+        let (queued, leased): (u64, u64) = conn.query_row(
+            TRIAGE_WAITING_SQL,
+            params![account_id, now.to_rfc3339()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok([queued, leased])
+    }
+
+    /// Queued triage/access jobs the worker parked because a daily budget ran
+    /// out, and the earliest time one becomes claimable again. Across ALL
+    /// queued work, not only a re-triage: the stats door uses it to say "paused
+    /// until tomorrow" rather than letting a parked queue read as stuck.
+    pub fn triage_budget_parked(
+        &self,
+        account_id: AccountId,
+    ) -> Result<(u64, Option<DateTime<Utc>>)> {
+        let conn = self.lock()?;
+        let (parked, resumes_at): (u64, Option<String>) = conn.query_row(
+            TRIAGE_BUDGET_PARKED_SQL,
+            params![account_id, Utc::now().to_rfc3339()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let resumes_at = resumes_at
+            .as_deref()
+            .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
+            .map(|at| at.with_timezone(&Utc));
+        Ok((parked, resumes_at))
     }
 }
 
@@ -1985,6 +2047,9 @@ fn list_items_with_query(
     now: DateTime<Utc>,
     query: &AgentListQuery,
 ) -> Result<Vec<AgentListItem>> {
+    // FYE skips auth mail: it lives on the Auth page's decision rail, and
+    // listing it in both places means ruling on it twice. An explicit thread
+    // preference (the human pinned it) and a fired reminder still win.
     let sql = if destination == "fye" {
         "SELECT
              m.id,m.thread_id,m.from_addr,m.subject,
@@ -1992,8 +2057,10 @@ fn list_items_with_query(
              FROM agent_thread_attention a JOIN messages m ON m.account_id=a.account_id AND
              m.id=a.message_id LEFT JOIN agent_message_decisions d ON d.account_id=m.account_id AND
              d.message_id=m.id LEFT JOIN triage t ON t.account_id=m.account_id AND
-             t.message_id=m.id WHERE a.account_id=?1 AND ?3='fye' AND (a.show_in_fye=1 OR t.reminded_at
-             IS NOT NULL) AND m.is_sent=0 AND m.is_spam=0 AND COALESCE(t.status,'new')!='done' AND
+             t.message_id=m.id LEFT JOIN agent_thread_preferences pref ON pref.account_id=a.account_id AND
+             pref.thread_id=a.thread_id WHERE a.account_id=?1 AND ?3='fye' AND
+             (COALESCE(pref.show_in_fye,CASE WHEN json_array_length(COALESCE(d.decision_json,'{}'),'$.auth.kinds')>0
+             THEN 0 ELSE a.show_in_fye END)=1 OR t.reminded_at IS NOT NULL) AND m.is_sent=0 AND m.is_spam=0 AND COALESCE(t.status,'new')!='done' AND
              (t.remind_at IS NULL OR t.remind_at<=?2) AND ?4 IS ?4 AND ?5 IS ?5"
     } else if destination == "records" {
         "SELECT m.id,m.thread_id,m.from_addr,m.subject,
@@ -2309,6 +2376,170 @@ mod tests {
         assert_eq!(store.triage_job_counts(1).unwrap(), [1, 1]);
         assert_eq!(store.triage_job_counts(2).unwrap(), [1, 0]);
         assert_eq!(store.triage_job_counts(99).unwrap(), [0, 0]);
+    }
+
+    /// The client's "emails waiting" count: distinct messages with work owed
+    /// NOW. Scheduled revisits (on by default, queued up to 400 days out) and
+    /// never-tried future work must not count, or an idle healthy mailbox
+    /// never reads as clear.
+    #[test]
+    fn triage_waiting_counts_only_work_owed_now_per_message() {
+        let store = fixture();
+        let now = Utc::now();
+        assert_eq!(store.triage_waiting_counts(1, now).unwrap(), [0, 0]);
+        {
+            let conn = store.lock().unwrap();
+            let past = "2000-01-01T00:00:00Z";
+            let future = "2099-01-01T00:00:00Z";
+            for (message, kind, state, trigger, at, error) in [
+                // Due: counts once per message, however many jobs it has.
+                (1, "triage", "queued", "arrival", past, None),
+                (1, "access", "queued", "access", past, None),
+                // Pushed back by the worker: still owed.
+                (
+                    2,
+                    "triage",
+                    "queued",
+                    "retriage",
+                    future,
+                    Some("provider_cooldown"),
+                ),
+                // A scheduled revisit, due or not: never owed now.
+                (
+                    3,
+                    "triage",
+                    "queued",
+                    "revisit:2099-01-01T00:00:00Z",
+                    future,
+                    None,
+                ),
+                (
+                    4,
+                    "triage",
+                    "queued",
+                    "revisit:2000-01-01T00:00:00Z",
+                    past,
+                    None,
+                ),
+                // Future work nobody has tried yet.
+                (5, "triage", "queued", "arrival", future, None),
+                // Running.
+                (6, "triage", "leased", "arrival", past, None),
+                // Other kinds and finished work.
+                (7, "notification", "queued", "n", past, None),
+                (8, "triage", "completed", "arrival", past, None),
+            ] {
+                conn.execute(
+                    "INSERT INTO agent_triage_jobs
+                    (account_id,message_id,kind,trigger,input_revision,state,available_at,last_error)
+                    VALUES(1,?1,?2,?3,1,?4,?5,?6)",
+                    params![message, kind, trigger, state, at, error],
+                )
+                .unwrap();
+            }
+        }
+        assert_eq!(store.triage_waiting_counts(1, now).unwrap(), [2, 1]);
+        assert_eq!(store.triage_waiting_counts(2, now).unwrap(), [0, 0]);
+    }
+
+    /// Both stats reads SEARCH the account's ready index, never scan the jobs
+    /// table or settle for `account_id` alone. Unpinned, the planner (no
+    /// ANALYZE here) picks the re-triage progress index on `account_id` only:
+    /// the #266 review measured 20 ms at 300k rows per `/client/stats`.
+    #[test]
+    fn stats_queue_reads_use_the_account_ready_index() {
+        let store = fixture();
+        let conn = store.lock().unwrap();
+        for sql in [TRIAGE_WAITING_SQL, TRIAGE_BUDGET_PARKED_SQL] {
+            let plan = conn
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap()
+                .query_map(params![1, Utc::now().to_rfc3339()], |r| {
+                    r.get::<_, String>(3)
+                })
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap()
+                .join("\n");
+            assert!(
+                plan.contains("INDEX idx_agent_jobs_account_ready (account_id=? AND state=?"),
+                "{plan}"
+            );
+            assert!(!plan.contains("SCAN"), "{plan}");
+        }
+    }
+
+    #[test]
+    fn triage_budget_parked_counts_only_future_budget_deferrals() {
+        let store = fixture();
+        assert_eq!(store.triage_budget_parked(1).unwrap(), (0, None));
+        {
+            let conn = store.lock().unwrap();
+            for (account, message, kind, state, error, at) in [
+                (
+                    1,
+                    1,
+                    "triage",
+                    "queued",
+                    "daily_budget_exhausted",
+                    "2099-01-02T00:00:00Z",
+                ),
+                (
+                    1,
+                    2,
+                    "access",
+                    "queued",
+                    "daily_budget_exhausted",
+                    "2099-01-01T00:00:00Z",
+                ),
+                // Already claimable again: not parked.
+                (
+                    1,
+                    3,
+                    "triage",
+                    "queued",
+                    "daily_budget_exhausted",
+                    "2000-01-01T00:00:00Z",
+                ),
+                // Parked for a different reason.
+                (
+                    1,
+                    4,
+                    "triage",
+                    "queued",
+                    "provider_cooldown",
+                    "2099-01-01T00:00:00Z",
+                ),
+                (
+                    1,
+                    5,
+                    "notification",
+                    "queued",
+                    "daily_budget_exhausted",
+                    "2099-01-01T00:00:00Z",
+                ),
+                (
+                    2,
+                    6,
+                    "triage",
+                    "queued",
+                    "daily_budget_exhausted",
+                    "2099-01-01T00:00:00Z",
+                ),
+            ] {
+                conn.execute(
+                    "INSERT INTO agent_triage_jobs
+                    (account_id,message_id,kind,trigger,input_revision,state,available_at,last_error)
+                    VALUES(?1,?2,?3,'t',1,?4,?5,?6)",
+                    params![account, message, kind, state, at, error],
+                )
+                .unwrap();
+            }
+        }
+        let (parked, resumes) = store.triage_budget_parked(1).unwrap();
+        assert_eq!(parked, 2);
+        assert_eq!(resumes.unwrap().to_rfc3339(), "2099-01-01T00:00:00+00:00");
+        assert_eq!(store.triage_budget_parked(2).unwrap().0, 1);
     }
 
     pub(super) fn decision(id: i64) -> MessageDecision {
@@ -2764,6 +2995,120 @@ mod tests {
             .unwrap();
         projection["sources"] = serde_json::json!(sources);
         projection
+    }
+
+    /// A sign-in alert is auth the agent may still read: `restricted` is
+    /// false and must stay false. It belongs on the Auth page's decision rail
+    /// and NOT in FYE, even when the model asked for FYE. Regression: every
+    /// unrestricted login alert used to land in FYE and never on the Auth page.
+    #[test]
+    fn unrestricted_auth_lists_on_auth_page_not_fye() {
+        use crate::triage::decision::{AuthAssessment, AuthKind};
+        let store = fixture();
+        let (job, context) = claim(&store, 1);
+        let mut alert = decision(1);
+        alert.auth = AuthAssessment {
+            kinds: vec![AuthKind::LoginAlert],
+            evidence: vec![],
+        };
+        assert!(!alert.external_access.restricted);
+        assert!(alert.attention.show_in_fye);
+        store
+            .commit_agent_decision(
+                &job,
+                &context,
+                &alert,
+                std::slice::from_ref(&context.message.source),
+            )
+            .unwrap();
+        let (job, context) = claim(&store, 2);
+        store
+            .commit_agent_decision(
+                &job,
+                &context,
+                &decision(2),
+                std::slice::from_ref(&context.message.source),
+            )
+            .unwrap();
+
+        let fye_threads = |store: &SqliteStore| {
+            store
+                .agent_fye(1, 10, &RankingConfig::default(), Utc::now())
+                .unwrap()
+                .into_iter()
+                .map(|item| item.thread_id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(fye_threads(&store), vec!["two".to_string()]);
+        // The legacy /client/updates Standing band (iOS, the assistant's
+        // get_updates tool) and its tier label must agree with the v2 feed.
+        let standing = |store: &SqliteStore| {
+            let mut threads = store
+                .human_agent_updates(
+                    1,
+                    &AgentInventoryQuery {
+                        since: Utc::now() - chrono::Duration::days(30),
+                        min_importance: None,
+                        status: None,
+                        band: Some(crate::store::SitrepBand::Standing),
+                        pending_reminders: false,
+                        spam: crate::store::SpamScope::Exclude,
+                        ranking: RankingConfig::default(),
+                    },
+                )
+                .unwrap()
+                .into_iter()
+                .map(|item| item.update.thread_id)
+                .collect::<Vec<_>>();
+            threads.sort();
+            threads
+        };
+        assert_eq!(standing(&store), vec!["two".to_string()]);
+        let all = store
+            .human_agent_updates(
+                1,
+                &AgentInventoryQuery {
+                    since: Utc::now() - chrono::Duration::days(30),
+                    min_importance: None,
+                    status: None,
+                    band: None,
+                    pending_reminders: false,
+                    spam: crate::store::SpamScope::Exclude,
+                    ranking: RankingConfig::default(),
+                },
+            )
+            .unwrap();
+        let tier_of = |id: i64| all.iter().find(|u| u.update.id == id).unwrap().update.tier;
+        assert_eq!(tier_of(1), crate::types::Tier::Noise);
+        assert_eq!(tier_of(2), crate::types::Tier::Signal);
+        let sealed = store.sealed_messages(1).unwrap();
+        assert_eq!(sealed.len(), 1);
+        assert_eq!(sealed[0].id, 1);
+        assert_eq!(sealed[0].sealed_kind.as_deref(), Some("login_alert"));
+        assert!(store.sealed_body(1, 1).is_ok());
+        assert!(matches!(
+            store.sealed_body(1, 2).unwrap_err(),
+            CoreError::NotFound
+        ));
+
+        // The human pinning the thread overrides the auth exclusion.
+        store
+            .correct_agent_triage(1, 1, "show_in_fye", &serde_json::json!(true), Utc::now())
+            .unwrap();
+        let mut pinned = fye_threads(&store);
+        pinned.sort();
+        assert_eq!(pinned, vec!["one".to_string(), "two".to_string()]);
+        assert_eq!(standing(&store), pinned);
+
+        // Archiving resolves the row to done, and done auth mail leaves the
+        // Auth list (and so the badge), while an explicit reveal still works.
+        store
+            .lock()
+            .unwrap()
+            .execute("UPDATE triage SET status='done' WHERE message_id=1", [])
+            .unwrap();
+        assert!(store.sealed_messages(1).unwrap().is_empty());
+        assert!(store.sealed_body(1, 1).is_ok());
     }
 
     #[test]
@@ -4390,7 +4735,13 @@ fn human_inventory(
         if query.pending_reminders && row.reminder.is_none() {
             continue;
         }
-        let selected = attention.as_ref().is_some_and(|a| a.show_in_fye);
+        // Same rule as the `fye` list in `list_items_with_query`: auth mail
+        // lives on the Auth page, so the model's FYE pick does not count for
+        // it unless the human pinned the thread.
+        let wants_fye = attention.as_ref().is_some_and(|a| a.show_in_fye);
+        let is_auth = decision.as_ref().is_some_and(|d| d.auth.is_auth());
+        let selected = wants_fye
+            && (!is_auth || thread_fye_override(conn, account, &row.thread)? == Some(true));
         let is_standing = ((selected && row.representative == Some(row.id))
             || row.reminded.is_some())
             && thread_fye_override(conn, account, &row.thread)? != Some(false);

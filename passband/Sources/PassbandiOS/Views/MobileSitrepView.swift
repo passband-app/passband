@@ -186,7 +186,10 @@ struct MobileSitrepView: View {
         if total > 0 {
             return "\(Self.spell(total)) item\(total == 1 ? "" : "s") on your plate."
         }
-        return "You're all clear."
+        // Only "all clear" when triage has actually run; the footnote says why.
+        return store.syncStatus.emptyHero(
+            queued: store.triageWaiting, lastSync: store.daemonLastSync)?.title
+            ?? "You're all clear."
     }
 
     // MARK: - for your eyes
@@ -262,18 +265,20 @@ struct MobileSitrepView: View {
                 .font(Typo.micro)
                 .foregroundStyle(Palette.warn)
                 .frame(maxWidth: .infinity, alignment: .leading)
-        } else {
-            Text(syncedLabel)
+        } else if let line = store.syncStatus.oneLine() {
+            // The same derived status the Mac's banner shows, in one line.
+            Label(line, systemImage: "clock")
                 .font(Typo.micro)
-                .foregroundStyle(Palette.inkFaintest)
+                .foregroundStyle(store.syncStatus.isWarning ? Palette.warn : Palette.inkFaint)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            // The same stamp and tint as the Mac's status strip.
+            let stamp = SyncStatus.syncedStamp(
+                stats: store.sitrep.stats, clientRefresh: store.lastRefresh, date: Fmt.date)
+            Text(stamp.text)
+                .font(Typo.micro)
+                .foregroundStyle(stamp.warn ? Palette.warn : Palette.inkFaintest)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
-    }
-
-    /// "synced 4m ago" / "synced just now" — never the nonsense "synced now ago".
-    private var syncedLabel: String {
-        guard let last = store.lastRefresh else { return "waiting for the first sync…" }
-        let age = Fmt.relAge(last)
-        return (age.isEmpty || age == "now") ? "synced just now" : "synced \(age) ago"
     }
 }

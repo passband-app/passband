@@ -2012,6 +2012,67 @@ async fn archive_success_audits_ok_and_hits_gmail() {
     assert_eq!(audit[0].detail.as_deref(), Some("ok"));
 }
 
+/// THE WIRING, not the pacer: an archive through the real handler books its
+/// Gmail cost against the budget the daemon handed ApiState, the same one the
+/// sync engines draw from. Two budgets per mailbox is how a tenant asked Gmail
+/// for 160% of its per-user limit (#263); drop `.with_budget` in
+/// `write_client` or the `admit` in the write client and this fails.
+#[tokio::test]
+async fn an_archive_books_against_the_mailbox_gmail_budget() {
+    use squelch_core::config::GmailQuotaProfile;
+    use squelch_core::gmail_budget::GmailBudget;
+    use std::time::{Duration, Instant};
+
+    let (base, handle) = mock_gmail(1).await;
+    // 10 ms a unit: modify costs 5, so the archive books 50 ms.
+    let budget = Arc::new(GmailBudget::with_unit(
+        GmailQuotaProfile::Standard,
+        Duration::from_millis(10),
+    ));
+    let (state, store, acct) = state_with(|store, acct| {
+        let m = store
+            .upsert_message(&msg(acct, "gmail-budget", "t1", "hi", "body"))
+            .unwrap();
+        store
+            .set_triage(
+                m,
+                acct,
+                80,
+                Tier::Signal,
+                Sensitivity::Normal,
+                None,
+                "",
+                "",
+                None,
+            )
+            .unwrap();
+    });
+    let app = router(
+        state
+            .with_write_test_harness(Arc::new(StubCreds), base)
+            .with_gmail_budget(budget.clone()),
+    );
+    let message_id = store.search(acct, "hi", 10, 0).unwrap()[0].id;
+    let resp = app
+        .oneshot(authed_json(
+            "POST",
+            "/client/actions/archive",
+            serde_json::json!({ "message_id": message_id, "confirm": true }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    handle.await.unwrap();
+
+    // The sync side's next request has to wait out what the archive booked.
+    let started = Instant::now();
+    budget.admit("GET", "/profile").await;
+    assert!(
+        started.elapsed() >= Duration::from_millis(25),
+        "the archive did not book against the shared budget"
+    );
+}
+
 #[tokio::test]
 async fn human_can_archive_restricted_mail() {
     let (base, handle) = mock_gmail(1).await;
@@ -8482,6 +8543,231 @@ async fn a_self_host_mailbox_is_told_it_is_disconnected_and_offered_no_link() {
     let json = body_json(resp).await;
     assert_eq!(json["gmail"]["connected"], serde_json::json!(false));
     assert!(json["gmail"].get("reconnect_url").is_none());
+}
+
+/// SYNC AND TRIAGE HEALTH ARE ABSENT FROM A DOOR THAT CANNOT SEE THEM, like
+/// `gmail`: an old or unwired daemon must read as "no answer", not "healthy".
+#[tokio::test]
+async fn stats_omit_sync_and_triage_when_this_door_cannot_see_them() {
+    let Harness { app, .. } = harness(|_, _| {});
+    let resp = app.oneshot(authed("GET", "/client/stats")).await.unwrap();
+    let json = body_json(resp).await;
+    assert!(json.get("sync").is_none());
+    assert!(json.get("triage").is_none());
+}
+
+/// THE HOSTED OUTAGE: Gmail is rate-limiting a mailbox whose credential is
+/// fine. `gmail.connected` stays true (it means the credential), and `sync`
+/// says what is actually wrong, when the next try is, and that triage is
+/// waiting on it with work queued.
+#[tokio::test]
+async fn stats_report_a_throttled_mailbox_and_the_triage_waiting_on_it() {
+    use squelch_core::metrics::{GmailErrorKind, SyncMetrics};
+    let (state, store, acct) = state_with(|store, acct| {
+        let m = seed_one_signal(store, acct, "g-q", "t-q", "waiting");
+        squelch_core::store::agent_triage::AgentTriageStore::enqueue_agent_triage(
+            store, acct, m, "test", false,
+        )
+        .unwrap();
+    });
+    let metrics = SyncMetrics::new();
+    metrics.record_gmail_error_reason(GmailErrorKind::Quota, "RATE_LIMIT_EXCEEDED");
+    metrics.record_sync_error();
+    let retry = chrono::Utc::now().timestamp() + 120;
+    metrics.note_sync_retry_at(retry);
+    let app = router(state.with_sync_metrics(metrics.clone()));
+
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", "/client/stats"))
+        .await
+        .unwrap();
+    let json = body_json(resp).await;
+    assert_eq!(json["gmail"]["connected"], serde_json::json!(true));
+    let sync = &json["sync"];
+    assert_eq!(sync["ok"], serde_json::json!(false));
+    assert_eq!(sync["consecutive_failures"], 1);
+    assert_eq!(sync["error"]["kind"], "quota");
+    assert_eq!(sync["error"]["reason"], "RATE_LIMIT_EXCEEDED");
+    assert!(sync["error"]["at"].is_string());
+    let next =
+        chrono::DateTime::parse_from_rfc3339(sync["next_retry_at"].as_str().unwrap()).unwrap();
+    assert_eq!(next.timestamp(), retry);
+    assert!(sync.get("last_success_at").is_none(), "it never synced");
+
+    let triage = &json["triage"];
+    assert_eq!(triage["waiting_for_sync"], serde_json::json!(true));
+    let [queued, leased] = store
+        .triage_waiting_counts(acct, chrono::Utc::now())
+        .unwrap();
+    assert!(queued > 0, "the fixture queued work");
+    assert_eq!(triage["queued"], queued);
+    assert_eq!(triage["leased"], leased);
+    assert_eq!(triage["budget_parked"], 0);
+    assert!(triage.get("cooldown_until").is_none());
+    assert!(triage.get("budget_resumes_at").is_none());
+
+    // Gmail answers: the outage is over, the error and retry go with it.
+    metrics.note_poll_ok();
+    let later = chrono::Utc::now().timestamp() + 600;
+    metrics.note_triage_cooldown(later);
+    let resp = app.oneshot(authed("GET", "/client/stats")).await.unwrap();
+    let json = body_json(resp).await;
+    let sync = &json["sync"];
+    assert_eq!(sync["ok"], serde_json::json!(true));
+    assert_eq!(sync["consecutive_failures"], 0);
+    assert!(sync.get("error").is_none());
+    assert!(sync.get("next_retry_at").is_none());
+    assert!(sync["last_success_at"].is_string());
+    assert_eq!(json["triage"]["waiting_for_sync"], serde_json::json!(false));
+    assert!(json["triage"]["cooldown_until"].is_string());
+}
+
+/// A FRESH DAEMON IS NOT AN OUTAGE. Before the first poll (onboarding's
+/// backfill, any restart) nothing has failed, so `sync.ok` is true and triage
+/// is not "waiting for sync"; the backfill shows up as `catch_up` progress.
+#[tokio::test]
+async fn stats_do_not_report_an_outage_before_anything_failed() {
+    use squelch_core::metrics::SyncMetrics;
+    let (state, _store, _acct) = state_with(|_, _| {});
+    let metrics = SyncMetrics::new();
+    metrics.catchup_begin(40);
+    metrics.catchup_step();
+    let app = router(state.with_sync_metrics(metrics.clone()));
+    let resp = app.oneshot(authed("GET", "/client/stats")).await.unwrap();
+    let json = body_json(resp).await;
+    assert!(!metrics.poll_ok(), "no poll has run");
+    assert_eq!(json["sync"]["ok"], serde_json::json!(true));
+    assert!(json["sync"].get("error").is_none());
+    assert_eq!(json["triage"]["waiting_for_sync"], serde_json::json!(false));
+    assert_eq!(
+        json["catch_up"],
+        serde_json::json!({"done": 1, "total": 40})
+    );
+}
+
+/// A SIDE-CALL ERROR IS NOT A SYNC OUTAGE. With sync healthy, an error the
+/// spam tab or unread count recorded (and any stray retry stamp) stays out
+/// of `sync`: `error` and `next_retry_at` describe a current outage only.
+#[tokio::test]
+async fn stats_hide_a_side_call_error_while_sync_is_healthy() {
+    use squelch_core::metrics::{GmailErrorKind, SyncMetrics};
+    let (state, _store, _acct) = state_with(|_, _| {});
+    let metrics = SyncMetrics::new();
+    metrics.record_gmail_error_reason(GmailErrorKind::Quota, "RATE_LIMIT_EXCEEDED");
+    metrics.record_sync_error();
+    metrics.note_poll_ok();
+    // After the good poll: a side call fails and a retry time is left over.
+    metrics.record_gmail_error_reason(GmailErrorKind::Http, "backendError");
+    metrics.note_sync_retry_at(chrono::Utc::now().timestamp() + 60);
+    assert!(metrics.sync_last_error().is_some());
+    let app = router(state.with_sync_metrics(metrics));
+    let resp = app.oneshot(authed("GET", "/client/stats")).await.unwrap();
+    let json = body_json(resp).await;
+    let sync = &json["sync"];
+    assert_eq!(sync["ok"], serde_json::json!(true));
+    assert!(sync.get("error").is_none(), "{sync}");
+    assert!(sync.get("next_retry_at").is_none(), "{sync}");
+}
+
+/// Seed one Stage-1-decided row a re-triage will pick up.
+fn seed_retriageable(store: &SqliteStore, acct: i64) {
+    let m = seed_one_signal(store, acct, "g-r", "t-r", "again");
+    store
+        .stage1_apply(&squelch_core::store::Stage1Applied {
+            message_id: m,
+            account_id: acct,
+            importance: 50,
+            tier: Tier::Signal,
+            one_line: "x".into(),
+            reason: "x".into(),
+            field_reasons: Default::default(),
+            stage1_model_used: "claude-x".into(),
+            needs_stage2: false,
+            escalation_reason: None,
+            deadline: None,
+            category: Some("general".into()),
+        })
+        .unwrap();
+}
+
+/// A STALLED RE-TRIAGE SAYS WHY. Gmail down outranks a provider cooldown, and
+/// a door with no metrics says nothing rather than guessing.
+#[tokio::test]
+async fn retriage_progress_names_what_is_holding_the_run() {
+    use squelch_core::metrics::SyncMetrics;
+    let (state, _store, _acct) = state_with(seed_retriageable);
+    let metrics = SyncMetrics::new();
+    let blind = router(state.clone());
+    let app = router(state.with_sync_metrics(metrics.clone()));
+
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", "/client/retriage"))
+        .await
+        .unwrap();
+    assert!(
+        body_json(resp).await.get("blocked").is_none(),
+        "no run in flight, nothing to block"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            "/client/retriage",
+            serde_json::json!({ "days": 7 }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(body_json(resp).await["reset"], 1);
+
+    // Nothing has polled yet, and nothing has failed: a fresh daemon is not
+    // blocked on Gmail, whatever `poll_ok` says.
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", "/client/retriage"))
+        .await
+        .unwrap();
+    assert!(
+        body_json(resp).await.get("blocked").is_none(),
+        "not polled yet is not waiting for sync"
+    );
+
+    // A lifecycle fails: triage is waiting for Gmail.
+    metrics.record_sync_error();
+    let retry = chrono::Utc::now().timestamp() + 60;
+    metrics.note_sync_retry_at(retry);
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", "/client/retriage"))
+        .await
+        .unwrap();
+    let json = body_json(resp).await;
+    assert_eq!(json["blocked"]["reason"], "waiting_for_sync");
+    let until =
+        chrono::DateTime::parse_from_rfc3339(json["blocked"]["until"].as_str().unwrap()).unwrap();
+    assert_eq!(until.timestamp(), retry);
+
+    // Gmail answers, but the model provider is cooling off.
+    metrics.note_poll_ok();
+    metrics.note_triage_cooldown(chrono::Utc::now().timestamp() + 300);
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", "/client/retriage"))
+        .await
+        .unwrap();
+    let json = body_json(resp).await;
+    assert_eq!(json["blocked"]["reason"], "provider_cooldown");
+    assert!(json["blocked"]["until"].is_string());
+
+    let resp = blind
+        .oneshot(authed("GET", "/client/retriage"))
+        .await
+        .unwrap();
+    let json = body_json(resp).await;
+    assert_eq!(json["total"], 1);
+    assert!(json.get("blocked").is_none(), "a blind door does not guess");
 }
 
 // --- the spam page over HTTP ------------------------------------------------

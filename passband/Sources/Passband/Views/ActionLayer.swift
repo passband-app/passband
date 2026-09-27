@@ -63,6 +63,7 @@ struct ActionLayer: View {
             // is whether to take the app away, and that cannot be answered from
             // behind whatever else happened to be open.
             if let days = store.retriageAsk { RetriageConfirm(days: days) }
+            if let ask = store.reconnectAsk { ReconnectAccountPrompt(ask: ask) }
             // LAST, and it outranks even the card above: that one is a greeting
             // the user can dismiss, this one is the app being unavailable while
             // a re-triage rewrites what every other overlay here is about.

@@ -130,6 +130,9 @@ pub struct ApiState {
     /// "connected": a door that cannot see the credential must not tell a
     /// client the mailbox is fine.
     pub(crate) sync_metrics: Option<Arc<squelch_core::metrics::SyncMetrics>>,
+    /// The mailbox's Gmail quota budget, shared with the sync engines. `None`
+    /// when no daemon wired one (tests); the write door is then unpaced.
+    pub(crate) gmail_budget: Option<Arc<squelch_core::gmail_budget::GmailBudget>>,
     /// THE ESCAPE HATCH, from `[console] allow_insecure_cookie` /
     /// `SQUELCH_CONSOLE_ALLOW_INSECURE_COOKIE`: the operator's declaration that
     /// this console is served over plain http on an origin that is not loopback.
@@ -378,6 +381,7 @@ impl ApiState {
             )),
             console_sso_url: None,
             sync_metrics: None,
+            gmail_budget: None,
             console_allow_insecure_cookie: false,
             console_signin_limiter: Arc::new(std::sync::Mutex::new(
                 ConsoleRateLimiter::per_minute(crate::console::CONSOLE_SIGNIN_REQUESTS_PER_MINUTE),
@@ -533,6 +537,20 @@ impl ApiState {
     /// origin rather than the control plane.
     /// Wire the process's metrics registry so `/client/stats` can answer
     /// whether the Gmail credential is currently working.
+    /// Share the mailbox's Gmail quota budget with the write door, so actions
+    /// book against the same per-user limit the sync engines pace to.
+    pub fn with_gmail_budget(
+        mut self,
+        budget: Arc<squelch_core::gmail_budget::GmailBudget>,
+    ) -> Self {
+        self.gmail_budget = Some(budget);
+        self
+    }
+
+    pub(crate) fn gmail_budget(&self) -> Option<&Arc<squelch_core::gmail_budget::GmailBudget>> {
+        self.gmail_budget.as_ref()
+    }
+
     pub fn with_sync_metrics(mut self, metrics: Arc<squelch_core::metrics::SyncMetrics>) -> Self {
         self.sync_metrics = Some(metrics);
         self

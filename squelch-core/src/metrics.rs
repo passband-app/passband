@@ -20,8 +20,8 @@
 //! scraper besides.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 
 use chrono::Utc;
 
@@ -55,7 +55,8 @@ pub enum GmailErrorKind {
 }
 
 impl GmailErrorKind {
-    fn label(self) -> &'static str {
+    /// The closed wire/metric name: `auth`, `quota`, `http` or `network`.
+    pub fn label(self) -> &'static str {
         match self {
             Self::Auth => "auth",
             Self::Quota => "quota",
@@ -397,6 +398,40 @@ pub struct SyncMetrics {
     /// memory next to this one reads as cause and effect instead of a mystery.
     /// Written by [`crate::embed::LazyEmbedder`] on each load and unload.
     embedder_loaded: AtomicU64,
+
+    /// Mirror of the engine's private `poll_healthy`: true once a poll has
+    /// succeeded and until the next lifecycle error. The human door has no
+    /// handle on the engine, so this registry is where it reads sync health.
+    poll_ok: AtomicBool,
+    /// Why the last Gmail call failed, as closed constants only. Cleared by the
+    /// next successful poll. See [`SyncError`].
+    sync_last_error: Mutex<Option<SyncError>>,
+    /// Unix seconds of the next lifecycle retry `run()` has scheduled, or 0
+    /// when none is (healthy, or never failed). Cleared by a successful poll.
+    sync_next_retry_unix: AtomicI64,
+    /// Unix seconds until which the triage worker holds off the model provider
+    /// after an outage (the engine's `agent_retry_after`). 0 = no cooldown.
+    triage_cooldown_until_unix: AtomicI64,
+}
+
+/// The last Gmail failure, in words a client can switch on. `reason` is one of
+/// a closed set of constants (Google's structured reason, or one of ours for a
+/// failure that never got a response); never Google's free-form message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyncError {
+    pub kind: GmailErrorKind,
+    pub reason: &'static str,
+    /// Unix seconds.
+    pub at: i64,
+}
+
+/// The reason recorded for a failure that carries no Gmail reason of its own.
+fn default_gmail_reason(kind: GmailErrorKind) -> &'static str {
+    match kind {
+        GmailErrorKind::Auth => "credential_rejected",
+        GmailErrorKind::Network => "no_response",
+        GmailErrorKind::Quota | GmailErrorKind::Http => "unavailable",
+    }
 }
 
 impl SyncMetrics {
@@ -419,11 +454,94 @@ impl SyncMetrics {
         self.stamp_sync_success();
     }
 
-    /// A sync run bubbled an error up to the retry loop.
+    /// A sync run bubbled an error up to the retry loop. The poll is no longer
+    /// healthy: that is exactly when the engine clears `poll_healthy` too.
     pub fn record_sync_error(&self) {
         self.sync_runs_err.fetch_add(1, Ordering::Relaxed);
         self.sync_consecutive_failures
             .fetch_add(1, Ordering::Relaxed);
+        self.poll_ok.store(false, Ordering::Relaxed);
+    }
+
+    /// A poll succeeded: Gmail answered. Stamps freshness, marks the poll
+    /// healthy, and ENDS THE FAILURE STREAK. The streak used to be reset only
+    /// by [`Self::record_sync_ok`], which runs on shutdown, so a daemon that
+    /// failed once and then polled happily for a week still reported one
+    /// consecutive failure. The last error and the scheduled retry go with it.
+    pub fn note_poll_ok(&self) {
+        self.poll_ok.store(true, Ordering::Relaxed);
+        self.sync_consecutive_failures.store(0, Ordering::Relaxed);
+        self.sync_next_retry_unix.store(0, Ordering::Relaxed);
+        if let Ok(mut last) = self.sync_last_error.lock() {
+            *last = None;
+        }
+        self.stamp_sync_success();
+    }
+
+    /// `run()` scheduled its next lifecycle attempt for `at` (unix seconds).
+    pub fn note_sync_retry_at(&self, at: i64) {
+        self.sync_next_retry_unix.store(at, Ordering::Relaxed);
+    }
+
+    /// `run()` is starting a lifecycle, so the retry it scheduled is no longer
+    /// in the future: it is happening now. Left standing, the old time reads
+    /// as "next try at 12:05" at 12:40, in the middle of a half-hour catch-up
+    /// that Gmail is answering perfectly well.
+    pub fn note_lifecycle_start(&self) {
+        self.sync_next_retry_unix.store(0, Ordering::Relaxed);
+    }
+
+    /// GMAIL SYNC HAS ACTUALLY FAILED: a lifecycle ended in an error and no
+    /// poll has succeeded since. Not merely "no poll yet": a first-run backfill
+    /// runs for many minutes before its first poll, and so does every restart,
+    /// and neither is an outage. This is what the client door reports as
+    /// `sync.ok == false` and `triage.waiting_for_sync`.
+    pub fn sync_failing(&self) -> bool {
+        !self.poll_ok() && self.sync_consecutive_failures() > 0
+    }
+
+    /// The triage worker is holding off the model provider until `until`
+    /// (unix seconds). Only ever moves later, like the engine's own cooldown.
+    pub fn note_triage_cooldown(&self, until: i64) {
+        self.triage_cooldown_until_unix
+            .fetch_max(until, Ordering::Relaxed);
+    }
+
+    /// Whether the last poll succeeded (and no lifecycle error has followed).
+    pub fn poll_ok(&self) -> bool {
+        self.poll_ok.load(Ordering::Relaxed)
+    }
+
+    /// Unix seconds of the last successful poll, or `None` if none has.
+    pub fn sync_last_success(&self) -> Option<i64> {
+        match self.sync_last_success_unix.load(Ordering::Relaxed) {
+            0 => None,
+            at => Some(at),
+        }
+    }
+
+    /// Failed lifecycles since the last successful poll.
+    pub fn sync_consecutive_failures(&self) -> u64 {
+        self.sync_consecutive_failures.load(Ordering::Relaxed)
+    }
+
+    /// The most recent Gmail failure since the last successful poll.
+    pub fn sync_last_error(&self) -> Option<SyncError> {
+        self.sync_last_error.lock().ok().and_then(|last| *last)
+    }
+
+    /// When `run()` will try again, or `None` when no retry is scheduled.
+    pub fn sync_next_retry_at(&self) -> Option<i64> {
+        match self.sync_next_retry_unix.load(Ordering::Relaxed) {
+            0 => None,
+            at => Some(at),
+        }
+    }
+
+    /// The provider cooldown's end, or `None` when there is none in force.
+    pub fn triage_cooldown_until(&self) -> Option<i64> {
+        let until = self.triage_cooldown_until_unix.load(Ordering::Relaxed);
+        (until > Utc::now().timestamp()).then_some(until)
     }
 
     /// Move the freshness stamp to now WITHOUT touching the run counters. The
@@ -446,6 +564,20 @@ impl SyncMetrics {
     }
 
     pub fn record_gmail_error(&self, kind: GmailErrorKind) {
+        self.record_gmail_error_reason(kind, default_gmail_reason(kind));
+    }
+
+    /// [`Self::record_gmail_error`] with Google's structured reason (a known
+    /// constant from `gmail_error_reason`, never free-form text), which is
+    /// what the client shows on hover and in developer mode.
+    pub fn record_gmail_error_reason(&self, kind: GmailErrorKind, reason: &'static str) {
+        if let Ok(mut last) = self.sync_last_error.lock() {
+            *last = Some(SyncError {
+                kind,
+                reason,
+                at: Utc::now().timestamp(),
+            });
+        }
         let slot = match kind {
             GmailErrorKind::Auth => &self.gmail_auth,
             GmailErrorKind::Quota => &self.gmail_quota,
@@ -1939,6 +2071,7 @@ mod tests {
                 started_at: None,
                 budget_parked: 0,
                 budget_resumes_at: None,
+                blocked: None,
             },
         };
         let text = render(&m, Some(&db));
@@ -2139,6 +2272,100 @@ mod gmail_auth_state_tests {
             m.record_gmail_error(kind);
         }
         assert_eq!(m.gmail_auth_failed_since(), None);
+    }
+}
+
+#[cfg(test)]
+mod sync_health_tests {
+    use super::*;
+
+    /// THE STREAK ENDS ON A SUCCESSFUL POLL. It used to end only in
+    /// `record_sync_ok`, which runs on shutdown, so a daemon that failed once
+    /// and then polled happily forever still reported a failure streak.
+    #[test]
+    fn a_successful_poll_ends_the_outage() {
+        let m = SyncMetrics::new();
+        assert!(!m.poll_ok(), "nothing has polled yet");
+        assert_eq!(m.sync_last_success(), None);
+
+        m.record_gmail_error_reason(GmailErrorKind::Quota, "RATE_LIMIT_EXCEEDED");
+        m.record_sync_error();
+        m.record_sync_error();
+        m.note_sync_retry_at(4_000_000_000);
+        assert!(!m.poll_ok());
+        assert_eq!(m.sync_consecutive_failures(), 2);
+        let error = m.sync_last_error().expect("recorded");
+        assert_eq!(error.kind, GmailErrorKind::Quota);
+        assert_eq!(error.reason, "RATE_LIMIT_EXCEEDED");
+        assert_eq!(m.sync_next_retry_at(), Some(4_000_000_000));
+
+        m.note_poll_ok();
+        assert!(m.poll_ok());
+        assert_eq!(m.sync_consecutive_failures(), 0, "the streak is over");
+        assert_eq!(m.sync_last_error(), None);
+        assert_eq!(m.sync_next_retry_at(), None);
+        assert!(m.sync_last_success().is_some());
+
+        // And the next failure makes the poll unhealthy again.
+        m.record_sync_error();
+        assert!(!m.poll_ok());
+        assert_eq!(m.sync_consecutive_failures(), 1);
+    }
+
+    /// NO POLL YET IS NOT AN OUTAGE. A fresh daemon (first-run backfill, or a
+    /// restart before its first poll) has not polled and has not failed, and
+    /// must not read as failing; one failed lifecycle does, until a poll lands.
+    #[test]
+    fn sync_is_failing_only_after_a_lifecycle_failed() {
+        let m = SyncMetrics::new();
+        assert!(!m.poll_ok());
+        assert!(!m.sync_failing(), "not polled yet is not failing");
+        m.record_sync_error();
+        assert!(m.sync_failing());
+        m.note_poll_ok();
+        assert!(!m.sync_failing());
+    }
+
+    /// The scheduled retry goes away once the retry is under way.
+    #[test]
+    fn a_lifecycle_start_clears_the_scheduled_retry() {
+        let m = SyncMetrics::new();
+        m.record_gmail_error_reason(GmailErrorKind::Quota, "RATE_LIMIT_EXCEEDED");
+        m.record_sync_error();
+        m.note_sync_retry_at(4_000_000_000);
+        m.note_lifecycle_start();
+        assert_eq!(m.sync_next_retry_at(), None);
+        assert!(m.sync_failing(), "still failing until a poll succeeds");
+        assert!(m.sync_last_error().is_some());
+    }
+
+    /// A failure with no Gmail reason of its own still names a closed constant.
+    #[test]
+    fn a_reasonless_failure_records_a_known_constant() {
+        let m = SyncMetrics::new();
+        m.record_gmail_error(GmailErrorKind::Network);
+        assert_eq!(m.sync_last_error().unwrap().reason, "no_response");
+        m.record_gmail_error(GmailErrorKind::Auth);
+        let error = m.sync_last_error().unwrap();
+        assert_eq!(
+            (error.kind, error.reason),
+            (GmailErrorKind::Auth, "credential_rejected")
+        );
+    }
+
+    /// The cooldown only moves later, and reads as absent once it has passed.
+    #[test]
+    fn the_triage_cooldown_reads_only_while_in_force() {
+        let m = SyncMetrics::new();
+        assert_eq!(m.triage_cooldown_until(), None);
+        let later = Utc::now().timestamp() + 600;
+        m.note_triage_cooldown(later);
+        m.note_triage_cooldown(later - 300);
+        assert_eq!(m.triage_cooldown_until(), Some(later));
+
+        let past = SyncMetrics::new();
+        past.note_triage_cooldown(Utc::now().timestamp() - 1);
+        assert_eq!(past.triage_cooldown_until(), None);
     }
 }
 

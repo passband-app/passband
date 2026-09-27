@@ -18,6 +18,7 @@ struct RetriageRunTests {
         stalling()
         deadEnds()
         pausing()
+        stepping()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -157,6 +158,79 @@ struct RetriageRunTests {
         equal(
             today.contains("\u{2014}") || next.contains("\u{2014}"), false,
             "no em dashes in copy")
+    }
+
+    /// The three steps: a blocked step says why and until when, the steps after
+    /// it wait rather than claim to run, and a healthy run reads as running.
+    static func stepping() {
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(identifier: "UTC")!
+        let en = Locale(identifier: "en_US_POSIX")
+        let now = Date(timeIntervalSince1970: 1_790_000_000)
+        let iso = ISO8601DateFormatter()
+        let parse = { (s: String?) in s.flatMap { iso.date(from: $0) } }
+        let triage = TriageHealth(
+            waiting_for_sync: true, cooldown_until: nil, queued: 220, leased: 0,
+            budget_parked: 0, budget_resumes_at: nil)
+
+        var run = RetriageRun(total: 220)
+        run.adopt(
+            .init(
+                total: 220, done: 0, started_at: "x",
+                blocked: .init(
+                    reason: "waiting_for_sync",
+                    until: iso.string(from: now.addingTimeInterval(300)))), at: now)
+        equal(run.canClose, true, "a run the daemon says is blocked opens the door at once")
+
+        let throttled = SyncStatus.throttled(
+            nextTry: now.addingTimeInterval(300), reason: "RATE_LIMIT_EXCEEDED", waiting: 220)
+        let steps = run.steps(
+            sync: throttled, triage: triage, now: now, calendar: utc, locale: en, date: parse)
+        equal(steps.map(\.state), [.blocked, .waiting, .waiting], "sync blocks the rest")
+        equal(
+            steps[0].detail?.hasPrefix("Gmail is rate-limiting this mailbox. Next try at "), true,
+            "the blocked step says why and when: \(steps[0].detail ?? "nil")")
+        equal(
+            steps[1].detail, "220 queued, 0 running. Starts once Gmail sync succeeds.",
+            "the queue step carries the counts")
+        equal(steps[2].detail, "0 of 220 emails", "and the tally")
+        equal(
+            steps.contains { $0.detail?.contains("RATE_LIMIT") == true }, false,
+            "no reason code in step copy")
+
+        // Gmail fine, provider cooling off.
+        var cooling = RetriageRun(total: 10)
+        cooling.adopt(
+            .init(
+                total: 10, done: 2, started_at: "x",
+                blocked: .init(
+                    reason: "provider_cooldown",
+                    until: iso.string(from: now.addingTimeInterval(600)))), at: now)
+        let c = cooling.steps(
+            sync: .healthy, triage: triage, now: now, calendar: utc, locale: en, date: parse)
+        equal(c.map(\.state), [.done, .blocked, .waiting], "the queue is the blocked step")
+        equal(c[1].detail?.hasPrefix("The sorting service had a problem. Resumes at "), true,
+              "cooldown copy: \(c[1].detail ?? "nil")")
+
+        // Healthy and moving.
+        var moving = RetriageRun(total: 10)
+        moving.adopt(.init(total: 10, done: 4, started_at: "x"), at: now)
+        let m = moving.steps(
+            sync: .healthy, triage: triage, now: now, calendar: utc, locale: en, date: parse)
+        equal(m.map(\.state), [.done, .active, .active], "a healthy run is running")
+        equal(moving.canClose, false, "and keeps its door shut")
+
+        moving.adopt(
+            .init(
+                total: 10, done: 10, started_at: "x",
+                blocked: .init(reason: "budget", until: nil)), at: now)
+        equal(moving.blocked, nil, "a finished run is never blocked")
+        let f = moving.steps(
+            sync: .healthy, triage: triage, now: now, calendar: utc, locale: en, date: parse)
+        equal(f.map(\.state), [.done, .done, .done], "finished is all done")
+        equal(
+            (steps + c + m + f).contains { ($0.detail ?? "").contains("\u{2014}") }, false,
+            "no em dashes in step copy")
     }
 
     // MARK: - assertions

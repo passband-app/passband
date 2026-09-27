@@ -1965,6 +1965,7 @@ final class AppStore {
             || triageFix != nil || remindTarget != nil || ruleEditor != nil
             || groupEditor != nil
             || !authQueue.isEmpty || retriage != nil || retriageAsk != nil
+            || reconnectAsk != nil
             || tour.wantsBlur || whatsNew.active
     }
 
@@ -2835,6 +2836,11 @@ final class AppStore {
         }
         // Whatever it opened with is what "untouched" means for the autosave.
         next.seededRecipients = next.recipients
+        // The side panel and the composer both claim the window's right-hand
+        // strip, and the panel draws ABOVE the composer: left open, the two
+        // stack in one place and the reader insets past both. Writing wins, so
+        // the panel goes (held, not lost: see `closeSide`).
+        if sideView.isOpen { closeSide() }
         compose = next
         DraftSaver.shared.noteOpened(.compose)
         Analytics.capture("compose_opened", ["kind": next.analyticsKind])
@@ -3021,6 +3027,9 @@ final class AppStore {
     /// asked for.
     func openInlineReply(replyTo messageId: Int, replyAll: Bool = false) {
         guard inlineReply == nil else { return }
+        // Same rule as the pane composer: a reply gets the whole reader, not
+        // the sliver left beside an open search strip.
+        if sideView.isOpen { closeSide() }
         inlineReply = ComposeState(
             replyToMessageId: messageId, body: Prefs.shared.signatureSeed,
             includeTracker: trackingDefault, replyAll: replyAll)
@@ -3344,6 +3353,9 @@ final class AppStore {
             inlineReply = state
             DraftSaver.shared.noteChange(.inlineReply)
         } else if compose.map(isBlankComposer) ?? true {
+            // Back into the pane's strip, so the side panel goes for the same
+            // reason `openCompose` closes it: the two cannot share the strip.
+            if sideView.isOpen { closeSide() }
             compose = state
             DraftSaver.shared.noteChange(.compose)
         } else {
@@ -3403,6 +3415,38 @@ final class AppStore {
         return raw
     }
 
+    /// A reconnect the human has pressed, parked on "which Google account".
+    ///
+    /// Google's account chooser lists every account signed in to the browser,
+    /// and nothing on it says which one this mailbox is. Pick the wrong one and
+    /// the consent succeeds for a mailbox Passband is not serving, so the
+    /// banner stays up and it looks like reconnecting does not work. One line
+    /// naming the address before the browser opens is the whole fix.
+    var reconnectAsk: ReconnectAsk?
+
+    struct ReconnectAsk: Hashable {
+        let url: String
+        let email: String
+    }
+
+    /// The banner's Reconnect. Asks first when the daemon told us the address;
+    /// on a daemon too old to say, there is nothing true to put in the dialog,
+    /// so it opens the link exactly as it did before.
+    func askReconnect() {
+        guard let url = gmailReconnectURL else { return }
+        let email = sitrep.stats?.account_email?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !email.isEmpty else { return Opener.open(url) }
+        reconnectAsk = ReconnectAsk(url: url, email: email)
+    }
+
+    func cancelReconnectAsk() { reconnectAsk = nil }
+
+    func confirmReconnect() {
+        guard let ask = reconnectAsk else { return }
+        reconnectAsk = nil
+        Opener.open(ask.url)
+    }
+
     /// How long the mailbox has been dark, for the banner's subtitle.
     ///
     /// `Fmt.date` and not a formatter of its own: the daemon emits fractional
@@ -3412,6 +3456,26 @@ final class AppStore {
     /// sentence with nothing announcing the loss. `Fmt` tries both, memoizes,
     /// and holds the lock these formatters need; this is read every render.
     var gmailDisconnectedSince: Date? { Fmt.date(sitrep.stats?.gmail?.disconnected_since) }
+
+    // MARK: - sync status
+
+    /// THE one answer to "is Passband working": daemon reachability, Gmail
+    /// credential, Gmail throttling or errors, catch-up and triage blockers,
+    /// in that precedence. Every surface that talks about sync health reads
+    /// this rather than re-deriving it. See Model/SyncStatus.swift.
+    var syncStatus: SyncStatus {
+        SyncStatus.derive(daemonDown: daemonDown, stats: sitrep.stats, date: Fmt.date)
+    }
+
+    /// When the DAEMON last heard from Gmail. Nil on a daemon too old to say,
+    /// and then callers fall back to the client's own poll time.
+    var daemonLastSync: Date? { Fmt.date(sitrep.stats?.sync?.last_success_at) }
+
+    /// Jobs waiting for, or running through, triage right now. 0 when unknown.
+    var triageWaiting: Int {
+        guard let t = sitrep.stats?.triage else { return 0 }
+        return max(t.queued, 0) + max(t.leased, 0)
+    }
 
 
     // MARK: - invite sharing

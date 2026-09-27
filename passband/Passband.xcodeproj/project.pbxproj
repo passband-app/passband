@@ -52,6 +52,7 @@
 		22E02ADE42C027FF43AC6665 /* AttachmentStrip.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15D14DE02E72E63FE53D5C8D /* AttachmentStrip.swift */; };
 		2305ADF476A30E034D2EC27C /* DraftSaver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06A50E65F84872DFA0504B96 /* DraftSaver.swift */; };
 		231B88B449E171FE30F25D07 /* AuthCode.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB5FEFF987265DA1E7F85007 /* AuthCode.swift */; };
+		24AF68BF417C51D26EB40ED6 /* SyncStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DAC2EA79665D763DD36958D /* SyncStatus.swift */; };
 		2530ADC217749D5FEEFFA4D9 /* DraftSaver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06A50E65F84872DFA0504B96 /* DraftSaver.swift */; };
 		26C5B834CA3DF63D12F9AAC4 /* Avatar.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC0ADC18AA758296235E8F59 /* Avatar.swift */; };
 		2785F1AA75B655313673E0D0 /* Trackers.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEFA34554013DFB615774309 /* Trackers.swift */; };
@@ -239,6 +240,7 @@
 		9F54901230BBCD7044B85B48 /* Haptics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DBFA0EDE4D57FC2CB095671 /* Haptics.swift */; };
 		A11CBD2D92BD4E50185AC54B /* SenderSuggestions.swift in Sources */ = {isa = PBXBuildFile; fileRef = DBC81A5D09703AAB2D2F092C /* SenderSuggestions.swift */; };
 		A137B52A5F6BC3F6ACC2C0F8 /* Keychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D19065EB7E9BFE9E846675B /* Keychain.swift */; };
+		A18FDD06D661272DAEB42CFB /* SyncStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DAC2EA79665D763DD36958D /* SyncStatus.swift */; };
 		A19640E9DA24D6C6F85E215C /* RelayProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A07093A9D416AD79A642B3A3 /* RelayProxy.swift */; };
 		A252756AF0D9655F2C1477B7 /* Ranking.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7079893CCCC8806D2B5099D8 /* Ranking.swift */; };
 		A32CA97991D874737EE663DA /* CidImages.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C9C77BCE41A573ED04E49AA /* CidImages.swift */; };
@@ -493,6 +495,7 @@
 		5B4B4C15D9674E6B94D01849 /* Brand */ = {isa = PBXFileReference; lastKnownFileType = folder; name = Brand; path = Sources/Passband/Resources/Brand; sourceTree = SOURCE_ROOT; };
 		5B7D3E42C4E6495943239602 /* SitrepWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SitrepWindow.swift; sourceTree = "<group>"; };
 		5C787F920246CFD228F21747 /* OnboardingIntroView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingIntroView.swift; sourceTree = "<group>"; };
+		5DAC2EA79665D763DD36958D /* SyncStatus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncStatus.swift; sourceTree = "<group>"; };
 		5F62561CEB4911BA0E72FEDD /* ThreadPrefetch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadPrefetch.swift; sourceTree = "<group>"; };
 		5FCD987D800267801D7B4DFE /* ConnectionHealth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionHealth.swift; sourceTree = "<group>"; };
 		613B9741AD84024778FA8204 /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClient.swift; sourceTree = "<group>"; };
@@ -837,6 +840,7 @@
 				3DD43DBA7248BE2CB133F428 /* RetriageRun.swift */,
 				A31EE886D87910F0348A94AB /* SitrepPoller.swift */,
 				E645BA6EC9A8686D95460095 /* SubjectText.swift */,
+				5DAC2EA79665D763DD36958D /* SyncStatus.swift */,
 				5F62561CEB4911BA0E72FEDD /* ThreadPrefetch.swift */,
 				5283FAB3FFAED5F77BF41F71 /* TourController.swift */,
 				D179CAC9853B13A5FBFD968E /* Updater.swift */,
@@ -1286,6 +1290,7 @@
 				C955E0DC78DCABE9CE211463 /* SquelchSceneView.swift in Sources */,
 				91F318BC5570E8048D351984 /* StagedAttachment.swift in Sources */,
 				EA0F7FADC742BF00778433BF /* SubjectText.swift in Sources */,
+				24AF68BF417C51D26EB40ED6 /* SyncStatus.swift in Sources */,
 				913D465C949CCE810929D314 /* ThreadArrivals.swift in Sources */,
 				4C66C7F7C1AB185340BCC719 /* ThreadMinimap.swift in Sources */,
 				AB169C9A19D62418DBAD4C3D /* ThreadPrefetch.swift in Sources */,
@@ -1465,6 +1470,7 @@
 				36AF6616DDF139B04CF8782F /* StagedAttachment.swift in Sources */,
 				C47E10D8934D830B5018DC8B /* SubjectText.swift in Sources */,
 				C8FCFA76D21B9E6DC3093D18 /* SwipeRow.swift in Sources */,
+				A18FDD06D661272DAEB42CFB /* SyncStatus.swift in Sources */,
 				1CE21E966B1C0068BBAE7178 /* ThreadArrivals.swift in Sources */,
 				9B3E18E0184901FAE39CB499 /* ThreadMinimap.swift in Sources */,
 				40E611424100EA3551AB3477 /* ThreadPrefetch.swift in Sources */,
@@ -1586,7 +1592,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.0.8;
+				MARKETING_VERSION = 0.0.9;
 				PRODUCT_BUNDLE_IDENTIFIER = app.passband.client;
 				PRODUCT_NAME = Passband;
 				SDKROOT = macosx;
@@ -1733,7 +1739,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.0.8;
+				MARKETING_VERSION = 0.0.9;
 				PRODUCT_BUNDLE_IDENTIFIER = app.passband.client;
 				PRODUCT_NAME = Passband;
 				SDKROOT = macosx;

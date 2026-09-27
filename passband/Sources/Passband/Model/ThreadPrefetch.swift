@@ -251,6 +251,13 @@ final class FrameHeights {
 
     private var heights: [String: Known] = [:]
     private var guesses: [String: CGFloat] = [:]
+    /// How wide a HUGGING bubble document came to (EmailWebView `bubble`), so
+    /// a message scrolled back into view opens at its width rather than the
+    /// whole measure and then narrowing. Keyed like the heights, and it only
+    /// ever holds bubble keys — a card is always the measure. Live frames are
+    /// the only source: width has none of the viewport feedback that makes
+    /// the offscreen pass necessary for heights.
+    private var hugWidths: [String: CGFloat] = [:]
     private init() {}
 
     /// THE WIDTH EVERY HEIGHT IN HERE WAS MEASURED AT. A height is only an
@@ -273,7 +280,13 @@ final class FrameHeights {
         guard width > 0, abs(width - self.width) > 0.5 else { return }
         self.width = width
         heights.removeAll()
+        hugWidths.removeAll()
     }
+
+    /// The width a hugging bubble document last came to, if this message has
+    /// been open as one at this column width.
+    func hugWidth(_ key: String) -> CGFloat? { hugWidths[key] }
+    func setHugWidth(_ key: String, _ width: CGFloat) { hugWidths[key] = width }
 
     /// The best height on file, whoever took it — what a frame is drawn at.
     func get(_ key: String) -> CGFloat? { heights[key]?.height }
@@ -304,6 +317,7 @@ final class FrameHeights {
             let key = style.frameKey(messageId)
             heights.removeValue(forKey: key)
             guesses.removeValue(forKey: key)
+            hugWidths.removeValue(forKey: key)
         }
     }
 
@@ -328,5 +342,6 @@ final class FrameHeights {
     func wipeAll() {
         heights.removeAll()
         guesses.removeAll()
+        hugWidths.removeAll()
     }
 }

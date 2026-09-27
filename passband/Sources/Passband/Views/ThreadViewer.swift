@@ -2377,8 +2377,11 @@ private struct MessageCard: View, Equatable {
 
     /// The mail itself. HTML brings its own bubble: the frame's document is an
     /// opaque white page with rounded corners already, so the chat style only
-    /// has to hand it a narrower measure. Plain text gets the fill, tinted on
-    /// the user's own side.
+    /// has to say so — the frame hugs its content, pads like a bubble and hangs
+    /// its own tail (EmailWebView `bubble`), because the tail belongs on the
+    /// document and the frame view is more than the document: an overlay on
+    /// the whole view hung the tail under the quoted-history chip. Plain text
+    /// gets the fill, tinted on the user's own side.
     ///
     /// The frame key carries the style (see ThreadStyle.frameKey) because a
     /// document measured at 620 points is not the one a full-width card wants
@@ -2396,12 +2399,8 @@ private struct MessageCard: View, Equatable {
                 html: html, cacheKey: style.frameKey(message.id),
                 allowTrackers: message.allowsTrackers,
                 attachments: message.attachmentList,
-                textHeight: Self.guessedBody(message, style: style))
-                // The web frame's document is hardcoded #fff (EmailFrame), so
-                // white IS this bubble's fill, in either theme.
-                .overlay(alignment: mine ? .bottomTrailing : .bottomLeading) {
-                    tail(Color.white)
-                }
+                textHeight: Self.guessedBody(message, style: style),
+                bubble: chat, mine: mine)
         } else {
             PlainBody(content: message.content, fills: !chat)
                 .padding(.horizontal, chat ? 12 : 0)
@@ -2415,16 +2414,20 @@ private struct MessageCard: View, Equatable {
                                 ? Color.clear
                                 : mine ? Palette.accentSoft : Palette.hairline)
                 )
-                .overlay(alignment: mine ? .bottomTrailing : .bottomLeading) {
+                // BEHIND the bubble, not over it: the tail's solid span reaches
+                // well inside the bubble to bury the corner, and over the
+                // bubble it would sit on the last line of text.
+                .background(alignment: mine ? .bottomTrailing : .bottomLeading) {
                     tail(mine ? Palette.accentSoft : Palette.hairline)
                 }
         }
     }
 
-    /// The speech tail, hung under the bubble's OUTER bottom corner and poking
-    /// past it — the message's side said twice, once by alignment and once by
-    /// the point. Mounted in both styles and merely clear in classic, for the
-    /// same identity reason as everything else on this card.
+    /// The speech tail on a PLAIN-TEXT bubble, hung under its OUTER bottom
+    /// corner and poking past it — the message's side said twice, once by
+    /// alignment and once by the point. Mounted in both styles and merely
+    /// clear in classic, for the same identity reason as everything else on
+    /// this card. An html bubble hangs its own (EmailWebView).
     private func tail(_ color: Color) -> some View {
         BubbleTail(mine: mine)
             .fill(chat ? color : Color.clear)
@@ -2457,7 +2460,8 @@ private struct MessageCard: View, Equatable {
 
 /// The little point under a bubble's OUTER bottom corner — the part that makes
 /// a rounded rectangle read as speech. Drawn for the trailing (sent) side and
-/// mirrored for the leading one.
+/// mirrored for the leading one. Shared with EmailWebView, which hangs it
+/// under an html bubble's document.
 ///
 /// The box overlaps the bubble by its inner span and is FILLED SOLID up to its
 /// top edge there, which is what buries the bubble's corner radius: the arc
@@ -2465,17 +2469,26 @@ private struct MessageCard: View, Equatable {
 /// the arc leaves that wedge showing through as a notch. The outer curve then
 /// starts ON the bubble's own edge line, heading down before it bends out, so
 /// the silhouette runs straight off the bubble's side into the point.
-private struct BubbleTail: Shape {
+struct BubbleTail: Shape {
     /// How far the point pokes past the bubble's edge; the view's offset uses
     /// the same number so the shape's idea of "the edge" is where the edge is.
     static let poke: CGFloat = 7
+    /// How far past its own box the solid inner span reaches, up the bubble's
+    /// edge and along its bottom. The bubble's corner is `.continuous`, and a
+    /// continuous radius-10 corner runs some fifteen points along EACH edge,
+    /// not ten: a span that stopped at the box (twelve up, five in) left the
+    /// last of the curve showing as a notch above the tail and a sliver under
+    /// the bubble beside it. A path may draw outside its rect, so the span is
+    /// simply bigger — all of it inside the bubble, where fill meets fill.
+    static let reach: CGFloat = 14
 
     var mine: Bool
 
     func path(in rect: CGRect) -> Path {
         let edge = rect.maxX - Self.poke
         var p = Path()
-        p.move(to: CGPoint(x: 0, y: 0))
+        p.move(to: CGPoint(x: -Self.reach, y: -Self.reach))
+        p.addLine(to: CGPoint(x: edge, y: -Self.reach))
         p.addLine(to: CGPoint(x: edge, y: 0))
         // Leaves the edge heading DOWN (control barely outboard), then bends
         // out to the point — the vertical tangent is what makes the bubble's
@@ -2486,6 +2499,7 @@ private struct BubbleTail: Shape {
         p.addQuadCurve(
             to: CGPoint(x: 0, y: rect.maxY),
             control: CGPoint(x: edge * 0.8, y: rect.maxY))
+        p.addLine(to: CGPoint(x: -Self.reach, y: rect.maxY))
         p.closeSubpath()
         guard !mine else { return p }
         return p.applying(

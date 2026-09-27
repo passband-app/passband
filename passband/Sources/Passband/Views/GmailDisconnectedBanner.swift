@@ -20,7 +20,8 @@
 // half that does not.
 //
 // TWO ENDINGS, because two products end here. A hosted mailbox re-consents
-// through the control plane and the button opens it. A self-host one is
+// through the control plane and the button opens it, after one dialog naming
+// the address to pick in Google's chooser. A self-host one is
 // repaired with `squelchd auth` at a shell, which is not a link anything can
 // offer, so it gets the sentence instead of the button. The daemon decides
 // which by whether it sent a `reconnect_url`; the app never guesses.
@@ -55,8 +56,8 @@ struct GmailDisconnectedBanner: View {
 
             Spacer(minLength: 8)
 
-            if let link = store.gmailReconnectURL {
-                Button("Reconnect") { Opener.open(link) }
+            if store.gmailReconnectURL != nil {
+                Button("Reconnect") { store.askReconnect() }
                     .controlSize(.small)
             }
         }
@@ -90,4 +91,49 @@ struct GmailDisconnectedBanner: View {
         f.unitsStyle = .full
         return f
     }()
+}
+
+/// Which Google account to pick, said before the browser opens. Google's
+/// chooser lists every account signed in there and none of them is marked as
+/// this mailbox; the wrong pick consents for somebody else's mail and leaves
+/// the banner up. See `AppStore.reconnectAsk`.
+struct ReconnectAccountPrompt: View {
+    @Environment(AppStore.self) private var store
+    let ask: AppStore.ReconnectAsk
+
+    var body: some View {
+        OverlayScrim(onDismiss: { store.cancelReconnectAsk() }) {
+            ModalCard(width: 400) {
+                Text("Be sure to select this email address")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Palette.ink)
+                // Email-derived, so plain Text and never markup.
+                Text(verbatim: ask.email)
+                    .font(.system(size: 13, weight: .medium, design: .monospaced))
+                    .foregroundStyle(Palette.ink)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(Palette.warnSoft, in: RoundedRectangle(cornerRadius: 7))
+                Text("Google will show every account signed in to your browser. Choosing a different one will not reconnect this mailbox.")
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.inkFaint)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                HStack(spacing: 8) {
+                    Spacer(minLength: 0)
+                    Button("Cancel") { store.cancelReconnectAsk() }
+                        .buttonStyle(.glass)
+                    Button("Continue to Google") { store.confirmReconnect() }
+                        .buttonStyle(.glassProminent)
+                }
+            }
+        }
+        .keyContext(.modal)
+        .keyBindings(.modal, [
+            KeyBinding("Escape", "cancel", allowInInput: true) { store.cancelReconnectAsk() },
+            KeyBinding("Enter", "continue", allowInInput: true) { store.confirmReconnect() },
+        ])
+    }
 }

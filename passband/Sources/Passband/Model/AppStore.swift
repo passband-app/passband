@@ -1948,6 +1948,7 @@ final class AppStore {
             || triageFix != nil || remindTarget != nil || ruleEditor != nil
             || groupEditor != nil
             || !authQueue.isEmpty || retriage != nil || retriageAsk != nil
+            || reconnectAsk != nil
             || tour.wantsBlur || whatsNew.active
     }
 
@@ -3384,6 +3385,38 @@ final class AppStore {
     var gmailReconnectURL: String? {
         guard let raw = sitrep.stats?.gmail?.reconnect_url, Opener.isHTTP(raw) else { return nil }
         return raw
+    }
+
+    /// A reconnect the human has pressed, parked on "which Google account".
+    ///
+    /// Google's account chooser lists every account signed in to the browser,
+    /// and nothing on it says which one this mailbox is. Pick the wrong one and
+    /// the consent succeeds for a mailbox Passband is not serving, so the
+    /// banner stays up and it looks like reconnecting does not work. One line
+    /// naming the address before the browser opens is the whole fix.
+    var reconnectAsk: ReconnectAsk?
+
+    struct ReconnectAsk: Hashable {
+        let url: String
+        let email: String
+    }
+
+    /// The banner's Reconnect. Asks first when the daemon told us the address;
+    /// on a daemon too old to say, there is nothing true to put in the dialog,
+    /// so it opens the link exactly as it did before.
+    func askReconnect() {
+        guard let url = gmailReconnectURL else { return }
+        let email = sitrep.stats?.account_email?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !email.isEmpty else { return Opener.open(url) }
+        reconnectAsk = ReconnectAsk(url: url, email: email)
+    }
+
+    func cancelReconnectAsk() { reconnectAsk = nil }
+
+    func confirmReconnect() {
+        guard let ask = reconnectAsk else { return }
+        reconnectAsk = nil
+        Opener.open(ask.url)
     }
 
     /// How long the mailbox has been dark, for the banner's subtitle.

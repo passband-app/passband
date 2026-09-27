@@ -385,6 +385,10 @@ struct RuleEditor: View {
     /// Rules whose match_pattern already covers `request.sender`; nil until the
     /// fetch settles, so "none yet" is never claimed before we know.
     @State private var inEffect: [SenderRule]?
+    /// A small model's guess at the sentence, shown as the placeholder and
+    /// taken with tab. Tune mode only; nil until (and unless) one arrives.
+    /// It is SHOWN, never saved on its own: the owner takes it and saves it.
+    @State private var suggestion: String?
     @FocusState private var focusedField: FocusTarget?
 
     private enum FocusTarget { case pattern, want }
@@ -448,10 +452,12 @@ struct RuleEditor: View {
         .keyContext(.modal)
         .keyBindings(.modal, [
             KeyBinding("Escape", "cancel", allowInInput: true) { onClose() },
-            // Tab only means something while the override is on screen. With
-            // advanced closed it DECLINES, so the key falls through to AppKit
-            // and moves focus the way it does in every other card.
-            KeyBinding(declining: "Tab", "cycle disposition", allowInInput: true) {
+            // Tab takes a suggestion while one is on offer in the empty field.
+            // Otherwise it only means something while the override is on
+            // screen; with advanced closed it DECLINES, so the key falls
+            // through to AppKit and moves focus the way it does in every card.
+            KeyBinding(declining: "Tab", "use suggestion / cycle disposition", allowInInput: true) {
+                if acceptSuggestion() { return true }
                 guard advanced else { return false }
                 cycle(1)
                 return true
@@ -483,6 +489,7 @@ struct RuleEditor: View {
             focusedField = mode == .create ? .pattern : .want
         }
         .task { await loadInEffect() }
+        .task { await loadSuggestion() }
     }
 
     /// WHO the rule is about. In tune mode the sender IS the title, so there is
@@ -531,15 +538,55 @@ struct RuleEditor: View {
             Text(wantLabel)
                 .font(Typo.row)
                 .foregroundStyle(Palette.inkDim)
-            TextField(
-                "e.g. only order confirmations, or: always show these",
-                text: $want, axis: .vertical
-            )
-            .textFieldStyle(.plain)
-            .lineLimit(2...5)
-            .focused($focusedField, equals: .want)
+            HStack(alignment: .top, spacing: 8) {
+                TextField(
+                    "", text: $want,
+                    prompt: Text(offered ?? "e.g. only order confirmations, or: always show these"),
+                    axis: .vertical
+                )
+                .textFieldStyle(.plain)
+                .lineLimit(2...5)
+                .focused($focusedField, equals: .want)
+                if offered != nil {
+                    // The key on a Mac, a tap target on a phone; both take it.
+                    Button { _ = acceptSuggestion(requireFocus: false) } label: {
+                        #if os(macOS)
+                            Kbd("tab")
+                        #else
+                            Text("use").font(Typo.micro).foregroundStyle(Palette.accent)
+                        #endif
+                    }
+                    .buttonStyle(.plain)
+                    .help("use this suggestion")
+                    .transition(.opacity)
+                }
+            }
             .fieldWell()
         }
+    }
+
+    /// The suggestion, while it is still on offer: the field is empty.
+    private var offered: String? {
+        want.isEmpty ? suggestion : nil
+    }
+
+    /// Put the suggestion in the field. From the keyboard only while the want
+    /// field has focus, so tab in the pattern field keeps its own meaning.
+    private func acceptSuggestion(requireFocus: Bool = true) -> Bool {
+        guard let offered, !requireFocus || focusedField == .want else { return false }
+        want = offered
+        focusedField = .want
+        return true
+    }
+
+    /// Best-effort, like the in-effect strip: no model, an old daemon, a slow
+    /// answer or no pattern all leave the generic example in place.
+    private func loadSuggestion() async {
+        guard mode == .tune, let sender = request.sender, want.isEmpty else { return }
+        guard let answer = try? await APIClient.shared.suggestRule(
+            sender: SenderID.address(sender))
+        else { return }
+        withAnimation(Motion.disclose) { suggestion = answer }
     }
 
     private var wantLabel: String {
@@ -639,7 +686,8 @@ struct RuleEditor: View {
                     HStack(spacing: 10) {
                         KeyHint("↵", "save")
                         KeyHint("⌥↵", "new line")
-                        if advanced { KeyHint("tab", "outcome") }
+                        // Tab takes a suggestion first; teach whichever it does.
+                        if offered == nil, advanced { KeyHint("tab", "outcome") }
                     }
                 #endif
             }
@@ -818,6 +866,8 @@ struct RuleEditor: View {
             var properties: [String: Any] = [
                 "has_want": !want.trimmed.isEmpty,
                 "edit": request.rule != nil,
+                "suggested": suggestion != nil,
+                "from_suggestion": suggestion != nil && want.trimmed == suggestion,
             ]
             if let resolved { properties["disposition"] = resolved.rawValue }
             Analytics.capture("rule_created", properties)

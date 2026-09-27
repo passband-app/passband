@@ -758,6 +758,12 @@ struct CreateRuleBody: Codable, Sendable {
 }
 
 /// POST /client/rules and PUT /client/rules/{id}.
+/// `GET /client/rules/suggest`. Null when the daemon has no model, too little
+/// history, or no clear pattern.
+struct RuleSuggestion: Codable, Sendable {
+    var suggestion: String?
+}
+
 struct CreatedRule: Codable, Sendable {
     var rule_id: Int
     /// What the rule ACTUALLY ended up as, which is the only place the client

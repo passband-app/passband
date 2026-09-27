@@ -319,7 +319,7 @@ struct ConnectView: View {
                     .padding(.top, 12)
                 }
 
-                bottomActions.padding(.top, purpose == .gate ? 28 : 20)
+                bottomActions.padding(.top, 20)
             }
     }
 
@@ -396,7 +396,9 @@ struct ConnectView: View {
     }
 
     @ViewBuilder private var credentialContent: some View {
-        if arrivedViaPairLink && mode == .pair {
+        if purpose == .gate {
+            gateCredentials
+        } else if arrivedViaPairLink && mode == .pair {
             linkedPairForm
         } else {
             if purpose == .addAccount || hostingChoice == .selfHosted {
@@ -411,51 +413,179 @@ struct ConnectView: View {
             case .token: tokenForm
             }
             nameField.padding(.top, 14)
-            if hostingChoice == .hosted {
-                Button("Open login in browser again") { Opener.open(Hosted.signIn(theme: colorScheme)) }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 12))
-                    .foregroundStyle(Palette.inkDim)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.top, 14)
+        }
+    }
+
+    // MARK: - the gate's rig
+
+    /// The gate's form, built the way the website's waitlist is: one machined
+    /// piece with slots cut in it and the submit set into its last row, rather
+    /// than a stack of captioned wells. A slot names itself on its trailing
+    /// edge instead of above it, because several arrive already filled (the
+    /// device name, a linked server) and a placeholder is gone by then.
+    @ViewBuilder private var gateCredentials: some View {
+        let linked = arrivedViaPairLink && mode == .pair
+        VStack(alignment: .leading, spacing: 0) {
+            if hostingChoice == .selfHosted, !linked {
+                GlassSegmented(
+                    options: [(ConnectMode.pair, "pair with code"), (.token, "api token")],
+                    selection: modeBinding)
+                    .padding(.bottom, 14)
             }
-            if purpose == .gate, hostingChoice == .selfHosted {
-                Button("Need help setting up a server?") { gateStep = .selfHostGuide }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 11))
-                    .foregroundStyle(Palette.inkFaint)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.top, 14)
+            ConnectRig(lit: focus != nil) {
+                if linked {
+                    RigSlot(label: "device", focused: focus == .device) {
+                        TextField("This Mac", text: $deviceName)
+                            .autocorrectionDisabled()
+                            .focused($focus, equals: .device)
+                            .onSubmit { focus = .name }
+                    }
+                } else {
+                    RigSlot(label: "server", focused: focus == .url) {
+                        TextField(serverPlaceholder, text: urlBinding)
+                            .textContentType(.URL)
+                            .autocorrectionDisabled()
+                            .focused($focus, equals: .url)
+                            .onSubmit { focus = mode == .pair ? .code : .token }
+                    }
+                    RigDivider()
+                    switch mode {
+                    case .pair:
+                        RigSlot(label: "pairing code", focused: focus == .code) {
+                            HStack(spacing: 6) {
+                                TextField("XXXX-XXXX", text: codeBinding)
+                                    // Monospaced so a code read off a terminal
+                                    // lines up with it character for character.
+                                    .font(Typo.mono(14))
+                                    .autocorrectionDisabled()
+                                    .focused($focus, equals: .code)
+                                    .onSubmit { focus = .device }
+                                if hostingChoice == .selfHosted { pairingHelpButton }
+                            }
+                        }
+                        RigDivider()
+                        RigSlot(label: "device", focused: focus == .device) {
+                            TextField("This Mac", text: $deviceName)
+                                .autocorrectionDisabled()
+                                .focused($focus, equals: .device)
+                                .onSubmit { focus = .name }
+                        }
+                    case .token:
+                        RigSlot(label: "api token", focused: focus == .token) {
+                            SecureField("SQUELCH_API_TOKEN", text: $token)
+                                .focused($focus, equals: .token)
+                                .onSubmit { focus = .name }
+                        }
+                    }
+                }
+                RigDivider()
+                HStack(spacing: 0) {
+                    RigSlot(label: "account", focused: focus == .name) {
+                        TextField("Name it (optional)", text: $accountLabel)
+                            .autocorrectionDisabled()
+                            .focused($focus, equals: .name)
+                            .onSubmit { submit() }
+                    }
+                    rigSubmit
+                }
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            if linked {
+                pairingDetails.padding(.top, 14)
             }
         }
     }
 
-    private var bottomActions: some View {
-        HStack(spacing: 12) {
-            if purpose == .gate {
-                // The intro's own controls: a quiet Back, then the way on.
+    /// The submit, set into the rig's last row: no ground or shell of its own,
+    /// divided off by one hairline, lit in the accent when it can be pressed.
+    private var rigSubmit: some View {
+        Button { submit() } label: {
+            HStack(spacing: 8) {
+                Text(buttonLabel)
+                Image(systemName: "arrow.right")
+            }
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(canSubmit ? Palette.accent : Palette.inkFaint)
+            .padding(.horizontal, 18)
+            .frame(maxHeight: .infinity)
+            .background(Palette.accent.opacity(canSubmit ? 0.12 : 0.04))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .overlay(alignment: .leading) {
+            Rectangle().fill(Palette.accent.opacity(0.18)).frame(width: 1)
+        }
+        // A pair link filled the form and stopped: ring the one press left.
+        .overlay {
+            if linkArmed {
+                Rectangle()
+                    .strokeBorder(Palette.accent, lineWidth: 2)
+                    .allowsHitTesting(false)
+            }
+        }
+        .disabled(!canSubmit)
+        .focused($focus, equals: .submit)
+        .keyboardShortcut(.defaultAction)
+    }
+
+    private var pairingHelpButton: some View {
+        Button { pairingHelp = true } label: {
+            Image(systemName: "questionmark.circle")
+                .font(.system(size: 12))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Palette.inkFaint)
+        .help("Where the pairing code comes from")
+        .popover(isPresented: $pairingHelp) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Run this on the machine hosting squelchd:")
+                    .font(.system(size: 12))
+                Text("squelchd pair")
+                    .font(Typo.mono(13))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Palette.canvas))
+            }
+            .padding(16)
+        }
+    }
+
+    /// The gate's quiet way out, beside whatever second chance this route has.
+    @ViewBuilder private var gateSecondaryAction: some View {
+        if hostingChoice == .hosted {
+            Button("Open sign in again") { Opener.open(Hosted.signIn(theme: colorScheme)) }
+                .buttonStyle(.plain)
+                .font(.system(size: 12))
+                .foregroundStyle(Palette.inkDim)
+        } else if hostingChoice == .selfHosted {
+            Button("Need help setting up a server?") { gateStep = .selfHostGuide }
+                .buttonStyle(.plain)
+                .font(.system(size: 12))
+                .foregroundStyle(Palette.inkDim)
+        }
+    }
+
+    @ViewBuilder private var bottomActions: some View {
+        if purpose == .gate {
+            HStack(spacing: 12) {
                 Button("Back") { goBack() }
                     .buttonStyle(.plain)
                     .foregroundStyle(Palette.inkDim)
                     .disabled(busy)
-            } else {
-                Button("cancel") { goBack() }
-                    .disabled(busy)
+                Spacer()
+                gateSecondaryAction
             }
+        } else {
+            sheetActions
+        }
+    }
+
+    private var sheetActions: some View {
+        HStack(spacing: 12) {
+            Button("cancel") { goBack() }
+                .disabled(busy)
             Spacer()
-            Button { submit() } label: {
-                if purpose == .gate {
-                    HStack(spacing: 9) {
-                        Text(buttonLabel)
-                        Image(systemName: "arrow.right")
-                    }
-                    .font(.system(size: 13, weight: .semibold))
-                    .padding(.vertical, 7)
-                    .padding(.horizontal, 8)
-                } else {
-                    Text(buttonLabel)
-                }
-            }
+            Button(buttonLabel) { submit() }
                 .buttonStyle(.borderedProminent)
                 .tint(Palette.accent)
                 .disabled(!canSubmit)
@@ -528,43 +658,49 @@ struct ConnectView: View {
                 .foregroundStyle(Palette.inkFaint)
                 .padding(.top, -10)
 
-            VStack(alignment: .leading, spacing: 10) {
-                Label(URL(string: url)?.host ?? url, systemImage: "link")
-                    .font(.system(size: 12))
-                    .foregroundStyle(Palette.inkDim)
-                    .lineLimit(2)
-                    .textSelection(.enabled)
-                DisclosureGroup("Pairing details", isExpanded: $showingPairingDetails) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Field(label: "Server URL") {
-                            TextField("Server URL", text: urlBinding)
-                                .textFieldStyle(.plain)
-                                .autocorrectionDisabled()
-                                .focused($focus, equals: .url)
-                        }
-                        Field(label: "Pairing code") {
-                            TextField("XXXX-XXXX", text: codeBinding)
-                                .textFieldStyle(.plain)
-                                .font(Typo.mono(12))
-                                .autocorrectionDisabled()
-                                .focused($focus, equals: .code)
-                                .onSubmit { submit() }
-                        }
+            pairingDetails
+        }
+    }
+
+    /// The server a pair link named, with its URL and code folded away for
+    /// the one case that needs them: a rejected code, corrected by hand.
+    private var pairingDetails: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(URL(string: url)?.host ?? url, systemImage: "link")
+                .font(.system(size: 12))
+                .foregroundStyle(Palette.inkDim)
+                .lineLimit(2)
+                .textSelection(.enabled)
+            DisclosureGroup("Pairing details", isExpanded: $showingPairingDetails) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Field(label: "Server URL") {
+                        TextField("Server URL", text: urlBinding)
+                            .textFieldStyle(.plain)
+                            .autocorrectionDisabled()
+                            .focused($focus, equals: .url)
                     }
-                    .padding(.top, 10)
-                    // A rejected code is corrected HERE, so the fields it
-                    // lives in open the moment there is something to correct.
-                    .onChange(of: pairError) { _, error in
-                        if error != nil { showingPairingDetails = true }
+                    Field(label: "Pairing code") {
+                        TextField("XXXX-XXXX", text: codeBinding)
+                            .textFieldStyle(.plain)
+                            .font(Typo.mono(12))
+                            .autocorrectionDisabled()
+                            .focused($focus, equals: .code)
+                            .onSubmit { submit() }
                     }
                 }
-                .font(.system(size: 11))
-                .foregroundStyle(Palette.inkFaint)
+                .padding(.top, 10)
+                // A rejected code is corrected HERE, so the fields it
+                // lives in open the moment there is something to correct.
+                .onChange(of: pairError) { _, error in
+                    if error != nil { showingPairingDetails = true }
+                }
             }
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: 12).fill(Palette.canvas.opacity(0.3)))
+            .font(.system(size: 11))
+            .foregroundStyle(Palette.inkFaint)
         }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Palette.canvas.opacity(0.3)))
     }
 
     private var pairForm: some View {
@@ -1088,6 +1224,71 @@ private struct SetupThemeToggle: View {
         .glassCapsule(tint: Palette.glassTint.opacity(0.35))
         .help(isDark ? "use light mode" : "use dark mode")
         .accessibilityLabel(isDark ? "Use light mode" : "Use dark mode")
+    }
+}
+
+/// The gate's machined form: one dark piece edged in the accent, with slots
+/// cut in it. Lights as ONE instrument while any slot holds focus, because
+/// typing into it and arming its submit are the same act.
+private struct ConnectRig<Content: View>: View {
+    let lit: Bool
+    @ViewBuilder var content: Content
+    @State private var hovering = false
+
+    var body: some View {
+        let active = lit || hovering
+        VStack(spacing: 0) { content }
+            .background(
+                LinearGradient(
+                    colors: [Palette.canvas.opacity(0.94), Palette.canvas.opacity(0.98)],
+                    startPoint: .top, endPoint: .bottom))
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(Palette.accent.opacity(active ? 0.62 : 0.22), lineWidth: 1))
+            .shadow(color: Palette.accent.opacity(active ? 0.3 : 0), radius: 18)
+            .shadow(color: .black.opacity(0.35), radius: 16, y: 10)
+            .animation(.easeOut(duration: 0.3), value: active)
+            .onHover { hovering = $0 }
+    }
+}
+
+/// The hairline between two of the rig's slots.
+private struct RigDivider: View {
+    var body: some View {
+        Rectangle().fill(Palette.accent.opacity(0.3)).frame(height: 1)
+    }
+}
+
+/// One slot in the rig: the field, and its name on the trailing edge. The
+/// live slot gets a lit edge down its leading side, so tabbing between them
+/// shows which one is taking the typing.
+private struct RigSlot<Field: View>: View {
+    let label: String
+    let focused: Bool
+    @ViewBuilder var field: Field
+
+    var body: some View {
+        HStack(spacing: 10) {
+            field
+                .textFieldStyle(.plain)
+                .font(.system(size: 14))
+                .foregroundStyle(Palette.ink)
+            Text(label)
+                .font(Typo.micro)
+                .foregroundStyle(Palette.inkFaint)
+                .textCase(.lowercase)
+                .accessibilityHidden(true)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 13)
+        .overlay(alignment: .leading) {
+            Rectangle()
+                .fill(Palette.accent.opacity(focused ? 0.7 : 0))
+                .frame(width: 2)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(label)
     }
 }
 

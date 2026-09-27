@@ -25,6 +25,14 @@ fn map_meta(r: &rusqlite::Row<'_>) -> rusqlite::Result<OutboundAttachmentMeta> {
 
 const META_COLS: &str = "id, filename, mime, size_bytes, content_id";
 
+/// THE "is claimed" predicate over an `outbound_attachments` row, spelled once.
+/// A claimed row belongs to something that will send it (today only a draft)
+/// and is never swept for age or re-claimed by another owner; `NOT ({CLAIMED})`
+/// is the unclaimed state an upload starts in. A second claim column (say a
+/// scheduled send's) is a change to THIS line only: every sweep and claim
+/// query formats it in rather than spelling its own `draft_id IS NULL`.
+pub(super) const CLAIMED: &str = "draft_id IS NOT NULL";
+
 /// Drop this account's leftovers: unclaimed rows past the TTL, and rows
 /// claimed by a draft that no longer exists (every draft delete cascades, so
 /// the second predicate is a belt for a row that slipped past one). Run from
@@ -36,12 +44,17 @@ pub(super) fn sweep(
     now: DateTime<Utc>,
 ) -> rusqlite::Result<()> {
     let cutoff = (now - OUTBOUND_UNCLAIMED_TTL).to_rfc3339();
+    // The orphan arm tests the DRAFT column's referent, not the generic claim:
+    // its `IS NOT NULL` is what keeps `NULL NOT IN (<no drafts>)`, which SQLite
+    // answers TRUE, from reading an unclaimed row as an orphan.
     conn.execute(
-        "DELETE FROM outbound_attachments
-         WHERE account_id = ?1
-           AND ((draft_id IS NULL AND created_at < ?2)
-                OR (draft_id IS NOT NULL
-                    AND draft_id NOT IN (SELECT id FROM drafts WHERE account_id = ?1)))",
+        &format!(
+            "DELETE FROM outbound_attachments
+             WHERE account_id = ?1
+               AND ((NOT ({CLAIMED}) AND created_at < ?2)
+                    OR (draft_id IS NOT NULL
+                        AND draft_id NOT IN (SELECT id FROM drafts WHERE account_id = ?1)))"
+        ),
         params![account_id, cutoff],
     )?;
     Ok(())
@@ -248,10 +261,10 @@ impl SqliteStore {
             params![account_id, draft_id],
         )?;
         {
-            let mut stmt = tx.prepare(
+            let mut stmt = tx.prepare(&format!(
                 "UPDATE outbound_attachments SET draft_id = ?2
-                 WHERE account_id = ?1 AND id = ?3 AND draft_id IS NULL",
-            )?;
+                 WHERE account_id = ?1 AND id = ?3 AND NOT ({CLAIMED})"
+            ))?;
             for id in ids {
                 stmt.execute(params![account_id, draft_id, id])?;
             }
@@ -322,7 +335,8 @@ mod tests {
             .stage_outbound_attachment(acct, "kept.txt", "text/plain", "cid-kept", b"y", t0)
             .unwrap();
         let draft = store
-            .upsert_draft(acct, None, DraftFields::default(), t0)
+            .upsert_draft(acct, DraftKey::NewLatest, DraftFields::default(), t0)
+            .unwrap()
             .unwrap();
         store
             .claim_outbound_attachments(acct, draft.id, &[claimed.id], t0)
@@ -386,7 +400,8 @@ mod tests {
         // the old row is past the TTL now, the fresh one is not.
         let later = t0 + chrono::Duration::hours(24) + chrono::Duration::minutes(1);
         let d2 = store
-            .upsert_draft(acct, None, DraftFields::default(), later)
+            .upsert_draft(acct, DraftKey::NewLatest, DraftFields::default(), later)
+            .unwrap()
             .unwrap();
         store
             .claim_outbound_attachments(acct, d2.id, &[fresh.id], later)
@@ -426,7 +441,8 @@ mod tests {
             .stage_outbound_attachment(acct, "b", "text/plain", "cid-b", b"b", now)
             .unwrap();
         let d1 = store
-            .upsert_draft(acct, None, DraftFields::default(), now)
+            .upsert_draft(acct, DraftKey::NewLatest, DraftFields::default(), now)
+            .unwrap()
             .unwrap();
         store
             .claim_outbound_attachments(acct, d1.id, &[a.id, b.id], now)
@@ -467,7 +483,8 @@ mod tests {
             })
             .unwrap();
         let d2 = store
-            .upsert_draft(acct, Some(m), DraftFields::default(), now)
+            .upsert_draft(acct, DraftKey::Reply(m), DraftFields::default(), now)
+            .unwrap()
             .unwrap();
         store
             .claim_outbound_attachments(acct, d2.id, &[b.id], now)
@@ -479,6 +496,41 @@ mod tests {
         assert_eq!(d1.attachments.len(), 1, "still the first draft's");
     }
 
+    /// The ONE claim predicate reads what the claim path writes: claimed after
+    /// a save names the file, unclaimed again after a save drops it.
+    #[test]
+    fn the_claimed_predicate_tracks_claim_and_release() {
+        let (store, acct) = store();
+        let now = Utc::now();
+        let a = store
+            .stage_outbound_attachment(acct, "a", "text/plain", "cid-a", b"a", now)
+            .unwrap();
+        let claimed = |store: &SqliteStore| -> bool {
+            store
+                .lock()
+                .unwrap()
+                .query_row(
+                    &format!("SELECT {CLAIMED} FROM outbound_attachments WHERE id = ?1"),
+                    params![a.id],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert!(!claimed(&store), "an upload starts unclaimed");
+        let d = store
+            .upsert_draft(acct, DraftKey::NewCreate, DraftFields::default(), now)
+            .unwrap()
+            .unwrap();
+        store
+            .claim_outbound_attachments(acct, d.id, &[a.id], now)
+            .unwrap();
+        assert!(claimed(&store));
+        store
+            .claim_outbound_attachments(acct, d.id, &[], now)
+            .unwrap();
+        assert!(!claimed(&store), "dropped from the tray = unclaimed");
+    }
+
     #[test]
     fn deleting_a_draft_takes_its_files_with_it() {
         let (store, acct) = store();
@@ -487,7 +539,8 @@ mod tests {
             .stage_outbound_attachment(acct, "a", "text/plain", "cid-a", b"a", now)
             .unwrap();
         let d = store
-            .upsert_draft(acct, None, DraftFields::default(), now)
+            .upsert_draft(acct, DraftKey::NewLatest, DraftFields::default(), now)
+            .unwrap()
             .unwrap();
         store
             .claim_outbound_attachments(acct, d.id, &[a.id], now)

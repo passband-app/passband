@@ -7130,7 +7130,7 @@ async fn put_draft_defaults_missing_text_fields_and_keys_new_mail_on_null() {
     let draft = put_draft(&app, serde_json::json!({ "to": "bob@example.com" })).await;
     assert!(
         draft["reply_to_message_id"].is_null(),
-        "no parent => the new-message slot"
+        "no parent => a new-message draft (the newest, created when none)"
     );
     assert_eq!(
         draft["subject"], "",
@@ -7433,6 +7433,18 @@ async fn draft_routes_require_bearer_auth() {
             .uri("/client/drafts/1")
             .body(Body::empty())
             .unwrap(),
+        common::json_request(
+            "POST",
+            "/client/drafts",
+            &serde_json::json!({ "to": "a@example.com" }),
+            false,
+        ),
+        common::json_request(
+            "PUT",
+            "/client/drafts/1",
+            &serde_json::json!({ "to": "a@example.com" }),
+            false,
+        ),
     ];
     for req in unauthed {
         let uri = req.uri().clone();
@@ -7444,6 +7456,290 @@ async fn draft_routes_require_bearer_auth() {
             "{method} {uri} must be behind auth"
         );
     }
+}
+
+/// Send one draft request and hand back `(status, json)`.
+async fn draft_call(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let resp = app
+        .clone()
+        .oneshot(authed_json(method, uri, body))
+        .await
+        .unwrap();
+    let status = resp.status();
+    if status == StatusCode::OK {
+        assert_eq!(
+            resp.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store",
+            "{method} {uri} must be no-store"
+        );
+    }
+    (status, body_json(resp).await)
+}
+
+/// Every key a `DraftView` must carry, null or not, so a client never has to
+/// tell a missing field from a daemon too old to have it.
+const DRAFT_VIEW_KEYS: [&str; 15] = [
+    "id",
+    "reply_to_message_id",
+    "forward_of_message_id",
+    "to",
+    "cc",
+    "bcc",
+    "subject",
+    "body",
+    "attachments",
+    "created_at",
+    "updated_at",
+    "thread_id",
+    "parent_subject",
+    "parent_from",
+    "parent_from_addr",
+];
+
+#[tokio::test]
+async fn post_drafts_creates_distinct_rows_and_put_by_id_edits_one() {
+    let Harness { app, store, acct } = harness(|_, _| {});
+    let (s1, a) = draft_call(
+        &app,
+        "POST",
+        "/client/drafts",
+        serde_json::json!({ "to": "bob@example.com", "subject": "One", "body": "1" }),
+    )
+    .await;
+    let (s2, b) = draft_call(
+        &app,
+        "POST",
+        "/client/drafts",
+        serde_json::json!({ "to": "carol@example.com", "subject": "Two", "body": "2" }),
+    )
+    .await;
+    assert_eq!((s1, s2), (StatusCode::OK, StatusCode::OK));
+    assert_ne!(a["id"], b["id"], "a second new mail is a second draft");
+    let obj = a.as_object().unwrap();
+    for key in DRAFT_VIEW_KEYS {
+        assert!(obj.contains_key(key), "DraftView lacks `{key}`: {a}");
+    }
+    for key in [
+        "reply_to_message_id",
+        "forward_of_message_id",
+        "thread_id",
+        "parent_subject",
+        "parent_from",
+        "parent_from_addr",
+    ] {
+        assert!(a[key].is_null(), "plain new mail has no `{key}`");
+    }
+    assert_eq!(a["attachments"], serde_json::json!([]));
+
+    let a_id = a["id"].as_i64().unwrap();
+    let (s, edited) = draft_call(
+        &app,
+        "PUT",
+        &format!("/client/drafts/{a_id}"),
+        serde_json::json!({ "to": "bob@example.com", "subject": "One", "body": "1 again", "cc": "x@example.com" }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(edited["id"], a["id"]);
+    assert_eq!(edited["created_at"], a["created_at"]);
+    assert_eq!(edited["body"], "1 again");
+    assert_eq!(edited["cc"], "x@example.com");
+
+    let all = list_drafts(&app).await;
+    let all = all.as_array().unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0]["id"], a["id"], "the edited draft is newest");
+    assert_eq!(store.list_drafts(acct).unwrap().len(), 2);
+    assert!(
+        store.list_audit(acct, 10).unwrap().is_empty(),
+        "never audited"
+    );
+}
+
+#[tokio::test]
+async fn put_draft_by_id_is_the_same_404_for_unknown_and_another_accounts_id() {
+    let Harness { app, store, .. } = harness(|_, _| {});
+    let other = store.ensure_account("other@example.com").unwrap();
+    let theirs = store
+        .upsert_draft(
+            other,
+            squelch_core::store::DraftKey::NewCreate,
+            squelch_core::store::DraftFields {
+                body: "theirs",
+                ..Default::default()
+            },
+            chrono::Utc::now(),
+        )
+        .unwrap()
+        .unwrap();
+    let (s_theirs, j_theirs) = draft_call(
+        &app,
+        "PUT",
+        &format!("/client/drafts/{}", theirs.id),
+        serde_json::json!({ "body": "mine now" }),
+    )
+    .await;
+    let (s_unknown, j_unknown) = draft_call(
+        &app,
+        "PUT",
+        "/client/drafts/999999",
+        serde_json::json!({ "body": "x" }),
+    )
+    .await;
+    assert_eq!(s_theirs, StatusCode::NOT_FOUND);
+    assert_eq!(s_unknown, StatusCode::NOT_FOUND);
+    assert_eq!(j_theirs, j_unknown, "indistinguishable");
+    assert!(j_theirs["error"].is_string());
+    // The miss wrote nothing, on either account.
+    assert_eq!(
+        store.draft_by_id(other, theirs.id).unwrap().unwrap().body,
+        "theirs"
+    );
+    assert_eq!(list_drafts(&app).await.as_array().map(Vec::len), Some(0));
+}
+
+#[tokio::test]
+async fn keyless_put_edits_the_newest_new_message_draft_for_old_apps() {
+    let mut parent = 0;
+    let Harness { app, .. } = harness(|store, acct| parent = seed_draft_parent(store, acct));
+    // A reply draft never counts as the new-message slot.
+    put_draft(
+        &app,
+        serde_json::json!({ "reply_to_message_id": parent, "body": "r" }),
+    )
+    .await;
+    let (_, older) = draft_call(
+        &app,
+        "POST",
+        "/client/drafts",
+        serde_json::json!({ "body": "older" }),
+    )
+    .await;
+    let (_, newer) = draft_call(
+        &app,
+        "POST",
+        "/client/drafts",
+        serde_json::json!({ "body": "newer" }),
+    )
+    .await;
+    let edited = put_draft(&app, serde_json::json!({ "body": "old app typed" })).await;
+    assert_eq!(edited["id"], newer["id"], "the NEWEST new-message row");
+    let all = list_drafts(&app).await;
+    let all = all.as_array().unwrap();
+    assert_eq!(all.len(), 3);
+    let old_row = all.iter().find(|d| d["id"] == older["id"]).unwrap();
+    assert_eq!(old_row["body"], "older", "the older draft is untouched");
+}
+
+#[tokio::test]
+async fn forward_drafts_are_keyed_per_message_and_carry_parent_context() {
+    let mut parent = 0;
+    let Harness { app, .. } = harness(|store, acct| parent = seed_draft_parent(store, acct));
+    let first = put_draft(
+        &app,
+        serde_json::json!({ "forward_of_message_id": parent, "to": "carol@example.com", "body": "fyi" }),
+    )
+    .await;
+    assert_eq!(first["forward_of_message_id"], parent);
+    assert!(first["reply_to_message_id"].is_null());
+    assert_eq!(first["thread_id"], "t-draft");
+    assert_eq!(first["parent_subject"], "Lunch?");
+    assert!(first["parent_from"].is_string());
+    assert!(first["parent_from_addr"].as_str().unwrap().contains('@'));
+    let second = put_draft(
+        &app,
+        serde_json::json!({ "forward_of_message_id": parent, "to": "carol@example.com", "body": "fyi!" }),
+    )
+    .await;
+    assert_eq!(second["id"], first["id"], "one forward draft per message");
+    // A reply to the same message is its own row, with the same context.
+    let reply = put_draft(
+        &app,
+        serde_json::json!({ "reply_to_message_id": parent, "body": "r" }),
+    )
+    .await;
+    assert_ne!(reply["id"], first["id"]);
+    assert_eq!(reply["parent_subject"], "Lunch?");
+    assert_eq!(list_drafts(&app).await.as_array().map(Vec::len), Some(2));
+
+    // Both keys at once is a 400; an unknown forward parent is a 404.
+    let (s, j) = draft_call(
+        &app,
+        "PUT",
+        "/client/drafts",
+        serde_json::json!({ "reply_to_message_id": parent, "forward_of_message_id": parent }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert!(j["error"].is_string());
+    let (s, _) = draft_call(
+        &app,
+        "PUT",
+        "/client/drafts",
+        serde_json::json!({ "forward_of_message_id": 999_999 }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert_eq!(list_drafts(&app).await.as_array().map(Vec::len), Some(2));
+}
+
+#[tokio::test]
+async fn stats_advertise_drafts_v2() {
+    let Harness { app, .. } = harness(|_, _| {});
+    let resp = app.oneshot(authed("GET", "/client/stats")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["drafts_v2"], true);
+}
+
+#[tokio::test]
+async fn a_forward_send_discards_the_forward_draft_it_consumed() {
+    let (base, handle) = mock_gmail_seq(vec![
+        (200, original_raw_response("<p>chart</p>")),
+        (200, "{}".to_string()),
+    ])
+    .await;
+    let Harness { app, store, acct } = app_with_writes(base, |store, acct| {
+        seed_one_signal(
+            store,
+            acct,
+            "gmail-original",
+            "thread-77",
+            "Quarterly numbers",
+        );
+    });
+    let id = store.search(acct, "quarterly", 10, 0).unwrap()[0].id;
+    let draft = put_draft(
+        &app,
+        serde_json::json!({ "forward_of_message_id": id, "to": "carol@example.com", "body": "worth a read" }),
+    )
+    .await;
+    let resp = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            "/client/actions/send",
+            serde_json::json!({
+                "forward_of_message_id": id,
+                "to": "carol@example.com",
+                "body": "worth a read",
+                "confirm": true,
+                "draft_id": draft["id"]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(handle.await.unwrap().len(), 2);
+    assert_eq!(
+        list_drafts(&app).await.as_array().map(Vec::len),
+        Some(0),
+        "the forward send consumed its draft"
+    );
 }
 
 #[tokio::test]

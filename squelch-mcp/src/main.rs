@@ -151,4 +151,18 @@ mod tests {
         let server = SquelchServer::new(store, "me@localhost").expect("server");
         assert_eq!(server.tool_count(), 7, "expected exactly 7 MCP tools");
     }
+
+    /// Drafts are human-door only (docs/SECURITY.md §4): the agent door must
+    /// never grow a tool that names them, however many kinds of draft exist.
+    #[test]
+    fn no_mcp_tool_touches_drafts() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("in-memory store"));
+        let server = SquelchServer::new(store, "me@localhost").expect("server");
+        let names = server.tool_names();
+        assert_eq!(names.len(), 7);
+        assert!(
+            names.iter().all(|n| !n.to_lowercase().contains("draft")),
+            "an MCP tool names drafts: {names:?}"
+        );
+    }
 }

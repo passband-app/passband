@@ -1806,3 +1806,75 @@ fn migrate_adds_a_background_foreground_flag_to_preexisting_followups() {
         .unwrap();
     assert_eq!(lane, 0);
 }
+
+#[test]
+fn init_upgrades_a_single_slot_drafts_table_to_many_drafts_and_forwards() {
+    // An install from before many drafts: no `forward_of_message_id`, and the
+    // single-slot `idx_drafts_new`, with its one new-message draft saved. Going
+    // through `init` (schema.sql THEN migrate) is the point: an index on the
+    // new column in schema.sql would fail right here, before migrate ran.
+    register_vec_extension();
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE drafts(
+             id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL,
+             reply_to_message_id INTEGER,
+             to_addr TEXT NOT NULL DEFAULT '', cc_addr TEXT NOT NULL DEFAULT '',
+             bcc_addr TEXT NOT NULL DEFAULT '', subject TEXT NOT NULL DEFAULT '',
+             body TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+             updated_at TEXT NOT NULL);
+         CREATE UNIQUE INDEX idx_drafts_reply
+             ON drafts(account_id, reply_to_message_id) WHERE reply_to_message_id IS NOT NULL;
+         CREATE UNIQUE INDEX idx_drafts_new
+             ON drafts(account_id) WHERE reply_to_message_id IS NULL;
+         INSERT INTO drafts(account_id, subject, body, created_at, updated_at)
+             VALUES (1, 'old', 'kept', '2026-07-01T00:00:00+00:00', '2026-07-01T00:00:00+00:00');",
+    )
+    .unwrap();
+    let store = SqliteStore::init(conn).unwrap();
+    let acct = store.ensure_account("me@example.com").unwrap();
+    assert_eq!(acct, 1, "the fixture's row belongs to the first account");
+    {
+        let conn = store.lock().unwrap();
+        let old_index: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_drafts_new'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_index, 0, "the single-slot index is dropped");
+        // Two MORE nil-keyed rows now insert beside the pre-existing one.
+        for _ in 0..2 {
+            conn.execute(
+                "INSERT INTO drafts(account_id, created_at, updated_at)
+                 VALUES (1, '2026-07-02T00:00:00+00:00', '2026-07-02T00:00:00+00:00')",
+                [],
+            )
+            .expect("many new-message drafts");
+        }
+        // The forward key exists and is unique per target.
+        conn.execute(
+            "INSERT INTO drafts(account_id, forward_of_message_id, created_at, updated_at)
+             VALUES (1, 5, '2026-07-03T00:00:00+00:00', '2026-07-03T00:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+        let dup = conn
+            .execute(
+                "INSERT INTO drafts(account_id, forward_of_message_id, created_at, updated_at)
+                 VALUES (1, 5, '2026-07-03T00:00:00+00:00', '2026-07-03T00:00:00+00:00')",
+                [],
+            )
+            .expect_err("a second forward draft of one message is refused")
+            .to_string();
+        assert!(dup.contains("UNIQUE"), "{dup}");
+    }
+    // The pre-existing draft reads back through the store, key columns NULL.
+    let all = store.list_drafts(acct).unwrap();
+    let old = all.iter().find(|d| d.subject == "old").unwrap();
+    assert_eq!(old.body, "kept");
+    assert!(old.reply_to_message_id.is_none() && old.forward_of_message_id.is_none());
+    // Migrating again is a no-op.
+    migrate(&store.lock().unwrap()).unwrap();
+}

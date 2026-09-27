@@ -61,9 +61,11 @@ fn tables_exist(conn: &Connection, tables: &[&str]) -> Result<bool> {
     Ok(n as usize == tables.len())
 }
 
-/// Additive, idempotent column migrations for pre-existing DBs. New tables and
-/// indexes are handled by `CREATE ... IF NOT EXISTS` in `schema.sql`; only new
-/// COLUMNS on an existing table need this seam.
+/// Additive, idempotent migrations for pre-existing DBs. New tables and most
+/// indexes are handled by `CREATE ... IF NOT EXISTS` in `schema.sql`; this seam
+/// carries new COLUMNS on an existing table, plus any index that NAMES such a
+/// column (schema.sql runs first, so it cannot create one against an old table)
+/// and the rare index that has to be dropped.
 pub(super) fn migrate(conn: &Connection) -> Result<()> {
     retire_records_destination(conn)?;
     add_column_if_missing(conn, "messages", "list_unsubscribe", "TEXT")?;
@@ -91,6 +93,23 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // the composer can show, or closing one silently drops recipients.
     add_column_if_missing(conn, "drafts", "cc_addr", "TEXT NOT NULL DEFAULT ''")?;
     add_column_if_missing(conn, "drafts", "bcc_addr", "TEXT NOT NULL DEFAULT ''")?;
+    // MANY NEW-MESSAGE DRAFTS. The old single-slot index made a second
+    // new-message draft a constraint violation; new mail is keyed by row id now.
+    // No dedupe is owed: that index guaranteed at most one nil-keyed row.
+    conn.execute("DROP INDEX IF EXISTS idx_drafts_new", [])?;
+    // Forwards are kept too, one per forwarded message like replies. The
+    // index lives HERE, not in schema.sql, because it names the migrated column:
+    // schema.sql runs before this seam, so on an old DB it would reference a
+    // column that does not exist yet and fail every open.
+    add_column_if_missing(conn, "drafts", "forward_of_message_id", "INTEGER")?;
+    if has_columns(conn, "drafts", &["account_id", "forward_of_message_id"])? {
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_drafts_forward
+             ON drafts(account_id, forward_of_message_id)
+             WHERE forward_of_message_id IS NOT NULL",
+            [],
+        )?;
+    }
     // The push routing tag. NULL on every pre-existing row and NOT backfilled:
     // nothing here can know which account a device filed itself under, and the
     // client re-registers (tag included) on its next foreground.

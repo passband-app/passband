@@ -26,7 +26,7 @@
 // MobileRootView presents this same view at `.large` off the same
 // `store.compose`, so opening, restoring, autosaving and sending are one code
 // path on both platforms. What is fenced below is the DESKTOP FURNITURE only —
-// the keys printed beside the footer's verbs (there is no Esc to promise), and
+// the keys printed beside the footer's verbs, and
 // the pane's glass edge and its leftward shadow (a sheet brings its own
 // ground). The ceremony itself, both phases of it, is shared and untouched: a
 // phone drives it with the same footer buttons, minus their keys.
@@ -40,6 +40,7 @@ struct ComposePane: View {
     private enum FocusTarget: Hashable { case recipient(RecipientSlot), subject }
 
     @State private var groupPickerOpen = false
+    @State private var draftsPickerOpen = false
     /// A file is being dragged over the pane: the editor's well says so.
     @State private var dropTargeted = false
     /// The picked group's size, for the fan-out pill's "· 12 ·". Held here rather
@@ -128,6 +129,7 @@ struct ComposePane: View {
                 Text(kindLabel(compose))
                     .font(Typo.zoneTitle)
                     .foregroundStyle(Palette.ink)
+                draftsButton
             #else
                 Text("compose")
                     .font(Typo.serif(24, weight: .medium))
@@ -135,11 +137,12 @@ struct ComposePane: View {
                 Text(kindLabel(compose))
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaintest)
+                draftsButton
             #endif
             Spacer()
-            // NO `Esc close` CHIP ON THE MAC. The footer's cancel button names
-            // the same key, and the header saying it too made three places on
-            // one pane promising Esc.
+            // NO `Esc close` CHIP, AND NO CANCEL BUTTON IN THE FOOTER EITHER.
+            // Esc closes this pane like every other panel in the app; saying
+            // so in a chip or a button was the pane promising one key twice.
             #if os(macOS)
                 expandButton
             #else
@@ -198,6 +201,50 @@ struct ComposePane: View {
             .accessibilityLabel(expanded ? "Exit full screen" : "Full screen")
         }
     #endif
+
+    /// THE DRAFTS BUTTON, beside the kind label: the kind label says what this
+    /// mail is, and this answers which one. It sits in the header rather than
+    /// the footer because the footer's left cluster is how a mail goes out
+    /// (attach, track), and this is not that.
+    ///
+    /// The number is the drafts you could open from here: the one this pane
+    /// is editing is not "another draft", so it does not count. At zero the
+    /// word stays, muted, so the door does not come and go as you type.
+    /// Hidden on a daemon without the drafts list (`draftsV2Available`).
+    @ViewBuilder
+    private var draftsButton: some View {
+        if store.draftsV2Available {
+            let count = store.otherDrafts.count
+            Button {
+                draftsPickerOpen = true
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: "square.stack").font(.system(size: 9, weight: .semibold))
+                    Text(Self.draftsLabel(count))
+                }
+                .font(Typo.micro)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(count == 0 ? Palette.inkFaintest : Palette.inkFaint)
+            .pointingHand()
+            .help("saved drafts")
+            .accessibilityLabel(count == 0 ? "Drafts" : "\(Self.draftsLabel(count)), open list")
+            .popover(isPresented: $draftsPickerOpen, arrowEdge: .bottom) {
+                DraftsPicker { draftsPickerOpen = false }
+                    .environment(store)
+            }
+        }
+    }
+
+    /// "drafts" / "1 draft" / "3 drafts".
+    static func draftsLabel(_ count: Int) -> String {
+        switch count {
+        case 0: "drafts"
+        case 1: "1 draft"
+        default: "\(count) drafts"
+        }
+    }
 
     /// Which of the three this composer is, in the header's lowercase voice.
     private func kindLabel(_ compose: ComposeState) -> String {
@@ -310,10 +357,6 @@ struct ComposePane: View {
                 TrackerToggle(on: bindFlag(\.includeTracker))
             #endif
             Spacer()
-            #if os(macOS)
-                Button { store.closeCompose() } label: { keyed("cancel", "esc") }
-                    .buttonStyle(.glass)
-            #endif
             // Past a blocked verdict the plain send stays (the match may have
             // been edited out) and the override stands beside it in danger red:
             // two acts, never one button that quietly means both.

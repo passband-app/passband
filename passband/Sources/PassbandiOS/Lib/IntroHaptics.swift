@@ -215,9 +215,9 @@ final class IntroHaptics {
         let step = 1.0 / (hz * 16)
         let samples = stride(from: 0.0, through: d + step / 2, by: step).map { t -> (TimeInterval, Float) in
             let wave = 0.5 + 0.5 * sin(2 * .pi * hz * t - .pi / 2)
-            // Never still: 0.2 at the trough (felt, where 0.1 was not) up to
-            // full at the crest.
-            return (t, Float(0.2 + 0.8 * wave))
+            // Never still, never harsh: 0.2 at the trough (felt, where 0.1
+            // was not) up to 0.8 at the crest (full strength was too much).
+            return (t, Float(0.2 + 0.6 * wave))
         }
         var curves: [CHHapticParameterCurve] = []
         var i = 0

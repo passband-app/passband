@@ -8,10 +8,14 @@ Locked 2026-09-26. §2 through §5 are the contract the build waves carry.
 
 ## 1. Why not drafts
 
-`drafts` allows ONE new-message draft per account and one per reply target,
-and stores none of forward id, group, tracker, or reply-all. A queue of
-scheduled mails is many rows of the full send request, so it is its own
-table. Drafts stay what they are: the composer's autosave.
+A draft is a mutable autosave of words. A scheduled send is a frozen,
+guard-checked, attachment-claimed send REQUEST with a state machine
+(scheduled, sending, sent, failed) and a lease. Drafts store none of group,
+tracker, reply-all, or override, and the branch `drafts` (in flight
+2026-09-26, see §10) is widening them into a many-rows picker, which makes
+them even less of a queue: nothing in a draft says "the user is done with
+this." So it is its own table, and scheduling CONSUMES the draft it came
+from (§3 step 7). Drafts stay the composer's autosave.
 
 ## 2. Data
 
@@ -226,3 +230,22 @@ request.
    `not_before` the worker honors. Decide then.
 4. Later: iOS long-press on Send, a very-late cap, daemon roll + release
    note (the stats gate makes either ship order safe).
+
+## 10. Concurrent work: branch `drafts`
+
+Another session is building the drafts feature on branch `drafts`
+(worktree `.claude/worktrees/drafts`, same base `f3c0be6`). Three overlaps:
+
+- **Same footer.** Drafts adds a picker button IN the composer. This branch
+  drops Cancel and adds the clock on the left. Whichever merges second
+  rebases through `ComposePane.swift`'s footer. Design-wise the left
+  cluster would read attach / track / clock / drafts. The drafts picker is
+  "which mail is this," not "how it goes out," so it arguably belongs in the
+  header beside the kind label instead. Not decided.
+- **Same bug, two fixes.** Drafts parks held sends as drafts on quit. §9
+  step 3 moves the hold into the outbox so the mail still SENDS. Both can
+  land; the outbox one supersedes the park. Once step 3 ships, the
+  quit-parking path becomes dead code and should come out.
+- **Drafts schema moves.** Drafts drops `idx_drafts_new` and adds
+  `forward_of_message_id`. Nothing here depends on either; §3 step 7 deletes
+  the consumed draft by id whatever its key shape.

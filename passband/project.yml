@@ -121,12 +121,12 @@ targets:
           # The Mac's floating ask/search bar. The phone's twin is the search
           # tab's field plus Sources/PassbandiOS/Views/MobileAgentView.swift.
           - "Views/AskBar.swift"
-          # Needs AskBar. Everything else it mounts compiles here, and each
-          # piece is either mounted by MobileShell (MobileRootView.swift) on
-          # the same store flags or deliberately absent: the TOASTS are re-laid
-          # out for a thumb in MobileToastHost; the rule editor and the code
-          # modal are mounted as-is; the tour overlay, What's New and the
-          # re-triage confirm/modal have NO phone mount.
+          # Needs AskBar. Everything else it mounts compiles here; MobileShell
+          # (MobileRootView.swift) mounts the pieces the phone has taken on,
+          # on the same store flags. Among them: the TOASTS re-laid out for a
+          # thumb in MobileToastHost, and the rule editor and code modal as-is.
+          # Not all of it has a phone mount. The tour overlay, What's New and
+          # the re-triage confirm/modal do not, for example.
           - "Views/ActionLayer.swift"
           # --- phase 4: the remaining destinations ------------------------
           # The rail is the Mac's navigation model; the phone's is the tab bar.

@@ -21,10 +21,9 @@
 // SO THE MATERIAL SPLIT FROM THE URGENCY. What the key opens is a lookup — the
 // sign-in alert from Tuesday, the reset you half remember asking for — and a
 // lookup is exactly what this tab is for, one tap off the bar with a dot on it
-// when something has landed, and where an auth notification tap lands
-// (`AppStore.requestAuthPage`). The one case that is a RACE does not come
-// through here at all: a fresh code raises AuthCodeModal over the whole shell,
-// so the most urgent row on the phone is still the cheapest one to reach.
+// when something has landed. The case that is a RACE comes in by banner, and
+// tapping it opens this same page from any tab (`AppStore.requestAuthPage`), so
+// the most urgent row on the phone is still one tap from the notification.
 //
 // A Mac can pin all of this beside the work surface and a phone cannot, so what
 // is one glance there is one tab here. Tapping a row opens the underlying email

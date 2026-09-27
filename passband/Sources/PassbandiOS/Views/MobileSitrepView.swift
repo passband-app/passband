@@ -36,11 +36,11 @@
 // your mail and is holding (MobileRecordsView's bar carries the key now, dot and
 // all).
 //
-// WITH ONE EXCEPTION. A code that just landed is not a lookup — you are
-// standing at a login form holding the phone the code is on — so it does not
-// wait behind a glyph on another tab. It raises AuthCodeModal over the whole
-// shell (MobileRootView, off `store.authQueue`), the same modal the Mac stacks
-// in its action layer, wherever you happen to be.
+// THE URGENT CASE COMES IN BY NOTIFICATION. A code that just landed is not a
+// lookup — you are standing at a login form holding the phone the code is on —
+// and its banner is the fast path: a tap opens the login-codes page straight
+// from wherever you were (`AppStore.requestAuthPage`), and a reveal there raises
+// AuthCodeModal over the whole shell.
 
 import SwiftUI
 

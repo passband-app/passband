@@ -131,10 +131,15 @@ struct EmailWebView: View {
         /// document order, capped (ImageProxy.maxWarmURLs) — what the launch
         /// warmer pre-fetches and pins, not the full uncapped render set.
         var imageURLs: [String]
+        /// The mail's TOPLINE — its `<title>`, which the daemon's sanitizer
+        /// leaves as bare text at the top of the body when it drops the head
+        /// around it (Topline). Taken OUT of `html` and shown above the
+        /// frame instead, muted, where a caption goes.
+        var topline: String?
 
         static let empty = Prepared(
             sourceHash: 0, html: "", trackers: 0, trackersAllowed: false,
-            hasRemoteCandidates: false, imageURLs: [])
+            hasRemoteCandidates: false, imageURLs: [], topline: nil)
 
         static func make(
             from html: String, allowTrackers: Bool = false, attachments: [Attachment] = []
@@ -145,8 +150,11 @@ struct EmailWebView: View {
             // tracking pixel can never be the "first occurrence" that suppresses
             // a real image further down the thread. Dedupe layers on top, never
             // in place of it.
-            let stripped = Trackers.strip(html)
-            let body = allowTrackers ? html : stripped.html
+            // The topline comes off FIRST: it is text ahead of the document,
+            // not part of it, and every pass below is about the document.
+            let (topline, source) = Topline.split(html)
+            let stripped = Trackers.strip(source)
+            let body = allowTrackers ? source : stripped.html
             // A repeated sender logo is still part of THIS message. Suppressing
             // it because an older message used the same URL made current mail
             // look broken (and could erase every image in a short reply). Keep
@@ -174,7 +182,8 @@ struct EmailWebView: View {
                 trackers: stripped.blocked,
                 trackersAllowed: allowTrackers,
                 hasRemoteCandidates: hasRemoteCandidates,
-                imageURLs: proxied.urls)
+                imageURLs: proxied.urls,
+                topline: topline)
         }
 
         /// Tracker policy is part of the identity: the two policies produce
@@ -239,6 +248,18 @@ struct EmailWebView: View {
         // left of a stack the chip had made wider and end up flush with nothing.
         VStack(alignment: bubble && mine ? .trailing : .leading, spacing: 8) {
             imageBar
+            // The mail's own topline, where the sender put it — above the
+            // body — but as a caption rather than the first line of the
+            // page: grey, small, and not part of the bubble.
+            if let topline = prepared.topline {
+                Text(topline)
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.inkFaint)
+                    .lineLimit(2)
+                    .multilineTextAlignment(bubble && mine ? .trailing : .leading)
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 2)
+            }
 
             EmailWebViewRepresentable(
                 html: prepared.html,
@@ -1171,6 +1192,93 @@ final class EmailFrameCoordinator: NSObject {
     nonisolated private static let bubbleBody =
         "body{padding:9px 12px;box-sizing:border-box;"
         + "width:-webkit-fit-content;width:fit-content;max-width:100%;}"
+}
+
+/// THE LINE AHEAD OF THE DOCUMENT. A sanitized body very often opens with
+/// bare text and then a `<style>`: that is the head of the original mail with
+/// its tags removed — the `<title>` text survives, the `<style>` block after it
+/// survives — and rendered as-is it is a stray first line on the page (in this
+/// mailbox, the top of some 990 messages). It IS the mail's topline, so it is
+/// shown, as a caption over the body rather than inside it.
+///
+/// Only that exact shape is taken: text, then `<style`. A message that opens
+/// "Hello,<br>" opens with text too, and that text is the mail.
+enum Topline {
+    static func split(_ html: String) -> (topline: String?, html: String) {
+        let trimmedStart = html.drop(while: { $0.isWhitespace })
+        guard let lt = trimmedStart.firstIndex(of: "<"), lt != trimmedStart.startIndex,
+            trimmedStart[lt...].prefix(6).lowercased() == "<style"
+        else { return (nil, html) }
+        let raw = trimmedStart[trimmedStart.startIndex..<lt]
+        let text = decode(String(raw))
+            .split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        guard !text.isEmpty, text.count <= 300 else { return (nil, html) }
+        return (text, String(trimmedStart[lt...]))
+    }
+
+    /// Entities, decoded UNTIL THEY STOP DECODING: the sanitizer escaped what
+    /// was already escaped, so the stored text reads `&amp;#x27;` where the
+    /// mail said an apostrophe. Two passes is the common case; the loop is
+    /// bounded either way.
+    static func decode(_ text: String) -> String {
+        var out = text
+        for _ in 0..<3 {
+            let next = decodeOnce(out)
+            if next == out { return out }
+            out = next
+        }
+        return out
+    }
+
+    private static let named: [String: String] = [
+        "amp": "&", "lt": "<", "gt": ">", "quot": "\"", "apos": "'", "nbsp": " ",
+        "mdash": "\u{2014}", "ndash": "\u{2013}", "hellip": "\u{2026}", "copy": "\u{A9}",
+        "reg": "\u{AE}", "trade": "\u{2122}", "lsquo": "\u{2018}", "rsquo": "\u{2019}",
+        "ldquo": "\u{201C}", "rdquo": "\u{201D}", "bull": "\u{2022}", "zwnj": "", "zwj": "",
+        "shy": "", "euro": "\u{20AC}", "pound": "\u{A3}", "yen": "\u{A5}", "deg": "\u{B0}",
+        "times": "\u{D7}", "laquo": "\u{AB}", "raquo": "\u{BB}", "rarr": "\u{2192}",
+        "larr": "\u{2190}", "middot": "\u{B7}", "eacute": "\u{E9}", "egrave": "\u{E8}",
+        "ecirc": "\u{EA}", "aacute": "\u{E1}", "agrave": "\u{E0}", "acirc": "\u{E2}",
+        "auml": "\u{E4}", "iacute": "\u{ED}", "oacute": "\u{F3}", "ouml": "\u{F6}",
+        "uacute": "\u{FA}", "uuml": "\u{FC}", "ntilde": "\u{F1}", "ccedil": "\u{E7}",
+        "Eacute": "\u{C9}", "Uuml": "\u{DC}", "Ouml": "\u{D6}", "Auml": "\u{C4}",
+    ]
+
+    private static func decodeOnce(_ text: String) -> String {
+        guard text.contains("&") else { return text }
+        var out = ""
+        var rest = Substring(text)
+        while let amp = rest.firstIndex(of: "&") {
+            out += rest[rest.startIndex..<amp]
+            let tail = rest[amp...]
+            guard let semi = tail.firstIndex(of: ";"), tail.distance(from: amp, to: semi) <= 10
+            else {
+                out.append("&")
+                rest = tail.dropFirst()
+                continue
+            }
+            let name = tail[tail.index(after: amp)..<semi]
+            var replacement: String?
+            if name.hasPrefix("#x") || name.hasPrefix("#X") {
+                replacement = UInt32(name.dropFirst(2), radix: 16)
+                    .flatMap(Unicode.Scalar.init).map { String(Character($0)) }
+            } else if name.hasPrefix("#") {
+                replacement = UInt32(name.dropFirst())
+                    .flatMap(Unicode.Scalar.init).map { String(Character($0)) }
+            } else {
+                replacement = named[String(name)]
+            }
+            if let replacement {
+                out += replacement
+                rest = tail[tail.index(after: semi)...]
+            } else {
+                out.append("&")
+                rest = tail.dropFirst()
+            }
+        }
+        out += rest
+        return out
+    }
 }
 
 /// What the measuring script says about the document it is in — the height

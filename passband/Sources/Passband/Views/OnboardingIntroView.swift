@@ -270,6 +270,47 @@ struct IntroWordmark: View {
     }
 }
 
+/// The intro's stage for the screens after it: the closed squelch behind, the
+/// wordmark up top, and one column of content on the scrimmed side. Every
+/// first-run step past the intro sits on this, so moving between them changes
+/// the column and nothing else.
+///
+/// The column is centered in a scroll view rather than between spacers: a long
+/// form (an error, an open disclosure) in a short window has to scroll, and
+/// spacers inside a scroll view never grow.
+struct IntroStage<Content: View>: View {
+    var columnWidth: CGFloat = 440
+    @ViewBuilder var content: (_ wide: Bool) -> Content
+
+    var body: some View {
+        GeometryReader { geometry in
+            let wide = geometry.size.width >= 820
+            let inset: CGFloat = wide ? 44 : 24
+            ZStack(alignment: .topLeading) {
+                if SquelchScene.shared.isUnavailable {
+                    IntroFallbackGlow()
+                } else {
+                    // Engaged: the intro's last beat left the squelch closed,
+                    // and every step after it picks up exactly there.
+                    IntroSceneBackdrop(engaged: true, wide: wide)
+                }
+                ScrollView {
+                    content(wide)
+                        .frame(maxWidth: wide ? columnWidth : .infinity, alignment: .leading)
+                        .padding(.horizontal, inset)
+                        // Clears the wordmark above and the corner toggle below.
+                        .padding(.vertical, inset + 56)
+                        .frame(maxWidth: .infinity, minHeight: geometry.size.height, alignment: .leading)
+                }
+                .scrollBounceBehavior(.basedOnSize)
+                IntroWordmark()
+                    .modifier(IntroEntrance(delay: 0, distance: 4))
+                    .padding(inset)
+            }
+        }
+    }
+}
+
 /// A single quiet entrance per view identity. No timers or repeating motion;
 /// leaving a beat cancels its task, and Reduce Motion renders it immediately.
 struct IntroEntrance: ViewModifier {

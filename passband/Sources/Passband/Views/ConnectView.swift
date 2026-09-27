@@ -263,7 +263,7 @@ struct ConnectView: View {
                         gateStep = .credentials(.selfHosted)
                     })
             case .credentials:
-                connectCard
+                IntroStage { wide in formColumn(wide: wide) }
             }
         }
         // The phone's screen margin. On the Mac the card is a fixed measure
@@ -278,9 +278,29 @@ struct ConnectView: View {
         }
     }
 
+    /// The Add Account sheet's form: the same column as the gate's, worn as a
+    /// glass card over the working app rather than set on the intro's stage.
     private var connectCard: some View {
+        formColumn(wide: false)
+            .padding(30)
+            // A window can always be 440pt wide; a phone cannot. Same intended
+            // measure either way — the Mac states it, the phone treats it as a
+            // ceiling and takes whatever the screen leaves (see body's margin).
+            #if os(macOS)
+                .frame(width: 440)
+            #else
+                .frame(maxWidth: 440)
+            #endif
+            .passbandGlass(.pane, cornerRadius: 24, tint: Palette.glassTintStrong)
+            .shadow(color: .black.opacity(0.3), radius: 50, y: 24)
+    }
+
+    /// Everything the form says and asks, with no chrome of its own: the gate
+    /// sets it on the intro's stage, the sheet wraps it in a card.
+    private func formColumn(wide: Bool) -> some View {
             VStack(spacing: 0) {
-                header
+                header(wide: wide)
+                    .modifier(IntroEntrance(delay: purpose == .gate ? 0.04 : 0))
                 credentialContent
 
                 if let errorText {
@@ -299,40 +319,39 @@ struct ConnectView: View {
                     .padding(.top, 12)
                 }
 
-                bottomActions.padding(.top, 20)
+                bottomActions.padding(.top, purpose == .gate ? 28 : 20)
             }
-            .padding(30)
-            // A window can always be 440pt wide; a phone cannot. Same intended
-            // measure either way — the Mac states it, the phone treats it as a
-            // ceiling and takes whatever the screen leaves (see body's margin).
-            #if os(macOS)
-                .frame(width: 440)
-            #else
-                .frame(maxWidth: 440)
-            #endif
-            .passbandGlass(
-                purpose == .gate ? .chrome : .pane,
-                cornerRadius: 24,
-                tint: purpose == .gate ? Palette.glassTint.opacity(0.35) : Palette.glassTintStrong)
-            .shadow(color: .black.opacity(0.3), radius: 50, y: 24)
     }
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(headerTitle)
-                .font(Typo.serif(purpose == .gate ? 34 : 30, weight: .medium))
-                .foregroundStyle(Palette.ink)
-            Text(
-                purpose == .gate
-                    ? headerSubtitle
-                    : "one daemon per mailbox. this one joins the accounts you already have."
-            )
-            .font(.system(size: 13))
-            .foregroundStyle(Palette.inkFaint)
+    @ViewBuilder private func header(wide: Bool) -> some View {
+        if purpose == .gate {
+            // The intro's voice: a hero line and a readable paragraph under it.
+            VStack(alignment: .leading, spacing: 16) {
+                Text(headerTitle)
+                    .font(Typo.hero(wide ? 40 : 32))
+                    .foregroundStyle(Palette.ink)
+                    .accessibilityAddTraits(.isHeader)
+                Text(headerSubtitle)
+                    .font(.system(size: 15))
+                    .foregroundStyle(Palette.inkDim)
+                    .lineSpacing(5)
+            }
             .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.bottom, 28)
+        } else {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(headerTitle)
+                    .font(Typo.serif(30, weight: .medium))
+                    .foregroundStyle(Palette.ink)
+                Text("one daemon per mailbox. this one joins the accounts you already have.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Palette.inkFaint)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.bottom, 22)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.bottom, 22)
     }
 
     private var hostingChoice: HostingChoice? {
@@ -356,9 +375,9 @@ struct ConnectView: View {
         guard purpose == .gate else { return "add account" }
         if arrivedViaPairLink { return "Make yourself at home." }
         switch hostingChoice {
-        case .hosted: return "Connect your account."
-        case .selfHosted: return "connect self-hosted"
-        case nil: return "pair this device"
+        case .hosted: return "Finish in your browser."
+        case .selfHosted: return "Connect your server."
+        case nil: return "Pair this device."
         }
     }
 
@@ -368,7 +387,7 @@ struct ConnectView: View {
         }
         switch hostingChoice {
         case .hosted:
-            return "Finish logging in in your browser. If you aren’t brought back automatically, enter your server URL and pairing code below."
+            return "Sign in with Google in the tab that just opened. If Passband doesn’t come back on its own, enter the server URL and pairing code from that page."
         case .selfHosted:
             return "Run squelchd pair on your server, then enter what it prints."
         case nil:
@@ -397,6 +416,7 @@ struct ConnectView: View {
                     .buttonStyle(.plain)
                     .font(.system(size: 12))
                     .foregroundStyle(Palette.inkDim)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.top, 14)
             }
             if purpose == .gate, hostingChoice == .selfHosted {
@@ -404,6 +424,7 @@ struct ConnectView: View {
                     .buttonStyle(.plain)
                     .font(.system(size: 11))
                     .foregroundStyle(Palette.inkFaint)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.top, 14)
             }
         }
@@ -411,10 +432,30 @@ struct ConnectView: View {
 
     private var bottomActions: some View {
         HStack(spacing: 12) {
-            Button(purpose == .addAccount ? "cancel" : "back") { goBack() }
-                .disabled(busy)
+            if purpose == .gate {
+                // The intro's own controls: a quiet Back, then the way on.
+                Button("Back") { goBack() }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Palette.inkDim)
+                    .disabled(busy)
+            } else {
+                Button("cancel") { goBack() }
+                    .disabled(busy)
+            }
             Spacer()
-            Button(buttonLabel) { submit() }
+            Button { submit() } label: {
+                if purpose == .gate {
+                    HStack(spacing: 9) {
+                        Text(buttonLabel)
+                        Image(systemName: "arrow.right")
+                    }
+                    .font(.system(size: 13, weight: .semibold))
+                    .padding(.vertical, 7)
+                    .padding(.horizontal, 8)
+                } else {
+                    Text(buttonLabel)
+                }
+            }
                 .buttonStyle(.borderedProminent)
                 .tint(Palette.accent)
                 .disabled(!canSubmit)
@@ -605,7 +646,15 @@ struct ConnectView: View {
         }
     }
 
+    /// Sentence case at the gate, where it sits under the intro's type; the
+    /// sheet keeps the app's lowercase chrome.
     private var buttonLabel: String {
+        let label = rawButtonLabel
+        guard purpose == .gate, let first = label.first else { return label }
+        return first.uppercased() + label.dropFirst()
+    }
+
+    private var rawButtonLabel: String {
         if claiming { return "pairing…" }
         if adding || store.connStatus == .connecting { return "testing…" }
         // The claim is done and only its probe is outstanding, so the button
@@ -819,27 +868,7 @@ private struct WelcomeGate: View {
     let selfHostedLogin: () -> Void
 
     var body: some View {
-        GeometryReader { geometry in
-            let wide = geometry.size.width >= 820
-            ZStack(alignment: .topLeading) {
-                if SquelchScene.shared.isUnavailable {
-                    IntroFallbackGlow()
-                } else {
-                    // Engaged: the intro's last beat left the squelch closed,
-                    // and this screen picks up exactly there.
-                    IntroSceneBackdrop(engaged: true, wide: wide)
-                }
-                VStack(alignment: .leading, spacing: 0) {
-                    IntroWordmark()
-                        .modifier(IntroEntrance(delay: 0, distance: 4))
-                    Spacer(minLength: 24)
-                    content(wide: wide)
-                        .frame(maxWidth: wide ? 440 : .infinity, alignment: .leading)
-                    Spacer(minLength: 24)
-                }
-                .padding(wide ? 44 : 24)
-            }
-        }
+        IntroStage { wide in content(wide: wide) }
     }
 
     private func content(wide: Bool) -> some View {
@@ -924,58 +953,69 @@ private struct SelfHostGuide: View {
     let continueToForm: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text("set up your server")
-                .font(Typo.serif(34, weight: .medium))
-                .foregroundStyle(Palette.ink)
-            Text("Run squelchd on this Mac, a NAS, or a server you control.")
-                .font(.system(size: 13))
-                .foregroundStyle(Palette.inkFaint)
-                .padding(.top, 5)
+        IntroStage(columnWidth: 520) { wide in
+            VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Set up your server.")
+                        .font(Typo.hero(wide ? 44 : 34))
+                        .foregroundStyle(Palette.ink)
+                        .accessibilityAddTraits(.isHeader)
+                    Text("Run squelchd on this Mac, a NAS, or a server you control. Three commands and you’re in.")
+                        .font(.system(size: 15))
+                        .foregroundStyle(Palette.inkDim)
+                        .lineSpacing(5)
+                }
+                .fixedSize(horizontal: false, vertical: true)
+                .modifier(IntroEntrance(delay: 0.04))
 
-            VStack(spacing: 12) {
-                SetupStep(
-                    number: 1,
-                    title: "install squelchd",
-                    detail: "Pull the public image for amd64 or arm64.",
-                    command: "docker pull ghcr.io/braelyn-ai/squelchd")
-                SetupStep(
-                    number: 2,
-                    title: "authorize gmail",
-                    detail: "Complete Google's one-time consent on the server.",
-                    command: "squelchd auth")
-                SetupStep(
-                    number: 3,
-                    title: "pair this device",
-                    detail: "Mint the short code the next screen accepts.",
-                    command: "squelchd pair")
-            }
-            .padding(.top, 22)
+                VStack(spacing: 16) {
+                    SetupStep(
+                        number: 1,
+                        title: "Install squelchd",
+                        detail: "Pull the public image for amd64 or arm64.",
+                        command: "docker pull ghcr.io/braelyn-ai/squelchd")
+                    SetupStep(
+                        number: 2,
+                        title: "Authorize Gmail",
+                        detail: "Complete Google's one-time consent on the server.",
+                        command: "squelchd auth")
+                    SetupStep(
+                        number: 3,
+                        title: "Pair this device",
+                        detail: "Mint the short code the next screen accepts.",
+                        command: "squelchd pair")
+                }
+                .padding(.top, 28)
+                .modifier(IntroEntrance(delay: 0.16))
 
-            Button("view detailed instructions on GitHub") {
-                Opener.open(
-                    "https://github.com/braelyn-ai/squelch/blob/main/docs/GETTING-STARTED.md")
-            }
-            .buttonStyle(.textAction)
-            .padding(.top, 16)
+                Button("View detailed instructions on GitHub") {
+                    Opener.open(
+                        "https://github.com/braelyn-ai/squelch/blob/main/docs/GETTING-STARTED.md")
+                }
+                .buttonStyle(.textAction)
+                .padding(.top, 18)
 
-            HStack {
-                Button("back", action: back)
-                Spacer()
-                Button("my server is running", action: continueToForm)
+                HStack(spacing: 12) {
+                    Button("Back", action: back)
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Palette.inkDim)
+                    Spacer()
+                    Button(action: continueToForm) {
+                        HStack(spacing: 9) {
+                            Text("My server is running")
+                            Image(systemName: "arrow.right")
+                        }
+                        .font(.system(size: 13, weight: .semibold))
+                        .padding(.vertical, 7)
+                        .padding(.horizontal, 8)
+                    }
                     .buttonStyle(.borderedProminent)
                     .tint(Palette.accent)
+                    .keyboardShortcut(.defaultAction)
+                }
+                .padding(.top, 28)
             }
-            .padding(.top, 22)
         }
-        .padding(34)
-        #if os(macOS)
-            .frame(width: 620)
-        #else
-            .frame(maxWidth: 620)
-        #endif
-        .passbandGlass(.chrome, cornerRadius: 24, tint: Palette.glassTint.opacity(0.35))
-        .shadow(color: .black.opacity(0.3), radius: 50, y: 24)
     }
 }
 
@@ -995,10 +1035,11 @@ private struct SetupStep: View {
                 .background(Circle().fill(Palette.accent))
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Palette.ink)
                 Text(detail)
-                    .font(.system(size: 11))
-                    .foregroundStyle(Palette.inkFaint)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Palette.inkDim)
                 HStack(spacing: 8) {
                     Text(command)
                         .font(Typo.mono(11))
@@ -1014,7 +1055,7 @@ private struct SetupStep: View {
                 }
                 .padding(.horizontal, 9)
                 .padding(.vertical, 6)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Palette.canvas.opacity(0.65)))
+                .background(RoundedRectangle(cornerRadius: 8).fill(Palette.canvas.opacity(0.9)))
                 .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Palette.hairline, lineWidth: 0.75))
                 .padding(.top, 2)
             }
@@ -1050,8 +1091,9 @@ private struct SetupThemeToggle: View {
     }
 }
 
-/// A labelled input well. Near-opaque on purpose: a fully translucent field
-/// over a busy wallpaper leaves typed text unreadable.
+/// A labelled input well. Near-opaque on purpose: a translucent field over a
+/// busy wallpaper, or over the first-run squelch scene, leaves typed text
+/// unreadable.
 struct Field<Content: View>: View {
     let label: String
     @ViewBuilder var content: Content
@@ -1087,7 +1129,7 @@ extension View {
             .padding(.vertical, 8)
             .background(
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(Palette.canvas.opacity(0.65))
+                    .fill(Palette.canvas.opacity(0.9))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 9, style: .continuous)

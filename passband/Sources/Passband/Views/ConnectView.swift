@@ -268,13 +268,14 @@ struct ConnectView: View {
         }
     }
 
-    /// Leaving the intro. On the phone it is ANIMATED, carrying on from the
-    /// swipe that ended it: the scene recedes (a little smaller, drifting the
-    /// way the finger went, fading) while the login screen comes in from the
-    /// right, the two overlapping for half a second. The Mac still cuts.
+    /// Leaving the intro. On the phone it is a CROSSFADE: the login steps
+    /// stand on the same squelch scene the intro ends on (IntroStage), so the
+    /// scene holds still and only the words change. Anything that moved or
+    /// scaled the two layers would slide one copy of the waves over another.
+    /// The Mac still cuts.
     private func finishIntro() {
         #if os(iOS)
-            withAnimation(reduceMotion ? .easeInOut(duration: 0.3) : .smooth(duration: 0.6)) {
+            withAnimation(.easeInOut(duration: reduceMotion ? 0.3 : 0.5)) {
                 gateStep = .welcome
             }
         #else
@@ -284,9 +285,7 @@ struct ConnectView: View {
 
     private var introExit: AnyTransition {
         #if os(iOS)
-            reduceMotion
-                ? .opacity
-                : .opacity.combined(with: .scale(scale: 0.92)).combined(with: .offset(x: -60))
+            .opacity
         #else
             .identity
         #endif
@@ -294,7 +293,7 @@ struct ConnectView: View {
 
     private var loginEntrance: AnyTransition {
         #if os(iOS)
-            reduceMotion ? .opacity : .opacity.combined(with: .offset(x: 48))
+            .opacity
         #else
             .identity
         #endif

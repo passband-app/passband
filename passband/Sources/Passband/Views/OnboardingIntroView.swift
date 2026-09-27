@@ -414,9 +414,28 @@ struct IntroStage<Content: View>: View {
                     content(wide)
                         .frame(maxWidth: wide ? columnWidth : .infinity, alignment: .leading)
                         .padding(.horizontal, inset)
+                        // On a phone the column shares the screen's width
+                        // with the waves, and a tall step (the guide, a form)
+                        // reaches down into the bright bands. A soft band of
+                        // the scene's own night, sized to the content, keeps
+                        // it legible without moving the scene the intro left.
+                        .background {
+                            if !wide && !SquelchScene.shared.isUnavailable {
+                                ColumnScrim()
+                            }
+                        }
                         // Clears the wordmark above and the corner toggle below.
                         .padding(.vertical, inset + 56)
-                        .frame(maxWidth: .infinity, minHeight: geometry.size.height, alignment: .leading)
+                        // Narrow (the phone) hangs the column from the top.
+                        // Centered, it sat on the crest of the nearest bands,
+                        // where the copy and the fields were unreadable; up
+                        // here it is in the dark sky the top scrim keeps for
+                        // it, as the intro's story is. A window is always wide
+                        // and keeps the centered column beside the scene.
+                        .padding(.top, wide ? 0 : 24)
+                        .frame(
+                            maxWidth: .infinity, minHeight: geometry.size.height,
+                            alignment: wide ? .leading : .topLeading)
                 }
                 .scrollBounceBehavior(.basedOnSize)
                 IntroWordmark()
@@ -424,6 +443,26 @@ struct IntroStage<Content: View>: View {
                     .padding(inset)
             }
         }
+    }
+}
+
+/// Behind a stage column on a phone: the scene's backdrop at most of its
+/// strength, feathered top and bottom past the content so it has no edge.
+private struct ColumnScrim: View {
+    var body: some View {
+        IntroNight.backdrop.opacity(0.78)
+            .mask {
+                LinearGradient(
+                    stops: [
+                        .init(color: .clear, location: 0),
+                        .init(color: .black, location: 0.18),
+                        .init(color: .black, location: 0.82),
+                        .init(color: .clear, location: 1),
+                    ],
+                    startPoint: .top, endPoint: .bottom)
+            }
+            .padding(.vertical, -56)
+            .allowsHitTesting(false)
     }
 }
 

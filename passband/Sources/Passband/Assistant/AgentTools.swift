@@ -406,6 +406,10 @@ enum AgentTools {
             return failure("status must be \"open\" or \"done\"", summary: "status failed")
         }
         let result = try await APIClient.shared.setStatus(messageId, status)
+        // The assistant's resolves count as the verb they are, under the one
+        // `via` no page owns, so "how much triage does the agent do" is the
+        // same query as "how much do people do by keyboard".
+        if status == .done { Analytics.capture("email_done", ["via": "assistant"]) }
         return ok(
             ["status": result.status, "message_id": messageId],
             summary: "marked \(raw)")
@@ -535,6 +539,7 @@ enum AgentTools {
             verifiedSender: target.sender, verifiedSubject: target.subject)
         return await confirmed(action, gate) {
             let result = try await APIClient.shared.actionArchive(target.messageId)
+            Analytics.capture("email_archived", ["via": "assistant"])
             return (json(["status": result.status, "message_id": target.messageId]), "Archived")
         }
     }

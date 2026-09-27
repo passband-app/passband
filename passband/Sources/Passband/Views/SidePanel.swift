@@ -442,7 +442,7 @@ struct SearchView: View {
         remember()
         // openThread itself collapses `expanded` — every path into the reader
         // must, so the collapse lives there rather than here.
-        store.openThread(hit.thread_id)
+        store.openThread(hit.thread_id, from: .search)
     }
 
     /// Put a submitted query in the ring. What counts as submitted, and which
@@ -827,7 +827,7 @@ struct BrowseView: View {
                                 BrowseRow(
                                     update: u, selected: i == index
                                 ) { index = i } open: {
-                                    store.openThread(u.thread_id)
+                                    store.openThread(u.thread_id, from: .browse)
                                 }
                                 .id(u.id)
                             }
@@ -856,7 +856,7 @@ struct BrowseView: View {
             KeyBinding("j", "next") { index = min(visible.count - 1, index + 1) },
             KeyBinding("k", "prev") { index = max(0, index - 1) },
             KeyBinding("Enter", "open thread") {
-                if let u = visible[safe: index] { store.openThread(u.thread_id) }
+                if let u = visible[safe: index] { store.openThread(u.thread_id, from: .browse) }
             },
             KeyBinding("+", "raise noise filter") { squelch = min(100, squelch + 5) },
             KeyBinding("=", "raise noise filter") { squelch = min(100, squelch + 5) },

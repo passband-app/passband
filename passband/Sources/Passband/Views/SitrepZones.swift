@@ -313,7 +313,7 @@ private struct ShipmentCard: View {
                 .fill(Palette.hairline.opacity(hovering && target != nil ? 0.85 : 0.5))
         )
         .contentShape(Rectangle())
-        .onTapGesture { if let target { store.openThread(target) } }
+        .onTapGesture { if let target { store.openThread(target, from: .sitrepCard) } }
         .onHover { hovering = $0 }
         // A CONTEXT MENU rather than a chip or a swipe: the card's whole face is
         // already spoken for (the tap opens the email), and this rail is a VStack
@@ -740,7 +740,7 @@ private struct ReadingCard: View {
         guard !sender.latestThreadId.isEmpty else { return }
         store.openThread(
             sender.latestThreadId, queue: sender.items,
-            readingMail: true)
+            readingMail: true, from: .reading)
     }
 
 }

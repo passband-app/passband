@@ -209,7 +209,7 @@ struct MobileSitrepView: View {
         ZoneCard(symbol: "eye", title: "For your eyes", count: store.sitrep.standing.count) {
             VStack(spacing: 2) {
                 ForEach(Array(visible.enumerated()), id: \.element.id) { _, u in
-                    let verbs = UpdateVerbs(update: u, queue: queue)
+                    let verbs = UpdateVerbs(update: u, queue: queue, surface: .sitrep)
                     SwipeRow(leading: verbs.leadingVerbs, trailing: verbs.trailingVerbs) {
                         UpdateRow(
                             update: u,

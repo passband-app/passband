@@ -337,9 +337,9 @@ final class Notifier {
         switch target {
         case .thread(let threadId):
             guard let threadId, !threadId.isEmpty else { return }
-            AppStore.shared.openThread(threadId)
+            AppStore.shared.openThread(threadId, from: .notification)
         case .message(let messageId):
-            AppStore.shared.openMessage(messageId)
+            AppStore.shared.openMessage(messageId, from: .notification)
         case .event(let eventId):
             let store = AppStore.shared
             let epoch = store.epoch
@@ -347,7 +347,7 @@ final class Notifier {
                 do {
                     let event = try await APIClient.shared.getEvent(eventId)
                     guard store.isCurrent(epoch) else { return }
-                    store.openMessage(event.message_id)
+                    store.openMessage(event.message_id, from: .notification)
                 } catch {
                     guard store.isCurrent(epoch) else { return }
                     store.pushToast("Could not open this notification. Please try again.", .error)

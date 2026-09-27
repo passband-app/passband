@@ -123,7 +123,7 @@ struct DeeperSearchBand: View {
                     // `openThread` collapses it as every path into the reader
                     // must. What survives the click is the search, not the
                     // layout it was being read in.
-                    store.openThread(threadId)
+                    store.openThread(threadId, from: .deeperSearch)
                 }
             }
             if let line = answerLine, !line.isEmpty {

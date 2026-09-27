@@ -24,25 +24,30 @@ struct UpdateVerbs {
     /// open. The dashboard zones pass their ranked list; a zone with no walk of
     /// its own passes nothing, exactly as the Mac's zone rows do.
     var queue: [AttentionUpdate] = []
+    /// Which page these verbs act on, for the analytics origin. The list is
+    /// the default; the dashboard's zones say so.
+    var surface: Actions.Surface = .emails
 
     private var store: AppStore { AppStore.shared }
 
     /// `Enter` / a row tap.
     func open() {
-        store.openThread(update.thread_id, queue: queue)
+        store.openThread(
+            update.thread_id, queue: queue, from: surface == .sitrep ? .sitrep : .emails)
     }
 
     /// `e` / `d`. Both halves of EmailsView.resolveSelected: the action, then the
     /// cached-page eviction that keeps the next poll from re-serving the row.
-    func done() {
-        Task { await Actions.done(update) }
+    /// A rail swipe unless the long-press menu says otherwise.
+    func done(via: Actions.Via = .swipe) {
+        Task { await Actions.done(update, via: via, on: surface) }
         store.removeFromMail(update.id)
     }
 
     /// `e` in process mode — a DIFFERENT verb from done (status stays open, the
     /// INBOX label comes off), with its own inverse in the undo queue.
-    func archive() {
-        Task { await Actions.archive(update) }
+    func archive(via: Actions.Via = .swipe) {
+        Task { await Actions.archive(update, via: via, on: surface) }
     }
 
     /// `r`. Opens the reader with the reply state set; the composer that lands on
@@ -53,8 +58,8 @@ struct UpdateVerbs {
 
     /// `i`, and only on the spam page. Rescues the message out of the provider's
     /// spam folder; see `Actions.notSpam` for why it has no undo.
-    func notSpam() {
-        Task { await Actions.notSpam(update) }
+    func notSpam(via: Actions.Via = .swipe) {
+        Task { await Actions.notSpam(update, via: via, on: surface) }
     }
 
     /// `t` (registered in ActionLayer for the list context).
@@ -110,13 +115,13 @@ extension UpdateVerbs {
             return [
                 SwipeVerb(
                     title: "Done", symbol: "checkmark", tint: Palette.positive, destructive: true,
-                    run: done)
+                    run: { done(via: .swipe) })
             ]
         }
         return [
             SwipeVerb(
                 title: "Done", symbol: "checkmark", tint: Palette.positive, destructive: true,
-                run: done),
+                run: { done(via: .swipe) }),
             SwipeVerb(title: "Tune", symbol: "slider.horizontal.3", tint: Palette.accent, run: tune),
         ]
     }
@@ -128,13 +133,15 @@ extension UpdateVerbs {
             return [
                 SwipeVerb(
                     title: "Not spam", symbol: "tray.and.arrow.down", tint: Palette.positive,
-                    run: notSpam)
+                    run: { notSpam(via: .swipe) })
             ]
         }
         return [
             SwipeVerb(
                 title: "Reply", symbol: "arrowshape.turn.up.left", tint: Palette.accent, run: reply),
-            SwipeVerb(title: "Archive", symbol: "archivebox", tint: Palette.warn, run: archive),
+            SwipeVerb(
+                title: "Archive", symbol: "archivebox", tint: Palette.warn,
+                run: { archive(via: .swipe) }),
         ]
     }
 }
@@ -152,7 +159,7 @@ struct UpdateContextMenu: ViewModifier {
             // The spam page's menu is the short one, for the reason its rails
             // are short: the verdict verbs have no verdict to act on.
             if verbs.isSpamPage {
-                Button { verbs.notSpam() } label: {
+                Button { verbs.notSpam(via: .click) } label: {
                     Label("Not spam", systemImage: "tray.and.arrow.down")
                 }
             } else {
@@ -170,14 +177,16 @@ struct UpdateContextMenu: ViewModifier {
                     Label("Search this sender", systemImage: "magnifyingglass")
                 }
                 Divider()
-                Button { verbs.archive() } label: { Label("Archive", systemImage: "archivebox") }
+                Button { verbs.archive(via: .click) } label: {
+                    Label("Archive", systemImage: "archivebox")
+                }
             }
             Divider()
             // Destructive ROLE, not a destructive act: done is undoable for five
             // seconds like every other resolve. The role is what puts it last and
             // in red, which is where a thumb expects the one verb that empties
             // the row.
-            Button(role: .destructive) { verbs.done() } label: {
+            Button(role: .destructive) { verbs.done(via: .click) } label: {
                 Label("Done", systemImage: "checkmark")
             }
         }

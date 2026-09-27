@@ -14,6 +14,12 @@ cd "$(dirname "$0")"
 BUILD=build/tests
 mkdir -p "$BUILD"
 
+# The analytics vocabulary is closed at RUNTIME (an unlisted event asserts in
+# a debug build and is dropped in release), and nothing else at build time
+# knows that. This is the check; see the script's header for the history.
+echo "==> analytics-lint"
+python3 ./analytics-lint.py
+
 run_suite() {
   local name="$1"
   shift

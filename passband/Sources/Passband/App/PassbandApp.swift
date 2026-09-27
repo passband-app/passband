@@ -77,6 +77,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The boot view never passes through route(to:), so its screen event
         // is recorded here or not at all.
         Analytics.screen(AppStore.shared.activeView.rawValue)
+        AppStore.shared.identifyPerson()
+    }
+
+    /// The person row is refreshed on every activation, not only at launch:
+    /// a thread style changed in Settings or a second mailbox added last week
+    /// should describe the install by the next session, not the next update.
+    func applicationDidBecomeActive(_ notification: Notification) {
+        AppStore.shared.identifyPerson()
     }
 
     // FALSE, because the app is a notifier: terminating on last-window-close

@@ -312,7 +312,7 @@ struct GroupsView: View {
     /// is inert rather than dead-ending in an empty reader.
     private func open(_ entry: GroupHistoryEntry) {
         guard let threadId = entry.thread_id else { return }
-        store.openThread(threadId)
+        store.openThread(threadId, from: .groups)
     }
 
     private func load() async {

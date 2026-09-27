@@ -1606,7 +1606,7 @@ struct ThreadViewer: View {
             let cur = queue.firstIndex(where: { $0.thread_id == threadId }),
             let next = queue[safe: cur + delta]
         else { return }
-        store.openThread(next.thread_id, queue: queue, readingMail: store.readingMail)
+        store.openThread(next.thread_id, queue: queue, readingMail: store.readingMail, from: .reader)
     }
 
     /// Plain done walks a Reading sender's stack, or closes an ordinary reader.
@@ -1617,7 +1617,7 @@ struct ThreadViewer: View {
             return
         }
         let liftedAt = liftOff()
-        await resolveOpenThread()
+        await resolveOpenThread(via: .key)
         await flightOut(since: liftedAt)
         // Same outlived-its-reader guard as the walk: if this finished after the
         // reader moved to another thread, closing would close THAT one.
@@ -1633,9 +1633,9 @@ struct ThreadViewer: View {
     /// notification) has no row, so it resolves the newest message directly.
     /// There is no undo chip on that path: undo restores a row to a band, and
     /// this one never came from one.
-    private func resolveOpenThread() async {
+    private func resolveOpenThread(via: Actions.Via) async {
         if let row = store.threadQueue.first(where: { $0.thread_id == threadId }) {
-            await Actions.done(row)
+            await Actions.done(row, via: via, on: .reader)
             return
         }
         guard let newest else { return }
@@ -1670,7 +1670,7 @@ struct ThreadViewer: View {
         /// swipe gets on a list row, which is the other way this app says done.
         private func doneFromBar() async {
             Haptics.commit()
-            await resolveOpenThread()
+            await resolveOpenThread(via: .click)
             // Same outlived-its-reader guard the other two verbs take: a resolve
             // that finished after the reader moved on must not close the thread
             // that moved in.
@@ -1717,7 +1717,7 @@ struct ThreadViewer: View {
         let next = store.nextQueuedThread
 
         let liftedAt = liftOff()
-        await resolveOpenThread()
+        await resolveOpenThread(via: .key)
         await flightOut(since: liftedAt)
 
         // The reader can be closed while the email is still leaving — Esc, or
@@ -1738,7 +1738,9 @@ struct ThreadViewer: View {
         // sleep is the whole reason this works: an offset that is set and
         // cleared inside one update has never been drawn, so there is nothing
         // for the animation to move away from.
-        store.openThread(next.thread_id, queue: queue, entering: edge, readingMail: store.readingMail)
+        store.openThread(
+            next.thread_id, queue: queue, entering: edge, readingMail: store.readingMail,
+            from: .reader)
         try? await Task.sleep(for: .milliseconds(30))
         guard store.threadId == next.thread_id else { return }
         withAnimation(Motion.deckCard) { store.threadFlight = .settled }
@@ -1765,7 +1767,9 @@ struct ThreadViewer: View {
         }
         let edge: AppStore.ThreadEdge =
             (store.readingStack || sameSender(next, queue[cur])) ? .trailing : .bottom
-        store.openThread(next.thread_id, queue: queue, entering: edge, readingMail: store.readingMail)
+        store.openThread(
+            next.thread_id, queue: queue, entering: edge, readingMail: store.readingMail,
+            from: .reader)
         try? await Task.sleep(for: .milliseconds(30))
         guard store.threadId == next.thread_id else { return }
         withAnimation(Motion.deckCard) { store.threadFlight = .settled }

@@ -414,7 +414,7 @@ struct SitrepView: View {
             KeyBinding("ArrowUp", "prev item") { moveEyes(-1) },
             KeyBinding("d", "mark done") {
                 guard eyesActionable, let u = reachable[safe: cursor.index] else { return }
-                Task { await Actions.done(u) }
+                Task { await Actions.done(u, via: .key, on: .sitrep) }
             },
             // `e` first tries the hovered reading card; with nothing hovered
             // it DECLINES so the for-your-eyes done handler runs instead.
@@ -426,12 +426,12 @@ struct SitrepView: View {
                     return true
                 }
                 guard eyesActionable, let u = reachable[safe: cursor.index] else { return false }
-                Task { await Actions.done(u) }
+                Task { await Actions.done(u, via: .key, on: .sitrep) }
                 return true
             },
             KeyBinding("Enter", "open email") {
                 guard eyesActionable, let u = reachable[safe: cursor.index] else { return }
-                store.openThread(u.thread_id, queue: eyesWalk(store))
+                store.openThread(u.thread_id, queue: eyesWalk(store), from: .sitrep)
             },
             // Same guard as every other verb here — inert unless a row is
             // actually highlighted. Reply opens the email and composes inside it,
@@ -869,7 +869,7 @@ private struct ObligationRow: View {
         // not decide whether `E` inside it has anywhere to go.
         Button {
             cursor.index = index
-            store.openThread(update.thread_id, queue: eyesWalk(store))
+            store.openThread(update.thread_id, queue: eyesWalk(store), from: .sitrep)
         } label: {
             HStack(spacing: 9) {
                 Avatar(sender: update.senderString, size: 22)

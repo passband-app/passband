@@ -104,14 +104,14 @@ struct DeeperSearchBand: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .disabled(store.assistant.running)
+                .disabled(!store.canOpenSearchLaneInChat)
                 .help(expandHelp)
             }
         }
     }
 
     private var expandHelp: String {
-        if store.assistant.running { return "The chat is busy answering something else." }
+        if !store.canOpenSearchLaneInChat { return "The chat is busy answering something else." }
         return "Continue in chat: the full answer, and room for follow-ups. ⌘Return"
     }
 

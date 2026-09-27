@@ -175,6 +175,9 @@ struct AskBar: View {
     }
 
     private func submit() {
+        // A watched lane that ended a beat ago may not have been handed over
+        // yet; do it now so the question lands in the chat, not the search.
+        store.finishLaneHandoff()
         guard canSubmit else { return }
         let text = question.trimmed
         question = ""

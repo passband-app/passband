@@ -293,11 +293,11 @@ struct SearchView: View {
         .buttonStyle(.plain)
         .foregroundStyle(Palette.accentInk)
         .disabled(opens
-            ? store.assistant.running
+            ? !store.canOpenSearchLaneInChat
             : !DeeperSearchPolicy.canRequest(query: store.search.query,
                 choice: prefs.deeperSearch, running: store.searchLane.running || store.preparingSearchEvidence))
         .help(opens
-            ? (store.assistant.running
+            ? (!store.canOpenSearchLaneInChat
                 ? "The chat is busy answering something else."
                 : "Open this conversation in chat for the full answer and follow-ups. ⌘Return")
             : prefs.deeperSearch == .off

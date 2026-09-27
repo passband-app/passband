@@ -2712,9 +2712,27 @@ final class AppStore {
     /// conversation, so a follow-up there is a real follow-up, and the search
     /// panel stays as it was underneath for Esc to come back to.
     func expandSearchLaneToChat() {
+        // ALREADY THERE: the chat holds this search as it stands, maybe with
+        // follow-ups on top. Copying it again would wipe those, so just show it.
+        if chatHoldsSearchLane {
+            askBarOpen = true
+            return
+        }
         guard canExpandSearchLane else { return }
         assistant.adopt(searchLane)
         askBarOpen = true
+    }
+
+    /// The ⌘K chat is this search's conversation, taken over since the lane
+    /// last said anything.
+    var chatHoldsSearchLane: Bool {
+        assistant.adoptedThrough != nil && assistant.adoptedThrough == searchLane.itemMark
+    }
+
+    /// Whether opening the lane in chat can do anything right now. The one
+    /// refusal is a busy chat holding some OTHER conversation.
+    var canOpenSearchLaneInChat: Bool {
+        chatHoldsSearchLane || !assistant.running
     }
 
     /// Whether ⌘↩ in search means "open what the lane said" rather than "ask".
@@ -2727,8 +2745,8 @@ final class AppStore {
     /// and takes it over when the run ends. A busy ⌘K chat is left alone, since
     /// either route would end with this replacing it mid-answer.
     func openSearchLaneInChat() {
-        guard searchLaneHasConversation, !assistant.running else { return }
-        if searchLane.running {
+        guard searchLaneHasConversation, canOpenSearchLaneInChat else { return }
+        if searchLane.running && !chatHoldsSearchLane {
             askBarOpen = true
             askBarWatchesLane = true
         } else {

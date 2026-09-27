@@ -253,11 +253,14 @@ struct OnboardingIntroView: View {
             .accessibilityLabel("Introduction, step \(page + 1) of 2")
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.28), value: page)
 
-            if organized {
-                Button("Back") { page -= 1 }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(Palette.inkDim)
-            }
+            // The phone goes back by swiping right; only the Mac needs a button.
+            #if os(macOS)
+                if organized {
+                    Button("Back") { page -= 1 }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Palette.inkDim)
+                }
+            #endif
 
             Spacer(minLength: 0)
             #if os(iOS)
@@ -269,6 +272,8 @@ struct OnboardingIntroView: View {
                     .accessibilityHint(organized ? continueHint : "")
                     .accessibilityAddTraits(.isButton)
                     .accessibilityAction { advance() }
+                    // And the swipe back, for the same reason.
+                    .accessibilityAction(named: "Back") { if page > 0 { page -= 1 } }
             #else
             Button("Skip intro", action: onContinue)
                 .buttonStyle(.plain)

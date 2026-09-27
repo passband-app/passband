@@ -394,9 +394,14 @@ struct IntroWordmark: View {
 /// The column is centered in a scroll view rather than between spacers: a long
 /// form (an error, an open disclosure) in a short window has to scroll, and
 /// spacers inside a scroll view never grow.
-struct IntroStage<Content: View>: View {
+struct IntroStage<Content: View, Footer: View>: View {
     var columnWidth: CGFloat = 440
     @ViewBuilder var content: (_ wide: Bool) -> Content
+    /// On a phone, pinned to the bottom of the screen where a thumb rests,
+    /// clear of the theme toggle's corner. A step with nothing to pin passes
+    /// EmptyView; a wide window never shows it, and the step draws its own
+    /// actions inline instead.
+    @ViewBuilder var footer: (_ wide: Bool) -> Footer
 
     var body: some View {
         GeometryReader { geometry in
@@ -414,16 +419,71 @@ struct IntroStage<Content: View>: View {
                     content(wide)
                         .frame(maxWidth: wide ? columnWidth : .infinity, alignment: .leading)
                         .padding(.horizontal, inset)
+                        // On a phone the column shares the screen's width
+                        // with the waves, and a tall step (the guide, a form)
+                        // reaches down into the bright bands. A soft band of
+                        // the scene's own night, sized to the content, keeps
+                        // it legible without moving the scene the intro left.
+                        .background {
+                            if !wide && !SquelchScene.shared.isUnavailable {
+                                ColumnScrim()
+                            }
+                        }
                         // Clears the wordmark above and the corner toggle below.
                         .padding(.vertical, inset + 56)
-                        .frame(maxWidth: .infinity, minHeight: geometry.size.height, alignment: .leading)
+                        // Narrow (the phone) hangs the column from the top.
+                        // Centered, it sat on the crest of the nearest bands,
+                        // where the copy and the fields were unreadable; up
+                        // here it is in the dark sky the top scrim keeps for
+                        // it, as the intro's story is. A window is always wide
+                        // and keeps the centered column beside the scene.
+                        .padding(.top, wide ? 0 : 24)
+                        .frame(
+                            maxWidth: .infinity, minHeight: wide ? geometry.size.height : 0,
+                            alignment: wide ? .leading : .topLeading)
                 }
                 .scrollBounceBehavior(.basedOnSize)
+                // An inset, not an overlay, so a column made tall by large
+                // text scrolls above the pinned actions instead of under them.
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    if !wide {
+                        footer(wide)
+                            .padding(.horizontal, inset)
+                            // The theme toggle's corner: 20pt in, ~36pt tall.
+                            .padding(.bottom, 68)
+                    }
+                }
                 IntroWordmark()
                     .modifier(IntroEntrance(delay: 0, distance: 4))
                     .padding(inset)
             }
         }
+    }
+}
+
+/// Behind a stage column on a phone: the scene's backdrop at most of its
+/// strength, feathered top and bottom past the content so it has no edge.
+private struct ColumnScrim: View {
+    var body: some View {
+        IntroNight.backdrop.opacity(0.78)
+            .mask {
+                LinearGradient(
+                    stops: [
+                        .init(color: .clear, location: 0),
+                        .init(color: .black, location: 0.18),
+                        .init(color: .black, location: 0.82),
+                        .init(color: .clear, location: 1),
+                    ],
+                    startPoint: .top, endPoint: .bottom)
+            }
+            .padding(.vertical, -56)
+            .allowsHitTesting(false)
+    }
+}
+
+extension IntroStage where Footer == EmptyView {
+    init(columnWidth: CGFloat = 440, @ViewBuilder content: @escaping (_ wide: Bool) -> Content) {
+        self.init(columnWidth: columnWidth, content: content, footer: { _ in EmptyView() })
     }
 }
 

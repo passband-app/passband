@@ -343,15 +343,37 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
    aspect ratio, just smaller. An accurate picture of the app beats a legible
    one of a layout the app never draws. */
 
-/* THE TRUST ROW. Three facts, no icons: the claims are specific enough to
-   carry themselves, and an icon beside each is how a list becomes slop. */
-.pb-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: clamp(1.5rem, 4vw, 3.5rem);
-  border-top: 1px solid var(--hair); padding-top: clamp(2rem, 4vw, 3rem); }
-@media (max-width: 760px) { .pb-facts { grid-template-columns: minmax(0, 1fr); row-gap: 2rem; } }
-.pb-fact h3 { margin: 0 0 0.55rem; font-size: 0.98rem; font-weight: 600; }
-.pb-fact p { margin: 0; color: var(--dim); font-size: 0.93rem; line-height: 1.6; }
+/* THE TRUST ROW. Three readouts on one instrument strip, the same shape as
+   /trust's spec strip: a channel label, the value in serif, one line under
+   it. No icons: the values carry themselves. Even borders all round, and the
+   analyzer's graticule faint behind, so it reads as part of the scope. */
+.pb-facts { position: relative; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  border: 1px solid rgba(130, 186, 245, 0.2); border-radius: 14px; overflow: hidden;
+  background: rgba(9, 13, 22, 0.7); }
+.pb-facts::before { content: ""; position: absolute; inset: 0; pointer-events: none;
+  background-image:
+    repeating-linear-gradient(90deg, rgba(130, 186, 245, 0.06) 0 1px, transparent 1px 5%),
+    repeating-linear-gradient(180deg, rgba(130, 186, 245, 0.06) 0 1px, transparent 1px 25%);
+  -webkit-mask-image: radial-gradient(ellipse 60% 120% at 50% 0%, #000 10%, transparent 75%);
+          mask-image: radial-gradient(ellipse 60% 120% at 50% 0%, #000 10%, transparent 75%); }
+.pb-fact { position: relative; padding: clamp(1.4rem, 3vw, 2rem) clamp(1.2rem, 2.6vw, 1.8rem);
+  border-left: 1px solid rgba(130, 186, 245, 0.1); }
+.pb-fact:first-child { border-left: 0; }
+.pb-fact dt { display: flex; align-items: center; gap: 0.55rem; font: 500 10.5px/1 var(--mono);
+  letter-spacing: 0.12em; text-transform: uppercase; color: var(--faintest); }
+.pb-fact dt b { color: var(--accent-ink); font-weight: 600; }
+.pb-fact dd { margin: 0; }
+.pb-fact-val { margin: 1rem 0 0.7rem; font-family: var(--serif); font-weight: 500;
+  font-size: clamp(1.9rem, 3.2vw, 2.5rem); line-height: 1; letter-spacing: -0.01em; color: var(--ink); }
+.pb-fact-val em { font-style: normal; color: var(--accent-ink); }
+.pb-fact p { margin: 0; color: var(--dim); font-size: 0.93rem; line-height: 1.6; max-width: 22rem; }
 .pb-fact a { color: var(--accent-ink); text-decoration: none; }
 .pb-fact a:hover { text-decoration: underline; }
+@media (max-width: 760px) {
+  .pb-facts { grid-template-columns: minmax(0, 1fr); }
+  .pb-fact { border-left: 0; border-top: 1px solid rgba(130, 186, 245, 0.1); }
+  .pb-fact:first-child { border-top: 0; }
+}
 
 .pb-close { text-align: center; display: flex; flex-direction: column; align-items: center; gap: 1.4rem; }
 .pb-close .pb-h2 { margin: 0; }
@@ -1535,29 +1557,38 @@ export function App() {
       </section>
 
       <section className="pb-section" style={{ paddingTop: 0 }}>
-        <div className="pb-facts">
+        <dl className="pb-facts">
           <div className="pb-fact">
-            <h3>Open source</h3>
-            <p>
-              MIT licensed. Every line is <a href="https://github.com/braelyn-ai/squelch">on GitHub</a>,
-              the threat model included.
-            </p>
+            <dt><b>01</b> License</dt>
+            <dd>
+              <div className="pb-fact-val">Open <em>source</em></div>
+              <p>
+                MIT licensed. Every line is <a href="https://github.com/braelyn-ai/squelch">on GitHub</a>,
+                the threat model included.
+              </p>
+            </dd>
           </div>
           <div className="pb-fact">
-            <h3>Run it where you like</h3>
-            <p>
-              <a href="/self-host">Self-host</a> the daemon on your own machine, or let us run an
-              isolated instance for you.
-            </p>
+            <dt><b>02</b> Where it runs</dt>
+            <dd>
+              <div className="pb-fact-val">Yours <em>or ours</em></div>
+              <p>
+                <a href="/self-host">Self-host</a> the daemon on your own machine, or let us run an
+                isolated instance for you.
+              </p>
+            </dd>
           </div>
           <div className="pb-fact">
-            <h3>Your mail isn’t training data</h3>
-            <p>
-              Not for us, not for our model provider. <a href="/trust">Where your mail goes</a>,
-              every wire of it.
-            </p>
+            <dt><b>03</b> Training on your mail</dt>
+            <dd>
+              <div className="pb-fact-val"><em>Never</em></div>
+              <p>
+                Not for us, not for our model provider. <a href="/trust">Where your mail goes</a>,
+                every wire of it.
+              </p>
+            </dd>
           </div>
-        </div>
+        </dl>
       </section>
 
       <section className="pb-section pb-close">

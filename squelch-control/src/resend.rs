@@ -259,7 +259,7 @@ fn html_body(code: &str, signup_url: &str) -> String {
 </tr></table>
 <p style="font: 500 34px/1.08 Newsreader, Georgia, 'Times New Roman', serif; letter-spacing: -0.01em; color: #E9EEF5; margin: 0 0 12px;">You're invited to Passband</p>
 <p style="margin: 0 0 28px;">Pick a username and connect Gmail. Your code is already filled in.</p>
-<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin: 0 0 36px;"><tr><td bgcolor="#121A26" style="background: #121A26; border: 1px solid #1f3656; border-top-color: #3a6a9e; border-radius: 14px;">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin: 0 0 36px;"><tr><td bgcolor="#121A26" style="background: #121A26; border: 1px solid #1f3656; border-radius: 14px;">
 <a href="{link}" style="display: inline-block; padding: 15px 30px; color: #DFE8F3; font-weight: 600; font-size: 15px; letter-spacing: 0.015em; text-decoration: none;">Set up your mailbox &rarr;</a>
 </td></tr></table>
 <p style="font-size: 13px; color: #808E9F; margin: 0 0 8px;">Or enter this code at <a href="{url}" style="color: #82BAF5;">{url}</a></p>

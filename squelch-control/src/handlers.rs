@@ -160,11 +160,9 @@ const MAX_NAME_READ: usize = 1024;
 /// unpadded base64url characters.
 const RANDOM_BYTES: usize = 32;
 
-/// What every invite failure says. ONE message for "no such code", "already
-/// used", "expired", "held by another signup", "revoked", and "not even shaped
-/// like a code", because anything that tells those apart is an oracle for the
-/// code space.
-const INVITE_REFUSED: &str = "That invite code is not usable.";
+/// What every invite failure says. Lives in [`pages`], which unfolds the
+/// invite field on exactly this message.
+const INVITE_REFUSED: &str = pages::INVITE_REFUSED;
 
 /// What a claimed label says, whichever authority reported it. Both this
 /// control plane's record and the warden's answer produce it, so a person

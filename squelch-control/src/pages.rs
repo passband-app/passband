@@ -455,7 +455,8 @@ body.console .sr {{ position: absolute; width: 1px; height: 1px; overflow: hidde
 /* THE ACCOUNT PAGES WEAR THE LANDING PAGE (passband-site/App.tsx), token for
    token: its night ground, its analyzer graticule, Newsreader for the words
    that matter, and ONE material for controls, the dark machined "rig" edged in
-   passband blue with a filament along its top. Somebody arrives here from that
+   passband blue. No highlight line along one edge: on a rounded control it
+   bends around the corners into an arc, which reads as generated UI. Somebody arrives here from that
    page, and the signup should read as the next screen of it rather than as a
    form somewhere else.
    DARK BY DEFAULT, like the landing page, which has no light mode at all.
@@ -469,7 +470,7 @@ body.auth {{ color-scheme: dark;
   --grid: rgba(130, 186, 245, 0.06); --rig-top: #152032; --rig-bottom: #0c121c;
   --rig-edge: rgba(78, 155, 234, 0.22); --rig-lit: rgba(78, 155, 234, 0.62);
   --rig-glow: rgba(78, 155, 234, 0.45); --rig-shadow: rgba(0, 0, 0, 0.5);
-  --rig-sheen: rgba(255, 255, 255, 0.07); --slot-rule: rgba(78, 155, 234, 0.18);
+  --slot-rule: rgba(78, 155, 234, 0.18);
   --cta-ink: #dfe8f3; --cta-ink-lit: #f4f8fd; --autofill: #101826;
   --serif: "Newsreader", ui-serif, Georgia, serif;
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
@@ -483,7 +484,7 @@ body.auth[data-theme="light"] {{ color-scheme: light;
   --grid: rgba(28, 99, 174, 0.07); --rig-top: #FFFFFF; --rig-bottom: #F3F6FA;
   --rig-edge: rgba(28, 99, 174, 0.24); --rig-lit: rgba(28, 99, 174, 0.6);
   --rig-glow: rgba(28, 99, 174, 0.22); --rig-shadow: rgba(20, 28, 38, 0.1);
-  --rig-sheen: rgba(255, 255, 255, 0.9); --slot-rule: rgba(28, 99, 174, 0.16);
+  --slot-rule: rgba(28, 99, 174, 0.16);
   --cta-ink: #141C26; --cta-ink-lit: #0B1C33; --autofill: #FFFFFF; }}
 /* The analyzer's graticule, faded out toward the edges exactly as the landing
    page fades it, so the ground has texture and no border. */
@@ -511,21 +512,17 @@ body.auth::before {{ content: ""; position: fixed; inset: 0; z-index: -1; pointe
 .auth :is(code, .code) {{ background: var(--hair); color: var(--ink); }}
 /* THE MATERIAL. One recipe for every control on these pages: a standalone
    button is a small piece of it, and the form is a bigger piece with slots
-   cut in it. Lit as one instrument on hover or focus, with the landing page's
-   filament along the top edge. */
+   cut in it. Lit as one instrument on hover or focus: the whole edge and a
+   glow, never one side of it. */
 .auth :is(.rig, a.button, button) {{ position: relative; isolation: isolate; overflow: hidden;
   border-radius: 0.9rem; border: 1px solid var(--rig-edge);
   background: linear-gradient(180deg, var(--rig-top), var(--rig-bottom));
-  box-shadow: inset 0 1px 0 var(--rig-sheen), 0 12px 30px var(--rig-shadow);
+  box-shadow: 0 12px 30px var(--rig-shadow);
   transition: transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1), border-color 0.4s ease,
     box-shadow 0.4s ease, color 0.4s ease; }}
-.auth :is(.rig, a.button, button)::before {{ content: ""; position: absolute; inset: 0 0 auto;
-  height: 1px; z-index: 2; opacity: 0.45; transition: opacity 0.4s ease;
-  background: linear-gradient(90deg, transparent, var(--accent), transparent); }}
 .auth :is(.rig:hover, .rig:focus-within, a.button:hover, a.button:focus-visible, button:hover, button:focus-visible) {{
   border-color: var(--rig-lit);
-  box-shadow: inset 0 1px 0 var(--rig-sheen), 0 0 34px -6px var(--rig-glow), 0 16px 38px var(--rig-shadow); }}
-.auth :is(.rig:hover, .rig:focus-within, a.button:hover, a.button:focus-visible, button:hover, button:focus-visible)::before {{ opacity: 1; }}
+  box-shadow: 0 0 34px -6px var(--rig-glow), 0 16px 38px var(--rig-shadow); }}
 .auth :is(a.button, button) {{ display: inline-flex; align-items: center; justify-content: center;
   gap: 0.6rem; width: auto; margin: 0; padding: 0.95rem 1.9rem; box-sizing: border-box;
   color: var(--cta-ink); font: 600 0.95rem/1.2 var(--sans); letter-spacing: 0.015em;
@@ -540,7 +537,13 @@ body.auth::before {{ content: ""; position: fixed; inset: 0; z-index: -1; pointe
 .auth .rig {{ display: flex; flex-direction: column; margin: 0; padding: 0; }}
 .auth .slot {{ position: relative; margin: 0; padding: 0.8rem 1.1rem 0.85rem;
   border-bottom: 1px solid var(--slot-rule); }}
-.auth .slot:focus-within {{ box-shadow: inset 2px 0 0 var(--rig-lit); }}
+.auth .slot:focus-within > label:first-child {{ color: var(--brand); }}
+/* A code that came filled in from the emailed link: out of the way until the
+   link under the form targets it. The link goes when the field comes back. */
+.auth .slot.folded:not(:target) {{ display: none; }}
+.auth main:has(.slot.folded:target) .swap {{ display: none; }}
+.auth .swap a {{ color: var(--faint); }}
+.auth .swap a:hover {{ color: var(--ink); }}
 .auth .slot > label:first-child {{ display: block; margin: 0 0 0.3rem; color: var(--faintest);
   font-size: 0.68rem; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; }}
 .auth .slot input {{ display: block; width: 100%; margin: 0; padding: 0; border: 0; border-radius: 0;
@@ -550,7 +553,6 @@ body.auth::before {{ content: ""; position: fixed; inset: 0; z-index: -1; pointe
   box-shadow: inset 0 0 0 100vw var(--autofill); transition: background-color 9999s; }}
 .auth .rig button {{ width: 100%; padding: 1rem 1.1rem; border: 0; border-radius: 0;
   background: none; box-shadow: none; }}
-.auth .rig button::before {{ display: none; }}
 .auth .rig button:is(:hover, :focus-visible) {{ transform: none; box-shadow: none;
   background: linear-gradient(180deg, transparent, var(--slot-rule)); }}
 .auth .rig button:focus-visible {{ outline-offset: -3px; }}
@@ -608,6 +610,13 @@ body.auth::before {{ content: ""; position: fixed; inset: 0; z-index: -1; pointe
         .into_response()
 }
 
+/// What every invite failure says. ONE message for "no such code", "already
+/// used", "expired", "held by another signup", "revoked", and "not even shaped
+/// like a code", because anything that tells those apart is an oracle for the
+/// code space. Here rather than in `handlers` because [`signup_form`] keys the
+/// invite field's visibility on it.
+pub const INVITE_REFUSED: &str = "That invite code is not usable.";
+
 /// The signup form.
 ///
 /// TWO FIELDS AND ONE BUTTON ARE THE PAGE, and everything else is arranged
@@ -622,6 +631,14 @@ body.auth::before {{ content: ""; position: fixed; inset: 0; z-index: -1; pointe
 /// `field-sizing` lets the input fill the box instead and the suffix sits at
 /// the right edge, which still says which namespace is being claimed. The box
 /// is a second `<label>` so a click on the suffix lands in the field.
+///
+/// A CODE THAT ARRIVED FILLED IN IS FOLDED AWAY. Somebody who clicked the
+/// emailed link has nothing to do with the invite field, so it is hidden and
+/// the form is one field. It is still in the form (a `display: none` input
+/// submits like any other), and a quiet link under the form reveals it through
+/// `:target`, which again needs no script. It unfolds by itself when the code
+/// is the thing that was refused, because a field somebody has to fix cannot be
+/// one they have to find first.
 ///
 /// THE GRANT IS STILL STATED BESIDE THE BUTTON, in one line naming all three
 /// permissions, because the consent screen that follows is Google's and says it
@@ -658,6 +675,17 @@ pub fn signup_form(
     error: Option<&str>,
 ) -> Response {
     let error_html = stop_note(error);
+    let folded = !invite.trim().is_empty() && error != Some(INVITE_REFUSED);
+    let (invite_class, invite_focus, label_focus, swap_html) = if folded {
+        (
+            r#"slot folded" id="code"#,
+            "",
+            " autofocus",
+            r##"<p class="fine swap"><a href="#code">Use a different invite code</a></p>"##,
+        )
+    } else {
+        ("slot", " autofocus", "", "")
+    };
     // The link out, or nothing at all. Built from the configured origin, which
     // this crate owns; it is escaped anyway, because the rule is that nothing is
     // interpolated raw.
@@ -677,21 +705,21 @@ pub fn signup_form(
 <p class="lead">Pick a username, then connect Gmail.</p>
 {error_html}
 <form class="rig" method="post" action="/signup">
-<div class="slot">
+<div class="{invite_class}">
 <label for="invite">Invite code</label>
 <input type="text" id="invite" name="invite" value="{invite}" placeholder="XXXX-XXXX-XXXX-XXXX"
-  autocomplete="off" autocapitalize="off" spellcheck="false"
-  autofocus required>
+  autocomplete="off" autocapitalize="off" spellcheck="false"{invite_focus} required>
 </div>
 <div class="slot">
 <label for="label">Your Passband username</label>
 <label class="affix"><input type="text" id="label" name="label" value="{label}" placeholder="yourname"
-  aria-describedby="label-hint" maxlength="30" autocomplete="off" autocapitalize="off" spellcheck="false" required><span class="domain">.{domain}</span></label>
+  aria-describedby="label-hint" maxlength="30" autocomplete="off" autocapitalize="off" spellcheck="false"{label_focus} required><span class="domain">.{domain}</span></label>
 </div>
 <button type="submit">Continue with Google <span class="arrow" aria-hidden="true">→</span></button>
 </form>
 <p class="fine" id="label-hint">Usernames are 3 to 30 lowercase letters, numbers or hyphens.</p>
 <p class="fine">Google will ask to read, change, and send your Gmail. Passband needs all three.</p>
+{swap_html}
 {waitlist_html}
 <details>
 <summary>Gmail access and privacy</summary>
@@ -704,6 +732,10 @@ pub fn signup_form(
 </details>"#,
             error_html = error_html,
             waitlist_html = waitlist_html,
+            invite_class = invite_class,
+            invite_focus = invite_focus,
+            label_focus = label_focus,
+            swap_html = swap_html,
             invite = escape_html(invite),
             label = escape_html(label),
             domain = escape_html(base_domain),
@@ -1525,6 +1557,46 @@ mod tests {
             field.ends_with(r#"<span class="domain">.passband.email</span>"#),
             "{field}"
         );
+    }
+
+    /// A code that came filled in is folded behind a link, and the username is
+    /// what gets focus. An empty field, or a refused code, stays in the open.
+    #[tokio::test]
+    async fn a_prefilled_invite_is_folded_until_it_is_the_problem() {
+        let code = "ABCD-EFGH-JKMN-PQRS";
+        let folded = document_of(signup_form("passband.email", None, "", code, None)).await;
+        assert!(
+            folded.contains(r#"class="slot folded" id="code""#),
+            "{folded}"
+        );
+        assert!(folded.contains(&format!(r#"value="{code}""#)), "{folded}");
+        assert!(folded.contains(r##"href="#code""##), "{folded}");
+        let (_, username) = folded.split_once(r#"id="label""#).unwrap();
+        let (username, _) = username.split_once('>').unwrap();
+        assert!(username.contains("autofocus"), "{username}");
+
+        // A username problem keeps the code folded: it was not the problem.
+        let taken = document_of(signup_form(
+            "passband.email",
+            None,
+            "ada",
+            code,
+            Some("That username is already taken."),
+        ))
+        .await;
+        assert!(taken.contains("slot folded"), "{taken}");
+
+        for open in [
+            signup_form("passband.email", None, "", "", None),
+            signup_form("passband.email", None, "ada", code, Some(INVITE_REFUSED)),
+        ] {
+            let html = document_of(open).await;
+            assert!(!html.contains("slot folded"), "{html}");
+            assert!(!html.contains(r##"href="#code""##), "{html}");
+            let (_, invite) = html.split_once(r#"id="invite""#).unwrap();
+            let (invite, _) = invite.split_once('>').unwrap();
+            assert!(invite.contains("autofocus"), "{invite}");
+        }
     }
 
     /// The invite field shows the shape of a code this deployment actually

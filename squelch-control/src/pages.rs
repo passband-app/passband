@@ -437,6 +437,8 @@ body.auth {{ color-scheme: light; --brand: #1c63ae; background: #fff; color: #14
 .auth :is(button, a.button) {{ box-sizing: border-box; width: 100%; text-align: center;
   padding: 0.85rem 1.25rem; border-radius: 8px; background: #141c26; color: #fff; }}
 .auth :is(button, a.button):hover {{ background: #293746; }}
+.auth a.button {{ margin-bottom: 0; }}
+.auth p:has(> a.button) + .hint {{ margin-top: -0.25rem; }}
 .auth :is(.hint, .muted, .suffix) {{ color: #455465; font-size: 0.875rem; }}
 .auth .alt {{ border: 0; padding: 0; text-align: center; margin-bottom: 2rem; }}
 .auth details {{ border-color: #e4e7eb; font-size: 0.875rem; color: #455465; }}
@@ -456,20 +458,6 @@ body.auth {{ color-scheme: light; --brand: #1c63ae; background: #fff; color: #14
   .auth .affix input {{ flex: 0 1 auto; width: auto; field-sizing: content; }}
 }}
 .auth .affix .domain {{ flex: none; white-space: nowrap; color: #8a96a3; }}
-/* The finishing page's two steps: a label on the left, its button on the right,
-   and the second one is the primary. */
-.auth ol.steps {{ list-style: none; counter-reset: step; padding: 0; margin: 0 0 1.75rem;
-  border-top: 1px solid #e4e7eb; }}
-.auth .steps li {{ counter-increment: step; display: flex; align-items: center; gap: 1rem;
-  margin: 0; padding: 1rem 0; border-bottom: 1px solid #e4e7eb; }}
-.auth .steps li::before {{ content: counter(step); flex: none; width: 1.6rem; height: 1.6rem;
-  border-radius: 50%; background: #f2f4f7; color: #455465; font-size: 0.85rem; font-weight: 600;
-  display: grid; place-items: center; }}
-.auth .steps span {{ flex: 1; font-weight: 500; }}
-.auth .steps a.button {{ width: 12rem; flex: none; margin: 0; }}
-.auth .steps + details {{ border-top: 0; padding-top: 0; }}
-.auth a.button.secondary {{ background: none; color: inherit; box-shadow: inset 0 0 0 1px #cbd1d8; }}
-.auth a.button.secondary:hover {{ background: #f2f4f7; }}
 body.auth[data-theme="dark"] {{ color-scheme: dark; --brand: #82baf5;
   background: #0e141d; color: #e9eef5; }}
 .auth[data-theme="dark"] :is(.lead, .hint, .muted, .suffix, details) {{ color: #a8b4c4; }}
@@ -477,11 +465,6 @@ body.auth[data-theme="dark"] {{ color-scheme: dark; --brand: #82baf5;
 .auth[data-theme="dark"] label.affix {{ background: #131a24; border-color: #39434e; }}
 .auth[data-theme="dark"] .affix input {{ background: none; }}
 .auth[data-theme="dark"] .affix .domain {{ color: #7b8796; }}
-.auth[data-theme="dark"] :is(ol.steps, .steps li) {{ border-color: #303740; }}
-.auth[data-theme="dark"] .steps li::before {{ background: #1e2835; color: #a8b4c4; }}
-.auth[data-theme="dark"] a.button.secondary {{ background: none; color: #e9eef5;
-  box-shadow: inset 0 0 0 1px #39434e; }}
-.auth[data-theme="dark"] a.button.secondary:hover {{ background: #1e2835; }}
 .auth[data-theme="dark"] :is(button, a.button) {{ background: #e9eef5; color: #0e141d; }}
 .auth[data-theme="dark"] :is(button, a.button):hover {{ background: #fff; }}
 .auth[data-theme="dark"] details {{ border-color: #303740; }}
@@ -491,8 +474,6 @@ body.auth[data-theme="dark"] {{ color-scheme: dark; --brand: #82baf5;
   body.auth {{ padding: 1.5rem 1.25rem 2.5rem; }}
   .auth main {{ margin-top: 3rem; }}
   .auth h1 {{ font-size: 1.75rem; }}
-  .auth .steps li {{ flex-wrap: wrap; }}
-  .auth .steps a.button {{ width: 100%; }}
 }}
 </style>
 </head>
@@ -627,26 +608,13 @@ pub fn signup_form(
     )
 }
 
-/// The end of the flow: the tenant exists, the daemon is running, and the user
-/// needs to get the app connected to it.
+/// The end of the signup flow: the tenant exists and the daemon is running.
 ///
-/// The code and the URL are `user-select: all` text rather than a copy button,
-/// because a copy button is JavaScript and this page has none. The deep link is
-/// the fast path; typing the code into the app is the path that always works.
-///
-/// THE DISCLOSURE'S SUMMARY NAMES THE SYMPTOM, not the mechanism. The path that
-/// always works is folded away, and the person who needs it is the person for
-/// whom the button just did nothing: a summary reading "connect manually" is
-/// findable only by somebody who already knows that is what went wrong, which
-/// is the one thing they do not know. See [`app_signed_in`], where the same
-/// line replaced a standing "if that button does nothing" heading.
-pub fn success(
-    tenant_url: &str,
-    pair_code: &str,
-    minutes: i64,
-    analytics_id: Option<&str>,
-) -> Response {
-    let link = deep_link(tenant_url, pair_code, analytics_id);
+/// ONE BUTTON, THE DOWNLOAD. Somebody arriving from an invite email has no app
+/// yet, and the app's own onboarding signs in with Gmail and pairs itself
+/// through [`app_signed_in`], so this page carries no deep link and no pairing
+/// code: a second connect path here was a step the app already does.
+pub fn success(tenant_url: &str) -> Response {
     let host = tenant_url
         .trim_start_matches("https://")
         .trim_start_matches("http://");
@@ -656,38 +624,11 @@ pub fn success(
         &format!(
             r#"<h1>Your mailbox is ready</h1>
 <p class="lead">{host}</p>
-<ol class="steps">
-<li><span>Get the Mac app</span><a class="button secondary" href="{download}">Download Passband</a></li>
-<li><span>Connect it to your mailbox</span><a class="button" href="{link}">Open Passband</a></li>
-</ol>
-{manual}"#,
+<p><a class="button" href="{download}">Download Passband for Mac</a></p>
+<p class="hint">Open it and sign in with Gmail to finish.</p>"#,
             host = escape_html(host),
-            link = escape_html(&link),
             download = DOWNLOAD_URL,
-            manual = manual_connect(
-                tenant_url,
-                pair_code,
-                minutes,
-                "request a new one in Passband"
-            ),
         ),
-    )
-}
-
-/// The fallback both finishing pages fold away: the server and pairing code as
-/// selectable text, for when the deep link did nothing.
-fn manual_connect(tenant_url: &str, pair_code: &str, minutes: i64, if_expired: &str) -> String {
-    format!(
-        r#"<details>
-<summary>Button did nothing? Connect manually</summary>
-<p>In Passband, choose Sign in with Gmail and enter:</p>
-<p><code>{url}</code></p>
-<p><span class="code">{code}</span></p>
-<p>Works once, expires in {minutes} minutes. If it lapses, {if_expired}.</p>
-</details>"#,
-        url = escape_html(tenant_url),
-        code = escape_html(pair_code),
-        if_expired = escape_html(if_expired),
     )
 }
 
@@ -732,11 +673,18 @@ pub fn app_signed_in(
 <p class="lead">{email}</p>
 <p><a class="button" href="{link}">Open Passband</a></p>
 <p class="alt">Need the app? <a href="{download}">Download Passband</a>.</p>
-{manual}"#,
+<details>
+<summary>Button did nothing? Connect manually</summary>
+<p>In Passband, choose Sign in with Gmail and enter:</p>
+<p><code>{url}</code></p>
+<p><span class="code">{code}</span></p>
+<p>Works once, expires in {minutes} minutes. If it lapses, sign in again.</p>
+</details>"#,
             email = escape_html(account_email),
+            url = escape_html(tenant_url),
+            code = escape_html(pair_code),
             link = escape_html(&link),
             download = DOWNLOAD_URL,
-            manual = manual_connect(tenant_url, pair_code, minutes, "sign in again"),
         ),
     )
 }
@@ -1399,7 +1347,7 @@ mod tests {
         );
     }
 
-    /// Both flow-finishing pages carry the aid'd link when a person is known,
+    /// The app sign-in page carries the aid'd link when a person is known,
     /// HTML-escaped like every href on them. The `&amp;` is the point of the
     /// assertion: a raw `&` in an attribute is the kind of thing only a test
     /// notices.
@@ -1409,13 +1357,6 @@ mod tests {
         let expected = format!(
             "passband://pair?url=https%3A%2F%2Fada.passband.email&amp;code=ABCD-EFGH&amp;aid={aid}"
         );
-        let success_html = body_of(success(
-            "https://ada.passband.email",
-            "ABCD-EFGH",
-            10,
-            Some(aid),
-        ))
-        .await;
         let app_html = body_of(app_signed_in(
             "ada@example.com",
             "https://ada.passband.email",
@@ -1424,9 +1365,7 @@ mod tests {
             Some(aid),
         ))
         .await;
-        for html in [success_html, app_html] {
-            assert!(html.contains(&expected), "{html}");
-        }
+        assert!(app_html.contains(&expected), "{app_html}");
     }
 
     /// The form is the only place the three grants are explained in the
@@ -1540,22 +1479,22 @@ mod tests {
         assert!(html.contains("&lt;script&gt;"));
     }
 
+    /// The signup's last page is the download and nothing else: the app's own
+    /// onboarding signs in and pairs, so no code and no deep link ride here.
     #[tokio::test]
-    async fn the_success_page_carries_the_code_the_url_and_the_link() {
-        let html = body_of(success("https://ada.passband.email", "ABCD-EFGH", 10, None)).await;
-        assert!(html.contains("ABCD-EFGH"));
-        assert!(html.contains("https://ada.passband.email"));
+    async fn the_success_page_is_the_download_and_nothing_else() {
+        let html = document_of(success("https://ada.passband.email")).await;
+        assert!(html.contains("ada.passband.email"), "{html}");
         assert!(
-            html.contains(
-                "passband://pair?url=https%3A%2F%2Fada.passband.email&amp;code=ABCD-EFGH"
-            )
+            html.contains(&format!(r#"href="{DOWNLOAD_URL}""#)),
+            "{html}"
         );
-        assert!(html.contains("passband.app"));
-        assert!(!html.contains("<script"));
+        assert!(!html.contains("passband://"), "{html}");
+        assert!(!html.contains("<details"), "{html}");
+        assert!(!html.contains("<script"), "{html}");
     }
 
-    /// The fallback is FOLDED AWAY BUT LABELLED WITH THE SYMPTOM, on both pages
-    /// that end a flow.
+    /// The app page's fallback is FOLDED AWAY BUT LABELLED WITH THE SYMPTOM.
     ///
     /// A `contains` over the whole document cannot tell a code somebody can read
     /// from a code sealed inside a shut `<details>`, which is how the pairing
@@ -1566,37 +1505,33 @@ mod tests {
     /// than what to do about it. Moving the code back into the open should fail
     /// here and be a deliberate edit to this test.
     #[tokio::test]
-    async fn the_finishing_pages_label_the_fallback_with_the_symptom() {
-        for html in [
-            body_of(success("https://ada.passband.email", "ABCD-EFGH", 10, None)).await,
-            body_of(app_signed_in(
-                "ada@example.com",
-                "https://ada.passband.email",
-                "ABCD-EFGH",
-                10,
-                None,
-            ))
-            .await,
-        ] {
-            let (open, folded) = html.split_once("<details>").expect("{html}");
-            // The deep link is the page; the code is the way out when it fails.
-            // Asserted on the wrapper, not the code: the `href` above carries
-            // the same string, and a code inside a link is not one to read off.
-            assert!(open.contains("passband://pair?url="), "{html}");
-            assert!(!open.contains(r#"<span class="code">"#), "{html}");
-            assert!(
-                folded.contains(r#"<span class="code">ABCD-EFGH</span>"#),
-                "{html}"
-            );
-            // Shut, so the summary is the whole of what gets read.
-            assert!(!html.contains("<details open"), "{html}");
-            let summary = folded
-                .split_once("</summary>")
-                .expect("{html}")
-                .0
-                .to_lowercase();
-            assert!(summary.contains("did nothing"), "{html}");
-        }
+    async fn the_app_page_labels_the_fallback_with_the_symptom() {
+        let html = body_of(app_signed_in(
+            "ada@example.com",
+            "https://ada.passband.email",
+            "ABCD-EFGH",
+            10,
+            None,
+        ))
+        .await;
+        let (open, folded) = html.split_once("<details>").expect("{html}");
+        // The deep link is the page; the code is the way out when it fails.
+        // Asserted on the wrapper, not the code: the `href` above carries
+        // the same string, and a code inside a link is not one to read off.
+        assert!(open.contains("passband://pair?url="), "{html}");
+        assert!(!open.contains(r#"<span class="code">"#), "{html}");
+        assert!(
+            folded.contains(r#"<span class="code">ABCD-EFGH</span>"#),
+            "{html}"
+        );
+        // Shut, so the summary is the whole of what gets read.
+        assert!(!html.contains("<details open"), "{html}");
+        let summary = folded
+            .split_once("</summary>")
+            .expect("{html}")
+            .0
+            .to_lowercase();
+        assert!(summary.contains("did nothing"), "{html}");
     }
 
     /// THE DOWNLOAD LIVES AT THE END OF THE FLOW, not on the landing page: that
@@ -1613,7 +1548,7 @@ mod tests {
     #[tokio::test]
     async fn the_pages_that_finish_a_flow_hand_over_the_client() {
         for html in [
-            body_of(success("https://ada.passband.email", "ABCD-EFGH", 10, None)).await,
+            body_of(success("https://ada.passband.email")).await,
             body_of(app_signed_in(
                 "ada@example.com",
                 "https://ada.passband.email",
@@ -1627,7 +1562,7 @@ mod tests {
                 html.contains(&format!(r#"href="{DOWNLOAD_URL}""#)),
                 "{html}"
             );
-            assert!(html.contains(">Download Passband</a>"), "{html}");
+            assert!(html.contains(">Download Passband"), "{html}");
         }
         // And nowhere else. The signup form is somebody deciding whether to
         // hand over their mail, and an app they cannot yet point at anything is
@@ -2073,7 +2008,7 @@ mod tests {
                 Some("no"),
             ))
             .await,
-            body_of(success("https://ada.passband.email", "ABCD-EFGH", 10, None)).await,
+            body_of(success("https://ada.passband.email")).await,
             body_of(app_signed_in(
                 "ada@example.com",
                 "https://ada.passband.email",
@@ -2119,7 +2054,7 @@ mod tests {
     async fn every_page_wears_the_mark_and_fetches_nothing_to_do_it() {
         for html in [
             body_of(signup_form("passband.email", None, "", "", None)).await,
-            body_of(success("https://ada.passband.email", "ABCD-EFGH", 10, None)).await,
+            body_of(success("https://ada.passband.email")).await,
             body_of(app_signed_in(
                 "ada@example.com",
                 "https://ada.passband.email",
@@ -2170,7 +2105,7 @@ mod tests {
     async fn every_page_carries_the_security_headers() {
         for r in [
             signup_form("passband.email", None, "", "", None),
-            success("https://ada.passband.email", "ABCD-EFGH", 10, None),
+            success("https://ada.passband.email"),
             problem(StatusCode::BAD_REQUEST, "Nope", "Try again."),
             console_problem(StatusCode::BAD_REQUEST, "Nope", "Try again."),
             admin_login(None),

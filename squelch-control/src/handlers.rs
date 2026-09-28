@@ -1237,8 +1237,8 @@ pub async fn oauth_callback(
     // here leaves the pending tenant standing, which is the retriable state the
     // page below describes: no credential was written, no invite was spent, and
     // the same address is still reserved for this mailbox.
-    let pairing = match state.warden().put_credentials(&label, &ciphertext).await {
-        Ok(p) => p,
+    match state.warden().put_credentials(&label, &ciphertext).await {
+        Ok(_) => {}
         Err(WardenError::AlreadyProvisioned) => {
             release().await;
             log_orphaned_vks(&label, vk_id.as_deref(), assistant_vk_id.as_deref());
@@ -1348,8 +1348,8 @@ pub async fn oauth_callback(
     }
 
     // THE FUNNEL ROW, and the last thing on this path that is allowed to fail.
-    // A mailbox exists, the code is spent, and the person is looking at a
-    // pairing code; a database that will not take a row about it is a reporting
+    // A mailbox exists, the code is spent, and the person is looking at the
+    // download; a database that will not take a row about it is a reporting
     // problem, not their problem, so this logs loudly and costs them nothing.
     //
     // AFTER THE CONSUME, and that ordering is free rather than load-bearing:
@@ -1361,7 +1361,7 @@ pub async fn oauth_callback(
     // arm would still record this person by the Google account they signed up
     // with, which is the outcome worth having.
     //
-    let user = match state
+    match state
         .store()
         .record_signup(invite_id, &grant.account_email, &label, chrono::Utc::now())
         .await
@@ -1371,7 +1371,6 @@ pub async fn oauth_callback(
             // is in scope on this line and does not go in it, and neither does
             // the analytics id, which must never be logged beside one.
             tracing::info!(user_id = record.user_id, label = %label, "signup recorded on the funnel");
-            Some(record)
         }
         Err(e) => {
             tracing::error!(
@@ -1379,22 +1378,15 @@ pub async fn oauth_callback(
                 label = %label,
                 "PROVISIONED BUT NOT ON THE FUNNEL: the mailbox exists and no users row records it"
             );
-            None
         }
-    };
+    }
 
     tracing::info!(label = %label, "tenant provisioned");
 
-    // The analytics id rides the pairing deep link so the app can adopt it as
-    // its PostHog distinct_id — the funnel-to-behavior join that never names
-    // an address. `None` when the funnel stamp failed above: the pairing does
-    // not wait on analytics, and the next /app/auth sign-in heals the gap.
-    done(pages::success(
-        &config.tenant_url(&label),
-        &pairing.pair_code,
-        PAIRING_MINUTES,
-        user.as_ref().map(|u| u.analytics_id.as_str()),
-    ))
+    // No pairing code on this page: the app's own onboarding signs in and
+    // pairs through /app/auth, which is also where the analytics id joins the
+    // app.
+    done(pages::success(&config.tenant_url(&label)))
 }
 
 /// The console login's half of the callback: prove who is signed in, hold it
@@ -1779,7 +1771,7 @@ fn console_unavailable() -> Response {
     )
 }
 
-/// The pairing window, in minutes, for the success page's copy. Derived from
+/// The pairing window, in minutes, for app sign-in page.s copy. Derived from
 /// the DAEMON's constant rather than typed here, because the warden mints that
 /// code by running `squelchd pair` on the box: if the daemon's TTL ever moves,
 /// this sentence moves with it instead of quietly lying to the user.

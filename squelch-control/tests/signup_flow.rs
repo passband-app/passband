@@ -1022,14 +1022,13 @@ async fn signup_provisions_a_tenant_and_hands_back_a_pairing_code() {
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
 
-    // The success page: code, tenant URL, deep link, and pairing instructions.
-    assert!(body.contains("ABCD-EFGH"), "{body}");
-    assert!(body.contains("https://ada.passband.test"), "{body}");
-    assert!(
-        body.contains("passband://pair?url=https%3A%2F%2Fada.passband.test&amp;code=ABCD-EFGH"),
-        "{body}"
-    );
-    assert!(body.contains("passband.app"));
+    // The success page: the mailbox's host and the download. The app's own
+    // onboarding pairs, so the warden's code never reaches this page.
+    assert!(body.contains("Your mailbox is ready"), "{body}");
+    assert!(body.contains("ada.passband.test"), "{body}");
+    assert!(body.contains("passband.app/download"), "{body}");
+    assert!(!body.contains("ABCD-EFGH"), "{body}");
+    assert!(!body.contains("passband://"), "{body}");
     // No token, ever, on a page.
     assert!(!body.contains(REFRESH_TOKEN));
     assert!(!body.contains(ACCESS_TOKEN));
@@ -1321,7 +1320,7 @@ async fn a_failed_credential_install_leaves_a_retriable_signup() {
     h.rec.lock().unwrap().fail_credentials = false;
     let (status, body) = h.run_signup("ada", &invite).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(body.contains("ABCD-EFGH"), "{body}");
+    assert!(body.contains("Your mailbox is ready"), "{body}");
 
     // ONE identity for this tenant across both attempts, and both ciphertexts
     // open with it: the retry re-used the same recipient rather than orphaning
@@ -1770,7 +1769,7 @@ async fn a_wider_grant_than_we_asked_for_is_accepted() {
     let invite = h.invite_code.clone();
     let (status, body) = h.run_signup("ada", &invite).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(body.contains("ABCD-EFGH"), "{body}");
+    assert!(body.contains("Your mailbox is ready"), "{body}");
 }
 
 /// With the Bifrost trio configured, signup mints TWO virtual keys per tenant
@@ -1865,7 +1864,7 @@ async fn a_failed_key_install_still_records_the_vk_id() {
     let invite = h.invite_code.clone();
     let (status, body) = h.run_signup("ada", &invite).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(body.contains("ABCD-EFGH"), "{body}");
+    assert!(body.contains("Your mailbox is ready"), "{body}");
     assert!(
         !body.contains(&vk_value_for("tenant-ada")),
         "the key value must never reach a page"
@@ -1903,7 +1902,7 @@ async fn a_bifrost_outage_does_not_refuse_a_signup() {
     let invite = h.invite_code.clone();
     let (status, body) = h.run_signup("ada", &invite).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(body.contains("ABCD-EFGH"), "{body}");
+    assert!(body.contains("Your mailbox is ready"), "{body}");
 
     {
         let rec = h.rec.lock().unwrap();
@@ -1942,7 +1941,7 @@ async fn an_assistant_mint_failure_still_installs_the_triage_key() {
     let invite = h.invite_code.clone();
     let (status, body) = h.run_signup("ada", &invite).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(body.contains("ABCD-EFGH"), "{body}");
+    assert!(body.contains("Your mailbox is ready"), "{body}");
 
     {
         let rec = h.rec.lock().unwrap();
@@ -1985,7 +1984,7 @@ async fn a_triage_mint_failure_still_installs_the_assistant_key() {
     let invite = h.invite_code.clone();
     let (status, body) = h.run_signup("ada", &invite).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(body.contains("ABCD-EFGH"), "{body}");
+    assert!(body.contains("Your mailbox is ready"), "{body}");
 
     {
         let rec = h.rec.lock().unwrap();

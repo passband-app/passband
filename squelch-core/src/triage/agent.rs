@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const PROMPT_VERSION: &str = "agent-triage-v3";
+pub const PROMPT_VERSION: &str = "agent-triage-v4";
 const SYSTEM: &str = include_str!("prompts/agent-v1.txt");
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "step", rename_all = "snake_case")]
@@ -900,6 +900,10 @@ mod tests {
         // must say what an invitation is, not only list the auth kinds.
         assert!(SYSTEM.contains("An invitation is not authentication"));
         assert!(SYSTEM.contains("one-click join or accept link"));
+        // A Passband invite (one-time signup code, 30-day expiry) was sealed as
+        // verification: the code box looked like an OTP.
+        assert!(SYSTEM.contains("invite, referral, promo, or waitlist code"));
+        assert!(SYSTEM.contains("invite or referral or promo codes"));
         assert!(!SYSTEM.contains('\u{2014}'), "em dash in the agent prompt");
     }
     #[test]

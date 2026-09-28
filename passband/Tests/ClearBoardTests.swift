@@ -22,6 +22,7 @@ struct ClearBoardTests {
         runCountsBackFromToday()
         markTodayPersistsAndExtends()
         tallyReadsRightForEveryShape()
+        windowSaysWhereTheUTCDayStarts()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -82,6 +83,32 @@ struct ClearBoardTests {
                 expect(!s.contains("\u{2014}"), "no em dashes in copy: \(s)")
             }
         }
+    }
+
+    static func windowSaysWhereTheUTCDayStarts() {
+        func zone(_ id: String) -> Calendar {
+            var c = Calendar(identifier: .gregorian)
+            c.timeZone = TimeZone(identifier: id)!
+            return c
+        }
+        func at(_ iso: String) -> Date { ISO8601DateFormatter().date(from: iso)! }
+        // 3 PM in LA on the 10th is 22:00 UTC: still UTC day the 10th, which
+        // began at 5 PM LA time on the 9th.
+        let la = ClearCopy.window(utcDay: "2026-09-10", now: at("2026-09-10T22:00:00Z"), calendar: zone("America/Los_Angeles"))
+        expect(la.hasPrefix("since 5") && la.hasSuffix("yesterday"), "LA afternoon: \(la)")
+        // 7 PM in LA on the 10th is the 11th in UTC, which began at 5 PM today.
+        let eve = ClearCopy.window(utcDay: "2026-09-11", now: at("2026-09-11T02:00:00Z"), calendar: zone("America/Los_Angeles"))
+        expect(eve.hasPrefix("since 5") && !eve.hasSuffix("yesterday"), "LA evening: \(eve)")
+        // Berlin in summer: the UTC day starts at 2 AM local, today.
+        let ber = ClearCopy.window(utcDay: "2026-09-10", now: at("2026-09-10T10:00:00Z"), calendar: zone("Europe/Berlin"))
+        expect(ber.hasPrefix("since 2") && !ber.hasSuffix("yesterday"), "Berlin: \(ber)")
+        // UTC itself is the one place the daemon's day is the local day.
+        let utc = ClearCopy.window(utcDay: "2026-09-10", now: at("2026-09-10T10:00:00Z"), calendar: zone("UTC"))
+        expect(utc == "today", "UTC: \(utc)")
+        expect(ClearCopy.tally(received: 3, noise: 3, attention: 0, window: "since 5:00 PM yesterday")
+            == "3 emails came in since 5:00 PM yesterday. 3 squelched as noise. None needed you.", "window in copy")
+        expect(ClearCopy.tally(received: 0, noise: 0, attention: 0, window: "since 1:00 AM")
+            == "No mail since 1:00 AM. Suspiciously peaceful.", "empty window in copy")
     }
 
     static func expect(_ cond: Bool, _ what: String) {

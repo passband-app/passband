@@ -29,6 +29,9 @@ struct PhosphorParams: Equatable, Sendable {
     var tau: Float = 12
     /// The one carrier standing in the passband.
     var carrier = true
+    /// Paper instead of night: the trace as ink rather than light, the way
+    /// the onboarding scene draws its day.
+    var light = false
 }
 
 final class PhosphorRenderer: @unchecked Sendable {
@@ -266,7 +269,8 @@ final class PhosphorRenderer: @unchecked Sendable {
         out.colorAttachments[0].storeAction = .store
         if let enc = buffer.makeRenderCommandEncoder(descriptor: out) {
             var u = CompositeUniforms(
-                size: SIMD2(Float(w), Float(h)), glow: Self.glow, lineWidth: 1.8 * Float(h) / 1024)
+                size: SIMD2(Float(w), Float(h)), glow: Self.glow, lineWidth: 1.8 * Float(h) / 1024,
+                light: params.light ? 1 : 0)
             enc.setRenderPipelineState(compositePipeline)
             enc.setFragmentTexture(scene, index: 0)
             for (i, level) in blooms.enumerated() { enc.setFragmentTexture(level.blurred, index: 1 + i) }
@@ -438,6 +442,7 @@ private struct CompositeUniforms {
     var size: SIMD2<Float>
     var glow: Float
     var lineWidth: Float
+    var light: Float
 }
 
 /// A small, fast, seedable generator: the scene only needs noise that looks
@@ -525,7 +530,7 @@ kernel void combine_kernel(texture2d<float, access::read> beam [[texture(0)]],
     out.write(float4(v, 0, 0, 0), gid);
 }
 
-struct CompositeUniforms { float2 size; float glow; float lineWidth; };
+struct CompositeUniforms { float2 size; float glow; float lineWidth; float light; };
 
 // scope.graticule: 16 x 10 divisions, fine ticks along both centre axes.
 static float graticule(float2 p, float2 size, float lw) {
@@ -553,16 +558,28 @@ fragment float4 composite_fragment(FullOut in [[stage_in]],
     float I = scene.sample(s, uv).r;
     float B = (0.5 * b0.sample(s, uv).r + 0.35 * b1.sample(s, uv).r
              + 0.22 * b2.sample(s, uv).r + 0.12 * b3.sample(s, uv).r) * u.glow;
+    float r = length((uv - float2(0.5, 0.6)) * float2(1.0, 1.4));
+    float sky = exp(-r * r * 3.0);
+    float hz = haze.sample(s, uv).r;
+    float grid = graticule(uv * u.size, u.size, u.lineWidth) * 0.5 * (0.35 + 6 * hz);
+    if (u.light > 0.5) {
+        // Paper: SquelchRenderer's day backdrop, and the trace as ink. The
+        // same intensity ABSORBS instead of emitting, red first, so the beam
+        // reads as blue ink that pools dark where the phosphor would burn.
+        float3 paper = mix(float3(0.93, 0.953, 0.98), float3(0.895, 0.918, 0.95), uv.y)
+            - float3(0.03, 0.018, 0.0) * sky;
+        paper -= grid * float3(0.16, 0.13, 0.08);
+        float3 ink = exp(-(I * float3(1.6, 1.0, 0.45) + B * float3(0.45, 0.3, 0.12)));
+        return float4(saturate(paper * ink), 1);
+    }
     // P7: the trace saturates through blue toward white.
     float3 lit = 1 - exp(-(I * float3(0.55, 1.35, 3.0) + B * float3(0.10, 0.38, 1.10)));
     // The onboarding scene's night sky (SquelchRenderer's backdrop()) rather
     // than finish_p7's flat black: navy at the top deepening downward, with
     // a faint bloom behind the passband, so the two scenes share a sky.
-    float r = length((uv - float2(0.5, 0.6)) * float2(1.0, 1.4));
     float3 bg = mix(float3(0.035, 0.05, 0.085), float3(0.012, 0.016, 0.03), uv.y)
-        + float3(0.05, 0.09, 0.16) * exp(-r * r * 3.0);
-    float hz = haze.sample(s, uv).r;
-    bg += graticule(uv * u.size, u.size, u.lineWidth) * float3(0.10, 0.14, 0.20) * 0.5 * (0.35 + 6 * hz);
+        + float3(0.05, 0.09, 0.16) * sky;
+    bg += grid * float3(0.10, 0.14, 0.20);
     return float4(saturate(1 - (1 - bg) * (1 - lit)), 1);
 }
 """

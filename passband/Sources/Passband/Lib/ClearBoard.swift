@@ -52,9 +52,32 @@ enum ClearStreak {
 }
 
 enum ClearCopy {
-    static func tally(received: Int, noise: Int, attention: Int) -> String {
-        guard received > 0 else { return "No mail today. Suspiciously peaceful." }
-        let came = "\(received) email\(received == 1 ? "" : "s") came in today."
+    /// The window the daemon's "today" actually covers, in the reader's words.
+    ///
+    /// /client/mail-activity buckets by UTC day, so its latest row starts at
+    /// UTC midnight: 5 PM the day before in California, 1 AM in Berlin.
+    /// Calling that "today" was wrong for most of the planet, and in the US
+    /// it reset every evening, which read as "No mail today" after a full
+    /// day of it. So say where the window starts instead, and "today" only
+    /// where UTC midnight IS local midnight.
+    static func window(utcDay key: String, now: Date = Date(), calendar: Calendar = .current) -> String {
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(identifier: "UTC")!
+        guard let start = DayKey.date(key, calendar: utc) else { return "today" }
+        let localMidnight = calendar.startOfDay(for: now)
+        if start == localMidnight { return "today" }
+        let time = start.formatted(
+            Date.FormatStyle(date: .omitted, time: .shortened, timeZone: calendar.timeZone))
+        return start < localMidnight ? "since \(time) yesterday" : "since \(time)"
+    }
+
+    static func tally(received: Int, noise: Int, attention: Int, window: String = "today") -> String {
+        guard received > 0 else {
+            return window == "today"
+                ? "No mail today. Suspiciously peaceful."
+                : "No mail \(window). Suspiciously peaceful."
+        }
+        let came = "\(received) email\(received == 1 ? "" : "s") came in \(window)."
         let handled = attention == 1
             ? "the one that mattered is handled."
             : "the \(attention) that mattered are handled."

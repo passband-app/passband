@@ -276,12 +276,14 @@ struct MainShell: View {
             let composeWidth = max(420, geo.size.width / 2)
 
         ZStack(alignment: .topLeading) {
-            // THE QUIET BOARD: the sitrep with nothing on it sits on the
-            // onboarding's squelch scene. Drawn HERE, under the rail and the
-            // traffic lights, so it fills the window rather than the page; and
-            // OUTSIDE the layer below, because that layer blurs under a modal
-            // and a blurred live Metal layer stutters.
-            if QuietBoard.shared.isQuiet {
+            // THE QUIET BOARD: the sitrep with nothing on it sits on the live
+            // P7 squelch. Drawn HERE, under the rail and the traffic lights,
+            // so it fills the window rather than the page; and OUTSIDE the
+            // layer below, because that layer blurs under a modal and a
+            // blurred live Metal layer stutters. Not while an email is open:
+            // the sitrep stays mounted under the reader, and a scene nobody
+            // can see would keep rendering behind it.
+            if QuietBoard.shared.isQuiet && store.threadId == nil {
                 ClearScene()
                     .ignoresSafeArea()
                     .transition(.opacity)

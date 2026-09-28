@@ -255,7 +255,8 @@ struct SitrepView: View {
     }
 
     /// Clear AND nothing to read: the board with nothing on it at all, which
-    /// is what the scope plays behind. Mail in either zone fades it away.
+    /// is what the quiet board's scene plays behind. Mail in either zone
+    /// fades it away.
     private var quiet: Bool { isClear && readingSenders.isEmpty }
 
     /// Every records card would only say it has nothing. Four cards of "No

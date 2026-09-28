@@ -2,9 +2,9 @@
 // empty board is the best state this app has, and it used to look like a
 // broken one: a headline over a void.
 //
-// Two pieces. `ClearNote` sits under the hero and says it in words: a line of
-// encouragement, today's tally, a run of clear days. `ClearScene` fills the
-// whole window behind everything: the onboarding's squelch scene, gate closed.
+// Two pieces. `ClearNote` sits under the hero and says it in words: where
+// all the mail went, the day's tally, a run of clear days. `ClearScene` fills
+// the whole window behind everything: the P7 phosphor squelch, live.
 //
 // THE MOMENT: when the reader clears the last thing (on this page, or in the
 // reader and then comes back), the Squelch chime plays. Once per clearing,
@@ -39,6 +39,8 @@ final class QuietBoard {
 
 struct ClearNote: View {
     @State private var today: MailActivityDay?
+    /// When `today` starts, said for the reader's time zone (ClearCopy.window).
+    @State private var window = "today"
     @State private var streak = 0
 
     var body: some View {
@@ -72,11 +74,13 @@ struct ClearNote: View {
     private var tally: String? {
         guard let d = today else { return nil }
         return ClearCopy.tally(
-            received: d.received, noise: d.noise, attention: d.past_due + d.deadline + d.signal)
+            received: d.received, noise: d.noise, attention: d.past_due + d.deadline + d.signal,
+            window: window)
     }
 
     private func loadToday() async {
         guard let res = try? await APIClient.shared.getMailActivity(days: 1) else { return }
+        window = ClearCopy.window(utcDay: res.until)
         // Sparse rows: a day with no mail has no row at all, and that is a
         // real zero rather than a missing answer.
         today = res.rows.first { $0.day == res.until }

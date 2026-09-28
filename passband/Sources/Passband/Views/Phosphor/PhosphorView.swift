@@ -41,18 +41,25 @@ struct PhosphorBackdrop: View {
     var paused = false
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
     private var scene: PhosphorScene { .shared }
 
-    /// The top of the scene's sky, shown until the renderer is ready so the
-    /// scene fades up out of its own night rather than out of the page.
-    static let backdrop = Color(red: 0.035, green: 0.05, blue: 0.085)
+    /// The top of the scene's sky (or its paper), shown until the renderer
+    /// is ready so the scene fades up out of itself rather than the page.
+    static let backdrop = Color(light: 0xEDF3FA, dark: 0x090D16)
+
+    private var lit: PhosphorParams {
+        var p = params
+        p.light = colorScheme == .light
+        return p
+    }
 
     var body: some View {
         ZStack {
             Self.backdrop
             if let renderer = scene.renderer {
                 PhosphorRepresentable(
-                    renderer: renderer, params: params, paused: paused, still: reduceMotion)
+                    renderer: renderer, params: lit, paused: paused, still: reduceMotion)
                     .transition(.opacity)
             }
         }

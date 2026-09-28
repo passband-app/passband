@@ -276,10 +276,10 @@ main {{ max-width: 34rem; margin: 0 auto; }}
 .brand svg {{ height: 1.5rem; width: auto; flex: none; color: var(--brand); }}
 /* The brand's ONE serif moment, rationed the way the site and the Swift
    client's Typo ration it: Newsreader for the wordmark and nowhere else, since
-   a display serif spread further becomes wallpaper. The webfont itself cannot
-   be fetched under this page's CSP, so it is named first for the reader who
-   happens to have it installed and the stack falls through to the platform's
-   own serif for everybody else. */
+   a display serif spread further becomes wallpaper. Signup and sign-in pages load
+   the webfont from this origin (see `body.auth`); the operator console does not
+   declare it, so there it is named first for the reader who happens to have it
+   installed and the stack falls through to the platform's own serif. */
 .wordmark {{ font-family: "Newsreader", ui-serif, Georgia, "Times New Roman", serif;
   font-size: 1.32rem; font-weight: 500; letter-spacing: -0.005em; }}
 /* The admin dashboard is the one page with a table, and the reading width the
@@ -462,7 +462,7 @@ body.console .sr {{ position: absolute; width: 1px; height: 1px; overflow: hidde
    DARK BY DEFAULT, like the landing page, which has no light mode at all.
    `?theme=light` still works (the app passes its own appearance), and restates
    the tokens below rather than inheriting anything. */
-@font-face {{ font-family: "Newsreader"; src: url("/fonts/newsreader.woff2") format("woff2");
+@font-face {{ font-family: "Newsreader"; src: url("{font_path}") format("woff2");
   font-weight: 200 800; font-style: normal; font-display: swap; }}
 body.auth {{ color-scheme: dark;
   --bg: #090D16; --ink: #E9EEF5; --dim: #A8B4C4; --faint: #808E9F; --faintest: #62707F;
@@ -539,6 +539,8 @@ body.auth::before {{ content: ""; position: fixed; inset: 0; z-index: -1; pointe
 /* A code that came filled in from the emailed link: out of the way until the
    link under the form targets it. The link goes when the field comes back. */
 .auth .slot.folded:not(:target) {{ display: none; }}
+.auth .sr {{ position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip-path: inset(50%); white-space: nowrap; }}
 .auth main:has(.slot.folded:target) .swap {{ display: none; }}
 .auth .swap a {{ color: var(--faint); }}
 .auth .slot > label:first-child {{ display: block; margin: 0 0 0.3rem; color: var(--faintest);
@@ -590,6 +592,7 @@ body.auth::before {{ content: ""; position: fixed; inset: 0; z-index: -1; pointe
 "#,
         title = title,
         opening = opening,
+        font_path = FONT_PATH,
         theme = crate::appearance::current().name(),
         body = body,
         body_class = body_class,
@@ -612,17 +615,11 @@ body.auth::before {{ content: ""; position: fixed; inset: 0; z-index: -1; pointe
         .into_response()
 }
 
-/// What every invite failure says. ONE message for "no such code", "already
-/// used", "expired", "held by another signup", "revoked", and "not even shaped
-/// like a code", because anything that tells those apart is an oracle for the
-/// code space. Here rather than in `handlers` because [`signup_form`] keys the
-/// invite field's visibility on it.
-pub const INVITE_REFUSED: &str = "That invite code is not usable.";
-
 /// The signup form.
 ///
 /// TWO FIELDS AND ONE BUTTON ARE THE PAGE, and everything else is arranged
-/// around that. The form is unboxed on the native app’s white ground. The
+/// around that. The fields are slots cut into one rig, the landing page's
+/// control material. The
 /// username hint is tied to its input with `aria-describedby`; privacy details
 /// stay available in a collapsed disclosure.
 ///
@@ -634,20 +631,24 @@ pub const INVITE_REFUSED: &str = "That invite code is not usable.";
 /// the right edge, which still says which namespace is being claimed. The box
 /// is a second `<label>` so a click on the suffix lands in the field.
 ///
-/// A CODE THAT ARRIVED FILLED IN IS FOLDED AWAY. Somebody who clicked the
+/// A CODE THAT ARRIVED FILLED IN IS FOLDED AWAY, on that first render only. Somebody who clicked the
 /// emailed link has nothing to do with the invite field, so it is hidden and
 /// the form is one field. It is still in the form (a `display: none` input
 /// submits like any other), and a quiet link under the form reveals it through
 /// `:target`, which again needs no script. It unfolds by itself when the code
 /// is the thing that was refused, because a field somebody has to fix cannot be
-/// one they have to find first.
+/// one they have to find first. After any refused submit the field is shown,
+/// because by then the code may be one the person typed.
 ///
 /// THE GRANT IS STILL STATED BESIDE THE BUTTON, in one line naming all three
 /// permissions, because the consent screen that follows is Google's and says it
 /// in Google's vocabulary. That line is the `<summary>` of the disclosure, so
 /// it is always on screen and is also the way into the detail. The username
-/// rule is not printed at all: the field's `pattern` enforces it on submit and
-/// the server's refusal states it. What moved is the LONG version: three paragraphs of
+/// rule is not printed: the server's refusal states whichever rule was broken,
+/// and a screen reader gets it up front from a visually hidden hint. No
+/// `pattern` on the field, because the server trims and case-folds first and a
+/// browser pattern would refuse `ada ` (a predictive-text space) that the
+/// server accepts, with a tooltip that cannot say which rule it meant. What moved is the LONG version: three paragraphs of
 /// scope detail above the fold pushed the form off a phone screen and read as
 /// the page's subject, which it is not. It is a `<details>` now, shut by
 /// default, open to anybody who wants it, and made of the same markup as before
@@ -680,9 +681,13 @@ pub fn signup_form(
     error: Option<&str>,
 ) -> Response {
     let error_html = stop_note(error);
-    let folded = !invite.trim().is_empty() && error != Some(INVITE_REFUSED);
+    // Folded only on the first render of an emailed link: a filled-in code
+    // and nothing refused yet. Any re-render after a submit shows the code, so
+    // a code somebody typed (or just changed) is never hidden behind an error
+    // about something else.
+    let folded = !invite.trim().is_empty() && error.is_none();
     let (invite_class, invite_focus, label_focus) = if folded {
-        (r#"slot folded" id="code"#, "", " autofocus")
+        ("slot folded", "", " autofocus")
     } else {
         ("slot", " autofocus", "")
     };
@@ -717,7 +722,7 @@ pub fn signup_form(
 <p class="lead">Pick a username, then connect Gmail.</p>
 {error_html}
 <form class="rig" method="post" action="/signup">
-<div class="{invite_class}">
+<div class="{invite_class}" id="code">
 <label for="invite">Invite code</label>
 <input type="text" id="invite" name="invite" value="{invite}" placeholder="XXXX-XXXX-XXXX-XXXX"
   autocomplete="off" autocapitalize="off" spellcheck="false"{invite_focus} required>
@@ -725,8 +730,8 @@ pub fn signup_form(
 <div class="slot">
 <label for="label">Your Passband username</label>
 <label class="affix"><input type="text" id="label" name="label" value="{label}" placeholder="yourname"
-  pattern="[A-Za-z0-9][A-Za-z0-9\-]{{1,28}}[A-Za-z0-9]" title="3 to 30 letters, numbers or hyphens"
-  maxlength="30" autocomplete="off" autocapitalize="off" spellcheck="false"{label_focus} required><span class="domain">.{domain}</span></label>
+  aria-describedby="label-hint" maxlength="{max}" autocomplete="off" autocapitalize="off" spellcheck="false"{label_focus} required><span class="domain">.{domain}</span></label>
+<span class="sr" id="label-hint">{min} to {max} lowercase letters, numbers or hyphens.</span>
 </div>
 <button type="submit">Continue with Google <span class="arrow" aria-hidden="true">→</span></button>
 </form>
@@ -748,6 +753,8 @@ pub fn signup_form(
             invite = escape_html(invite),
             label = escape_html(label),
             domain = escape_html(base_domain),
+            min = crate::labels::MIN_LABEL_LEN,
+            max = crate::labels::MAX_LABEL_LEN,
         ),
     )
 }
@@ -780,9 +787,8 @@ pub fn success(tenant_url: &str) -> Response {
 /// THE DEEP LINK IS THE PAGE. Everything else on it exists for the cases the
 /// link cannot cover: a browser that will not hand a custom scheme to the OS, a
 /// sign in finished on a phone for a Mac, an app that is not installed yet. So
-/// the code and the server are on it as `user-select: all` text too, exactly as
-/// they are on [`success`], and for the same reason: the link is the fast path
-/// and typing is the path that always works.
+/// the code and the server are on it as `user-select: all` text too: the link
+/// is the fast path and typing is the path that always works.
 ///
 /// They are folded into a disclosure now rather than standing open, and the
 /// summary carries what the old standing `<h2>If that button does nothing</h2>`
@@ -1570,9 +1576,10 @@ mod tests {
     }
 
     /// A code that came filled in is folded behind a link, and the username is
-    /// what gets focus. An empty field, or a refused code, stays in the open.
+    /// what gets focus. An empty field, or any re-render after a submit, shows
+    /// the code in the open.
     #[tokio::test]
-    async fn a_prefilled_invite_is_folded_until_it_is_the_problem() {
+    async fn a_prefilled_invite_is_folded_only_on_arrival() {
         let code = "ABCD-EFGH-JKMN-PQRS";
         let folded = document_of(signup_form("passband.email", None, "", code, None)).await;
         assert!(
@@ -1585,20 +1592,23 @@ mod tests {
         let (username, _) = username.split_once('>').unwrap();
         assert!(username.contains("autofocus"), "{username}");
 
-        // A username problem keeps the code folded: it was not the problem.
-        let taken = document_of(signup_form(
-            "passband.email",
-            None,
-            "ada",
-            code,
-            Some("That username is already taken."),
-        ))
-        .await;
-        assert!(taken.contains("slot folded"), "{taken}");
-
         for open in [
             signup_form("passband.email", None, "", "", None),
-            signup_form("passband.email", None, "ada", code, Some(INVITE_REFUSED)),
+            signup_form(
+                "passband.email",
+                None,
+                "ada",
+                code,
+                Some("That invite code is not usable."),
+            ),
+            // Any refusal unfolds: the code may be one the person typed.
+            signup_form(
+                "passband.email",
+                None,
+                "ada",
+                code,
+                Some("That username is already taken."),
+            ),
         ] {
             let html = document_of(open).await;
             assert!(!html.contains("slot folded"), "{html}");
@@ -2305,6 +2315,18 @@ mod tests {
         let bytes = to_bytes(r.into_body(), 1 << 20).await.unwrap();
         assert!(bytes.starts_with(b"wOF2"));
         assert!(CSP.contains("font-src 'self';"));
+    }
+
+    /// The vendored font IS the landing page's font. The control image never
+    /// sees `passband-site/`, so the copy is by hand; this is what notices when
+    /// the site's subset moves and the copy did not.
+    #[test]
+    fn the_vendored_font_is_the_sites_font() {
+        let site = include_bytes!("../../passband-site/newsreader-var.woff2");
+        assert!(
+            NEWSREADER == site.as_slice(),
+            "copy passband-site/newsreader-var.woff2 to squelch-control/assets/newsreader.woff2"
+        );
     }
 
     #[tokio::test]

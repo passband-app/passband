@@ -160,9 +160,11 @@ const MAX_NAME_READ: usize = 1024;
 /// unpadded base64url characters.
 const RANDOM_BYTES: usize = 32;
 
-/// What every invite failure says. Lives in [`pages`], which unfolds the
-/// invite field on exactly this message.
-const INVITE_REFUSED: &str = pages::INVITE_REFUSED;
+/// What every invite failure says. ONE message for "no such code", "already
+/// used", "expired", "held by another signup", "revoked", and "not even shaped
+/// like a code", because anything that tells those apart is an oracle for the
+/// code space.
+const INVITE_REFUSED: &str = "That invite code is not usable.";
 
 /// What a claimed label says, whichever authority reported it. Both this
 /// control plane's record and the warden's answer produce it, so a person
@@ -1235,6 +1237,12 @@ pub async fn oauth_callback(
     // here leaves the pending tenant standing, which is the retriable state the
     // page below describes: no credential was written, no invite was spent, and
     // the same address is still reserved for this mailbox.
+    //
+    // The warden answers with a pairing code, and the success page no longer
+    // shows it: the app's own onboarding pairs through /app/auth. The code is
+    // one-shot and lapses after the daemon's pairing TTL. A route that installs
+    // the credential WITHOUT minting one, like reconnect_credentials, is the
+    // real fix and is a warden API change (tracked separately).
     match state.warden().put_credentials(&label, &ciphertext).await {
         Ok(_) => {}
         Err(WardenError::AlreadyProvisioned) => {
@@ -1243,7 +1251,7 @@ pub async fn oauth_callback(
             return done(pages::problem(
                 StatusCode::CONFLICT,
                 "That mailbox is already set up",
-                "Nothing was changed and your invite code has not been used. Open Passband and sign in to it.",
+                "Nothing was changed and your invite code has not been used. Try signing in from Passband, and if it does not find your mailbox, get in touch.",
             ));
         }
         Err(e) => {
@@ -1769,7 +1777,7 @@ fn console_unavailable() -> Response {
     )
 }
 
-/// The pairing window, in minutes, for app sign-in page.s copy. Derived from
+/// The pairing window, in minutes, for the app sign-in page's copy. Derived from
 /// the DAEMON's constant rather than typed here, because the warden mints that
 /// code by running `squelchd pair` on the box: if the daemon's TTL ever moves,
 /// this sentence moves with it instead of quietly lying to the user.

@@ -68,11 +68,21 @@ actor APIClient {
     }
 
     /// Set the base URL + bearer token used by all subsequent requests.
+    ///
+    /// DEVELOPER HOOK: `PASSBAND_API_URL` and `PASSBAND_API_TOKEN` in the
+    /// process environment override whatever the active account says, for the
+    /// whole life of the process. That is how a build of a branch is pointed
+    /// at a scratch daemon of the same branch without adding an account to
+    /// the keychain or touching the account the user actually reads mail
+    /// through. Same posture as `PASSBAND_FORCE_TOUR`: a launch environment
+    /// only a developer sets, never a preference, never persisted. A user
+    /// double-clicking the app has neither variable.
     func configure(baseURL: String, token: String) {
+        let env = ProcessInfo.processInfo.environment
         // Normalize: strip trailing slashes so we can join with `/client/...`.
-        var base = baseURL
+        var base = env["PASSBAND_API_URL"] ?? baseURL
         while base.hasSuffix("/") { base.removeLast() }
-        config = Config(baseURL: base, token: token)
+        config = Config(baseURL: base, token: env["PASSBAND_API_TOKEN"] ?? token)
     }
 
     /// Forget the configured daemon. After this, requests fail with "client

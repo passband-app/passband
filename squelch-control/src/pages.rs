@@ -218,31 +218,12 @@ fn console(status: StatusCode, title: &str, body: &str) -> Response {
 /// it is plain CSS with single braces that can be edited as CSS.
 const CONSOLE_CSS: &str = include_str!("console.css");
 
-/// The analyzer furniture behind and around every console page: the backdrop
-/// layers and the settings line along the top. All of it `aria-hidden`, all of
-/// it the same on every page, and NONE of it data: the sign in door renders it
-/// too, and that page names no waitlist, no counts, and no operator.
-const CONSOLE_CHROME: &str = concat!(
-    r#"<div class="fx" aria-hidden="true"><i class="aurora"></i><i class="grat"></i>"#,
-    r#"<i class="sweep"></i><i class="scan"></i></div>"#,
-    r#"<div class="hud" aria-hidden="true"><span class="lock">SQUELCH LOCKED</span>"#,
-    r#"<span>REF <b>-20 dBm</b></span><span>RBW <b>30 kHz</b></span>"#,
-    r#"<span>VBW <b>10 kHz</b></span><span>SPAN <b>2.4 GHz</b></span>"#,
-    r#"<span class="push clock">OPERATOR CONSOLE</span></div>"#,
-);
-
-/// The crawl along the foot. Two identical halves so the loop has no seam.
-/// Jargon and nothing else, for the same reason as [`CONSOLE_CHROME`].
-const CONSOLE_TICKER: &str = concat!(
-    r#"<div class="ticker" aria-hidden="true"><div>"#,
-    r#"<span>  PASSBAND  <em>///</em>  SQUELCH <i class="ok">LOCKED</i>  <em>///</em>  NOISE FLOOR -118 dBm  <em>///</em>  "#,
-    r#"SIGNAL, NOT NOISE  <em>///</em>  RBW 30 kHz  <em>///</em>  ALL CARRIERS <i class="ok">NOMINAL</i>  <em>///</em>  "#,
-    r#"SWEEP 7.0 s  <em>///</em>  MKR 1-4 ON  <em>///</em>  THE INBOX IS A SPECTRUM  <em>///</em>  </span>"#,
-    r#"<span>  PASSBAND  <em>///</em>  SQUELCH <i class="ok">LOCKED</i>  <em>///</em>  NOISE FLOOR -118 dBm  <em>///</em>  "#,
-    r#"SIGNAL, NOT NOISE  <em>///</em>  RBW 30 kHz  <em>///</em>  ALL CARRIERS <i class="ok">NOMINAL</i>  <em>///</em>  "#,
-    r#"SWEEP 7.0 s  <em>///</em>  MKR 1-4 ON  <em>///</em>  THE INBOX IS A SPECTRUM  <em>///</em>  </span>"#,
-    r#"</div></div>"#,
-);
+/// The backdrop behind every console page: a glow and the analyzer's
+/// graticule, fixed and still. `aria-hidden`, the same on every page, and NONE
+/// of it data: the sign in door renders it too, and that page names no
+/// waitlist, no counts, and no operator.
+const CONSOLE_CHROME: &str =
+    r#"<div class="fx" aria-hidden="true"><i class="glow"></i><i class="grat"></i></div>"#;
 
 fn render(status: StatusCode, title: &str, body: &str, body_class: &str) -> Response {
     let title = escape_html(title);
@@ -256,11 +237,7 @@ fn render(status: StatusCode, title: &str, body: &str, body_class: &str) -> Resp
     } else {
         format!("<main>{masthead}")
     };
-    let (console_css, closing) = if is_console {
-        (CONSOLE_CSS, CONSOLE_TICKER)
-    } else {
-        ("", "")
-    };
+    let console_css = if is_console { CONSOLE_CSS } else { "" };
     let html = format!(
         r#"<!doctype html>
 <html lang="en">
@@ -423,7 +400,7 @@ body.auth[data-theme="dark"] {{ color-scheme: dark; --brand: #82baf5;
 {console_css}</style>
 </head>
 <body{body_class} data-theme="{theme}">{opening}
-{body}</main>{closing}</body>
+{body}</main></body>
 </html>
 "#,
         title = title,
@@ -972,12 +949,9 @@ pub fn admin_page(pending: &[UserRow], approved: &[UserRow], error: Option<&str>
                 .approved_at
                 .map(|at| format!("<br>approved {}", day(at)))
                 .unwrap_or_default();
-            // The row's rung, for the stylesheet only: the green glow on an
-            // active row and the red counter on one nobody was told about.
+            // For the stylesheet only: an active row's pill is green.
             let rung = if r.first_paired_at.is_some() {
                 r#" class="active""#
-            } else if r.signed_up_at.is_none() && r.notified_at.is_none() {
-                r#" class="unsent""#
             } else {
                 ""
             };
@@ -1015,13 +989,13 @@ pub fn admin_page(pending: &[UserRow], approved: &[UserRow], error: Option<&str>
             label: "signed up",
             count: accepted_count,
             colour: "var(--accent-ink)",
-            of: Some(approved.len()),
+            of: Some((approved.len(), "approved")),
         },
         Rung {
             label: "active",
             count: active_count,
             colour: "var(--positive)",
-            of: Some(accepted_count),
+            of: Some((accepted_count, "signed up")),
         },
     ];
 
@@ -1030,9 +1004,8 @@ pub fn admin_page(pending: &[UserRow], approved: &[UserRow], error: Option<&str>
         "Waitlist",
         &format!(
             r#"<section class="hero">
-<div class="kicker"><span class="led"></span>CH 01 &middot; INTAKE &middot; LIVE</div>
-<h1 data-text="Waitlist">Waitlist</h1>
-<p class="tally">{waiting_count} waiting, {approved_count} approved recently,
+<h1>Waitlist</h1>
+<p class="sr">{waiting_count} waiting, {approved_count} approved recently,
 {accepted_count} of those signed up, {active_count} of those active</p>
 </section>
 {scope}
@@ -1056,18 +1029,14 @@ once and expires in {ttl} days.</p></div>
   autocomplete="off" autocapitalize="off" spellcheck="false" required>
 <button type="submit">Mint and email an invite</button>
 </form>
-<p class="hint">They do not have to be on the list. The address lands under
-Approved above and is tracked from there like everybody else. Nothing here can
-read a code back out, so a lost invite is replaced rather than resent, and a
-code that was already spent is not replaced at all.</p>
+<p class="hint">They do not have to be on the list first.</p>
 </section>
 </div>
 <div class="footer-row">
 <form class="signout" method="post" action="/admin/logout">
 <button type="submit" class="quiet">Sign out</button>
 </form>
-<p class="hint">This session lasts {session_days} days. Signing out ends it on
-this browser; rotating the admin token ends it everywhere.</p>
+<p class="hint">This session lasts {session_days} days.</p>
 </div>"#,
             scope = scope(&rungs),
             error_html = stop_note(error),
@@ -1095,12 +1064,12 @@ struct Rung {
     count: usize,
     /// A CSS colour, always one of the stylesheet's own variables. Never data.
     colour: &'static str,
-    /// The rung this one is a fraction of, for the conversion line under it.
-    of: Option<usize>,
+    /// The rung this one is a fraction of, and its name, for the rate under it.
+    of: Option<(usize, &'static str)>,
 }
 
 /// The funnel as the landing page's analyzer would draw it: a noise floor with
-/// one carrier per rung standing out of it, and a numbered marker on each peak.
+/// one carrier per rung standing out of it, and a marker on each peak.
 ///
 /// THE PEAKS ARE THE DATA. Each carrier's height is its count on a log scale
 /// against the largest rung, so a board of 200 waiting and 3 active still
@@ -1169,54 +1138,36 @@ fn scope(rungs: &[Rung; 4]) -> String {
         }
         d
     };
-    let live = trace(7, 14.0);
-    let hold = {
-        // Max hold: the envelope a few sweeps would have painted, drawn as the
-        // amber dashes an analyzer uses for it.
-        let mut d = String::new();
-        let mut x = 0.0;
-        while x <= W {
-            let y = (FLOOR - 18.0 - signal(x) * 1.04).max(6.0);
-            d.push_str(&format!(
-                "{}{x:.0} {y:.1}",
-                if x == 0.0 { "M" } else { "L" }
-            ));
-            x += 8.0;
-        }
-        d
-    };
+    let live = trace(7, 12.0);
 
     let markers: String = rungs
         .iter()
         .enumerate()
         .map(|(i, r)| {
-            let top = (FLOOR - 14.0 - heights[i] * 1.0).max(8.0);
+            let top = (FLOOR - 12.0 - heights[i]).max(8.0);
             format!(
-                r#"<div class="mkr" style="--c:{c};left:{l:.2}%;top:{t:.2}%">{n}</div>"#,
+                r#"<i class="mkr" style="--c:{c};left:{l:.2}%;top:{t:.2}%"></i>"#,
                 c = r.colour,
                 l = centres[i] / W * 100.0,
                 t = top / H * 100.0,
-                n = i + 1,
             )
         })
         .collect();
     let readouts: String = rungs
         .iter()
-        .enumerate()
-        .map(|(i, r)| {
+        .map(|r| {
+            // A rate only where there is one to state. The top two rungs are
+            // just their counts.
             let sub = match r.of {
-                Some(of) if of > 0 => format!(
-                    "<b>{}%</b> of the rung before",
+                Some((of, name)) if of > 0 => format!(
+                    r#"<div class="sub">{}% of {name}</div>"#,
                     (r.count as f64 / of as f64 * 100.0).round()
                 ),
-                Some(_) => "nothing to convert yet".to_string(),
-                None if i == 0 => "at the gate".to_string(),
-                None => "invite codes minted".to_string(),
+                _ => String::new(),
             };
             format!(
-                r#"<div class="readout" style="--c:{c}"><div class="lbl"><b>MKR {n}</b>{label}</div><span class="num" style="--target:{count}" aria-hidden="true"></span><div class="sub">{sub}</div></div>"#,
+                r#"<div class="readout" style="--c:{c}"><div class="lbl">{label}</div><span class="num">{count}</span>{sub}</div>"#,
                 c = r.colour,
-                n = i + 1,
                 label = r.label,
                 count = r.count,
             )
@@ -1224,18 +1175,7 @@ fn scope(rungs: &[Rung; 4]) -> String {
         .collect();
 
     format!(
-        r#"<figure class="scope" aria-hidden="true"><div class="scope-screen"><svg viewBox="0 0 {W} {H}" preserveAspectRatio="none"><path class="fill" d="{live} L{W} {H} L0 {H} Z"/><path class="hold" vector-effect="non-scaling-stroke" d="{hold}"/><path class="ghost" vector-effect="non-scaling-stroke" d="{g1}"/><path class="ghost" vector-effect="non-scaling-stroke" d="{g2}"/><path class="trace" vector-effect="non-scaling-stroke" pathLength="4000" d="{live}"/></svg>{markers}<div class="axis"><span class="edge">START 0 Hz</span>{ticks}<span class="edge">STOP 2.4 GHz</span></div></div><div class="readouts">{readouts}</div></figure>"#,
-        ticks = rungs
-            .iter()
-            .zip(centres)
-            .map(|(r, c)| format!(
-                r#"<span style="left:{:.2}%">{}</span>"#,
-                c / W * 100.0,
-                r.label.to_uppercase()
-            ))
-            .collect::<String>(),
-        g1 = trace(11, 20.0),
-        g2 = trace(23, 24.0),
+        r#"<figure class="scope" aria-hidden="true"><div class="scope-screen"><svg viewBox="0 0 {W} {H}" preserveAspectRatio="none"><path class="fill" d="{live} L{W} {H} L0 {H} Z"/><path class="trace" vector-effect="non-scaling-stroke" pathLength="4000" d="{live}"/></svg>{markers}</div><div class="readouts">{readouts}</div></figure>"#,
     )
 }
 

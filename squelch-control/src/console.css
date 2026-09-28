@@ -1,409 +1,207 @@
-/* THE OPERATOR'S SURFACE: the landing page's spectrum analyzer, turned up
-   until the knob comes off.
+/* THE OPERATOR'S SURFACE: the landing page's spectrum analyzer, as a board.
 
-   Same ground, same passband blue, same graticule, same serif rationed to the
-   wordmark and the one big heading, same mono readouts. Everything the landing
-   page does once, this does all the time, because the only person who reads
-   this page already bought the product and is owed a little theatre for
-   approving forty people in a row.
+   Same ground, same passband blue, same graticule, the serif rationed to the
+   wordmark and the one heading, mono for anything that is a reading. The
+   funnel is drawn as the scope the landing page opens on, from the real
+   counts; everything under it is lists and buttons, and stays quiet.
+
+   ONE MOVEMENT, ON ARRIVAL: the trace draws and the markers settle. Nothing
+   loops. This page is read every day by one person pressing buttons, and a
+   thing that keeps moving at the edge of the eye is a thing in the way.
 
    NO SCRIPT, NO FETCH. The CSP is `default-src 'none'` with inline style
-   only, so every moving thing here is a CSS animation over markup the server
-   wrote: the counters count with `@property` integers, the scope's peaks are
-   drawn in Rust from the real funnel, and nothing reaches off the page.
+   only, so this is CSS over markup the server wrote.
 
    ALWAYS DARK, in both palettes, exactly as the landing page is. Every colour
    is stated here rather than inherited from the base sheet's dark query, or a
    light-mode operator would get warm paper under a phosphor screen. */
-@property --n { syntax: "<integer>"; initial-value: 0; inherits: false; }
-@property --spin { syntax: "<angle>"; initial-value: 0deg; inherits: false; }
-
 body.console {
-  --bg: #090d16; --canvas: #0e141d; --card: #121a26;
-  --ink: #e9eef5; --dim: #a8b4c4; --faint: #808e9f; --faintest: #62707f;
-  --hair: rgba(233, 238, 245, 0.08); --hair-strong: rgba(233, 238, 245, 0.14);
+  --bg: #090d16; --ink: #e9eef5; --dim: #a8b4c4; --faint: #808e9f; --faintest: #62707f;
+  --hair: rgba(130, 186, 245, 0.1);
   --accent: #4e9bea; --accent-ink: #82baf5; --brand: #82baf5;
   --warn: #e8ac4c; --positive: #4fc08a; --danger: #ff7a68;
   --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
   --serif: "Newsreader", ui-serif, Georgia, "Times New Roman", serif;
   color-scheme: dark; background: var(--bg); color: var(--ink);
-  padding: 4.25rem 1.25rem 5.5rem; min-height: 100vh; box-sizing: border-box;
-  position: relative; overflow-x: hidden; -webkit-font-smoothing: antialiased; }
-body.console main { position: relative; z-index: 2; max-width: 30rem; }
-body.console main:has(.scope) { max-width: 76rem; }
+  padding: 3rem 1.25rem 4rem; min-height: 100vh; box-sizing: border-box;
+  -webkit-font-smoothing: antialiased; }
+body.console main { position: relative; z-index: 1; max-width: 30rem; }
+body.console main:has(.scope) { max-width: 64rem; }
 
-/* THE BACKDROP. Four layers, all fixed, all behind the page, none of them
-   clickable: an aurora of the passband blue breathing in two corners, the
-   analyzer's graticule, the sweep, and the tube's scanlines over the lot. */
-.console .fx { position: fixed; inset: 0; z-index: 0; pointer-events: none; overflow: hidden; }
+/* THE BACKDROP: one glow from the top and the graticule, faded out at the
+   edges so the screen has no border to sit inside. Still. */
+.console .fx { position: fixed; inset: 0; z-index: 0; pointer-events: none; }
 .console .fx > i { position: absolute; inset: 0; display: block; }
-.console .aurora { inset: -20%;
-  background:
-    radial-gradient(40% 35% at 18% 12%, rgba(78, 155, 234, 0.22), transparent 70%),
-    radial-gradient(35% 30% at 85% 30%, rgba(79, 192, 138, 0.1), transparent 70%),
-    radial-gradient(45% 40% at 70% 95%, rgba(130, 186, 245, 0.16), transparent 70%);
-  filter: blur(20px); animation: aurora 22s ease-in-out infinite alternate; }
-@keyframes aurora {
-  0% { transform: translate3d(0, 0, 0) rotate(0deg) scale(1); }
-  50% { transform: translate3d(4%, -3%, 0) rotate(6deg) scale(1.08); }
-  100% { transform: translate3d(-3%, 4%, 0) rotate(-4deg) scale(1.02); } }
+.console .glow { background: radial-gradient(60% 45% at 50% -5%, rgba(78, 155, 234, 0.14), transparent 70%); }
 .console .grat {
   background-image:
-    repeating-linear-gradient(90deg, rgba(130, 186, 245, 0.06) 0 1px, transparent 1px 64px),
-    repeating-linear-gradient(180deg, rgba(130, 186, 245, 0.06) 0 1px, transparent 1px 64px),
-    repeating-linear-gradient(90deg, rgba(130, 186, 245, 0.025) 0 1px, transparent 1px 16px),
-    repeating-linear-gradient(180deg, rgba(130, 186, 245, 0.025) 0 1px, transparent 1px 16px);
-  -webkit-mask-image: radial-gradient(ellipse 80% 70% at 50% 40%, #000 25%, transparent 85%);
-          mask-image: radial-gradient(ellipse 80% 70% at 50% 40%, #000 25%, transparent 85%);
-  animation: drift 40s linear infinite; }
-@keyframes drift { to { background-position: 64px 64px, 64px 64px, 16px 16px, 16px 16px; } }
-/* The sweep: one lit line crossing the screen, trailing phosphor behind it. */
-.console .sweep { right: auto; width: 22vw; left: -22vw;
-  background: linear-gradient(90deg, transparent, rgba(78, 155, 234, 0.05) 70%, rgba(130, 186, 245, 0.28) 99%, rgba(233, 238, 245, 0.7));
-  -webkit-mask-image: linear-gradient(180deg, transparent, #000 15%, #000 85%, transparent);
-          mask-image: linear-gradient(180deg, transparent, #000 15%, #000 85%, transparent);
-  animation: sweep 7s cubic-bezier(0.45, 0, 0.55, 1) infinite; mix-blend-mode: screen; }
-@keyframes sweep { to { transform: translateX(calc(100vw + 22vw)); } }
-.console .scan {
-  background: repeating-linear-gradient(180deg, rgba(0, 0, 0, 0.22) 0 1px, transparent 1px 3px),
-    radial-gradient(ellipse 110% 90% at 50% 45%, transparent 55%, rgba(3, 5, 10, 0.75) 100%);
-  animation: flicker 5s steps(1) infinite; }
-@keyframes flicker { 0%, 100% { opacity: 1; } 47% { opacity: 0.86; } 48% { opacity: 1; } 71% { opacity: 0.93; } 72% { opacity: 1; } }
-
-/* THE HUD: the analyzer's top line of settings, pinned to the glass. */
-.console .hud { position: fixed; z-index: 3; top: 0; left: 0; right: 0;
-  display: flex; gap: 1.6rem; align-items: center; padding: 0.7rem 1.4rem;
-  font: 500 10.5px/1 var(--mono); letter-spacing: 0.14em; color: var(--faintest);
-  background: linear-gradient(180deg, rgba(9, 13, 22, 0.92), rgba(9, 13, 22, 0));
-  white-space: nowrap; overflow: hidden; }
-.console .hud b { color: var(--accent-ink); font-weight: 600; }
-.console .hud .lock { color: var(--positive); display: inline-flex; align-items: center; gap: 0.5rem; }
-.console .hud .lock::before, .console .led { content: ""; width: 7px; height: 7px; border-radius: 50%;
-  background: currentColor; box-shadow: 0 0 10px 1px currentColor; display: inline-block;
-  animation: blink 1.4s ease-in-out infinite; }
-@keyframes blink { 50% { opacity: 0.25; box-shadow: 0 0 2px 0 currentColor; } }
-.console .hud .clock::after { content: "_"; animation: caret 1s steps(1) infinite; }
-@keyframes caret { 50% { opacity: 0; } }
-.console .hud .push { margin-left: auto; }
-
-/* THE TICKER: a status crawl along the foot, like the bottom of a trading
-   floor that only trades in inbox zero. Two copies so the loop never seams. */
-.console .ticker { position: fixed; z-index: 3; left: 0; right: 0; bottom: 0; overflow: hidden;
-  border-top: 1px solid rgba(130, 186, 245, 0.14); background: rgba(9, 13, 22, 0.82);
-  -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
-  font: 500 10.5px/1 var(--mono); letter-spacing: 0.16em; color: var(--faint); }
-.console .ticker > div { display: flex; width: max-content; animation: crawl 48s linear infinite; }
-.console .ticker span { padding: 0.75rem 0; white-space: pre; }
-.console .ticker em { font-style: normal; color: var(--accent-ink); }
-.console .ticker .ok { color: var(--positive); font-style: normal; }
-@keyframes crawl { to { transform: translateX(-50%); } }
-
-/* THE MASTHEAD, with the mark's bars running as a live equalizer. They only
-   ever SHRINK from their drawn height, never grow past it, so no bar breaches
-   the curve: brand/generate.ts fails its build over exactly that, and the rule
-   does not stop applying because the bars are dancing. */
-.console .brand { margin: 0 0 2.5rem; gap: 0.75rem; }
-.console .brand svg { height: 2rem; color: var(--accent-ink);
-  filter: drop-shadow(0 0 6px rgba(78, 155, 234, 0.7)) drop-shadow(0 0 22px rgba(78, 155, 234, 0.35)); }
-.console .brand rect { transform-box: fill-box; transform-origin: 50% 100%;
-  animation: eq 1.1s cubic-bezier(0.5, 0, 0.5, 1) infinite alternate; }
-.console .brand rect:nth-child(3n) { animation-duration: 0.8s; }
-.console .brand rect:nth-child(3n + 1) { animation-duration: 1.35s; }
-.console .brand rect:nth-child(2) { animation-delay: -0.2s; } .console .brand rect:nth-child(4) { animation-delay: -0.6s; }
-.console .brand rect:nth-child(5) { animation-delay: -0.35s; } .console .brand rect:nth-child(6) { animation-delay: -0.9s; }
-.console .brand rect:nth-child(7) { animation-delay: -0.15s; } .console .brand rect:nth-child(8) { animation-delay: -0.7s; }
-.console .brand rect:nth-child(9) { animation-delay: -0.45s; } .console .brand rect:nth-child(10) { animation-delay: -1s; }
-.console .brand rect:nth-child(11) { animation-delay: -0.25s; } .console .brand rect:nth-child(12) { animation-delay: -0.55s; }
-@keyframes eq { 0% { transform: scaleY(0.3); } 60% { transform: scaleY(0.85); } 100% { transform: scaleY(1); } }
-.console .wordmark { font-size: 1.6rem; color: var(--ink);
-  text-shadow: 0 0 18px rgba(130, 186, 245, 0.45); }
+    repeating-linear-gradient(90deg, rgba(130, 186, 245, 0.04) 0 1px, transparent 1px 64px),
+    repeating-linear-gradient(180deg, rgba(130, 186, 245, 0.04) 0 1px, transparent 1px 64px);
+  -webkit-mask-image: radial-gradient(ellipse 70% 60% at 50% 30%, #000 20%, transparent 80%);
+          mask-image: radial-gradient(ellipse 70% 60% at 50% 30%, #000 20%, transparent 80%); }
 
 /* TYPE. */
+.console .brand { margin: 0 0 2.5rem; }
+.console .brand svg { height: 1.6rem; color: var(--accent-ink); }
+.console .wordmark { font-size: 1.4rem; color: var(--ink); }
 .console h1 { margin: 0; font-family: var(--serif); font-weight: 500;
-  font-size: clamp(2.4rem, 6vw, 3.6rem); line-height: 1; letter-spacing: -0.02em; }
+  font-size: clamp(2.2rem, 5vw, 3rem); line-height: 1.05; letter-spacing: -0.02em; }
 .console p { color: var(--dim); }
 .console .hint, .console .muted { color: var(--faint); }
 .console a { color: var(--accent-ink); }
-.console code, .console .code { font-family: var(--mono); background: rgba(130, 186, 245, 0.1);
-  color: var(--accent-ink); border: 1px solid rgba(130, 186, 245, 0.18); }
-.console .stop { border-left: 0; padding: 0.85rem 1rem; border-radius: 10px;
-  background: rgba(255, 122, 104, 0.08); color: var(--danger);
-  box-shadow: inset 0 0 0 1px rgba(255, 122, 104, 0.35), 0 0 40px -12px rgba(255, 122, 104, 0.6);
-  animation: alarm 2.4s ease-in-out infinite; }
-.console .stop strong { color: #ffd2cb; }
-@keyframes alarm { 50% { box-shadow: inset 0 0 0 1px rgba(255, 122, 104, 0.6), 0 0 60px -8px rgba(255, 122, 104, 0.8); } }
+.console code, .console .code { font-family: var(--mono); background: rgba(130, 186, 245, 0.08); color: var(--dim); }
+.console .stop { border-left: 0; padding: 0.8rem 1rem; border-radius: 10px;
+  background: rgba(255, 122, 104, 0.07); color: var(--danger);
+  box-shadow: inset 0 0 0 1px rgba(255, 122, 104, 0.3); }
+.console .stop strong { color: #ffd2cb; font-weight: 600; }
+.console .sr { position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip-path: inset(50%); white-space: nowrap; }
 
-/* THE HERO, on the board only. The heading is the one place the serif gets
-   to be enormous, and it arrives the way a signal does: out of the noise, in
-   three channels that have not quite locked, then snapping together. */
-.console .hero { display: grid; grid-template-columns: 1fr auto; align-items: end; gap: 1rem 2rem;
-  margin: 0 0 1.75rem; }
-.console .kicker { grid-column: 1 / -1; display: flex; align-items: center; gap: 0.6rem;
-  font: 600 11px/1 var(--mono); letter-spacing: 0.22em; color: var(--accent-ink); }
-.console .kicker .led { color: var(--positive); }
-.console .hero h1 { position: relative; font-size: clamp(4.2rem, 13vw, 11rem); line-height: 0.86;
-  letter-spacing: -0.045em; padding-bottom: 0.08em;
-  background: linear-gradient(100deg, #e9eef5 0%, #e9eef5 30%, #82baf5 45%, #ffffff 50%, #82baf5 55%, #e9eef5 70%, #9fb3c9 100%);
-  background-size: 250% 100%; -webkit-background-clip: text; background-clip: text; color: transparent;
-  filter: drop-shadow(0 0 28px rgba(78, 155, 234, 0.35));
-  animation: shimmer 6s ease-in-out infinite, tune-in 1.4s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
-@keyframes shimmer { 0% { background-position: 100% 0; } 100% { background-position: -150% 0; } }
-@keyframes tune-in {
-  0% { opacity: 0; letter-spacing: 0.2em; filter: blur(16px) drop-shadow(0 0 0 transparent); }
-  60% { opacity: 1; filter: blur(1px) drop-shadow(0 0 40px rgba(78, 155, 234, 0.6)); } }
-.console .hero h1::before, .console .hero h1::after { content: attr(data-text); position: absolute;
-  inset: 0; -webkit-background-clip: initial; background: none; mix-blend-mode: screen;
-  pointer-events: none; opacity: 0.55; animation: split 5.5s steps(1) infinite; }
-.console .hero h1::before { color: rgba(255, 122, 104, 0.8); }
-.console .hero h1::after { color: rgba(79, 192, 138, 0.8); animation-delay: -0.12s; }
-@keyframes split {
-  0%, 100% { transform: none; opacity: 0; clip-path: inset(0 0 0 0); }
-  2% { transform: translate(-6px, 1px); opacity: 0.6; clip-path: inset(10% 0 55% 0); }
-  4% { transform: translate(5px, -2px); clip-path: inset(62% 0 8% 0); }
-  6% { transform: translate(-2px, 0); clip-path: inset(30% 0 40% 0); }
-  8% { opacity: 0; transform: none; }
-  61% { opacity: 0.5; transform: translate(4px, 0); clip-path: inset(70% 0 5% 0); }
-  63% { opacity: 0; transform: none; } }
-.console .tally { margin: 0 0 0.35rem; max-width: 20rem; text-align: right;
-  font: 500 0.78rem/1.6 var(--mono); letter-spacing: 0.04em; color: var(--faint); }
+.console .hero { margin: 0 0 1.5rem; }
+.console .hero h1 { font-size: clamp(3rem, 7vw, 4.75rem); letter-spacing: -0.035em; line-height: 0.95; }
 
-/* THE SCOPE. The funnel, drawn as the landing page draws a mailbox: a noise
-   floor with four carriers standing out of it, one per rung, their heights
-   the real counts on a log scale so one very busy week does not flatten the
-   rest into the floor. The markers ride the peaks like an analyzer's do. */
-.console .scope { position: relative; margin: 0 0 1.25rem; border-radius: 18px; overflow: hidden;
-  background:
-    radial-gradient(90% 120% at 50% 110%, rgba(78, 155, 234, 0.16), transparent 60%),
-    linear-gradient(180deg, rgba(14, 20, 29, 0.85), rgba(9, 13, 22, 0.95));
-  box-shadow: inset 0 0 0 1px rgba(130, 186, 245, 0.2), 0 0 0 1px rgba(0, 0, 0, 0.6),
-    0 0 90px -30px rgba(78, 155, 234, 0.55), 0 40px 100px -40px rgba(0, 0, 0, 0.9); }
-.console .scope-screen { position: relative; aspect-ratio: 1000 / 300; }
+/* THE SCOPE. The funnel as a noise floor with four carriers standing out of
+   it, one per rung, their heights the real counts on a log scale so one busy
+   week does not flatten the rest into the floor. */
+.console .scope { margin: 0 0 1.5rem; border-radius: 14px; overflow: hidden;
+  background: linear-gradient(180deg, rgba(14, 20, 29, 0.9), rgba(9, 13, 22, 0.9));
+  box-shadow: inset 0 0 0 1px var(--hair), 0 30px 80px -40px rgba(0, 0, 0, 0.9); }
+.console .scope-screen { position: relative; aspect-ratio: 1000 / 260; }
 .console .scope-screen::before { content: ""; position: absolute; inset: 0;
   background-image:
-    repeating-linear-gradient(90deg, rgba(130, 186, 245, 0.09) 0 1px, transparent 1px 10%),
-    repeating-linear-gradient(180deg, rgba(130, 186, 245, 0.09) 0 1px, transparent 1px 12.5%); }
+    repeating-linear-gradient(90deg, rgba(130, 186, 245, 0.06) 0 1px, transparent 1px 10%),
+    repeating-linear-gradient(180deg, rgba(130, 186, 245, 0.06) 0 1px, transparent 1px 12.5%); }
 .console .scope svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
-.console .scope .fill { fill: rgba(78, 155, 234, 0.16); stroke: none;
+.console .scope .fill { fill: rgba(78, 155, 234, 0.1); stroke: none;
   -webkit-mask-image: linear-gradient(180deg, #000 20%, transparent 100%);
           mask-image: linear-gradient(180deg, #000 20%, transparent 100%); }
-.console .scope .trace { fill: none; stroke: var(--accent-ink); stroke-width: 1.6; stroke-linejoin: round;
-  filter: drop-shadow(0 0 3px rgba(130, 186, 245, 0.9)) drop-shadow(0 0 12px rgba(78, 155, 234, 0.6));
-  stroke-dasharray: 4000; stroke-dashoffset: 4000; animation: draw 2.4s cubic-bezier(0.3, 0, 0.2, 1) 0.2s forwards; }
-.console .scope .ghost { fill: none; stroke: rgba(130, 186, 245, 0.35); stroke-width: 1;
-  animation: noise 0.18s steps(2) infinite; }
-.console .scope .ghost + .ghost { animation-delay: -0.09s; stroke: rgba(79, 192, 138, 0.22); }
-.console .scope .hold { fill: none; stroke: rgba(232, 172, 76, 0.45); stroke-width: 1; stroke-dasharray: 3 5; }
+.console .scope .trace { fill: none; stroke: var(--accent-ink); stroke-width: 1.4; stroke-linejoin: round;
+  filter: drop-shadow(0 0 4px rgba(78, 155, 234, 0.6));
+  stroke-dasharray: 4000; stroke-dashoffset: 4000; animation: draw 1.6s cubic-bezier(0.3, 0, 0.2, 1) 0.1s forwards; }
 @keyframes draw { to { stroke-dashoffset: 0; } }
-@keyframes noise { 0% { opacity: 0.9; transform: translateY(0); } 50% { opacity: 0.2; transform: translateY(1.5px); } }
-/* The live sweep inside the screen, faster than the one behind the page. */
-.console .scope-screen::after { content: ""; position: absolute; top: 0; bottom: 0; width: 2px; left: 0;
-  background: rgba(233, 238, 245, 0.85); box-shadow: 0 0 18px 4px rgba(130, 186, 245, 0.55), -40px 0 60px 10px rgba(78, 155, 234, 0.12);
-  animation: beam 3.2s linear infinite; }
-@keyframes beam { from { left: 0; } to { left: 100%; } }
-.console .mkr { position: absolute; z-index: 2; transform: translate(-50%, calc(-100% - 10px));
-  display: flex; flex-direction: column; align-items: center; gap: 3px;
-  font: 700 11px/1 var(--mono); color: var(--c); text-shadow: 0 0 10px var(--c);
-  animation: drop 0.6s cubic-bezier(0.2, 0.8, 0.2, 1.4) both; }
-.console .mkr::after { content: ""; border: 6px solid transparent; border-top: 7px solid var(--c);
-  border-bottom: 0; filter: drop-shadow(0 0 6px var(--c)); }
-.console .mkr:nth-of-type(1) { animation-delay: 1.1s; } .console .mkr:nth-of-type(2) { animation-delay: 1.35s; }
-.console .mkr:nth-of-type(3) { animation-delay: 1.6s; } .console .mkr:nth-of-type(4) { animation-delay: 1.85s; }
-@keyframes drop { from { opacity: 0; transform: translate(-50%, calc(-100% - 40px)); } }
-.console .axis { position: absolute; left: 0; right: 0; bottom: 0.6rem; height: 1em;
-  font: 500 9.5px/1 var(--mono); letter-spacing: 0.14em; color: var(--faintest); text-transform: uppercase; }
-.console .axis span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
-.console .axis .edge { transform: none; left: 0.9rem; }
-.console .axis .edge:last-child { left: auto; right: 0.9rem; }
+.console .mkr { position: absolute; z-index: 1; transform: translate(-50%, -100%);
+  border: 5px solid transparent; border-top: 6px solid var(--c); border-bottom: 0;
+  animation: settle 0.5s ease-out 1.1s backwards; }
+@keyframes settle { from { opacity: 0; transform: translate(-50%, calc(-100% - 8px)); } }
 
-/* THE MARKER TABLE, under the screen like the landing page's readout box, and
-   loud: every rung's number counts up from zero on arrival. */
 .console .readouts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
-  border-top: 1px solid rgba(130, 186, 245, 0.16); }
-.console .readout { position: relative; padding: 1.1rem 1.25rem 1.2rem; border-left: 1px solid rgba(130, 186, 245, 0.1); }
+  border-top: 1px solid var(--hair); }
+.console .readout { padding: 1rem 1.25rem 1.1rem; border-left: 1px solid var(--hair); }
 .console .readout:first-child { border-left: 0; }
-.console .readout::before { content: ""; position: absolute; left: 1.25rem; right: 1.25rem; top: -1px; height: 2px;
-  background: var(--c); box-shadow: 0 0 14px 1px var(--c); opacity: 0.9; }
-.console .readout .lbl { display: flex; gap: 0.55rem; align-items: baseline;
-  font: 600 10.5px/1 var(--mono); letter-spacing: 0.16em; color: var(--faint); text-transform: uppercase; }
-.console .readout .lbl b { color: var(--c); }
-.console .num { display: block; margin: 0.55rem 0 0.35rem; font: 600 clamp(2.2rem, 4.4vw, 3.4rem)/1 var(--mono);
-  letter-spacing: -0.04em; color: var(--ink); font-variant-numeric: tabular-nums;
-  text-shadow: 0 0 24px color-mix(in srgb, var(--c) 60%, transparent);
-  --n: var(--target); counter-reset: n var(--n); animation: count 1.8s cubic-bezier(0.2, 0.7, 0.2, 1) 0.4s backwards; }
-.console .num::after { content: counter(n); }
-@keyframes count { from { --n: 0; } }
-.console .readout .sub { font: 500 11px/1.4 var(--mono); color: var(--faintest); }
-.console .readout .sub b { color: var(--dim); font-weight: 600; }
+.console .readout .lbl { display: flex; align-items: center; gap: 0.5rem;
+  font: 600 10.5px/1 var(--mono); letter-spacing: 0.14em; color: var(--faint); text-transform: uppercase; }
+.console .readout .lbl::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--c); }
+.console .num { display: block; margin: 0.55rem 0 0; font: 500 clamp(1.8rem, 3.4vw, 2.4rem)/1 var(--mono);
+  letter-spacing: -0.03em; color: var(--ink); font-variant-numeric: tabular-nums; }
+.console .readout .sub { margin-top: 0.4rem; font: 500 11px/1.4 var(--mono); color: var(--faintest); }
 
-/* THE RACKS: one glass panel per list, each with its own channel colour and
-   an LED that says whether anybody in it is owed something. */
-.console .racks { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1.25rem; }
-.console .rack { --c: var(--accent); position: relative; border-radius: 16px; padding: 0.35rem 1.35rem 0.6rem;
-  background: linear-gradient(180deg, rgba(18, 26, 38, 0.72), rgba(12, 18, 28, 0.72));
-  -webkit-backdrop-filter: blur(14px) saturate(1.3); backdrop-filter: blur(14px) saturate(1.3);
-  box-shadow: inset 0 0 0 1px rgba(130, 186, 245, 0.14), 0 30px 80px -30px rgba(0, 0, 0, 0.8),
-    0 0 60px -30px color-mix(in srgb, var(--c) 70%, transparent);
-  overflow-x: auto; }
+/* THE LISTS: one panel each, a dot in its channel colour beside the label. */
+.console .racks { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1rem; }
+.console .rack { --c: var(--accent); border-radius: 14px; padding: 0.25rem 1.25rem 0.5rem;
+  background: rgba(14, 20, 29, 0.72); box-shadow: inset 0 0 0 1px var(--hair); overflow-x: auto; }
 .console .rack.wait { --c: var(--warn); }
-.console .rack.done-list { --c: var(--accent); }
-.console .rack.send { --c: var(--accent-ink); }
-.console .rack-head { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;
-  padding: 0.95rem 0 0.9rem; border-bottom: 1px solid rgba(130, 186, 245, 0.1); margin-bottom: 0.3rem; }
-.console .rack-head .led { color: var(--c); }
-.console .rack h2 { margin: 0; font: 600 11.5px/1 var(--mono); letter-spacing: 0.22em;
+.console .rack-head { display: flex; align-items: center; gap: 0.65rem; flex-wrap: wrap;
+  padding: 0.95rem 0 0.85rem; border-bottom: 1px solid var(--hair); }
+.console .rack-head .led { width: 6px; height: 6px; border-radius: 50%; background: var(--c); }
+.console .rack h2 { margin: 0; font: 600 11px/1 var(--mono); letter-spacing: 0.16em;
   text-transform: uppercase; color: var(--ink); }
-.console .rack-head .count { font: 600 11px/1 var(--mono); color: var(--c); padding: 0.28rem 0.55rem;
-  border-radius: 999px; background: color-mix(in srgb, var(--c) 12%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--c) 40%, transparent); }
-.console .rack-head .hint { margin: 0 0 0 auto; font-size: 0.8rem; max-width: 30rem; text-align: right; }
-.console .rack > .muted { padding: 1.4rem 0 1rem; margin: 0; font: 500 0.8rem/1.4 var(--mono);
-  letter-spacing: 0.08em; color: var(--faintest); }
-.console .rack > .muted::before { content: "NO CARRIER  "; color: var(--c); white-space: pre; }
+.console .rack-head .count { font: 500 11px/1 var(--mono); color: var(--faint); }
+.console .rack-head .hint { margin: 0 0 0 auto; font-size: 0.82rem; }
+.console .rack > .muted { padding: 1.25rem 0 0.9rem; margin: 0; font-size: 0.9rem; }
 
-.console table { margin: 0; counter-reset: row; font-size: 0.95rem; }
-.console th { font: 600 10px/1 var(--mono); letter-spacing: 0.16em; color: var(--faintest);
-  padding: 0.75rem 1.1rem 0.6rem 0; border-bottom: 1px solid rgba(130, 186, 245, 0.1); }
+.console table { margin: 0; font-size: 0.95rem; }
+.console th { font: 600 10px/1 var(--mono); letter-spacing: 0.14em; color: var(--faintest);
+  padding: 0.85rem 1.1rem 0.6rem 0; border-bottom: 1px solid var(--hair); }
 .console :is(th, td) { padding-right: 1.1rem; }
-.console td { padding-top: 0.8rem; padding-bottom: 0.8rem; border-bottom: 1px solid rgba(130, 186, 245, 0.07);
+.console td { padding-top: 0.75rem; padding-bottom: 0.75rem; border-bottom: 1px solid rgba(130, 186, 245, 0.06);
   vertical-align: middle; }
 .console tr:last-child td { border-bottom: 0; }
-.console tr:has(td) { position: relative; counter-increment: row; transition: background 0.25s;
-  animation: row-in 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) backwards; }
-.console tr:has(td):nth-child(2) { animation-delay: 0.05s; } .console tr:has(td):nth-child(3) { animation-delay: 0.1s; }
-.console tr:has(td):nth-child(4) { animation-delay: 0.15s; } .console tr:has(td):nth-child(5) { animation-delay: 0.2s; }
-.console tr:has(td):nth-child(n + 6) { animation-delay: 0.25s; }
-@keyframes row-in { from { opacity: 0; transform: translateX(-12px); } }
-.console tr:has(td):hover { background: linear-gradient(90deg, color-mix(in srgb, var(--c) 14%, transparent), transparent 70%); }
+.console tr:has(td) { transition: background 0.15s; }
+.console tr:has(td):hover { background: rgba(130, 186, 245, 0.035); }
 .console td.who { color: var(--ink); overflow-wrap: anywhere; }
-.console td.who::before { content: counter(row, decimal-leading-zero); display: inline-block; width: 2.2rem;
-  font: 600 10.5px/1 var(--mono); color: var(--c); opacity: 0.75; letter-spacing: 0.05em; }
-.console tr:hover td.who::before { opacity: 1; text-shadow: 0 0 8px var(--c); }
-.console td.who br + span { margin-left: 2.2rem; }
 .console td.who .given { color: var(--faint); }
 .console td.when { width: 1%; white-space: nowrap; color: var(--faint);
   font: 500 0.78rem/1.5 var(--mono); font-variant-numeric: tabular-nums; }
 .console :is(td.act, th:last-child) { width: 1%; white-space: nowrap; text-align: right; padding-right: 0; }
 .console td form { display: inline; }
-.console td.act > .muted { font: 500 0.78rem/1 var(--mono); margin-right: 0.65rem; }
+.console td.act > .muted { font: 500 0.78rem/1 var(--mono); margin-right: 0.6rem; }
 .console td.act code { margin-left: 0.4rem; font-size: 0.78rem; }
 
-/* THE PILLS. Red pulses, because that row is wrong: approved, and nobody told
-   them. Active glows green, because that row is the whole point. */
-.console :is(.flag, .done) { display: inline-block; margin-right: 0.6rem; padding: 0.25rem 0.6rem;
-  border-radius: 999px; border: 0; font: 700 10px/1 var(--mono); letter-spacing: 0.14em; text-transform: uppercase; }
-.console .flag { color: var(--danger); background: rgba(255, 122, 104, 0.1);
-  box-shadow: inset 0 0 0 1px rgba(255, 122, 104, 0.5); animation: sos 1.2s ease-in-out infinite; }
-@keyframes sos { 50% { box-shadow: inset 0 0 0 1px rgba(255, 122, 104, 0.9), 0 0 22px 2px rgba(255, 122, 104, 0.45); } }
-.console .done { color: var(--accent-ink); background: rgba(78, 155, 234, 0.1);
-  box-shadow: inset 0 0 0 1px rgba(130, 186, 245, 0.4); }
-.console tr.active .done { color: var(--positive); background: rgba(79, 192, 138, 0.12);
-  box-shadow: inset 0 0 0 1px rgba(79, 192, 138, 0.5), 0 0 18px -2px rgba(79, 192, 138, 0.55); }
-.console tr.unsent td.who::before { color: var(--danger); opacity: 1; }
+/* THE PILLS. Red is the row that is wrong (approved, nobody told); green is
+   the row that is the point (using it). Neither moves: colour is enough. */
+.console :is(.flag, .done) { display: inline-block; margin-right: 0.55rem; padding: 0.22rem 0.55rem;
+  border-radius: 999px; border: 0; font: 600 10px/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; }
+.console .flag { color: var(--danger); background: rgba(255, 122, 104, 0.1); }
+.console .done { color: var(--accent-ink); background: rgba(78, 155, 234, 0.12); }
+.console tr.active .done { color: var(--positive); background: rgba(79, 192, 138, 0.12); }
 
-/* CONTROLS. The landing page's call to action, everywhere: a dark glass slab
-   with a passband edge that lights on approach. The edge goes all the way
-   round; a lit top edge on its own is the tell of a template, not a design. */
-.console button, .console a.button { position: relative; font: 600 0.86rem/1 var(--sans, inherit);
-  letter-spacing: 0.01em; color: #f4f8fd; padding: 0.8rem 1.25rem; border-radius: 10px; cursor: pointer;
-  background: linear-gradient(180deg, #152032, #0c121c); border: 1px solid rgba(78, 155, 234, 0.45);
-  box-shadow: 0 0 30px -8px rgba(78, 155, 234, 0.5), 0 12px 30px rgba(0, 0, 0, 0.5);
-  transition: border-color 0.2s, box-shadow 0.25s, transform 0.15s; }
-.console button:hover, .console a.button:hover { border-color: rgba(130, 186, 245, 0.9);
-  box-shadow: 0 0 44px -4px rgba(78, 155, 234, 0.7), 0 16px 38px rgba(0, 0, 0, 0.55); transform: translateY(-1px); }
-.console button:active { transform: translateY(1px) scale(0.98); }
-.console button.quiet { background: rgba(130, 186, 245, 0.05); color: var(--dim); padding: 0.45rem 0.75rem;
-  font: 600 0.72rem/1 var(--mono); letter-spacing: 0.12em; text-transform: uppercase;
-  border: 1px solid rgba(130, 186, 245, 0.22); box-shadow: none; }
-.console button.quiet:hover { color: var(--ink); border-color: var(--c, var(--accent-ink));
-  box-shadow: 0 0 18px -4px var(--c, var(--accent)); }
-.console .wait button.quiet { color: var(--warn); border-color: rgba(232, 172, 76, 0.45); }
-.console .wait button.quiet:hover { background: rgba(232, 172, 76, 0.12); color: #ffe3b3; }
-.console td .flag + form button { color: #fff; border-color: rgba(255, 122, 104, 0.7);
-  background: linear-gradient(180deg, #3a1a18, #1f0f0e); box-shadow: 0 0 26px -6px rgba(255, 122, 104, 0.7);
-  padding: 0.5rem 0.85rem; font-size: 0.8rem; }
+/* CONTROLS: the landing page's call to action, a dark slab with a passband
+   edge all the way round that brightens on hover. */
+.console button, .console a.button { font: 500 0.88rem/1 inherit; color: var(--ink);
+  padding: 0.75rem 1.15rem; border-radius: 9px; cursor: pointer;
+  background: linear-gradient(180deg, #152032, #0e1622); border: 1px solid rgba(78, 155, 234, 0.4);
+  transition: border-color 0.15s, background 0.15s; }
+.console button:hover, .console a.button:hover { border-color: rgba(130, 186, 245, 0.8); }
+.console button.quiet { background: transparent; color: var(--dim); padding: 0.42rem 0.7rem;
+  font-size: 0.8rem; border-color: rgba(130, 186, 245, 0.2); }
+.console button.quiet:hover { color: var(--ink); border-color: rgba(130, 186, 245, 0.5); }
+.console .wait button.quiet { color: var(--warn); border-color: rgba(232, 172, 76, 0.35); }
+.console .wait button.quiet:hover { background: rgba(232, 172, 76, 0.08); border-color: rgba(232, 172, 76, 0.7); }
+.console td .flag + form button { padding: 0.42rem 0.7rem; font-size: 0.8rem;
+  border-color: rgba(255, 122, 104, 0.55); background: rgba(255, 122, 104, 0.08); }
+.console td .flag + form button:hover { border-color: rgba(255, 122, 104, 0.9); }
 .console :is(input[type=text], input[type=password], input[type=email]) {
-  font: 500 0.95rem/1.2 var(--mono); color: var(--ink); padding: 0.85rem 1rem; border-radius: 10px;
-  background: rgba(9, 13, 22, 0.75); border: 1px solid rgba(130, 186, 245, 0.2);
-  transition: border-color 0.2s, box-shadow 0.2s; }
+  font: 0.95rem/1.2 var(--mono); color: var(--ink); padding: 0.8rem 0.95rem; border-radius: 9px;
+  background: rgba(9, 13, 22, 0.7); border: 1px solid rgba(130, 186, 245, 0.18);
+  transition: border-color 0.15s, box-shadow 0.15s; }
 .console input::placeholder { color: var(--faintest); }
-.console input:focus { outline: none; border-color: var(--accent-ink);
-  box-shadow: 0 0 0 3px rgba(78, 155, 234, 0.2), 0 0 30px -4px rgba(78, 155, 234, 0.6); }
-.console :is(input, button, a, summary):focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 3px; }
-.console label { font: 600 10.5px/1 var(--mono); letter-spacing: 0.18em; text-transform: uppercase;
-  color: var(--faint); margin-bottom: 0.65rem; }
+.console input:focus { outline: none; border-color: rgba(130, 186, 245, 0.6);
+  box-shadow: 0 0 0 3px rgba(78, 155, 234, 0.15); }
+.console :is(input, button, a, summary):focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 2px; }
+.console label { font: 600 10.5px/1 var(--mono); letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--faint); margin-bottom: 0.6rem; }
 
-/* THE TRANSMITTER: the direct invite, as the one panel with a live ring
-   spinning round it, because this is the only form on the page that makes
-   somebody's inbox happen. */
-.console .rack.send { overflow: visible; isolation: isolate; }
-.console .rack.send::before { content: ""; position: absolute; inset: -1px; z-index: -1; border-radius: 17px;
-  padding: 1px; background: conic-gradient(from var(--spin), transparent 0deg, rgba(130, 186, 245, 0.9) 40deg, transparent 90deg, transparent 180deg, rgba(79, 192, 138, 0.7) 220deg, transparent 270deg);
-  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor; mask-composite: exclude; animation: spin 6s linear infinite; }
-@keyframes spin { to { --spin: 360deg; } }
-.console .invite { display: flex; gap: 0.6rem; max-width: 40rem; margin: 1rem 0 0.9rem; }
+.console .invite { display: flex; gap: 0.6rem; max-width: 36rem; margin: 1rem 0 0.75rem; }
 .console .invite input { margin: 0; flex: 1; }
 .console .invite button { flex: none; }
-.console .rack.send > .hint { max-width: 44rem; font-size: 0.84rem; }
-.console .footer-row { display: flex; align-items: center; gap: 1.25rem; flex-wrap: wrap; margin: 2rem 0 0; }
+.console .rack.send > .hint { font-size: 0.84rem; margin-bottom: 0.6rem; }
+.console .footer-row { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; margin: 1.75rem 0 0; }
 .console .signout { margin: 0; }
-.console .footer-row .hint { margin: 0; font-size: 0.8rem; }
-.console .sr { position: absolute; width: 1px; height: 1px; overflow: hidden;
-  clip-path: inset(50%); white-space: nowrap; }
+.console .footer-row .hint { margin: 0; font-size: 0.82rem; }
 
-/* THE DOORS (sign in, cross-origin, confirm): one glass slab in the middle of
-   the screen with the transmitter's ring round it. Says nothing about what is
-   behind it, loudly. */
-.console main:not(:has(.scope)) { margin-top: clamp(1rem, 8vh, 5rem); }
-.console main:not(:has(.scope)) { padding: 2.25rem 2rem 2rem; border-radius: 20px; isolation: isolate;
-  background: linear-gradient(180deg, rgba(18, 26, 38, 0.8), rgba(10, 15, 24, 0.85));
-  -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px);
-  box-shadow: inset 0 0 0 1px rgba(130, 186, 245, 0.16), 0 0 120px -40px rgba(78, 155, 234, 0.7), 0 50px 120px -40px rgba(0, 0, 0, 0.9); }
-.console main:not(:has(.scope))::before { content: ""; position: absolute; inset: -1px; z-index: -1; border-radius: 21px; padding: 1px;
-  background: conic-gradient(from var(--spin), transparent 0deg, rgba(130, 186, 245, 0.95) 50deg, transparent 110deg, transparent 180deg, rgba(78, 155, 234, 0.6) 230deg, transparent 290deg);
-  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor; mask-composite: exclude; animation: spin 5s linear infinite; }
+/* THE DOORS (sign in, cross-origin, confirm): one panel, centred. */
+.console main:not(:has(.scope)) { margin-top: clamp(1rem, 10vh, 6rem); padding: 2rem 2rem 1.75rem;
+  border-radius: 16px; background: rgba(14, 20, 29, 0.85);
+  box-shadow: inset 0 0 0 1px var(--hair), 0 40px 100px -40px rgba(0, 0, 0, 0.9); }
 .console main:not(:has(.scope)) .brand { margin-bottom: 1.75rem; }
 .console main:not(:has(.scope)) h1 { margin-bottom: 1.25rem; }
 .console main:not(:has(.scope)) input { margin-bottom: 1.25rem; }
-.console main:not(:has(.scope)) form button { width: 100%; padding: 0.95rem; }
+.console main:not(:has(.scope)) form button { width: 100%; padding: 0.9rem; }
 
-/* PHONES: the scope keeps its screen, the readouts go two by two, the racks
-   stack their heads, and the hud keeps only the lock. */
+/* PHONES: readouts two by two, and table rows become cards, because three
+   columns do not fit and a sideways scroll on a list that needs reading is
+   worse than a longer page. */
 @media (max-width: 760px) {
-  body.console { padding: 3.5rem 1rem 4.5rem; }
-  .console .hero { grid-template-columns: 1fr; }
-  .console .tally { text-align: left; max-width: none; }
-  .console .scope-screen { aspect-ratio: 1000 / 520; }
+  body.console { padding: 2rem 1rem 3rem; }
+  .console .scope-screen { aspect-ratio: 1000 / 440; }
   .console .readouts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .console .readout:nth-child(3) { border-left: 0; }
-  .console .readout:nth-child(n + 3) { border-top: 1px solid rgba(130, 186, 245, 0.1); }
-  .console .rack { padding: 0.35rem 1rem 0.6rem; }
-  .console .rack-head .hint { margin: 0; text-align: left; flex-basis: 100%; }
+  .console .readout:nth-child(n + 3) { border-top: 1px solid var(--hair); }
+  .console .rack { padding: 0.25rem 1rem 0.5rem; }
+  .console .rack-head .hint { margin: 0; flex-basis: 100%; }
   .console .invite { flex-direction: column; }
-  /* Rows become cards: the address on its own line, then the dates, then the
-     outcome and its button, all left aligned. Three columns do not fit in a
-     phone, and a sideways scroll on the one list that needs reading is worse. */
   .console :is(table, tbody, tr, td) { display: block; width: auto; }
   .console tr:first-child:not(:has(td)) { display: none; }
-  .console tr:has(td) { padding: 0.85rem 0; border-bottom: 1px solid rgba(130, 186, 245, 0.07); }
+  .console tr:has(td) { padding: 0.8rem 0; border-bottom: 1px solid rgba(130, 186, 245, 0.06); }
   .console td { border: 0; padding: 0; }
-  .console td.who::before { display: block; margin-bottom: 0.3rem; }
-  .console td.who br + span { margin-left: 0; }
-  .console td.when { margin: 0.35rem 0 0.6rem; white-space: normal; }
   .console td:is(.who, .when, .act) { width: auto; }
+  .console td.when { margin: 0.3rem 0 0.55rem; white-space: normal; }
   .console td.act { text-align: left; white-space: normal; }
-  .console td.act > * { margin-bottom: 0.3rem; }
-  .console .hud span:not(.lock):not(.push) { display: none; }
-  .console .axis .edge { display: none; }
-  .console main:not(:has(.scope)) { padding: 1.75rem 1.25rem 1.5rem; }
+  .console main:not(:has(.scope)) { padding: 1.6rem 1.25rem 1.4rem; }
 }
 
-/* And for anybody whose system asked for stillness: everything lands where it
-   was going, immediately, and stays there. The numbers are still right. */
 @media (prefers-reduced-motion: reduce) {
-  .console *, .console *::before, .console *::after, .console .fx > i {
-    animation-duration: 0.001s !important; animation-iteration-count: 1 !important;
-    animation-delay: 0s !important; transition: none !important; }
-  .console .fx > .sweep, .console .scope-screen::after, .console .hero h1::before, .console .hero h1::after { display: none; }
+  .console .scope .trace { animation: none; stroke-dashoffset: 0; }
+  .console .mkr { animation: none; }
+  .console * { transition: none !important; }
 }

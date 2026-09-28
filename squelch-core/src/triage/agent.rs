@@ -894,6 +894,15 @@ mod tests {
     }
 
     #[test]
+    fn invitations_are_carved_out_of_auth_in_the_prompt() {
+        // A Slack workspace invite ("X has invited you to work with them in Y",
+        // one-click join link) was classified sign_in_link and sealed. The prompt
+        // must say what an invitation is, not only list the auth kinds.
+        assert!(SYSTEM.contains("An invitation is not authentication"));
+        assert!(SYSTEM.contains("one-click join or accept link"));
+        assert!(!SYSTEM.contains('\u{2014}'), "em dash in the agent prompt");
+    }
+    #[test]
     fn credentials_are_not_inferred_from_auth_category() {
         let mut decision = valid();
         decision.auth = AuthAssessment {

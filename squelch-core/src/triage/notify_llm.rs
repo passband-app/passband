@@ -21,7 +21,9 @@ You are the fast notification assessor for a personal inbox. Read this arrival a
 return the schema object. This decision is independent of filing or full triage. \
 Identify whether the message concerns authentication or account security in is_auth. \
 This includes codes, password resets, sign-in links, verification requests, login \
-alerts, and account security alerts. ALL auth qualifies for a notification regardless of \
+alerts, and account security alerts. An invitation to join a workspace, team, group, \
+shared document, or event is not auth, even when it carries a join link. ALL auth \
+qualifies for a notification regardless of \
 score or sender preferences. Do not infer auth from a sender name or an isolated word: \
 assess the message's actual meaning.
 
@@ -434,5 +436,8 @@ mod tests {
         // It asks its own question, not Stage-1's.
         assert!(a.contains("interruption now"));
         assert!(a.contains("ALL auth qualifies"));
+        // A workspace invite with a join link is not a sign-in link (a Slack
+        // invite was sealed as auth once).
+        assert!(a.contains("An invitation to join a workspace"));
     }
 }

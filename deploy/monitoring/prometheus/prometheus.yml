@@ -33,7 +33,7 @@ scrape_configs:
       - target_label: __address__
         replacement: blackbox.railway.internal:9115
 
-  # THE LLM CANARY: a real claude-opus-5 call through the public gateway path
+  # THE LLM CANARY: a real claude-opus-5-5 call through the public gateway path
   # every tenant daemon uses, mirroring the daemon's full request shape, with a
   # dedicated canary virtual key (see deploy/monitoring/blackbox/blackbox.yml).
   # probe_success{job="blackbox-bifrost-llm"} == 0 means LLM calls are NOT

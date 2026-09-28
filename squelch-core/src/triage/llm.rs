@@ -144,9 +144,14 @@ pub async fn classify_llm(
 }
 
 /// The investigation schema exceeds Anthropic's strict grammar complexity
-/// limits. Use a forced native tool submission there; the agent still parses
-/// and validates every step before it can commit a decision. Other classifiers
-/// and the OpenAI transport retain their existing strict JSON schemas.
+/// limits, so the agent step is submitted through a native tool instead of
+/// `output_config.format`. The tool is NOT forced: Claude Opus 5.5 (and every
+/// model after it) answers `tool_choice: tool`/`any` with a 400, so the
+/// request sends `auto` and the system prompt tells the model to answer only
+/// by calling the tool. A turn that comes back without the call is
+/// `missing_agent_submission`, which the agent already spends a repair turn
+/// on; it still parses and validates every step before a decision can commit.
+/// Other classifiers and the OpenAI transport keep their strict JSON schemas.
 pub async fn classify_agent_step(
     http: &reqwest::Client,
     url: &str,
@@ -461,7 +466,7 @@ async fn classify_anthropic(
             "input_schema": req.schema,
         }]);
         body["tool_choice"] = serde_json::json!({
-            "type": "tool", "name": AGENT_SUBMISSION_TOOL, "disable_parallel_tool_use": true,
+            "type": "auto", "disable_parallel_tool_use": true,
         });
     }
 
@@ -828,7 +833,9 @@ mod tests {
                     assert_eq!(body["output_config"]["effort"], "low");
                     assert_eq!(body["tools"][0]["input_schema"], schema);
                     assert!(body["tools"][0].get("strict").is_none());
-                    assert_eq!(body["tool_choice"]["name"], AGENT_SUBMISSION_TOOL);
+                    // Never forced: a forced tool_choice is a 400 on Opus 5.5.
+                    assert_eq!(body["tool_choice"]["type"], "auto");
+                    assert!(body["tool_choice"].get("name").is_none());
                     assert_eq!(body["tool_choice"]["disable_parallel_tool_use"], true);
                     Json(json!({"content":content,"stop_reason":stop,"usage":{"input_tokens":11,"output_tokens":7}}))
                 }

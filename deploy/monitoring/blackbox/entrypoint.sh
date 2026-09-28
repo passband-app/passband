@@ -17,8 +17,8 @@ fi
 # (SQUELCH_WARDEN_LLM_STAGE1_MODEL / _STAGE2_MODEL); a canary probing a model
 # the fleet does not send is a canary that can go green while the fleet is
 # down. Provider-qualified by default: this gateway cannot auto-resolve a bare
-# `claude-opus-5`.
-MODEL="${BLACKBOX_CANARY_MODEL:-anthropic/claude-opus-5}"
+# `claude-opus-5-5`.
+MODEL="${BLACKBOX_CANARY_MODEL:-anthropic/claude-opus-5-5}"
 echo "blackbox: bifrost_llm canary will probe model ${MODEL}" >&2
 
 # Rendered to /tmp: the stock image runs as nobody, which cannot write

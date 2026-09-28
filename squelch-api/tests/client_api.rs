@@ -5512,10 +5512,11 @@ async fn stats_expose_stage2_usage_and_cost() {
     assert_eq!(s2["output_tokens_today"], 200_000);
     assert_eq!(s2["cache_creation_tokens_today"], 200_000);
     assert_eq!(s2["cache_read_tokens_today"], 1_000_000);
-    // cost = 5.0*(1e6/1e6) + 25.0*(0.2e6/1e6)
-    //      + 5.0*1.25*(0.2e6/1e6) + 5.0*0.1*(1e6/1e6) = 5.0 + 5.0 + 1.25 + 0.5
+    // cost = 4.0*(1e6/1e6) + 20.0*(0.2e6/1e6)
+    //      + 4.0*2.0*(0.2e6/1e6) + 4.0*0.05*(1e6/1e6) = 4.0 + 4.0 + 1.6 + 0.2
+    // (Opus 5.5 prices; 1-hour cache writes at 2x, reads at 0.05x)
     let cost = s2["est_cost_usd_today"].as_f64().unwrap();
-    assert!((cost - 11.75).abs() < 1e-9, "expected 11.75, got {cost}");
+    assert!((cost - 9.8).abs() < 1e-9, "expected 9.8, got {cost}");
 }
 
 #[tokio::test]
@@ -5645,16 +5646,16 @@ async fn usage_returns_rows_totals_and_is_bearer_gated() {
     assert_eq!(totals["output_tokens"], 200_000);
     assert_eq!(totals["cache_creation_tokens"], 400_000);
     assert_eq!(totals["cache_read_tokens"], 2_000_000);
-    // cost = 5.0*(1e6/1e6) + 25.0*(0.2e6/1e6)
-    //      + 5.0*2.0*(0.4e6/1e6) + 5.0*0.1*(2e6/1e6) = 5.0 + 5.0 + 4.0 + 1.0
-    // (cache writes at the 1-hour TTL's 2x, see CACHE_WRITE_INPUT_MULT)
+    // cost = 4.0*(1e6/1e6) + 20.0*(0.2e6/1e6)
+    //      + 4.0*2.0*(0.4e6/1e6) + 4.0*0.05*(2e6/1e6) = 4.0 + 4.0 + 3.2 + 0.4
+    // (Opus 5.5 prices; cache writes at the 1-hour TTL's 2x, reads at 0.05x)
     let cost = totals["est_cost_usd"].as_f64().unwrap();
-    assert!((cost - 15.0).abs() < 1e-9, "expected 15.0, got {cost}");
+    assert!((cost - 11.6).abs() < 1e-9, "expected 11.6, got {cost}");
 
     // Stage-1 and Stage-2 appear as separate usage categories.
-    assert_eq!(json["model"], "claude-opus-5");
-    assert_eq!(json["categories"]["stage2"]["model"], "claude-opus-5");
-    assert_eq!(json["categories"]["stage1"]["model"], "claude-opus-5");
+    assert_eq!(json["model"], "claude-opus-5-5");
+    assert_eq!(json["categories"]["stage2"]["model"], "claude-opus-5-5");
+    assert_eq!(json["categories"]["stage1"]["model"], "claude-opus-5-5");
 
     // Bearer-gated: no token => 401.
     let req = Request::builder()
@@ -6469,12 +6470,12 @@ async fn triage_config_get_default_shape() {
 
     // Stage-2 escalation model label. SAME model as Stage-1: escalation buys
     // context and reasoning depth, not a different reader.
-    assert_eq!(json["stage2_model"], "claude-opus-5");
+    assert_eq!(json["stage2_model"], "claude-opus-5-5");
 
     // Stage-1 block: GLOBAL-only cap (default 500), "default" source, null
     // tokens/call (empty ledger), and prices.
     let s1 = &json["stage1"];
-    assert_eq!(s1["model"], "claude-opus-5");
+    assert_eq!(s1["model"], "claude-opus-5-5");
     assert_eq!(s1["global_daily_cap"], 500);
     assert_eq!(s1["source"], "default");
     assert_eq!(s1["avg_calls_per_day"], 0.0);

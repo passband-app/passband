@@ -15,7 +15,6 @@ import SwiftUI
 
 #if os(macOS)
     import AppKit
-    import AVFoundation
 #endif
 
 /// The quiet board's shared state. The sitrep decides it; the window shell
@@ -129,92 +128,33 @@ private struct StreakChip: View {
 // MARK: - the scene
 
 /// The quiet board's backdrop: the P7 phosphor squelch from brand/phosphor,
-/// pre-rendered widescreen with the gate held open (Resources/Brand/
-/// P7Squelch.mp4, a seamless 8 s loop, 12 sweeps of persistence so it breathes rather than strobes). A video rather than a live render
-/// because the look IS the offline renderer: bloom at four radii, a phosphor
-/// tonemap and 9000 beam samples a frame are not something to redo per frame
-/// in a mail app.
+/// rendered live (Views/Phosphor), gate open and actively squelching, with
+/// the calm backdrop's persistence. Falls back to the onboarding's squelch
+/// scene on a Mac without a usable Metal device.
 ///
-/// Paused while this window is not key, and held on its first frame under
-/// Reduce Motion. Falls back to the onboarding's Metal scene when the video
-/// is missing (and on the phone, which has not had this pass yet).
+/// Paused while this window is not key: a mail app sits open all day, and a
+/// display link running behind other windows is a battery bug with a nice
+/// animation on top.
 struct ClearScene: View {
     #if os(macOS)
         @Environment(\.controlActiveState) private var activeState
-        @Environment(\.accessibilityReduceMotion) private var reduceMotion
-        private var paused: Bool { activeState != .key || reduceMotion }
+        private var paused: Bool { activeState != .key }
     #else
         private let paused = false
     #endif
 
-    static let video: URL? =
-        Bundle.main.url(forResource: "P7Squelch", withExtension: "mp4", subdirectory: "Brand")
-        ?? Bundle.main.url(forResource: "P7Squelch", withExtension: "mp4")
-
     var body: some View {
         Group {
-            #if os(macOS)
-                if let url = Self.video {
-                    LoopingVideo(url: url, paused: paused)
-                } else {
-                    IntroSceneBackdrop(engaged: true, wide: true, paused: paused)
-                }
-            #else
+            if PhosphorScene.shared.isUnavailable {
                 IntroSceneBackdrop(engaged: true, wide: true, paused: paused)
-            #endif
+            } else {
+                PhosphorBackdrop(paused: paused)
+            }
         }
         .allowsHitTesting(false)
         .accessibilityHidden(true)
     }
 }
-
-#if os(macOS)
-    /// A muted, aspect-filled, gaplessly looping video. `AVPlayerLooper` over a
-    /// queue player, because a plain player's seek-to-zero on end leaves a
-    /// visible hitch at every loop.
-    private struct LoopingVideo: NSViewRepresentable {
-        let url: URL
-        let paused: Bool
-
-        func makeNSView(context: Context) -> LoopingVideoView { LoopingVideoView(url: url) }
-
-        func updateNSView(_ view: LoopingVideoView, context: Context) {
-            view.setPaused(paused)
-        }
-
-        static func dismantleNSView(_ view: LoopingVideoView, coordinator: ()) {
-            view.setPaused(true)
-        }
-    }
-
-    private final class LoopingVideoView: NSView {
-        private let player = AVQueuePlayer()
-        private var looper: AVPlayerLooper?
-        private let playerLayer = AVPlayerLayer()
-
-        init(url: URL) {
-            super.init(frame: .zero)
-            player.isMuted = true
-            // Never wake the display or hold off sleep for a backdrop.
-            player.preventsDisplaySleepDuringVideoPlayback = false
-            looper = AVPlayerLooper(player: player, templateItem: AVPlayerItem(url: url))
-            playerLayer.player = player
-            playerLayer.videoGravity = .resizeAspectFill
-            wantsLayer = true
-            layer = playerLayer
-        }
-
-        required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
-
-        func setPaused(_ paused: Bool) {
-            if paused {
-                if player.rate != 0 { player.pause() }
-            } else if player.rate == 0 {
-                player.play()
-            }
-        }
-    }
-#endif
 
 /// The Squelch chime and a haptic tick, for the moment the board is cleared.
 @MainActor

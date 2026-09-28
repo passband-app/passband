@@ -47,6 +47,7 @@
 		1D4DC0356DE1A699763FBFB0 /* UsageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8D7384FAFC16891C369CFA8 /* UsageView.swift */; };
 		1E07DF0006E501D0B7C3228A /* Ranking.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7079893CCCC8806D2B5099D8 /* Ranking.swift */; };
 		1E3D3435F491C658C93127B4 /* Format.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5883BA424612265657845246 /* Format.swift */; };
+		1E8DA017E91A02EF7B7BD2E3 /* PhosphorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C6A02D8A42FF0B05E18ED65 /* PhosphorView.swift */; };
 		217F91C35460C7286C88712C /* WebKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BBC8D81B089AFD24BD4AC367 /* WebKit.framework */; };
 		21C07F48F3C41E83CEBDD284 /* OnboardingIntroView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C787F920246CFD228F21747 /* OnboardingIntroView.swift */; };
 		22511E51CB7D38C82320FE21 /* SitrepView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B0750416DB37BFF3B78457B /* SitrepView.swift */; };
@@ -125,6 +126,7 @@
 		4E721B91AEB73F8E8B0AAFE8 /* AttachmentKinds.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DAF25E856CCAD8284AAA131 /* AttachmentKinds.swift */; };
 		4F1ACF4C4907587277817F3D /* QuickLookPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 361AB4D81F3740E2B072C5BA /* QuickLookPanel.swift */; };
 		50E69A11AB542FBC85149FDE /* ShareNudge.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEACCDDABDFBD619EB070CEB /* ShareNudge.swift */; };
+		5126015E560E46C1804BA20F /* PhosphorRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD507C4D43AF7D5C49DF0D2E /* PhosphorRenderer.swift */; };
 		521C6B71EEF0E5C03EF7AF89 /* SubjectText.swift in Sources */ = {isa = PBXBuildFile; fileRef = E645BA6EC9A8686D95460095 /* SubjectText.swift */; };
 		526581101F846DEC04813704 /* ReleaseNotes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1964D381D25BBC803E490328 /* ReleaseNotes.swift */; };
 		542F16866D729BD1E30B6AA6 /* AccountPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA2F8E5310BCCF203247E428 /* AccountPage.swift */; };
@@ -145,6 +147,7 @@
 		61C6647BAE622BF233B599EF /* GroupPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0119D99E10BB97CC572DCA69 /* GroupPicker.swift */; };
 		61E6D7AA7EB53F8AEE04063C /* SitrepZones.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22B6CF4EF83BEF15EB372184 /* SitrepZones.swift */; };
 		61EDF2730A3827299A5E9660 /* LiveInboxSummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 72CBF9D9D70A4E7B3BEC601D /* LiveInboxSummary.swift */; };
+		62146C86E8F526DE2B2D99B6 /* PhosphorRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD507C4D43AF7D5C49DF0D2E /* PhosphorRenderer.swift */; };
 		6277F73C5576C9955C6B0656 /* RecipientField.swift in Sources */ = {isa = PBXBuildFile; fileRef = 327BC236C39F192198AFEF7D /* RecipientField.swift */; };
 		63B1D314BBBFDE43A8860992 /* Reading.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AC75F572A768A3A2EEB001F /* Reading.swift */; };
 		647DD68EDE188660654C0D27 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDDBA0B71BDDC46E844D2856 /* RootView.swift */; };
@@ -221,6 +224,7 @@
 		8E1F8DB308ED83F7376BE9B5 /* GroupsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CC257E1C6D252919F11B337 /* GroupsView.swift */; };
 		8E4141BFBB745019FB5C7D4D /* GmailDisconnectedBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = C756C9A9A4570C1AFFE7003E /* GmailDisconnectedBanner.swift */; };
 		903D181BC549637A0AEEB564 /* EmailWebCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3BFBFFBE499370A5F88E2540 /* EmailWebCore.swift */; };
+		91072B199B1161CD7D310819 /* PhosphorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C6A02D8A42FF0B05E18ED65 /* PhosphorView.swift */; };
 		911E2DC6E6549AECE86FFBAA /* Sounds in Resources */ = {isa = PBXBuildFile; fileRef = F538ABF63F676ADB2910AE59 /* Sounds */; };
 		913D465C949CCE810929D314 /* ThreadArrivals.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB8DC0D632309B6B97130426 /* ThreadArrivals.swift */; };
 		91774D41994F36BA146947E7 /* Badge.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3B428F6536347775B3EA5DC /* Badge.swift */; };
@@ -500,6 +504,7 @@
 		5A1CE9442DCA54FF7863D7C5 /* AttachmentPreviewiOS.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentPreviewiOS.swift; sourceTree = "<group>"; };
 		5B4B4C15D9674E6B94D01849 /* Brand */ = {isa = PBXFileReference; lastKnownFileType = folder; name = Brand; path = Sources/Passband/Resources/Brand; sourceTree = SOURCE_ROOT; };
 		5B7D3E42C4E6495943239602 /* SitrepWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SitrepWindow.swift; sourceTree = "<group>"; };
+		5C6A02D8A42FF0B05E18ED65 /* PhosphorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhosphorView.swift; sourceTree = "<group>"; };
 		5C787F920246CFD228F21747 /* OnboardingIntroView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingIntroView.swift; sourceTree = "<group>"; };
 		5DAC2EA79665D763DD36958D /* SyncStatus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncStatus.swift; sourceTree = "<group>"; };
 		5F62561CEB4911BA0E72FEDD /* ThreadPrefetch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadPrefetch.swift; sourceTree = "<group>"; };
@@ -572,6 +577,7 @@
 		BBA1338A4CA4B001850F8140 /* AssistantKey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AssistantKey.swift; sourceTree = "<group>"; };
 		BBC8D81B089AFD24BD4AC367 /* WebKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WebKit.framework; path = System/Library/Frameworks/WebKit.framework; sourceTree = SDKROOT; };
 		BC0ADC18AA758296235E8F59 /* Avatar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Avatar.swift; sourceTree = "<group>"; };
+		BD507C4D43AF7D5C49DF0D2E /* PhosphorRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhosphorRenderer.swift; sourceTree = "<group>"; };
 		BD9028BBB8ECDE62A486B41B /* AttachmentTray.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentTray.swift; sourceTree = "<group>"; };
 		BE74212A3CE62E8F28EC8D7E /* Markdown.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Markdown.swift; sourceTree = "<group>"; };
 		BE85FBF58B14F2DC27FC16FB /* AttachmentThumbs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentThumbs.swift; sourceTree = "<group>"; };
@@ -665,6 +671,7 @@
 		01658E921375653A5AF4F1EC /* Views */ = {
 			isa = PBXGroup;
 			children = (
+				C4A36A6B3A4ACA1C0083074D /* Phosphor */,
 				8C4CC5CD37504FFBBBE5B8C8 /* Squelch */,
 				9B11AE47A064BB58DD81A6DB /* ActionLayer.swift */,
 				09312A1F80127B91A8FDC394 /* AgentCards.swift */,
@@ -978,6 +985,15 @@
 			path = PassbandiOSNotify;
 			sourceTree = "<group>";
 		};
+		C4A36A6B3A4ACA1C0083074D /* Phosphor */ = {
+			isa = PBXGroup;
+			children = (
+				BD507C4D43AF7D5C49DF0D2E /* PhosphorRenderer.swift */,
+				5C6A02D8A42FF0B05E18ED65 /* PhosphorView.swift */,
+			);
+			path = Phosphor;
+			sourceTree = "<group>";
+		};
 		C7309193114201DF62A11D3D /* Assistant */ = {
 			isa = PBXGroup;
 			children = (
@@ -1243,6 +1259,8 @@
 				DD971CBBDF48F7F74F7D1190 /* Pairing.swift in Sources */,
 				BBE3AD0E42A5038B4013E5BB /* Palette.swift in Sources */,
 				42B14F1B7A46FE2A0B7E9772 /* PassbandApp.swift in Sources */,
+				62146C86E8F526DE2B2D99B6 /* PhosphorRenderer.swift in Sources */,
+				1E8DA017E91A02EF7B7BD2E3 /* PhosphorView.swift in Sources */,
 				D912E3C77E849D839A27A115 /* Platform.swift in Sources */,
 				AE9F688F49884E6B3BC14D14 /* PracticeProductTour.swift in Sources */,
 				E0E0FC3C3E25A35C8DA35700 /* PracticeTourStep.swift in Sources */,
@@ -1427,6 +1445,8 @@
 				D8FAA331307EB4021EF60BE1 /* Pairing.swift in Sources */,
 				DA96B9B6DC4CF125D3626BEC /* Palette.swift in Sources */,
 				B3BD3AFC1DED8C5544D23602 /* PassbandiOSApp.swift in Sources */,
+				5126015E560E46C1804BA20F /* PhosphorRenderer.swift in Sources */,
+				91072B199B1161CD7D310819 /* PhosphorView.swift in Sources */,
 				B36D0542B36A1421D26CA968 /* Platform.swift in Sources */,
 				A6995509034F916948DB02E9 /* PracticeTourStep.swift in Sources */,
 				7379C8366D649A8F25C27826 /* Prefs.swift in Sources */,

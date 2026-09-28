@@ -4,11 +4,10 @@
 //
 // Two pieces. `ClearNote` sits under the hero and says it in words: a line of
 // encouragement, today's tally, a run of clear days. `ClearScene` fills the
-// page behind everything: the onboarding's squelch scene, gate closed.
+// whole window behind everything: the onboarding's squelch scene, gate closed.
 //
 // THE MOMENT: when the reader clears the last thing (on this page, or in the
-// reader and then comes back), the gate drops open, noise pours through, and
-// the squelch closes on it again, with the Squelch chime. Once per clearing,
+// reader and then comes back), the Squelch chime plays. Once per clearing,
 // never on a board that simply opened quiet: a reward nobody earned is just
 // noise, which is the one thing this surface is against.
 
@@ -18,12 +17,22 @@ import SwiftUI
     import AppKit
 #endif
 
-/// Whether the board has held anything since it was last seen quiet. Process
-/// wide rather than view state, because the clearing that earns the moment
-/// usually happens in the reader, while the sitrep is not mounted at all.
+/// The quiet board's shared state. The sitrep decides it; the window shell
+/// draws the scene from it, because the scene runs under the sidebar rail
+/// and the traffic lights too, which are not the sitrep's to paint.
 @MainActor
-enum ClearMoment {
-    static var armed = false
+@Observable
+final class QuietBoard {
+    static let shared = QuietBoard()
+
+    /// The sitrep is on screen with nothing on it.
+    var isQuiet = false
+
+    /// Whether the board has held anything since it was last seen quiet.
+    /// Process wide rather than view state, because the clearing that earns
+    /// the chime usually happens in the reader, while the sitrep is not
+    /// mounted at all.
+    @ObservationIgnored var armed = false
 }
 
 // MARK: - the note
@@ -95,19 +104,13 @@ private struct StreakChip: View {
 // MARK: - the scene
 
 /// The onboarding's squelch scene as the quiet board's backdrop, scrims and
-/// all (`IntroSceneBackdrop`), so the page the reader earns looks like the
-/// page they were promised on the first launch. At rest the squelch is closed.
-/// After a clearing it drops open, noise pours through the gate, and it closes
-/// again on the Squelch chime.
+/// all (`IntroSceneBackdrop`), gate closed: only the actively squelching
+/// beat, never the dormant one.
 ///
 /// Held on its settled frame while this window is not key: a mail app sits
 /// open all day, and a Metal display link running behind other windows is a
 /// battery bug with a nice animation on top.
 struct ClearScene: View {
-    /// When the board was cleared, or nil for a board that opened quiet.
-    let clearedAt: Date?
-
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     #if os(macOS)
         @Environment(\.controlActiveState) private var activeState
         private var paused: Bool { activeState != .key }
@@ -115,33 +118,21 @@ struct ClearScene: View {
         private let paused = false
     #endif
 
-    @State private var engaged = true
-
-    /// How long the gate stands open before it closes on the chime: long
-    /// enough to see the noise pour, short enough to still read as a reward.
-    private static let openFor: Duration = .milliseconds(1600)
-
     var body: some View {
-        IntroSceneBackdrop(engaged: engaged, wide: true, paused: paused)
+        IntroSceneBackdrop(engaged: true, wide: true, paused: paused)
             .allowsHitTesting(false)
             .accessibilityHidden(true)
-            .task(id: clearedAt) {
-                guard clearedAt != nil else { return }
-                if !reduceMotion {
-                    engaged = false
-                    try? await Task.sleep(for: Self.openFor)
-                    guard !Task.isCancelled else { return }
-                    engaged = true
-                }
-                Self.chime()
-            }
     }
+}
 
+/// The Squelch chime and a haptic tick, for the moment the board is cleared.
+@MainActor
+enum ClearChime {
     #if os(macOS)
         private static var sound: NSSound?
     #endif
 
-    private static func chime() {
+    static func play() {
         #if os(macOS)
             NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now)
             // The Mac bundles the chimes under Sounds/; the phone's are flat.

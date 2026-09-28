@@ -50,9 +50,6 @@ final class SitrepCursor {
     /// Hovered reading-card address — `e` marks that sender's whole window done,
     /// deferring to the For-your-eyes handler when nothing hovers.
     var reading: String?
-    /// When the reader cleared the board's last item, for the clear band's
-    /// one-shot squelch. Nil when the board simply opened clear.
-    var clearedAt: Date?
 
     /// Point the cursor at a row the POINTER is over. EVERY WRITE IS GUARDED:
     /// `@Observable` notifies on assignment, not on change, so an unguarded
@@ -132,8 +129,7 @@ struct SitrepView: View {
             // padding inside each scroll view's content.
             DashHero(
                 standing: store.sitrep.standing,
-                empty: emptyHero,
-                clearedAt: cursor.clearedAt)
+                empty: emptyHero)
                 .padding(.horizontal, 28)
                 .padding(.bottom, 18)
 
@@ -150,7 +146,6 @@ struct SitrepView: View {
                         if !recordsEmpty {
                             railCards.tourTarget(.records)
                         }
-                        StatusStrip()
                     }
                     .padding(.top, 14)
                     .padding(.bottom, 28)
@@ -164,7 +159,6 @@ struct SitrepView: View {
                     ScrollView(.vertical) {
                         VStack(spacing: 16) {
                             leftZones(visible: visible, overflow: overflow)
-                            StatusStrip()
                         }
                         .padding(.top, 14)
                         .padding(.bottom, 28)
@@ -202,15 +196,10 @@ struct SitrepView: View {
                 .padding(.horizontal, 24)
             }
         }
-        // THE QUIET BOARD's backdrop: under everything, the top bar too, as
-        // the onboarding sets it, and gone (faded, not cut) the moment anything lands on the board.
-        .background {
-            if quiet {
-                ClearScene(clearedAt: cursor.clearedAt)
-                    .transition(.opacity)
-            }
-        }
-        .animation(.easeInOut(duration: 0.9), value: quiet)
+        // The window shell draws the scene (it runs under the rail and the
+        // traffic lights), so the sitrep only says whether it should.
+        .onChange(of: quiet, initial: true) { _, q in QuietBoard.shared.isQuiet = q }
+        .onDisappear { QuietBoard.shared.isQuiet = false }
         .animation(.easeInOut(duration: 0.3), value: recordsEmpty)
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { pageWidth = $0 }
         .keyContext(.sitrep)
@@ -240,11 +229,10 @@ struct SitrepView: View {
         // that alone would never arm.
         .onChange(of: [ranked.isEmpty && readingSenders.isEmpty, quiet], initial: true) { _, now in
             if !now[0] {
-                ClearMoment.armed = true
-                cursor.clearedAt = nil
-            } else if now[1], ClearMoment.armed {
-                ClearMoment.armed = false
-                cursor.clearedAt = Date()
+                QuietBoard.shared.armed = true
+            } else if now[1], QuietBoard.shared.armed {
+                QuietBoard.shared.armed = false
+                ClearChime.play()
             }
         }
     }
@@ -772,12 +760,8 @@ struct GreetingLine: View {
 private struct DashHero: View {
     let standing: [AttentionUpdate]
     /// What to say over an empty board when it is empty because triage has
-    /// not run (see `SyncStatus.emptyHero`). Nil lets "You're all clear." stand.
+    /// not run (see `SyncStatus.emptyHero`). Nil lets the all-clear line stand.
     var empty: (title: String, note: String)? = nil
-    /// When the last item was cleared: the headline lands with a small pop.
-    var clearedAt: Date? = nil
-
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private static let smallWords = [
         "Zero", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine",
@@ -800,7 +784,7 @@ private struct DashHero: View {
             return "\(Self.spell(total)) item\(total == 1 ? "" : "s") on your plate."
         }
         // An empty board is only "all clear" when triage has actually run.
-        return empty?.title ?? "You're all clear."
+        return empty?.title ?? "You've cleared all your important mail!"
     }
 
     /// The reason under an empty-board headline, only when there is one.
@@ -814,14 +798,6 @@ private struct DashHero: View {
                 .foregroundStyle(Palette.ink)
                 .lineSpacing(-2)
                 .fixedSize(horizontal: false, vertical: true)
-                .keyframeAnimator(
-                    initialValue: 1.0, trigger: reduceMotion ? nil : clearedAt
-                ) { view, scale in
-                    view.scaleEffect(scale, anchor: .leading)
-                } keyframes: { _ in
-                    SpringKeyframe(1.06, duration: 0.22, spring: .snappy)
-                    SpringKeyframe(1.0, duration: 0.5, spring: .bouncy)
-                }
             if let note {
                 Text(note)
                     .font(Typo.rowSub)
@@ -1070,56 +1046,6 @@ private struct ObligationWash: View {
                     .strokeBorder(
                         focused ? tint.opacity(SelectionTone.border) : .clear, lineWidth: 1)
             )
-    }
-}
-
-// MARK: - status strip
-
-private struct StatusStrip: View {
-    @Environment(AppStore.self) private var store
-    @State private var refreshing = false
-
-    var body: some View {
-        HStack(spacing: 9) {
-            if !RehearsalMode.isEnabled {
-            ChromeChip(
-                tone: stamp.warn ? Palette.warn : Palette.inkDim,
-                help: "check for new mail now"
-            ) {
-                guard !refreshing else { return }
-                refreshing = true
-                Task {
-                    await SitrepPoller.shared.triggerMailRefresh()
-                    refreshing = false
-                }
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 10, weight: .semibold))
-                        .symbolEffect(.rotate, isActive: refreshing)
-                    Text(stamp.text)
-                }
-                .font(Typo.micro)
-            }
-            .disabled(refreshing)
-            }
-
-            if let cost = store.sitrep.stats?.stage2?.est_cost_usd_today {
-                Text("triage: \(String(format: "$%.2f", cost)) today")
-                    .font(Typo.num(11))
-                    .foregroundStyle(Palette.inkFaintest)
-                    .help("today's stage-2 triage cost estimate")
-            }
-
-            Spacer(minLength: 0)
-        }
-        .padding(.top, 2)
-    }
-
-    /// Shared with the phone's footnote: see `SyncStatus.syncedStamp`.
-    private var stamp: (text: String, warn: Bool) {
-        SyncStatus.syncedStamp(
-            stats: store.sitrep.stats, clientRefresh: store.lastRefresh, date: Fmt.date)
     }
 }
 

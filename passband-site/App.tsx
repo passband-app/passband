@@ -1466,8 +1466,8 @@ export function App() {
               <span>passband</span>
             </a>
             <nav className="pb-nav">
-              <a href="/about">About</a>
               <a href="/self-host">Self-host</a>
+              <a href="/trust">Trust</a>
               <a className="pb-keep" href="https://github.com/braelyn-ai/squelch">GitHub</a>
             </nav>
           </header>
@@ -1573,6 +1573,7 @@ export function App() {
         <nav>
           <a href="/about">About</a>
           <a href="/self-host">Self-host</a>
+          <a href="/trust">Trust</a>
           <a href="/privacy">Privacy</a>
           <a href="/terms">Terms</a>
           <a href="https://github.com/braelyn-ai/squelch">GitHub</a>

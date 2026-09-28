@@ -33,9 +33,9 @@ struct ClearBand: View {
     @State private var streak = 0
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 10) {
             CarrierTrace(clearedAt: reduceMotion ? nil : clearedAt, still: reduceMotion)
-                .frame(height: 128)
+                .frame(height: 100)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 6) {
                 Text(ClearCopy.tagline())
@@ -157,7 +157,7 @@ private struct CarrierTrace: View {
             let p = since / Self.pulseTime
             let r = (0.08 + p) * max(w, h) * 0.55
             let ring = Path(ellipseIn: CGRect(x: w / 2 - r, y: mid - r * 0.34, width: r * 2, height: r * 0.68))
-            ctx.stroke(ring, with: .color(Palette.accent.opacity(0.45 * (1 - p))), lineWidth: 1.5)
+            ctx.stroke(ring, with: .color(Palette.accent.opacity(0.7 * (1 - p))), lineWidth: 2)
             sparks(&ctx, size, progress: p)
         }
 
@@ -235,11 +235,11 @@ private struct CarrierTrace: View {
             let dist = (40 + 70 * Self.hash(i, 17)) * ease
             let x = x0 + cos(angle) * dist * 0.6
             let y = mid - sin(angle) * dist
-            let r = 1.2 + 1.6 * Self.hash(i, 19)
+            let r = 1.8 + 2.2 * Self.hash(i, 19)
             let color = i % 3 == 0 ? Palette.positive : Palette.accent
             ctx.fill(
                 Path(ellipseIn: CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2)),
-                with: .color(color.opacity(0.9 * (1 - p))))
+                with: .color(color.opacity(1 - p * p)))
         }
     }
 

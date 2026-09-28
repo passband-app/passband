@@ -792,11 +792,43 @@ enum EmailFrame {
           }
           decideHug();
 
+          // ---- fit to width ------------------------------------------------
+          // A template built at a FIXED width (a 600px table, a 640px image
+          // row) is wider than a phone, and the body is overflow:hidden, so
+          // the right side was simply gone: text cut mid-word, no way to
+          // scroll to it. Scale the whole document down until its widest box
+          // fits, the way Mail does. Measured at zoom 1 each time, since the
+          // overflow is a property of the layout, not of the last fit.
+          // WebKit's zoom is the standardized kind: rects come back in visual
+          // px, scrollHeight/scrollWidth in the element's own; contentHeight
+          // accounts for that.
+          var zoom = 1;
+          function fitWidth() {
+            var b = document.body, h = document.documentElement;
+            if (!b || !h) return;
+            h.style.zoom = '';
+            zoom = 1;
+            var over = b.scrollWidth, room = b.clientWidth;
+            if (room > 0 && over > room + 1) {
+              zoom = Math.max(0.25, room / over);
+              h.style.zoom = String(zoom);
+            }
+          }
+          var fitAt = window.innerWidth;
+          window.addEventListener('resize', function () {
+            if (window.innerWidth === fitAt) return;
+            fitAt = window.innerWidth;
+            fitWidth();
+            measure();
+          });
+
           var quoteNodes = findQuoteNodes();
           window.__passbandSetQuotes = function (collapsed) {
             for (var i = 0; i < quoteNodes.length; i++) {
               quoteNodes[i].style.display = collapsed ? 'none' : '';
             }
+            // An expanded chain can be wider than the reply above it.
+            fitWidth();
             measure();
           };
           // Collapsed by default, BEFORE the first measure, so the frame sizes
@@ -815,7 +847,8 @@ enum EmailFrame {
             if (!b) {
               return document.documentElement ? document.documentElement.scrollHeight : 0;
             }
-            return Math.max(b.scrollHeight, Math.ceil(b.getBoundingClientRect().height));
+            return Math.max(
+              Math.ceil(b.scrollHeight * zoom), Math.ceil(b.getBoundingClientRect().height));
           }
           // The width the body came to. Only a bubble document hugs (its body
           // is `fit-content`), so for a card this is just the frame's width.
@@ -871,7 +904,8 @@ enum EmailFrame {
           window.__passbandMeasure = measurement;
           measure();
           requestAnimationFrame(measure);
-          window.addEventListener('load', measure);
+          // Images with a width attribute can widen a table once they land.
+          window.addEventListener('load', function () { fitWidth(); measure(); });
           // Images arriving are the only post-load height change (no page
           // script can run) — re-measure as each settles.
           Array.prototype.forEach.call(document.images, function (img) {

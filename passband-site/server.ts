@@ -1,3 +1,9 @@
+// Where the Mac archives are downloaded from. TEMPORARY: the source repo is
+// private for now and its release assets 404 for the public, so the release
+// workflow also publishes each zip to this public, releases-only mirror. To
+// undo, set it back to "braelyn-ai/squelch" and drop the workflow's mirror step.
+const RELEASES_REPO = "braelyn-ai/passband-releases";
+
 // Static pages are plain HTML files, not React routes: legal pages must be
 // readable by crawlers and reviewers without executing the bundle.
 // Newest released version, read once from the appcast baked into this image
@@ -70,7 +76,7 @@ const server = Bun.serve({
       return Response.redirect(
         version
           ? `/download/Passband-${version}.zip`
-          : "https://github.com/braelyn-ai/squelch/releases",
+          : `https://github.com/${RELEASES_REPO}/releases`,
         302,
       );
     }
@@ -81,7 +87,7 @@ const server = Bun.serve({
     const dl = path.match(/^\/download\/(Passband-(\d+\.\d+\.\d+)\.zip)$/);
     if (dl) {
       return Response.redirect(
-        `https://github.com/braelyn-ai/squelch/releases/download/passband-mac-${dl[2]}/${dl[1]}`,
+        `https://github.com/${RELEASES_REPO}/releases/download/passband-mac-${dl[2]}/${dl[1]}`,
         302,
       );
     }

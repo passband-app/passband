@@ -47,6 +47,8 @@ const pages: Record<string, string> = {
   // because it serves an empty #root.
   "/about": "about.html",
   "/privacy": "privacy.html",
+  // The MIT license text, which /terms links while the source repo is private.
+  "/license": "license.html",
   // The threat model, published from docs/SECURITY.md while the source repo is
   // private: the privacy policy (which Google's OAuth verification reviews)
   // and /about link here rather than to a GitHub page that now 404s.

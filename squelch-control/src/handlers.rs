@@ -206,9 +206,9 @@ const CONSOLE_SESSION_REFUSED: &str =
 /// the person who just proved they are that mailbox costs nothing and is the
 /// difference between a dead end and knowing to sign up.
 const APP_NO_TENANT_HEADING: &str = "No Passband mailbox for that Google account";
-const APP_NO_TENANT: &str = "Nothing is set up for the account you signed in with. If you have a \
-     Passband mailbox on another Google account, sign in with that one. If you do not have one \
-     yet, sign up first and come back.";
+const APP_NO_TENANT: &str = "Nothing is set up for the account you signed in with yet. If you \
+     have a Passband mailbox on another Google account, sign in with that one. Otherwise, sign up \
+     below. When your mailbox is ready, you get a button straight back into the app.";
 
 /// [`CONSOLE_SESSION_REFUSED`] in the app flow's words. Same four causes and the
 /// same single answer; what changes is where it sends you, and an app login's
@@ -1665,11 +1665,7 @@ async fn app_login(state: &ControlState, code: String, pkce_verifier: String) ->
         // [`APP_NO_TENANT`] for why that is not an oracle.
         Ok(None) => {
             tracing::info!("app login found no active tenant for that mailbox");
-            return pages::console_problem(
-                StatusCode::NOT_FOUND,
-                APP_NO_TENANT_HEADING,
-                APP_NO_TENANT,
-            );
+            return pages::app_no_tenant(APP_NO_TENANT_HEADING, APP_NO_TENANT);
         }
         Err(e) => {
             tracing::error!(error = %e, "app tenant lookup failed");

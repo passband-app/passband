@@ -488,8 +488,7 @@ struct MainShell: View {
         // ahead of the lowercase ⌘K above.
         bindings.append(
             KeyBinding("K", "new ask chat", meta: true, allowInInput: true) {
-                store.assistant.clear()
-                store.askBarOpen = true
+                store.newAskChat()
             })
         // Global, not list-only: `/`, `\` and `?` must work on every surface,
         // including the sitrep the app lands on. All three stay input-guarded

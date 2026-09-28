@@ -82,6 +82,12 @@ CREATE INDEX IF NOT EXISTS idx_messages_received ON messages(account_id, receive
 -- a full scan of `messages JOIN triage` per escalated row, taken while holding
 -- the store's single connection mutex.
 CREATE INDEX IF NOT EXISTS idx_messages_from ON messages(account_id, from_addr);
+-- NOCASE twin of the sender index, for the per-sender reads that compare
+-- `from_addr = ? COLLATE NOCASE` (ingest keeps the header's spelling, so the
+-- column is not normalized). The BINARY index above cannot serve that
+-- comparison; see `idx_contacts_addr_nocase` for what the walk cost.
+CREATE INDEX IF NOT EXISTS idx_messages_from_nocase
+    ON messages(account_id, from_addr COLLATE NOCASE);
 
 CREATE TABLE IF NOT EXISTS contacts (
     account_id INTEGER NOT NULL,

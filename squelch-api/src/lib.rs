@@ -164,6 +164,10 @@ fn client_router(state: ApiState) -> Router {
         .route("/client/sent", get(handlers::get_sent))
         .route("/client/rules", get(handlers::list_rules))
         .route("/client/rules", post(handlers::create_rule))
+        // A suggested rule sentence for the card. Human door only: it reads a
+        // sender's recent subjects, and its answer is shown to the owner, never
+        // saved on its own.
+        .route("/client/rules/suggest", get(handlers::suggest_rule))
         .route("/client/rules/{id}", put(handlers::update_rule))
         .route("/client/rules/{id}", delete(handlers::delete_rule))
         // Local drafts: served EXCLUSIVELY here. Unsent compositions stay on

@@ -143,6 +143,9 @@ actor RehearsalAPI {
             data = try encode(rules)
         case ("POST", "/client/rules"):
             data = try saveRule(body, id: nil)
+        case ("GET", "/client/rules/suggest"):
+            // No model in practice: the card shows its generic example.
+            data = try encode(RuleSuggestion(suggestion: nil))
         case ("GET", "/client/search"):
             let term = (query["q"] ?? "").lowercased()
             let hits = mailbox.messages.filter { message in

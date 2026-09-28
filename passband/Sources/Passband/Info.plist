@@ -27,6 +27,12 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<!-- The git branch a dev build was cut from; build.sh fills it in and
+	     leaves it empty for release builds and for main. An xcodebuild leaves
+	     the setting undefined, which resolves to empty too. The masthead
+	     shows it next to the sitrep label when non-empty (see SitrepView). -->
+	<key>PassbandBuildBranch</key>
+	<string>$(PASSBAND_BUILD_BRANCH)</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
 	<key>NSHumanReadableCopyright</key>

@@ -721,6 +721,20 @@ pub struct SenderHistory {
     pub corrected: i64,
 }
 
+/// One recent message from a sender, as the RULE SUGGESTER sees it: the subject
+/// plus what triage and the owner did with it. Non-sealed, inbound, non-spam
+/// only; see [`Store::sender_rule_digest`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SenderDigestRow {
+    pub subject: String,
+    /// Triage tier (`signal`, `noise`, ...).
+    pub tier: String,
+    /// Attention status: `new`, `open` or `done`.
+    pub status: String,
+    /// The owner opened it in Passband.
+    pub opened: bool,
+}
+
 /// One other message in the escalated row's thread. Verdict and envelope only,
 /// never a body: the point is whether the owner is IN this conversation, which
 /// the metadata answers without a second body's worth of tokens or a second
@@ -1601,6 +1615,16 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     ) -> Result<i64>;
 
     fn list_sender_rules(&self, account_id: AccountId) -> Result<Vec<SenderRule>>;
+
+    /// The newest `limit` messages from `from_addr` with what became of each,
+    /// for suggesting a rule about that sender. SEALED ROWS ARE EXCLUDED IN
+    /// SQL: a sealed subject is as forbidden to a model as its body.
+    fn sender_rule_digest(
+        &self,
+        account_id: AccountId,
+        from_addr: &str,
+        limit: usize,
+    ) -> Result<Vec<SenderDigestRow>>;
 
     /// Overwrite an existing sender rule by id (scoped to `account_id`),
     /// restamping `updated_at`. `false` => unknown id => caller returns 404.

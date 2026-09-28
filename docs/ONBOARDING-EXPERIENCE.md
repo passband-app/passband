@@ -8,8 +8,10 @@ The experience starts with relief, then shows how Passband organizes mail:
 2. **A different goal.** “Know what needs you.”
    The same cards organize into a request, a record, and a newsletter. Both
    opening beats are user-paced, with Back and Skip intro controls.
-3. **Bring your inbox.** Choose Log in or Sign up, with Self-hosted login as a secondary option.
-   Log in opens the browser and leaves a full manual pairing form available;
+3. **Bring your inbox.** One door: Sign in with Gmail, with Use a self-hosted server
+   beneath it, on the intro's own scene. A Google account with no mailbox yet is
+   sent to signup from the sign-in page, so there is no separate Sign up button.
+   Sign in opens the browser and leaves a compact manual pairing form available;
    a deep link emphasizes device and account names and collapses technical details.
    Hosted auth URLs carry the current light/dark appearance via the theme parameter
    introduced in #214, including when the app follows the system appearance.

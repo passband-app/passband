@@ -273,12 +273,14 @@
       content is not used for any purpose other than serving your request.
     </p>
 
-    <h3>What is never sent to a model, on either tier</h3>
+    <h3>Login codes and password resets, on either tier</h3>
     <p>
-      Security-sensitive mail (verification codes, one-time passcodes, password
-      resets, and similar) is detected deterministically, before any model is
-      consulted, and is never sent to a model, never exposed to the assistant,
-      and never crosses the agent-facing interface.
+      Security-sensitive mail (verification codes, one-time passcodes, sign-in
+      links, password resets, and similar) is sealed as soon as it is
+      recognized. Rules recognize the common forms before any model is
+      consulted; mail the rules miss may be read once by the triage model,
+      which seals it if it is one. Sealed mail is never exposed to the
+      assistant and never crosses the agent-facing interface.
     </p>
 
     <h2>Services we operate</h2>

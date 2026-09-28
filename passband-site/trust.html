@@ -350,7 +350,7 @@
           <div><dt>Training on your mail</dt><dd>Never<small>not by us, not by our model provider</small></dd></div>
           <div><dt>Isolation</dt><dd>One per account<small>own daemon, own database, own key</small></dd></div>
           <div><dt>Subprocessors</dt><dd>7<small>all listed below</small></dd></div>
-          <div><dt>Login codes to a model</dt><dd>Never<small>caught before any model sees mail</small></dd></div>
+          <div><dt>Login codes to agents</dt><dd>Never<small>sealed away from the assistant and AI tools</small></dd></div>
         </dl>
       </section>
 
@@ -403,7 +403,7 @@
               <div class="stays">
                 <span class="tag">Never leaves</span>
                 <p>Your Google token, after signup</p>
-                <p>Verification codes and password resets</p>
+                <p>Sealed login codes, to the assistant or any agent</p>
               </div>
               <p class="fence tenant-hosted">Its own container and volume. Network default-deny: no other tenant can reach it.</p>
               <p class="fence tenant-self">On your disk. We hold no copy and no key.</p>
@@ -418,7 +418,7 @@
             </div>
             <div class="ch content" data-hosted>
               <span class="wire"></span>
-              <div class="what"><b>Triage and the assistant</b>The parts of a message a model needs to score it, summarize it, or answer a question you asked. Login codes are held back before this point.</div>
+              <div class="what"><b>Triage and the assistant</b>The parts of a message a model needs to score it, summarize it, or answer a question you asked. Codes our rules recognize are held back before this point.</div>
               <div class="who"><b>Anthropic</b>through our gateway on Railway, which meters spend and keeps no bodies<br /><span class="pill">mail content</span><span class="off">off</span></div>
             </div>
             <div class="ch sealed" data-hosted>
@@ -614,8 +614,8 @@
             <p>Your Google token is sealed to a key only your tenant holds. Cluster secrets are encrypted at rest. Backups are encrypted before they leave the server.</p>
           </div>
           <div>
-            <h3>Login codes stay out</h3>
-            <p>Verification codes and password resets are caught by rules before any model is consulted, and never reach a model or the assistant.</p>
+            <h3>Login codes are sealed</h3>
+            <p>Verification codes, sign-in links and password resets are sealed as they are recognized, by rules first and triage second. Sealed mail is never shown to the assistant or to AI agents, and opens only when you reveal it.</p>
           </div>
           <div>
             <h3>Agents read, never write</h3>

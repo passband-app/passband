@@ -202,12 +202,11 @@ struct SitrepView: View {
                 .padding(.horizontal, 24)
             }
         }
-        // THE QUIET BOARD's backdrop: under everything, below the top bar,
-        // and gone (faded, not cut) the moment anything lands on the board.
-        .background(alignment: .top) {
+        // THE QUIET BOARD's backdrop: under everything, the top bar too, as
+        // the onboarding sets it, and gone (faded, not cut) the moment anything lands on the board.
+        .background {
             if quiet {
-                ClearScope(clearedAt: cursor.clearedAt)
-                    .padding(.top, TopBar.height)
+                ClearScene(clearedAt: cursor.clearedAt)
                     .transition(.opacity)
             }
         }

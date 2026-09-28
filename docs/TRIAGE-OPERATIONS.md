@@ -126,6 +126,12 @@ usage-page and warden controls to a dollar budget is [follow-up #216](https://gi
 and protected arrival capacity. When the true total is exhausted, mail stays
 human-readable and visibly pending until the next UTC day.
 
+A sender-rule change re-triages that sender's mail from the last 30 days
+(`PREFERENCE_RETRIAGE_DAYS`) plus any older message whose thread is still on FYE
+or unresolved. Older mail keeps its placement: every re-triage is a full
+investigation, and before this bound one rule on a daily newsletter re-ran its
+whole stored history.
+
 The fast notification lane retains its separate `[notify].daily_cap` and
 `SQUELCH_NOTIFY_DAILY_CAP`; investigation backlog cannot consume that allowance.
 

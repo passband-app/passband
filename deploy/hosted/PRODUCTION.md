@@ -227,8 +227,8 @@ separate multi-day outages.
 
 | Where | Spelling it matches | Written by |
 |---|---|---|
-| Virtual key `allowed_models` | the id the daemon sent, `anthropic/claude-opus-5` | `squelch-control llm mint` |
-| Provider key `models` | the same id with the provider resolved away, `claude-opus-5` | `squelch-control llm sync` |
+| Virtual key `allowed_models` | the id the daemon sent, `anthropic/claude-opus-5-5` | `squelch-control llm mint` |
+| Provider key `models` | the same id with the provider resolved away, `claude-opus-5-5` | `squelch-control llm sync` |
 
 A model present in the first and absent from the second answers **400 `no keys
 found that support model: <model>`**. Nothing about that failure is visible

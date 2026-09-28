@@ -60,6 +60,14 @@ impl AgentConfig {
 #[serde(default)]
 pub struct ContextConfig {
     pub initial_thread_messages: usize,
+    /// Of the `initial_thread_messages` siblings (newest first), how many
+    /// arrive with their whole (condensed) body. The rest carry an excerpt of
+    /// `sibling_excerpt_chars` and `body_excerpted: true`; `read_thread`
+    /// returns their whole (condensed) bodies and `read_message` the raw
+    /// pages when the model wants them. Measured before this knob:
+    /// threads of five or more messages cost 2.5x a single message's input.
+    pub full_sibling_bodies: usize,
+    pub sibling_excerpt_chars: usize,
     pub max_related_messages: usize,
     pub max_context_bytes: usize,
     pub max_tool_result_bytes: usize,
@@ -68,6 +76,8 @@ impl Default for ContextConfig {
     fn default() -> Self {
         Self {
             initial_thread_messages: 8,
+            full_sibling_bodies: 2,
+            sibling_excerpt_chars: 400,
             max_related_messages: 20,
             max_context_bytes: 120_000,
             max_tool_result_bytes: 24_000,

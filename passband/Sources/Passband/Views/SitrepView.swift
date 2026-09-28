@@ -760,7 +760,7 @@ struct GreetingLine: View {
 private struct DashHero: View {
     let standing: [AttentionUpdate]
     /// What to say over an empty board when it is empty because triage has
-    /// not run (see `SyncStatus.emptyHero`). Nil lets the all-clear line stand.
+    /// not run (see `SyncStatus.emptyHero`). Nil lets "You're all clear." stand.
     var empty: (title: String, note: String)? = nil
 
     private static let smallWords = [
@@ -784,7 +784,7 @@ private struct DashHero: View {
             return "\(Self.spell(total)) item\(total == 1 ? "" : "s") on your plate."
         }
         // An empty board is only "all clear" when triage has actually run.
-        return empty?.title ?? "You've cleared all your important mail!"
+        return empty?.title ?? "You're all clear."
     }
 
     /// The reason under an empty-board headline, only when there is one.

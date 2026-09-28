@@ -43,7 +43,7 @@ struct ClearNote: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(ClearCopy.tagline())
+            Text("You've cleared all your important mail!")
                 .font(Typo.serif(19))
                 .foregroundStyle(Palette.inkDim)
             if let line = tally {

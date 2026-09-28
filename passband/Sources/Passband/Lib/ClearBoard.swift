@@ -52,24 +52,6 @@ enum ClearStreak {
 }
 
 enum ClearCopy {
-    /// One line per day, not per render: a tagline that changed every time
-    /// the page redrew would read as a glitch rather than a voice.
-    private static let taglines = [
-        "Squelch closed. Nothing is getting through.",
-        "Quiet on every channel.",
-        "The noise is squelched. The signal is handled.",
-        "Nothing needs you. Enjoy that.",
-        "Band clear. Go do something that is not email.",
-    ]
-
-    static func tagline(now: Date = Date(), calendar: Calendar = .current) -> String {
-        // Whole local days since a fixed start. `ordinality(of: .day, in: .era)`
-        // looked like this and was not: it disagreed with itself within a day.
-        let epoch = calendar.date(from: DateComponents(year: 2026, month: 1, day: 1)) ?? .distantPast
-        let day = calendar.dateComponents([.day], from: epoch, to: calendar.startOfDay(for: now)).day ?? 0
-        return taglines[((day % taglines.count) + taglines.count) % taglines.count]
-    }
-
     static func tally(received: Int, noise: Int, attention: Int) -> String {
         guard received > 0 else { return "No mail today. Suspiciously peaceful." }
         let came = "\(received) email\(received == 1 ? "" : "s") came in today."

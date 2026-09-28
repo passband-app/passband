@@ -22,7 +22,6 @@ struct ClearBoardTests {
         runCountsBackFromToday()
         markTodayPersistsAndExtends()
         tallyReadsRightForEveryShape()
-        taglineHoldsForADay()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -83,14 +82,6 @@ struct ClearBoardTests {
                 expect(!s.contains("\u{2014}"), "no em dashes in copy: \(s)")
             }
         }
-    }
-
-    static func taglineHoldsForADay() {
-        let morning = ClearCopy.tagline(now: day("2026-09-10", hour: 1), calendar: cal)
-        let night = ClearCopy.tagline(now: day("2026-09-10", hour: 23), calendar: cal)
-        let tomorrow = ClearCopy.tagline(now: day("2026-09-11"), calendar: cal)
-        expect(morning == night, "one line all day")
-        expect(morning != tomorrow, "a new line tomorrow")
     }
 
     static func expect(_ cond: Bool, _ what: String) {

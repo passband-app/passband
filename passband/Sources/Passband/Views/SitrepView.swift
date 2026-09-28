@@ -147,7 +147,9 @@ struct SitrepView: View {
                         leftZones(visible: visible, overflow: overflow)
                         // Same key as the pinned rail below: whichever layout is
                         // on screen is the one the tour's ring finds.
-                        railCards.tourTarget(.records)
+                        if !recordsEmpty {
+                            railCards.tourTarget(.records)
+                        }
                         StatusStrip()
                     }
                     .padding(.top, 14)
@@ -180,6 +182,7 @@ struct SitrepView: View {
                     // taller than the window is still reachable —
                     // `.basedOnSize` is what keeps it completely inert until then,
                     // instead of rubber-banding against nothing.
+                    if !recordsEmpty {
                     ScrollView(.vertical) {
                         VStack(spacing: 14) {
                             railZones
@@ -194,10 +197,22 @@ struct SitrepView: View {
                     // The COLUMN, not its content: a rail taller than the window
                     // would put the ring's bottom edge off screen.
                     .tourTarget(.records)
+                    }
                 }
                 .padding(.horizontal, 24)
             }
         }
+        // THE QUIET BOARD's backdrop: under everything, below the top bar,
+        // and gone (faded, not cut) the moment anything lands on the board.
+        .background(alignment: .top) {
+            if quiet {
+                ClearScope(clearedAt: cursor.clearedAt)
+                    .padding(.top, TopBar.height)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.9), value: quiet)
+        .animation(.easeInOut(duration: 0.3), value: recordsEmpty)
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { pageWidth = $0 }
         .keyContext(.sitrep)
         .keyBindings(.sitrep, bindings)
@@ -224,7 +239,7 @@ struct SitrepView: View {
         // Keyed on BOTH facts: a board that loads straight into items never
         // changes `isClear` (false before the load, false after), so watching
         // that alone would never arm.
-        .onChange(of: [ranked.isEmpty, isClear], initial: true) { _, now in
+        .onChange(of: [ranked.isEmpty && readingSenders.isEmpty, quiet], initial: true) { _, now in
             if !now[0] {
                 ClearMoment.armed = true
                 cursor.clearedAt = nil
@@ -241,10 +256,28 @@ struct SitrepView: View {
         store.syncStatus.emptyHero(queued: store.triageWaiting, lastSync: store.daemonLastSync)
     }
 
-    /// Nothing left, and truly so: the board has loaded, and it is not empty
-    /// only because sync or triage is stuck.
+    /// Nothing for your eyes, and truly so: the board has loaded, and it is not
+    /// empty only because sync or triage is stuck.
     private var isClear: Bool {
         store.sitrep.stats != nil && store.sitrep.standing.isEmpty && emptyHero == nil
+    }
+
+    /// The reading cards as the zone draws them.
+    private var readingSenders: [ReadingSender] {
+        Reading.prune(store.zones.reading, resolved: store.resolvedIds)
+    }
+
+    /// Clear AND nothing to read: the board with nothing on it at all, which
+    /// is what the scope plays behind. Mail in either zone fades it away.
+    private var quiet: Bool { isClear && readingSenders.isEmpty }
+
+    /// Every records card would only say it has nothing. Four cards of "No
+    /// receipts today." is a dashboard of absences, so the rail steps aside.
+    private var recordsEmpty: Bool {
+        CalendarZone.rows(store, now: Date()).isEmpty
+            && ShipmentsZone.rows(store).isEmpty
+            && BankingZone.rows(store).isEmpty
+            && ReceiptsZone.rows(store).isEmpty
     }
 
     // MARK: - columns
@@ -257,15 +290,18 @@ struct SitrepView: View {
             forYourEyes(visible: visible, overflow: overflow)
                 .tourTarget(.eyes)
         } else if isClear {
-            ClearBand(clearedAt: cursor.clearedAt)
-                .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .top)))
+            ClearNote()
+                .padding(.horizontal, 4)
+                .transition(.opacity)
         }
-        ReadingZone(
-            senders: Reading.prune(
-                store.zones.reading, resolved: store.resolvedIds),
-            cursor: cursor
-        )
-        .tourTarget(.reading)
+        // Empty reading still stands beside a live For-your-eyes (a zone that
+        // vanishes mid-work reads as a missing feature), but on a board with
+        // nothing else it is one more absence to look at.
+        let senders = readingSenders
+        if !(senders.isEmpty && store.sitrep.standing.isEmpty) {
+            ReadingZone(senders: senders, cursor: cursor)
+                .tourTarget(.reading)
+        }
     }
 
     /// The records zones as the pinned rail shows them: full-width rows.

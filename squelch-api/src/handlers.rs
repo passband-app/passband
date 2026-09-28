@@ -2129,9 +2129,37 @@ fn no_store() -> HeaderMap {
     headers
 }
 
-pub async fn list_drafts(State(state): State<ApiState>) -> Result<impl IntoResponse, ApiError> {
+/// `GET /client/drafts` query. `forwards` is an OPT-IN that only a client
+/// which understands forward drafts sends: an app predating them restores
+/// "the first row with no reply key" as its new message, and a forward row
+/// matches that, so it would open ⌘N on the forward's subject and note with
+/// the original silently gone. Hidden rows are still stored and still
+/// consumed by a forward send; they are only kept out of an old app's list.
+#[derive(Debug, Default, Deserialize)]
+pub struct ListDraftsQuery {
+    #[serde(default, deserialize_with = "query_flag")]
+    forwards: bool,
+}
+
+/// A query-string flag: `1` or `true` is on, anything else (or absent) off.
+/// A plain `bool` would 400 on the `1` the client sends.
+fn query_flag<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    let raw = String::deserialize(d)?;
+    Ok(raw == "1" || raw.eq_ignore_ascii_case("true"))
+}
+
+pub async fn list_drafts(
+    State(state): State<ApiState>,
+    Query(q): Query<ListDraftsQuery>,
+) -> Result<impl IntoResponse, ApiError> {
     let drafts = store_call(&state, |store, account_id| store.list_drafts(account_id)).await?;
-    let items: Vec<DraftView> = drafts.into_iter().map(DraftView::from).collect();
+    // Filtered here, not in the store: the hole is a wire-compat one, and the
+    // store's own callers (a forward send discarding its draft) see every row.
+    let items: Vec<DraftView> = drafts
+        .into_iter()
+        .filter(|d| q.forwards || d.forward_of_message_id.is_none())
+        .map(DraftView::from)
+        .collect();
     Ok((no_store(), Json(items)))
 }
 

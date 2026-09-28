@@ -96,11 +96,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let inline = DraftSaver.shared.flush(.inlineReply, store.inlineReply)
             guard store.hasHeldSends || pane || inline else { return .terminateNow }
             if store.hasHeldSends { store.parkHeldSends(quitting: true) }
+            // Before the first stats land, every save queued above first waits
+            // up to `verdictWait` to learn which route to write by; a bound
+            // shorter than that kills the process before the write it waited
+            // for. Once stats are in, the write goes out at once.
+            let limit: Duration = store.sitrep.stats == nil
+                ? DraftSaver.verdictWait + .seconds(2) : .seconds(3)
             Task { @MainActor in
                 // Whichever lands first answers; a reply of `true` ends the
                 // process, so the loser never gets to answer twice.
                 let bound = Task { @MainActor in
-                    try? await Task.sleep(for: .seconds(3))
+                    try? await Task.sleep(for: limit)
                     if !Task.isCancelled { NSApp.reply(toApplicationShouldTerminate: true) }
                 }
                 await DraftSaver.shared.settle()

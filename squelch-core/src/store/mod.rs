@@ -611,7 +611,10 @@ pub enum DraftKey {
     /// single-slot behaviour. MIXED-VERSION COST: an older app edits whichever
     /// keyless plain draft is newest, possibly one a newer app has open
     /// elsewhere; last writer wins, rows never pile up. Kept short by shipping
-    /// the app with the daemon.
+    /// the app with the daemon. The same older app would READ a forward draft
+    /// as its new message (it restores the first row with no reply key), so
+    /// `GET /client/drafts` lists forward rows only to a client that sends
+    /// `forwards=1`.
     NewLatest,
 }
 

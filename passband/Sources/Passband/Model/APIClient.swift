@@ -77,12 +77,25 @@ actor APIClient {
     /// through. Same posture as `PASSBAND_FORCE_TOUR`: a launch environment
     /// only a developer sets, never a preference, never persisted. A user
     /// double-clicking the app has neither variable.
+    ///
+    /// ALL OR NOTHING: the override applies only when BOTH are set and
+    /// non-empty. Half of one is worse than none: a shell that exports only
+    /// the token would present it to every account's real daemon (and fail
+    /// them all), and only the URL would send a real account's token to the
+    /// scratch daemon.
     func configure(baseURL: String, token: String) {
         let env = ProcessInfo.processInfo.environment
+        var base = baseURL
+        var bearer = token
+        if let url = env["PASSBAND_API_URL"], !url.isEmpty,
+            let devToken = env["PASSBAND_API_TOKEN"], !devToken.isEmpty
+        {
+            base = url
+            bearer = devToken
+        }
         // Normalize: strip trailing slashes so we can join with `/client/...`.
-        var base = env["PASSBAND_API_URL"] ?? baseURL
         while base.hasSuffix("/") { base.removeLast() }
-        config = Config(baseURL: base, token: env["PASSBAND_API_TOKEN"] ?? token)
+        config = Config(baseURL: base, token: bearer)
     }
 
     /// Forget the configured daemon. After this, requests fail with "client
@@ -891,7 +904,13 @@ actor APIClient {
     /// on purpose (pinned by the daemon test
     /// `human_can_save_draft_for_restricted_parent_but_unknown_still_fails`),
     /// so a row here is not a promise its parent is still readable.
-    func listDrafts() async throws -> [DraftView] { try await get("/client/drafts") }
+    ///
+    /// `forwards=1` opts in to forward drafts, which the daemon hides from a
+    /// bare GET: an app predating them would restore one as a plain new
+    /// message. An older daemon ignores the parameter.
+    func listDrafts() async throws -> [DraftView] {
+        try await get("/client/drafts", query: ["forwards": "1"])
+    }
 
     /// Upsert by KEY: `replyToMessageId` or `forwardOfMessageId` names the
     /// draft, so a second PUT edits the same row rather than making another. A

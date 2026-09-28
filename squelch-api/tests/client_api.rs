@@ -7168,11 +7168,12 @@ async fn put_draft(app: &axum::Router, body: Value) -> Value {
     body_json(resp).await
 }
 
-/// The current draft list as a JSON array.
+/// The current draft list as a JSON array, as the current client asks for it
+/// (forward drafts included).
 async fn list_drafts(app: &axum::Router) -> Value {
     let resp = app
         .clone()
-        .oneshot(authed("GET", "/client/drafts"))
+        .oneshot(authed("GET", "/client/drafts?forwards=1"))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -7799,6 +7800,49 @@ async fn forward_drafts_are_keyed_per_message_and_carry_parent_context() {
     .await;
     assert_eq!(s, StatusCode::NOT_FOUND);
     assert_eq!(list_drafts(&app).await.as_array().map(Vec::len), Some(2));
+}
+
+/// An app predating forward drafts restores the first row with no reply key
+/// as its new message, so a forward row must not reach it: listed only to a
+/// client that opts in with `forwards=1`.
+#[tokio::test]
+async fn forward_drafts_are_listed_only_with_forwards_opt_in() {
+    let mut parent = 0;
+    let Harness { app, .. } = harness(|store, acct| parent = seed_draft_parent(store, acct));
+    let fwd = put_draft(
+        &app,
+        serde_json::json!({ "forward_of_message_id": parent, "body": "fyi" }),
+    )
+    .await;
+    let reply = put_draft(
+        &app,
+        serde_json::json!({ "reply_to_message_id": parent, "body": "r" }),
+    )
+    .await;
+
+    let with = list_drafts(&app).await;
+    let ids: Vec<&Value> = with.as_array().unwrap().iter().map(|d| &d["id"]).collect();
+    assert!(ids.contains(&&fwd["id"]), "opted in: the forward is listed");
+    assert!(ids.contains(&&reply["id"]));
+
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", "/client/drafts"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let without = body_json(resp).await;
+    let ids: Vec<&Value> = without
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| &d["id"])
+        .collect();
+    assert!(
+        !ids.contains(&&fwd["id"]),
+        "an old app never sees the forward"
+    );
+    assert!(ids.contains(&&reply["id"]), "only forwards are hidden");
 }
 
 #[tokio::test]

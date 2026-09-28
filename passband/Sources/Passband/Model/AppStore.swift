@@ -2983,8 +2983,9 @@ final class AppStore {
     private func restoreForward(_ messageId: Int) async {
         let e = epoch
         // Only a `drafts_v2` daemon keeps forward rows at all; asking an older
-        // one would list drafts for nothing.
-        guard draftsV2Available else { return }
+        // one would list drafts for nothing. Nil stats is "not asked yet", not
+        // "no", so an `f` pressed right after launch waits for the answer.
+        guard await DraftSaver.shared.awaitVerdict(), draftsV2Available else { return }
         // SETTLE FIRST, as `refreshDrafts` does: a forward of this message
         // closed a moment ago flushed its last save fire-and-forget, and a
         // list taken before it lands restores the text as it was a keystroke
@@ -3006,11 +3007,10 @@ final class AppStore {
         // typed into in the meantime all mean the draft has missed its window.
         // Untouched is measured against what `openComposeForward` SEEDED (its
         // `Fwd:` subject and the signature), not against empty, which a
-        // forward never is.
+        // forward never is: `hasContent` already reads it that way. A file
+        // still uploading is not staged yet, so the tray is checked too.
         guard var next = compose, next.forwardOfMessageId == messageId, next.draftId == nil,
-            next.recipients == next.seededRecipients,
-            next.subject == ComposeCopy.forwardSubject(next.forwardedSubject ?? ""),
-            Prefs.shared.isBodyUntouched(next.body), next.attachments.isEmpty
+            !DraftSaver.hasContent(next), next.attachments.isEmpty
         else { return }
         // `fill` after `openCompose`, as for new mail: the draft's addressees
         // are what somebody typed, not the seed.
@@ -3029,9 +3029,12 @@ final class AppStore {
     private func restoreNewMessage() async {
         let e = epoch
         // No verdict on the daemon yet, no rule to apply: which rows count as
-        // candidates depends on whether it keeps one slot or many. A blank
-        // composer is the honest answer for the half second before stats land.
-        guard sitrep.stats != nil else { return }
+        // candidates depends on whether it keeps one slot or many. WAIT for it
+        // (bounded, like a save does) rather than open blank: a `c` in the
+        // first half second after launch restored its draft before there was
+        // a verdict to ask about, and must still. Every "still the blank
+        // composer" guard below runs after the wait, so typing meanwhile wins.
+        guard await DraftSaver.shared.awaitVerdict(), e == epoch else { return }
         // OLD DAEMON: not while a new message is in the send HOLD. Its draft row
         // is the one slot, still there until the send deletes it, and restoring
         // it here would put mail that is about to go out into a fresh composer,
@@ -3085,11 +3088,10 @@ final class AppStore {
         // restore in it and quietly re-address someone else's mail. The subject
         // this seeds would survive as the only visible trace.
         guard var next = compose, next.replyToMessageId == nil, next.forwardOfMessageId == nil,
-            next.draftId == nil,
-            next.to.isEmpty, next.cc.isEmpty, next.bcc.isEmpty, next.subject.isEmpty,
-            Prefs.shared.isBodyUntouched(next.body),
-            // A file dropped in the meantime is composing too: overwriting the
-            // tray with the draft's would orphan its upload and cut its marker.
+            next.draftId == nil, !DraftSaver.hasContent(next),
+            // A file dropped in the meantime is composing too, even before it
+            // finishes staging: overwriting the tray with the draft's would
+            // orphan its upload and cut its marker.
             next.attachments.isEmpty
         else { return }
         fill(&next, from: draft)
@@ -3325,7 +3327,7 @@ final class AppStore {
         let index = draftsRows.firstIndex { $0.id == id } ?? draftsRows.count
         draftsRows.removeAll { $0.id == id }
         let timer = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(Self.sendHold))
+            try? await Task.sleep(for: .seconds(Self.draftDeleteHold))
             guard !Task.isCancelled else { return }
             await self?.fireDraftDelete(id, epoch: e)
         }
@@ -3489,9 +3491,10 @@ final class AppStore {
         // Another account's drafts are not this composer's to restore — and
         // `reply_to_message_id` is a per-daemon id, so one WOULD match.
         guard e == epoch else { return }
-        // Untouched, not empty — the seeded signature must not block the restore.
+        // Untouched, not empty: the seeded signature and the derived audience
+        // must not block the restore, but an edited recipient must.
         guard var next = inlineReply, next.replyToMessageId == messageId, next.draftId == nil,
-            Prefs.shared.isBodyUntouched(next.body), next.attachments.isEmpty
+            !DraftSaver.hasContent(next), next.attachments.isEmpty
         else { return }
         next.body = draft.body
         // Only a draft that actually recorded a copy list gets to state one:
@@ -4091,6 +4094,11 @@ final class AppStore {
     // MARK: - undo
 
     private static let undoTTL: TimeInterval = 5
+
+    /// How long a draft DELETE waits before going out: exactly as long as its
+    /// undo toast lives, so the toast can never outlast the row (an undo that
+    /// fails) or vanish while the delete is still revocable.
+    static let draftDeleteHold: TimeInterval = undoTTL
 
     @discardableResult
     func pushUndo(

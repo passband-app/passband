@@ -171,7 +171,9 @@ fn client_router(state: ApiState) -> Router {
         // table exists. The keyed PUT edits in place (one draft per reply
         // target, one per forwarded message; no key edits the newest new-message
         // draft, for apps that predate many drafts). New-message drafts are
-        // many: POST creates one, PUT /{id} edits one by id.
+        // many: POST creates one, PUT /{id} edits one by id. GET omits forward
+        // drafts unless asked with `forwards=1`: an app predating them would
+        // restore one as its plain new message (see `ListDraftsQuery`).
         .route(
             "/client/drafts",
             get(handlers::list_drafts)

@@ -105,6 +105,14 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // UNIQUE violation; with it, the old binary merely edits one of several
     // keyless rows. Dropped only while still UNIQUE, so a normal open is a
     // no-op rather than a drop and rebuild.
+    //
+    // The SECOND degradation under rollback: the older binary's key-less upsert
+    // selects `reply_to_message_id IS NULL` and knows nothing of forwards, so
+    // it can pick a forward row and rewrite its text while the forward key
+    // survives: the forward's note is overwritten, and a later newer binary
+    // shows the old app's new message as a forward of that message. Accepted,
+    // not fixed: it needs a rollback AND a held forward draft, and no schema
+    // trick here can change an old binary's WHERE clause.
     let unique_new_index: bool = conn
         .prepare("SELECT 1 FROM pragma_index_list('drafts') WHERE name = 'idx_drafts_new' AND \"unique\" = 1")?
         .exists([])?;

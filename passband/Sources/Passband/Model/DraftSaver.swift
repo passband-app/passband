@@ -383,8 +383,9 @@ final class DraftSaver {
     /// How long a save waits for `/client/stats` before giving up. Long enough
     /// to cover a slow launch or account switch; short enough that `settle`
     /// (which an account switch awaits) is not held hostage by a daemon that
-    /// never answers.
-    private static let verdictWait: Duration = .seconds(10)
+    /// never answers. Internal because the quit hook has to outlast it (see
+    /// `applicationShouldTerminate`).
+    static let verdictWait: Duration = .seconds(10)
 
     /// WAIT FOR THE DAEMON'S VERDICT (`/client/stats`), bounded. True once
     /// the stats are in; false on timeout, or when the account changed
@@ -399,8 +400,9 @@ final class DraftSaver {
     /// daemon hits its compat rule and OVERWRITES the newest existing draft;
     /// the new routes on an old daemon 404. Polled, because the stats have no
     /// change hook to await, and a tenth of a second is nothing next to a
-    /// human closing a composer.
-    private func awaitVerdict() async -> Bool {
+    /// human closing a composer. Internal so a RESTORE can wait the same
+    /// bounded way before reading `draftsV2Available`.
+    func awaitVerdict() async -> Bool {
         let epoch = store.epoch
         let deadline = ContinuousClock.now + Self.verdictWait
         while store.sitrep.stats == nil {

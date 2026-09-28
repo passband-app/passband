@@ -130,7 +130,7 @@ private struct StreakChip: View {
 
 /// The quiet board's backdrop: the P7 phosphor squelch from brand/phosphor,
 /// pre-rendered widescreen with the gate held open (Resources/Brand/
-/// P7Squelch.mp4, a seamless 8 s loop). A video rather than a live render
+/// P7Squelch.mp4, a seamless 8 s loop, 12 sweeps of persistence so it breathes rather than strobes). A video rather than a live render
 /// because the look IS the offline renderer: bloom at four radii, a phosphor
 /// tonemap and 9000 beam samples a frame are not something to redo per frame
 /// in a mail app.

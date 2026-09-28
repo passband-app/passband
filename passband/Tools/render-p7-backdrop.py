@@ -9,7 +9,8 @@ Needs brand/phosphor (branch new-logo) and its requirements:
     ffmpeg -framerate 30 -i out.frames/%04d.png -c:v libx265 -tag:v hvc1 \
         -pix_fmt yuv420p -crf 26 -preset slow Sources/Passband/Resources/Brand/P7Squelch.mp4
 
-~2.3 s a frame at 1920x1200. CARRIER=0 renders the band empty."""
+~2.3 s a frame at 1920x1200. CARRIER=0 renders the band empty. TAU sets
+the persistence in sweeps (default 12; the brand loop used 4)."""
 import sys, os, time, shutil, subprocess
 sys.path.insert(0, os.environ['PHOSPHOR'])
 import numpy as np
@@ -43,6 +44,9 @@ def finish(b, *, exp=5.2, glow=2.8, gate=0.5, grat=0.5):
 
 W, H = int(os.environ.get('W', 1920)), int(os.environ.get('H', 1200))
 carrier = os.environ.get('CARRIER', '1') == '1'
+# Phosphor persistence, in sweeps. Longer is calmer: noise builds into a glow
+# and spikes fade out instead of strobing.
+TAU = float(os.environ.get('TAU', 12))
 def beam():
     return Wide(W, H, base=0.80 * H, amp=0.52 * H,
                 carriers=[dict(dx=0, h=0.70)] if carrier else [], cw=0.022 * 0.625,
@@ -51,17 +55,17 @@ def beam():
 mode = sys.argv[1]
 if mode == 'still':
     b = beam()
-    for _ in range(20): b.advance(b.M, np.exp(-1 / 4))
+    for _ in range(int(TAU * 5)): b.advance(b.M, np.exp(-1 / TAU))
     t = time.time(); f = finish(b); print(f'{time.time()-t:.2f}s/frame')
     Image.fromarray((f * 255 + .5).astype(np.uint8)).save(sys.argv[2])
 else:
     FPS, secs, xf = 30, float(os.environ.get('SECS', 8)), 15
     n = int(FPS * secs)
     b = beam()
-    for _ in range(20): b.advance(b.M, np.exp(-1 / 4))
+    for _ in range(int(TAU * 5)): b.advance(b.M, np.exp(-1 / TAU))
     frames = []
     for i in range(n + xf):
-        b.advance(b.M, np.exp(-1 / 4))
+        b.advance(b.M, np.exp(-1 / TAU))
         frames.append(finish(b)); print(f'\r{i}', end='', flush=True)
     # Seamless loop: the tail crossfades into the head.
     for i in range(xf):

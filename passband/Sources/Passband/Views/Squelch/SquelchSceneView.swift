@@ -46,6 +46,10 @@ final class SquelchScene {
 struct SquelchSceneView: View {
     /// Whether the squelch is closed: noise stops at the gate, passband leaves.
     let engaged: Bool
+    /// Holds the scene on its settled frame, the way Reduce Motion does. For a
+    /// host that stays on screen for hours (the quiet sitrep) and must not
+    /// keep a display link running while its window is in the background.
+    var paused = false
 
     /// The shader's top backdrop stop, night and paper. Shown until the
     /// renderer is ready, and the color scrims over the scene blend into.
@@ -61,7 +65,9 @@ struct SquelchSceneView: View {
             if let renderer = scene.renderer {
                 SquelchLayerRepresentable(
                     renderer: renderer,
-                    inputs: .init(engaged: engaged, light: colorScheme == .light, reduceMotion: reduceMotion))
+                    inputs: .init(
+                        engaged: engaged, light: colorScheme == .light,
+                        reduceMotion: reduceMotion || paused))
             }
         }
         .onAppear { scene.warm() }

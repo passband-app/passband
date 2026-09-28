@@ -129,8 +129,7 @@ struct SitrepView: View {
             // padding inside each scroll view's content.
             DashHero(
                 standing: store.sitrep.standing,
-                empty: store.syncStatus.emptyHero(
-                    queued: store.triageWaiting, lastSync: store.daemonLastSync))
+                empty: emptyHero)
                 .padding(.horizontal, 28)
                 .padding(.bottom, 18)
 
@@ -144,8 +143,9 @@ struct SitrepView: View {
                         leftZones(visible: visible, overflow: overflow)
                         // Same key as the pinned rail below: whichever layout is
                         // on screen is the one the tour's ring finds.
-                        railCards.tourTarget(.records)
-                        StatusStrip()
+                        if !recordsEmpty {
+                            railCards.tourTarget(.records)
+                        }
                     }
                     .padding(.top, 14)
                     .padding(.bottom, 28)
@@ -159,7 +159,6 @@ struct SitrepView: View {
                     ScrollView(.vertical) {
                         VStack(spacing: 16) {
                             leftZones(visible: visible, overflow: overflow)
-                            StatusStrip()
                         }
                         .padding(.top, 14)
                         .padding(.bottom, 28)
@@ -177,6 +176,7 @@ struct SitrepView: View {
                     // taller than the window is still reachable —
                     // `.basedOnSize` is what keeps it completely inert until then,
                     // instead of rubber-banding against nothing.
+                    if !recordsEmpty {
                     ScrollView(.vertical) {
                         VStack(spacing: 14) {
                             railZones
@@ -191,10 +191,16 @@ struct SitrepView: View {
                     // The COLUMN, not its content: a rail taller than the window
                     // would put the ring's bottom edge off screen.
                     .tourTarget(.records)
+                    }
                 }
                 .padding(.horizontal, 24)
             }
         }
+        // The window shell draws the scene (it runs under the rail and the
+        // traffic lights), so the sitrep only says whether it should.
+        .onChange(of: quiet, initial: true) { _, q in QuietBoard.shared.isQuiet = q }
+        .onDisappear { QuietBoard.shared.isQuiet = false }
+        .animation(.easeInOut(duration: 0.3), value: recordsEmpty)
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { pageWidth = $0 }
         .keyContext(.sitrep)
         .keyBindings(.sitrep, bindings)
@@ -214,6 +220,52 @@ struct SitrepView: View {
         .onChange(of: visible.count) { _, count in
             cursor.index = max(0, min(cursor.index, max(0, count - 1)))
         }
+        // Arms the clear moment while there is something on the board, and
+        // spends it the first time the board is seen clear afterwards. With
+        // `initial`, coming back from the reader after finishing the last
+        // email counts: that is where most boards actually get cleared.
+        // Keyed on BOTH facts: a board that loads straight into items never
+        // changes `isClear` (false before the load, false after), so watching
+        // that alone would never arm.
+        .onChange(of: [ranked.isEmpty && readingSenders.isEmpty, quiet], initial: true) { _, now in
+            if !now[0] {
+                QuietBoard.shared.armed = true
+            } else if now[1], QuietBoard.shared.armed {
+                QuietBoard.shared.armed = false
+                ClearChime.play()
+            }
+        }
+    }
+
+    /// What the hero says over an empty board that is empty for a reason other
+    /// than the reader having handled everything. Nil when the board is clear.
+    private var emptyHero: (title: String, note: String)? {
+        store.syncStatus.emptyHero(queued: store.triageWaiting, lastSync: store.daemonLastSync)
+    }
+
+    /// Nothing for your eyes, and truly so: the board has loaded, and it is not
+    /// empty only because sync or triage is stuck.
+    private var isClear: Bool {
+        store.sitrep.stats != nil && store.sitrep.standing.isEmpty && emptyHero == nil
+    }
+
+    /// The reading cards as the zone draws them.
+    private var readingSenders: [ReadingSender] {
+        Reading.prune(store.zones.reading, resolved: store.resolvedIds)
+    }
+
+    /// Clear AND nothing to read: the board with nothing on it at all, which
+    /// is what the quiet board's scene plays behind. Mail in either zone
+    /// fades it away.
+    private var quiet: Bool { isClear && readingSenders.isEmpty }
+
+    /// Every records card would only say it has nothing. Four cards of "No
+    /// receipts today." is a dashboard of absences, so the rail steps aside.
+    private var recordsEmpty: Bool {
+        CalendarZone.rows(store, now: Date()).isEmpty
+            && ShipmentsZone.rows(store).isEmpty
+            && BankingZone.rows(store).isEmpty
+            && ReceiptsZone.rows(store).isEmpty
     }
 
     // MARK: - columns
@@ -225,13 +277,19 @@ struct SitrepView: View {
         if !store.sitrep.standing.isEmpty {
             forYourEyes(visible: visible, overflow: overflow)
                 .tourTarget(.eyes)
+        } else if isClear {
+            ClearNote()
+                .padding(.horizontal, 4)
+                .transition(.opacity)
         }
-        ReadingZone(
-            senders: Reading.prune(
-                store.zones.reading, resolved: store.resolvedIds),
-            cursor: cursor
-        )
-        .tourTarget(.reading)
+        // Empty reading still stands beside a live For-your-eyes (a zone that
+        // vanishes mid-work reads as a missing feature), but on a board with
+        // nothing else it is one more absence to look at.
+        let senders = readingSenders
+        if !(senders.isEmpty && store.sitrep.standing.isEmpty) {
+            ReadingZone(senders: senders, cursor: cursor)
+                .tourTarget(.reading)
+        }
     }
 
     /// The records zones as the pinned rail shows them: full-width rows.
@@ -989,56 +1047,6 @@ private struct ObligationWash: View {
                     .strokeBorder(
                         focused ? tint.opacity(SelectionTone.border) : .clear, lineWidth: 1)
             )
-    }
-}
-
-// MARK: - status strip
-
-private struct StatusStrip: View {
-    @Environment(AppStore.self) private var store
-    @State private var refreshing = false
-
-    var body: some View {
-        HStack(spacing: 9) {
-            if !RehearsalMode.isEnabled {
-            ChromeChip(
-                tone: stamp.warn ? Palette.warn : Palette.inkDim,
-                help: "check for new mail now"
-            ) {
-                guard !refreshing else { return }
-                refreshing = true
-                Task {
-                    await SitrepPoller.shared.triggerMailRefresh()
-                    refreshing = false
-                }
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 10, weight: .semibold))
-                        .symbolEffect(.rotate, isActive: refreshing)
-                    Text(stamp.text)
-                }
-                .font(Typo.micro)
-            }
-            .disabled(refreshing)
-            }
-
-            if let cost = store.sitrep.stats?.stage2?.est_cost_usd_today {
-                Text("triage: \(String(format: "$%.2f", cost)) today")
-                    .font(Typo.num(11))
-                    .foregroundStyle(Palette.inkFaintest)
-                    .help("today's stage-2 triage cost estimate")
-            }
-
-            Spacer(minLength: 0)
-        }
-        .padding(.top, 2)
-    }
-
-    /// Shared with the phone's footnote: see `SyncStatus.syncedStamp`.
-    private var stamp: (text: String, warn: Bool) {
-        SyncStatus.syncedStamp(
-            stats: store.sitrep.stats, clientRefresh: store.lastRefresh, date: Fmt.date)
     }
 }
 

@@ -50,6 +50,9 @@ final class SitrepCursor {
     /// Hovered reading-card address — `e` marks that sender's whole window done,
     /// deferring to the For-your-eyes handler when nothing hovers.
     var reading: String?
+    /// When the reader cleared the board's last item, for the clear band's
+    /// one-shot squelch. Nil when the board simply opened clear.
+    var clearedAt: Date?
 
     /// Point the cursor at a row the POINTER is over. EVERY WRITE IS GUARDED:
     /// `@Observable` notifies on assignment, not on change, so an unguarded
@@ -129,8 +132,8 @@ struct SitrepView: View {
             // padding inside each scroll view's content.
             DashHero(
                 standing: store.sitrep.standing,
-                empty: store.syncStatus.emptyHero(
-                    queued: store.triageWaiting, lastSync: store.daemonLastSync))
+                empty: emptyHero,
+                clearedAt: cursor.clearedAt)
                 .padding(.horizontal, 28)
                 .padding(.bottom, 18)
 
@@ -214,6 +217,34 @@ struct SitrepView: View {
         .onChange(of: visible.count) { _, count in
             cursor.index = max(0, min(cursor.index, max(0, count - 1)))
         }
+        // Arms the clear moment while there is something on the board, and
+        // spends it the first time the board is seen clear afterwards. With
+        // `initial`, coming back from the reader after finishing the last
+        // email counts: that is where most boards actually get cleared.
+        // Keyed on BOTH facts: a board that loads straight into items never
+        // changes `isClear` (false before the load, false after), so watching
+        // that alone would never arm.
+        .onChange(of: [ranked.isEmpty, isClear], initial: true) { _, now in
+            if !now[0] {
+                ClearMoment.armed = true
+                cursor.clearedAt = nil
+            } else if now[1], ClearMoment.armed {
+                ClearMoment.armed = false
+                cursor.clearedAt = Date()
+            }
+        }
+    }
+
+    /// What the hero says over an empty board that is empty for a reason other
+    /// than the reader having handled everything. Nil when the board is clear.
+    private var emptyHero: (title: String, note: String)? {
+        store.syncStatus.emptyHero(queued: store.triageWaiting, lastSync: store.daemonLastSync)
+    }
+
+    /// Nothing left, and truly so: the board has loaded, and it is not empty
+    /// only because sync or triage is stuck.
+    private var isClear: Bool {
+        store.sitrep.stats != nil && store.sitrep.standing.isEmpty && emptyHero == nil
     }
 
     // MARK: - columns
@@ -225,6 +256,9 @@ struct SitrepView: View {
         if !store.sitrep.standing.isEmpty {
             forYourEyes(visible: visible, overflow: overflow)
                 .tourTarget(.eyes)
+        } else if isClear {
+            ClearBand(clearedAt: cursor.clearedAt)
+                .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .top)))
         }
         ReadingZone(
             senders: Reading.prune(
@@ -705,6 +739,10 @@ private struct DashHero: View {
     /// What to say over an empty board when it is empty because triage has
     /// not run (see `SyncStatus.emptyHero`). Nil lets "You're all clear." stand.
     var empty: (title: String, note: String)? = nil
+    /// When the last item was cleared: the headline lands with a small pop.
+    var clearedAt: Date? = nil
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private static let smallWords = [
         "Zero", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine",
@@ -741,6 +779,14 @@ private struct DashHero: View {
                 .foregroundStyle(Palette.ink)
                 .lineSpacing(-2)
                 .fixedSize(horizontal: false, vertical: true)
+                .keyframeAnimator(
+                    initialValue: 1.0, trigger: reduceMotion ? nil : clearedAt
+                ) { view, scale in
+                    view.scaleEffect(scale, anchor: .leading)
+                } keyframes: { _ in
+                    SpringKeyframe(1.06, duration: 0.22, spring: .snappy)
+                    SpringKeyframe(1.0, duration: 0.5, spring: .bouncy)
+                }
             if let note {
                 Text(note)
                     .font(Typo.rowSub)

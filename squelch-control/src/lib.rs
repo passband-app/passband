@@ -178,6 +178,7 @@ pub fn router(state: ControlState) -> Router {
         ));
     let app = Router::new()
         .route("/healthz", get(handlers::healthz))
+        .route(pages::FONT_PATH, get(pages::newsreader))
         .merge(accounts)
         .merge(tenant);
 

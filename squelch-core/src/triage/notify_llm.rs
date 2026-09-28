@@ -7,7 +7,7 @@ use crate::triage::llm::{self, ClassifyError, LlmOutcome, LlmRequest};
 use crate::triage::text::{Untrusted, neutralize, truncate_flagged};
 use serde::{Deserialize, Serialize};
 
-pub const PROMPT_VERSION: &str = "notification-v3";
+pub const PROMPT_VERSION: &str = "notification-v4";
 
 const ONE_LINE_RULES: &str =
     "ONE_LINE: one clear sentence, at most 120 characters. No leading label, em dash, or en dash.";
@@ -21,7 +21,10 @@ You are the fast notification assessor for a personal inbox. Read this arrival a
 return the schema object. This decision is independent of filing or full triage. \
 Identify whether the message concerns authentication or account security in is_auth. \
 This includes codes, password resets, sign-in links, verification requests, login \
-alerts, and account security alerts. ALL auth qualifies for a notification regardless of \
+alerts, and account security alerts. An invitation to join a workspace, team, group, \
+shared document, event, or product is not auth, even when it carries a join link or an \
+invite code: a code is auth only when it verifies an identity or account the recipient \
+already holds. ALL auth qualifies for a notification regardless of \
 score or sender preferences. Do not infer auth from a sender name or an isolated word: \
 assess the message's actual meaning.
 
@@ -434,5 +437,12 @@ mod tests {
         // It asks its own question, not Stage-1's.
         assert!(a.contains("interruption now"));
         assert!(a.contains("ALL auth qualifies"));
+        // A workspace invite with a join link is not a sign-in link (a Slack
+        // invite was sealed as auth once).
+        assert!(a.contains("An invitation to join a workspace"));
+        // A Passband invite (one-time signup code in a box) was sealed as
+        // verification. A code is auth only for an account already held.
+        assert!(a.contains("invite code"));
+        assert!(a.contains("invite or referral or promo codes"));
     }
 }

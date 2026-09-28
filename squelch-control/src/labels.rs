@@ -60,16 +60,16 @@ impl LabelError {
     /// user-facing copy.
     pub fn message(self) -> String {
         match self {
-            LabelError::Empty => "Choose an address for your mailbox.".to_string(),
+            LabelError::Empty => "Choose a username.".to_string(),
             LabelError::TooShort => {
-                format!("That address is too short. Use at least {MIN_LABEL_LEN} characters.")
+                format!("That username is too short. Use at least {MIN_LABEL_LEN} characters.")
             }
             LabelError::TooLong => {
-                format!("That address is too long. Use at most {MAX_LABEL_LEN} characters.")
+                format!("That username is too long. Use at most {MAX_LABEL_LEN} characters.")
             }
             LabelError::Charset => "Use lowercase letters, numbers, and hyphens only.".to_string(),
-            LabelError::HyphenEdge => "An address cannot start or end with a hyphen.".to_string(),
-            LabelError::Reserved => "That address is reserved. Pick another one.".to_string(),
+            LabelError::HyphenEdge => "A username cannot start or end with a hyphen.".to_string(),
+            LabelError::Reserved => "That username is reserved. Pick another one.".to_string(),
         }
     }
 }

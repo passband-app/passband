@@ -1,3 +1,9 @@
+// Where the Mac archives are downloaded from. TEMPORARY: the source repo is
+// private for now and its release assets 404 for the public, so the release
+// workflow also publishes each zip to this public, releases-only mirror. To
+// undo, set it back to "braelyn-ai/squelch" and drop the workflow's mirror step.
+const RELEASES_REPO = "braelyn-ai/passband-releases";
+
 // Static pages are plain HTML files, not React routes: legal pages must be
 // readable by crawlers and reviewers without executing the bundle.
 // Newest released version, read once from the appcast baked into this image
@@ -27,7 +33,10 @@ const pages: Record<string, string> = {
   // Groundless, for the landing page's own dark field.
   "/mark.svg": "mark.svg",
   // The same mark as raster, for the invite email. No mail client renders SVG.
+  // mark.png is the ink ramps, kept for invites already sitting in inboxes;
+  // mark-light.png is the lit ramps the current (dark) invite email uses.
   "/mark.png": "mark.png",
+  "/mark-light.png": "mark-light.png",
   "/icon-180.png": "icon-180.png",
   "/icon-512.png": "icon-512.png",
   // The link-unfurl card, rendered by brand/og/build.sh. Crawlers do not run
@@ -41,6 +50,10 @@ const pages: Record<string, string> = {
   // because it serves an empty #root.
   "/about": "about.html",
   "/privacy": "privacy.html",
+  // The threat model, published from docs/SECURITY.md while the source repo is
+  // private: the privacy policy (which Google's OAuth verification reviews)
+  // and /about link here rather than to a GitHub page that now 404s.
+  "/security": "security.html",
   "/self-host": "selfhost.html",
   "/terms": "terms.html",
   "/trust": "trust.html",
@@ -73,7 +86,7 @@ const server = Bun.serve({
       return Response.redirect(
         version
           ? `/download/Passband-${version}.zip`
-          : "https://github.com/braelyn-ai/squelch/releases",
+          : `https://github.com/${RELEASES_REPO}/releases`,
         302,
       );
     }
@@ -84,7 +97,7 @@ const server = Bun.serve({
     const dl = path.match(/^\/download\/(Passband-(\d+\.\d+\.\d+)\.zip)$/);
     if (dl) {
       return Response.redirect(
-        `https://github.com/braelyn-ai/squelch/releases/download/passband-mac-${dl[2]}/${dl[1]}`,
+        `https://github.com/${RELEASES_REPO}/releases/download/passband-mac-${dl[2]}/${dl[1]}`,
         302,
       );
     }

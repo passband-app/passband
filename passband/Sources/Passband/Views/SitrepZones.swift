@@ -475,10 +475,8 @@ struct BankingZone: View {
                                     .foregroundStyle(Palette.inkDim)
                                     .lineLimit(1)
                                     .frame(maxWidth: .infinity, alignment: .leading)
-                                Chip(text: r.kind.tag, tone: Palette.inkFaintest)
-                                if r.autopay == true {
-                                    Chip(text: "autopay", tone: Palette.inkFaintest)
-                                }
+                                // Autopay implies bill; one chip says both.
+                                Chip(text: r.autopay == true ? "autopay" : r.kind.tag, tone: Palette.inkFaintest)
                                 if let due = Fmt.deadlineChip(r.due) {
                                     Chip(text: due.text, tone: due.overdue ? Palette.danger : Palette.inkFaintest)
                                 }
@@ -486,6 +484,8 @@ struct BankingZone: View {
                                     Text(Fmt.usd(r.amount, currency: r.currency))
                                         .font(Typo.num(11, weight: .medium))
                                         .foregroundStyle(Palette.accentInk)
+                                        .lineLimit(1)
+                                        .fixedSize()
                                 }
                             }
                             .padding(.horizontal, 7)

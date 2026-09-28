@@ -63,9 +63,11 @@ cp svg/icon.svg            ../passband-site/icon.svg
 cp svg/icon-dark.svg       ../passband-site/icon-dark.svg
 # The landing page shows the mark on its own dark field, not the tile.
 cp svg/mark-light.svg      ../passband-site/mark.svg
-# Raster copy for the invite email: no mail client renders SVG. Ink ramps,
-# because a mail body is white.
+# Raster copies for the invite email: no mail client renders SVG. mark.png is
+# the ink ramps for a white body and stays published for mail already sent;
+# the current email is dark like the landing page and uses the lit ramps.
 cp png/mark-512.png        ../passband-site/mark.png
+cp png/mark-light-512.png  ../passband-site/mark-light.png
 cp png/icon-180.png        ../passband-site/icon-180.png
 cp png/icon-512.png        ../passband-site/icon-512.png
 

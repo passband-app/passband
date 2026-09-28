@@ -504,9 +504,7 @@ body.auth::before {{ content: ""; position: fixed; inset: 0; z-index: -1; pointe
 .auth .lead {{ font-size: 1rem; line-height: 1.6; margin: 0 0 2rem; }}
 .auth a {{ color: var(--brand); }}
 .auth :is(.hint, .muted, .suffix) {{ color: var(--faintest); font-size: 0.8rem; }}
-.auth .fine {{ margin: 0.35rem 0 0; color: var(--faintest); font-size: 0.8rem; line-height: 1.55; }}
-.auth .rig + .fine {{ margin-top: 1rem; }}
-.auth .alt {{ border: 0; padding: 0; margin: 1.75rem 0 0; font-size: 0.9rem; color: var(--faint); }}
+.auth .alt {{ border: 0; padding: 0; margin: 1.5rem 0 0; font-size: 0.85rem; color: var(--faint); }}
 .auth .stop {{ border: 0; padding: 0; margin: 0 0 1.25rem; color: var(--danger); font-size: 0.9rem; }}
 .auth .stop strong {{ font-weight: 500; }}
 .auth :is(code, .code) {{ background: var(--hair); color: var(--ink); }}
@@ -543,7 +541,6 @@ body.auth::before {{ content: ""; position: fixed; inset: 0; z-index: -1; pointe
 .auth .slot.folded:not(:target) {{ display: none; }}
 .auth main:has(.slot.folded:target) .swap {{ display: none; }}
 .auth .swap a {{ color: var(--faint); }}
-.auth .swap a:hover {{ color: var(--ink); }}
 .auth .slot > label:first-child {{ display: block; margin: 0 0 0.3rem; color: var(--faintest);
   font-size: 0.68rem; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; }}
 .auth .slot input {{ display: block; width: 100%; margin: 0; padding: 0; border: 0; border-radius: 0;
@@ -566,11 +563,16 @@ body.auth::before {{ content: ""; position: fixed; inset: 0; z-index: -1; pointe
   .auth .affix input {{ flex: 0 1 auto; width: auto; field-sizing: content; }}
 }}
 .auth .affix .domain {{ flex: none; white-space: nowrap; color: var(--faintest); }}
-.auth details {{ margin: 2rem 0 0; padding: 1rem 0 0; border-top: 1px solid var(--hair);
-  color: var(--faint); font-size: 0.85rem; }}
-.auth summary {{ font-weight: 500; color: var(--faint); }}
-.auth summary:hover {{ color: var(--ink); }}
-.auth details ul {{ margin-top: 0.75rem; }}
+.auth details {{ margin: 1rem 0 0; padding: 0; border: 0; color: var(--faint); font-size: 0.8rem; }}
+.auth summary {{ color: var(--faintest); font-weight: 400; list-style: none; }}
+.auth summary::-webkit-details-marker {{ display: none; }}
+.auth summary::after {{ content: "Why?"; margin-left: 0.3em; color: var(--faint); text-decoration: underline;
+  text-underline-offset: 0.15em; }}
+.auth details[open] summary::after {{ content: ""; }}
+.auth summary:hover::after {{ color: var(--ink); }}
+.auth details ul {{ margin: 0.6rem 0 0.5rem; }}
+.auth details li {{ margin: 0 0 0.25rem; }}
+.auth details p {{ color: var(--faint); margin: 0; }}
 .auth details strong {{ color: var(--ink); font-weight: 500; }}
 @media (max-width: 600px) {{
   .auth main {{ margin-top: 3rem; }}
@@ -642,7 +644,10 @@ pub const INVITE_REFUSED: &str = "That invite code is not usable.";
 ///
 /// THE GRANT IS STILL STATED BESIDE THE BUTTON, in one line naming all three
 /// permissions, because the consent screen that follows is Google's and says it
-/// in Google's vocabulary. What moved is the LONG version: three paragraphs of
+/// in Google's vocabulary. That line is the `<summary>` of the disclosure, so
+/// it is always on screen and is also the way into the detail. The username
+/// rule is not printed at all: the field's `pattern` enforces it on submit and
+/// the server's refusal states it. What moved is the LONG version: three paragraphs of
 /// scope detail above the fold pushed the form off a phone screen and read as
 /// the page's subject, which it is not. It is a `<details>` now, shut by
 /// default, open to anybody who wants it, and made of the same markup as before
@@ -676,27 +681,34 @@ pub fn signup_form(
 ) -> Response {
     let error_html = stop_note(error);
     let folded = !invite.trim().is_empty() && error != Some(INVITE_REFUSED);
-    let (invite_class, invite_focus, label_focus, swap_html) = if folded {
-        (
-            r#"slot folded" id="code"#,
-            "",
-            " autofocus",
-            r##"<p class="fine swap"><a href="#code">Use a different invite code</a></p>"##,
-        )
+    let (invite_class, invite_focus, label_focus) = if folded {
+        (r#"slot folded" id="code"#, "", " autofocus")
     } else {
-        ("slot", " autofocus", "", "")
+        ("slot", " autofocus", "")
     };
-    // The link out, or nothing at all. Built from the configured origin, which
-    // this crate owns; it is escaped anyway, because the rule is that nothing is
-    // interpolated raw.
-    let waitlist_html = waitlist_url
-        .map(|url| {
-            format!(
-                r#"<p class="alt">No invite code? <a href="{url}">Join the waitlist</a>.</p>"#,
-                url = escape_html(url),
-            )
-        })
-        .unwrap_or_default();
+    // The quiet row under the form: the way out for somebody with no code, and
+    // the way back to a folded one. The waitlist half is built from the
+    // configured origin, which this crate owns, and escaped anyway, because the
+    // rule is that nothing is interpolated raw.
+    let waitlist = waitlist_url.map(|url| {
+        format!(
+            r#"No invite code? <a href="{url}">Join the waitlist</a>"#,
+            url = escape_html(url),
+        )
+    });
+    let swap = folded.then(|| {
+        let dot = if waitlist.is_some() { " · " } else { "" };
+        format!(r##"<span class="swap">{dot}<a href="#code">Use a different code</a></span>"##)
+    });
+    let links_html = if waitlist.is_none() && swap.is_none() {
+        String::new()
+    } else {
+        format!(
+            r#"<p class="alt">{}{}</p>"#,
+            waitlist.unwrap_or_default(),
+            swap.unwrap_or_default()
+        )
+    };
     page(
         StatusCode::OK,
         "Set up Passband",
@@ -713,29 +725,26 @@ pub fn signup_form(
 <div class="slot">
 <label for="label">Your Passband username</label>
 <label class="affix"><input type="text" id="label" name="label" value="{label}" placeholder="yourname"
-  aria-describedby="label-hint" maxlength="30" autocomplete="off" autocapitalize="off" spellcheck="false"{label_focus} required><span class="domain">.{domain}</span></label>
+  pattern="[A-Za-z0-9][A-Za-z0-9\-]{{1,28}}[A-Za-z0-9]" title="3 to 30 letters, numbers or hyphens"
+  maxlength="30" autocomplete="off" autocapitalize="off" spellcheck="false"{label_focus} required><span class="domain">.{domain}</span></label>
 </div>
 <button type="submit">Continue with Google <span class="arrow" aria-hidden="true">→</span></button>
 </form>
-<p class="fine" id="label-hint">Usernames are 3 to 30 lowercase letters, numbers or hyphens.</p>
-<p class="fine">Google will ask to read, change, and send your Gmail. Passband needs all three.</p>
-{swap_html}
-{waitlist_html}
 <details>
-<summary>Gmail access and privacy</summary>
+<summary>Google will ask to read, change, and send your Gmail.</summary>
 <ul>
 <li><strong>Read</strong> (<code>gmail.readonly</code>): mail triage.</li>
 <li><strong>Change</strong> (<code>gmail.modify</code>): archiving and labeling, never deletion.</li>
 <li><strong>Send</strong> (<code>gmail.send</code>): replying from the app.</li>
 </ul>
-<p>Your Google refresh token is stored encrypted so mail keeps syncing. Self-host to hold it yourself.</p>
-</details>"#,
+<p>Passband needs all three, so keep every box checked. Your Google refresh token is stored encrypted so mail keeps syncing; self-host to hold it yourself.</p>
+</details>
+{links_html}"#,
             error_html = error_html,
-            waitlist_html = waitlist_html,
+            links_html = links_html,
             invite_class = invite_class,
             invite_focus = invite_focus,
             label_focus = label_focus,
-            swap_html = swap_html,
             invite = escape_html(invite),
             label = escape_html(label),
             domain = escape_html(base_domain),
@@ -1524,19 +1533,20 @@ mod tests {
 
     /// The scope detail may be folded away, but all three permissions are named
     /// in the open, beside the button, where somebody deciding whether to press
-    /// it will read them. The `<details>` block is the long version and is shut
-    /// by default; the summary line is not.
+    /// it will read them: they ARE the disclosure's summary line, which is
+    /// always on screen. What each is for sits behind it, shut by default.
     #[tokio::test]
     async fn the_form_names_all_three_permissions_outside_the_disclosure() {
         let html = body_of(signup_form("passband.email", None, "", "", None)).await;
-        let (before_details, details) = html.split_once("<details>").expect("{html}");
+        let (_, details) = html.split_once("<details>").expect("{html}");
+        let (summary, folded) = details.split_once("</summary>").expect("{html}");
+        // The summary is the line that is always on screen, beside the button.
         assert!(
-            before_details.contains("read, change, and send your Gmail"),
-            "{html}"
+            summary.contains("read, change, and send your Gmail"),
+            "{summary}"
         );
-        assert!(before_details.contains("needs all three"), "{html}");
+        assert!(folded.contains("needs all three"), "{html}");
         // Shut by default: `open` is what would render it expanded.
-        assert!(!details.contains("<details open"), "{html}");
         assert!(!html.contains("<details open"), "{html}");
         // A disclosure is markup, not script. This page still has none.
         assert!(!html.contains("<script"), "{html}");

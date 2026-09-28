@@ -265,8 +265,7 @@ fn condense_initial_context(initial: &mut Value, config: &super::agent_config::C
             *body = super::condense::condense_body(body);
             continue;
         }
-        let excerpt = super::condense::excerpt(body, config.sibling_excerpt_chars);
-        let cut = excerpt.chars().count() < super::condense::condense_body(body).chars().count();
+        let (excerpt, cut) = super::condense::excerpt(body, config.sibling_excerpt_chars);
         *body = excerpt;
         if cut {
             fields.insert("body_excerpted".into(), Value::Bool(true));

@@ -518,11 +518,8 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             self.metrics.note_triage_cooldown(until.timestamp());
             let _ = self.store.defer_agent_job(job, until, &error.kind);
             self.metrics.record_agent(AgentVerdict::Retryable);
-        } else if error.kind == "agent_refused" {
-            // A safety-classifier refusal is a property of this content, not
-            // of the moment: retrying re-buys the same refusal, thinking
-            // tokens included, up to max_attempts times. Fail it once; the
-            // row stays inspectable and can be retried by hand.
+        } else if crate::triage::llm::is_content_refusal(&error.kind) {
+            // See is_content_refusal: fail once, in either lane.
             self.metrics.record_agent(AgentVerdict::Failed);
             if let Err(error) = self.store.fail_agent_job(job, &error.kind) {
                 eprintln!("squelch: could not record refused triage job: {error}");

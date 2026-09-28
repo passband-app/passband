@@ -167,6 +167,14 @@ pub async fn classify_agent_step(
 
 const AGENT_SUBMISSION_TOOL: &str = "submit_triage_step";
 
+/// A safety-classifier refusal of THIS content, from either lane. Retrying
+/// one re-buys the same refusal, thinking tokens included, so the worker
+/// fails the row once instead of walking `max_attempts`; the row stays
+/// inspectable and can be retried by hand.
+pub fn is_content_refusal(kind: &str) -> bool {
+    matches!(kind, "agent_refused" | "access_refused")
+}
+
 /// [`classify_llm`] plus the verdict parse: deserialize the raw text into `T`,
 /// then hand it to `finish` for the caller's own validation/repackaging (its
 /// `Err` is a redacted failure kind). Refusals and permanent failures pass
@@ -899,6 +907,11 @@ mod tests {
         assert!(is_config_failure("http_402:payment_required"));
         assert!(is_config_failure("http_404:not_found_error"));
         assert!(!is_config_failure("max_tokens_truncation"));
+        // Refusals are row-level and terminal in both lanes, never config.
+        assert!(is_content_refusal("agent_refused"));
+        assert!(is_content_refusal("access_refused"));
+        assert!(!is_content_refusal("json_parse"));
+        assert!(!is_config_failure("agent_refused"));
         assert!(!is_config_failure("json_parse"));
         assert!(!is_config_failure("response_decode"));
         assert!(!is_config_failure("importance_out_of_range"));

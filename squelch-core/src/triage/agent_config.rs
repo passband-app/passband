@@ -62,8 +62,9 @@ pub struct ContextConfig {
     pub initial_thread_messages: usize,
     /// Of the `initial_thread_messages` siblings (newest first), how many
     /// arrive with their whole (condensed) body. The rest carry an excerpt of
-    /// `sibling_excerpt_chars` and `body_excerpted: true`; `read_thread` has
-    /// the full text when the model wants it. Measured before this knob:
+    /// `sibling_excerpt_chars` and `body_excerpted: true`; `read_thread`
+    /// returns their whole (condensed) bodies and `read_message` the raw
+    /// pages when the model wants them. Measured before this knob:
     /// threads of five or more messages cost 2.5x a single message's input.
     pub full_sibling_bodies: usize,
     pub sibling_excerpt_chars: usize,

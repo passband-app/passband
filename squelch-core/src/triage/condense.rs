@@ -41,16 +41,21 @@ const ATTRIBUTION_WINDOW: usize = 240;
 
 /// Drop the quoted earlier messages from the end of a body and shorten long
 /// URLs throughout. A body with no new text before its quote (an empty reply,
-/// or one the detector cannot place) is returned with only its URLs shortened.
+/// or one the detector cannot place) is returned with only its URLs shortened,
+/// and so is a forward: there the "quoted" part IS the message.
 pub fn condense_body(body: &str) -> String {
-    let cut = [
-        attribution_cut(body),
-        outlook_cut(body),
-        quoted_block_cut(body),
-    ]
-    .into_iter()
-    .flatten()
-    .min();
+    let cut = if forwarded(body) {
+        None
+    } else {
+        [
+            attribution_cut(body),
+            outlook_cut(body),
+            quoted_block_cut(body),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+    };
     match cut {
         Some(at)
             if body[..at].chars().any(|c| !c.is_whitespace())
@@ -67,8 +72,33 @@ pub fn condense_body(body: &str) -> String {
 
 /// A condensed body cut to `chars` scalar values (marker included), for the
 /// older siblings of a thread whose gist matters but whose text rarely does.
-pub fn excerpt(body: &str, chars: usize) -> String {
-    crate::text::truncate_ellipsis(&condense_body(body), chars)
+/// The flag says whether the cut removed anything.
+pub fn excerpt(body: &str, chars: usize) -> (String, bool) {
+    let condensed = condense_body(body);
+    let cut = condensed.chars().count() > chars;
+    (crate::text::truncate_ellipsis(&condensed, chars), cut)
+}
+
+/// Whether the body's UNQUOTED text announces a forward: Gmail's and Apple
+/// Mail's banners, or an Outlook header block whose subject starts with a
+/// forward prefix. A marker inside a `>`-quoted line does not count, or a
+/// reply to a forward would keep its whole quoted chain.
+fn forwarded(body: &str) -> bool {
+    body.lines().any(|line| {
+        let line = line.trim_start();
+        if line.starts_with('>') {
+            return false;
+        }
+        if line.contains("Forwarded message") || line.contains("Begin forwarded message") {
+            return true;
+        }
+        line.strip_prefix("Subject:").is_some_and(|subject| {
+            let subject = subject.trim_start().to_ascii_lowercase();
+            ["fw:", "fwd:", "tr:", "wg:"]
+                .iter()
+                .any(|prefix| subject.starts_with(prefix))
+        })
+    })
 }
 
 /// The byte offset of the earliest attribution line ("On …, X wrote:") whose
@@ -94,8 +124,15 @@ fn attribution_cut(body: &str) -> Option<usize> {
                 };
                 at_boundary.then_some(window_start + idx)
             });
+            // A real attribution carries a date or time and usually an
+            // address; prose ("On Tuesday the vendor wrote:") carries neither.
+            let looks_like_attribution = |between: &str| {
+                between.chars().any(|c| c.is_ascii_digit())
+                    && between.chars().any(|c| matches!(c, '@' | '<' | ':'))
+            };
             if let Some(cut) = lead_at
                 && body[cut..tail_at].matches('\n').count() <= 2
+                && looks_like_attribution(&body[cut..tail_at])
             {
                 best = Some(best.map_or(cut, |b| b.min(cut)));
                 break;
@@ -128,12 +165,9 @@ fn outlook_cut(body: &str) -> Option<usize> {
 }
 
 /// A trailing block of `>`-prefixed lines, three or more, that nothing
-/// unquoted follows. Skipped for forwards, where the quoted block IS the
-/// message the reader wants triaged.
+/// unquoted follows. ([`forwarded`] has already excused the forwards, where
+/// the quoted block IS the message the reader wants triaged.)
 fn quoted_block_cut(body: &str) -> Option<usize> {
-    if body.contains("Forwarded message") || body.contains("Begin forwarded message") {
-        return None;
-    }
     let mut cut = None;
     let mut quoted_lines = 0usize;
     let mut offset = 0usize;
@@ -232,6 +266,12 @@ mod tests {
         let fwd =
             "FYI\n---------- Forwarded message ---------\n> line one\n> line two\n> line three\n";
         assert_eq!(condense_body(fwd), fwd);
+        // An Outlook forward: the header block is the message, not a quote.
+        let fw = "FYI, please handle.\n\n________________________________\nFrom: Vendor <billing@vendor.example>\nSent: Mon\nTo: me\nSubject: FW: Invoice 4471 due Oct 5\n\nPlease pay the attached invoice by October 5.";
+        assert_eq!(condense_body(fw), fw);
+        // A forward banner INSIDE the quoted tail does not excuse the tail.
+        let reply = "Thanks!\n> ---------- Forwarded message ---------\n> From: someone\n> body\n";
+        assert_eq!(condense_body(reply), format!("Thanks!\n{QUOTE_MARKER}"));
         // Two quoted lines are not a tail worth cutting.
         let short = "Thoughts?\n> one\n> two\n";
         assert_eq!(condense_body(short), short);
@@ -247,6 +287,11 @@ mod tests {
         assert_eq!(condense_body(body), body);
         // A stray "wrote:" with no lead within the window is not an attribution.
         let body = "The reviewer wrote: ship it. Then everyone went home.";
+        assert_eq!(condense_body(body), body);
+        // Prose that happens to open with "On <day>": no date, time or address.
+        let body = "Thanks for the update. On Tuesday the vendor wrote: delivery slips to October 20, please replan.";
+        assert_eq!(condense_body(body), body);
+        let body = "Am Montag schrieb ich noch, dass alles passt.";
         assert_eq!(condense_body(body), body);
     }
 
@@ -279,15 +324,17 @@ mod tests {
         let body = format!(
             "Short note. {TRACKER}\n\nOn Mon, Sep 28, 2026 Alice <a@example.com> wrote:\n> long quote"
         );
-        let out = excerpt(&body, 40);
+        let (out, cut) = excerpt(&body, 40);
+        assert!(cut);
         assert_eq!(out.chars().count(), 40);
         assert!(out.ends_with('…'));
         assert!(out.starts_with("Short note. https://"));
         // Under budget: the condensed body comes back whole, marker included.
-        let out = excerpt(
+        let (out, cut) = excerpt(
             "Hi\n\nOn Mon, Sep 28, 2026 Alice <a@example.com> wrote:\n> q",
             200,
         );
+        assert!(!cut);
         assert_eq!(out, format!("Hi\n{QUOTE_MARKER}"));
     }
 }

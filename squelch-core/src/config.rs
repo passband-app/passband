@@ -1198,6 +1198,12 @@ impl Default for Stage1Config {
 /// and access lanes on Haiku never reach the cache minimum, so the triage
 /// rate is the one that prices real tokens. Change the write multiplier with
 /// the TTL and the read multiplier with the model.
+///
+/// Known drift: the daily ledger holds one cache_creation total, so rows
+/// written before the 1-hour TTL (at 1.25x) are re-priced at 2x here, and so
+/// would every row if a gateway dropped the `ttl` field. The per-TTL split
+/// is stored per run in `agent_triage_runs.metadata_json.usage[].cache_creation`;
+/// pricing from it needs a ledger column, which is a follow-up.
 pub const CACHE_WRITE_INPUT_MULT: f64 = 2.0;
 pub const CACHE_READ_INPUT_MULT: f64 = 0.05;
 

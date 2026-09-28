@@ -43,9 +43,12 @@ struct ClearNote: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("You've cleared all your important mail!")
-                .font(Typo.serif(19))
-                .foregroundStyle(Palette.inkDim)
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text("There is no important mail.")
+                    .foregroundStyle(Palette.inkDim)
+                AllMailLink()
+            }
+            .font(Typo.serif(19))
             if let line = tally {
                 Text(line)
                     .font(Typo.rowSub)
@@ -80,6 +83,27 @@ struct ClearNote: View {
             ?? MailActivityDay(
                 day: res.until, received: 0, sent: 0, sealed: 0, past_due: 0,
                 deadline: 0, signal: 0, noise: 0, pending: nil)
+    }
+}
+
+/// The way out of an empty board: the mail Passband sorted away is all still
+/// there, one click off, for whoever wants to check its work.
+private struct AllMailLink: View {
+    @Environment(AppStore.self) private var store
+    @State private var hovering = false
+
+    var body: some View {
+        Button {
+            store.openMail(.inbox)
+        } label: {
+            Text("View all mail")
+                .foregroundStyle(Palette.accent)
+                .underline(hovering, color: Palette.accent)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .pointingHand()
+        .accessibilityHint("opens all mail")
     }
 }
 

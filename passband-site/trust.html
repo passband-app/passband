@@ -1,0 +1,685 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Trust &middot; Passband</title>
+    <meta name="description" content="Where your mail goes when Passband handles it: the data flow, what leaves your tenant and to whom, how long anything is kept, our subprocessors, and the DPA we sign." />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Passband" />
+    <meta property="og:title" content="Trust &middot; Passband" />
+    <meta property="og:description" content="Where your mail goes when Passband handles it: the data flow, what leaves your tenant and to whom, how long anything is kept, our subprocessors, and the DPA we sign." />
+    <meta property="og:url" content="https://passband.app/trust" />
+    <meta property="og:image" content="https://passband.app/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="4,312 emails. Three need you. Passband, over a spectrum analyzer with three marked peaks." />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="/icon.svg"
+      media="(prefers-color-scheme: light)"
+    />
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="/icon-dark.svg"
+      media="(prefers-color-scheme: dark)"
+    />
+    <link rel="apple-touch-icon" href="/icon-180.png" />
+    <link
+      rel="preload"
+      href="/newsreader-var.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <!--
+      Static, like the other legal pages: a procurement reviewer's crawler
+      reads it without executing anything. The look is the landing page's
+      (App.tsx PAGE_CSS), restated here rather than shared, because the bundle
+      is not loaded on this page. The one interaction, the hosted / self-host
+      switch, is two radio inputs and sibling selectors: no script.
+    -->
+    <style>
+      @font-face {
+        font-family: "Newsreader";
+        src: url("/newsreader-var.woff2") format("woff2");
+        font-weight: 200 800;
+        font-style: normal;
+        font-display: swap;
+      }
+      :root {
+        --bg: #090D16;
+        --canvas: #0E141D;
+        --card: #121A26;
+        --ink: #E9EEF5;
+        --dim: #A8B4C4;
+        --faint: #808E9F;
+        --faintest: #62707F;
+        --hair: rgba(233, 238, 245, 0.08);
+        --hair-strong: rgba(233, 238, 245, 0.14);
+        --accent: #4E9BEA;
+        --accent-ink: #82BAF5;
+        --warn: #E8AC4C;
+        --positive: #4FC08A;
+        --danger: #FF7A68;
+        --serif: "Newsreader", ui-serif, Georgia, serif;
+        --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+        --mono: ui-monospace, "SF Mono", Menlo, monospace;
+        --gutter: clamp(1rem, 4vw, 2.75rem);
+      }
+      html { background: var(--bg); color-scheme: dark; }
+      body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans);
+        line-height: 1.6; -webkit-font-smoothing: antialiased; }
+      a { color: var(--accent-ink); text-decoration: none; }
+      a:hover { text-decoration: underline; }
+      code { font-family: var(--mono); font-size: 0.88em; }
+
+      .top { display: flex; align-items: center; justify-content: space-between;
+        padding: 1.4rem var(--gutter); max-width: 84rem; margin: 0 auto; box-sizing: border-box; }
+      .brand { display: flex; align-items: center; gap: 0.6rem; color: var(--ink); }
+      .brand:hover { text-decoration: none; }
+      .brand img { width: 42px; height: auto; }
+      .brand span { font-family: var(--serif); font-size: 1.5rem; font-weight: 500; }
+      .nav { display: flex; gap: 1.4rem; font-size: 0.9rem; }
+      .nav a, .foot a { color: var(--faint); }
+      .nav a:hover, .foot a:hover { color: var(--ink); text-decoration: none; }
+      .nav [aria-current] { color: var(--ink); }
+
+      /* THE HERO sits on the analyzer's graticule, faded at the edges, so the
+         page opens on the same screen the landing page does. */
+      .hero { position: relative; padding: clamp(3rem, 8vw, 6rem) var(--gutter) clamp(2.5rem, 6vw, 4rem);
+        max-width: 84rem; margin: 0 auto; box-sizing: border-box; }
+      .hero::before { content: ""; position: absolute; inset: 0; pointer-events: none; z-index: -1;
+        background-image:
+          repeating-linear-gradient(90deg, rgba(130, 186, 245, 0.07) 0 1px, transparent 1px 10%),
+          repeating-linear-gradient(180deg, rgba(130, 186, 245, 0.07) 0 1px, transparent 1px 12.5%);
+        -webkit-mask-image: radial-gradient(ellipse 70% 80% at 70% 40%, #000 20%, transparent 80%);
+                mask-image: radial-gradient(ellipse 70% 80% at 70% 40%, #000 20%, transparent 80%); }
+      .eyebrow { margin: 0 0 1.1rem; font: 500 11px/1 var(--mono); letter-spacing: 0.12em;
+        color: var(--faintest); text-transform: uppercase; }
+      .eyebrow b { color: var(--accent-ink); font-weight: 600; }
+      h1 { margin: 0; font-family: var(--serif); font-weight: 500; font-size: clamp(2.6rem, 5.4vw, 4rem);
+        line-height: 1.02; letter-spacing: -0.012em; max-width: 14ch; }
+      .lede { margin: 1.25rem 0 0; font-size: 1.1rem; color: var(--dim); max-width: 36rem; }
+
+      /* The spec strip: the page's claims as instrument readouts. */
+      .spec { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin-top: clamp(2.5rem, 5vw, 3.5rem);
+        border: 1px solid rgba(130, 186, 245, 0.2); border-radius: 12px; background: rgba(9, 13, 22, 0.7);
+        -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); overflow: hidden; }
+      .spec div { padding: 1rem 1.1rem 1.1rem; border-left: 1px solid rgba(130, 186, 245, 0.1); }
+      .spec div:first-child { border-left: 0; }
+      .spec dt { font: 500 10px/1.3 var(--mono); letter-spacing: 0.1em; color: var(--faintest); text-transform: uppercase; }
+      .spec dd { margin: 0.45rem 0 0; font-family: var(--serif); font-size: 1.45rem; line-height: 1.1; }
+      .spec dd small { display: block; margin-top: 0.3rem; font: 12px/1.4 var(--sans); color: var(--faint); }
+      @media (max-width: 820px) {
+        .spec { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .spec div:nth-child(3) { border-left: 0; }
+        .spec div:nth-child(n + 3) { border-top: 1px solid rgba(130, 186, 245, 0.1); }
+        .nav a:not(.keep) { display: none; }
+      }
+
+      .section { padding: clamp(3.5rem, 8vw, 6rem) var(--gutter) 0; max-width: 84rem; margin: 0 auto;
+        box-sizing: border-box; }
+      .num { font: 600 11px/1 var(--mono); letter-spacing: 0.1em; color: var(--accent-ink); margin: 0 0 0.9rem; }
+      h2 { margin: 0 0 0.9rem; font-family: var(--serif); font-weight: 500;
+        font-size: clamp(2rem, 3.8vw, 2.7rem); line-height: 1.05; letter-spacing: -0.01em; }
+      h2 em { font-style: normal; color: var(--accent-ink); }
+      .intro { margin: 0 0 clamp(1.75rem, 4vw, 2.75rem); color: var(--dim); font-size: 1.05rem; max-width: 40rem; }
+
+      /* THE SIGNAL CHAIN. The tenant is the instrument; everything that leaves
+         it is a channel off one bus, each wire coloured by what it carries.
+         HTML rather than SVG so it reflows on a phone instead of shrinking. */
+      .tier-in { position: absolute; opacity: 0; pointer-events: none; }
+      .switch { display: inline-flex; padding: 3px; border-radius: 99px; margin-bottom: 1.5rem;
+        border: 1px solid var(--hair-strong); background: var(--canvas); font-size: 0.88rem; }
+      .switch label { padding: 0.4rem 1rem; border-radius: 99px; cursor: pointer; color: var(--faint);
+        transition: background 0.2s, color 0.2s; }
+      #tier-hosted:checked ~ .switch [for="tier-hosted"],
+      #tier-self:checked ~ .switch [for="tier-self"] { background: #1a2638; color: var(--ink);
+        box-shadow: inset 0 0 0 1px rgba(130, 186, 245, 0.25); }
+      #tier-hosted:focus-visible ~ .switch [for="tier-hosted"],
+      #tier-self:focus-visible ~ .switch [for="tier-self"] { outline: 2px solid var(--accent); outline-offset: 2px; }
+      .tier-note { margin: -0.5rem 0 1.5rem; font-size: 0.92rem; color: var(--faint); max-width: 44rem; }
+      .tier-note .self, #tier-self:checked ~ .tier-note .hosted { display: none; }
+      #tier-self:checked ~ .tier-note .self { display: inline; }
+
+      .legend { display: flex; flex-wrap: wrap; gap: 0.6rem 1.4rem; margin: 0 0 1.5rem;
+        font: 500 11px/1 var(--mono); letter-spacing: 0.06em; color: var(--faint); }
+      .legend span { display: inline-flex; align-items: center; gap: 0.5rem; }
+      .legend i { width: 26px; height: 0; border-top: 2px solid; }
+      .k-content { color: var(--accent); }
+      .k-sealed { color: var(--positive); }
+      .k-meta { color: var(--faint); }
+      .legend .k-sealed i, .ch.sealed .wire { border-top-style: dashed; }
+      .legend .k-meta i, .ch.meta .wire { border-top-style: dotted; }
+
+      .chain { display: grid; grid-template-columns: minmax(0, 20rem) minmax(0, 1fr); gap: 0;
+        align-items: stretch; }
+      @media (max-width: 900px) { .chain { grid-template-columns: minmax(0, 1fr); } }
+
+      .source, .tenant { border-radius: 14px; background: var(--card);
+        box-shadow: inset 0 0 0 1px var(--hair-strong); padding: 1rem 1.1rem; }
+      .tag { font: 600 10px/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--faintest); }
+      .box-title { margin: 0.45rem 0 0.2rem; font-weight: 600; font-size: 1rem; }
+      .box-sub { margin: 0; font-size: 0.86rem; color: var(--faint); line-height: 1.5; }
+
+      .intake { width: min(100%, 20rem); }
+      .core { display: flex; flex-direction: column; gap: 0; }
+      .tenant { display: flex; flex-direction: column; }
+      .tenant .fence { margin-top: auto; padding-top: 0.9rem; }
+      /* Gmail feeds the tenant from above: one short two-way wire. */
+      .feed { position: relative; height: 3.4rem; margin-left: 1.6rem; border-left: 2px solid var(--accent);
+        font: 500 11px/1.3 var(--mono); color: var(--dim); }
+      .feed span { position: absolute; left: 0.8rem; top: 50%; transform: translateY(-50%); }
+      .feed::before, .feed::after { content: ""; position: absolute; left: -6px; border: 5px solid transparent; }
+      .feed::before { bottom: -1px; border-top: 6px solid var(--accent); border-bottom: 0; }
+      .feed::after { top: -1px; border-bottom: 6px solid var(--accent); border-top: 0; }
+      .tenant { flex: 1; background: linear-gradient(180deg, #152032, #0f1724);
+        box-shadow: inset 0 0 0 1px rgba(130, 186, 245, 0.35), 0 0 60px -20px rgba(78, 155, 234, 0.45); }
+      .tenant .tag { color: var(--accent-ink); }
+      .tenant ul { list-style: none; margin: 0.9rem 0 0; padding: 0; display: grid; gap: 0.45rem; }
+      .tenant li { display: flex; gap: 0.6rem; align-items: baseline; font-size: 0.86rem; color: var(--dim);
+        padding: 0.5rem 0.65rem; border-radius: 8px; background: rgba(9, 13, 22, 0.45); }
+      .tenant li b { color: var(--ink); font-weight: 600; flex: none; }
+      .tenant .fence { font-size: 0.8rem; color: var(--faint); }
+      .stays { margin-top: 1.4rem; padding-top: 1rem; border-top: 1px dashed rgba(130, 186, 245, 0.2); }
+      .stays p { margin: 0.45rem 0 0; font-size: 0.84rem; color: var(--dim); display: flex; gap: 0.5rem; }
+      .stays p::before { content: "\2298"; color: var(--accent-ink); }
+
+      /* The bus: a vertical rail along the channels' left edge; each channel
+         taps it with its own wire. On a phone it hangs under the tenant. */
+      .bus { position: relative; padding-left: 2.2rem; display: grid; gap: 0.7rem; align-content: start; }
+      .bus::before { content: ""; position: absolute; left: 0; top: 1.6rem; bottom: 1.6rem; width: 2px;
+        background: linear-gradient(var(--hair-strong), var(--hair-strong)); }
+      @media (max-width: 900px) {
+        .bus { margin-top: 0; padding-top: 1.4rem; margin-left: 1.6rem; }
+        .bus::before { top: 0; }
+      }
+      .ch { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 15rem);
+        gap: 0.4rem 1.2rem; align-items: center; padding: 0.85rem 1rem; border-radius: 12px;
+        background: var(--canvas); box-shadow: inset 0 0 0 1px var(--hair);
+        transition: opacity 0.35s ease, filter 0.35s ease; }
+      @media (max-width: 640px) { .ch { grid-template-columns: minmax(0, 1fr); } }
+      .wire { position: absolute; left: -2.2rem; top: 1.6rem; width: 2.2rem; height: 0; border-top: 2px solid; }
+      .ch.content .wire { color: var(--accent); }
+      .ch.sealed .wire { color: var(--positive); }
+      .ch.meta .wire { color: var(--faint); }
+      .wire::after { content: ""; position: absolute; right: -1px; top: -6px; border: 5px solid transparent;
+        border-left: 6px solid currentColor; border-right: 0; }
+      .ch.two .wire::before { content: ""; position: absolute; left: 3px; top: -6px; border: 5px solid transparent;
+        border-right: 6px solid currentColor; border-left: 0; }
+      .what { font-size: 0.9rem; color: var(--dim); }
+      .opt { font: 600 10px/1 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint);
+        margin-left: 0.4rem; }
+      .what b { display: block; color: var(--ink); font-weight: 600; font-size: 0.95rem; margin-bottom: 0.1rem; }
+      .who { font-size: 0.85rem; color: var(--faint); line-height: 1.45; }
+      .who b { display: block; color: var(--ink); font-weight: 600; }
+      .pill { display: inline-block; margin-top: 0.45rem; padding: 0.15rem 0.5rem; border-radius: 99px;
+        font: 600 10px/1.4 var(--mono); letter-spacing: 0.06em; text-transform: uppercase; }
+      .ch.content .pill { color: var(--accent-ink); background: rgba(78, 155, 234, 0.14); }
+      .ch.sealed .pill { color: var(--positive); background: rgba(79, 192, 138, 0.12); }
+      .ch.meta .pill { color: var(--dim); background: rgba(168, 180, 196, 0.1); }
+      .off { display: none; font: 600 10px/1 var(--mono); letter-spacing: 0.1em; color: var(--faintest); }
+      /* Self-host squelches every channel we operate. They stay on screen,
+         dimmed, so the difference between the tiers is the picture. */
+      #tier-self:checked ~ .chain .ch[data-hosted] { opacity: 0.32; filter: saturate(0); }
+      #tier-self:checked ~ .chain .ch[data-hosted] .off { display: inline-block; margin-left: 0.5rem; }
+      #tier-self:checked ~ .chain .tenant-hosted,
+      #tier-hosted:checked ~ .chain .tenant-self { display: none; }
+
+      .aside { margin-top: 1.25rem; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.7rem; }
+      @media (max-width: 900px) { .aside { grid-template-columns: minmax(0, 1fr); } }
+      .aside .ch { grid-template-columns: minmax(0, 1fr); align-items: start; }
+      .aside-h { margin: 2.5rem 0 0.3rem; font-weight: 600; font-size: 1rem; }
+      .aside-sub { margin: 0; color: var(--faint); font-size: 0.9rem; }
+
+      /* TABLES: hairlines, no boxes, mono headers like the analyzer's. */
+      .table-wrap { overflow-x: auto; border-radius: 12px; box-shadow: inset 0 0 0 1px var(--hair-strong); }
+      table { border-collapse: collapse; width: 100%; font-size: 0.9rem; min-width: 40rem; }
+      th { text-align: left; font: 600 10px/1.3 var(--mono); letter-spacing: 0.1em; text-transform: uppercase;
+        color: var(--faintest); padding: 0.85rem 1rem; background: var(--canvas); }
+      td { padding: 0.85rem 1rem; border-top: 1px solid var(--hair); vertical-align: top; color: var(--dim); }
+      td:first-child { color: var(--ink); font-weight: 600; white-space: nowrap; }
+      td small { display: block; color: var(--faint); font-weight: 400; font-size: 0.8rem; }
+      .dot { display: inline-flex; align-items: center; gap: 0.45rem; white-space: nowrap; }
+      .dot::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+      .dot.content { color: var(--accent-ink); } .dot.sealed { color: var(--positive); } .dot.meta { color: var(--faint); }
+
+      /* RETENTION: every holding on one scale, from "never stored" to "for the
+         life of the account", so the long-lived things are the ones that
+         stand out. */
+      .ret { display: grid; gap: 0; border-radius: 12px; box-shadow: inset 0 0 0 1px var(--hair-strong); overflow: hidden; }
+      .ret-head, .ret-row { display: grid; grid-template-columns: minmax(0, 17rem) minmax(0, 1fr); gap: 1.25rem;
+        padding: 0.8rem 1rem; align-items: center; }
+      .ret-head { background: var(--canvas); font: 600 10px/1.3 var(--mono); letter-spacing: 0.1em;
+        text-transform: uppercase; color: var(--faintest); }
+      .ret-row { border-top: 1px solid var(--hair); }
+      .ret-row > div:first-child { font-size: 0.9rem; font-weight: 600; }
+      .ret-row > div:first-child small { display: block; font-weight: 400; color: var(--faint); font-size: 0.8rem; }
+      .scale { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+      .scale span { text-align: center; }
+      .track { position: relative; height: 1.6rem; }
+      .track::before { content: ""; position: absolute; left: 12.5%; right: 12.5%; top: 50%; height: 1px;
+        background: var(--hair-strong); }
+      .track i { position: absolute; top: 50%; left: 12.5%; height: 3px; transform: translateY(-50%);
+        border-radius: 2px; background: linear-gradient(90deg, rgba(78, 155, 234, 0.25), var(--accent)); }
+      .track b { position: absolute; top: 50%; width: 11px; height: 11px; border-radius: 50%;
+        transform: translate(-50%, -50%); background: var(--accent-ink); box-shadow: 0 0 12px rgba(78, 155, 234, 0.8); }
+      .track em { position: absolute; top: 50%; transform: translate(12px, -50%); font: 500 11px/1 var(--mono);
+        font-style: normal; color: var(--dim); white-space: nowrap;
+        background: var(--bg); padding: 2px 6px; }
+      .track.flip em { transform: translate(calc(-100% - 12px), -50%); }
+      .s0 b, .s0 em { left: 12.5%; } .s0 i { width: 0; }
+      .s1 b, .s1 em { left: 37.5%; } .s1 i { width: 25%; }
+      .s2 b, .s2 em { left: 62.5%; } .s2 i { width: 50%; }
+      .s3 b, .s3 em { left: 87.5%; } .s3 i { width: 75%; }
+      @media (max-width: 700px) {
+        .ret-head { display: none; }
+        .ret-row { grid-template-columns: minmax(0, 1fr); gap: 0.4rem; }
+        .ret-row .track em { display: none; }
+        .ret-row .when { display: block; }
+      }
+      .when { display: none; font: 500 11px/1.3 var(--mono); color: var(--accent-ink); }
+
+      .steps { list-style: none; counter-reset: s; margin: 2rem 0 0; padding: 0; display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.7rem; }
+      @media (max-width: 820px) { .steps { grid-template-columns: minmax(0, 1fr); } }
+      .steps li { counter-increment: s; padding: 1rem 1.1rem; border-radius: 12px; background: var(--canvas);
+        box-shadow: inset 0 0 0 1px var(--hair); font-size: 0.9rem; color: var(--dim); }
+      .steps li::before { content: "0" counter(s); display: block; font: 600 11px/1 var(--mono);
+        color: var(--accent-ink); margin-bottom: 0.6rem; letter-spacing: 0.1em; }
+      .steps b { color: var(--ink); }
+
+      /* FACTS: the landing page's three-up, reused for controls. */
+      .facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2rem clamp(1.5rem, 4vw, 3.5rem);
+        border-top: 1px solid var(--hair); padding-top: clamp(2rem, 4vw, 3rem); }
+      @media (max-width: 760px) { .facts { grid-template-columns: minmax(0, 1fr); } }
+      .facts h3 { margin: 0 0 0.55rem; font-size: 0.98rem; font-weight: 600; }
+      .facts p { margin: 0; color: var(--dim); font-size: 0.93rem; line-height: 1.6; }
+
+      /* THE DPA: the one call to action on the page. */
+      .dpa { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: clamp(1.5rem, 4vw, 3.5rem);
+        padding: clamp(1.5rem, 4vw, 2.5rem); border-radius: 18px;
+        background: linear-gradient(180deg, #152032, #0c121c);
+        box-shadow: inset 0 0 0 1px rgba(130, 186, 245, 0.25), 0 0 80px -30px rgba(78, 155, 234, 0.45); }
+      @media (max-width: 900px) { .dpa { grid-template-columns: minmax(0, 1fr); } }
+      .dpa h2 { font-size: clamp(1.9rem, 3.4vw, 2.5rem); }
+      .dpa p { color: var(--dim); margin: 0 0 1.4rem; }
+      .dpa ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.1rem; }
+      .dpa li { display: grid; grid-template-columns: 1.4rem minmax(0, 1fr); gap: 0.5rem; padding: 0.6rem 0;
+        border-top: 1px solid var(--hair); font-size: 0.92rem; color: var(--dim); }
+      .dpa li:first-child { border-top: 0; }
+      .dpa li::before { content: "✓"; color: var(--positive); font-weight: 700; }
+      .dpa li b { color: var(--ink); font-weight: 600; }
+      .cta { display: inline-flex; align-items: center; gap: 0.6rem; padding: 0.8rem 1.4rem; border-radius: 99px;
+        color: #f4f8fd; background: linear-gradient(180deg, #1f3654, #152640); font-weight: 600; font-size: 0.95rem;
+        box-shadow: inset 0 0 0 1px rgba(130, 186, 245, 0.45), 0 0 24px -6px rgba(78, 155, 234, 0.6); }
+      .cta:hover { text-decoration: none; color: #fff; box-shadow: inset 0 0 0 1px rgba(130, 186, 245, 0.7), 0 0 30px -4px rgba(78, 155, 234, 0.8); }
+      .fine { margin-top: 1rem !important; font-size: 0.82rem; color: var(--faintest) !important; }
+
+      .updated { margin: 0; font-size: 0.85rem; color: var(--faint); }
+      .foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 1rem; margin-top: clamp(4rem, 9vw, 7rem);
+        padding: 1.75rem var(--gutter) 2.25rem; border-top: 1px solid var(--hair); font-size: 0.85rem; color: var(--faintest); }
+      .foot nav { display: flex; flex-wrap: wrap; gap: 1.25rem; }
+      @media (prefers-reduced-motion: reduce) { .ch, .switch label { transition: none; } }
+    </style>
+  </head>
+  <body>
+    <header class="top">
+      <a class="brand" href="/"><img src="/mark.svg" alt="" width="42" height="23" /><span>passband</span></a>
+      <nav class="nav">
+        <a href="/about">About</a>
+        <a href="/self-host">Self-host</a>
+        <a class="keep" href="/trust" aria-current="page">Trust</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="hero">
+        <p class="eyebrow"><b>Trust</b> &middot; updated September 28, 2026</p>
+        <h1>Where your mail goes. All of it.</h1>
+        <p class="lede">
+          Passband reads your mail so it can decide what needs you. This page is
+          the full account of what that involves: every place a byte of it goes,
+          who runs that place, and how long it stays.
+        </p>
+        <dl class="spec">
+          <div><dt>Training on your mail</dt><dd>Never<small>not by us, not by our model provider</small></dd></div>
+          <div><dt>Isolation</dt><dd>One per account<small>own daemon, own database, own key</small></dd></div>
+          <div><dt>Subprocessors</dt><dd>7<small>all listed below</small></dd></div>
+          <div><dt>Login codes to a model</dt><dd>Never<small>caught before any model sees mail</small></dd></div>
+        </dl>
+      </section>
+
+      <section class="section" id="data-flow">
+        <p class="num">01 &middot; DATA FLOW</p>
+        <h2>One tenant. <em>Every wire out of it.</em></h2>
+        <p class="intro">
+          Your hosted account is its own instance of the Passband daemon with its
+          own database. Nothing else runs in it and no other account can reach
+          it. These are the only ways data leaves.
+        </p>
+
+        <input class="tier-in" type="radio" name="tier" id="tier-hosted" checked />
+        <input class="tier-in" type="radio" name="tier" id="tier-self" />
+        <div class="switch" role="presentation">
+          <label for="tier-hosted">Hosted</label>
+          <label for="tier-self">Self-host</label>
+        </div>
+        <p class="tier-note">
+          <span class="hosted">We run the daemon for you. Every channel below is live.</span>
+          <span class="self">You run the daemon. Every channel we operate is off; what is left talks to Google, to your devices, and to a model provider only if you give it your own key.</span>
+        </p>
+
+        <div class="legend" aria-hidden="true">
+          <span class="k-content"><i></i>mail content</span>
+          <span class="k-sealed"><i></i>encrypted before it leaves</span>
+          <span class="k-meta"><i></i>no mail content</span>
+        </div>
+
+        <div class="intake">
+          <div class="source">
+            <span class="tag">Source</span>
+            <p class="box-title">Your Gmail</p>
+            <p class="box-sub">Google, via the Gmail API. OAuth, scopes you approve.</p>
+          </div>
+          <div class="feed"><span>sync in &middot; your actions out</span></div>
+        </div>
+        <div class="chain">
+          <div class="core">
+            <div class="tenant">
+              <span class="tag tenant-hosted">Your tenant &middot; Hetzner, US</span>
+              <span class="tag tenant-self">Your tenant &middot; your hardware</span>
+              <p class="box-title">squelchd</p>
+              <p class="box-sub">The daemon that syncs, triages, and serves your mail.</p>
+              <ul>
+                <li><b>Mail</b> messages, attachments, search index</li>
+                <li><b>Google token</b> sealed to a key only this tenant holds</li>
+                <li><b>Triage</b> scores, rules, extracted cards</li>
+              </ul>
+              <div class="stays">
+                <span class="tag">Never leaves</span>
+                <p>Your Google token, after signup</p>
+                <p>Verification codes and password resets</p>
+              </div>
+              <p class="fence tenant-hosted">Its own container and volume. Network default-deny: no other tenant can reach it.</p>
+              <p class="fence tenant-self">On your disk. We hold no copy and no key.</p>
+            </div>
+          </div>
+
+          <div class="bus">
+            <div class="ch two content">
+              <span class="wire"></span>
+              <div class="what"><b>Your devices</b>Threads, search results and actions, between the daemon and the Passband apps you paired.</div>
+              <div class="who"><b>Passband for Mac and iPhone</b>TLS, per-device tokens<br /><span class="pill">mail content</span></div>
+            </div>
+            <div class="ch content" data-hosted>
+              <span class="wire"></span>
+              <div class="what"><b>Triage and the assistant</b>The parts of a message a model needs to score it, summarize it, or answer a question you asked. Login codes are held back before this point.</div>
+              <div class="who"><b>Anthropic</b>through our gateway on Railway, which meters spend and keeps no bodies<br /><span class="pill">mail content</span><span class="off">off</span></div>
+            </div>
+            <div class="ch sealed" data-hosted>
+              <span class="wire"></span>
+              <div class="what"><b>Backups</b>The mailbox database, streamed continuously so a lost disk costs minutes, not your history. Encrypted on our server before upload.</div>
+              <div class="who"><b>Cloudflare R2</b>ciphertext only; Cloudflare holds no key<br /><span class="pill">encrypted</span><span class="off">off</span></div>
+            </div>
+            <div class="ch meta">
+              <span class="wire"></span>
+              <div class="what"><b>Push notifications</b>A fixed alert, an event id, and the Gmail thread id so repeat alerts collapse. The phone fetches the mail itself, from the daemon.</div>
+              <div class="who"><b>Apple Push Notification service</b>via our relay on Railway, which stores nothing<br /><span class="pill">no mail content</span></div>
+            </div>
+            <div class="ch meta">
+              <span class="wire"></span>
+              <div class="what"><b>Read receipts <small class="opt">opt-in</small></b>If you turn on open tracking for mail you send, the relay holds an opaque token, a time and a user agent until your daemon collects them.</div>
+              <div class="who"><b>Our relay on Railway</b>only your daemon can tie a token to a message<br /><span class="pill">no mail content</span></div>
+            </div>
+            <div class="ch meta" data-hosted>
+              <span class="wire"></span>
+              <div class="what"><b>Health metrics</b>Counts and timings, like messages synced and triage latency, labelled with your account's label and nothing finer.</div>
+              <div class="who"><b>Our monitoring on Railway</b>aggregate by design, never per message<br /><span class="pill">no mail content</span><span class="off">off</span></div>
+            </div>
+          </div>
+        </div>
+
+        <p class="aside-h">Outside the tenant</p>
+        <p class="aside-sub">These never see your mailbox. They are how an account comes to exist and how we know the apps work.</p>
+        <div class="aside">
+          <div class="ch meta">
+            <div class="what"><b>Your account record</b>The address you signed up with, your account label, your invite, and timestamps. No mail, no Google token.</div>
+            <div class="who">Our control plane, Postgres on Railway</div>
+          </div>
+          <div class="ch meta">
+            <div class="what"><b>Your invite</b>When you come off the waitlist, one email with your invite code.</div>
+            <div class="who">Resend</div>
+          </div>
+          <div class="ch meta">
+            <div class="what"><b>App usage</b>Events like "a thread was archived", from a fixed list enforced in code, keyed to a random id rather than your address. You can turn it down or off in Settings.</div>
+            <div class="who">PostHog, US</div>
+          </div>
+          <div class="ch meta">
+            <div class="what"><b>Images and icons</b>The apps load images in your mail directly from the sender's servers, with cookies off and tracking pixels stripped. Switch to On demand in Settings to load none. Icons for automated senders come from DuckDuckGo's icon service, by domain.</div>
+            <div class="who">The sender's servers, DuckDuckGo</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="subprocessors">
+        <p class="num">02 &middot; SUBPROCESSORS</p>
+        <h2>Who we hand data to.</h2>
+        <p class="intro">
+          Every third party that processes data on our behalf for the hosted
+          service. We give 30 days' notice before adding one; see the DPA below.
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Provider</th><th>What for</th><th>What it sees</th><th>Where</th></tr></thead>
+            <tbody>
+            <tr>
+              <td>Hetzner<small>hetzner.com</small></td>
+              <td>Servers that run hosted tenants</td>
+              <td>Your mailbox database and sealed Google token, at rest and in memory<br /><span class="dot content">mail content</span></td>
+              <td>United States</td>
+            </tr>
+            <tr>
+              <td>Anthropic<small>anthropic.com</small></td>
+              <td>Language model inference for triage, summaries and the assistant</td>
+              <td>Message excerpts, in transit. Not used for training<br /><span class="dot content">mail content</span></td>
+              <td>United States</td>
+            </tr>
+            <tr>
+              <td>Railway<small>railway.com</small></td>
+              <td>Our control plane, LLM gateway, push relay and monitoring</td>
+              <td>Mail excerpts passing through the gateway, not stored. Your account record<br /><span class="dot content">mail content</span></td>
+              <td>United States</td>
+            </tr>
+            <tr>
+              <td>Cloudflare<small>cloudflare.com</small></td>
+              <td>Backup storage (R2) and DNS</td>
+              <td>Mailbox backups, encrypted before they arrive<br /><span class="dot sealed">encrypted only</span></td>
+              <td>Global</td>
+            </tr>
+            <tr>
+              <td>Apple<small>apple.com</small></td>
+              <td>Push notification delivery</td>
+              <td>Device token, event id, thread id<br /><span class="dot meta">no mail content</span></td>
+              <td>United States</td>
+            </tr>
+            <tr>
+              <td>Resend<small>resend.com</small></td>
+              <td>Sending invite email</td>
+              <td>Your email address and invite code<br /><span class="dot meta">no mail content</span></td>
+              <td>United States</td>
+            </tr>
+            <tr>
+              <td>PostHog<small>posthog.com</small></td>
+              <td>Product analytics from the apps</td>
+              <td>Allowlisted usage events, a random id<br /><span class="dot meta">no mail content</span></td>
+              <td>United States</td>
+            </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="aside-sub" style="margin-top:1rem">
+          Google is where your mail comes from, not a processor of ours: Passband
+          reaches it with the Gmail API scopes you approve and no others. On
+          self-host, none of the providers above are involved unless you choose
+          them.
+        </p>
+      </section>
+
+      <section class="section" id="retention">
+        <p class="num">03 &middot; RETENTION</p>
+        <h2>How long anything stays.</h2>
+        <p class="intro">
+          Most of what passes through our services is never written down. The
+          rest is on a clock, or kept until you ask us to erase it.
+        </p>
+        <div class="ret">
+          <div class="ret-head">
+            <div>What</div>
+            <div class="scale"><span>Not stored</span><span>Days</span><span>Weeks</span><span>Life of account</span></div>
+          </div>
+          <div class="ret-row">
+            <div>Push notifications<small>relay</small><span class="when">never stored</span></div>
+            <div class="track s0"><i></i><b></b><em>never stored</em></div>
+          </div>
+          <div class="ret-row">
+            <div>Model requests<small>at our gateway</small><span class="when">bodies never stored; token counts kept</span></div>
+            <div class="track s0"><i></i><b></b><em>bodies never stored; token counts kept</em></div>
+          </div>
+          <div class="ret-row">
+            <div>Backups<small>Cloudflare R2, encrypted</small><span class="when">rolling 24 hours</span></div>
+            <div class="track s1"><i></i><b></b><em>rolling 24 hours</em></div>
+          </div>
+          <div class="ret-row">
+            <div>Server snapshots<small>Hetzner, system disk, no mail</small><span class="when">7 days</span></div>
+            <div class="track s1"><i></i><b></b><em>7 days</em></div>
+          </div>
+          <div class="ret-row">
+            <div>Model requests<small>at Anthropic; longer only if flagged for abuse</small><span class="when">up to 30 days</span></div>
+            <div class="track s2"><i></i><b></b><em>up to 30 days</em></div>
+          </div>
+          <div class="ret-row">
+            <div>Read-receipt events<small>relay, until collected</small><span class="when">up to 90 days</span></div>
+            <div class="track s2"><i></i><b></b><em>up to 90 days</em></div>
+          </div>
+          <div class="ret-row">
+            <div>Your mailbox<small>mail, attachments, search index, triage</small><span class="when">until you delete it</span></div>
+            <div class="track s3 flip"><i></i><b></b><em>until you delete it</em></div>
+          </div>
+          <div class="ret-row">
+            <div>Google token<small>sealed to your tenant</small><span class="when">until you delete it</span></div>
+            <div class="track s3 flip"><i></i><b></b><em>until you delete it</em></div>
+          </div>
+          <div class="ret-row">
+            <div>Account record<small>control plane</small><span class="when">until you delete it</span></div>
+            <div class="track s3 flip"><i></i><b></b><em>until you delete it</em></div>
+          </div>
+        </div>
+
+        <ol class="steps">
+          <li><b>Ask.</b> Email us from the address on the account. You do not need a reason.</li>
+          <li><b>We erase it within 30 days.</b> The mailbox volume, the Google token and its key, every backup, the gateway key and the account record.</li>
+          <li><b>We confirm in writing.</b> The only thing left is a server snapshot of our own system disk, holding no mail, and it ages out in 7 days.</li>
+        </ol>
+        <p class="aside-sub" style="margin-top:1.25rem">
+          Revoking Passband at
+          <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>
+          ends our access to your mailbox at once, whether or not you have asked us
+          to delete anything.
+        </p>
+      </section>
+
+      <section class="section" id="security">
+        <p class="num">04 &middot; CONTROLS</p>
+        <h2>How it is held.</h2>
+        <p class="intro">
+          The short version of the threat model. Ask and we will walk your
+          security team through the long one.
+        </p>
+        <div class="facts">
+          <div>
+            <h3>Reading can't send</h3>
+            <p>Sync holds a read-only Google credential. The one that can write lives apart, and the sync path cannot load it.</p>
+          </div>
+          <div>
+            <h3>One instance per account</h3>
+            <p>Your own container and volume, user-namespaced, behind a default-deny network policy. Tenants cannot reach each other.</p>
+          </div>
+          <div>
+            <h3>Keys you can count</h3>
+            <p>Your Google token is sealed to a key only your tenant holds. Cluster secrets are encrypted at rest. Backups are encrypted before they leave the server.</p>
+          </div>
+          <div>
+            <h3>Login codes stay out</h3>
+            <p>Verification codes and password resets are caught by rules before any model is consulted, and never reach a model or the assistant.</p>
+          </div>
+          <div>
+            <h3>Agents read, never write</h3>
+            <p>The interface Passband offers to AI agents is read-only and serves text only, never HTML and never sealed mail.</p>
+          </div>
+          <div>
+            <h3>Mail renders sandboxed</h3>
+            <p>Email is sanitized when it arrives and shown with scripts off, navigation blocked and nothing written to disk.</p>
+          </div>
+        </div>
+
+        <p class="aside-h">What we do not have yet</p>
+        <p class="aside-sub" style="max-width:44rem">
+          Said here so you do not have to find it in a questionnaire. No SOC 2
+          report. Hosted tenants run in one region on one server, and the
+          mailbox volume is not encrypted at the disk layer; the Google token
+          and the backups are. The people who run Passband can, in principle,
+          reach a hosted mailbox, and do so only to answer a request you made or
+          to investigate a security problem. If that is more trust than you want
+          to extend, self-host: then we hold nothing at all.
+        </p>
+        <p class="aside-sub" style="margin-top:1rem">
+          Found a vulnerability? Email
+          <a href="mailto:bboynton97@gmail.com?subject=Security">bboynton97@gmail.com</a>.
+          We acknowledge within 72 hours.
+        </p>
+      </section>
+
+      <section class="section" id="dpa">
+        <div class="dpa">
+          <div>
+            <p class="num">05 &middot; DPA</p>
+            <h2>We sign your DPA.</h2>
+            <p>
+              If your company processes personal data under GDPR, UK GDPR or
+              a US state privacy law, send us your data processing agreement
+              and we will review and sign it. Whatever paper it is on, these
+              are the terms we commit to.
+            </p>
+            <a class="cta" href="mailto:bboynton97@gmail.com?subject=DPA%20for%20Passband">Send us your DPA &rarr;</a>
+            <p class="fine">Or email <a href="mailto:bboynton97@gmail.com?subject=DPA%20for%20Passband">bboynton97@gmail.com</a> for a call with your security team.</p>
+          </div>
+          <ul>
+            <li><span><b>Your instructions only.</b> We process your data to run Passband for you and for nothing else.</span></li>
+            <li><span><b>Named subprocessors.</b> The list above, with 30 days' notice before we add one and the right to object.</span></li>
+            <li><span><b>Breach notice within 72 hours</b> of our becoming aware of one that affects your data.</span></li>
+            <li><span><b>International transfers</b> under the EU Standard Contractual Clauses and the UK Addendum. Hosted data lives in the United States.</span></li>
+            <li><span><b>Deletion on exit.</b> Everything erased within 30 days of termination, confirmed in writing.</span></li>
+            <li><span><b>Help with requests</b> from your people to access, correct or delete their data.</span></li>
+            <li><span><b>Security as described here,</b> as the DPA's technical and organisational measures, with this page and a completed questionnaire for audit.</span></li>
+          </ul>
+        </div>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <span>Passband</span>
+      <nav>
+        <a href="/about">About</a>
+        <a href="/self-host">Self-host</a>
+        <a href="/trust">Trust</a>
+        <a href="/privacy">Privacy</a>
+        <a href="/terms">Terms</a>
+      </nav>
+    </footer>
+  </body>
+</html>

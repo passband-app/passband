@@ -55,7 +55,7 @@ enum ClearCopy {
     /// One line per day, not per render: a tagline that changed every time
     /// the page redrew would read as a glitch rather than a voice.
     private static let taglines = [
-        "Nothing on the band but a clean carrier.",
+        "Squelch closed. Nothing is getting through.",
         "Quiet on every channel.",
         "The noise is squelched. The signal is handled.",
         "Nothing needs you. Enjoy that.",

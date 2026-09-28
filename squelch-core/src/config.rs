@@ -1190,10 +1190,12 @@ impl Default for Stage1Config {
 }
 
 /// Prompt-cache multipliers on the per-MTok INPUT price, for costing the
-/// ledger's cache-token columns at read time. These are Anthropic's standard
-/// 5-minute-ephemeral-cache rates (the TTL our `cache_control` blocks use):
-/// cache writes bill at 1.25x the input price, cache reads at 0.1x.
-pub const CACHE_WRITE_INPUT_MULT: f64 = 1.25;
+/// ledger's cache-token columns at read time. Anthropic's standard rates for
+/// the cache our `cache_control` blocks ask for: the ONE-HOUR TTL (see
+/// `triage::llm::CacheControl` for why), whose writes bill at 2x the input
+/// price where the 5-minute write is 1.25x. Reads are 0.1x on the models the
+/// ledger has seen so far. Change these with the TTL, not with the model.
+pub const CACHE_WRITE_INPUT_MULT: f64 = 2.0;
 pub const CACHE_READ_INPUT_MULT: f64 = 0.1;
 
 /// Stage-2 LLM triage tunables. The pass runs only over rows Stage-1 refined but

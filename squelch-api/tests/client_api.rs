@@ -5646,9 +5646,10 @@ async fn usage_returns_rows_totals_and_is_bearer_gated() {
     assert_eq!(totals["cache_creation_tokens"], 400_000);
     assert_eq!(totals["cache_read_tokens"], 2_000_000);
     // cost = 5.0*(1e6/1e6) + 25.0*(0.2e6/1e6)
-    //      + 5.0*1.25*(0.4e6/1e6) + 5.0*0.1*(2e6/1e6) = 5.0 + 5.0 + 2.5 + 1.0
+    //      + 5.0*2.0*(0.4e6/1e6) + 5.0*0.1*(2e6/1e6) = 5.0 + 5.0 + 4.0 + 1.0
+    // (cache writes at the 1-hour TTL's 2x, see CACHE_WRITE_INPUT_MULT)
     let cost = totals["est_cost_usd"].as_f64().unwrap();
-    assert!((cost - 13.5).abs() < 1e-9, "expected 13.5, got {cost}");
+    assert!((cost - 15.0).abs() < 1e-9, "expected 15.0, got {cost}");
 
     // Stage-1 and Stage-2 appear as separate usage categories.
     assert_eq!(json["model"], "claude-opus-5");

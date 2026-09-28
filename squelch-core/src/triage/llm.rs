@@ -232,11 +232,23 @@ struct SystemBlock<'a> {
     cache_control: Option<CacheControl>,
 }
 
+/// The system block's cache marker. `ttl` is the ONE-HOUR duration, not the
+/// 5-minute default, and that is a measured choice: on the 5-minute TTL the
+/// prefix (system prompt plus the step schema, ~6.6k tokens) missed on 48% of
+/// steady-state triage calls, because a mailbox's arrivals are minutes to
+/// hours apart. A miss re-writes the whole prefix at 1.25x input price; the
+/// 1-hour write costs 2x but happens a few times a day instead of every other
+/// call, and it was 31% of the triage bill. Anthropic reports the split in
+/// `usage.cache_creation` so [`Usage::cache_creation`] can prove the field
+/// survived a fronting gateway (an integration that drops it silently falls
+/// back to 5 minutes, and `ephemeral_1h_input_tokens` stays at zero).
 #[derive(Debug, Serialize)]
 struct CacheControl {
     #[serde(rename = "type")]
     kind: &'static str,
+    ttl: &'static str,
 }
+const CACHE_TTL: &str = "1h";
 
 #[derive(Debug, Serialize)]
 struct RequestMessage<'a> {
@@ -330,6 +342,7 @@ impl OpenAiUsage {
             // OpenAI's wire has no prompt-cache split; the ledger records zero.
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            cache_creation: None,
         }
     }
 }
@@ -371,6 +384,20 @@ pub struct Usage {
     pub cache_creation_input_tokens: u64,
     #[serde(default)]
     pub cache_read_input_tokens: u64,
+    /// `cache_creation_input_tokens` split by TTL. Not a ledger column: it
+    /// rides along in each run's metadata so an operator can confirm from the
+    /// stored usage that the 1-hour TTL ([`CacheControl`]) reached the provider.
+    /// Absent when the provider (or a gateway in front of it) did not report it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation: Option<CacheCreationBreakdown>,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, Deserialize)]
+pub struct CacheCreationBreakdown {
+    #[serde(default)]
+    pub ephemeral_5m_input_tokens: u64,
+    #[serde(default)]
+    pub ephemeral_1h_input_tokens: u64,
 }
 
 /// The ledger records exactly the split the API reports, so a usage block maps
@@ -401,7 +428,10 @@ async fn classify_anthropic(
         system: vec![SystemBlock {
             kind: "text",
             text: req.system,
-            cache_control: Some(CacheControl { kind: "ephemeral" }),
+            cache_control: Some(CacheControl {
+                kind: "ephemeral",
+                ttl: CACHE_TTL,
+            }),
         }],
         messages: vec![RequestMessage {
             role: "user",

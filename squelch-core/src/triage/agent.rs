@@ -607,6 +607,24 @@ fn number() -> Value {
 fn boolean() -> Value {
     json!({"type":"boolean"})
 }
+/// A `$ref` into [`schema_defs`]. The step schema used to inline every
+/// repeated sub-schema — `attention` twice, `evidence` a dozen times, `time`
+/// six — and the whole thing rode in the cached prefix of every call. Refs
+/// keep the JSON the model sees a fraction of that size; both transports'
+/// structured-output modes resolve local `$ref`s.
+fn reference(name: &str) -> Value {
+    json!({"$ref": format!("#/$defs/{name}")})
+}
+/// The shared definitions. Attached at the ROOT of whichever schema is sent
+/// ([`step_schema`], or [`decision_schema`] on its own), because a `$ref` is
+/// resolved against the document root, not the object that contains it.
+fn schema_defs() -> Value {
+    json!({
+        "evidence": evidence_schema(),
+        "time": time_schema(),
+        "attention": attention_schema(),
+    })
+}
 fn evidence_schema() -> Value {
     array(object(vec![
         ("message_id", integer()),
@@ -643,8 +661,8 @@ fn attention_schema() -> Value {
                 ),
                 ("description", text()),
                 ("resolved", boolean()),
-                ("due", nullable(time_schema())),
-                ("evidence", evidence_schema()),
+                ("due", nullable(reference("time"))),
+                ("evidence", reference("evidence")),
             ])),
         ),
         ("summary", text()),
@@ -655,30 +673,39 @@ fn attention_schema() -> Value {
                 ("action_need", number()),
                 ("personal_relevance", number()),
                 ("importance", number()),
-                ("attention_at", nullable(time_schema())),
+                ("attention_at", nullable(reference("time"))),
             ]),
         ),
         ("relevant_message_ids", array(integer())),
-        ("evidence", evidence_schema()),
+        ("evidence", reference("evidence")),
     ])
 }
+/// The decision schema as a self-contained document (with its `$defs`), for
+/// callers that send or inspect it on its own.
 pub fn decision_schema() -> Value {
+    let mut schema = decision_schema_body();
+    schema["$defs"] = schema_defs();
+    schema
+}
+/// [`decision_schema`] minus the `$defs`, for embedding under a root that
+/// carries them ([`step_schema`]).
+fn decision_schema_body() -> Value {
     let records = vec![
         object(vec![
             ("kind", enumeration(&["bill"])),
             ("merchant", text()),
             ("amount", nullable(number())),
             ("currency", nullable(text())),
-            ("due", nullable(time_schema())),
+            ("due", nullable(reference("time"))),
             ("autopay", nullable(boolean())),
-            ("evidence", evidence_schema()),
+            ("evidence", reference("evidence")),
         ]),
         object(vec![
             ("kind", enumeration(&["receipt"])),
             ("merchant", text()),
             ("amount", nullable(number())),
             ("currency", nullable(text())),
-            ("evidence", evidence_schema()),
+            ("evidence", reference("evidence")),
         ]),
         object(vec![
             ("kind", enumeration(&["delivery"])),
@@ -703,20 +730,20 @@ pub fn decision_schema() -> Value {
             ("item_name", nullable(text())),
             ("merchant", nullable(text())),
             ("order_refs", array(text())),
-            ("evidence", evidence_schema()),
+            ("evidence", reference("evidence")),
         ]),
         object(vec![
             ("kind", enumeration(&["event"])),
             ("title", text()),
-            ("start", nullable(time_schema())),
+            ("start", nullable(reference("time"))),
             ("location", nullable(text())),
-            ("evidence", evidence_schema()),
+            ("evidence", reference("evidence")),
         ]),
         object(vec![
             ("kind", enumeration(&["financial_update"])),
             ("institution", text()),
             ("description", text()),
-            ("evidence", evidence_schema()),
+            ("evidence", reference("evidence")),
         ]),
     ];
     object(vec![
@@ -753,7 +780,7 @@ pub fn decision_schema() -> Value {
                         "security_alert",
                     ])),
                 ),
-                ("evidence", evidence_schema()),
+                ("evidence", reference("evidence")),
             ]),
         ),
         (
@@ -761,18 +788,18 @@ pub fn decision_schema() -> Value {
             object(vec![
                 ("restricted", boolean()),
                 ("reason", text()),
-                ("evidence", evidence_schema()),
+                ("evidence", reference("evidence")),
             ]),
         ),
-        ("attention", attention_schema()),
+        ("attention", reference("attention")),
         ("records", array(json!({"anyOf":records}))),
         (
             "related_updates",
             array(object(vec![
                 ("thread_id", text()),
                 ("expected_revision", integer()),
-                ("attention", attention_schema()),
-                ("evidence", evidence_schema()),
+                ("attention", reference("attention")),
+                ("evidence", reference("evidence")),
             ])),
         ),
         (
@@ -780,7 +807,7 @@ pub fn decision_schema() -> Value {
             array(object(vec![
                 ("rule_id", integer()),
                 ("reason", text()),
-                ("evidence", evidence_schema()),
+                ("evidence", reference("evidence")),
             ])),
         ),
         (
@@ -839,12 +866,14 @@ fn step_schema() -> Value {
         ]),
         object(vec![
             ("step", enumeration(&["finish"])),
-            ("decision", decision_schema()),
+            ("decision", decision_schema_body()),
         ]),
     ];
     // Provider structured outputs require an object at the root; a nested
     // union is supported by both transports. WireStep unwraps that envelope.
-    object(vec![("result", json!({"anyOf": steps}))])
+    let mut schema = object(vec![("result", json!({"anyOf": steps}))]);
+    schema["$defs"] = schema_defs();
+    schema
 }
 #[derive(Deserialize)]
 struct WireStep {
@@ -854,6 +883,49 @@ struct WireStep {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The step schema is part of the cached prefix of EVERY triage call, so
+    /// its encoded size is a cost line item. The bound is the `$defs` version's
+    /// size with headroom; inlining the shared sub-schemas again roughly
+    /// doubles it, and this is what notices.
+    #[test]
+    fn step_schema_stays_compact_and_its_refs_resolve() {
+        let schema = step_schema();
+        let encoded = serde_json::to_string(&schema).unwrap();
+        eprintln!("step schema: {} bytes", encoded.len());
+        assert!(
+            encoded.len() < 9_000,
+            "step schema grew to {} bytes",
+            encoded.len()
+        );
+        let defs = schema["$defs"].as_object().unwrap();
+        fn refs(value: &Value, out: &mut Vec<String>) {
+            match value {
+                Value::Object(fields) => {
+                    if let Some(Value::String(target)) = fields.get("$ref") {
+                        out.push(target.clone());
+                    }
+                    fields.values().for_each(|v| refs(v, out));
+                }
+                Value::Array(values) => values.iter().for_each(|v| refs(v, out)),
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        refs(&schema, &mut found);
+        assert!(found.len() >= 10, "expected the shared schemas to be referenced");
+        for target in found {
+            let name = target.strip_prefix("#/$defs/").expect("local ref");
+            assert!(defs.contains_key(name), "dangling $ref {target}");
+        }
+        // The standalone decision schema resolves on its own too.
+        let alone = decision_schema();
+        let mut found = Vec::new();
+        refs(&alone, &mut found);
+        for target in found {
+            let name = target.strip_prefix("#/$defs/").unwrap();
+            assert!(alone["$defs"].get(name).is_some(), "dangling {target}");
+        }
+    }
     fn valid() -> MessageDecision {
         let evidence = vec![EvidenceRef {
             message_id: 7,

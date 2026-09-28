@@ -1551,10 +1551,10 @@ export function App() {
             </p>
           </div>
           <div className="pb-fact">
-            <h3>Reading can’t send</h3>
+            <h3>Your mail isn’t training data</h3>
             <p>
-              Sync holds a read-only Google credential. The one that can write lives apart,
-              and the sync path can’t load it.
+              Not for us, not for our model provider. <a href="/trust">Where your mail goes</a>,
+              every wire of it.
             </p>
           </div>
         </div>

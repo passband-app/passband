@@ -228,10 +228,10 @@ Works once, expires in {ttl} days.
 /// tradeoff is that a self-hoster's recipients fetch an image from us, which is
 /// part of why the wordmark beside it is live text — see [`html_body`].
 ///
-/// The groundless mark, not the icon: a mail body is white, so a tile would put
-/// a light rectangle on a light page. The 512px asset is deliberately larger
-/// than the 45px it renders at, because mail reaches retina screens.
-const MARK_URL: &str = "https://passband.app/mark.png";
+/// The groundless mark in its LIT ramps, because the email is dark like the
+/// landing page. The 512px asset is deliberately larger than the 45px it
+/// renders at, because mail reaches retina screens.
+const MARK_URL: &str = "https://passband.app/mark-light.png";
 
 /// The HTML part. Everything interpolated is escaped, including values this
 /// crate produced itself: "this one was checked already" is how the exception
@@ -251,19 +251,23 @@ fn html_body(code: &str, signup_url: &str) -> String {
     let code = escape_html(code);
     let url = escape_html(signup_url);
     format!(
-        r#"<div style="font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #141c26; max-width: 30rem;">
-<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin: 0 0 32px;"><tr>
+        r##"<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#090D16" style="background: #090D16;"><tr><td align="left" style="padding: 40px 28px 48px;">
+<div style="max-width: 28rem; font: 16px/1.6 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #A8B4C4;">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin: 0 0 40px;"><tr>
 <td style="padding-right: 10px;"><img src="{mark}" alt="" width="45" height="24" style="display: block; border: 0;"></td>
-<td style="font: 500 21px/1 Georgia, 'Times New Roman', serif; color: #141c26; vertical-align: middle;">Passband</td>
+<td style="font: 500 22px/1 Newsreader, Georgia, 'Times New Roman', serif; color: #E9EEF5; vertical-align: middle;">Passband</td>
 </tr></table>
-<p style="font-size: 24px; line-height: 1.25; font-weight: 600; letter-spacing: -0.02em; margin: 0 0 8px;">You're invited to Passband</p>
-<p style="color: #455465; margin: 0 0 24px;">Pick a username and connect Gmail. Your code is already filled in.</p>
-<p style="margin: 0 0 32px;"><a href="{link}" style="display: inline-block; background: #141c26; color: #ffffff; text-decoration: none; padding: 13px 24px; border-radius: 8px; font-weight: 500;">Set up your mailbox</a></p>
-<p style="color: #455465; font-size: 14px; margin: 0 0 8px;">Or enter this code at <a href="{url}" style="color: #1c63ae;">{url}</a></p>
-<p style="font: 17px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: 0.04em; background: #f2f4f7; border-radius: 8px; padding: 12px 16px; display: inline-block; margin: 0 0 16px;">{code}</p>
-<p style="color: #455465; font-size: 14px; margin: 0;">Works once, expires in {ttl} days.</p>
+<p style="font: 500 34px/1.08 Newsreader, Georgia, 'Times New Roman', serif; letter-spacing: -0.01em; color: #E9EEF5; margin: 0 0 12px;">You're invited to Passband</p>
+<p style="margin: 0 0 28px;">Pick a username and connect Gmail. Your code is already filled in.</p>
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin: 0 0 36px;"><tr><td bgcolor="#121A26" style="background: #121A26; border: 1px solid #1f3656; border-top-color: #3a6a9e; border-radius: 14px;">
+<a href="{link}" style="display: inline-block; padding: 15px 30px; color: #DFE8F3; font-weight: 600; font-size: 15px; letter-spacing: 0.015em; text-decoration: none;">Set up your mailbox &rarr;</a>
+</td></tr></table>
+<p style="font-size: 13px; color: #808E9F; margin: 0 0 8px;">Or enter this code at <a href="{url}" style="color: #82BAF5;">{url}</a></p>
+<p style="font: 17px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: 0.04em; color: #E9EEF5; background: #121A26; border: 1px solid #1d2633; border-radius: 10px; padding: 12px 16px; display: inline-block; margin: 0 0 16px;">{code}</p>
+<p style="font-size: 13px; color: #62707F; margin: 0;">Works once, expires in {ttl} days.</p>
 </div>
-"#,
+</td></tr></table>
+"##,
         mark = MARK_URL,
         ttl = crate::invites::DEFAULT_TTL_DAYS,
     )

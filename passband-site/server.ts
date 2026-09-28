@@ -27,7 +27,10 @@ const pages: Record<string, string> = {
   // Groundless, for the landing page's own dark field.
   "/mark.svg": "mark.svg",
   // The same mark as raster, for the invite email. No mail client renders SVG.
+  // mark.png is the ink ramps, kept for invites already sitting in inboxes;
+  // mark-light.png is the lit ramps the current (dark) invite email uses.
   "/mark.png": "mark.png",
+  "/mark-light.png": "mark-light.png",
   "/icon-180.png": "icon-180.png",
   "/icon-512.png": "icon-512.png",
   // The link-unfurl card, rendered by brand/og/build.sh. Crawlers do not run

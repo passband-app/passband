@@ -6,6 +6,10 @@
 //! third party can watch, and the one thing a user does here is decide whether
 //! to hand over access to their mail.
 //!
+//! ONE FIRST-PARTY FETCH: the Newsreader webfont, served by this service
+//! itself at [`FONT_PATH`] so the headings are the landing page's letterforms.
+//! Same origin, so the CSP names `'self'` for fonts and nothing else.
+//!
 //! THE LOGO IS SUBJECT TO THAT RULE RATHER THAN AN EXCEPTION TO IT. These pages
 //! carry the Passband masthead so that arriving from the landing page does not
 //! feel like leaving the product, and the mark reaches them as an inline `<svg>`
@@ -39,7 +43,9 @@ use crate::store::UserRow;
 /// 303 to Google consent, and under `form-action 'self'` Chrome silently eats
 /// that navigation - the button "does nothing" while the server logs a
 /// perfectly healthy signup. Found live on the first real signup, 2026-08-11.
-const CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://accounts.google.com; frame-ancestors 'none'; base-uri 'none'";
+/// `font-src 'self'` admits exactly one file, [`NEWSREADER`], served by this
+/// same origin: the landing page's serif, and still nothing a third party sees.
+const CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; form-action 'self' https://accounts.google.com; frame-ancestors 'none'; base-uri 'none'";
 
 /// Escape text for HTML.
 pub fn escape_html(s: &str) -> String {
@@ -185,6 +191,29 @@ const MARK: &str = concat!(
     r#"L636 262L651 275L681 311L711 357L744 418L834 600L861 646L888 685"#,
     r#"L918 718L936 733L954 744L972 753L993 760L1035 768"/></svg>"#,
 );
+
+/// Where the Newsreader webfont is served. Same origin as every page here.
+pub const FONT_PATH: &str = "/fonts/newsreader.woff2";
+
+/// Newsreader, byte for byte the subset `passband-site/newsreader-var.woff2`
+/// the landing page ships, vendored into this crate because the control image
+/// is built from the crates alone and never sees `passband-site/`. If the
+/// site's subset changes, copy it over again.
+const NEWSREADER: &[u8] = include_bytes!("../assets/newsreader.woff2");
+
+/// `GET /fonts/newsreader.woff2`. Immutable for a year: the bytes only change
+/// with a deploy, and a changed font is a changed file worth a new path.
+pub async fn newsreader() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "font/woff2"),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        NEWSREADER,
+    )
+        .into_response()
+}
 
 /// The shell every page shares.
 ///
@@ -423,57 +452,131 @@ body.console .signout {{ margin: 2.75rem 0 0.6rem; }}
    row and the placeholder in it are enough on screen; neither is a label. */
 body.console .sr {{ position: absolute; width: 1px; height: 1px; overflow: hidden;
   clip-path: inset(50%); white-space: nowrap; }}
-/* Account appearance is explicit; browser theme never overrides the URL choice. */
-body.auth {{ color-scheme: light; --brand: #1c63ae; background: #fff; color: #141c26;
-  padding: 2rem 3rem 4rem; }}
-.auth > .brand {{ margin: 0; }}
-.auth main {{ max-width: 42rem; margin: clamp(3rem, 9vh, 6rem) auto 0; overflow-wrap: anywhere; }}
-.auth h1 {{ font-size: 2rem; line-height: 1.2; letter-spacing: -0.035em; margin-bottom: 0.75rem; }}
-.auth .lead {{ color: #455465; margin-bottom: 2rem; }}
-.auth .card {{ background: transparent; border: 0; border-radius: 0; padding: 0; margin-bottom: 1.5rem; }}
-.auth .field {{ margin-bottom: 1.5rem; }}
-.auth label {{ font-size: 0.9rem; font-weight: 500; margin-bottom: 0.5rem; }}
-.auth input {{ background: #fff; border-color: #cbd1d8; border-radius: 8px; padding: 0.8rem 0.9rem; }}
-.auth :is(button, a.button) {{ box-sizing: border-box; width: 100%; text-align: center;
-  padding: 0.85rem 1.25rem; border-radius: 8px; background: #141c26; color: #fff; }}
-.auth :is(button, a.button):hover {{ background: #293746; }}
-.auth a.button {{ margin-bottom: 0; }}
-.auth p:has(> a.button) + .hint {{ margin-top: -0.25rem; }}
-.auth :is(.hint, .muted, .suffix) {{ color: #455465; font-size: 0.875rem; }}
-.auth .alt {{ border: 0; padding: 0; text-align: center; margin-bottom: 2rem; }}
-.auth details {{ border-color: #e4e7eb; font-size: 0.875rem; color: #455465; }}
-.auth summary {{ font-weight: 500; }}
-.auth :is(code, .code) {{ background: #f2f4f7; }}
-.auth .stop {{ border-left-color: #b3261e; }}
-/* The username field: the input and its domain inside one box that wears the
-   input's border, so `.passband.email` reads as the tail of what is typed. See
-   [`signup_form`] for why this needs no script. */
-.auth label.affix {{ display: flex; align-items: center; margin: 0 0 0.4rem; padding: 0 0.9rem;
-  border: 1px solid #cbd1d8; border-radius: 8px; background: #fff; cursor: text;
-  font-size: 1rem; font-weight: 400; overflow: hidden; }}
-.auth label.affix:focus-within {{ outline: 2px solid var(--brand); outline-offset: 2px; }}
-.auth .affix input {{ flex: 1 1 auto; width: 100%; min-width: 1ch; margin: 0; padding: 0.8rem 0;
-  border: 0; border-radius: 0; background: none; outline: none; text-transform: lowercase; }}
+/* THE ACCOUNT PAGES WEAR THE LANDING PAGE (passband-site/App.tsx), token for
+   token: its night ground, its analyzer graticule, Newsreader for the words
+   that matter, and ONE material for controls, the dark machined "rig" edged in
+   passband blue with a filament along its top. Somebody arrives here from that
+   page, and the signup should read as the next screen of it rather than as a
+   form somewhere else.
+   DARK BY DEFAULT, like the landing page, which has no light mode at all.
+   `?theme=light` still works (the app passes its own appearance), and restates
+   the tokens below rather than inheriting anything. */
+@font-face {{ font-family: "Newsreader"; src: url("/fonts/newsreader.woff2") format("woff2");
+  font-weight: 200 800; font-style: normal; font-display: swap; }}
+body.auth {{ color-scheme: dark;
+  --bg: #090D16; --ink: #E9EEF5; --dim: #A8B4C4; --faint: #808E9F; --faintest: #62707F;
+  --hair: rgba(233, 238, 245, 0.08); --accent: #4E9BEA; --brand: #82BAF5; --danger: #FF7A68;
+  --grid: rgba(130, 186, 245, 0.06); --rig-top: #152032; --rig-bottom: #0c121c;
+  --rig-edge: rgba(78, 155, 234, 0.22); --rig-lit: rgba(78, 155, 234, 0.62);
+  --rig-glow: rgba(78, 155, 234, 0.45); --rig-shadow: rgba(0, 0, 0, 0.5);
+  --rig-sheen: rgba(255, 255, 255, 0.07); --slot-rule: rgba(78, 155, 234, 0.18);
+  --cta-ink: #dfe8f3; --cta-ink-lit: #f4f8fd; --autofill: #101826;
+  --serif: "Newsreader", ui-serif, Georgia, serif;
+  --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  --gutter: clamp(1rem, 4vw, 2.75rem);
+  margin: 0; min-height: 100vh; padding: 1.4rem var(--gutter) 4rem; box-sizing: border-box;
+  background: var(--bg); color: var(--ink); font-family: var(--sans);
+  -webkit-font-smoothing: antialiased; }}
+body.auth[data-theme="light"] {{ color-scheme: light;
+  --bg: #F6F8FB; --ink: #141C26; --dim: #455465; --faint: #5F6D7E; --faintest: #7B8796;
+  --hair: rgba(20, 28, 38, 0.1); --accent: #1C63AE; --brand: #1C63AE; --danger: #B3261E;
+  --grid: rgba(28, 99, 174, 0.07); --rig-top: #FFFFFF; --rig-bottom: #F3F6FA;
+  --rig-edge: rgba(28, 99, 174, 0.24); --rig-lit: rgba(28, 99, 174, 0.6);
+  --rig-glow: rgba(28, 99, 174, 0.22); --rig-shadow: rgba(20, 28, 38, 0.1);
+  --rig-sheen: rgba(255, 255, 255, 0.9); --slot-rule: rgba(28, 99, 174, 0.16);
+  --cta-ink: #141C26; --cta-ink-lit: #0B1C33; --autofill: #FFFFFF; }}
+/* The analyzer's graticule, faded out toward the edges exactly as the landing
+   page fades it, so the ground has texture and no border. */
+body.auth::before {{ content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  background-image:
+    repeating-linear-gradient(90deg, var(--grid) 0 1px, transparent 1px 10%),
+    repeating-linear-gradient(180deg, var(--grid) 0 1px, transparent 1px 12.5%);
+  -webkit-mask-image: radial-gradient(ellipse 70% 65% at 50% 45%, #000 20%, transparent 80%);
+          mask-image: radial-gradient(ellipse 70% 65% at 50% 45%, #000 20%, transparent 80%); }}
+.auth > .brand {{ margin: 0; gap: 0.6rem; }}
+.auth > .brand svg {{ height: 1.45rem; color: var(--brand); }}
+.auth .wordmark {{ font-family: var(--serif); font-size: 1.5rem; }}
+.auth main {{ max-width: 28rem; margin: clamp(3.5rem, 13vh, 8rem) auto 0; overflow-wrap: anywhere; }}
+.auth h1 {{ font-family: var(--serif); font-weight: 500; font-size: clamp(2.2rem, 5vw, 2.9rem);
+  line-height: 1.05; letter-spacing: -0.01em; margin: 0 0 0.9rem; }}
+.auth p {{ color: var(--dim); }}
+.auth .lead {{ font-size: 1rem; line-height: 1.6; margin: 0 0 2rem; }}
+.auth a {{ color: var(--brand); }}
+.auth :is(.hint, .muted, .suffix) {{ color: var(--faintest); font-size: 0.8rem; }}
+.auth .fine {{ margin: 0.35rem 0 0; color: var(--faintest); font-size: 0.8rem; line-height: 1.55; }}
+.auth .rig + .fine {{ margin-top: 1rem; }}
+.auth .alt {{ border: 0; padding: 0; margin: 1.75rem 0 0; font-size: 0.9rem; color: var(--faint); }}
+.auth .stop {{ border: 0; padding: 0; margin: 0 0 1.25rem; color: var(--danger); font-size: 0.9rem; }}
+.auth .stop strong {{ font-weight: 500; }}
+.auth :is(code, .code) {{ background: var(--hair); color: var(--ink); }}
+/* THE MATERIAL. One recipe for every control on these pages: a standalone
+   button is a small piece of it, and the form is a bigger piece with slots
+   cut in it. Lit as one instrument on hover or focus, with the landing page's
+   filament along the top edge. */
+.auth :is(.rig, a.button, button) {{ position: relative; isolation: isolate; overflow: hidden;
+  border-radius: 0.9rem; border: 1px solid var(--rig-edge);
+  background: linear-gradient(180deg, var(--rig-top), var(--rig-bottom));
+  box-shadow: inset 0 1px 0 var(--rig-sheen), 0 12px 30px var(--rig-shadow);
+  transition: transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1), border-color 0.4s ease,
+    box-shadow 0.4s ease, color 0.4s ease; }}
+.auth :is(.rig, a.button, button)::before {{ content: ""; position: absolute; inset: 0 0 auto;
+  height: 1px; z-index: 2; opacity: 0.45; transition: opacity 0.4s ease;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent); }}
+.auth :is(.rig:hover, .rig:focus-within, a.button:hover, a.button:focus-visible, button:hover, button:focus-visible) {{
+  border-color: var(--rig-lit);
+  box-shadow: inset 0 1px 0 var(--rig-sheen), 0 0 34px -6px var(--rig-glow), 0 16px 38px var(--rig-shadow); }}
+.auth :is(.rig:hover, .rig:focus-within, a.button:hover, a.button:focus-visible, button:hover, button:focus-visible)::before {{ opacity: 1; }}
+.auth :is(a.button, button) {{ display: inline-flex; align-items: center; justify-content: center;
+  gap: 0.6rem; width: auto; margin: 0; padding: 0.95rem 1.9rem; box-sizing: border-box;
+  color: var(--cta-ink); font: 600 0.95rem/1.2 var(--sans); letter-spacing: 0.015em;
+  text-decoration: none; cursor: pointer; }}
+.auth :is(a.button, button):is(:hover, :focus-visible) {{ color: var(--cta-ink-lit); transform: translateY(-2px); }}
+.auth :is(a.button, button):active {{ transform: translateY(0) scale(0.995); }}
+.auth :is(a.button, button):focus-visible {{ outline: 2px solid var(--rig-lit); outline-offset: 3px; }}
+.auth .arrow {{ transition: transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1); }}
+.auth :is(a.button, button):is(:hover, :focus-visible) .arrow {{ transform: translateX(3px); }}
+/* The form: slots cut into one rig, each with its label engraved in it, and
+   the submit as the rig's last slot rather than a button sitting under it. */
+.auth .rig {{ display: flex; flex-direction: column; margin: 0; padding: 0; }}
+.auth .slot {{ position: relative; margin: 0; padding: 0.8rem 1.1rem 0.85rem;
+  border-bottom: 1px solid var(--slot-rule); }}
+.auth .slot:focus-within {{ box-shadow: inset 2px 0 0 var(--rig-lit); }}
+.auth .slot > label:first-child {{ display: block; margin: 0 0 0.3rem; color: var(--faintest);
+  font-size: 0.68rem; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; }}
+.auth .slot input {{ display: block; width: 100%; margin: 0; padding: 0; border: 0; border-radius: 0;
+  background: none; outline: none; color: var(--ink); font: 1rem/1.4 var(--sans); }}
+.auth .slot input::placeholder {{ color: var(--faintest); }}
+.auth .slot input:-webkit-autofill {{ -webkit-text-fill-color: var(--ink); caret-color: var(--ink);
+  box-shadow: inset 0 0 0 100vw var(--autofill); transition: background-color 9999s; }}
+.auth .rig button {{ width: 100%; padding: 1rem 1.1rem; border: 0; border-radius: 0;
+  background: none; box-shadow: none; }}
+.auth .rig button::before {{ display: none; }}
+.auth .rig button:is(:hover, :focus-visible) {{ transform: none; box-shadow: none;
+  background: linear-gradient(180deg, transparent, var(--slot-rule)); }}
+.auth .rig button:focus-visible {{ outline-offset: -3px; }}
+/* The username slot: the input and its domain on one line, the domain in the
+   placeholder's grey riding right behind what is typed. See [`signup_form`]
+   for why this needs no script. */
+.auth label.affix {{ display: flex; align-items: baseline; margin: 0; padding: 0; cursor: text;
+  font: inherit; color: inherit; letter-spacing: normal; text-transform: none; }}
+.auth .affix input {{ flex: 1 1 auto; width: 100%; min-width: 1ch; text-transform: lowercase; }}
 @supports (field-sizing: content) {{
   .auth .affix input {{ flex: 0 1 auto; width: auto; field-sizing: content; }}
 }}
-.auth .affix .domain {{ flex: none; white-space: nowrap; color: #8a96a3; }}
-body.auth[data-theme="dark"] {{ color-scheme: dark; --brand: #82baf5;
-  background: #0e141d; color: #e9eef5; }}
-.auth[data-theme="dark"] :is(.lead, .hint, .muted, .suffix, details) {{ color: #a8b4c4; }}
-.auth[data-theme="dark"] input {{ background: #131a24; border-color: #39434e; }}
-.auth[data-theme="dark"] label.affix {{ background: #131a24; border-color: #39434e; }}
-.auth[data-theme="dark"] .affix input {{ background: none; }}
-.auth[data-theme="dark"] .affix .domain {{ color: #7b8796; }}
-.auth[data-theme="dark"] :is(button, a.button) {{ background: #e9eef5; color: #0e141d; }}
-.auth[data-theme="dark"] :is(button, a.button):hover {{ background: #fff; }}
-.auth[data-theme="dark"] details {{ border-color: #303740; }}
-.auth[data-theme="dark"] :is(code, .code) {{ background: #1e2835; }}
-.auth[data-theme="dark"] .stop {{ border-left-color: #ff7a68; }}
+.auth .affix .domain {{ flex: none; white-space: nowrap; color: var(--faintest); }}
+.auth details {{ margin: 2rem 0 0; padding: 1rem 0 0; border-top: 1px solid var(--hair);
+  color: var(--faint); font-size: 0.85rem; }}
+.auth summary {{ font-weight: 500; color: var(--faint); }}
+.auth summary:hover {{ color: var(--ink); }}
+.auth details ul {{ margin-top: 0.75rem; }}
+.auth details strong {{ color: var(--ink); font-weight: 500; }}
 @media (max-width: 600px) {{
-  body.auth {{ padding: 1.5rem 1.25rem 2.5rem; }}
   .auth main {{ margin-top: 3rem; }}
-  .auth h1 {{ font-size: 1.75rem; }}
+}}
+@media (prefers-reduced-motion: reduce) {{
+  .auth :is(.rig, a.button, button, .arrow) {{ transition-duration: 0.01ms; }}
+  .auth :is(a.button, button):is(:hover, :focus-visible) {{ transform: none; }}
+  .auth :is(a.button, button):is(:hover, :focus-visible) .arrow {{ transform: none; }}
 }}
 </style>
 </head>
@@ -573,22 +676,22 @@ pub fn signup_form(
             r#"<h1>Set up Passband</h1>
 <p class="lead">Pick a username, then connect Gmail.</p>
 {error_html}
-<form class="card" method="post" action="/signup">
-<div class="field">
+<form class="rig" method="post" action="/signup">
+<div class="slot">
 <label for="invite">Invite code</label>
 <input type="text" id="invite" name="invite" value="{invite}" placeholder="XXXX-XXXX-XXXX-XXXX"
   autocomplete="off" autocapitalize="off" spellcheck="false"
   autofocus required>
 </div>
-<div class="field">
+<div class="slot">
 <label for="label">Your Passband username</label>
 <label class="affix"><input type="text" id="label" name="label" value="{label}" placeholder="yourname"
   aria-describedby="label-hint" maxlength="30" autocomplete="off" autocapitalize="off" spellcheck="false" required><span class="domain">.{domain}</span></label>
-<p class="hint" id="label-hint">3 to 30 lowercase letters, numbers or hyphens.</p>
 </div>
-<button type="submit">Continue with Google</button>
-<p class="hint">Google will ask to read, change, and send your Gmail. Passband needs all three.</p>
+<button type="submit">Continue with Google <span class="arrow" aria-hidden="true">→</span></button>
 </form>
+<p class="fine" id="label-hint">Usernames are 3 to 30 lowercase letters, numbers or hyphens.</p>
+<p class="fine">Google will ask to read, change, and send your Gmail. Passband needs all three.</p>
 {waitlist_html}
 <details>
 <summary>Gmail access and privacy</summary>
@@ -623,9 +726,8 @@ pub fn success(tenant_url: &str) -> Response {
         "Your mailbox is ready",
         &format!(
             r#"<h1>Your mailbox is ready</h1>
-<p class="lead">{host}</p>
-<p><a class="button" href="{download}">Download Passband for Mac</a></p>
-<p class="hint">Open it and sign in with Gmail to finish.</p>"#,
+<p class="lead">{host} is live. Get the app, then sign in with Gmail to finish.</p>
+<a class="button" href="{download}">Download Passband for Mac <span class="arrow" aria-hidden="true">→</span></a>"#,
             host = escape_html(host),
             download = DOWNLOAD_URL,
         ),
@@ -671,7 +773,7 @@ pub fn app_signed_in(
         &format!(
             r#"<h1>You’re signed in</h1>
 <p class="lead">{email}</p>
-<p><a class="button" href="{link}">Open Passband</a></p>
+<a class="button" href="{link}">Open Passband <span class="arrow" aria-hidden="true">→</span></a>
 <p class="alt">Need the app? <a href="{download}">Download Passband</a>.</p>
 <details>
 <summary>Button did nothing? Connect manually</summary>
@@ -752,7 +854,7 @@ pub fn reconnect_result(view: ReconnectView) -> Response {
         StatusCode::OK,
         heading,
         &format!(
-            "<h1>{}</h1><p role=\"status\">{}</p><p><a class=\"button\" href=\"{}\">{}</a></p>",
+            "<h1>{}</h1><p class=\"lead\" role=\"status\">{}</p><a class=\"button\" href=\"{}\">{} <span class=\"arrow\" aria-hidden=\"true\">→</span></a>",
             escape_html(heading),
             escape_html(detail),
             escape_html(link),
@@ -784,7 +886,7 @@ pub fn console_problem(status: StatusCode, heading: &str, detail: &str) -> Respo
         heading,
         &format!(
             r#"<h1>{heading}</h1>
-<p>{detail}</p>"#,
+<p class="lead">{detail}</p>"#,
             heading = escape_html(heading),
             detail = escape_html(detail),
         ),
@@ -815,8 +917,8 @@ pub fn console_problem_with_link(
         heading,
         &format!(
             r#"<h1>{heading}</h1>
-<p>{detail}</p>
-<p><a class="button" href="{url}">Back to your console</a></p>"#,
+<p class="lead">{detail}</p>
+<a class="button" href="{url}">Back to your console <span class="arrow" aria-hidden="true">→</span></a>"#,
             heading = escape_html(heading),
             detail = escape_html(detail),
             url = escape_html(console_url),
@@ -837,8 +939,8 @@ pub fn app_no_tenant(heading: &str, detail: &str) -> Response {
         heading,
         &format!(
             r#"<h1>{heading}</h1>
-<p>{detail}</p>
-<p><a class="button" href="/">Sign up for Passband</a></p>"#,
+<p class="lead">{detail}</p>
+<a class="button" href="/">Sign up for Passband <span class="arrow" aria-hidden="true">→</span></a>"#,
             heading = escape_html(heading),
             detail = escape_html(detail),
         ),
@@ -1275,8 +1377,8 @@ pub fn problem(status: StatusCode, heading: &str, detail: &str) -> Response {
         heading,
         &format!(
             r#"<h1>{heading}</h1>
-<p>{detail}</p>
-<p><a class="button" href="/">Start again</a></p>"#,
+<p class="lead">{detail}</p>
+<a class="button" href="/">Start again <span class="arrow" aria-hidden="true">→</span></a>"#,
             heading = escape_html(heading),
             detail = escape_html(detail),
         ),
@@ -2079,11 +2181,16 @@ mod tests {
                 "{html}"
             );
             assert!(html.contains("<svg"), "{html}");
-            // Inline, not fetched: an `<img src>` or a `url()` here would be a
-            // request `default-src 'none'` refuses, i.e. a broken logo.
+            // Inline, not fetched: an `<img src>` or a `url()` in the masthead
+            // would be a request `default-src 'none'` refuses, i.e. a broken
+            // logo. The stylesheet's one `url()` is the same-origin font.
+            let (_, masthead) = html.split_once(r#"<header class="brand">"#).unwrap();
+            let (masthead, _) = masthead.split_once("</header>").unwrap();
+            assert!(!masthead.contains("url("), "{masthead}");
             assert!(!html.contains("<img"), "{html}");
-            assert!(!html.contains("url("), "{html}");
             assert!(!html.contains("http://"), "{html}");
+            assert_eq!(html.matches("url(").count(), 1, "{html}");
+            assert!(html.contains(&format!(r#"url("{FONT_PATH}")"#)), "{html}");
         }
     }
 
@@ -2099,6 +2206,23 @@ mod tests {
         let (masthead, _) = html.split_once("</header>").expect("{html}");
         assert!(!masthead.contains("<a "), "{masthead}");
         assert!(!masthead.contains("href"), "{masthead}");
+    }
+
+    /// The font is served as a font, cacheable, and the CSP admits it from this
+    /// origin and nowhere else.
+    #[tokio::test]
+    async fn the_font_is_first_party_and_cacheable() {
+        let r = newsreader().await;
+        assert_eq!(r.headers()[header::CONTENT_TYPE], "font/woff2");
+        assert!(
+            r.headers()[header::CACHE_CONTROL]
+                .to_str()
+                .unwrap()
+                .contains("immutable")
+        );
+        let bytes = to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        assert!(bytes.starts_with(b"wOF2"));
+        assert!(CSP.contains("font-src 'self';"));
     }
 
     #[tokio::test]

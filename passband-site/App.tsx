@@ -76,7 +76,7 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--s
 /* THE STORY. A tall section with a sticky stage inside it: the scroll through
    the section is the squelch closing, and the stage holds still while it
    happens. The height is the length of the scrub. */
-.pb-story { position: relative; height: 260vh; }
+.pb-story { position: relative; height: 210vh; }
 .pb-stage { position: sticky; top: 0; height: 100vh; height: 100svh; overflow: hidden; }
 .pb-scene { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 /* The analyzer's graticule: ten divisions across, eight down, faded out at the
@@ -1369,8 +1369,8 @@ export function App() {
       const travel = Math.max(1, rect.height - innerHeight);
       const p = Math.min(1, Math.max(0, -rect.top / travel));
       scene?.setProgress(p);
-      setBeat(p > 0.3 ? 1 : 0);
-      setLocked(p > 0.58);
+      setBeat(p > 0.23 ? 1 : 0);
+      setLocked(p > 0.46);
       setScrolled(p > 0.03);
     };
     const onResize = () => {

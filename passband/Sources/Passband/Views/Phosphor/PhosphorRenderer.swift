@@ -555,7 +555,12 @@ fragment float4 composite_fragment(FullOut in [[stage_in]],
              + 0.22 * b2.sample(s, uv).r + 0.12 * b3.sample(s, uv).r) * u.glow;
     // P7: the trace saturates through blue toward white.
     float3 lit = 1 - exp(-(I * float3(0.55, 1.35, 3.0) + B * float3(0.10, 0.38, 1.10)));
-    float3 bg = float3(0.020, 0.028, 0.040);
+    // The onboarding scene's night sky (SquelchRenderer's backdrop()) rather
+    // than finish_p7's flat black: navy at the top deepening downward, with
+    // a faint bloom behind the passband, so the two scenes share a sky.
+    float r = length((uv - float2(0.5, 0.6)) * float2(1.0, 1.4));
+    float3 bg = mix(float3(0.035, 0.05, 0.085), float3(0.012, 0.016, 0.03), uv.y)
+        + float3(0.05, 0.09, 0.16) * exp(-r * r * 3.0);
     float hz = haze.sample(s, uv).r;
     bg += graticule(uv * u.size, u.size, u.lineWidth) * float3(0.10, 0.14, 0.20) * 0.5 * (0.35 + 6 * hz);
     return float4(saturate(1 - (1 - bg) * (1 - lit)), 1);

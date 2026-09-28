@@ -43,9 +43,9 @@ struct PhosphorBackdrop: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var scene: PhosphorScene { .shared }
 
-    /// finish_p7's background, shown until the renderer is ready so the
-    /// scene fades up out of its own black rather than out of the page.
-    static let backdrop = Color(red: 0.020, green: 0.028, blue: 0.040)
+    /// The top of the scene's sky, shown until the renderer is ready so the
+    /// scene fades up out of its own night rather than out of the page.
+    static let backdrop = Color(red: 0.035, green: 0.05, blue: 0.085)
 
     var body: some View {
         ZStack {

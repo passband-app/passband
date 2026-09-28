@@ -206,16 +206,16 @@ fn invite_link(code: &str, signup_url: &str) -> String {
 /// message, and a code typed on a different device all land on the same field.
 fn text_body(code: &str, signup_url: &str) -> String {
     format!(
-        "open this and your invite code will already be filled in:
+        "You're invited to Passband.
 
+Set up your mailbox (your code is already filled in):
 {link}
 
-or go to {signup_url} and paste it in yourself:
+Or enter this code at {signup_url}:
 
 {code}
 
-the code works once and expires in {ttl} days. if it lapses, just ask again and
-we will send a fresh one.
+Works once, expires in {ttl} days.
 ",
         link = invite_link(code, signup_url),
         ttl = crate::invites::DEFAULT_TTL_DAYS,
@@ -230,7 +230,7 @@ we will send a fresh one.
 ///
 /// The groundless mark, not the icon: a mail body is white, so a tile would put
 /// a light rectangle on a light page. The 512px asset is deliberately larger
-/// than the 56px it renders at, because mail reaches retina screens.
+/// than the 45px it renders at, because mail reaches retina screens.
 const MARK_URL: &str = "https://passband.app/mark.png";
 
 /// The HTML part. Everything interpolated is escaped, including values this
@@ -251,17 +251,17 @@ fn html_body(code: &str, signup_url: &str) -> String {
     let code = escape_html(code);
     let url = escape_html(signup_url);
     format!(
-        r#"<div style="font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #1a1a1a;">
-<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin: 0 0 24px;"><tr>
-<td style="padding-right: 12px;"><img src="{mark}" alt="" width="56" height="30" style="display: block; border: 0;"></td>
-<td style="font: 21px/1 Georgia, 'Times New Roman', serif; color: #1a1a1a; vertical-align: middle;">Passband</td>
+        r#"<div style="font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #141c26; max-width: 30rem;">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin: 0 0 32px;"><tr>
+<td style="padding-right: 10px;"><img src="{mark}" alt="" width="45" height="24" style="display: block; border: 0;"></td>
+<td style="font: 500 21px/1 Georgia, 'Times New Roman', serif; color: #141c26; vertical-align: middle;">Passband</td>
 </tr></table>
-<p>Passband runs a mailbox daemon for you. This link opens the signup page with
-your invite code already filled in:</p>
-<p><a href="{link}" style="display: inline-block; background: #1a1a1a; color: #fbfaf8; text-decoration: none; padding: 12px 22px; border-radius: 8px; font-weight: 500;">Set up your mailbox</a></p>
-<p style="color: #6b6b6b;">or go to <a href="{url}">{url}</a> and paste the code in yourself:</p>
-<p style="font: 18px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: 0.04em; background: #f3f1ed; border-radius: 8px; padding: 14px 16px; display: inline-block;">{code}</p>
-<p style="color: #6b6b6b;">the code works once and expires in {ttl} days. if it lapses, just ask again and we will send a fresh one.</p>
+<p style="font-size: 24px; line-height: 1.25; font-weight: 600; letter-spacing: -0.02em; margin: 0 0 8px;">You're invited to Passband</p>
+<p style="color: #455465; margin: 0 0 24px;">Pick a username and connect Gmail. Your code is already filled in.</p>
+<p style="margin: 0 0 32px;"><a href="{link}" style="display: inline-block; background: #141c26; color: #ffffff; text-decoration: none; padding: 13px 24px; border-radius: 8px; font-weight: 500;">Set up your mailbox</a></p>
+<p style="color: #455465; font-size: 14px; margin: 0 0 8px;">Or enter this code at <a href="{url}" style="color: #1c63ae;">{url}</a></p>
+<p style="font: 17px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: 0.04em; background: #f2f4f7; border-radius: 8px; padding: 12px 16px; display: inline-block; margin: 0 0 16px;">{code}</p>
+<p style="color: #455465; font-size: 14px; margin: 0;">Works once, expires in {ttl} days.</p>
 </div>
 "#,
         mark = MARK_URL,
@@ -381,7 +381,7 @@ mod tests {
         for part in [text, html] {
             assert!(part.contains(CODE), "{part}");
             assert!(part.contains(SIGNUP_URL), "{part}");
-            assert!(part.contains("works once"), "{part}");
+            assert!(part.contains("Works once"), "{part}");
             // The constant, not the number it happens to hold: copy that says
             // "30 days" while the mint says 14 is copy that lies.
             assert!(

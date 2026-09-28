@@ -443,10 +443,45 @@ body.auth {{ color-scheme: light; --brand: #1c63ae; background: #fff; color: #14
 .auth summary {{ font-weight: 500; }}
 .auth :is(code, .code) {{ background: #f2f4f7; }}
 .auth .stop {{ border-left-color: #b3261e; }}
+/* The username field: the input and its domain inside one box that wears the
+   input's border, so `.passband.email` reads as the tail of what is typed. See
+   [`signup_form`] for why this needs no script. */
+.auth label.affix {{ display: flex; align-items: center; margin: 0 0 0.4rem; padding: 0 0.9rem;
+  border: 1px solid #cbd1d8; border-radius: 8px; background: #fff; cursor: text;
+  font-size: 1rem; font-weight: 400; overflow: hidden; }}
+.auth label.affix:focus-within {{ outline: 2px solid var(--brand); outline-offset: 2px; }}
+.auth .affix input {{ flex: 1 1 auto; width: 100%; min-width: 1ch; margin: 0; padding: 0.8rem 0;
+  border: 0; border-radius: 0; background: none; outline: none; text-transform: lowercase; }}
+@supports (field-sizing: content) {{
+  .auth .affix input {{ flex: 0 1 auto; width: auto; field-sizing: content; }}
+}}
+.auth .affix .domain {{ flex: none; white-space: nowrap; color: #8a96a3; }}
+/* The finishing page's two steps: a label on the left, its button on the right,
+   and the second one is the primary. */
+.auth ol.steps {{ list-style: none; counter-reset: step; padding: 0; margin: 0 0 1.75rem;
+  border-top: 1px solid #e4e7eb; }}
+.auth .steps li {{ counter-increment: step; display: flex; align-items: center; gap: 1rem;
+  margin: 0; padding: 1rem 0; border-bottom: 1px solid #e4e7eb; }}
+.auth .steps li::before {{ content: counter(step); flex: none; width: 1.6rem; height: 1.6rem;
+  border-radius: 50%; background: #f2f4f7; color: #455465; font-size: 0.85rem; font-weight: 600;
+  display: grid; place-items: center; }}
+.auth .steps span {{ flex: 1; font-weight: 500; }}
+.auth .steps a.button {{ width: 12rem; flex: none; margin: 0; }}
+.auth .steps + details {{ border-top: 0; padding-top: 0; }}
+.auth a.button.secondary {{ background: none; color: inherit; box-shadow: inset 0 0 0 1px #cbd1d8; }}
+.auth a.button.secondary:hover {{ background: #f2f4f7; }}
 body.auth[data-theme="dark"] {{ color-scheme: dark; --brand: #82baf5;
   background: #0e141d; color: #e9eef5; }}
 .auth[data-theme="dark"] :is(.lead, .hint, .muted, .suffix, details) {{ color: #a8b4c4; }}
 .auth[data-theme="dark"] input {{ background: #131a24; border-color: #39434e; }}
+.auth[data-theme="dark"] label.affix {{ background: #131a24; border-color: #39434e; }}
+.auth[data-theme="dark"] .affix input {{ background: none; }}
+.auth[data-theme="dark"] .affix .domain {{ color: #7b8796; }}
+.auth[data-theme="dark"] :is(ol.steps, .steps li) {{ border-color: #303740; }}
+.auth[data-theme="dark"] .steps li::before {{ background: #1e2835; color: #a8b4c4; }}
+.auth[data-theme="dark"] a.button.secondary {{ background: none; color: #e9eef5;
+  box-shadow: inset 0 0 0 1px #39434e; }}
+.auth[data-theme="dark"] a.button.secondary:hover {{ background: #1e2835; }}
 .auth[data-theme="dark"] :is(button, a.button) {{ background: #e9eef5; color: #0e141d; }}
 .auth[data-theme="dark"] :is(button, a.button):hover {{ background: #fff; }}
 .auth[data-theme="dark"] details {{ border-color: #303740; }}
@@ -456,6 +491,8 @@ body.auth[data-theme="dark"] {{ color-scheme: dark; --brand: #82baf5;
   body.auth {{ padding: 1.5rem 1.25rem 2.5rem; }}
   .auth main {{ margin-top: 3rem; }}
   .auth h1 {{ font-size: 1.75rem; }}
+  .auth .steps li {{ flex-wrap: wrap; }}
+  .auth .steps a.button {{ width: 100%; }}
 }}
 </style>
 </head>
@@ -491,8 +528,16 @@ body.auth[data-theme="dark"] {{ color-scheme: dark; --brand: #82baf5;
 ///
 /// TWO FIELDS AND ONE BUTTON ARE THE PAGE, and everything else is arranged
 /// around that. The form is unboxed on the native app’s white ground. The
-/// address hint is tied to its input with `aria-describedby`; privacy details
+/// username hint is tied to its input with `aria-describedby`; privacy details
 /// stay available in a collapsed disclosure.
+///
+/// THE DOMAIN TRAILS THE TYPING WITHOUT A SCRIPT. The username input and a
+/// greyed `.{domain}` sit together inside one bordered `.affix` box, and
+/// `field-sizing: content` shrinks the input to what has been typed (or to its
+/// placeholder), so the suffix rides right behind the cursor. A browser without
+/// `field-sizing` lets the input fill the box instead and the suffix sits at
+/// the right edge, which still says which namespace is being claimed. The box
+/// is a second `<label>` so a click on the suffix lands in the field.
 ///
 /// THE GRANT IS STILL STATED BESIDE THE BUTTON, in one line naming all three
 /// permissions, because the consent screen that follows is Google's and says it
@@ -542,10 +587,10 @@ pub fn signup_form(
         .unwrap_or_default();
     page(
         StatusCode::OK,
-        "Set up your Passband mailbox",
+        "Set up Passband",
         &format!(
-            r#"<h1>Set up your mailbox</h1>
-<p class="lead">Connect Gmail to get started with Passband.</p>
+            r#"<h1>Set up Passband</h1>
+<p class="lead">Pick a username, then connect Gmail.</p>
 {error_html}
 <form class="card" method="post" action="/signup">
 <div class="field">
@@ -555,12 +600,12 @@ pub fn signup_form(
   autofocus required>
 </div>
 <div class="field">
-<label for="label">Your Passband address</label>
-<input type="text" id="label" name="label" value="{label}" placeholder="yourname"
-  aria-describedby="label-hint" autocomplete="off" autocapitalize="off" spellcheck="false" required>
-<p class="hint" id="label-hint">yourname<span class="suffix">.{domain}</span> · 3 to 30 lowercase letters, numbers or hyphens.</p>
+<label for="label">Your Passband username</label>
+<label class="affix"><input type="text" id="label" name="label" value="{label}" placeholder="yourname"
+  aria-describedby="label-hint" maxlength="30" autocomplete="off" autocapitalize="off" spellcheck="false" required><span class="domain">.{domain}</span></label>
+<p class="hint" id="label-hint">3 to 30 lowercase letters, numbers or hyphens.</p>
 </div>
-<button type="submit">Continue to Google</button>
+<button type="submit">Continue with Google</button>
 <p class="hint">Google will ask to read, change, and send your Gmail. Passband needs all three.</p>
 </form>
 {waitlist_html}
@@ -571,9 +616,7 @@ pub fn signup_form(
 <li><strong>Change</strong> (<code>gmail.modify</code>): archiving and labeling, never deletion.</li>
 <li><strong>Send</strong> (<code>gmail.send</code>): replying from the app.</li>
 </ul>
-<p>Keep all permissions checked to continue.</p>
-<p>Your Google refresh token is stored encrypted to keep mail in sync.
-Self-host to manage it yourself.</p>
+<p>Your Google refresh token is stored encrypted so mail keeps syncing. Self-host to hold it yourself.</p>
 </details>"#,
             error_html = error_html,
             waitlist_html = waitlist_html,
@@ -604,28 +647,47 @@ pub fn success(
     analytics_id: Option<&str>,
 ) -> Response {
     let link = deep_link(tenant_url, pair_code, analytics_id);
+    let host = tenant_url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
     page(
         StatusCode::OK,
         "Your mailbox is ready",
         &format!(
             r#"<h1>Your mailbox is ready</h1>
-<p class="lead">Connect the app to start using Passband.</p>
-<p><a class="button" href="{link}">Open Passband</a></p>
-<p class="alt">Need the app? <a href="{download}">Download Passband</a>.</p>
-<details>
-<summary>Button did nothing? Connect manually</summary>
-<p>Open Passband, press Sign in with Gmail, and enter this server and pairing code in the form it shows. You can close the browser tab that opens.</p>
-<p><code>{url}</code></p>
-<p><span class="code">{code}</span></p>
-<p>The code works once and expires in {minutes} minutes. Keep it private.
-If it expires, request a new code in Passband.</p>
-</details>"#,
-            url = escape_html(tenant_url),
-            code = escape_html(pair_code),
+<p class="lead">{host}</p>
+<ol class="steps">
+<li><span>Get the Mac app</span><a class="button secondary" href="{download}">Download Passband</a></li>
+<li><span>Connect it to your mailbox</span><a class="button" href="{link}">Open Passband</a></li>
+</ol>
+{manual}"#,
+            host = escape_html(host),
             link = escape_html(&link),
             download = DOWNLOAD_URL,
-            minutes = minutes,
+            manual = manual_connect(
+                tenant_url,
+                pair_code,
+                minutes,
+                "request a new one in Passband"
+            ),
         ),
+    )
+}
+
+/// The fallback both finishing pages fold away: the server and pairing code as
+/// selectable text, for when the deep link did nothing.
+fn manual_connect(tenant_url: &str, pair_code: &str, minutes: i64, if_expired: &str) -> String {
+    format!(
+        r#"<details>
+<summary>Button did nothing? Connect manually</summary>
+<p>In Passband, choose Sign in with Gmail and enter:</p>
+<p><code>{url}</code></p>
+<p><span class="code">{code}</span></p>
+<p>Works once, expires in {minutes} minutes. If it lapses, {if_expired}.</p>
+</details>"#,
+        url = escape_html(tenant_url),
+        code = escape_html(pair_code),
+        if_expired = escape_html(if_expired),
     )
 }
 
@@ -670,20 +732,11 @@ pub fn app_signed_in(
 <p class="lead">{email}</p>
 <p><a class="button" href="{link}">Open Passband</a></p>
 <p class="alt">Need the app? <a href="{download}">Download Passband</a>.</p>
-<details>
-<summary>Button did nothing? Connect manually</summary>
-<p>Open Passband, press Sign in with Gmail, and enter this server and pairing code in the form it shows. You can close the browser tab that opens.</p>
-<p><code>{url}</code></p>
-<p><span class="code">{code}</span></p>
-<p>The code works once and expires in {minutes} minutes. Keep it private.
-If it expires, sign in again.</p>
-</details>"#,
+{manual}"#,
             email = escape_html(account_email),
-            url = escape_html(tenant_url),
-            code = escape_html(pair_code),
             link = escape_html(&link),
             download = DOWNLOAD_URL,
-            minutes = minutes,
+            manual = manual_connect(tenant_url, pair_code, minutes, "sign in again"),
         ),
     )
 }
@@ -1416,6 +1469,23 @@ mod tests {
         assert!(!html.contains("<script"), "{html}");
     }
 
+    /// The username field carries its domain inside the same box, right after
+    /// the input, so the suffix trails what is typed rather than sitting in a
+    /// hint underneath it.
+    #[tokio::test]
+    async fn the_username_field_trails_its_domain() {
+        let html = document_of(signup_form("passband.email", None, "ada", "", None)).await;
+        assert!(html.contains("Your Passband username"), "{html}");
+        let (_, field) = html.split_once(r#"<label class="affix">"#).expect("{html}");
+        let (field, _) = field.split_once("</label>").expect("{html}");
+        assert!(field.contains(r#"id="label""#), "{field}");
+        assert!(field.contains(r#"value="ada""#), "{field}");
+        assert!(
+            field.ends_with(r#"<span class="domain">.passband.email</span>"#),
+            "{field}"
+        );
+    }
+
     /// The invite field shows the shape of a code this deployment actually
     /// mints. It used to show the eight-symbol shape that predates
     /// [`crate::invites::CODE_LEN`], which is a placeholder no live code has
@@ -1554,11 +1624,10 @@ mod tests {
             .await,
         ] {
             assert!(
-                html.contains(&format!(
-                    r#"<a href="{DOWNLOAD_URL}">Download Passband</a>"#
-                )),
+                html.contains(&format!(r#"href="{DOWNLOAD_URL}""#)),
                 "{html}"
             );
+            assert!(html.contains(">Download Passband</a>"), "{html}");
         }
         // And nowhere else. The signup form is somebody deciding whether to
         // hand over their mail, and an app they cannot yet point at anything is

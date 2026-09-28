@@ -1,0 +1,547 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Security Model · Passband</title>
+    <meta name="description" content="Passband brings the important things forward, so you can give them your attention and get on with your day. For Gmail, on Mac and iPhone." />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Passband" />
+    <meta property="og:title" content="Security Model · Passband" />
+    <meta property="og:description" content="Passband brings the important things forward, so you can give them your attention and get on with your day. For Gmail, on Mac and iPhone." />
+    <meta property="og:url" content="https://passband.app/security" />
+    <meta property="og:image" content="https://passband.app/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="4,312 emails. Three need you. Passband, over a spectrum analyzer with three marked peaks." />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="/icon.svg"
+      media="(prefers-color-scheme: light)"
+    />
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="/icon-dark.svg"
+      media="(prefers-color-scheme: dark)"
+    />
+    <link rel="apple-touch-icon" href="/icon-180.png" />
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 42rem;
+        margin: 0 auto;
+        padding: 3rem 1.25rem 5rem;
+        line-height: 1.65;
+        color: #1a1a1a;
+      }
+      h1 { font-size: 1.8rem; margin-bottom: 0.25rem; }
+      h2 { font-size: 1.15rem; margin-top: 2.2rem; }
+      h3 { font-size: 1rem; margin-top: 1.6rem; }
+      .meta { color: #777; font-size: 0.9rem; margin-top: 0; }
+      a { color: #3556c9; }
+      nav { margin-bottom: 2rem; font-size: 0.9rem; }
+      ul { padding-left: 1.3rem; }
+      li { margin: 0.3rem 0; }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 0.9rem;
+        margin: 1rem 0;
+      }
+      th, td {
+        border: 1px solid #ddd;
+        padding: 0.45rem 0.6rem;
+        text-align: left;
+        vertical-align: top;
+      }
+      th { background: #f6f6f6; font-weight: 600; }
+      .tier {
+        border-left: 3px solid #3556c9;
+        padding-left: 1rem;
+        margin: 1.2rem 0;
+      }
+      code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.88em; background: #f3f3f3; padding: 0.08em 0.3em; border-radius: 3px; }
+      pre { background: #f6f6f6; padding: 0.8rem 1rem; overflow-x: auto; border-radius: 6px; line-height: 1.45; }
+      pre code { background: none; padding: 0; font-size: 0.85em; }
+      .tbl { overflow-x: auto; }
+      blockquote { margin: 1rem 0; padding-left: 1rem; border-left: 3px solid #ddd; color: #555; }
+    </style>
+  </head>
+  <body>
+    <nav><a href="/">&larr; Passband</a> &middot; <a href="/privacy">Privacy Policy</a></nav>
+    <h1>Security Model</h1>
+    <p class="meta">How Passband and its daemon, squelchd, handle untrusted mail, secrets and access.</p>
+
+<p>One section per surface: the <strong>invariant</strong>, the <strong>enforcement point</strong> (<code>file:symbol</code>
+- the line that actually holds it), and <strong>what a maintainer must not break</strong>.
+Verified against the tree on 2026-07-30; §6 was written against it on 2026-08-18.
+Stale source comments are flagged, not trusted.</p>
+<h2>1. HTML sanitization at ingest</h2>
+<p><strong>Invariant.</strong> <code>messages.body_html</code> never contains active content: no <code>&lt;script&gt;</code>, no
+<code>on*</code> handlers, no <code>javascript:</code>/<code>data:</code> URLs, no forms, no nested browsing contexts,
+no <code>&lt;meta&gt;</code>/<code>&lt;link&gt;</code>/<code>&lt;base&gt;</code>.</p>
+<p><strong>Enforcement.</strong> <code>squelch-core/src/sync/html.rs:sanitize_email_html</code> - a closed
+<code>ammonia::Builder</code> allow-list, run once at ingest before storage; pure, no I/O,
+fixture-tested in the same file. Four deliberate deviations from ammonia&#39;s
+defaults: <code>url_schemes</code> narrowed to <code>{http, https, mailto, cid}</code>; <code>&lt;style&gt;</code> kept with
+CSS verbatim (<code>rm_clean_content_tags</code> then <code>add_tags</code> - that order, or ammonia
+panics); <code>style</code>/<code>class</code>/<code>id</code> added to the generic attribute set; <code>link_rel</code>
+pinned to <code>noopener noreferrer</code>.</p>
+<p><strong>Do not break.</strong></p>
+<ul>
+<li>Never widen <code>url_schemes</code>; <code>data:</code> coming back re-admits inline
+<code>data:text/html</code> payloads and is the only reason <code>data:</code> image URIs drop today.
+<code>cid:</code> is the one addition ever made, and only because it is a pointer with
+nothing behind it: it names a part of the same message (RFC 2392), reaches no
+host, and no renderer we ship resolves it. It is kept so the client can pair the
+reference with the attachment row carrying that Content-ID; dropping the <code>src</code>
+instead leaves an anonymous <code>&lt;img&gt;</code> nothing can resolve. The client rewrites the
+resolvable ones to <code>passband-cid:</code> and deletes the rest before any web view sees
+the body (§3), and <code>img-src</code> never names <code>cid:</code>.</li>
+<li>Never add a tag that creates a browsing context, submits, or loads a document
+(<code>iframe</code>, <code>object</code>, <code>embed</code>, <code>form</code>, <code>link</code>, <code>meta</code>, <code>base</code>).</li>
+<li><code>&lt;style&gt;</code> is the ONLY raw-text tag allowed. Ammonia escapes <code>&lt;</code> in text <em>and</em> in
+attribute values, so every surviving <code>&lt;img</code> is a real tag - the client&#39;s regex
+image passes (§3) depend on that for correctness and for linear runtime.</li>
+<li>HTML never crosses the agent door; MCP serves flattened text only.</li>
+<li><code>body_html</code> is <strong>baked at ingest</strong> - a sanitizer change does not retroactively fix
+stored mail. Delete the <code>sync_state</code> <code>history</code> row and restart <code>squelchd</code> to
+re-ingest (triage is preserved).</li>
+</ul>
+<h2>2. Rendering sandbox</h2>
+<p><strong>Invariant.</strong> A body renders with no script execution, no network except the image
+proxy, no navigation, no cookies, nothing on disk.</p>
+<p><strong>Enforcement.</strong> <code>passband/Sources/Passband/Views/EmailWebView.swift</code> -
+five independent layers, each sufficient alone. Layer 1 is §1 above; the rest,
+numbered as the source comments number them:</p>
+<ol start="2">
+<li><code>allowsContentJavaScript = false</code>: page script cannot run at all. Our own injected
+<code>WKUserScript</code> is governed separately and still runs.</li>
+<li>CSP injected as the FIRST child of <code>&lt;head&gt;</code> by
+<code>Coordinator.document(html:allowRemote:)</code>, built by <code>Lib/MailCSP.swift</code>:
+<code>default-src &#39;none&#39;; style-src &#39;unsafe-inline&#39;; img-src passband-img: passband-cid: data:</code> (<code>img-src passband-cid: data:</code> when remote images are
+off), plus <code>&lt;meta name=&quot;referrer&quot; content=&quot;no-referrer&quot;&gt;</code>. No <code>script-src</code>, and
+no <code>http:</code>/<code>https:</code>/<code>cid:</code> anywhere in the policy. <code>passband-cid:</code> is
+unconditional because those bytes are a part of the same message fetched from
+the user&#39;s own daemon, so the remote-image opt-in has nothing to gate (§3).</li>
+<li>Navigation refused. <code>Coordinator.decideNavigation</code> allows exactly the loads we
+started (<code>pendingOwnLoads</code> is a counter, not a flag: <code>loadHTMLString</code> is async,
+so two loads would otherwise race one permission) and cancels everything else; a
+<code>linkActivated</code> URL goes to <code>Opener.open</code>, which re-guards to http(s), and
+<code>FrameRelay.webView(_:createWebViewWith:…)</code> returns nil - no popups.</li>
+<li>A shared <strong>non-persistent</strong> <code>WKWebsiteDataStore</code>; <code>baseURL: nil</code> for an opaque origin.</li>
+</ol>
+<p><strong>Do not break.</strong></p>
+<ul>
+<li>The delegate signature
+<code>webView(_:decidePolicyFor:decisionHandler: @escaping @MainActor @Sendable …)</code>
+must match exactly. A near-miss leaves the requirement unimplemented and WebKit
+silently defaults to <strong>allowing every navigation</strong>.</li>
+<li><code>FrameRelay</code> with no owner keeps returning <code>.cancel</code>: a pooled frame is unowned,
+and nobody is entitled to navigate it.</li>
+<li><code>WebFramePool.Key</code> is <code>(message, allowRemote, document)</code> - all three, which is what
+makes a pool hit a byte-identical document under an identical CSP. Dropping
+<code>allowRemote</code> reuses a permissive frame for a strict render; dropping <code>message</code>
+leaves &quot;one sender&#39;s mail in another&#39;s frame&quot; to a hash collision.</li>
+<li>A body with <strong>no message id</strong> (the sealed reveal) is never pooled -
+<code>Coordinator.release</code> refuses it because <code>loadedPoolKey</code> is nil. Keep
+<code>WebFramePool.discard</code> unwiring the relay too: the content controller retains it,
+so merely dropping the frame leaves a live callback target.</li>
+</ul>
+<h2>3. Image loading and trackers</h2>
+<p><strong>Invariant.</strong> Remote images may load, but only through our own audited fetch path,
+never with cookies or a referrer, and never for a reference we did not mint.
+Tracking pixels are stripped from mail whose sender the user has never written to.</p>
+<p>Outbound read tracking is the mirror image of this section and is documented
+separately in TRACKING.md.</p>
+<p><strong>Current behavior - VERIFIED, and not what old comments claimed.</strong> Remote images
+<strong>load by default</strong>: <code>Lib/Prefs.swift</code> registers <code>squelch.pref.loadRemoteImages = true</code>, <code>SettingsView.swift:MailSection</code> exposes it as Mail → images → <em>Always</em> /
+<em>On demand</em>, and <code>EmailWebView.allowRemote == prefs.loadRemoteImages || optedIn</code>.
+There is no per-message <code>i</code> keystroke gate - that was the retired desktop client.
+On <em>On demand</em> <code>img-src</code> collapses to <code>data:</code>, an opt-in bar appears, and <strong>no
+request is made</strong> (the proxy scheme is absent from the policy, so the document
+refuses it before the handler is reached).</p>
+<p><strong>Enforcement.</strong></p>
+<ul>
+<li><code>Lib/Trackers.swift:strip</code> drops <code>&lt;img&gt;</code> elements on strong signals only: both
+declared dimensions ≤ 2px, <code>display:none</code>/<code>visibility:hidden</code>, or a short
+path-scoped known-endpoint list. The bias is deliberately asymmetric - a missed
+tracker is one opaque referrer-less GET, a false strip visibly breaks the mail.
+<strong>No reserialization</strong>: every non-<code>&lt;img&gt;</code> byte survives verbatim, because a DOM
+round-trip would rewrite markup ammonia already vetted.</li>
+<li><strong>The strip is CONDITIONAL as of 2026-08-04.</strong> <code>GET /client/thread/{id}</code> carries
+a per-message <code>sender_known</code>, true iff BOTH halves hold: the sender is a
+Sent-derived contact (<code>Store::is_known_contact</code> - a <code>contacts</code> row with
+<code>sent_count &gt; 0</code>, the same predicate Stage-1 uses) AND the message&#39;s stored
+email-authentication verdict is a pass. When it is true
+<code>EmailWebView.Prepared.make</code> renders the unstripped body: someone the user
+writes to is allowed to learn they opened the mail. The bypass is scoped to
+<code>Trackers.strip</code> ALONE - <code>ImageProxy.rewrite</code>, the <code>passband-img:</code> CSP, the
+ingest sanitizer, and the remote-images default all still apply, so an allowed
+pixel still needs remote images on before it fetches. <code>allowTrackers</code> is part of
+<code>Prepared.cacheKey</code>, and <code>ImageWarmer</code> always prefetches the STRIPPED body so
+warming can never report an open the reader never made.</li>
+<li><strong>The auth half of the gate.</strong> The <code>From</code> header is free text, so contact
+membership alone cannot authorize a tracker bypass.
+<code>squelch-core/src/sync/ingest.rs:extract_auth_pass</code> computes the verdict once at
+ingest into <code>messages.auth_pass</code>;
+<code>squelch-api/src/handlers.rs:get_thread</code> ANDs it into <code>sender_known</code>. Gated
+there and not inside <code>is_known_contact</code>, because that call also feeds triage&#39;s
+known-contact importance floor, which must not move.
+The verdict is read from the <strong>TOPMOST</strong> <code>Authentication-Results</code> header: Gmail
+PREPENDS its own and does not strip copies the sender wrote, so every occurrence
+below the first is attacker-controlled text. It counts only when the authserv-id
+is <code>mx.google.com</code>, a Google-written header (<code>X-Google-Smtp-Source</code>, or a
+<code>Received</code> handed off <code>by mx.google.com</code>) sits ABOVE it, and the POP marker
+<code>X-Gmail-Fetch-Info</code> is absent. Every <code>pass</code> must bind to the RFC 5322 From
+domain - <code>dmarc=pass</code> via an aligned <code>header.from=</code>, <code>dkim=pass</code> via an aligned
+signing domain. Two <code>From</code> headers yield no verdict at all.
+<strong>NULL DENIES THE BYPASS.</strong> Only <code>Some(true)</code> is a pass. <code>Some(false)</code> is &quot;Gmail
+evaluated it and neither method held&quot;; <code>NULL</code> is &quot;never evaluated&quot; - no Gmail
+header, an undecodable one, two <code>From</code> headers, or a row ingested before the
+column existed. Absence of proof withholds a permissive feature.
+<strong>Nothing is backfilled.</strong> <code>store/sqlite/migrate.rs</code> adds the column to an
+existing <code>messages</code> table with every historical row left NULL; a re-sync refills
+it through the message upsert.
+<strong>Residual risks, accepted:</strong><ul>
+<li>The evidence is header SHAPE, not a signature - nothing in the bytes is
+cryptographically bound to Google. On an ingestion path where Gmail prepends
+nothing (POP with the marker somehow absent, or <code>users.messages.import</code>/
+<code>insert</code> performed with the user&#39;s own credentials) a sender who writes both a
+fake <code>Received: … by mx.google.com</code> and a fake verdict still gets through.
+Closing it needs the Gmail API&#39;s own delivery metadata, which this parser
+cannot see.</li>
+<li><strong>No public-suffix list.</strong> Alignment is equality or a dot-suffixed child of
+the signing domain, so a signature by a registry suffix such as <code>co.uk</code> would
+align with <code>victim.co.uk</code>. Not attacker-reachable - it needs a DKIM key for
+the suffix itself.</li>
+<li><code>header.i=</code> alone is accepted when <code>header.d=</code> is absent (the form Gmail
+usually emits), which DELEGATES the binding to Gmail enforcing RFC 6376 §3.5:
+an <code>i=</code> domain must be <code>d=</code> or a subdomain of it. When both are present that
+relationship is checked here instead of assumed.</li>
+</ul>
+</li>
+<li><code>Lib/ImageProxy.swift:rewrite</code> rewrites every http(s) image reference - <code>&lt;img src&gt;</code>, <code>style=&quot;…&quot;</code> <code>url()</code>, <code>&lt;style&gt;</code> block CSS - to
+<code>passband-img://local/&lt;hmac&gt;?u=&lt;encoded&gt;</code>. Default-port <code>http://</code> targets are
+upgraded by splicing only the scheme to satisfy App Transport Security without
+normalizing or otherwise changing the source URL. <code>@import</code>/<code>@font-face</code> are
+skipped on purpose: they load no image, are dead under <code>default-src &#39;none&#39;</code>,
+and rewriting them would hand the launch warmer requests the reader never made.</li>
+<li><code>Model/ImageSchemeHandler.swift</code> is the only responder and
+<code>ImageProxy.original(from:)</code> its only parser: it requires this launch&#39;s HMAC and
+an http(s) target. The key is 256 random bits per process, never written down, so
+a signature cannot be replayed across launches. Provenance, not secrecy - mail can
+spell <code>passband-img:</code> itself in a kept <code>&lt;style&gt;</code> block, which <code>rewrite</code> neuters to
+<code>passband-img-blocked:</code> before minting anything.</li>
+<li><code>Model/ImageStore.swift</code> owns the fetch: ephemeral session, no cookies, empty
+referrer, <code>image/*</code> only, redirects re-guarded per hop, files named <code>sha256(url)</code>
+and a manifest holding <strong>no URLs</strong> - a directory listing the reader&#39;s mail URLs
+would be a readable index of their correspondence.</li>
+<li><strong><code>cid:</code> references are the local mirror of all this.</strong> <code>Lib/CidImages.swift</code>
+matches each <code>&lt;img src=&quot;cid:…&quot;&gt;</code> against this message&#39;s own attachment rows by
+normalized Content-ID (§1 keeps the scheme so there is something to match) and
+rewrites the ones that resolve to <code>passband-cid://local/&lt;hmac&gt;?a=&lt;id&gt;&amp;n=&lt;name&gt;</code>.
+A reference that matches nothing, or whose part fails the same inline gate the
+attachment strip renders under (<code>AttachmentKinds.isInline</code> - stored bytes, a
+non-svg image mime, within <code>inlineMaxBytes</code>), has its <strong>whole <code>&lt;img&gt;</code> tag
+dropped</strong>: pre-migration mail resolves nothing at all, and a body with a gap
+reads as a message while one full of broken glyphs reads as a bug. The HMAC is
+over both values the parser returns and is what scopes a reference to its own
+message - without it a body could hand-write <code>?a=91</code> and read another message&#39;s
+attachment. Bytes come from the authenticated human door
+(<code>GET /client/attachments/{id}</code>), served by the same <code>ImageSchemeHandler</code> under
+the same live-set discipline, refused again over <code>inlineMaxBytes</code>.</li>
+</ul>
+<p><strong>Do not break.</strong></p>
+<ul>
+<li>The order in <code>EmailWebView.Prepared.make</code>: <code>Trackers.strip</code> → <code>ImageRepeats</code>
+dedupe → the <code>hasNetworkImages</code>/<code>extractLinks</code> reads → <code>CidImages.rewrite</code> →
+<code>ImageProxy.rewrite</code> <strong>last</strong>. Trackers first so a pixel can never be the &quot;first
+occurrence&quot; that suppresses a real image; rewrite last because after it nothing
+recognises a reference as remote.</li>
+<li><code>Prepared.cacheKey</code> folds in every attachment field the cid rewrite reads (id,
+content-id, downloadable, mime, size). Drop them and two bodies that share html
+but not parts collide in <code>PreparedBodies</code> - which is one message&#39;s photo pasted
+into another&#39;s.</li>
+<li>Never put <code>http:</code>/<code>https:</code> in <code>img-src</code>. A missed rewrite must fail closed
+instead of becoming an un-proxied request.</li>
+<li>Keep the signature check: without it a hand-written <code>url(passband-img://…)</code> in a
+kept <code>&lt;style&gt;</code> fetches a tracker while the UI says the mail has no remote content.</li>
+<li><code>auth_pass</code> is three-valued and the comparison must stay <code>== Some(true)</code>. Any
+rewrite that treats NULL as a pass - <code>!= Some(false)</code>, <code>unwrap_or(true)</code>, a
+<code>NOT NULL DEFAULT 1</code> column, a backfill &quot;so old mail isn&#39;t penalised&quot; - silently
+grants the bypass to every row that predates the column and to every message on
+an ingestion path Gmail never stamped.</li>
+<li>Read the verdict from the FIRST <code>Authentication-Results</code> header, never the last.
+<code>Message::header_raw</code> resolves to the LAST occurrence - the forgeable one - and
+<code>headers_raw()</code> DROPS non-UTF-8 headers, which would let an attacker hide the
+genuine verdict and promote one they wrote.</li>
+</ul>
+<h2>4. Human and agent access after the triage rewrite</h2>
+<p><strong>Invariant.</strong> Humans and internal triage models can read all their mail, including
+pending assessments and actionable authentication. External user agents, including
+the embedded assistant, cannot read actionable authentication secrets or their
+derivatives. Informational login/security alerts are normally allowed.</p>
+<p><strong>Assessment.</strong> The triage model decides whether actual access-granting material
+is present. There is no deterministic sealing detector in ingest. A missing or
+stale assessment denies external access until a current allowed decision exists.
+Model summaries, notification text, reasons, and evidence locations must not quote
+credentials. This is a model-output requirement; it is not a claim that arbitrary
+model output can be proven secret-free by a string filter.</p>
+<p><strong>Enforcement.</strong> <code>store/sqlite/messages.rs:external_message_allowed_conn</code> checks the
+current assessment and source provenance under the store lock. External whole-thread
+reads require the thread&#39;s sources to be allowed. MCP and dedicated
+<code>/client/agent/</code> routes use these checks for messages and derived results. Search
+rehydrates results under the same guard instead of releasing stale cached snippets.
+Account ownership is checked independently of access assessment.</p>
+<p>The human <code>/client/v2/messages/{id}</code> endpoint can open the exact message immediately.
+It returns <code>Cache-Control: no-store</code>; <code>cache_allowed</code> controls client prefetch
+eligibility. Human read, attachment, draft, and reply paths do not treat a legacy
+<code>sensitivity=sealed</code> value as a denial. The legacy sealed list/reveal API remains a
+compatibility surface, not the new access authority.</p>
+<p><strong>Do not break.</strong></p>
+<ul>
+<li>Do not let the embedded assistant call unrestricted human read endpoints.</li>
+<li>Do not treat a missing assessment as allowed, or trust a client-only filter.</li>
+<li>Keep source provenance with derived summaries, attention, records, and drafts.</li>
+<li>Internal evidence readers stay account-scoped and never execute email instructions.</li>
+<li>Keep user message access independent from the speed or availability of triage.</li>
+</ul>
+<p>See TRIAGE-OPERATIONS.md for the current execution contract.</p>
+<p><strong>Staged outbound attachments.</strong> <code>outbound_attachments</code> holds composer files until
+a send consumes them or their owning draft is deleted. Unclaimed uploads are
+swept after a day by the next upload. These human-only routes never expose bytes
+on MCP, never audit file contents, and use <code>no-store</code>. Byte responses use the same
+content-type whitelist, <code>nosniff</code>, and attachment disposition as inbound files.
+The outbound guard scans text and message parts at send time; binary files are
+not scanned. Restricting external-agent access does not delete human drafts or
+their attachments.</p>
+<h2>4b. Provider spam</h2>
+<p><strong>Invariant.</strong> Mail the provider filed as spam is stored and readable on one
+human-door page, and is otherwise absent: it never reaches an LLM, never crosses
+the agent door, is never embedded, and never fires a notification.</p>
+<p><strong>Why it is a security rule and not only a cost one.</strong> Spam is attacker-authored
+text selected for its ability to talk a reader into things, and a Stage-1 prompt
+is a reader. It is also the bulk of what arrives, so &quot;score it like anything
+else&quot; would mean spending the most model calls on the least trustworthy corpus.
+The same reasoning is why the agent door gets <strong>no spam at all</strong> rather than
+spam it is told to distrust: everything the agent reads is text it may act on.</p>
+<p><strong>Enforcement, in order.</strong></p>
+<ul>
+<li><strong>Fetched only when asked for.</strong> The poll loop does not walk the <code>SPAM</code> label
+at all - not on backfill, not on a history tick, not on a catch-up.
+<code>SyncEngine::sync_spam_window</code> runs when the page that shows the folder is
+opened, capped at <code>sync.spam_max</code> newest-first. That is a cost decision rather
+than a security one, but it has a security effect worth stating: the untrusted
+corpus is not continuously ingested, so on an install where nobody ever opens
+the page it is never fetched at all. The store&#39;s upsert keeps
+<code>is_spam = MIN(stored, incoming)</code>, so a message ever seen under a visible
+label cannot be hidden by a later spam sighting.</li>
+<li><strong>Never triaged.</strong> <code>sync/ingest.rs</code> returns a neutral <code>tier=noise</code> row before
+Stage-1 - after the seal check, so a misfiled OTP is still sealed and sealed
+still outranks spam. <code>ingest_message</code> stamps the <code>&#39;n/a&#39;</code> stage markers, which
+is what keeps the row out of both LLM queues.</li>
+<li><strong>Never embedded.</strong> <code>SyncEngine::ingest_one</code> returns <code>None</code> for a spam row, the
+same structural gate sealed mail gets. An embedding is a similarity claim, and
+spam is written to imitate the mail it impersonates.</li>
+<li><strong>SQL absence.</strong> Every band, queue, count and search leg pairs <code>is_spam = 0</code>
+with its <code>is_sent = 0</code>. The one caller asking for the other side is
+<code>GET /client/updates?spam=only</code>; an unrecognized value is a 400, never a
+silent full listing.</li>
+<li><strong>The page&#39;s rows carry the mail&#39;s own words, and only there.</strong> Nothing
+triaged a spam row, so its <code>one_line</code> is the empty string and the page would
+be a column of senders against a blank. <code>attention_updates</code> fills <code>subject</code>
+and <code>preview</code> (the stored 200-character snippet) on <code>SpamScope::Only</code> and on
+nothing else. Both are <code>Option</code>, skipped when <code>None</code>, so the agent door&#39;s
+<code>Update</code> never grows the keys at all - the same discipline <code>from_name</code> holds,
+for the sharper version of its reason: this is text out of the corpus written
+to talk readers into things. A person reading their own spam folder expects
+that and can weigh it. It is rendered as words on a row, never handed to a
+model, and never summarized.</li>
+<li><strong>Agent door.</strong> <code>store::thread_view</code> (the <code>/mcp</code> shape) selects <code>is_spam = 0</code>,
+so a thread of nothing but spam is <code>NotFound</code> - the same shape sealed mail
+gets. <code>hybrid_search</code> is gated on all three of its queries.</li>
+<li><strong>Never notifies.</strong> <code>triage::events::worthy_kind</code> returns <code>None</code> for a spam
+row as an explicit arm, not as a side effect of its neutral tier.</li>
+<li><strong>The one write.</strong> <code>POST /client/actions/not_spam</code> removes the label in Gmail
+FIRST and only then clears the flag locally, so a refused write leaves both
+sides agreeing. There is deliberately no route the other way: squelch cannot
+show anyone the effects of training a filter it does not read.</li>
+</ul>
+<p><strong>Guard tests.</strong> <code>squelch-core/src/store/sqlite/tests/spam.rs</code> seeds one spam row
+beside one ordinary row with overlapping search terms and walks every listing at
+once, so a predicate dropped in a refactor fails there rather than in production.
+The sync suite asserts the &quot;not fetched routinely&quot; half against the mock&#39;s CALL
+LOG rather than against what landed: &quot;no spam rows appeared&quot; would also pass if
+the walk ran and the folder happened to be empty, and the thing being avoided is
+the request.</p>
+<h2>5. Outbound secret guard</h2>
+<p><strong>Invariant.</strong> A secret-looking outgoing body is blocked unless the caller
+explicitly overrides, and the matched text is never copied anywhere - not into a
+response, a log, or the audit row.</p>
+<p><strong>Enforcement.</strong> <code>squelch-api/src/guard.rs:scan</code> / <code>scan_kinds</code>, called from
+<code>handlers::action_send</code> before the message leaves the process. Detects <code>pem_block</code>,
+<code>api_key</code> (vendor prefixes), <code>otp_code</code> (6–8 digits near an auth word), <code>long_hex</code>
+(≥32), <code>long_base64</code> (≥40). A non-empty match set returns HTTP 422 listing only the
+<strong>kinds</strong>; <code>override_guard: true</code> sends anyway and writes a <code>guard_override:&lt;kinds&gt;</code>
+audit row. False positives are acceptable precisely because it is overridable.</p>
+<p><strong>Forwards are scanned twice over.</strong> Forwarding is the classic exfiltration shape -
+a clean note wrapped around someone else&#39;s secret - so <code>handlers::forward_send</code>
+scans the ORIGINAL as well as the note, unions the kinds and issues ONE 422 / one
+<code>guard_override</code> row for both. The scan runs on the raw bytes re-fetched from Gmail
+and about to be composed, never on the stored row: the stored body is a sanitized,
+flattened memory of the message and the bytes on the wire are the original.</p>
+<p><em>Exactly what is scanned</em> on a forward: the sender&#39;s typed note, the original&#39;s
+decoded text bodies - every part in mail-parser&#39;s <code>text_body</code> list - an html-to-text
+conversion of its <code>html_body</code> view, <strong>and</strong> the contents of every <code>text/*</code> and
+<code>message/*</code> attachment part. Both body views are needed because when a <code>text/plain</code>
+part exists mail-parser never converts the html alternative down, so an alternative
+whose text half is innocuous and whose html half carries the key would otherwise ship
+unread. The text attachments are scanned because a PEM key pasted into <code>notes.txt</code>
+and dragged onto a mail is the same exfiltration shape as one pasted into the body -
+arguably the more natural one - and mail-parser has already transcoded each such part
+to UTF-8, so reading it as text costs nothing; <code>message/*</code> parts (an attached email,
+a bounce report) are plain RFC822 text and are read the same way. Two known limits,
+stated rather than implied: <strong>attachment bytes under any other mime are not scanned</strong>
+(a key inside a zip, or an <code>id_rsa</code> carrying an <code>application/octet-stream</code> mime,
+passes), and <strong>html attribute values are not scanned</strong> (the converter yields visible
+text, so a secret inside an <code>href</code> or a <code>data-</code> attribute survives). The guard is a seatbelt against the accident, not a DLP
+boundary against a determined sender - it is overridable by design.</p>
+<p><strong>Forwarded HTML goes out verbatim, trackers included.</strong> The original&#39;s markup is
+embedded as it arrived (the only edit is stripping the <code>&lt;meta&gt;</code> tags that DECLARE a
+charset - a <code>charset</code> attribute or the <code>http-equiv=&quot;Content-Type&quot;</code> spelling - which
+would contradict the part&#39;s own <code>charset=&quot;UTF-8&quot;</code>; a <code>&lt;meta&gt;</code> that merely mentions the
+word survives). The forward&#39;s two body parts then ship
+<code>Content-Transfer-Encoding: quoted-printable</code>, which is an encoding rather than an
+edit: a stranger&#39;s newsletter html is routinely one line far past RFC 5322&#39;s 998-octet
+limit, and re-emitting it raw put illegal lines and raw 8-bit bytes on the wire. It
+decodes back byte-for-byte at the far end. All of which means the ORIGINAL sender&#39;s
+tracking pixels are re-armed and will fire toward whoever the forward is addressed to.
+This is deliberate and matches every mainstream mail client: passband strips trackers
+out of what it RENDERS to its user, not out of what its user chooses to pass on.
+Rewriting a stranger&#39;s markup on the way out would forward something other than what
+arrived, and the user&#39;s decision is to send <em>this message</em>.</p>
+<p><strong>Do not break.</strong> <code>GuardMatch::kind()</code> is the only thing that may leave the process -
+never return, log, or audit the matched substring. Keep the override audited; an
+un-audited bypass is not a bypass we can reason about.</p>
+<p><strong>Post-send echo (audit contract).</strong> After a successful send,
+<code>handlers::echo_sent</code> fetches the sent message back (<code>format=raw</code>, write token) and
+ingests it locally so the thread shows the reply immediately. It is strictly
+best-effort - the mail has already left, so nothing here may fail the request - and
+audits under its own action <code>send.echo</code>, alongside the <code>send</code> row&#39;s own outcomes
+(<code>rejected:confirm</code>, <code>rejected:forward_and_reply</code>, <code>rejected:empty_body</code> - skipped for
+a forward, whose note may legitimately be empty - <code>blocked:guard</code>,
+<code>guard_override:&lt;kinds&gt;</code>, <code>rejected:no_write_credential</code> (including the forward whose
+raw fetch found the write credential dead - a 403 telling the user to re-run
+<code>squelchd auth --write</code>, never the 502 that would blame Gmail), <code>failed:target</code>,
+<code>rejected:no_recipient</code>, <code>rejected:too_large</code> (the original exceeds
+<code>MAX_FORWARD_RAW_BYTES</code> = 20 MiB decoded, refused with a 413 before the four-to-five-x
+re-encode allocates - or the send&#39;s own staged attachments total more than 25 MB),
+<code>rejected:attachment_missing</code> (an <code>attachment_ids</code> entry names no staged file - swept,
+deleted, or another account&#39;s - so the whole send is refused rather than going out
+with fewer files than the tray showed), <code>rejected:attachment_cid_clash</code> (two staged
+files carry one <code>content_id</code>, so the body&#39;s reference would resolve to a coin flip),
+<code>failed:fetch_original</code> (the forwarded
+original could not be read back, so nothing was sent), <code>rejected:compose</code>,
+<code>failed:gmail</code>, <code>ok</code>, <code>ok:forward</code>):</p>
+<div class="tbl"><table>
+<thead>
+<tr>
+<th><code>send.echo</code> detail</th>
+<th>meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>skipped:no_id</code></td>
+<td>Gmail&#39;s send response carried no message id; nothing to fetch back.</td>
+</tr>
+<tr>
+<td><code>skipped:sealed</code></td>
+<td>the outbound copy tripped seal detection; nothing was committed.</td>
+</tr>
+<tr>
+<td><code>failed:fetch</code></td>
+<td>the read-back GET timed out (5s), failed, decoded badly, or returned zero bytes.</td>
+</tr>
+<tr>
+<td><code>failed:ingest</code></td>
+<td>the local store write failed.</td>
+</tr>
+<tr>
+<td><code>ok:&lt;local id&gt;</code></td>
+<td>echoed; <code>&lt;local id&gt;</code> is the local <code>messages.id</code>.</td>
+</tr>
+</tbody></table></div>
+<p>The echoed row goes through the SAME seal-first ingest as any other message
+(<code>sync::ingest::ingest_sent</code>, <code>is_sent: true</code>), so it runs no LLM. Because seal
+detection precedes the <code>is_sent</code> branch, a reply quoting an OTP trips it - and such
+a copy is <strong>not written at all</strong> (<code>Ok(None)</code>, <code>skipped:sealed</code>). Committing it would
+put a sealed row in the thread, and <code>thread_guard_and_subject</code> 404s any thread
+holding one, so the echo would hide the counterparty&#39;s mail the user was reading a
+second ago; skipping degrades to &quot;the reply appears on the next backfill&quot;, the
+pre-echo status quo. The read-back is also capped at <strong>5s</strong>
+(<code>ECHO_FETCH_TIMEOUT_SECS</code>): the client&#39;s POST timeout is 15s and <code>action_send</code> has
+already made two serial Gmail calls, so bookkeeping may not spend the rest of that
+budget. Keep the echo&#39;s failures audited and swallowed; keep it out of core&#39;s write
+surface (the fetch lives in <code>squelch-api/src/gmail_write.rs</code>, core takes bytes).</p>
+<h2>6. The embedded assistant</h2>
+<blockquote>
+<p>The dedicated <code>/client/agent/</code> read routes and source checks in §4 supersede
+references below to using ordinary human endpoints or legacy sealing.</p>
+</blockquote>
+<p><strong>Invariant.</strong> The agent inside Passband reads only what the human door serves, so
+sealed mail is absent from it for the same reason it is absent from the door; and it
+cannot touch the mailbox without a human tap that has already happened by the time
+the call goes out.</p>
+<p><strong>Enforcement.</strong></p>
+<ul>
+<li><strong>Reads inherit §4.</strong> Every tool call in
+<code>passband/Sources/Passband/Assistant/AgentTools.swift</code> goes through <code>APIClient</code>,
+i.e. <code>/client/*</code>. The assistant cannot read a 2FA code because the door it knocks
+on has none - nothing is filtered here, and nothing needs to be. It holds no
+sealed tool: <code>/client/sealed</code> and the reveal route are not in its inventory.</li>
+<li><strong>Three tiers, and only one of them stops.</strong> Fourteen tools: reads are never
+gated; safe writes touch this database only (status, sender rules, drafts) and are
+reversible in the app; the four that touch Gmail (archive, label, send,
+unsubscribe) route through <code>AgentTools.confirmed(_:_:)</code>, where only <code>.approved</code>
+reaches <code>perform</code>. That single funnel is the entire reason the <code>confirm: true</code>
+those calls carry is a true statement rather than a default.</li>
+<li><strong>The daemon does not take the client&#39;s word for it.</strong> Every mutating <code>/client/*</code>
+route demands the flag itself and audits the attempt, and a send still meets the
+outbound secret guard (§5). A client that lied would be recorded doing it.</li>
+<li><strong>A half-arrived instruction is not an instruction.</strong>
+<code>passband/Sources/Passband/Assistant/Assistant.swift</code> executes a <code>tool_use</code> only
+after its message has closed, so a partially streamed tool input never runs.</li>
+<li><strong>The key.</strong> Self-host is BYOK and the key is read only inside
+<code>LLMProxy</code> (<code>passband/Sources/Passband/Model/Keychain.swift</code>) at call time -
+never a parameter, a return value, or an error string - over sessions that refuse
+every redirect, because URLSession carries <code>x-api-key</code> verbatim across a hop.
+Hosted holds no key in the app at all: <code>POST /client/assistant/messages</code>
+(<code>squelch-api/src/assistant.rs</code>) relays with a daemon-held credential and streams
+the bytes back, human door only, and 404s when no gateway is configured. The
+conversation body is treated like mail content and logged in neither direction.</li>
+</ul>
+<p><strong>What a maintainer must not break.</strong></p>
+<ul>
+<li><strong>Prompt injection is the standing threat, and the gate is the answer to it.</strong>
+Mail bodies reach this model as data, so assume the text is adversarial and
+assume it will eventually ask for an action. Everything that touches the mailbox
+must keep going through <code>confirmed</code>; a new ungated write is how this section stops
+being true.</li>
+<li>Do not hand the assistant a sealed route, and do not &quot;helpfully&quot; widen a tool&#39;s
+read to a store call that bypasses the door.</li>
+<li>Do not log the relay body, in either direction, at any level.</li>
+<li>A decline is a legitimate answer with <code>is_error</code> false. Do not turn it into a
+failure the model feels invited to retry.</li>
+</ul>
+
+    <h2>Reporting a vulnerability</h2>
+    <p>
+      Email <a href="mailto:bboynton97@gmail.com">bboynton97@gmail.com</a>. We
+      will acknowledge within 72 hours.
+    </p>
+  </body>
+</html>

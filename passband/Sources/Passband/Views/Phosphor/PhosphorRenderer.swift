@@ -60,8 +60,12 @@ final class PhosphorRenderer: @unchecked Sendable {
     private var w = 0
     private var h = 0
     private var samples = 0
-    private var xs: [Float] = []
-    private var gateAtten: [Float] = []
+    // Per-sample tables and scratch, allocated once per size: the sweep's
+    // hot loop reads and writes them through raw pointers.
+    private var xs = UnsafeMutablePointer<Float>.allocate(capacity: 1)
+    private var gateAtten = UnsafeMutablePointer<Float>.allocate(capacity: 1)
+    private var rawScratch = UnsafeMutablePointer<Float>.allocate(capacity: 1)
+    private var floorScratch = UnsafeMutablePointer<Float>.allocate(capacity: 1)
     private var accum: MTLTexture?
     private var blurred: MTLTexture?
     private var scene: MTLTexture?
@@ -132,6 +136,10 @@ final class PhosphorRenderer: @unchecked Sendable {
         combineKernel = combine
     }
 
+    deinit {
+        for p in [xs, gateAtten, rawScratch, floorScratch, kernel] { p.deallocate() }
+    }
+
     func makeCommandBuffer() -> MTLCommandBuffer? { queue.makeCommandBuffer() }
 
     // MARK: - sizing
@@ -145,8 +153,16 @@ final class PhosphorRenderer: @unchecked Sendable {
         w = width
         h = height
         samples = Int(Self.refSamples * Float(w) / Self.refW)
-        xs = (0..<samples).map { -0.02 + 1.04 * Float($0) / Float(samples - 1) }
-        gateAtten = xs.map { 1 - Self.response($0, Self.center, Self.gateW) * (1 - Self.inband) }
+        for p in [xs, gateAtten, rawScratch, floorScratch] { p.deallocate() }
+        xs = .allocate(capacity: samples)
+        gateAtten = .allocate(capacity: samples)
+        rawScratch = .allocate(capacity: samples)
+        floorScratch = .allocate(capacity: samples)
+        for i in 0..<samples {
+            let x = -0.02 + 1.04 * Float(i) / Float(samples - 1)
+            xs[i] = x
+            gateAtten[i] = 1 - Self.response(x, Self.center, Self.gateW) * (1 - Self.inband)
+        }
 
         func tex(_ tw: Int, _ th: Int, _ usage: MTLTextureUsage) -> MTLTexture? {
             let d = MTLTextureDescriptor.texture2DDescriptor(
@@ -265,44 +281,61 @@ final class PhosphorRenderer: @unchecked Sendable {
 
     /// `Beam.sweep` plus the weights `advance` gives it, written straight
     /// into the point buffer. Returns the sweep's share of the normalizer.
+    ///
+    /// The hot loop of the whole scene, so it runs over raw pointers into
+    /// scratch allocated once per size: the first version allocated two
+    /// arrays a frame and iterated ranges, and an unoptimized build spent
+    /// half a core on Swift's generic machinery rather than on the noise.
     private func writeSweep(_ params: PhosphorParams, into buffer: MTLBuffer, decay: Float) -> Float {
         let m = samples
         let base = 0.80 * Float(h), amp = 0.52 * Float(h)
         let W = Float(w)
+        let raw = rawScratch, fl = floorScratch, xs = xs, atten = gateAtten
 
         // The floor: rectified gaussian jitter, smoothed by a 9-tap kernel.
-        var raw = [Float](repeating: 0, count: m)
-        for i in 0..<m { raw[i] = 0.028 + 0.035 * abs(rng.normal()) * Self.jitter }
-        var fl = [Float](repeating: 0, count: m)
-        for i in 0..<m {
+        var i = 0
+        while i < m {
+            raw[i] = 0.028 + 0.035 * abs(rng.normal()) * Self.jitter
+            i += 1
+        }
+        let k = kernel
+        i = 0
+        while i < m {
             var acc: Float = 0
-            for k in -4...4 {
-                let j = i + k
-                if j >= 0, j < m { acc += raw[j] * Self.kernel[k + 4] }
+            var t = 0
+            while t < 9 {
+                let j = i + t - 4
+                if j >= 0, j < m { acc += raw[j] * k[t] }
+                t += 1
             }
             fl[i] = acc
+            i += 1
         }
         // The transients: digests, offers, notifications.
-        for _ in 0..<Self.spikes {
+        let toIndex = Float(m - 1) / 1.04
+        var n = 0
+        while n < Self.spikes {
             let sx = rng.uniform()
             let sh = 0.08 + pow(rng.uniform(), 1.8) * 0.42
             let sw = 0.002 + rng.uniform() * 0.006
-            let lo = max(0, Int((sx - 4 * sw + 0.02) / 1.04 * Float(m - 1)))
-            let hi = min(m - 1, Int((sx + 4 * sw + 0.02) / 1.04 * Float(m - 1)) + 1)
-            if lo <= hi {
-                for i in lo...hi {
-                    let d = (xs[i] - sx) / sw
-                    fl[i] += sh * exp(-d * d)
-                }
+            let lo = max(0, Int((sx - 4 * sw + 0.02) * toIndex))
+            let hi = min(m - 1, Int((sx + 4 * sw + 0.02) * toIndex) + 1)
+            i = lo
+            while i <= hi {
+                let d = (xs[i] - sx) / sw
+                fl[i] += sh * exp(-d * d)
+                i += 1
             }
+            n += 1
         }
         let shimmer = 1 + 0.004 * rng.normal()
         let per = pow(decay, 1 / Float(m))
         let p = buffer.contents().bindMemory(to: SIMD4<Float>.self, capacity: m)
         var total: Float = 0
         var weight: Float = 1  // the newest sample is the last one written
-        for i in stride(from: m - 1, through: 0, by: -1) {
-            let floor = fl[i] * Self.noise * gateAtten[i]
+        i = m - 1
+        while i >= 0 {
+            let floor = fl[i] * Self.noise * atten[i]
             var y = floor
             if params.carrier {
                 let d = (xs[i] - Self.center) / Self.carrierW
@@ -312,6 +345,7 @@ final class PhosphorRenderer: @unchecked Sendable {
             p[i] = SIMD4(xs[i] * W, base - y * amp, weight, 0)
             total += weight
             weight *= per
+            i -= 1
         }
         return total / Float(m)
     }
@@ -382,13 +416,16 @@ final class PhosphorRenderer: @unchecked Sendable {
         1 / (1 + pow((x - c) / w, 16)).squareRoot()
     }
 
-    private static let kernel: [Float] = {
+    /// The floor's 9-tap smoothing kernel, normalized.
+    private let kernel: UnsafeMutablePointer<Float> = {
         let k = (0..<9).map { i -> Float in
             let t = -3 + 6 * Float(i) / 8
             return exp(-t * t)
         }
         let s = k.reduce(0, +)
-        return k.map { $0 / s }
+        let p = UnsafeMutablePointer<Float>.allocate(capacity: 9)
+        for i in 0..<9 { p[i] = k[i] / s }
+        return p
     }()
 }
 

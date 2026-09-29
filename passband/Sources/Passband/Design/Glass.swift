@@ -426,6 +426,14 @@ extension ButtonStyle where Self == TextActionStyle {
                 window.titlebarAppearsTransparent = true
                 window.titleVisibility = .hidden
                 window.styleMask.insert(.fullSizeContentView)
+                // Everything AppKit reads as background is now a window
+                // handle, and AppKit decides that per mouse-down by asking the
+                // hit view's `mouseDownCanMoveWindow`. SwiftUI's hosting view
+                // says yes over anything without an immediate gesture — which
+                // includes a `.draggable` shape, whose drag has nothing to
+                // claim until the pointer moves. Anything in the shell that
+                // needs to be picked up rather than clicked has to be an
+                // AppKit view that says no: see `PillDragHandle`.
                 window.isMovableByWindowBackground = true
                 // Restoration can hand the window back already fullscreen,
                 // before any transition our observers could hear.

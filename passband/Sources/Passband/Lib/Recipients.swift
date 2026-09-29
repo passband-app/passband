@@ -129,6 +129,24 @@ struct Recipients: Sendable, Equatable {
         }
     }
 
+    /// THE ADDRESSES IN A DROPPED PAYLOAD. A pill dragged in from another field
+    /// arrives as its own token; text dragged out of a message, or out of
+    /// another app, arrives as whatever was under the selection. Only tokens
+    /// that ARE addresses count — a key with an `@` and no whitespace, so a
+    /// sentence that happens to mention somebody is not pilled as them — and
+    /// each person once, under the first spelling they arrived in.
+    ///
+    /// Lines split before commas: a column of addresses copied out of a
+    /// spreadsheet is a list too, just one that never learned about commas.
+    static func dropped(_ text: String) -> [String] {
+        var seen = Set<String>()
+        return text.split(whereSeparator: \.isNewline).flatMap { split(String($0)) }.filter { token in
+            let k = key(token)
+            guard !k.isEmpty, !k.contains(where: \.isWhitespace) else { return false }
+            return seen.insert(k).inserted
+        }
+    }
+
     // MARK: - list grammar
 
     /// Split an address-list header on the commas that SEPARATE addresses. A

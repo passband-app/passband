@@ -54,13 +54,14 @@ enum ScheduleCopy {
     static let mayHaveReachedGmail =
         "the last try may have reached Gmail. check Sent before sending again"
 
-    /// A pulled-back mail would take over a keyed draft row somebody else's
-    /// words live in (`PullBackDraft.wouldReplace`), so its autosave waits for
-    /// a keystroke and this says what that keystroke will do.
-    static func replacesDraft(forward: Bool) -> String {
+    /// A pulled-back mail took over a keyed draft row somebody else's words
+    /// lived in (`PullBackDraft.arrival`). `edit` is an explicit choice, so
+    /// the scheduled mail WINS and its autosave is armed at once; this says,
+    /// in the past tense, what that cost.
+    static func replacedDraft(forward: Bool) -> String {
         forward
-            ? "your unsent forward of this email will be replaced when you type"
-            : "your unsent draft to this thread will be replaced when you type"
+            ? "replaced your unsent forward of this email"
+            : "replaced your unsent draft to this thread"
     }
 }
 
@@ -393,14 +394,36 @@ enum ScheduledCancelUndo {
     }
 }
 
-/// A PULLED-BACK MAIL AND THE KEYED DRAFT ROW IT WOULD LAND ON. A reply's
-/// draft is one row per parent and a forward's one per original (new mail too,
-/// on a daemon without `drafts_v2`), so the reopened composer's first autosave
-/// PUTs over whatever that row holds: somebody's unsent reply to the same
-/// thread, silently gone. When such a row (or an open composer saving to it)
-/// holds words, the store does not arm the save; the person's first edit does,
-/// and a toast says so before then.
+/// A PULLED-BACK MAIL AND THE KEYED DRAFT ROW IT LANDS ON. A reply's draft is
+/// one row per parent and a forward's one per original (new mail too, on a
+/// daemon without `drafts_v2`), so the reopened composer's first autosave PUTs
+/// over whatever that row holds: somebody's unsent reply to the same thread.
+///
+/// THE SCHEDULED MAIL WINS (user decision 2026-09-29). Pulling back is an
+/// explicit `edit` from the preview now, and the cancel that reopened it has
+/// already taken the mail out of the outbox: a save held back until the first
+/// keystroke (the previous rule) made Esc-without-typing LOSE the scheduled
+/// mail, which is the worse of the two losses. So the save is ALWAYS armed, and
+/// when it will land on somebody's words the toast says so, not silently.
 enum PullBackDraft {
+    /// What the reopened composer does on arrival.
+    struct Arrival: Equatable {
+        /// Always true; spelled out so a test holds the invariant.
+        var armsAutosave: Bool
+        /// Said once the composer is open, when a keyed row held words.
+        var toast: String?
+    }
+
+    static func arrival(
+        _ state: ComposeState, drafts: [DraftView], open: [ComposeState], keyedNewMail: Bool
+    ) -> Arrival {
+        let replaces = wouldReplace(state, drafts: drafts, open: open, keyedNewMail: keyedNewMail)
+        return Arrival(
+            armsAutosave: true,
+            toast: replaces
+                ? ScheduleCopy.replacedDraft(forward: state.forwardOfMessageId != nil) : nil)
+    }
+
     /// `drafts`: the daemon's rows. `open`: the composers on screen that hold
     /// content (their close flush writes the same row). `keyedNewMail`: new
     /// mail shares the one nil-keyed row (an older daemon).
@@ -417,4 +440,146 @@ enum PullBackDraft {
         return drafts.contains { same(reply: $0.reply_to_message_id, forward: $0.forward_of_message_id) }
             || open.contains { $0.id != state.id && same(reply: $0.replyToMessageId, forward: $0.forwardOfMessageId) }
     }
+}
+
+// MARK: - the read-only preview
+
+/// WHAT THE PREVIEW OF AN OUTBOX ROW SAYS (Views/ScheduledPreview.swift):
+/// opening a scheduled row SHOWS it, as scheduled, and nothing about looking at
+/// it moves it (user decision 2026-09-29). Pure for the reason the row's copy
+/// is: a status line that said "scheduled" over a row that failed, or a header
+/// that named the wrong thread, is the app lying about somebody's mail.
+enum ScheduledPreviewCopy {
+    struct Status: Equatable {
+        var text: String
+        var tone: ScheduledRowCopy.Tone
+    }
+
+    /// The top bar's right-hand line, one per state. The row's trailing cell
+    /// plus the reason the row keeps for its second line, since the preview
+    /// has one line to say both:
+    ///
+    /// - `scheduled`: "scheduled · Tue 9am · in 3h".
+    /// - `scheduled` with a claim behind it: "retrying · <reason>".
+    /// - `sending`: "sending".
+    /// - `failed`: "didn't send · <reason>", EXCEPT a row that may have gone
+    ///   (`ScheduledRowCopy.mayHaveSent`), which says "may have sent".
+    static func status(
+        _ row: ScheduledSendView, now: Date = Date(), calendar: Calendar = .current
+    ) -> Status {
+        switch row.state {
+        case "sending":
+            return Status(text: "sending", tone: .busy)
+        case "failed":
+            if ScheduledRowCopy.mayHaveSent(row) {
+                return Status(text: "may have sent", tone: .danger)
+            }
+            return Status(
+                text: "didn't send · \(ScheduledRowCopy.reason(row.last_error))", tone: .danger)
+        default:
+            if row.attempts > 0 {
+                let why = row.last_error.map { " · \(ScheduledRowCopy.reason($0))" } ?? ""
+                return Status(text: "retrying\(why)", tone: .busy)
+            }
+            guard let at = Fmt.date(row.send_at) else {
+                return Status(text: "scheduled", tone: .quiet)
+            }
+            let chip = Fmt.sendAtChip(at, now: now, calendar: calendar)
+            return Status(text: "scheduled · \(chip) · \(Fmt.relUntil(at, now: now))", tone: .quiet)
+        }
+    }
+
+    struct Line: Equatable {
+        var label: String
+        var value: String
+    }
+
+    /// The header block, top to bottom. The listing carries `to` ONLY (no cc,
+    /// no bcc), so the preview shows what it has rather than inventing empty
+    /// copy lists that would read as "nobody else".
+    ///
+    /// - NEW: `to` (or the fan-out / bcc truth, as the row says it), subject.
+    /// - REPLY: `to` when stated, else the thread decides at fire time; then
+    ///   "re: <parent subject> · <parent sender>", then its own subject if it
+    ///   typed one (blank means the daemon titles it from the parent, and the
+    ///   `re` line already says which).
+    /// - FORWARD: `to`, "fwd: <original subject>", its own subject if typed.
+    static func header(_ row: ScheduledSendView, groupName: String? = nil) -> [Line] {
+        let reply = row.forward_of_message_id == nil && row.reply_to_message_id != nil
+        let forward = row.forward_of_message_id != nil
+        var lines: [Line] = []
+        let to = SenderID.recipients(row.to).joined(separator: ", ")
+        if !to.isEmpty {
+            lines.append(Line(label: "to", value: to))
+        } else if reply {
+            lines.append(Line(label: "to", value: replyAudience))
+        } else {
+            lines.append(Line(label: "to", value: ScheduledRowCopy.emptyRecipient(groupName: groupName)))
+        }
+        let parent = row.parent_subject?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let parentSubject = parent.isEmpty ? noSubject : parent
+        if reply {
+            let from = row.parent_from.map(SenderID.readableName) ?? ""
+            lines.append(
+                Line(label: "re", value: from.isEmpty ? parentSubject : "\(parentSubject) · \(from)"))
+        } else if forward {
+            lines.append(Line(label: "fwd", value: parentSubject))
+        }
+        let subject = row.subject.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !subject.isEmpty {
+            lines.append(Line(label: "subject", value: subject))
+        } else if !reply && !forward {
+            lines.append(Line(label: "subject", value: noSubject))
+        }
+        return lines
+    }
+
+    /// A reply with no stated `to`: the daemon derives its audience from the
+    /// thread when it fires, so naming anyone here would be a guess.
+    static let replyAudience = "the thread's people, when it sends"
+    static let noSubject = "(no subject)"
+
+    enum Verb: Equatable {
+        case back, edit, sendNow, cancel
+
+        var label: String {
+            switch self {
+            case .back: "back"
+            case .edit: "edit"
+            case .sendNow: "send now"
+            case .cancel: "cancel"
+            }
+        }
+    }
+
+    struct Key: Equatable {
+        /// The KeyDispatch spelling.
+        var key: String
+        /// What the verb prints beside it on the Mac.
+        var hint: String
+        var verb: Verb
+    }
+
+    /// THE PREVIEW'S KEYS. Not `e` for edit: `e` is done everywhere else, and
+    /// a done that quietly pulled a mail out of the outbox would be the worst
+    /// possible misreading of it. Enter edits (it is the "open this further"
+    /// key), `s` and `x` are the row's own verbs, Esc is back and leaves the
+    /// mail scheduled. A `sending` row is in Gmail's hands: Esc only.
+    static func keys(_ row: ScheduledSendView) -> [Key] {
+        let back = Key(key: "Escape", hint: "esc", verb: .back)
+        guard actionable(row) else { return [back] }
+        return [
+            back,
+            Key(key: "Enter", hint: "↵", verb: .edit),
+            Key(key: "s", hint: "s", verb: .sendNow),
+            Key(key: "x", hint: "x", verb: .cancel),
+        ]
+    }
+
+    /// The verbs at the bottom, in reading order. None for a `sending` row.
+    static func verbs(_ row: ScheduledSendView) -> [Key] {
+        keys(row).filter { $0.verb != .back }
+    }
+
+    static func actionable(_ row: ScheduledSendView) -> Bool { row.state != "sending" }
 }

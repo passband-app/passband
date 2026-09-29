@@ -135,7 +135,9 @@ run_suite compose-attachments \
 # cancel. And the Sent page's half: what an outbox row says in each state, the
 # order it sits in, a failure toasting once, a cancel's undo rebuilding the
 # schedule, and the tombstone ledger drafts and the outbox share. Every one of
-# these is wrong only in somebody's outbox, later.
+# these is wrong only in somebody's outbox, later. And the read-only preview
+# a row opens: its status line, its header, its keys, and the M2 rule (edit
+# arms the save at once and says what it replaced).
 # ComposeState lives in its own pure file for exactly this suite.
 run_suite scheduled-send \
   Sources/Passband/Model/SubjectText.swift \

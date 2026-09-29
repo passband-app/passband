@@ -1615,6 +1615,7 @@ final class AppStore {
         scheduledGroupNames = [:]
         outboxKnownEmpty = false
         scheduledBusy = []
+        scheduledPreviewId = nil
         authRings = []
         authQueue = []
         tracking = nil
@@ -1860,6 +1861,8 @@ final class AppStore {
         // A's message id. Same-thread reopens keep it — the viewer is already
         // mounted and may never re-adopt.
         if self.threadId != threadId { openThreadSummary = nil }
+        // The reader's slot holds one thing: a thread replaces a preview.
+        scheduledPreviewId = nil
         self.threadId = threadId
         // The arrivals ledger follows the thread, and declines to forget on a
         // REOPEN of the same one — see ThreadArrivals.reset.
@@ -1898,6 +1901,9 @@ final class AppStore {
     }
 
     func closeThread() {
+        // The preview lives in the reader's slot, so every way out of the
+        // reader (Esc, the rail, an account switch) is a way out of it too.
+        scheduledPreviewId = nil
         focusedMessageId = nil
         focusedMessageView = nil
         threadId = nil
@@ -4378,6 +4384,13 @@ final class AppStore {
         let next = ScheduledRowCopy.ordered(kept)
         // Assigned only on a real change: the tick re-runs this.
         if next != scheduledRows { scheduledRows = next }
+        // A PREVIEWED ROW THAT LEFT: sent by the worker, or cancelled from
+        // another device. The preview would otherwise vanish mid-read with
+        // nothing said; this says why.
+        if let id = scheduledPreviewId, !next.contains(where: { $0.id == id }) {
+            scheduledPreviewId = nil
+            pushToast(ScheduledRowCopy.noLongerScheduled)
+        }
         scheduledLoadedAt = Date()
         outboxKnownEmpty = listed?.isEmpty ?? false
         // ONCE PER ROW. The first listing of a run toasts a row that failed
@@ -4432,9 +4445,12 @@ final class AppStore {
         return true
     }
 
-    /// Enter / click on an outbox row: PULL IT BACK into the composer it came
-    /// from. DELETE the row, and open the request it hands back with its time
-    /// still set, so ⌘↵ reschedules and Esc keeps it in drafts.
+    /// The preview's `edit` (and the row's context-menu "edit"): PULL IT BACK
+    /// into the composer it came from. DELETE the row, and open the request it
+    /// hands back with its time still set, so ⌘↵ reschedules and Esc keeps it
+    /// in drafts. Enter / click on the row only PREVIEWS it
+    /// (`openScheduledPreview`); this is the one door that takes it out of the
+    /// outbox.
     ///
     /// `openDraft`'s branching, fed from the request instead of a `DraftView`:
     ///
@@ -4495,6 +4511,37 @@ final class AppStore {
             scheduledGroupNames[row.id] = nil
             await openPulledBack(state, threadId: row.thread_id, epoch: e)
         }
+    }
+
+    // MARK: - the read-only preview
+
+    /// The outbox row open READ-ONLY in the reader's slot
+    /// (Views/ScheduledPreview.swift), by id so the preview follows the row
+    /// through each poll (a retry, a failure) instead of freezing the copy it
+    /// opened with. Mutually exclusive with `threadId`: `openThread` clears
+    /// it, and `closeThread` (every way out of the reader) does too.
+    private(set) var scheduledPreviewId: Int?
+
+    /// The previewed row as last listed. nil while none is open, and for a
+    /// row that has left the listing (the refresh closes the preview then).
+    var scheduledPreviewRow: ScheduledSendView? {
+        guard let id = scheduledPreviewId else { return nil }
+        return scheduledRows.first { $0.id == id }
+    }
+
+    /// Enter / click on an outbox row: SHOW it, as scheduled (user decision
+    /// 2026-09-29). Nothing about opening it cancels it, pulls it into a
+    /// composer or moves it to drafts; only the preview's `edit` does that.
+    /// A `sending` row opens too: it has a status to show, just no verbs.
+    func openScheduledPreview(_ row: ScheduledSendView) {
+        if threadId != nil { closeThread() }
+        scheduledPreviewId = row.id
+    }
+
+    /// Esc on the preview, or the way out after one of its verbs. The mail
+    /// stays exactly where it was.
+    func closeScheduledPreview() {
+        scheduledPreviewId = nil
     }
 
     /// The group a request's `group_id` names, as the daemon describes it now:
@@ -4674,31 +4721,27 @@ final class AppStore {
     /// released the files' claim, and the draft the save writes is what
     /// claims them again before the unclaimed sweep can.
     ///
-    /// EXCEPT OVER SOMEBODY'S WORDS. A reply's draft row is one per parent, a
-    /// forward's one per original (and new mail's one, on a daemon without
-    /// `drafts_v2`), so an armed save would PUT this mail over an unsent
-    /// draft to the same thread without a word. When such a row holds
-    /// anything, or an open composer is about to flush into it, the save is
-    /// left unarmed until the person's first edit arms it the ordinary way,
-    /// and a toast says what that edit will do (`PullBackDraft`). The list
-    /// is refetched first: the cache may be minutes old.
+    /// ALWAYS ARMED, EVEN OVER SOMEBODY'S WORDS. A reply's draft row is one
+    /// per parent, a forward's one per original (and new mail's one, on a
+    /// daemon without `drafts_v2`), so the save PUTs this mail over an unsent
+    /// draft to the same thread. The mail is already out of the outbox, and a
+    /// save held for the first keystroke made Esc-without-typing lose it, so
+    /// the scheduled mail WINS and a toast says what it replaced
+    /// (`PullBackDraft.arrival`). The list is refetched first: the cache may
+    /// be minutes old.
     private func openPulledBack(_ state: ComposeState, threadId: String?, epoch e: Int) async {
-        var replaces = false
+        var arrival = PullBackDraft.Arrival(armsAutosave: true, toast: nil)
         if state.replyToMessageId != nil || state.forwardOfMessageId != nil || !draftsV2Available {
             await refreshDrafts()
             guard e == epoch else { return }
-            replaces = PullBackDraft.wouldReplace(
+            arrival = PullBackDraft.arrival(
                 state, drafts: draftsRows,
                 open: [compose, inlineReply].compactMap { $0 }.filter(DraftSaver.hasContent),
                 keyedNewMail: !draftsV2Available)
         }
         func arm(_ slot: DraftSaver.Slot) {
-            if replaces {
-                DraftSaver.shared.noteOpened(slot)
-                pushToast(ScheduleCopy.replacesDraft(forward: state.forwardOfMessageId != nil))
-            } else {
-                DraftSaver.shared.noteChange(slot)
-            }
+            if arrival.armsAutosave { DraftSaver.shared.noteChange(slot) }
+            if let toast = arrival.toast { pushToast(toast) }
         }
         if state.replyToMessageId != nil, let threadId {
             // Through `openThread`, which flushes any inline reply already

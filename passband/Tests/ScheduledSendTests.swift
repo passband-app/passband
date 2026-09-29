@@ -43,6 +43,11 @@ struct ScheduledSendTests {
         theCursorFollowsItsRow()
         aRowGmailMayHaveIsNeverResentBlind()
         aFanOutRowSaysWhoItIsFor()
+        // The read-only preview.
+        anEditArmsItsSaveAndSaysWhatItReplaced()
+        thePreviewSaysWhereTheMailIs()
+        thePreviewHeaderNamesTheMail()
+        thePreviewKeysAreEnterSXAndEsc()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -563,7 +568,7 @@ struct ScheduledSendTests {
         equal(wrong.groupName, nil, "nor its name")
     }
 
-    /// M2: which pull-backs would PUT over a keyed row holding somebody's words.
+    /// M2: which pull-backs PUT over a keyed row holding somebody's words.
     static func aPullBackNeverSilentlyReplacesAKeyedDraft() {
         var reply = ComposeState()
         reply.replyToMessageId = 10
@@ -610,13 +615,151 @@ struct ScheduledSendTests {
         check(
             !PullBackDraft.wouldReplace(reply, drafts: [], open: [reply], keyedNewMail: false),
             "the composer itself is not a rival")
-        equal(
-            ScheduleCopy.replacesDraft(forward: false),
-            "your unsent draft to this thread will be replaced when you type", "the reply toast")
         check(
-            !ScheduleCopy.replacesDraft(forward: true).contains("\u{2014}")
-                && !ScheduleCopy.replacesDraft(forward: false).contains("\u{2014}"),
+            !ScheduleCopy.replacedDraft(forward: true).contains("\u{2014}")
+                && !ScheduleCopy.replacedDraft(forward: false).contains("\u{2014}"),
             "no em dashes")
+    }
+
+    /// THE M2 RULE, revised (2026-09-29): `edit` is an explicit choice, so the
+    /// scheduled mail WINS. The save is armed at once, always, and a keyed
+    /// draft with words in it earns a toast saying it was replaced. Held back
+    /// for a keystroke, Esc-without-typing lost the scheduled mail.
+    static func anEditArmsItsSaveAndSaysWhatItReplaced() {
+        typealias A = PullBackDraft.Arrival
+        var reply = ComposeState()
+        reply.replyToMessageId = 10
+        var forward = ComposeState()
+        forward.forwardOfMessageId = 20
+        let fresh = ComposeState()
+        equal(
+            PullBackDraft.arrival(
+                reply, drafts: [draft(id: 1, replyTo: 10)], open: [], keyedNewMail: false),
+            A(armsAutosave: true, toast: "replaced your unsent draft to this thread"),
+            "a reply over the parent's draft: armed, and it says so")
+        equal(
+            PullBackDraft.arrival(
+                forward, drafts: [draft(id: 2, forwardOf: 20)], open: [], keyedNewMail: false),
+            A(armsAutosave: true, toast: "replaced your unsent forward of this email"),
+            "a forward over the original's draft: the forward's words")
+        var typing = ComposeState()
+        typing.replyToMessageId = 10
+        equal(
+            PullBackDraft.arrival(reply, drafts: [], open: [typing], keyedNewMail: false),
+            A(armsAutosave: true, toast: "replaced your unsent draft to this thread"),
+            "an open composer to the same parent counts")
+        equal(
+            PullBackDraft.arrival(
+                reply, drafts: [draft(id: 4, replyTo: 11)], open: [], keyedNewMail: false),
+            A(armsAutosave: true, toast: nil), "no rival: armed, nothing said")
+        equal(
+            PullBackDraft.arrival(fresh, drafts: [draft(id: 3)], open: [], keyedNewMail: false),
+            A(armsAutosave: true, toast: nil), "new mail on drafts_v2: nothing to replace")
+        equal(
+            PullBackDraft.arrival(fresh, drafts: [draft(id: 3)], open: [], keyedNewMail: true),
+            A(armsAutosave: true, toast: "replaced your unsent draft to this thread"),
+            "new mail on the one nil-keyed row")
+    }
+
+    // MARK: - the read-only preview
+
+    static func thePreviewSaysWhereTheMailIs() {
+        let cal = utc()
+        let now = date(cal, 2026, 10, 4, 10, 0)
+        typealias S = ScheduledPreviewCopy.Status
+        equal(
+            ScheduledPreviewCopy.status(
+                row(sendAt: "2026-10-06T09:00:00Z"), now: now, calendar: cal),
+            S(text: "scheduled · Tue 9am · in 2d", tone: .quiet), "scheduled: chip and countdown")
+        equal(
+            ScheduledPreviewCopy.status(
+                row(attempts: 1, lastError: "failed:gmail"), now: now, calendar: cal),
+            S(text: "retrying · Gmail refused it", tone: .busy), "retrying, with why")
+        equal(
+            ScheduledPreviewCopy.status(row(attempts: 2), now: now, calendar: cal),
+            S(text: "retrying", tone: .busy), "retrying with no reason on file")
+        equal(
+            ScheduledPreviewCopy.status(row(state: "sending", attempts: 1), now: now, calendar: cal),
+            S(text: "sending", tone: .busy), "sending")
+        equal(
+            ScheduledPreviewCopy.status(
+                row(state: "failed", attempts: 1, lastError: "rejected:too_large"), now: now,
+                calendar: cal),
+            S(text: "didn't send · it is too large to send", tone: .danger), "failed, with why")
+        equal(
+            ScheduledPreviewCopy.status(
+                row(state: "failed", attempts: 1, lastError: "failed:gmail", maybeSent: true),
+                now: now, calendar: cal),
+            S(text: "may have sent", tone: .danger), "a row that may have gone never says didn't")
+        equal(
+            ScheduledPreviewCopy.status(row(sendAt: "garbage"), now: now, calendar: cal),
+            S(text: "scheduled", tone: .quiet), "an unreadable time says only scheduled")
+        for state in ["scheduled", "sending", "failed"] {
+            let text = ScheduledPreviewCopy.status(row(state: state), now: now, calendar: cal).text
+            check(!text.contains("\u{2014}"), "no em dash in \(state)")
+        }
+    }
+
+    static func thePreviewHeaderNamesTheMail() {
+        typealias L = ScheduledPreviewCopy.Line
+        // New mail: to, subject.
+        equal(
+            ScheduledPreviewCopy.header(row()),
+            [L(label: "to", value: "ana@x.test"), L(label: "subject", value: "lunch")], "new mail")
+        var untitled = row()
+        untitled.subject = "  "
+        untitled.to = ""
+        equal(
+            ScheduledPreviewCopy.header(untitled, groupName: "Book club"),
+            [L(label: "to", value: "Book club"), L(label: "subject", value: "(no subject)")],
+            "a fan-out with no subject")
+        // A reply: to, re: parent · sender, and its own subject only if typed.
+        var reply = row()
+        reply.reply_to_message_id = 10
+        reply.thread_id = "t1"
+        reply.parent_subject = "Dinner?"
+        reply.parent_from = "Bo Lee <bo@x.test>"
+        reply.subject = ""
+        equal(
+            ScheduledPreviewCopy.header(reply),
+            [L(label: "to", value: "ana@x.test"), L(label: "re", value: "Dinner? · Bo Lee")],
+            "a reply")
+        reply.to = ""
+        equal(
+            ScheduledPreviewCopy.header(reply).first,
+            L(label: "to", value: ScheduledPreviewCopy.replyAudience),
+            "a reply with no stated audience says the thread decides")
+        // A forward: to, fwd: original, subject when typed.
+        var forward = row()
+        forward.forward_of_message_id = 20
+        forward.parent_subject = "Receipt"
+        forward.parent_from = "shop@x.test"
+        equal(
+            ScheduledPreviewCopy.header(forward),
+            [
+                L(label: "to", value: "ana@x.test"), L(label: "fwd", value: "Receipt"),
+                L(label: "subject", value: "lunch"),
+            ],
+            "a forward")
+    }
+
+    static func thePreviewKeysAreEnterSXAndEsc() {
+        let keys = ScheduledPreviewCopy.keys(row())
+        equal(keys.map(\.key), ["Escape", "Enter", "s", "x"], "the four keys")
+        equal(
+            keys.map(\.verb), [.back, .edit, .sendNow, .cancel], "each to its verb")
+        check(!keys.contains { $0.key == "e" || $0.key == "E" }, "never e: e is done")
+        equal(
+            ScheduledPreviewCopy.verbs(row()).map(\.verb.label), ["edit", "send now", "cancel"],
+            "the verbs at the bottom")
+        equal(
+            ScheduledPreviewCopy.verbs(row()).map(\.hint), ["↵", "s", "x"], "their printed keys")
+        let sending = row(state: "sending", attempts: 1)
+        equal(ScheduledPreviewCopy.keys(sending).map(\.key), ["Escape"], "sending: back only")
+        equal(ScheduledPreviewCopy.verbs(sending).count, 0, "sending: no verbs")
+        equal(
+            ScheduledPreviewCopy.keys(row(state: "failed")).count, 4,
+            "a failed row can still be edited, sent or cancelled")
     }
 
     /// Minor 2: the ledger survives a relaunch (the store saves `keys` per

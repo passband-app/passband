@@ -81,7 +81,7 @@ struct EmailsView: View {
     /// The row under the cursor as the two things every page can answer: the
     /// message id (a `.task` key, and the scroll target) and the thread to warm.
     /// An outbox row answers only when it has a thread (a reply's), which is
-    /// the thread a pull-back opens.
+    /// the thread the preview's `edit` opens.
     private var cursorRow: (id: Int, threadId: String)? {
         if mode == .sent {
             if let row = selectedScheduled {
@@ -257,7 +257,8 @@ struct EmailsView: View {
                         kbActive = false
                         index = i
                     },
-                    onOpen: { store.pullBackScheduled(row) },
+                    onOpen: { store.openScheduledPreview(row) },
+                    onEdit: { store.pullBackScheduled(row) },
                     onSendNow: { store.sendScheduledNow(row) },
                     onCancel: { store.cancelScheduledRow(row) }
                 )
@@ -649,10 +650,12 @@ struct EmailsView: View {
             KeyBinding("Enter", "drill in") {
                 guard actionable else { return }
                 if mode == .sent {
-                    // An outbox row goes back into the composer it came from.
-                    // A `sending` one takes no Enter: it is in Gmail's hands.
+                    // An outbox row opens READ-ONLY in the reader's slot, as
+                    // scheduled: NEVER into the composer (only the preview's
+                    // `edit` does that). A `sending` row opens too, for its
+                    // status; the preview offers it no verbs.
                     if let row = selectedScheduled {
-                        if row.state != "sending" { store.pullBackScheduled(row) }
+                        store.openScheduledPreview(row)
                         return
                     }
                     guard let item = selectedSent else { return }

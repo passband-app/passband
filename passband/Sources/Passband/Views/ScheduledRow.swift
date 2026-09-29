@@ -5,11 +5,12 @@
 // row uses; only the trailing cell is this row's: when it goes and what state
 // it is in, worded by `ScheduledRowCopy` (Lib/ScheduledSend.swift).
 //
-// The row does nothing itself. Enter / click pulls it back into the composer,
-// `s` sends it now, `x` (Backspace / Delete on the Mac) cancels it behind the
+// The row does nothing itself. Enter / click opens it READ-ONLY in the
+// reader's slot (Views/ScheduledPreview.swift), `s` sends it now, `x` (Backspace / Delete on the Mac) cancels it behind the
 // undo toast; the keys are the Sent page's (EmailsView), and the same three
 // verbs sit in the context menu (and, on the phone, the swipes) so a mouse and
-// a thumb reach them too.
+// a thumb reach them too. The menu's "edit" is the pull-back itself, straight
+// into the composer, for a pointer that already knows what it wants.
 
 import SwiftUI
 
@@ -19,7 +20,10 @@ struct ScheduledRow: View {
     var groupName: String? = nil
     let selected: Bool
     let onHover: () -> Void
+    /// Show it (the preview). Never the composer.
     let onOpen: () -> Void
+    /// Pull it back into the composer (the context menu's "edit").
+    let onEdit: () -> Void
     let onSendNow: () -> Void
     let onCancel: () -> Void
 
@@ -36,8 +40,9 @@ struct ScheduledRow: View {
             onHoverChange: { if $0 { onHover() } },
             action: {
                 onHover()
-                // A `sending` row is in Gmail's hands: nothing to pull back.
-                if row.state != "sending" { onOpen() }
+                // Every row opens, `sending` included: the preview shows its
+                // status and simply offers no verbs.
+                onOpen()
             }
         ) { _, _ in
             CompositionSummary(
@@ -67,12 +72,12 @@ struct ScheduledRow: View {
         }
         .contextMenu {
             if row.state != "sending" {
-                Button("edit") { onOpen() }
+                Button("edit") { onEdit() }
                 Button("send now") { onSendNow() }
                 Button("cancel", role: .destructive) { onCancel() }
             }
         }
-        .accessibilityHint(row.state == "sending" ? "" : "opens it in the composer")
+        .accessibilityHint("shows it as scheduled")
     }
 
     private func color(_ tone: ScheduledRowCopy.Tone) -> Color {

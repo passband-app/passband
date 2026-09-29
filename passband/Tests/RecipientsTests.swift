@@ -28,6 +28,7 @@ struct RecipientsTests {
         removingIsIdempotent()
         countsAndSlots()
         aMovedAddressIsAFinishedRecipient()
+        aDroppedPayloadYieldsOnlyAddresses()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -111,6 +112,20 @@ struct RecipientsTests {
         equal(r.to, "", "the named copy went")
         equal(r.cc, "", "so did the shouted one")
         equal(r.bcc, "bob@x.test", "one person, one field")
+    }
+
+    static func aDroppedPayloadYieldsOnlyAddresses() {
+        // A pill from the next field over: its own token, whole.
+        equal(Recipients.dropped("Bob Smith <bob@x.test>"), ["Bob Smith <bob@x.test>"], "one pill, name and all")
+        // A list, with the same person spelled twice: once, first spelling.
+        equal(
+            Recipients.dropped("Bob <bob@x.test>, alice@x.test, BOB@X.TEST"),
+            ["Bob <bob@x.test>", "alice@x.test"], "each person once")
+        // A column pasted out of a spreadsheet has newlines where commas go.
+        equal(Recipients.dropped("a@x.test\nb@x.test"), ["a@x.test", "b@x.test"], "lines are separators too")
+        // Prose is nobody, even prose that mentions somebody.
+        equal(Recipients.dropped("call me maybe"), [], "no @, no address")
+        equal(Recipients.dropped("Contact alice@x.test for details"), [], "a sentence is not an address")
     }
 
     static func movingSomebodyAlreadyThereIsANoOp() {

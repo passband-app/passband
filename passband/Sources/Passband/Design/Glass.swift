@@ -446,15 +446,18 @@ extension ButtonStyle where Self == TextActionStyle {
 
         /// A DRAG IN TEXT SELECTS; it does not move the window. A text view
         /// that draws no background is non-opaque, and a non-opaque view
-        /// answers yes to `mouseDownCanMoveWindow` by default — so with the
-        /// window movable by its background, a drag across the composer's body
-        /// (or a focused field's editor, or the bare scroller below short
-        /// text) picked the window up instead of the words. Every text surface
-        /// in the shell is SwiftUI or a representable we do not subclass all
-        /// of, so the answer is settled here, once: each left mouse-down turns
-        /// background-moving off when it lands on text, and back on otherwise.
-        /// A local monitor runs before the window's `sendEvent`, which is
-        /// where AppKit makes that call.
+        /// answers yes to `mouseDownCanMoveWindow` by default, so with the
+        /// window movable by its background a drag across text can pick the
+        /// window up instead of the words.
+        ///
+        /// THIS IS THE SECOND LINE, NOT THE FIRST. AppKit settles the window's
+        /// draggable region AHEAD of the click, so a view we own answers no
+        /// itself (`HighlightingTextView`, `PillHandleView`); a monitor only
+        /// sees the event after that call is made. What this catches is the
+        /// text we do not subclass — SwiftUI's fields and their field editors
+        /// — for every mouse-down after the one that lands the caret: each
+        /// left mouse-down turns background-moving off when it lands on text,
+        /// and back on otherwise.
         private static func keepTextSelectable(in window: NSWindow) {
             NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak window] event in
                 guard let window, event.window === window, let content = window.contentView

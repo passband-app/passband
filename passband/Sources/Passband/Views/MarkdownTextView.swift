@@ -61,7 +61,7 @@ struct MarkdownTextView: NSViewRepresentable {
         // at the top, above it, not after it where setString parks it.
         view.setSelectedRange(NSRange(location: 0, length: 0))
 
-        let scroll = NSScrollView()
+        let scroll = EditorScrollView()
         scroll.documentView = view
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
@@ -141,8 +141,23 @@ struct MarkdownTextView: NSViewRepresentable {
 
 /// The NSTextView half: owns the re-style pass. Attribute changes never touch
 /// the characters, so the selection and undo stack survive every pass.
+/// The editor's scroller, which is a window handle unless it says otherwise:
+/// see `HighlightingTextView.mouseDownCanMoveWindow`. Under short text the
+/// scroller is what a click lands on, and it has to select, not move.
+final class EditorScrollView: NSScrollView {
+    override var mouseDownCanMoveWindow: Bool { false }
+}
+
 final class HighlightingTextView: NSTextView {
     var onDropFiles: (([URL], Int?) -> Void)?
+
+    /// NOT A WINDOW HANDLE. The shell window moves by its background, and a
+    /// text view that draws none is non-opaque, which AppKit reads as "a
+    /// mouse-down here may move the window". It asks that ahead of the click
+    /// — the draggable region is settled before the event reaches any
+    /// monitor — so the first drag into an unfocused editor moved the window
+    /// instead of selecting. The answer has to come from the view itself.
+    override var mouseDownCanMoveWindow: Bool { false }
     var onPasteImage: ((Data, Int?) -> Void)?
     var onDropHover: ((Bool) -> Void)?
 

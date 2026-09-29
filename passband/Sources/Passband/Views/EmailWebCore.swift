@@ -38,11 +38,32 @@ struct EmailWebView: View {
     /// middle of reading. A guess that is roughly right turns that shove into a
     /// nudge.
     let textHeight: CGFloat
+    /// Drawn as a CHAT BUBBLE rather than a card: the document hugs its
+    /// content instead of filling the measure, its padding is a bubble's, and
+    /// the speech tail is hung under its own outer corner — here, because the
+    /// tail belongs to the white document and nothing else in this view (the
+    /// image bar above it, the quoted-history chip below) is the bubble.
+    let bubble: Bool
+    /// Which side the bubble is on. Only read when `bubble` is set.
+    let mine: Bool
 
     @Environment(Prefs.self) private var prefs
     @Environment(AppStore.self) private var store
 
     @State private var height: CGFloat = 0
+    /// The width the document came to, for a hugging bubble. 0 until the
+    /// document says, and read through `displayWidth`.
+    @State private var width: CGFloat = 0
+    /// The collapsed document has NOTHING VISIBLE in it — a reply whose whole
+    /// body is the quoted chain, a forward with no note on top. The frame
+    /// collapses to nothing and the quoted-history chip stands alone; the
+    /// alternative is a blank white box that says the mail is broken.
+    @State private var empty = false
+    /// The document's own background, for the tail. Mail brings its own page
+    /// colour — a grey newsletter page with a white card in it is common —
+    /// and a white tail under a grey bubble is a white tail under a grey
+    /// bubble. White until the document says otherwise.
+    @State private var background: Color = .white
     @State private var optedIn = false
     @State private var hasQuoted = false
     @State private var quotedHidden = true
@@ -82,13 +103,16 @@ struct EmailWebView: View {
     /// from `body`, and every later hook is a frame too late.
     init(
         html: String, cacheKey: String? = nil, allowTrackers: Bool = false,
-        attachments: [Attachment] = [], textHeight: CGFloat = 0
+        attachments: [Attachment] = [], textHeight: CGFloat = 0,
+        bubble: Bool = false, mine: Bool = false
     ) {
         self.html = html
         self.cacheKey = cacheKey
         self.allowTrackers = allowTrackers
         self.attachments = attachments
         self.textHeight = textHeight
+        self.bubble = bubble
+        self.mine = mine
         _prepared = State(
             initialValue: PreparedBodies.shared.get(
                 Prepared.cacheKey(html, allowTrackers, attachments)) ?? .empty)
@@ -107,10 +131,15 @@ struct EmailWebView: View {
         /// document order, capped (ImageProxy.maxWarmURLs) — what the launch
         /// warmer pre-fetches and pins, not the full uncapped render set.
         var imageURLs: [String]
+        /// The mail's TOPLINE — its `<title>`, which the daemon's sanitizer
+        /// leaves as bare text at the top of the body when it drops the head
+        /// around it (Topline). Taken OUT of `html` and shown above the
+        /// frame instead, muted, where a caption goes.
+        var topline: String?
 
         static let empty = Prepared(
             sourceHash: 0, html: "", trackers: 0, trackersAllowed: false,
-            hasRemoteCandidates: false, imageURLs: [])
+            hasRemoteCandidates: false, imageURLs: [], topline: nil)
 
         static func make(
             from html: String, allowTrackers: Bool = false, attachments: [Attachment] = []
@@ -121,8 +150,11 @@ struct EmailWebView: View {
             // tracking pixel can never be the "first occurrence" that suppresses
             // a real image further down the thread. Dedupe layers on top, never
             // in place of it.
-            let stripped = Trackers.strip(html)
-            let body = allowTrackers ? html : stripped.html
+            // The topline comes off FIRST: it is text ahead of the document,
+            // not part of it, and every pass below is about the document.
+            let (topline, source) = Topline.split(html)
+            let stripped = Trackers.strip(source)
+            let body = allowTrackers ? source : stripped.html
             // A repeated sender logo is still part of THIS message. Suppressing
             // it because an older message used the same URL made current mail
             // look broken (and could erase every image in a short reply). Keep
@@ -150,7 +182,8 @@ struct EmailWebView: View {
                 trackers: stripped.blocked,
                 trackersAllowed: allowTrackers,
                 hasRemoteCandidates: hasRemoteCandidates,
-                imageURLs: proxied.urls)
+                imageURLs: proxied.urls,
+                topline: topline)
         }
 
         /// Tracker policy is part of the identity: the two policies produce
@@ -200,26 +233,44 @@ struct EmailWebView: View {
     /// whose caller offered no guess at all. A LAST RESORT: a frame that opens
     /// at this and measures at ten times it is the thread lurching.
     private static let placeholderHeight: CGFloat = 120
-    /// The document's own top and bottom padding (the 14px in `document`),
-    /// which a caller counting lines of text knows nothing about.
-    private static let documentPadding: CGFloat = 28
+    /// The document's own top and bottom padding (the body padding in
+    /// `document`), which a caller counting lines of text knows nothing about.
+    /// A bubble is padded like the plain-text bubble beside it, a card like a
+    /// card.
+    private var documentPadding: CGFloat { bubble ? 18 : 28 }
     /// Height used when measurement never arrives at all — generous on purpose:
     /// too tall leaves whitespace, too short silently hides mail.
     private static let unmeasuredFallbackHeight: CGFloat = 900
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        // A sent bubble's chrome — the image bar, the quoted-history chip —
+        // keeps to the bubble's own side, or a short bubble would sit at the
+        // left of a stack the chip had made wider and end up flush with nothing.
+        VStack(alignment: bubble && mine ? .trailing : .leading, spacing: 8) {
             imageBar
+            // The mail's own topline, where the sender put it — above the
+            // body — but as a caption rather than the first line of the
+            // page: grey, small, and not part of the bubble.
+            if let topline = prepared.topline {
+                Text(topline)
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.inkFaint)
+                    .lineLimit(2)
+                    .multilineTextAlignment(bubble && mine ? .trailing : .leading)
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 2)
+            }
 
             EmailWebViewRepresentable(
                 html: prepared.html,
                 allowRemote: allowRemote,
                 collapseQuotes: quotedHidden,
+                bubble: bubble,
                 // The pool's message identity. nil is not "unkeyed", it is
                 // NOT POOLABLE — see WebFramePool.Key.
                 poolKey: cacheKey,
-                onHeight: { h in
-                    apply(h)
+                onHeight: { m in
+                    apply(m)
                 },
                 onLoaded: {
                     // The document and its subresources are in. Whatever it
@@ -230,33 +281,66 @@ struct EmailWebView: View {
                 onQuotedFound: { hasQuoted = $0 },
                 onLink: { Opener.open($0) }
             )
-            .frame(height: displayHeight)
+            // `maxWidth`, not `width`: a hugging bubble is capped at what the
+            // document reported, and the column caps that in turn, so a
+            // measurement taken in a wider window can never push a bubble
+            // past the edge while the heights are being retaken.
+            .frame(maxWidth: displayWidth)
+            .frame(height: empty ? 0 : displayHeight)
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            // The speech tail, on the DOCUMENT's outer bottom corner, in the
+            // document's own page colour. BEHIND the frame, not over it: the
+            // tail's solid span reaches well inside the bubble to bury the
+            // clipped corner, and the document is opaque, so from behind only
+            // the poke ever shows — over the frame the span showed as a
+            // block of the wrong colour on any mail whose page is not white.
+            // Mounted in both styles and merely clear in a card, so a style
+            // flip changes no identity.
+            .background(alignment: mine ? .bottomTrailing : .bottomLeading) {
+                BubbleTail(mine: mine)
+                    .fill(background)
+                    .frame(width: 12, height: 12)
+                    .offset(x: mine ? BubbleTail.poke : -BubbleTail.poke)
+                    .opacity(bubble && !empty ? 1 : 0)
+                    .allowsHitTesting(false)
+            }
             // PAINT-HOLD: the frame keeps its space but stays invisible until the
             // first measurement lands, so no half-laid-out document snaps to size.
             // WebKit's `suppressesIncrementalRendering` is deliberately NOT used:
             // it waits for every subresource, holding parsed mail hostage to the
             // slowest CDN. Measurement fires at document end, before images.
             .opacity(measured ? 1 : 0)
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 
-            if hasQuoted {
-                Button {
-                    quotedHidden.toggle()
-                } label: {
-                    Text(quotedHidden ? "··· show quoted history" : "hide quoted history")
-                        .font(Typo.micro)
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 3)
+            // Under the mail: the quoted-history toggle and the tracker
+            // footnote, on one line when both are here. Conditional as a
+            // whole, or an empty row would still cost the stack's spacing.
+            if hasQuoted || (prepared.trackers > 0 && !prepared.trackersAllowed) {
+              HStack(spacing: 10) {
+                if hasQuoted {
+                    Button {
+                        quotedHidden.toggle()
+                    } label: {
+                        Text(quotedHidden ? "··· show quoted history" : "hide quoted history")
+                            .font(Typo.micro)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 3)
+                    }
+                    // Text-on-hover like the header actions: the only control
+                    // INSIDE the reading surface, where a glass pill reads as
+                    // chrome.
+                    .buttonStyle(.textAction)
+                    .help("the quoted reply chain below this message")
                 }
-                // Text-on-hover like the header actions: the only control INSIDE
-                // the reading surface, where a glass pill reads as chrome.
-                .buttonStyle(.textAction)
-                .help("the quoted reply chain below this message")
+                trackerNote
+              }
             }
         }
         .onAppear {
             if let cacheKey, let remembered = FrameHeights.shared.get(cacheKey) {
                 height = remembered
+            }
+            if bubble, let cacheKey, let remembered = FrameHeights.shared.hugWidth(cacheKey) {
+                width = remembered
             }
         }
         // A NEW DOCUMENT TO SIZE. Unfolding the quoted history and letting the
@@ -320,12 +404,29 @@ struct EmailWebView: View {
         sizingIsUserDriven = userDriven
     }
 
-    /// Take a reported height, or decline it. THE ONE PLACE a measurement ever
-    /// becomes the frame's size.
-    private func apply(_ h: CGFloat) {
+    /// Take a reported measurement, or decline it. THE ONE PLACE a measurement
+    /// ever becomes the frame's size.
+    private func apply(_ m: FrameMeasurement) {
+        let h = m.height
         guard h > 0, h <= Self.sanityCeiling else {
             trace("refused \(Int(h))")
             return
+        }
+        // THE WIDTH AND THE EMPTINESS ARE TAKEN FROM EVERY REPORT, ahead of
+        // the phases below, which exist for the height alone. The height is
+        // the viewport-feedback problem (a `vh` body is as tall as the box it
+        // is asked in); the width has no such loop — a hugging document is
+        // min(its widest line, the frame), so narrowing the frame to what it
+        // reported reports the same number back — and the offscreen pass never
+        // measures either, so a frame deferring to that pass would otherwise
+        // never learn them.
+        empty = m.empty
+        if let page = m.background { background = page }
+        // A floor under the hug: nothing this narrow is a message, so a
+        // report like that is a document mid-layout, not a size.
+        if bubble, m.width >= 40 {
+            width = m.width
+            if let cacheKey { FrameHeights.shared.setHugWidth(cacheKey, m.width) }
         }
         // A MEASUREMENT TAKEN AT A FIXED VIEWPORT BEATS ANYTHING THIS FRAME CAN
         // WORK OUT, and for one kind of body it is the only real answer there
@@ -391,7 +492,15 @@ struct EmailWebView: View {
     /// when it offered none. Never remembered as a height: it is a guess, and
     /// `FrameHeights` holds measurements.
     private var guessedHeight: CGFloat? {
-        textHeight > 0 ? textHeight + Self.documentPadding : nil
+        textHeight > 0 ? textHeight + documentPadding : nil
+    }
+    /// How wide the frame may be: what the document said, or what it said
+    /// last time this message was open, or the whole measure. A card is
+    /// always the whole measure.
+    private var displayWidth: CGFloat {
+        guard bubble else { return .infinity }
+        if width > 0 { return width }
+        return cacheKey.flatMap { FrameHeights.shared.hugWidth($0) } ?? .infinity
     }
     /// THE CONFIDENCE ORDER, and it is not the obvious one: a measurement taken
     /// at a FIXED viewport outranks what this frame worked out for itself, even
@@ -449,16 +558,26 @@ struct EmailWebView: View {
             .help(
                 "\(prepared.trackers) tracking pixel\(prepared.trackers == 1 ? "" : "s") left in place: you have emailed this sender, so they may see that you opened this"
             )
-        } else if prepared.trackers > 0 {
+        }
+    }
+
+    /// A FOOTNOTE UNDER THE MAIL, not a badge over it. This is the normal case
+    /// — nearly every commercial mail carries a pixel and nearly every one is
+    /// stripped — and a green capsule over every bubble was the reader being
+    /// congratulated for the default. Faint, small, and after the mail, where
+    /// a note about how it was rendered belongs; the help text carries the
+    /// detail. The two things that DO warrant attention before reading — the
+    /// remote-images offer and pixels left in for a known sender — stay above.
+    @ViewBuilder
+    private var trackerNote: some View {
+        if prepared.trackers > 0, !prepared.trackersAllowed {
             Label(
                 "\(prepared.trackers) tracker\(prepared.trackers == 1 ? "" : "s") blocked",
                 systemImage: "eye.slash"
             )
             .font(Typo.micro)
-            .foregroundStyle(Palette.positive)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 4)
-            .glassCapsule(tint: Palette.positiveSoft, interactive: false)
+            .foregroundStyle(Palette.inkFaint)
+            .padding(.horizontal, 2)
             .help(
                 "tracking pixels removed before render; links open externally and no referrer is ever sent"
             )
@@ -536,10 +655,13 @@ enum EmailFrame {
     /// What a LIVE frame would have to be holding to be reusable for this render,
     /// or nil if this render cannot use one (nothing to render yet, or no message
     /// id).
-    static func renderKey(poolKey: String?, html: String, allowRemote: Bool) -> WebFramePool.Key? {
+    static func renderKey(poolKey: String?, html: String, allowRemote: Bool, bubble: Bool)
+        -> WebFramePool.Key?
+    {
         guard let poolKey, !html.isEmpty else { return nil }
         return WebFramePool.Key(
-            message: poolKey, allowRemote: allowRemote, document: html.hashValue)
+            message: poolKey, allowRemote: allowRemote,
+            document: EmailFrameCoordinator.documentHash(html: html, bubble: bubble))
     }
 
     /// Injected AFTER document end (the message cannot run script to interfere):
@@ -614,11 +736,99 @@ enum EmailFrame {
             return [];
           }
 
+          // ---- full-bleed mail -------------------------------------------
+          // A newsletter paints its own page: one wrapper (a table, a div)
+          // with an opaque background, as wide as the body. Our padding
+          // around that is a ring of OUR page colour around THEIR page —
+          // white around grey. So when the visible content is nothing but
+          // such wrappers, the body gives up its padding and takes their
+          // colour, and the tail follows (pageBackground reads the body).
+          // Runs once, before the first measurement, so the frame is sized
+          // to what it will show. Text mail has text at the top level or a
+          // transparent wrapper, and keeps its padding.
+          function opaque(bg) {
+            return bg && bg !== 'transparent' && bg !== 'rgba(0, 0, 0, 0)';
+          }
+          function adoptFullBleed() {
+            var b = document.body;
+            if (!b) return;
+            var kids = Array.prototype.filter.call(b.childNodes, function (n) {
+              if (n.nodeType === 3) return (n.textContent || '').trim().length > 0;
+              if (n.nodeType !== 1) return false;
+              if (n.tagName === 'STYLE' || n.tagName === 'SCRIPT') return false;
+              return n.getClientRects().length > 0;
+            });
+            if (!kids.length) return;
+            var first = kids[0];
+            if (first.nodeType !== 1) return;
+            var bg = getComputedStyle(first).backgroundColor;
+            if (!opaque(bg)) return;
+            for (var i = 1; i < kids.length; i++) {
+              var k = kids[i];
+              if (k.nodeType !== 1 || getComputedStyle(k).backgroundColor !== bg) return;
+            }
+            var cs = getComputedStyle(b);
+            var inner = b.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+            if (inner <= 0 || first.getBoundingClientRect().width < inner * 0.95) return;
+            b.style.padding = '0';
+            b.style.backgroundColor = bg;
+          }
+          adoptFullBleed();
+
+          // ---- hug or fill ---------------------------------------------
+          // A bubble document hugs its content (body.hug, EmailFrame) ONLY
+          // when the content can say how wide it is: plain prose, a few
+          // inline images. Tables and percentage widths answer with nothing,
+          // and anything already overflowing sideways is wider than it says.
+          // Those fill the measure — which is what a 600px newsletter was
+          // designed for anyway. Decided once, before the first measurement,
+          // so the frame is never narrowed on a bad answer.
+          function decideHug() {
+            var b = document.body;
+            if (!b || !b.classList.contains('hug')) return;
+            var complex = document.querySelector(
+              'table, center, [width$="%"], [style*="%"], iframe');
+            if (complex || b.scrollWidth > b.clientWidth + 1) b.classList.remove('hug');
+          }
+          decideHug();
+
+          // ---- fit to width ------------------------------------------------
+          // A template built at a FIXED width (a 600px table, a 640px image
+          // row) is wider than a phone, and the body is overflow:hidden, so
+          // the right side was simply gone: text cut mid-word, no way to
+          // scroll to it. Scale the whole document down until its widest box
+          // fits, the way Mail does. Measured at zoom 1 each time, since the
+          // overflow is a property of the layout, not of the last fit.
+          // WebKit's zoom is the standardized kind: rects come back in visual
+          // px, scrollHeight/scrollWidth in the element's own; contentHeight
+          // accounts for that.
+          var zoom = 1;
+          function fitWidth() {
+            var b = document.body, h = document.documentElement;
+            if (!b || !h) return;
+            h.style.zoom = '';
+            zoom = 1;
+            var over = b.scrollWidth, room = b.clientWidth;
+            if (room > 0 && over > room + 1) {
+              zoom = Math.max(0.25, room / over);
+              h.style.zoom = String(zoom);
+            }
+          }
+          var fitAt = window.innerWidth;
+          window.addEventListener('resize', function () {
+            if (window.innerWidth === fitAt) return;
+            fitAt = window.innerWidth;
+            fitWidth();
+            measure();
+          });
+
           var quoteNodes = findQuoteNodes();
           window.__passbandSetQuotes = function (collapsed) {
             for (var i = 0; i < quoteNodes.length; i++) {
               quoteNodes[i].style.display = collapsed ? 'none' : '';
             }
+            // An expanded chain can be wider than the reply above it.
+            fitWidth();
             measure();
           };
           // Collapsed by default, BEFORE the first measure, so the frame sizes
@@ -637,13 +847,49 @@ enum EmailFrame {
             if (!b) {
               return document.documentElement ? document.documentElement.scrollHeight : 0;
             }
-            return Math.max(b.scrollHeight, Math.ceil(b.getBoundingClientRect().height));
+            return Math.max(
+              Math.ceil(b.scrollHeight * zoom), Math.ceil(b.getBoundingClientRect().height));
+          }
+          // The width the body came to. Only a bubble document hugs (its body
+          // is `fit-content`), so for a card this is just the frame's width.
+          function contentWidth() {
+            var b = document.body;
+            return b ? Math.ceil(b.getBoundingClientRect().width) : 0;
+          }
+          // Nothing visible in the collapsed document: no text, and no image
+          // that has a box (display:none ones have no client rects).
+          function contentEmpty() {
+            var b = document.body;
+            if (!b) return true;
+            if ((b.textContent || '').trim().length > 0) return false;
+            return !Array.prototype.some.call(document.images, function (img) {
+              return img.getClientRects().length > 0;
+            });
+          }
+          // The page colour the tail should be: the body's, unless the sender
+          // left ours (white) on the body and painted the html element.
+          function pageBackground() {
+            var b = document.body, h = document.documentElement;
+            var bg = b ? getComputedStyle(b).backgroundColor : '';
+            if ((!bg || bg === 'rgba(0, 0, 0, 0)' || bg === 'transparent') && h) {
+              bg = getComputedStyle(h).backgroundColor;
+            }
+            return bg || '';
+          }
+          function measurement() {
+            return {
+              height: contentHeight(), width: contentWidth(), empty: contentEmpty(),
+              background: pageBackground()
+            };
           }
           function measure() {
-            var h = contentHeight();
-            if (h > 0 && Math.abs(h - last) > 1) {
-              last = h;
-              send({ kind: 'height', value: h });
+            var m = measurement();
+            if (m.height > 0 && Math.abs(m.height - last) > 1) {
+              last = m.height;
+              send({
+                kind: 'height', value: m.height, width: m.width, empty: m.empty,
+                background: m.background
+              });
             }
           }
           // THE SAME NUMBER, ASKED FOR RATHER THAN SENT. A frame being
@@ -655,9 +901,11 @@ enum EmailFrame {
           // asked. Defined on the collapsed document, so it reports what the
           // reader will actually show.
           window.__passbandHeight = contentHeight;
+          window.__passbandMeasure = measurement;
           measure();
           requestAnimationFrame(measure);
-          window.addEventListener('load', measure);
+          // Images with a width attribute can widen a table once they land.
+          window.addEventListener('load', function () { fitWidth(); measure(); });
           // Images arriving are the only post-load height change (no page
           // script can run) — re-measure as each settles.
           Array.prototype.forEach.call(document.images, function (img) {
@@ -701,7 +949,7 @@ enum EmailFrame {
 /// representable, because there are two representables and only one of these.
 @MainActor
 final class EmailFrameCoordinator: NSObject {
-    var onHeight: (CGFloat) -> Void
+    var onHeight: (FrameMeasurement) -> Void
     /// The navigation this frame started has finished — subresources and all.
     var onLoaded: () -> Void
     var onQuotedFound: (Bool) -> Void
@@ -739,7 +987,7 @@ final class EmailFrameCoordinator: NSObject {
     private var appliedCollapse: Bool?
 
     init(
-        onHeight: @escaping (CGFloat) -> Void, onLoaded: @escaping () -> Void,
+        onHeight: @escaping (FrameMeasurement) -> Void, onLoaded: @escaping () -> Void,
         onQuotedFound: @escaping (Bool) -> Void, onLink: @escaping (String) -> Void
     ) {
         self.onHeight = onHeight
@@ -755,12 +1003,25 @@ final class EmailFrameCoordinator: NSObject {
         "\(allowRemote)|\(document)"
     }
 
-    func load(_ webView: WKWebView, html: String, allowRemote: Bool, poolKey: String?) {
+    /// The identity of a DOCUMENT, as opposed to a body: the same html is two
+    /// documents when one hugs as a bubble and the other fills as a card, and
+    /// a frame holding the one must not pass for the other — neither at the
+    /// load guard nor in the pool.
+    nonisolated static func documentHash(html: String, bubble: Bool) -> Int {
+        var hasher = Hasher()
+        hasher.combine(html)
+        hasher.combine(bubble)
+        return hasher.finalize()
+    }
+
+    func load(
+        _ webView: WKWebView, html: String, allowRemote: Bool, bubble: Bool, poolKey: String?
+    ) {
         // NEVER LOAD THE PLACEHOLDER: `prepared` can start empty, and loading
         // a blank document lands the real one as a SECOND navigation — which
         // is what makes the load race reachable at all.
         guard !html.isEmpty else { return }
-        let document = html.hashValue
+        let document = Self.documentHash(html: html, bubble: bubble)
         let signature = Self.signature(allowRemote: allowRemote, document: document)
         guard signature != loadedSignature else { return }
         loadedSignature = signature
@@ -775,7 +1036,7 @@ final class EmailFrameCoordinator: NSObject {
         relay?.noteLoadStarted()
         pendingOwnLoads += 1
         webView.loadHTMLString(
-            Self.document(html: html, allowRemote: allowRemote),
+            Self.document(html: html, allowRemote: allowRemote, bubble: bubble),
             // A nil base URL gives the document a unique opaque origin, so
             // relative references resolve to nothing rather than to us.
             baseURL: nil)
@@ -810,12 +1071,12 @@ final class EmailFrameCoordinator: NSObject {
         // frame comes back at a new width. The main-actor hop is not optional
         // — makeNSView runs inside a view update and these callbacks write
         // @State.
-        let height = entry.relay.lastHeight
+        let last = entry.relay.lastMeasurement
         let quoted = entry.relay.lastQuoted
         Task { @MainActor [weak self] in
             guard let self else { return }
             self.onQuotedFound(quoted)
-            if height > 0 { self.onHeight(height) }
+            if let last { self.onHeight(last) }
             // A POOLED FRAME NEVER FIRES `didFinish` AGAIN — it finished
             // loading for its previous host. Saying so here is what leaves the
             // host willing to take one more measurement, which is the whole
@@ -886,10 +1147,10 @@ final class EmailFrameCoordinator: NSObject {
     /// so nothing else would ever tell the host it had stopped moving.
     private func settle(_ webView: WKWebView) {
         onLoaded()
-        webView.evaluateJavaScript("window.__passbandHeight ? window.__passbandHeight() : 0") {
+        webView.evaluateJavaScript("window.__passbandMeasure ? window.__passbandMeasure() : 0") {
             [weak self] value, _ in
-            guard let self, let number = value as? NSNumber, number.doubleValue > 0 else { return }
-            self.onHeight(CGFloat(number.doubleValue))
+            guard let self, let m = FrameMeasurement(payload: value) else { return }
+            self.onHeight(m)
         }
     }
 
@@ -952,7 +1213,9 @@ final class EmailFrameCoordinator: NSObject {
     /// It does NOT cover `vh` units, which resolve against the viewport no
     /// matter what html and body are told to be. Those are bounded on the host
     /// side instead — see EmailWebView's sizing phases.
-    nonisolated static func document(html: String, allowRemote: Bool) -> String {
+    nonisolated static func document(html: String, allowRemote: Bool, bubble: Bool = false)
+        -> String
+    {
         // Which schemes an image may come from, and why the two custom ones are
         // gated differently, is MailCSP's — the policy lives where it can be
         // asserted without a WebKit process.
@@ -974,18 +1237,169 @@ final class EmailFrameCoordinator: NSObject {
             <meta name="referrer" content="no-referrer">\
             <meta charset="utf-8">\(viewport)\
             <style>\
-            html,body{margin:0;padding:14px;background:#fff;color:#111;\
+            html,body{margin:0;padding:0;background:#fff;color:#111;\
             font:14px/1.55 -apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;\
             word-break:break-word;overflow-wrap:anywhere;overflow:hidden;}\
             html,body{height:auto!important;min-height:0!important;}\
+            \(bubble ? bubbleBody : cardBody)\
             img{max-width:100%;height:auto;}\
             a{color:#2b7fd4;}\
             table{max-width:100%;}\
             pre{white-space:pre-wrap!important;}\
             blockquote{margin:8px 0;padding-left:10px;border-left:2px solid #d8dee6;color:#555;}\
             </style>\
-            </head><body>\(html)</body></html>
+            </head><body\(bubble ? " class=\"hug\"" : "")>\(html)</body></html>
             """
+    }
+
+    /// THE BODY IS THE ONLY PADDED BOX. It used to be `html,body{padding:14px}`,
+    /// which pads both and puts the text 28 points in — a slab, in a bubble.
+    /// The measuring script reads the body's box, so what it reports is what
+    /// is drawn.
+    nonisolated private static let cardBody = "body{padding:14px;}"
+    /// A bubble is padded like the plain-text bubble beside it (PlainBody: 12
+    /// across, 9 down) and is only as wide as what is in it: `fit-content` is
+    /// min(the widest line, the frame), border-box so the cap includes the
+    /// padding. A one-line reply hugs; a newsletter's 600px table fills.
+    ///
+    /// THE HUG IS A CLASS, so the measuring script can take it away: a body
+    /// built from `width="100%"` tables and percentage-width images answers
+    /// the question "how wide do you want to be" with nothing (percentages
+    /// contribute zero to an intrinsic width), and a frame narrowed to that
+    /// answer caps the document at it for good. Such a document fills.
+    nonisolated private static let bubbleBody =
+        "body{padding:9px 12px;box-sizing:border-box;}"
+        + "body.hug{width:-webkit-fit-content;width:fit-content;max-width:100%;}"
+}
+
+/// THE LINE AHEAD OF THE DOCUMENT. A sanitized body very often opens with
+/// bare text and then a `<style>`: that is the head of the original mail with
+/// its tags removed — the `<title>` text survives, the `<style>` block after it
+/// survives — and rendered as-is it is a stray first line on the page (in this
+/// mailbox, the top of some 990 messages). It IS the mail's topline, so it is
+/// shown, as a caption over the body rather than inside it.
+///
+/// Only that exact shape is taken: text, then `<style`. A message that opens
+/// "Hello,<br>" opens with text too, and that text is the mail.
+enum Topline {
+    static func split(_ html: String) -> (topline: String?, html: String) {
+        let trimmedStart = html.drop(while: { $0.isWhitespace })
+        guard let lt = trimmedStart.firstIndex(of: "<"), lt != trimmedStart.startIndex,
+            trimmedStart[lt...].prefix(6).lowercased() == "<style"
+        else { return (nil, html) }
+        let raw = trimmedStart[trimmedStart.startIndex..<lt]
+        let text = decode(String(raw))
+            .split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        guard !text.isEmpty, text.count <= 300 else { return (nil, html) }
+        return (text, String(trimmedStart[lt...]))
+    }
+
+    /// Entities, decoded UNTIL THEY STOP DECODING: the sanitizer escaped what
+    /// was already escaped, so the stored text reads `&amp;#x27;` where the
+    /// mail said an apostrophe. Two passes is the common case; the loop is
+    /// bounded either way.
+    static func decode(_ text: String) -> String {
+        var out = text
+        for _ in 0..<3 {
+            let next = decodeOnce(out)
+            if next == out { return out }
+            out = next
+        }
+        return out
+    }
+
+    private static let named: [String: String] = [
+        "amp": "&", "lt": "<", "gt": ">", "quot": "\"", "apos": "'", "nbsp": " ",
+        "mdash": "\u{2014}", "ndash": "\u{2013}", "hellip": "\u{2026}", "copy": "\u{A9}",
+        "reg": "\u{AE}", "trade": "\u{2122}", "lsquo": "\u{2018}", "rsquo": "\u{2019}",
+        "ldquo": "\u{201C}", "rdquo": "\u{201D}", "bull": "\u{2022}", "zwnj": "", "zwj": "",
+        "shy": "", "euro": "\u{20AC}", "pound": "\u{A3}", "yen": "\u{A5}", "deg": "\u{B0}",
+        "times": "\u{D7}", "laquo": "\u{AB}", "raquo": "\u{BB}", "rarr": "\u{2192}",
+        "larr": "\u{2190}", "middot": "\u{B7}", "eacute": "\u{E9}", "egrave": "\u{E8}",
+        "ecirc": "\u{EA}", "aacute": "\u{E1}", "agrave": "\u{E0}", "acirc": "\u{E2}",
+        "auml": "\u{E4}", "iacute": "\u{ED}", "oacute": "\u{F3}", "ouml": "\u{F6}",
+        "uacute": "\u{FA}", "uuml": "\u{FC}", "ntilde": "\u{F1}", "ccedil": "\u{E7}",
+        "Eacute": "\u{C9}", "Uuml": "\u{DC}", "Ouml": "\u{D6}", "Auml": "\u{C4}",
+    ]
+
+    private static func decodeOnce(_ text: String) -> String {
+        guard text.contains("&") else { return text }
+        var out = ""
+        var rest = Substring(text)
+        while let amp = rest.firstIndex(of: "&") {
+            out += rest[rest.startIndex..<amp]
+            let tail = rest[amp...]
+            guard let semi = tail.firstIndex(of: ";"), tail.distance(from: amp, to: semi) <= 10
+            else {
+                out.append("&")
+                rest = tail.dropFirst()
+                continue
+            }
+            let name = tail[tail.index(after: amp)..<semi]
+            var replacement: String?
+            if name.hasPrefix("#x") || name.hasPrefix("#X") {
+                replacement = UInt32(name.dropFirst(2), radix: 16)
+                    .flatMap(Unicode.Scalar.init).map { String(Character($0)) }
+            } else if name.hasPrefix("#") {
+                replacement = UInt32(name.dropFirst())
+                    .flatMap(Unicode.Scalar.init).map { String(Character($0)) }
+            } else {
+                replacement = named[String(name)]
+            }
+            if let replacement {
+                out += replacement
+                rest = tail[tail.index(after: semi)...]
+            } else {
+                out.append("&")
+                rest = tail.dropFirst()
+            }
+        }
+        out += rest
+        return out
+    }
+}
+
+/// What the measuring script says about the document it is in — the height
+/// the frame should be, the width the body came to, and whether there is
+/// anything in it at all. Pushed on every change and pulled on demand
+/// (`__passbandMeasure`), the same shape either way.
+struct FrameMeasurement: Equatable, Sendable {
+    var height: CGFloat
+    var width: CGFloat
+    var empty: Bool
+    /// The page's computed background, or nil when it was not a plain colour
+    /// (a gradient, an image, nothing reported). The tail is drawn in it.
+    var background: Color?
+
+    /// From a script message or an `evaluateJavaScript` result — a dictionary
+    /// with NSNumber values either way. nil for anything that is not a
+    /// measurement, including a height of zero (a document that did not run
+    /// the script).
+    init?(payload: Any?) {
+        guard let dict = payload as? [String: Any],
+            let height = (dict["height"] as? NSNumber)?.doubleValue ?? (dict["value"] as? NSNumber)?.doubleValue,
+            height > 0
+        else { return nil }
+        self.height = CGFloat(height)
+        self.width = CGFloat((dict["width"] as? NSNumber)?.doubleValue ?? 0)
+        self.empty = (dict["empty"] as? Bool) ?? false
+        self.background = Self.color(css: dict["background"] as? String)
+    }
+
+    /// `rgb(r, g, b)` / `rgba(r, g, b, a)` as `getComputedStyle` spells a
+    /// colour, to a Color. Anything else — transparent, a keyword, nothing —
+    /// is nil, and the caller keeps what it had.
+    static func color(css: String?) -> Color? {
+        guard let css, let open = css.firstIndex(of: "("), let close = css.lastIndex(of: ")"),
+            css.hasPrefix("rgb")
+        else { return nil }
+        let parts = css[css.index(after: open)..<close]
+            .split(whereSeparator: { $0 == "," || $0 == " " || $0 == "/" })
+            .compactMap { Double($0) }
+        guard parts.count >= 3 else { return nil }
+        if parts.count >= 4, parts[3] == 0 { return nil }
+        return Color(
+            .sRGB, red: parts[0] / 255, green: parts[1] / 255, blue: parts[2] / 255, opacity: 1)
     }
 }
 
@@ -1013,7 +1427,7 @@ final class FrameRelay: NSObject, WKScriptMessageHandler, WKNavigationDelegate,
 
     /// What THIS document last told us. Read at checkout, because the measuring
     /// script does not re-run for a frame that was not reloaded.
-    private(set) var lastHeight: CGFloat = 0
+    private(set) var lastMeasurement: FrameMeasurement?
     private(set) var lastQuoted = false
     /// Whether the current document finished loading. Only a settled frame is safe
     /// to pool — see Coordinator.release.
@@ -1021,7 +1435,7 @@ final class FrameRelay: NSObject, WKScriptMessageHandler, WKNavigationDelegate,
 
     func noteLoadStarted() {
         loaded = false
-        lastHeight = 0
+        lastMeasurement = nil
         lastQuoted = false
     }
 
@@ -1033,9 +1447,9 @@ final class FrameRelay: NSObject, WKScriptMessageHandler, WKNavigationDelegate,
         else { return }
         switch kind {
         case "height":
-            guard let value = payload["value"] as? Double, value > 0 else { return }
-            lastHeight = CGFloat(value)
-            owner?.onHeight(lastHeight)
+            guard let m = FrameMeasurement(payload: payload) else { return }
+            lastMeasurement = m
+            owner?.onHeight(m)
         case "quoted":
             guard let value = payload["value"] as? Bool else { return }
             lastQuoted = value

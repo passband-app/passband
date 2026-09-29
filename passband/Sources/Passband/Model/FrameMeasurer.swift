@@ -186,7 +186,12 @@ final class FrameMeasurer {
         relay.expectOwnLoad()
         guard
             let navigation = view.loadHTMLString(
-                EmailFrameCoordinator.document(html: prepared.html, allowRemote: allowRemote),
+                // THE SAME DOCUMENT THE READER LOADS, bubble chrome included: a
+                // bubble is padded differently from a card, and a height
+                // taken from the wrong one is filed as authoritative under
+                // the key the right one reads.
+                EmailFrameCoordinator.document(
+                    html: prepared.html, allowRemote: allowRemote, bubble: style == .bubbles),
                 baseURL: nil)
         else {
             relay.forgetOwnLoad()

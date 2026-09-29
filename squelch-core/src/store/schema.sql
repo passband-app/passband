@@ -82,6 +82,12 @@ CREATE INDEX IF NOT EXISTS idx_messages_received ON messages(account_id, receive
 -- a full scan of `messages JOIN triage` per escalated row, taken while holding
 -- the store's single connection mutex.
 CREATE INDEX IF NOT EXISTS idx_messages_from ON messages(account_id, from_addr);
+-- NOCASE twin of the sender index, for the per-sender reads that compare
+-- `from_addr = ? COLLATE NOCASE` (ingest keeps the header's spelling, so the
+-- column is not normalized). The BINARY index above cannot serve that
+-- comparison; see `idx_contacts_addr_nocase` for what the walk cost.
+CREATE INDEX IF NOT EXISTS idx_messages_from_nocase
+    ON messages(account_id, from_addr COLLATE NOCASE);
 
 CREATE TABLE IF NOT EXISTS contacts (
     account_id INTEGER NOT NULL,
@@ -1028,20 +1034,29 @@ CREATE TABLE IF NOT EXISTS devices (
 -- The pusher's read is exactly "every token for my account".
 CREATE INDEX IF NOT EXISTS idx_devices_account ON devices(account_id);
 
--- LOCAL DRAFTS. One unsent composition per reply target, plus ONE new-message
--- draft per account (`reply_to_message_id IS NULL`).
+-- LOCAL DRAFTS. One unsent composition per reply target, one per forwarded
+-- message, and ANY NUMBER of new-message drafts per account (both keys NULL),
+-- each addressed by its own `id`. A row carries at most one of the two keys.
 --
 -- HUMAN-DOOR DATA ONLY: served exclusively by /client/drafts, never synced to
 -- Gmail Drafts, and never visible on /mcp — an unsent draft is the user's own
 -- thinking, not mail the agent door was handed (two-door invariant).
 --
--- Uniqueness is two PARTIAL indexes rather than UNIQUE(account_id,
--- reply_to_message_id), because SQLite treats NULLs as distinct in a UNIQUE:
--- the new-message draft would otherwise be insertable without bound.
+-- Uniqueness is PARTIAL indexes rather than UNIQUE(account_id,
+-- reply_to_message_id), so the key only binds rows that carry it. The NULL key
+-- is NOT unique any more: new-message drafts are many by design. Its index
+-- (`idx_drafts_new`) keeps the old name on purpose, as a ROLLBACK GUARD: an
+-- older binary's `CREATE UNIQUE INDEX IF NOT EXISTS idx_drafts_new` checks
+-- only the name, so it is a no-op instead of a UNIQUE violation on every open
+-- (see migrate.rs).
+-- The forward key's index (`idx_drafts_forward`) is created in migrate.rs, NOT
+-- here: this file runs before `migrate`, and on an existing DB the index would
+-- name a column that does not exist yet.
 CREATE TABLE IF NOT EXISTS drafts (
     id                  INTEGER PRIMARY KEY,
     account_id          INTEGER NOT NULL,
-    reply_to_message_id INTEGER,          -- NULL = the new-message draft
+    reply_to_message_id INTEGER,          -- NULL = not a reply
+    forward_of_message_id INTEGER,        -- NULL = not a forward
     to_addr             TEXT NOT NULL DEFAULT '',
     -- The composer's other two recipient lists, comma-joined exactly as
     -- to_addr holds the visible ones. A draft that could not hold these would
@@ -1058,7 +1073,7 @@ CREATE TABLE IF NOT EXISTS drafts (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_drafts_reply
     ON drafts(account_id, reply_to_message_id) WHERE reply_to_message_id IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_drafts_new
+CREATE INDEX IF NOT EXISTS idx_drafts_new
     ON drafts(account_id) WHERE reply_to_message_id IS NULL;
 
 -- FILES STAGED FOR A SEND. The composer uploads each file the moment it is

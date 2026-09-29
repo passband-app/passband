@@ -11,17 +11,30 @@ import SwiftUI
 /// Upcoming calendar records, retained for 24 hours after their first viewing.
 struct CalendarZone: View {
     @Environment(AppStore.self) private var store
-    private var accountScope: String {
-        RehearsalMode.isEnabled ? CalendarVisibility.practiceAccount : AccountManager.shared.activeId?.uuidString ?? "disconnected"
+
+    /// The rows this card shows at `now`. Static so the sitrep can ask whether
+    /// the whole rail is empty by the SAME rule each card draws with.
+    @MainActor
+    private static var accountScope: String {
+        RehearsalMode.isEnabled
+            ? CalendarVisibility.practiceAccount
+            : AccountManager.shared.activeId?.uuidString ?? "disconnected"
+    }
+    private var accountScope: String { Self.accountScope }
+
+    @MainActor
+    static func rows(_ store: AppStore, now: Date) -> [CalendarUpdate] {
+        let account = accountScope
+        return store.zones.calendar.filter {
+            CalendarVisibility.shared.admits(
+                account: account, item: $0.id, startValue: $0.starts_at,
+                timezone: $0.start_timezone, now: now)
+        }
     }
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 30)) { context in
-            let rows = store.zones.calendar.filter {
-                CalendarVisibility.shared.admits(
-                    account: accountScope, item: $0.id, startValue: $0.starts_at,
-                    timezone: $0.start_timezone, now: context.date)
-            }
+            let rows = Self.rows(store, now: context.date)
             ZoneCard(
                 symbol: "calendar", title: "Calendar", count: rows.count, tint: Palette.accent
             ) {
@@ -97,10 +110,13 @@ private struct CalendarSeenMarker: ViewModifier {
 // MARK: - shipments
 
 /// Still-active shipments plus anything delivered TODAY; older deliveries drop
-/// out. No j/k, but each card opens its email and a context menu clears a
-/// package the user is done looking at.
+/// out. No j/k, but each card opens its email, and a context menu — or `e`
+/// while hovering, on the Mac — clears a package the user is done looking at.
 struct ShipmentsZone: View {
     @Environment(AppStore.self) private var store
+    /// The Mac board's hover cursor, for `e`. `nil` on the phone, which has no
+    /// hover and no keymap; the context menu is its only way to clear.
+    var cursor: SitrepCursor? = nil
     private var shipments: [Shipment] { store.zones.shipments }
 
     /// A delivered package survives the DAY IT LANDED, and that day is
@@ -112,8 +128,11 @@ struct ShipmentsZone: View {
     /// A GROUPED card stays while ANY of its packages is still coming, even if
     /// the one standing for it has landed: one order's delivered first box must
     /// not hide its second, still in transit.
-    private var rows: [Shipment] {
-        shipments.filter { $0.staysOnRail(isToday: Fmt.isToday) }
+    private var rows: [Shipment] { Self.rows(store) }
+
+    @MainActor
+    static func rows(_ store: AppStore) -> [Shipment] {
+        store.zones.shipments.filter { $0.staysOnRail(isToday: Fmt.isToday) }
     }
 
     var body: some View {
@@ -124,7 +143,7 @@ struct ShipmentsZone: View {
                 EmptyNote("Nothing en route.")
             } else {
                 VStack(spacing: 8) {
-                    ForEach(rows) { ShipmentCard(shipment: $0) }
+                    ForEach(rows) { ShipmentCard(shipment: $0, cursor: cursor) }
                 }
             }
         }
@@ -135,6 +154,7 @@ struct ShipmentsZone: View {
 private struct ShipmentCard: View {
     @Environment(AppStore.self) private var store
     let shipment: Shipment
+    let cursor: SitrepCursor?
 
     @State private var hovering = false
 
@@ -314,7 +334,17 @@ private struct ShipmentCard: View {
         )
         .contentShape(Rectangle())
         .onTapGesture { if let target { store.openThread(target) } }
-        .onHover { hovering = $0 }
+        .onHover { over in
+            hovering = over
+            guard let cursor else { return }
+            // Only clear the slot if it is still OURS: sliding card to card can
+            // deliver the new card's enter before the old one's exit.
+            if over {
+                cursor.shipment = shipment.id
+            } else if cursor.shipment == shipment.id {
+                cursor.shipment = nil
+            }
+        }
         // A CONTEXT MENU rather than a chip or a swipe: the card's whole face is
         // already spoken for (the tap opens the email), and this rail is a VStack
         // of cards on both platforms, not a List — `swipeActions` would do
@@ -453,9 +483,14 @@ struct BankingZone: View {
 
     @State private var expanded = false
 
-    var body: some View {
+    @MainActor
+    static func rows(_ store: AppStore) -> [BankingRecord] {
         let window = SitrepWindow.shared
-        let inWindow = records.filter { window.admits(Fmt.date($0.received_at)) }
+        return store.zones.banking.filter { window.admits(Fmt.date($0.received_at)) }
+    }
+
+    var body: some View {
+        let inWindow = Self.rows(store)
         let rows = expanded ? inWindow : Array(inWindow.prefix(Self.collapsed))
         ZoneCard(
             symbol: "building.columns", title: "Billing", count: inWindow.count,
@@ -475,10 +510,8 @@ struct BankingZone: View {
                                     .foregroundStyle(Palette.inkDim)
                                     .lineLimit(1)
                                     .frame(maxWidth: .infinity, alignment: .leading)
-                                Chip(text: r.kind.tag, tone: Palette.inkFaintest)
-                                if r.autopay == true {
-                                    Chip(text: "autopay", tone: Palette.inkFaintest)
-                                }
+                                // Autopay implies bill; one chip says both.
+                                Chip(text: r.autopay == true ? "autopay" : r.kind.tag, tone: Palette.inkFaintest)
                                 if let due = Fmt.deadlineChip(r.due) {
                                     Chip(text: due.text, tone: due.overdue ? Palette.danger : Palette.inkFaintest)
                                 }
@@ -486,6 +519,8 @@ struct BankingZone: View {
                                     Text(Fmt.usd(r.amount, currency: r.currency))
                                         .font(Typo.num(11, weight: .medium))
                                         .foregroundStyle(Palette.accentInk)
+                                        .lineLimit(1)
+                                        .fixedSize()
                                 }
                             }
                             .padding(.horizontal, 7)
@@ -539,7 +574,12 @@ struct ReceiptsZone: View {
     @Environment(AppStore.self) private var store
     private var receipts: [Receipt] { store.zones.receipts }
 
-    private var rows: [Receipt] { receipts.filter { Fmt.isToday($0.received_at) } }
+    private var rows: [Receipt] { Self.rows(store) }
+
+    @MainActor
+    static func rows(_ store: AppStore) -> [Receipt] {
+        store.zones.receipts.filter { Fmt.isToday($0.received_at) }
+    }
 
     var body: some View {
         ZoneCard(

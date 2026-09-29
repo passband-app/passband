@@ -13,6 +13,7 @@ use std::net::IpAddr;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
+use crate::alert::{ALERT_TIMEOUT, AlertClient, AlertError};
 use crate::bifrost::{BifrostClient, BifrostError};
 use crate::config::{BifrostConfig, Config, OUTBOUND_TIMEOUT, WaitlistConfig};
 use crate::ratelimit::{
@@ -34,6 +35,8 @@ pub enum StateError {
     Bifrost(#[from] BifrostError),
     #[error(transparent)]
     Resend(#[from] ResendError),
+    #[error(transparent)]
+    Alert(#[from] AlertError),
 }
 
 #[derive(Clone)]
@@ -57,6 +60,9 @@ struct Inner {
     /// exactly when the config says the feature is, never in disagreement with
     /// it. `None` means the waitlist and admin routes are not mounted at all.
     resend: Option<Arc<ResendClient>>,
+    /// The operator's webhook, DERIVED from `config.alert_webhook_url` on the
+    /// same one-switch terms. `None` means [`ControlState::alert`] is a no-op.
+    alert: Option<Arc<AlertClient>>,
     sessions: Mutex<SessionStore>,
     page_limiter: Mutex<RateLimiter>,
     signup_limiter: Mutex<RateLimiter>,
@@ -117,6 +123,11 @@ impl ControlState {
                 .map(Arc::new)
             })
             .transpose()?;
+        let alert = config
+            .alert_webhook_url
+            .as_ref()
+            .map(|url| AlertClient::new(url.clone(), ALERT_TIMEOUT).map(Arc::new))
+            .transpose()?;
         Ok(Self {
             inner: Arc::new(Inner {
                 reconnect_slots: Arc::new(tokio::sync::Semaphore::new(
@@ -127,6 +138,7 @@ impl ControlState {
                 warden,
                 bifrost,
                 resend,
+                alert,
                 sessions: Mutex::new(SessionStore::new()),
                 page_limiter: Mutex::new(RateLimiter::per_minute(PAGE_REQUESTS_PER_MINUTE)),
                 signup_limiter: Mutex::new(RateLimiter::per_minute(SIGNUP_REQUESTS_PER_MINUTE)),
@@ -184,6 +196,14 @@ impl ControlState {
             .resend
             .as_deref()
             .zip(self.inner.config.waitlist.as_ref())
+    }
+
+    /// Tell the operator, in the background, when this deployment has a
+    /// webhook. Never waits and never fails: see [`crate::alert`].
+    pub fn alert(&self, text: String) {
+        if let Some(client) = &self.inner.alert {
+            client.notify(text);
+        }
     }
 
     /// The pending-signup table. Poisoning is RECOVERED rather than propagated:

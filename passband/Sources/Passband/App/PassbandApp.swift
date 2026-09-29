@@ -79,6 +79,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Analytics.screen(AppStore.shared.activeView.rawValue)
     }
 
+    /// ⌘Q INSIDE A SEND HOLD. TEMPORARY: this goes away once the send hold
+    /// moves into the daemon. Until then a held send lives only in memory for
+    /// its five seconds, so it is parked as a draft through the account
+    /// switch's own `parkHeldSends` and quit waits for that save, BOUNDED so an
+    /// unreachable daemon cannot wedge quit. Sparkle's install path ends in
+    /// `NSApp.terminate` and simply waits here too.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        MainActor.assumeIsolated {
+            let store = AppStore.shared
+            // An OPEN composer that was typed into gets its last save too:
+            // `flush` is a no-op for an untouched one, so a quit with nothing
+            // new to keep still terminates at once. Both are flushed before
+            // the test, so neither is skipped by a short-circuit.
+            let pane = DraftSaver.shared.flush(.compose, store.compose)
+            let inline = DraftSaver.shared.flush(.inlineReply, store.inlineReply)
+            let held = store.hasHeldSends
+            guard held || pane || inline else { return .terminateNow }
+            if held { store.parkHeldSends(quitting: true) }
+            // Before the first stats land, every save queued above first waits
+            // up to `verdictWait` to learn which route to write by; a bound
+            // shorter than that kills the process before the write it waited
+            // for. Once stats are in, the write goes out at once, but a parked
+            // send and an edited pane composer share slot `.compose`, whose
+            // writes go one after the other: two round trips, and the parked
+            // one (never toasted, so nobody knows to look) is the one a short
+            // bound cuts on a slow daemon.
+            let limit: Duration =
+                store.sitrep.stats == nil
+                ? DraftSaver.verdictWait + .seconds(2) : held ? .seconds(8) : .seconds(3)
+            Task { @MainActor in
+                // Whichever lands first answers; a reply of `true` ends the
+                // process, so the loser never gets to answer twice.
+                let bound = Task { @MainActor in
+                    try? await Task.sleep(for: limit)
+                    if !Task.isCancelled { NSApp.reply(toApplicationShouldTerminate: true) }
+                }
+                await DraftSaver.shared.settle()
+                bound.cancel()
+                NSApp.reply(toApplicationShouldTerminate: true)
+            }
+            return .terminateLater
+        }
+    }
+
     // FALSE, because the app is a notifier: terminating on last-window-close
     // would drop the event stream, so the notification the window was closed to
     // wait for would never arrive. ⌘Q and the app menu still quit.
@@ -229,10 +273,7 @@ struct PassbandCommands: Commands {
             Button("Ask Your Inbox…") { store.askBarOpen = true }
                 .keyboardShortcut("k", modifiers: [.command])
                 .disabled(blocked)
-            Button("New Ask Chat") {
-                store.assistant.clear()
-                store.askBarOpen = true
-            }
+            Button("New Ask Chat") { store.newAskChat() }
             .keyboardShortcut("k", modifiers: [.command, .shift])
             .disabled(blocked)
             Button("Search…") { store.openSearch() }

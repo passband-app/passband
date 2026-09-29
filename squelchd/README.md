@@ -33,6 +33,7 @@ Config comes from `~/.config/squelch/config.toml` (override with `--config`) plu
 | `SQUELCH_BIND` | bind address for `serve` | `127.0.0.1:8848` |
 | `SQUELCH_DB_PATH` | SQLite path | `~/.local/share/squelch/squelch.db` |
 | `SQUELCH_POLL_SECS` | Gmail poll interval | `45` |
+| `SQUELCH_FETCH_CONCURRENCY` | `messages.get` calls in flight while a window of mail is fetched (first backfill, catch-up, history walk); each is a raw body in memory, and the Gmail budget caps the gain past 2 | `2` |
 | `SQUELCH_MCP_ALLOWED_HOSTS` | extra Host values when fronted by a proxy | — |
 | `SQUELCH_METRICS_BIND` | second listener serving `GET /metrics` and `GET /healthz` | unset (no port opened) |
 | `SQUELCH_EMBED_MODEL` | semantic-recall weights, same value as `[embed] model` | `Xenova/bge-small-en-v1.5` |

@@ -28,8 +28,8 @@ private struct TourTargetModifier: ViewModifier {
 }
 
 /// The guide over the practice board, then the summary over the live one.
-/// The phone has no practice inbox yet (its guide is still to be designed),
-/// so its controller only ever reaches the summary.
+/// Mac only in practice: the phone has no tour (its onboarding is the cold
+/// open) and never mounts this; the `#else` below only keeps it compiling.
 struct TourOverlay: View {
     @Environment(AppStore.self) private var store
 

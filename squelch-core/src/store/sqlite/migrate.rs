@@ -61,9 +61,11 @@ fn tables_exist(conn: &Connection, tables: &[&str]) -> Result<bool> {
     Ok(n as usize == tables.len())
 }
 
-/// Additive, idempotent column migrations for pre-existing DBs. New tables and
-/// indexes are handled by `CREATE ... IF NOT EXISTS` in `schema.sql`; only new
-/// COLUMNS on an existing table need this seam.
+/// Additive, idempotent migrations for pre-existing DBs. New tables and most
+/// indexes are handled by `CREATE ... IF NOT EXISTS` in `schema.sql`; this seam
+/// carries new COLUMNS on an existing table, plus any index that NAMES such a
+/// column (schema.sql runs first, so it cannot create one against an old table)
+/// and the rare index that has to be dropped.
 pub(super) fn migrate(conn: &Connection) -> Result<()> {
     retire_records_destination(conn)?;
     add_column_if_missing(conn, "messages", "list_unsubscribe", "TEXT")?;
@@ -91,6 +93,52 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // the composer can show, or closing one silently drops recipients.
     add_column_if_missing(conn, "drafts", "cc_addr", "TEXT NOT NULL DEFAULT ''")?;
     add_column_if_missing(conn, "drafts", "bcc_addr", "TEXT NOT NULL DEFAULT ''")?;
+    // MANY NEW-MESSAGE DRAFTS. The old single-slot index made a second
+    // new-message draft a constraint violation; new mail is keyed by row id now.
+    // No dedupe is owed: that index guaranteed at most one nil-keyed row.
+    //
+    // ROLLBACK GUARD, deliberate: the name is kept, on a NON-unique index. An
+    // older binary's schema.sql runs `CREATE UNIQUE INDEX IF NOT EXISTS
+    // idx_drafts_new` on every open, and `IF NOT EXISTS` checks only the name,
+    // so with this index in place that create is a no-op. Without it, rolling
+    // back after a user holds two keyless drafts fails every open with a
+    // UNIQUE violation; with it, the old binary merely edits one of several
+    // keyless rows. Dropped only while still UNIQUE, so a normal open is a
+    // no-op rather than a drop and rebuild.
+    //
+    // The SECOND degradation under rollback: the older binary's key-less upsert
+    // selects `reply_to_message_id IS NULL` and knows nothing of forwards, so
+    // it can pick a forward row and rewrite its text while the forward key
+    // survives: the forward's note is overwritten, and a later newer binary
+    // shows the old app's new message as a forward of that message. Accepted,
+    // not fixed: it needs a rollback AND a held forward draft, and no schema
+    // trick here can change an old binary's WHERE clause.
+    let unique_new_index: bool = conn
+        .prepare("SELECT 1 FROM pragma_index_list('drafts') WHERE name = 'idx_drafts_new' AND \"unique\" = 1")?
+        .exists([])?;
+    if unique_new_index {
+        conn.execute("DROP INDEX idx_drafts_new", [])?;
+    }
+    if has_columns(conn, "drafts", &["account_id", "reply_to_message_id"])? {
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_drafts_new
+             ON drafts(account_id) WHERE reply_to_message_id IS NULL",
+            [],
+        )?;
+    }
+    // Forwards are kept too, one per forwarded message like replies. The
+    // index lives HERE, not in schema.sql, because it names the migrated column:
+    // schema.sql runs before this seam, so on an old DB it would reference a
+    // column that does not exist yet and fail every open.
+    add_column_if_missing(conn, "drafts", "forward_of_message_id", "INTEGER")?;
+    if has_columns(conn, "drafts", &["account_id", "forward_of_message_id"])? {
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_drafts_forward
+             ON drafts(account_id, forward_of_message_id)
+             WHERE forward_of_message_id IS NOT NULL",
+            [],
+        )?;
+    }
     // The push routing tag. NULL on every pre-existing row and NOT backfilled:
     // nothing here can know which account a device filed itself under, and the
     // client re-registers (tag included) on its next foreground.

@@ -13,13 +13,10 @@
 // reason it left is that the dashboard's trailing corner is worth more to a door
 // you open every day (the composer) than to one that is empty most days.
 //
-// AND THE URGENT HALF DOES NOT WAIT TO BE FOUND. Moving the key one tab over
-// would have made the most time-critical row on the phone the hardest to reach,
-// so the case that is actually a race — a code-kind message that just landed —
-// raises its own card at the top of the sitrep and reveals FROM THERE, without
-// coming through this page at all (MobileSitrepView). `freshCodes` is the gate
-// and `revealCode` is the tap, both below, so the two surfaces cannot disagree
-// about what is fresh or take different routes to the same digits.
+// AND THE URGENT HALF DOES NOT WAIT TO BE FOUND. The case that is actually a
+// race — a code-kind message that just landed — arrives as a banner, and
+// tapping it opens this page from any tab (`AppStore.requestAuthPage`). The
+// sitrep card that used to reveal fresh codes went with the triage rewrite.
 //
 // PRESENT, DON'T READ, exactly as the Mac does it. This page renders sealed
 // METADATA only — who it is from, what kind, how long ago. No body is fetched to

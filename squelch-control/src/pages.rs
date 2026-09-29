@@ -6,6 +6,10 @@
 //! third party can watch, and the one thing a user does here is decide whether
 //! to hand over access to their mail.
 //!
+//! ONE FIRST-PARTY FETCH: the Newsreader webfont, served by this service
+//! itself at [`FONT_PATH`] so the headings are the landing page's letterforms.
+//! Same origin, so the CSP names `'self'` for fonts and nothing else.
+//!
 //! THE LOGO IS SUBJECT TO THAT RULE RATHER THAN AN EXCEPTION TO IT. These pages
 //! carry the Passband masthead so that arriving from the landing page does not
 //! feel like leaving the product, and the mark reaches them as an inline `<svg>`
@@ -39,7 +43,9 @@ use crate::store::UserRow;
 /// 303 to Google consent, and under `form-action 'self'` Chrome silently eats
 /// that navigation - the button "does nothing" while the server logs a
 /// perfectly healthy signup. Found live on the first real signup, 2026-08-11.
-const CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://accounts.google.com; frame-ancestors 'none'; base-uri 'none'";
+/// `font-src 'self'` admits exactly one file, [`NEWSREADER`], served by this
+/// same origin: the landing page's serif, and still nothing a third party sees.
+const CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; form-action 'self' https://accounts.google.com; frame-ancestors 'none'; base-uri 'none'";
 
 /// Escape text for HTML.
 pub fn escape_html(s: &str) -> String {
@@ -186,6 +192,29 @@ const MARK: &str = concat!(
     r#"L918 718L936 733L954 744L972 753L993 760L1035 768"/></svg>"#,
 );
 
+/// Where the Newsreader webfont is served. Same origin as every page here.
+pub const FONT_PATH: &str = "/fonts/newsreader.woff2";
+
+/// Newsreader, byte for byte the subset `passband-site/newsreader-var.woff2`
+/// the landing page ships, vendored into this crate because the control image
+/// is built from the crates alone and never sees `passband-site/`. If the
+/// site's subset changes, copy it over again.
+const NEWSREADER: &[u8] = include_bytes!("../assets/newsreader.woff2");
+
+/// `GET /fonts/newsreader.woff2`. Immutable for a year: the bytes only change
+/// with a deploy, and a changed font is a changed file worth a new path.
+pub async fn newsreader() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "font/woff2"),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        NEWSREADER,
+    )
+        .into_response()
+}
+
 /// The shell every page shares.
 ///
 /// THE MASTHEAD IS PART OF THE SHELL, so every page carries it: the mark, then
@@ -212,15 +241,32 @@ fn console(status: StatusCode, title: &str, body: &str) -> Response {
     render(status, title, body, r#" class="console""#)
 }
 
+/// The operator surface's own stylesheet, appended to the shell's only on the
+/// pages [`console`] renders. See the file itself for what it is doing; it is a
+/// file rather than more of the format string because it is long, and because
+/// it is plain CSS with single braces that can be edited as CSS.
+const CONSOLE_CSS: &str = include_str!("console.css");
+
+/// The backdrop behind every console page: a glow and the analyzer's
+/// graticule, fixed and still. `aria-hidden`, the same on every page, and NONE
+/// of it data: the sign in door renders it too, and that page names no
+/// waitlist, no counts, and no operator.
+const CONSOLE_CHROME: &str =
+    r#"<div class="fx" aria-hidden="true"><i class="glow"></i><i class="grat"></i></div>"#;
+
 fn render(status: StatusCode, title: &str, body: &str, body_class: &str) -> Response {
     let title = escape_html(title);
     let masthead =
         format!(r#"<header class="brand">{MARK}<span class="wordmark">Passband</span></header>"#);
+    let is_console = body_class == r#" class="console""#;
     let opening = if body_class == r#" class="auth""# {
         format!("{masthead}<main>")
+    } else if is_console {
+        format!("{CONSOLE_CHROME}<main>{masthead}")
     } else {
         format!("<main>{masthead}")
     };
+    let console_css = if is_console { CONSOLE_CSS } else { "" };
     let html = format!(
         r#"<!doctype html>
 <html lang="en">
@@ -247,10 +293,9 @@ main {{ max-width: 34rem; margin: 0 auto; }}
 .brand svg {{ height: 1.5rem; width: auto; flex: none; color: var(--brand); }}
 /* The brand's ONE serif moment, rationed the way the site and the Swift
    client's Typo ration it: Newsreader for the wordmark and nowhere else, since
-   a display serif spread further becomes wallpaper. The webfont itself cannot
-   be fetched under this page's CSP, so it is named first for the reader who
-   happens to have it installed and the stack falls through to the platform's
-   own serif for everybody else. */
+   a display serif spread further becomes wallpaper. The webfont is served from
+   this origin and declared once in this sheet (see `body.auth`), so every page
+   that names it, the operator console's wordmark and heading included, gets it. */
 .wordmark {{ font-family: "Newsreader", ui-serif, Georgia, "Times New Roman", serif;
   font-size: 1.32rem; font-weight: 500; letter-spacing: -0.005em; }}
 /* The admin dashboard is the one page with a table, and the reading width the
@@ -346,118 +391,139 @@ a.button {{ display: inline-block; margin: 0.25rem 0 1.25rem; padding: 0.65rem 1
   .card {{ background: rgba(255, 255, 255, 0.055); border-color: rgba(255, 255, 255, 0.11); }}
   .alt, details {{ border-color: rgba(255, 255, 255, 0.11); }}
 }}
-/* THE OPERATOR'S SURFACE.
-   The landing page's ground, its mark and its type, and none of its selling: no
-   hero, no accent hardware, no motion. This is a page somebody reads in columns
-   and presses in a hurry, so it takes the dark field from that page and leaves
-   behind everything built to persuade.
-   ALWAYS DARK, in both palettes, exactly as the landing page is: nobody has a
-   light-mode Passband to match it to. That is why every colour the dark media
-   query above sets is RESTATED here instead of being inherited from it, which
-   would leave this page reading as warm paper for anybody whose OS is light. */
-/* THE ACCENT COMES WITH THE GROUND. `--brand` is the mark's ink ramp on light
-   and its lit ramp on dark, chosen by the media query above; this surface is
-   dark in BOTH, so it must state the dark one or a light-mode operator gets the
-   ink ramp on a near-black field. */
-body.console {{ --brand: #7cc8eb; background: #0f0f10; color: #f5f5f7; }}
-/* Wider ONLY when there is a board to lay out, the same way the base sheet
-   above widens for a table. The login door is one field, and a credential
-   stretched across fifty-four rems reads as a page that lost its layout. */
-body.console main:has(table) {{ max-width: 54rem; }}
-body.console .muted, body.console .hint, body.console th {{ color: #8a8a90; }}
-body.console code, body.console .code {{ background: rgba(255, 255, 255, 0.07); }}
-body.console :is(input[type=text], input[type=password], input[type=email]) {{
-  background: rgba(255, 255, 255, 0.04); border-color: rgba(255, 255, 255, 0.14); }}
-body.console button {{ background: #f5f5f7; color: #0f0f10; }}
-body.console button.quiet {{ background: none; color: #f5f5f7;
-  border-color: rgba(255, 255, 255, 0.2); }}
-body.console button.quiet:hover {{ border-color: rgba(255, 255, 255, 0.45); }}
-body.console :is(th, td) {{ border-bottom-color: rgba(255, 255, 255, 0.09); }}
-body.console .stop {{ border-left-color: #f2b8b5; }}
-/* The board says its own size, so the operator does not count rows to learn it. */
-body.console h1 {{ margin-bottom: 0; }}
-body.console .tally {{ color: #8a8a90; font-size: 0.9rem; margin: 0.3rem 0 2.5rem; }}
-/* Section headings as CONSOLE LABELS rather than document headings. This page
-   is three lists, not three chapters, and a heading that competes with the
-   addresses under it is a heading in the way. */
-body.console h2 {{ font-size: 0.72rem; font-weight: 600; text-transform: uppercase;
-  letter-spacing: 0.12em; color: #8a8a90; margin: 2.75rem 0 0.6rem; }}
-body.console h2 + .hint {{ margin: -0.2rem 0 1rem; }}
-/* THE COLUMNS ARE THE WHOLE POINT. The address is what gets read, so it takes
-   the width and the ink. The date and the button are looked at only after a row
-   has been picked, so they shrink to their contents and stay out of the scan:
-   `width: 1%` with nowrap is how a table is told to give a column exactly what
-   it needs and not one pixel more. It is also what stops a date breaking across
-   two lines in the middle of `2026-08-14`, which is what the narrow reading
-   column used to do to every row on the board. */
-body.console :is(td, th) {{ padding: 0.6rem 1.1rem 0.6rem 0; }}
-body.console td.who {{ color: #f5f5f7; }}
-body.console td.when {{ width: 1%; white-space: nowrap; color: #8a8a90;
-  font-size: 0.85rem; font-variant-numeric: tabular-nums; }}
-body.console :is(td.act, th:last-child) {{ width: 1%; white-space: nowrap;
-  text-align: right; padding-right: 0; }}
-/* THE ONE ROW THAT IS WRONG: approved, and nobody was told. Every other button
-   in a row is bordered rather than filled, so this is the only filled one among
-   them and the eye lands on it. (The direct-invite form at the foot of the page
-   is filled too, and should be: it is a form's submit, not one of forty
-   identical row actions, and it competes with nothing above it.) */
-body.console :is(.flag, .done) {{ display: inline-block; margin-right: 0.55rem;
-  padding: 0.12rem 0.55rem; border-radius: 999px; border: 1px solid;
-  font-size: 0.72rem; font-weight: 600; letter-spacing: 0.06em;
-  text-transform: uppercase; }}
-body.console .flag {{ color: #f2b8b5; border-color: rgba(242, 184, 181, 0.35); }}
-/* The other end of the funnel, and the reason this column exists: the invite
-   was spent, so there is a mailbox. Quieter than the red one, because a board
-   should draw the eye to what is broken before what worked. */
-body.console .done {{ color: var(--brand); border-color: rgba(124, 200, 235, 0.3); }}
-/* The direct invite: field and button on one row, at the foot of the board.
-   It used to sit BETWEEN the two lists, which split the one thing this page is
-   for (reading down a list of people) into two halves either side of a form. */
-body.console .invite {{ display: flex; gap: 0.5rem; max-width: 34rem; }}
-body.console .invite input {{ margin: 0; }}
-body.console .invite button {{ flex: none; }}
-/* The way out, at the foot of the board and quiet: it is the rarest press on
-   this page, and the session is long enough now that it needed to exist at all. */
-body.console .signout {{ margin: 2.75rem 0 0.6rem; }}
-/* A label the screen reader gets and the layout does not. The heading above the
-   row and the placeholder in it are enough on screen; neither is a label. */
-body.console .sr {{ position: absolute; width: 1px; height: 1px; overflow: hidden;
+/* THE ACCOUNT PAGES WEAR THE LANDING PAGE (passband-site/App.tsx), token for
+   token: its night ground, its analyzer graticule, Newsreader for the words
+   that matter, and ONE material for controls, the dark machined "rig" edged in
+   passband blue. No highlight line along one edge: on a rounded control it
+   bends around the corners into an arc, which reads as generated UI. Somebody arrives here from that
+   page, and the signup should read as the next screen of it rather than as a
+   form somewhere else.
+   DARK BY DEFAULT, like the landing page, which has no light mode at all.
+   `?theme=light` still works (the app passes its own appearance), and restates
+   the tokens below rather than inheriting anything. */
+@font-face {{ font-family: "Newsreader"; src: url("{font_path}") format("woff2");
+  font-weight: 200 800; font-style: normal; font-display: swap; }}
+body.auth {{ color-scheme: dark;
+  --bg: #090D16; --ink: #E9EEF5; --dim: #A8B4C4; --faint: #808E9F; --faintest: #62707F;
+  --hair: rgba(233, 238, 245, 0.08); --accent: #4E9BEA; --brand: #82BAF5; --danger: #FF7A68;
+  --grid: rgba(130, 186, 245, 0.06); --rig-top: #152032; --rig-bottom: #0c121c;
+  --rig-edge: rgba(78, 155, 234, 0.22); --rig-lit: rgba(78, 155, 234, 0.62);
+  --rig-glow: rgba(78, 155, 234, 0.45); --rig-shadow: rgba(0, 0, 0, 0.5);
+  --slot-rule: rgba(78, 155, 234, 0.18);
+  --cta-ink: #dfe8f3; --cta-ink-lit: #f4f8fd; --autofill: #101826;
+  --serif: "Newsreader", ui-serif, Georgia, serif;
+  --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  --gutter: clamp(1rem, 4vw, 2.75rem);
+  margin: 0; min-height: 100vh; padding: 1.4rem var(--gutter) 4rem; box-sizing: border-box;
+  background: var(--bg); color: var(--ink); font-family: var(--sans);
+  -webkit-font-smoothing: antialiased; }}
+body.auth[data-theme="light"] {{ color-scheme: light;
+  --bg: #F6F8FB; --ink: #141C26; --dim: #455465; --faint: #5F6D7E; --faintest: #7B8796;
+  --hair: rgba(20, 28, 38, 0.1); --accent: #1C63AE; --brand: #1C63AE; --danger: #B3261E;
+  --grid: rgba(28, 99, 174, 0.07); --rig-top: #FFFFFF; --rig-bottom: #F3F6FA;
+  --rig-edge: rgba(28, 99, 174, 0.24); --rig-lit: rgba(28, 99, 174, 0.6);
+  --rig-glow: rgba(28, 99, 174, 0.22); --rig-shadow: rgba(20, 28, 38, 0.1);
+  --slot-rule: rgba(28, 99, 174, 0.16);
+  --cta-ink: #141C26; --cta-ink-lit: #0B1C33; --autofill: #FFFFFF; }}
+/* The analyzer's graticule, faded out toward the edges exactly as the landing
+   page fades it, so the ground has texture and no border. */
+body.auth::before {{ content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  background-image:
+    repeating-linear-gradient(90deg, var(--grid) 0 1px, transparent 1px 10%),
+    repeating-linear-gradient(180deg, var(--grid) 0 1px, transparent 1px 12.5%);
+  -webkit-mask-image: radial-gradient(ellipse 70% 65% at 50% 45%, #000 20%, transparent 80%);
+          mask-image: radial-gradient(ellipse 70% 65% at 50% 45%, #000 20%, transparent 80%); }}
+.auth > .brand {{ margin: 0; gap: 0.6rem; }}
+.auth > .brand svg {{ height: 1.45rem; color: var(--brand); }}
+.auth .wordmark {{ font-family: var(--serif); font-size: 1.5rem; }}
+.auth main {{ max-width: 28rem; margin: clamp(3.5rem, 13vh, 8rem) auto 0; overflow-wrap: anywhere; }}
+.auth h1 {{ font-family: var(--serif); font-weight: 500; font-size: clamp(2.2rem, 5vw, 2.9rem);
+  line-height: 1.05; letter-spacing: -0.01em; margin: 0 0 0.9rem; }}
+.auth p {{ color: var(--dim); }}
+.auth .lead {{ font-size: 1rem; line-height: 1.6; margin: 0 0 2rem; }}
+.auth a {{ color: var(--brand); }}
+.auth :is(.hint, .muted, .suffix) {{ color: var(--faintest); font-size: 0.8rem; }}
+.auth .alt {{ border: 0; padding: 0; margin: 1.5rem 0 0; font-size: 0.85rem; color: var(--faint); }}
+.auth .stop {{ border: 0; padding: 0; margin: 0 0 1.25rem; color: var(--danger); font-size: 0.9rem; }}
+.auth .stop strong {{ font-weight: 500; }}
+.auth :is(code, .code) {{ background: var(--hair); color: var(--ink); }}
+/* THE MATERIAL. One recipe for every control on these pages: a standalone
+   button is a small piece of it, and the form is a bigger piece with slots
+   cut in it. Lit as one instrument on hover or focus: the whole edge and a
+   glow, never one side of it. */
+.auth :is(.rig, a.button, button) {{ position: relative; isolation: isolate; overflow: hidden;
+  border-radius: 0.9rem; border: 1px solid var(--rig-edge);
+  background: linear-gradient(180deg, var(--rig-top), var(--rig-bottom));
+  box-shadow: 0 12px 30px var(--rig-shadow);
+  transition: transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1), border-color 0.4s ease,
+    box-shadow 0.4s ease, color 0.4s ease; }}
+.auth :is(.rig:hover, .rig:focus-within, a.button:hover, a.button:focus-visible, button:hover, button:focus-visible) {{
+  border-color: var(--rig-lit);
+  box-shadow: 0 0 34px -6px var(--rig-glow), 0 16px 38px var(--rig-shadow); }}
+.auth :is(a.button, button) {{ display: inline-flex; align-items: center; justify-content: center;
+  gap: 0.6rem; width: auto; margin: 0; padding: 0.95rem 1.9rem; box-sizing: border-box;
+  color: var(--cta-ink); font: 600 0.95rem/1.2 var(--sans); letter-spacing: 0.015em;
+  text-decoration: none; cursor: pointer; }}
+.auth :is(a.button, button):is(:hover, :focus-visible) {{ color: var(--cta-ink-lit); transform: translateY(-2px); }}
+.auth :is(a.button, button):active {{ transform: translateY(0) scale(0.995); }}
+.auth :is(a.button, button):focus-visible {{ outline: 2px solid var(--rig-lit); outline-offset: 3px; }}
+.auth .arrow {{ transition: transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1); }}
+.auth :is(a.button, button):is(:hover, :focus-visible) .arrow {{ transform: translateX(3px); }}
+/* The form: slots cut into one rig, each with its label engraved in it, and
+   the submit as the rig's last slot rather than a button sitting under it. */
+.auth .rig {{ display: flex; flex-direction: column; margin: 0; padding: 0; }}
+.auth .slot {{ position: relative; margin: 0; padding: 0.8rem 1.1rem 0.85rem;
+  border-bottom: 1px solid var(--slot-rule); }}
+.auth .slot:focus-within > label:first-child {{ color: var(--brand); }}
+/* A code that came filled in from the emailed link: out of the way until the
+   link under the form targets it. The link goes when the field comes back. */
+.auth .slot.folded:not(:target) {{ display: none; }}
+.auth .sr {{ position: absolute; width: 1px; height: 1px; overflow: hidden;
   clip-path: inset(50%); white-space: nowrap; }}
-/* Account appearance is explicit; browser theme never overrides the URL choice. */
-body.auth {{ color-scheme: light; --brand: #1c63ae; background: #fff; color: #141c26;
-  padding: 2rem 3rem 4rem; }}
-.auth > .brand {{ margin: 0; }}
-.auth main {{ max-width: 42rem; margin: clamp(3rem, 9vh, 6rem) auto 0; overflow-wrap: anywhere; }}
-.auth h1 {{ font-size: 2rem; line-height: 1.2; letter-spacing: -0.035em; margin-bottom: 0.75rem; }}
-.auth .lead {{ color: #455465; margin-bottom: 2rem; }}
-.auth .card {{ background: transparent; border: 0; border-radius: 0; padding: 0; margin-bottom: 1.5rem; }}
-.auth .field {{ margin-bottom: 1.5rem; }}
-.auth label {{ font-size: 0.9rem; font-weight: 500; margin-bottom: 0.5rem; }}
-.auth input {{ background: #fff; border-color: #cbd1d8; border-radius: 8px; padding: 0.8rem 0.9rem; }}
-.auth :is(button, a.button) {{ box-sizing: border-box; width: 100%; text-align: center;
-  padding: 0.85rem 1.25rem; border-radius: 8px; background: #141c26; color: #fff; }}
-.auth :is(button, a.button):hover {{ background: #293746; }}
-.auth :is(.hint, .muted, .suffix) {{ color: #455465; font-size: 0.875rem; }}
-.auth .alt {{ border: 0; padding: 0; text-align: center; margin-bottom: 2rem; }}
-.auth details {{ border-color: #e4e7eb; font-size: 0.875rem; color: #455465; }}
-.auth summary {{ font-weight: 500; }}
-.auth :is(code, .code) {{ background: #f2f4f7; }}
-.auth .stop {{ border-left-color: #b3261e; }}
-body.auth[data-theme="dark"] {{ color-scheme: dark; --brand: #82baf5;
-  background: #0e141d; color: #e9eef5; }}
-.auth[data-theme="dark"] :is(.lead, .hint, .muted, .suffix, details) {{ color: #a8b4c4; }}
-.auth[data-theme="dark"] input {{ background: #131a24; border-color: #39434e; }}
-.auth[data-theme="dark"] :is(button, a.button) {{ background: #e9eef5; color: #0e141d; }}
-.auth[data-theme="dark"] :is(button, a.button):hover {{ background: #fff; }}
-.auth[data-theme="dark"] details {{ border-color: #303740; }}
-.auth[data-theme="dark"] :is(code, .code) {{ background: #1e2835; }}
-.auth[data-theme="dark"] .stop {{ border-left-color: #ff7a68; }}
-@media (max-width: 600px) {{
-  body.auth {{ padding: 1.5rem 1.25rem 2.5rem; }}
-  .auth main {{ margin-top: 3rem; }}
-  .auth h1 {{ font-size: 1.75rem; }}
+.auth main:has(.slot.folded:target) .swap {{ display: none; }}
+.auth .swap a {{ color: var(--faint); }}
+.auth .slot > label:first-child {{ display: block; margin: 0 0 0.3rem; color: var(--faintest);
+  font-size: 0.68rem; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; }}
+.auth .slot input {{ display: block; width: 100%; margin: 0; padding: 0; border: 0; border-radius: 0;
+  background: none; outline: none; color: var(--ink); font: 1rem/1.4 var(--sans); }}
+.auth .slot input::placeholder {{ color: var(--faintest); }}
+.auth .slot input:-webkit-autofill {{ -webkit-text-fill-color: var(--ink); caret-color: var(--ink);
+  box-shadow: inset 0 0 0 100vw var(--autofill); transition: background-color 9999s; }}
+.auth .rig button {{ width: 100%; padding: 1rem 1.1rem; border: 0; border-radius: 0;
+  background: none; box-shadow: none; }}
+.auth .rig button:is(:hover, :focus-visible) {{ transform: none; box-shadow: none;
+  background: linear-gradient(180deg, transparent, var(--slot-rule)); }}
+.auth .rig button:focus-visible {{ outline-offset: -3px; }}
+/* The username slot: the input and its domain on one line, the domain in the
+   placeholder's grey riding right behind what is typed. See [`signup_form`]
+   for why this needs no script. */
+.auth label.affix {{ display: flex; align-items: baseline; margin: 0; padding: 0; cursor: text;
+  font: inherit; color: inherit; letter-spacing: normal; text-transform: none; }}
+.auth .affix input {{ flex: 1 1 auto; width: 100%; min-width: 1ch; text-transform: lowercase; }}
+@supports (field-sizing: content) {{
+  .auth .affix input {{ flex: 0 1 auto; width: auto; field-sizing: content; }}
 }}
-</style>
+.auth .affix .domain {{ flex: none; white-space: nowrap; color: var(--faintest); }}
+.auth details {{ margin: 1rem 0 0; padding: 0; border: 0; color: var(--faint); font-size: 0.8rem; }}
+.auth summary {{ color: var(--faintest); font-weight: 400; list-style: none; }}
+.auth summary::-webkit-details-marker {{ display: none; }}
+.auth summary::after {{ content: "Why?"; margin-left: 0.3em; color: var(--faint); text-decoration: underline;
+  text-underline-offset: 0.15em; }}
+.auth details[open] summary::after {{ content: ""; }}
+.auth summary:hover::after {{ color: var(--ink); }}
+.auth details ul {{ margin: 0.6rem 0 0.5rem; }}
+.auth details li {{ margin: 0 0 0.25rem; }}
+.auth details p {{ color: var(--faint); margin: 0; }}
+.auth details strong {{ color: var(--ink); font-weight: 500; }}
+@media (max-width: 600px) {{
+  .auth main {{ margin-top: 3rem; }}
+}}
+@media (prefers-reduced-motion: reduce) {{
+  .auth :is(.rig, a.button, button, .arrow) {{ transition-duration: 0.01ms; }}
+  .auth :is(a.button, button):is(:hover, :focus-visible) {{ transform: none; }}
+  .auth :is(a.button, button):is(:hover, :focus-visible) .arrow {{ transform: none; }}
+}}
+{console_css}</style>
 </head>
 <body{body_class} data-theme="{theme}">{opening}
 {body}</main></body>
@@ -465,6 +531,7 @@ body.auth[data-theme="dark"] {{ color-scheme: dark; --brand: #82baf5;
 "#,
         title = title,
         opening = opening,
+        font_path = FONT_PATH,
         theme = crate::appearance::current().name(),
         body = body,
         body_class = body_class,
@@ -490,13 +557,37 @@ body.auth[data-theme="dark"] {{ color-scheme: dark; --brand: #82baf5;
 /// The signup form.
 ///
 /// TWO FIELDS AND ONE BUTTON ARE THE PAGE, and everything else is arranged
-/// around that. The form is unboxed on the native app’s white ground. The
-/// address hint is tied to its input with `aria-describedby`; privacy details
+/// around that. The fields are slots cut into one rig, the landing page's
+/// control material. The
+/// username hint is tied to its input with `aria-describedby`; privacy details
 /// stay available in a collapsed disclosure.
+///
+/// THE DOMAIN TRAILS THE TYPING WITHOUT A SCRIPT. The username input and a
+/// greyed `.{domain}` sit together inside one bordered `.affix` box, and
+/// `field-sizing: content` shrinks the input to what has been typed (or to its
+/// placeholder), so the suffix rides right behind the cursor. A browser without
+/// `field-sizing` lets the input fill the box instead and the suffix sits at
+/// the right edge, which still says which namespace is being claimed. The box
+/// is a second `<label>` so a click on the suffix lands in the field.
+///
+/// A CODE THAT ARRIVED FILLED IN IS FOLDED AWAY, on that first render only. Somebody who clicked the
+/// emailed link has nothing to do with the invite field, so it is hidden and
+/// the form is one field. It is still in the form (a `display: none` input
+/// submits like any other), and a quiet link under the form reveals it through
+/// `:target`, which again needs no script. It unfolds by itself when the code
+/// is the thing that was refused, because a field somebody has to fix cannot be
+/// one they have to find first. After any refused submit the field is shown,
+/// because by then the code may be one the person typed.
 ///
 /// THE GRANT IS STILL STATED BESIDE THE BUTTON, in one line naming all three
 /// permissions, because the consent screen that follows is Google's and says it
-/// in Google's vocabulary. What moved is the LONG version: three paragraphs of
+/// in Google's vocabulary. That line is the `<summary>` of the disclosure, so
+/// it is always on screen and is also the way into the detail. The username
+/// rule is not printed: the server's refusal states whichever rule was broken,
+/// and a screen reader gets it up front from a visually hidden hint. No
+/// `pattern` on the field, because the server trims and case-folds first and a
+/// browser pattern would refuse `ada ` (a predictive-text space) that the
+/// server accepts, with a tooltip that cannot say which rule it meant. What moved is the LONG version: three paragraphs of
 /// scope detail above the fold pushed the form off a phone screen and read as
 /// the page's subject, which it is not. It is a `<details>` now, shut by
 /// default, open to anybody who wants it, and made of the same markup as before
@@ -529,102 +620,103 @@ pub fn signup_form(
     error: Option<&str>,
 ) -> Response {
     let error_html = stop_note(error);
-    // The link out, or nothing at all. Built from the configured origin, which
-    // this crate owns; it is escaped anyway, because the rule is that nothing is
-    // interpolated raw.
-    let waitlist_html = waitlist_url
-        .map(|url| {
-            format!(
-                r#"<p class="alt">No invite code? <a href="{url}">Join the waitlist</a>.</p>"#,
-                url = escape_html(url),
-            )
-        })
-        .unwrap_or_default();
+    // Folded only on the first render of an emailed link: a filled-in code
+    // and nothing refused yet. Any re-render after a submit shows the code, so
+    // a code somebody typed (or just changed) is never hidden behind an error
+    // about something else.
+    let folded = !invite.trim().is_empty() && error.is_none();
+    let (invite_class, invite_focus, label_focus) = if folded {
+        ("slot folded", "", " autofocus")
+    } else {
+        ("slot", " autofocus", "")
+    };
+    // The quiet row under the form: the way out for somebody with no code, and
+    // the way back to a folded one. The waitlist half is built from the
+    // configured origin, which this crate owns, and escaped anyway, because the
+    // rule is that nothing is interpolated raw.
+    let waitlist = waitlist_url.map(|url| {
+        format!(
+            r#"No invite code? <a href="{url}">Join the waitlist</a>"#,
+            url = escape_html(url),
+        )
+    });
+    let swap = folded.then(|| {
+        let dot = if waitlist.is_some() { " · " } else { "" };
+        format!(r##"<span class="swap">{dot}<a href="#code">Use a different code</a></span>"##)
+    });
+    let links_html = if waitlist.is_none() && swap.is_none() {
+        String::new()
+    } else {
+        format!(
+            r#"<p class="alt">{}{}</p>"#,
+            waitlist.unwrap_or_default(),
+            swap.unwrap_or_default()
+        )
+    };
     page(
         StatusCode::OK,
-        "Set up your Passband mailbox",
+        "Set up Passband",
         &format!(
-            r#"<h1>Set up your mailbox</h1>
-<p class="lead">Connect Gmail to get started with Passband.</p>
+            r#"<h1>Set up Passband</h1>
+<p class="lead">Pick a username, then connect Gmail.</p>
 {error_html}
-<form class="card" method="post" action="/signup">
-<div class="field">
+<form class="rig" method="post" action="/signup">
+<div class="{invite_class}" id="code">
 <label for="invite">Invite code</label>
 <input type="text" id="invite" name="invite" value="{invite}" placeholder="XXXX-XXXX-XXXX-XXXX"
-  autocomplete="off" autocapitalize="off" spellcheck="false"
-  autofocus required>
+  autocomplete="off" autocapitalize="off" spellcheck="false"{invite_focus} required>
 </div>
-<div class="field">
-<label for="label">Your Passband address</label>
-<input type="text" id="label" name="label" value="{label}" placeholder="yourname"
-  aria-describedby="label-hint" autocomplete="off" autocapitalize="off" spellcheck="false" required>
-<p class="hint" id="label-hint">yourname<span class="suffix">.{domain}</span> · 3 to 30 lowercase letters, numbers or hyphens.</p>
+<div class="slot">
+<label for="label">Your Passband username</label>
+<label class="affix"><input type="text" id="label" name="label" value="{label}" placeholder="yourname"
+  aria-describedby="label-hint" maxlength="{max}" autocomplete="off" autocapitalize="off" spellcheck="false"{label_focus} required><span class="domain">.{domain}</span></label>
+<span class="sr" id="label-hint">{min} to {max} lowercase letters, numbers or hyphens.</span>
 </div>
-<button type="submit">Continue to Google</button>
-<p class="hint">Google will ask to read, change, and send your Gmail. Passband needs all three.</p>
+<button type="submit">Continue with Google <span class="arrow" aria-hidden="true">→</span></button>
 </form>
-{waitlist_html}
 <details>
-<summary>Gmail access and privacy</summary>
+<summary>Google will ask to read, change, and send your Gmail.</summary>
 <ul>
 <li><strong>Read</strong> (<code>gmail.readonly</code>): mail triage.</li>
 <li><strong>Change</strong> (<code>gmail.modify</code>): archiving and labeling, never deletion.</li>
 <li><strong>Send</strong> (<code>gmail.send</code>): replying from the app.</li>
 </ul>
-<p>Keep all permissions checked to continue.</p>
-<p>Your Google refresh token is stored encrypted to keep mail in sync.
-Self-host to manage it yourself.</p>
-</details>"#,
+<p>Passband needs all three, so keep every box checked. Your Google refresh token is stored encrypted so mail keeps syncing; self-host to hold it yourself.</p>
+</details>
+{links_html}"#,
             error_html = error_html,
-            waitlist_html = waitlist_html,
+            links_html = links_html,
+            invite_class = invite_class,
+            invite_focus = invite_focus,
+            label_focus = label_focus,
             invite = escape_html(invite),
             label = escape_html(label),
             domain = escape_html(base_domain),
+            min = crate::labels::MIN_LABEL_LEN,
+            max = crate::labels::MAX_LABEL_LEN,
         ),
     )
 }
 
-/// The end of the flow: the tenant exists, the daemon is running, and the user
-/// needs to get the app connected to it.
+/// The end of the signup flow: the tenant exists and the daemon is running.
 ///
-/// The code and the URL are `user-select: all` text rather than a copy button,
-/// because a copy button is JavaScript and this page has none. The deep link is
-/// the fast path; typing the code into the app is the path that always works.
-///
-/// THE DISCLOSURE'S SUMMARY NAMES THE SYMPTOM, not the mechanism. The path that
-/// always works is folded away, and the person who needs it is the person for
-/// whom the button just did nothing: a summary reading "connect manually" is
-/// findable only by somebody who already knows that is what went wrong, which
-/// is the one thing they do not know. See [`app_signed_in`], where the same
-/// line replaced a standing "if that button does nothing" heading.
-pub fn success(
-    tenant_url: &str,
-    pair_code: &str,
-    minutes: i64,
-    analytics_id: Option<&str>,
-) -> Response {
-    let link = deep_link(tenant_url, pair_code, analytics_id);
+/// ONE BUTTON, THE DOWNLOAD. Somebody arriving from an invite email has no app
+/// yet, and the app's own onboarding signs in with Gmail and pairs itself
+/// through [`app_signed_in`], so this page carries no deep link and no pairing
+/// code: a second connect path here was a step the app already does.
+pub fn success(tenant_url: &str) -> Response {
+    let host = tenant_url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
     page(
         StatusCode::OK,
         "Your mailbox is ready",
         &format!(
             r#"<h1>Your mailbox is ready</h1>
-<p class="lead">Connect the app to start using Passband.</p>
-<p><a class="button" href="{link}">Open Passband</a></p>
-<p class="alt">Need the app? <a href="{download}">Download Passband</a>.</p>
-<details>
-<summary>Button did nothing? Connect manually</summary>
-<p>Open Passband, choose hosted, and enter your server and pairing code.</p>
-<p><code>{url}</code></p>
-<p><span class="code">{code}</span></p>
-<p>The code works once and expires in {minutes} minutes. Keep it private.
-If it expires, request a new code in Passband.</p>
-</details>"#,
-            url = escape_html(tenant_url),
-            code = escape_html(pair_code),
-            link = escape_html(&link),
+<p class="lead">{host} is live. Get the app, then sign in with Gmail to finish.</p>
+<a class="button" href="{download}">Download Passband for Mac <span class="arrow" aria-hidden="true">→</span></a>"#,
+            host = escape_html(host),
             download = DOWNLOAD_URL,
-            minutes = minutes,
         ),
     )
 }
@@ -634,9 +726,8 @@ If it expires, request a new code in Passband.</p>
 /// THE DEEP LINK IS THE PAGE. Everything else on it exists for the cases the
 /// link cannot cover: a browser that will not hand a custom scheme to the OS, a
 /// sign in finished on a phone for a Mac, an app that is not installed yet. So
-/// the code and the server are on it as `user-select: all` text too, exactly as
-/// they are on [`success`], and for the same reason: the link is the fast path
-/// and typing is the path that always works.
+/// the code and the server are on it as `user-select: all` text too: the link
+/// is the fast path and typing is the path that always works.
 ///
 /// They are folded into a disclosure now rather than standing open, and the
 /// summary carries what the old standing `<h2>If that button does nothing</h2>`
@@ -668,22 +759,20 @@ pub fn app_signed_in(
         &format!(
             r#"<h1>You’re signed in</h1>
 <p class="lead">{email}</p>
-<p><a class="button" href="{link}">Open Passband</a></p>
+<a class="button" href="{link}">Open Passband <span class="arrow" aria-hidden="true">→</span></a>
 <p class="alt">Need the app? <a href="{download}">Download Passband</a>.</p>
 <details>
 <summary>Button did nothing? Connect manually</summary>
-<p>Open Passband, choose hosted, and enter your server and pairing code.</p>
+<p>In Passband, choose Sign in with Gmail and enter:</p>
 <p><code>{url}</code></p>
 <p><span class="code">{code}</span></p>
-<p>The code works once and expires in {minutes} minutes. Keep it private.
-If it expires, sign in again.</p>
+<p>Works once, expires in {minutes} minutes. If it lapses, sign in again.</p>
 </details>"#,
             email = escape_html(account_email),
             url = escape_html(tenant_url),
             code = escape_html(pair_code),
             link = escape_html(&link),
             download = DOWNLOAD_URL,
-            minutes = minutes,
         ),
     )
 }
@@ -751,7 +840,7 @@ pub fn reconnect_result(view: ReconnectView) -> Response {
         StatusCode::OK,
         heading,
         &format!(
-            "<h1>{}</h1><p role=\"status\">{}</p><p><a class=\"button\" href=\"{}\">{}</a></p>",
+            "<h1>{}</h1><p class=\"lead\" role=\"status\">{}</p><a class=\"button\" href=\"{}\">{} <span class=\"arrow\" aria-hidden=\"true\">→</span></a>",
             escape_html(heading),
             escape_html(detail),
             escape_html(link),
@@ -783,7 +872,7 @@ pub fn console_problem(status: StatusCode, heading: &str, detail: &str) -> Respo
         heading,
         &format!(
             r#"<h1>{heading}</h1>
-<p>{detail}</p>"#,
+<p class="lead">{detail}</p>"#,
             heading = escape_html(heading),
             detail = escape_html(detail),
         ),
@@ -814,11 +903,32 @@ pub fn console_problem_with_link(
         heading,
         &format!(
             r#"<h1>{heading}</h1>
-<p>{detail}</p>
-<p><a class="button" href="{url}">Back to your console</a></p>"#,
+<p class="lead">{detail}</p>
+<a class="button" href="{url}">Back to your console <span class="arrow" aria-hidden="true">→</span></a>"#,
             heading = escape_html(heading),
             detail = escape_html(detail),
             url = escape_html(console_url),
+        ),
+    )
+}
+
+/// The app login's answer for a Google account with no mailbox here, WITH the
+/// way forward on it: the app has one "sign in with Gmail" door for everybody,
+/// so a newcomer arrives here, and this is where they learn to sign up.
+///
+/// The link is the signup form at this deployment's own root, never anything a
+/// caller named. Not an oracle for the same reason the page itself is not: only
+/// the person who just proved they hold this Google account can read it.
+pub fn app_no_tenant(heading: &str, detail: &str) -> Response {
+    page(
+        StatusCode::NOT_FOUND,
+        heading,
+        &format!(
+            r#"<h1>{heading}</h1>
+<p class="lead">{detail}</p>
+<a class="button" href="/">Sign up for Passband <span class="arrow" aria-hidden="true">→</span></a>"#,
+            heading = escape_html(heading),
+            detail = escape_html(detail),
         ),
     )
 }
@@ -988,8 +1098,14 @@ pub fn admin_page(pending: &[UserRow], approved: &[UserRow], error: Option<&str>
                 .approved_at
                 .map(|at| format!("<br>approved {}", day(at)))
                 .unwrap_or_default();
+            // For the stylesheet only: an active row's pill is green.
+            let rung = if r.first_paired_at.is_some() {
+                r#" class="active""#
+            } else {
+                ""
+            };
             format!(
-                r#"<tr><td class="who">{who}</td><td class="when">joined {joined}{approved_on}</td><td class="act">{outcome}</td></tr>
+                r#"<tr{rung}><td class="who">{who}</td><td class="when">joined {joined}{approved_on}</td><td class="act">{outcome}</td></tr>
 "#,
                 who = who_cell(r),
                 joined = day(r.created_at),
@@ -997,47 +1113,84 @@ pub fn admin_page(pending: &[UserRow], approved: &[UserRow], error: Option<&str>
         })
         .collect();
 
+    // "OF THOSE" NESTS, so an active person is counted in BOTH numbers:
+    // everybody active signed up. Partitioning them instead would make
+    // "3 signed up, 2 active" read as five people.
+    let accepted_count = approved.iter().filter(|r| r.signed_up_at.is_some()).count();
+    let active_count = approved
+        .iter()
+        .filter(|r| r.first_paired_at.is_some())
+        .count();
+    let rungs = [
+        Rung {
+            label: "waiting",
+            count: pending.len(),
+            colour: "var(--warn)",
+            of: None,
+        },
+        Rung {
+            label: "approved",
+            count: approved.len(),
+            colour: "var(--accent)",
+            of: None,
+        },
+        Rung {
+            label: "signed up",
+            count: accepted_count,
+            colour: "var(--accent-ink)",
+            of: Some((approved.len(), "approved")),
+        },
+        Rung {
+            label: "active",
+            count: active_count,
+            colour: "var(--positive)",
+            of: Some((accepted_count, "signed up")),
+        },
+    ];
+
     console(
         StatusCode::OK,
         "Waitlist",
         &format!(
-            r#"<h1>Waitlist</h1>
-<p class="tally">{waiting_count} waiting, {approved_count} approved recently,
+            r#"<section class="hero">
+<h1 data-text="Waitlist">Waitlist</h1>
+<p class="sr">{waiting_count} waiting, {approved_count} approved recently,
 {accepted_count} of those signed up, {active_count} of those active</p>
+</section>
+{scope}
 {error_html}
-<h2>Waiting</h2>
+<div class="racks">
+<section class="rack wait">
+<div class="rack-head"><span class="led"></span><h2>Waiting</h2><span class="count">{waiting_count}</span>
 <p class="hint">Approving mints one invite code and emails it. The code works
-once and expires in {ttl} days.</p>
+once and expires in {ttl} days.</p></div>
 {waiting_table}
-<h2>Approved recently</h2>
+</section>
+<section class="rack done-list">
+<div class="rack-head"><span class="led"></span><h2>Approved recently</h2><span class="count">{approved_count}</span></div>
 {history_table}
-<h2>Invite someone directly</h2>
+</section>
+<section class="rack send">
+<div class="rack-head"><span class="led"></span><h2>Invite someone directly</h2></div>
 <form class="invite" method="post" action="/admin/invite">
 <label class="sr" for="email">Email address</label>
 <input type="email" id="email" name="email" placeholder="them@example.com"
   autocomplete="off" autocapitalize="off" spellcheck="false" required>
 <button type="submit">Mint and email an invite</button>
 </form>
-<p class="hint">They do not have to be on the list. The address lands under
-Approved above and is tracked from there like everybody else. Nothing here can
-read a code back out, so a lost invite is replaced rather than resent, and a
-code that was already spent is not replaced at all.</p>
+<p class="hint">They do not have to be on the list first.</p>
+</section>
+</div>
+<div class="footer-row">
 <form class="signout" method="post" action="/admin/logout">
 <button type="submit" class="quiet">Sign out</button>
 </form>
-<p class="hint">This session lasts {session_days} days. Signing out ends it on
-this browser; rotating the admin token ends it everywhere.</p>"#,
+<p class="hint">This session lasts {session_days} days.</p>
+</div>"#,
+            scope = scope(&rungs),
             error_html = stop_note(error),
             waiting_count = pending.len(),
             approved_count = approved.len(),
-            // "OF THOSE" NESTS, so an active person is counted in BOTH numbers:
-            // everybody active signed up. Partitioning them instead would make
-            // "3 signed up, 2 active" read as five people.
-            accepted_count = approved.iter().filter(|r| r.signed_up_at.is_some()).count(),
-            active_count = approved
-                .iter()
-                .filter(|r| r.first_paired_at.is_some())
-                .count(),
             session_days = crate::cookie::ADMIN_COOKIE_TTL_SECS / (24 * 60 * 60),
             waiting_table = table(
                 r#"<th>Who</th><th>Joined</th><th></th>"#,
@@ -1051,6 +1204,127 @@ this browser; rotating the admin token ends it everywhere.</p>"#,
             ),
             ttl = crate::invites::DEFAULT_TTL_DAYS,
         ),
+    )
+}
+
+/// One rung of the funnel, as the scope draws it: a carrier with a marker.
+struct Rung {
+    label: &'static str,
+    count: usize,
+    /// A CSS colour, always one of the stylesheet's own variables. Never data.
+    colour: &'static str,
+    /// The rung this one is a fraction of, and its name, for the rate under it.
+    of: Option<(usize, &'static str)>,
+}
+
+/// The funnel as the landing page's analyzer would draw it: a noise floor with
+/// one carrier per rung standing out of it, and a marker on each peak.
+///
+/// THE PEAKS ARE THE DATA. Each carrier's height is its count on a log scale
+/// against the largest rung, so a board of 200 waiting and 3 active still
+/// shows three as a real signal rather than a flat line. A rung of zero is a
+/// carrier that is not there: just the floor, which is the honest picture.
+///
+/// THE NOISE IS NOT. It comes from a fixed seed, so the same counts draw the
+/// same trace on every refresh and the only thing that moves the picture is
+/// the funnel moving. Decoration that changed on every load would read as the
+/// data changing.
+///
+/// Everything here is numbers the server computed and labels it owns; no
+/// string from the store reaches the SVG, so there is nothing to escape.
+fn scope(rungs: &[Rung; 4]) -> String {
+    const W: f64 = 1000.0;
+    const H: f64 = 300.0;
+    const FLOOR: f64 = 262.0;
+    const RANGE: f64 = 200.0;
+    let centres = [125.0, 375.0, 625.0, 875.0];
+    let max = rungs.iter().map(|r| r.count).max().unwrap_or(0);
+    let heights: Vec<f64> = rungs
+        .iter()
+        .map(|r| {
+            if r.count == 0 || max == 0 {
+                0.0
+            } else {
+                // A single person still clears the floor by a visible margin.
+                36.0 + (RANGE - 36.0) * ((1 + r.count) as f64).ln() / ((1 + max) as f64).ln()
+            }
+        })
+        .collect();
+
+    // A tiny LCG: deterministic, dependency free, and plenty random for grass.
+    let noise = |seed: u64| {
+        let mut state = seed;
+        move || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 33) as f64) / ((1u64 << 31) as f64)
+        }
+    };
+    let signal = |x: f64| -> f64 {
+        centres
+            .iter()
+            .zip(&heights)
+            .map(|(c, h)| {
+                let d = x - c;
+                // A sharp Lorentzian carrier on a broad skirt, which is the
+                // shape a real carrier has through a resolution filter.
+                h * (0.8 / (1.0 + (d / 11.0).powi(2)) + 0.2 / (1.0 + (d / 55.0).powi(2)))
+            })
+            .sum()
+    };
+    let trace = |seed: u64, grass: f64| -> String {
+        let mut rnd = noise(seed);
+        let mut d = String::new();
+        let mut x = 0.0;
+        while x <= W {
+            let y = (FLOOR - grass * rnd() - signal(x)).max(8.0);
+            d.push_str(&format!(
+                "{}{x:.0} {y:.1}",
+                if x == 0.0 { "M" } else { "L" }
+            ));
+            x += 4.0;
+        }
+        d
+    };
+    let live = trace(7, 12.0);
+
+    let markers: String = rungs
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let top = (FLOOR - 12.0 - heights[i]).max(8.0);
+            format!(
+                r#"<i class="mkr" style="--c:{c};left:{l:.2}%;top:{t:.2}%"></i>"#,
+                c = r.colour,
+                l = centres[i] / W * 100.0,
+                t = top / H * 100.0,
+            )
+        })
+        .collect();
+    let readouts: String = rungs
+        .iter()
+        .map(|r| {
+            // A rate only where there is one to state. The top two rungs are
+            // just their counts.
+            let sub = match r.of {
+                Some((of, name)) if of > 0 => format!(
+                    r#"<div class="sub">{}% of {name}</div>"#,
+                    (r.count as f64 / of as f64 * 100.0).round()
+                ),
+                _ => String::new(),
+            };
+            format!(
+                r#"<div class="readout" style="--c:{c}"><div class="lbl">{label}</div><span class="num">{count}</span>{sub}</div>"#,
+                c = r.colour,
+                label = r.label,
+                count = r.count,
+            )
+        })
+        .collect();
+
+    format!(
+        r#"<figure class="scope" aria-hidden="true"><div class="scope-screen"><svg viewBox="0 0 {W} {H}" preserveAspectRatio="none"><path class="fill" d="{live} L{W} {H} L0 {H} Z"/><path class="trace" vector-effect="non-scaling-stroke" pathLength="4000" d="{live}"/></svg>{markers}</div><div class="readouts">{readouts}</div></figure>"#,
     )
 }
 
@@ -1253,8 +1527,8 @@ pub fn problem(status: StatusCode, heading: &str, detail: &str) -> Response {
         heading,
         &format!(
             r#"<h1>{heading}</h1>
-<p>{detail}</p>
-<p><a class="button" href="/">Start again</a></p>"#,
+<p class="lead">{detail}</p>
+<a class="button" href="/">Start again <span class="arrow" aria-hidden="true">→</span></a>"#,
             heading = escape_html(heading),
             detail = escape_html(detail),
         ),
@@ -1325,7 +1599,7 @@ mod tests {
         );
     }
 
-    /// Both flow-finishing pages carry the aid'd link when a person is known,
+    /// The app sign-in page carries the aid'd link when a person is known,
     /// HTML-escaped like every href on them. The `&amp;` is the point of the
     /// assertion: a raw `&` in an attribute is the kind of thing only a test
     /// notices.
@@ -1335,13 +1609,6 @@ mod tests {
         let expected = format!(
             "passband://pair?url=https%3A%2F%2Fada.passband.email&amp;code=ABCD-EFGH&amp;aid={aid}"
         );
-        let success_html = body_of(success(
-            "https://ada.passband.email",
-            "ABCD-EFGH",
-            10,
-            Some(aid),
-        ))
-        .await;
         let app_html = body_of(app_signed_in(
             "ada@example.com",
             "https://ada.passband.email",
@@ -1350,9 +1617,7 @@ mod tests {
             Some(aid),
         ))
         .await;
-        for html in [success_html, app_html] {
-            assert!(html.contains(&expected), "{html}");
-        }
+        assert!(app_html.contains(&expected), "{app_html}");
     }
 
     /// The form is the only place the three grants are explained in the
@@ -1377,22 +1642,84 @@ mod tests {
 
     /// The scope detail may be folded away, but all three permissions are named
     /// in the open, beside the button, where somebody deciding whether to press
-    /// it will read them. The `<details>` block is the long version and is shut
-    /// by default; the summary line is not.
+    /// it will read them: they ARE the disclosure's summary line, which is
+    /// always on screen. What each is for sits behind it, shut by default.
     #[tokio::test]
     async fn the_form_names_all_three_permissions_outside_the_disclosure() {
         let html = body_of(signup_form("passband.email", None, "", "", None)).await;
-        let (before_details, details) = html.split_once("<details>").expect("{html}");
+        let (_, details) = html.split_once("<details>").expect("{html}");
+        let (summary, folded) = details.split_once("</summary>").expect("{html}");
+        // The summary is the line that is always on screen, beside the button.
         assert!(
-            before_details.contains("read, change, and send your Gmail"),
-            "{html}"
+            summary.contains("read, change, and send your Gmail"),
+            "{summary}"
         );
-        assert!(before_details.contains("needs all three"), "{html}");
+        assert!(folded.contains("needs all three"), "{html}");
         // Shut by default: `open` is what would render it expanded.
-        assert!(!details.contains("<details open"), "{html}");
         assert!(!html.contains("<details open"), "{html}");
         // A disclosure is markup, not script. This page still has none.
         assert!(!html.contains("<script"), "{html}");
+    }
+
+    /// The username field carries its domain inside the same box, right after
+    /// the input, so the suffix trails what is typed rather than sitting in a
+    /// hint underneath it.
+    #[tokio::test]
+    async fn the_username_field_trails_its_domain() {
+        let html = document_of(signup_form("passband.email", None, "ada", "", None)).await;
+        assert!(html.contains("Your Passband username"), "{html}");
+        let (_, field) = html.split_once(r#"<label class="affix">"#).expect("{html}");
+        let (field, _) = field.split_once("</label>").expect("{html}");
+        assert!(field.contains(r#"id="label""#), "{field}");
+        assert!(field.contains(r#"value="ada""#), "{field}");
+        assert!(
+            field.ends_with(r#"<span class="domain">.passband.email</span>"#),
+            "{field}"
+        );
+    }
+
+    /// A code that came filled in is folded behind a link, and the username is
+    /// what gets focus. An empty field, or any re-render after a submit, shows
+    /// the code in the open.
+    #[tokio::test]
+    async fn a_prefilled_invite_is_folded_only_on_arrival() {
+        let code = "ABCD-EFGH-JKMN-PQRS";
+        let folded = document_of(signup_form("passband.email", None, "", code, None)).await;
+        assert!(
+            folded.contains(r#"class="slot folded" id="code""#),
+            "{folded}"
+        );
+        assert!(folded.contains(&format!(r#"value="{code}""#)), "{folded}");
+        assert!(folded.contains(r##"href="#code""##), "{folded}");
+        let (_, username) = folded.split_once(r#"id="label""#).unwrap();
+        let (username, _) = username.split_once('>').unwrap();
+        assert!(username.contains("autofocus"), "{username}");
+
+        for open in [
+            signup_form("passband.email", None, "", "", None),
+            signup_form(
+                "passband.email",
+                None,
+                "ada",
+                code,
+                Some("That invite code is not usable."),
+            ),
+            // Any refusal unfolds: the code may be one the person typed.
+            signup_form(
+                "passband.email",
+                None,
+                "ada",
+                code,
+                Some("That username is already taken."),
+            ),
+        ] {
+            let html = document_of(open).await;
+            assert!(!html.contains("slot folded"), "{html}");
+            assert!(!html.contains(r##"href="#code""##), "{html}");
+            let (_, invite) = html.split_once(r#"id="invite""#).unwrap();
+            let (invite, _) = invite.split_once('>').unwrap();
+            assert!(invite.contains("autofocus"), "{invite}");
+        }
     }
 
     /// The invite field shows the shape of a code this deployment actually
@@ -1449,22 +1776,22 @@ mod tests {
         assert!(html.contains("&lt;script&gt;"));
     }
 
+    /// The signup's last page is the download and nothing else: the app's own
+    /// onboarding signs in and pairs, so no code and no deep link ride here.
     #[tokio::test]
-    async fn the_success_page_carries_the_code_the_url_and_the_link() {
-        let html = body_of(success("https://ada.passband.email", "ABCD-EFGH", 10, None)).await;
-        assert!(html.contains("ABCD-EFGH"));
-        assert!(html.contains("https://ada.passband.email"));
+    async fn the_success_page_is_the_download_and_nothing_else() {
+        let html = document_of(success("https://ada.passband.email")).await;
+        assert!(html.contains("ada.passband.email"), "{html}");
         assert!(
-            html.contains(
-                "passband://pair?url=https%3A%2F%2Fada.passband.email&amp;code=ABCD-EFGH"
-            )
+            html.contains(&format!(r#"href="{DOWNLOAD_URL}""#)),
+            "{html}"
         );
-        assert!(html.contains("passband.app"));
-        assert!(!html.contains("<script"));
+        assert!(!html.contains("passband://"), "{html}");
+        assert!(!html.contains("<details"), "{html}");
+        assert!(!html.contains("<script"), "{html}");
     }
 
-    /// The fallback is FOLDED AWAY BUT LABELLED WITH THE SYMPTOM, on both pages
-    /// that end a flow.
+    /// The app page's fallback is FOLDED AWAY BUT LABELLED WITH THE SYMPTOM.
     ///
     /// A `contains` over the whole document cannot tell a code somebody can read
     /// from a code sealed inside a shut `<details>`, which is how the pairing
@@ -1475,37 +1802,33 @@ mod tests {
     /// than what to do about it. Moving the code back into the open should fail
     /// here and be a deliberate edit to this test.
     #[tokio::test]
-    async fn the_finishing_pages_label_the_fallback_with_the_symptom() {
-        for html in [
-            body_of(success("https://ada.passband.email", "ABCD-EFGH", 10, None)).await,
-            body_of(app_signed_in(
-                "ada@example.com",
-                "https://ada.passband.email",
-                "ABCD-EFGH",
-                10,
-                None,
-            ))
-            .await,
-        ] {
-            let (open, folded) = html.split_once("<details>").expect("{html}");
-            // The deep link is the page; the code is the way out when it fails.
-            // Asserted on the wrapper, not the code: the `href` above carries
-            // the same string, and a code inside a link is not one to read off.
-            assert!(open.contains("passband://pair?url="), "{html}");
-            assert!(!open.contains(r#"<span class="code">"#), "{html}");
-            assert!(
-                folded.contains(r#"<span class="code">ABCD-EFGH</span>"#),
-                "{html}"
-            );
-            // Shut, so the summary is the whole of what gets read.
-            assert!(!html.contains("<details open"), "{html}");
-            let summary = folded
-                .split_once("</summary>")
-                .expect("{html}")
-                .0
-                .to_lowercase();
-            assert!(summary.contains("did nothing"), "{html}");
-        }
+    async fn the_app_page_labels_the_fallback_with_the_symptom() {
+        let html = body_of(app_signed_in(
+            "ada@example.com",
+            "https://ada.passband.email",
+            "ABCD-EFGH",
+            10,
+            None,
+        ))
+        .await;
+        let (open, folded) = html.split_once("<details>").expect("{html}");
+        // The deep link is the page; the code is the way out when it fails.
+        // Asserted on the wrapper, not the code: the `href` above carries
+        // the same string, and a code inside a link is not one to read off.
+        assert!(open.contains("passband://pair?url="), "{html}");
+        assert!(!open.contains(r#"<span class="code">"#), "{html}");
+        assert!(
+            folded.contains(r#"<span class="code">ABCD-EFGH</span>"#),
+            "{html}"
+        );
+        // Shut, so the summary is the whole of what gets read.
+        assert!(!html.contains("<details open"), "{html}");
+        let summary = folded
+            .split_once("</summary>")
+            .expect("{html}")
+            .0
+            .to_lowercase();
+        assert!(summary.contains("did nothing"), "{html}");
     }
 
     /// THE DOWNLOAD LIVES AT THE END OF THE FLOW, not on the landing page: that
@@ -1522,7 +1845,7 @@ mod tests {
     #[tokio::test]
     async fn the_pages_that_finish_a_flow_hand_over_the_client() {
         for html in [
-            body_of(success("https://ada.passband.email", "ABCD-EFGH", 10, None)).await,
+            body_of(success("https://ada.passband.email")).await,
             body_of(app_signed_in(
                 "ada@example.com",
                 "https://ada.passband.email",
@@ -1533,11 +1856,10 @@ mod tests {
             .await,
         ] {
             assert!(
-                html.contains(&format!(
-                    r#"<a href="{DOWNLOAD_URL}">Download Passband</a>"#
-                )),
+                html.contains(&format!(r#"href="{DOWNLOAD_URL}""#)),
                 "{html}"
             );
+            assert!(html.contains(">Download Passband"), "{html}");
         }
         // And nowhere else. The signup form is somebody deciding whether to
         // hand over their mail, and an app they cannot yet point at anything is
@@ -1983,7 +2305,7 @@ mod tests {
                 Some("no"),
             ))
             .await,
-            body_of(success("https://ada.passband.email", "ABCD-EFGH", 10, None)).await,
+            body_of(success("https://ada.passband.email")).await,
             body_of(app_signed_in(
                 "ada@example.com",
                 "https://ada.passband.email",
@@ -2029,7 +2351,7 @@ mod tests {
     async fn every_page_wears_the_mark_and_fetches_nothing_to_do_it() {
         for html in [
             body_of(signup_form("passband.email", None, "", "", None)).await,
-            body_of(success("https://ada.passband.email", "ABCD-EFGH", 10, None)).await,
+            body_of(success("https://ada.passband.email")).await,
             body_of(app_signed_in(
                 "ada@example.com",
                 "https://ada.passband.email",
@@ -2054,11 +2376,16 @@ mod tests {
                 "{html}"
             );
             assert!(html.contains("<svg"), "{html}");
-            // Inline, not fetched: an `<img src>` or a `url()` here would be a
-            // request `default-src 'none'` refuses, i.e. a broken logo.
+            // Inline, not fetched: an `<img src>` or a `url()` in the masthead
+            // would be a request `default-src 'none'` refuses, i.e. a broken
+            // logo. The stylesheet's one `url()` is the same-origin font.
+            let (_, masthead) = html.split_once(r#"<header class="brand">"#).unwrap();
+            let (masthead, _) = masthead.split_once("</header>").unwrap();
+            assert!(!masthead.contains("url("), "{masthead}");
             assert!(!html.contains("<img"), "{html}");
-            assert!(!html.contains("url("), "{html}");
             assert!(!html.contains("http://"), "{html}");
+            assert_eq!(html.matches("url(").count(), 1, "{html}");
+            assert!(html.contains(&format!(r#"url("{FONT_PATH}")"#)), "{html}");
         }
     }
 
@@ -2076,11 +2403,40 @@ mod tests {
         assert!(!masthead.contains("href"), "{masthead}");
     }
 
+    /// The font is served as a font, cacheable, and the CSP admits it from this
+    /// origin and nowhere else.
+    #[tokio::test]
+    async fn the_font_is_first_party_and_cacheable() {
+        let r = newsreader().await;
+        assert_eq!(r.headers()[header::CONTENT_TYPE], "font/woff2");
+        assert!(
+            r.headers()[header::CACHE_CONTROL]
+                .to_str()
+                .unwrap()
+                .contains("immutable")
+        );
+        let bytes = to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        assert!(bytes.starts_with(b"wOF2"));
+        assert!(CSP.contains("font-src 'self';"));
+    }
+
+    /// The vendored font IS the landing page's font. The control image never
+    /// sees `passband-site/`, so the copy is by hand; this is what notices when
+    /// the site's subset moves and the copy did not.
+    #[test]
+    fn the_vendored_font_is_the_sites_font() {
+        let site = include_bytes!("../../passband-site/newsreader-var.woff2");
+        assert!(
+            NEWSREADER == site.as_slice(),
+            "copy passband-site/newsreader-var.woff2 to squelch-control/assets/newsreader.woff2"
+        );
+    }
+
     #[tokio::test]
     async fn every_page_carries_the_security_headers() {
         for r in [
             signup_form("passband.email", None, "", "", None),
-            success("https://ada.passband.email", "ABCD-EFGH", 10, None),
+            success("https://ada.passband.email"),
             problem(StatusCode::BAD_REQUEST, "Nope", "Try again."),
             console_problem(StatusCode::BAD_REQUEST, "Nope", "Try again."),
             admin_login(None),

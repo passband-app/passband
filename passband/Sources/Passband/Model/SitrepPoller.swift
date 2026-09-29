@@ -39,6 +39,11 @@ final class SitrepPoller {
 
     private init() {}
 
+    /// Whether the loop is up. False between an account switch's `stop()`
+    /// and the next `start()`: nothing can land in `sitrep.stats` meanwhile,
+    /// which is what a writer waiting on that verdict needs to know.
+    var isPolling: Bool { resident.isRunning }
+
     /// Start interval + focus polling. Idempotent.
     func start() {
         // The observer rides on the loop's own guard: `ResidentTask` refuses a

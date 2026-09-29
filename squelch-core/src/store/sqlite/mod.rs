@@ -45,14 +45,15 @@ use crate::error::{CoreError, Result};
 use crate::metrics::{NotifyDecision, NotifyLane};
 use crate::store::{
     AttachmentBytes, BankingApplied, BlankBodyScan, ContactEntry, Device, DeviceToken, Draft,
-    DraftFields, ExtractQueued, FtsQuery, HealScope, InboxUnread, IssuedDeviceToken, LeggedHit,
-    MailActivityDay, MarketingApplied, MarketingOffer, MessageOpen, MessageUnsub,
+    DraftFields, DraftKey, ExtractQueued, FtsQuery, HealScope, InboxUnread, IssuedDeviceToken,
+    LeggedHit, MailActivityDay, MarketingApplied, MarketingOffer, MessageOpen, MessageUnsub,
     MintedPairingCode, MissingVector, NewAuditEntry, NewEvent, NewNotifyDecision,
     NotifyDecisionRow, RevisitQueued, SPAM_SYNCED_AT_KEY, SealedBody, SealedMessage,
-    SearchDiagnostics, SearchFilter, SearchSort, SeedVerdict, SenderEntry, SenderHistory,
-    SentMessage, SentMissingRecipients, SitrepBand, SpamScope, Stage1Applied, Stage1Queued,
-    Stage2Applied, Stage2CapOverrides, Stage2Queued, Stage2Usage, Stage2UsageDay, Store, SyncState,
-    TermDf, ThreadSibling, TrackedMessage, TriageDebug, TriagedMessage, UsageTokens,
+    SearchDiagnostics, SearchFilter, SearchSort, SeedVerdict, SenderDigestRow, SenderEntry,
+    SenderHistory, SentMessage, SentMissingRecipients, SitrepBand, SpamScope, Stage1Applied,
+    Stage1Queued, Stage2Applied, Stage2CapOverrides, Stage2Queued, Stage2Usage, Stage2UsageDay,
+    Store, SyncState, TermDf, ThreadSibling, TrackedMessage, TriageDebug, TriagedMessage,
+    UsageTokens,
 };
 use crate::types::{
     AccountId, AttachmentInfo, AttentionStatus, AttentionUpdate, AuditEntry, BandCounts, Banking,
@@ -171,7 +172,8 @@ impl SqliteStore {
         conn.execute_batch(SCHEMA)?;
         // SCHEMA is all `CREATE TABLE IF NOT EXISTS`, so a pre-existing DB never
         // picks up freshly-added columns from the CREATE — `migrate` adds them.
-        // New tables/indexes need no migration (IF NOT EXISTS covers them).
+        // New tables/indexes need no migration (IF NOT EXISTS covers them),
+        // EXCEPT an index naming a migrated column, which lives in `migrate`.
         migrate(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -778,6 +780,15 @@ impl Store for SqliteStore {
 
     fn list_sender_rules(&self, account_id: AccountId) -> Result<Vec<SenderRule>> {
         self.list_sender_rules(account_id)
+    }
+
+    fn sender_rule_digest(
+        &self,
+        account_id: AccountId,
+        from_addr: &str,
+        limit: usize,
+    ) -> Result<Vec<SenderDigestRow>> {
+        self.sender_rule_digest(account_id, from_addr, limit)
     }
 
     fn ingest_message(&self, triaged: &TriagedMessage) -> Result<i64> {

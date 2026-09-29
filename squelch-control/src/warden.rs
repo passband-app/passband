@@ -125,10 +125,17 @@ pub enum WardenError {
     /// The command is the LAST thing in the message, unquoted, with the regex
     /// in single quotes: somebody reads this mid-incident and selects to end of
     /// line, and nothing they paste should need thinking about.
+    ///
+    /// THE EVENTS POINTER IS THE OTHER HALF, added 2026-09-28. The warden waits
+    /// on a pod the API server may never create, and when admission refuses it
+    /// (that night: `exceeded quota: tenants`) the warden's log says nothing
+    /// and the reason is an event on the tenant's ReplicaSet. It goes in the
+    /// middle, not the end, so the pasteable grep stays last.
     #[error(
-        "the provisioning service did not answer in time and may still be working; read the \
-         warden's log before retrying or assuming nothing happened: \
-         kubectl -n warden logs deploy/squelch-warden | grep -E 'tenant={label}($| )'"
+        "the provisioning service did not answer in time and may still be working. A pod \
+         refused by quota or scheduling shows in `kubectl -n tenants get events`, not the \
+         warden's log; otherwise read the warden's log before retrying or assuming nothing \
+         happened: kubectl -n warden logs deploy/squelch-warden | grep -E 'tenant={label}($| )'"
     )]
     TimedOut { label: String },
     /// 401/403. A deployment misconfiguration, and one worth shouting about:
@@ -1039,7 +1046,8 @@ impl HttpWarden {
     }
 }
 
-/// Hold the warden's pairing answer to the shape the success page can render.
+/// Hold the warden's pairing answer to the shape a page can render (the app
+/// sign-in page shows it; signup's success page no longer does).
 ///
 /// The `deep_link` is checked but NOT used: [`crate::pages`] rebuilds it from
 /// the validated code and this deployment's own base domain, so a warden that
@@ -1809,6 +1817,9 @@ mod tests {
         assert!(matches!(err, WardenError::TimedOut { .. }));
         let said = err.to_string();
         assert!(said.contains("may still be working"), "{said}");
+        // Where a pod refused at admission shows up, which the warden's log
+        // does not say (2026-09-28, `exceeded quota`).
+        assert!(said.contains("kubectl -n tenants get events"), "{said}");
         // The check, with THIS tenant in it: the grep is useless without it.
         assert!(
             said.contains("kubectl -n warden logs deploy/squelch-warden"),

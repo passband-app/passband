@@ -365,8 +365,8 @@ extension View {
     ///
     /// Both halves are guarded and the disappear case is real, not defensive:
     /// these sit on controls that VANISH under the cursor by design — the
-    /// cc/bcc toggles fold a field open and the layout moves, the pill move bar
-    /// closes the moment its pill is gone — and a view removed while hovered
+    /// cc/bcc toggles fold a field open and the layout moves, a recipient pill
+    /// vanishes when it is dragged to another field — and a view removed while hovered
     /// never gets its exit callback. An unbalanced push leaves the pointing
     /// hand stuck over the whole window.
     private struct PointingHandCursor: ViewModifier {

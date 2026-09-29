@@ -19,23 +19,18 @@
 
 import SwiftUI
 
-/// The hosted control plane, and the two doors it opens.
+/// The hosted control plane's one door from the app.
 ///
-/// SIGN IN is for somebody whose mailbox already exists: Google names them, the
-/// control plane finds the daemon that mailbox owns, and the browser comes back
-/// with a `passband://pair` link. No invite code anywhere in it, because an
-/// invite provisions a tenant and this person's tenant is already running.
-///
-/// SIGN UP is the invite-code form, and it is the only place a code is asked
-/// for. Both actions share the connection chooser and open their browser route.
+/// SIGN IN is the only hosted action, for newcomers too: Google names them, the
+/// control plane looks for the daemon that mailbox owns, and the browser comes
+/// back with a `passband://pair` link. Somebody with no mailbox yet is told so
+/// on that same page and handed the signup form from there, so the app never
+/// has to ask "do you have an account?" before it knows the answer.
 private enum Hosted {
     // Send the rendered appearance, including a resolved system preference.
     // The account site preserves this choice through OAuth and pairing (#214).
     static func signIn(theme: ColorScheme) -> String {
         "https://signup.passband.app/app/auth?theme=\(theme == .dark ? "dark" : "light")"
-    }
-    static func signUp(theme: ColorScheme) -> String {
-        "https://signup.passband.app?theme=\(theme == .dark ? "dark" : "light")"
     }
 }
 
@@ -83,6 +78,7 @@ struct ConnectView: View {
 
     @State private var mode: ConnectMode = .pair
     @State private var gateStep: ConnectGateStep = .introduction
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var url = "http://127.0.0.1:8848"
     @State private var code = ""
     @State private var deviceName = Pairing.defaultDeviceName()
@@ -116,6 +112,10 @@ struct ConnectView: View {
     /// waiting for the press the link will never make for the user.
     @State private var linkArmed = false
     @State private var arrivedViaPairLink = false
+    /// This gate opened the browser sign in. A hosted form reached any other
+    /// way (a saved hosted account that failed to restore) has no tab to
+    /// point at, and must not say it does.
+    @State private var signInOpened = false
     @State private var showingPairingDetails = false
     /// The gate was mounted because a saved connection could not be restored,
     /// at launch or after the practice inbox. Fixed at mount: the retry it offers is about
@@ -241,51 +241,157 @@ struct ConnectView: View {
 
     private var gateBody: some View {
         ZStack {
-            switch effectiveGateStep {
-            case .introduction:
-                OnboardingIntroView { gateStep = .welcome }
-            case .welcome:
-                WelcomeGate(
-                    retrySaved: savedRetry,
-                    retrying: retryingSavedConnection,
-                    login: {
-                        url = ""
-                        mode = .pair
-                        arrivedViaPairLink = false
-                        gateStep = .credentials(.hosted)
-                        Opener.open(Hosted.signIn(theme: colorScheme))
-                    },
-                    selfHostedLogin: {
-                        url = "http://127.0.0.1:8848"
-                        mode = .pair
-                        gateStep = .credentials(.selfHosted)
-                    })
-            case .selfHostGuide:
-                SelfHostGuide(
-                    back: { gateStep = .welcome },
-                    continueToForm: {
-                        mode = .pair
-                        gateStep = .credentials(.selfHosted)
-                    })
-            case .credentials:
-                connectCard
+            if onIntro {
+                OnboardingIntroView { finishIntro() }
+                    .transition(introExit)
+            } else {
+                // No screen margin here: every login step is an IntroStage,
+                // full-bleed like the intro, with its own inset.
+                loginSteps
+                    .transition(loginEntrance)
             }
         }
-        // The phone's screen margin. On the Mac the card is a fixed measure
-        // floating in a large window and needs none.
-        #if !os(macOS)
-            .padding(.horizontal, 16)
-        #endif
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .overlay(alignment: .bottomTrailing) {
-            SetupThemeToggle()
-                .padding(20)
+            // On the phone the theme is a login-page setting: the intro is
+            // the scene and its swipe, with nothing in the corner to aim at.
+            #if os(iOS)
+                if !onIntro {
+                    SetupThemeToggle()
+                        .padding(20)
+                        .transition(.opacity)
+                }
+            #else
+                SetupThemeToggle()
+                    .padding(20)
+            #endif
         }
     }
 
+    /// Leaving the intro. On the phone it is a CROSSFADE: the login steps
+    /// stand on the same squelch scene the intro ends on (IntroStage), so the
+    /// scene holds still and only the words change. Anything that moved or
+    /// scaled the two layers would slide one copy of the waves over another.
+    /// The Mac still cuts.
+    private func finishIntro() {
+        #if os(iOS)
+            withAnimation(.easeInOut(duration: reduceMotion ? 0.3 : 0.5)) {
+                gateStep = .welcome
+            }
+        #else
+            gateStep = .welcome
+        #endif
+    }
+
+    private var introExit: AnyTransition {
+        #if os(iOS)
+            .opacity
+        #else
+            .identity
+        #endif
+    }
+
+    private var loginEntrance: AnyTransition {
+        #if os(iOS)
+            .opacity
+        #else
+            .identity
+        #endif
+    }
+
+    /// Everything after the intro, on ONE stage. Moves between these are not
+    /// animated, so this keeps one identity and only enters and leaves as a
+    /// whole — and so does the scene behind it: only the column swaps. A stage
+    /// per step would remount the squelch renderer on every Back and blank it
+    /// to the flat backdrop while it faded in again.
+    private var loginSteps: some View {
+        IntroStage(columnWidth: stepColumnWidth) { wide in
+            stepColumn(wide: wide)
+        } footer: { _ in
+            // On a phone the welcome screen's sign-in buttons sit at the
+            // bottom, in reach of the thumb; its copy stays at the top.
+            if case .welcome = effectiveGateStep {
+                WelcomeActions(
+                    retrySaved: savedRetry, retrying: retryingSavedConnection,
+                    login: signIn, selfHostedLogin: selfHost, maxWidth: .infinity)
+                    .modifier(IntroEntrance(delay: 0.32))
+            }
+        }
+    }
+
+    private func signIn() {
+        url = ""
+        mode = .pair
+        arrivedViaPairLink = false
+        signInOpened = true
+        gateStep = .credentials(.hosted)
+        Opener.open(Hosted.signIn(theme: colorScheme))
+    }
+
+    private func selfHost() {
+        url = "http://127.0.0.1:8848"
+        mode = .pair
+        gateStep = .credentials(.selfHosted)
+    }
+
+    /// The guide's command lines want more measure than a form does.
+    private var stepColumnWidth: CGFloat {
+        if case .selfHostGuide = effectiveGateStep { return 520 }
+        return 440
+    }
+
+    @ViewBuilder
+    private func stepColumn(wide: Bool) -> some View {
+        switch effectiveGateStep {
+        case .introduction:
+            EmptyView()
+        case .welcome:
+            WelcomeGate(
+                wide: wide,
+                retrySaved: savedRetry,
+                retrying: retryingSavedConnection,
+                login: signIn,
+                selfHostedLogin: selfHost)
+        case .selfHostGuide:
+            SelfHostGuide(
+                wide: wide,
+                back: { gateStep = .welcome },
+                continueToForm: {
+                    mode = .pair
+                    gateStep = .credentials(.selfHosted)
+                })
+        case .credentials:
+            formColumn(wide: wide)
+        }
+    }
+
+    private var onIntro: Bool {
+        if case .introduction = effectiveGateStep { return true }
+        return false
+    }
+
+    /// The Add Account sheet's form: the same column as the gate's, worn as a
+    /// glass card over the working app rather than set on the intro's stage.
     private var connectCard: some View {
+        formColumn(wide: false)
+            .padding(30)
+            // A window can always be 440pt wide; a phone cannot. Same intended
+            // measure either way — the Mac states it, the phone treats it as a
+            // ceiling and takes whatever the screen leaves (see body's margin).
+            #if os(macOS)
+                .frame(width: 440)
+            #else
+                .frame(maxWidth: 440)
+            #endif
+            .passbandGlass(.pane, cornerRadius: 24, tint: Palette.glassTintStrong)
+            .shadow(color: .black.opacity(0.3), radius: 50, y: 24)
+    }
+
+    /// Everything the form says and asks, with no chrome of its own: the gate
+    /// sets it on the intro's stage, the sheet wraps it in a card.
+    private func formColumn(wide: Bool) -> some View {
             VStack(spacing: 0) {
-                header
+                header(wide: wide)
                 credentialContent
 
                 if let errorText {
@@ -306,38 +412,38 @@ struct ConnectView: View {
 
                 bottomActions.padding(.top, 20)
             }
-            .padding(30)
-            // A window can always be 440pt wide; a phone cannot. Same intended
-            // measure either way — the Mac states it, the phone treats it as a
-            // ceiling and takes whatever the screen leaves (see body's margin).
-            #if os(macOS)
-                .frame(width: 440)
-            #else
-                .frame(maxWidth: 440)
-            #endif
-            .passbandGlass(
-                purpose == .gate ? .chrome : .pane,
-                cornerRadius: 24,
-                tint: purpose == .gate ? Palette.glassTint.opacity(0.35) : Palette.glassTintStrong)
-            .shadow(color: .black.opacity(0.3), radius: 50, y: 24)
     }
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(headerTitle)
-                .font(Typo.serif(purpose == .gate ? 34 : 30, weight: .medium))
-                .foregroundStyle(Palette.ink)
-            Text(
-                purpose == .gate
-                    ? headerSubtitle
-                    : "one daemon per mailbox. this one joins the accounts you already have."
-            )
-            .font(.system(size: 13))
-            .foregroundStyle(Palette.inkFaint)
+    @ViewBuilder private func header(wide: Bool) -> some View {
+        if purpose == .gate {
+            // The intro's voice: a hero line and a readable paragraph under it.
+            VStack(alignment: .leading, spacing: 16) {
+                Text(headerTitle)
+                    .font(Typo.hero(wide ? 40 : 32))
+                    .foregroundStyle(Palette.ink)
+                    .accessibilityAddTraits(.isHeader)
+                Text(headerSubtitle)
+                    .font(.system(size: 15))
+                    .foregroundStyle(Palette.inkDim)
+                    .lineSpacing(5)
+            }
             .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.bottom, 28)
+            .modifier(IntroEntrance(delay: 0.04))
+        } else {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(headerTitle)
+                    .font(Typo.serif(30, weight: .medium))
+                    .foregroundStyle(Palette.ink)
+                Text("one daemon per mailbox. this one joins the accounts you already have.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Palette.inkFaint)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.bottom, 22)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.bottom, 22)
     }
 
     private var hostingChoice: HostingChoice? {
@@ -361,9 +467,9 @@ struct ConnectView: View {
         guard purpose == .gate else { return "add account" }
         if arrivedViaPairLink { return "Make yourself at home." }
         switch hostingChoice {
-        case .hosted: return "Connect your account."
-        case .selfHosted: return "connect self-hosted"
-        case nil: return "pair this device"
+        case .hosted: return signInOpened ? "Finish in your browser." : "Reconnect your account."
+        case .selfHosted: return "Connect your server."
+        case nil: return "Pair this device."
         }
     }
 
@@ -373,7 +479,9 @@ struct ConnectView: View {
         }
         switch hostingChoice {
         case .hosted:
-            return "Finish logging in in your browser. If you aren’t brought back automatically, enter your server URL and pairing code below."
+            return signInOpened
+                ? "Sign in with Google in the tab that just opened. If Passband doesn’t come back on its own, enter the server URL and pairing code from that page."
+                : "Sign in with Gmail again to pick up where you left off, or enter your server URL and a pairing code below."
         case .selfHosted:
             return "Run squelchd pair on your server, then enter what it prints."
         case nil:
@@ -382,41 +490,207 @@ struct ConnectView: View {
     }
 
     @ViewBuilder private var credentialContent: some View {
-        if arrivedViaPairLink && mode == .pair {
+        if purpose == .gate {
+            gateCredentials
+        } else if arrivedViaPairLink && mode == .pair {
             linkedPairForm
         } else {
-            if purpose == .addAccount || hostingChoice == .selfHosted {
-                GlassSegmented(
-                    options: [(ConnectMode.pair, "pair with code"), (.token, "api token")],
-                    selection: modeBinding)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.bottom, 16)
-            }
+            // Only the sheet reaches here (the gate has its rig), and adding a
+            // daemon offers both ways in.
+            GlassSegmented(
+                options: [(ConnectMode.pair, "pair with code"), (.token, "api token")],
+                selection: modeBinding)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.bottom, 16)
             switch mode {
             case .pair: pairForm
             case .token: tokenForm
             }
             nameField.padding(.top, 14)
-            if hostingChoice == .hosted {
-                Button("Open login in browser again") { Opener.open(Hosted.signIn(theme: colorScheme)) }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 12))
-                    .foregroundStyle(Palette.inkDim)
-                    .padding(.top, 14)
+        }
+    }
+
+    // MARK: - the gate's rig
+
+    /// The gate's form, built the way the website's waitlist is: one machined
+    /// piece with slots cut in it and the submit set into its last row, rather
+    /// than a stack of captioned wells. A slot names itself on its trailing
+    /// edge instead of above it, because several arrive already filled (the
+    /// device name, a linked server) and a placeholder is gone by then.
+    @ViewBuilder private var gateCredentials: some View {
+        let linked = arrivedViaPairLink && mode == .pair
+        VStack(alignment: .leading, spacing: 0) {
+            if hostingChoice == .selfHosted, !linked {
+                GlassSegmented(
+                    options: [(ConnectMode.pair, "pair with code"), (.token, "api token")],
+                    selection: modeBinding)
+                    .padding(.bottom, 14)
             }
-            if purpose == .gate, hostingChoice == .selfHosted {
-                Button("Need help setting up a server?") { gateStep = .selfHostGuide }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 11))
-                    .foregroundStyle(Palette.inkFaint)
-                    .padding(.top, 14)
+            ConnectRig(lit: rigHasFocus(linked: linked)) {
+                if linked {
+                    RigSlot(label: "device", focused: focus == .device) {
+                        TextField("This Mac", text: $deviceName)
+                            .autocorrectionDisabled()
+                            .focused($focus, equals: .device)
+                            .onSubmit { focus = .name }
+                    }
+                } else {
+                    RigSlot(label: "server", focused: focus == .url) {
+                        TextField(serverPlaceholder, text: urlBinding)
+                            .textContentType(.URL)
+                            .autocorrectionDisabled()
+                            .focused($focus, equals: .url)
+                            .onSubmit { focus = mode == .pair ? .code : .token }
+                    }
+                    RigDivider()
+                    switch mode {
+                    case .pair:
+                        RigSlot(label: "pairing code", focused: focus == .code) {
+                            HStack(spacing: 6) {
+                                TextField("XXXX-XXXX", text: codeBinding)
+                                    // Monospaced so a code read off a terminal
+                                    // lines up with it character for character.
+                                    .font(Typo.mono(14))
+                                    .autocorrectionDisabled()
+                                    .focused($focus, equals: .code)
+                                    .onSubmit { focus = .device }
+                                if hostingChoice == .selfHosted { pairingHelpButton }
+                            }
+                        }
+                        RigDivider()
+                        RigSlot(label: "device", focused: focus == .device) {
+                            TextField("This Mac", text: $deviceName)
+                                .autocorrectionDisabled()
+                                .focused($focus, equals: .device)
+                                .onSubmit { focus = .name }
+                        }
+                    case .token:
+                        RigSlot(label: "api token", focused: focus == .token) {
+                            SecureField("SQUELCH_API_TOKEN", text: $token)
+                                .focused($focus, equals: .token)
+                                .onSubmit { focus = .name }
+                        }
+                    }
+                }
+                RigDivider()
+                HStack(spacing: 0) {
+                    RigSlot(label: "account", focused: focus == .name) {
+                        TextField("Name it (optional)", text: $accountLabel)
+                            .autocorrectionDisabled()
+                            .focused($focus, equals: .name)
+                            .onSubmit { submit() }
+                    }
+                    rigSubmit
+                }
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            if linked {
+                pairingDetails.padding(.top, 14)
             }
         }
     }
 
-    private var bottomActions: some View {
+    /// Whether the focused control is one of the rig's own. The linked form's
+    /// pairing details sit below the rig and share `focus`, and editing them
+    /// should not light an instrument they are not part of.
+    private func rigHasFocus(linked: Bool) -> Bool {
+        switch focus {
+        case .device, .name, .submit: return true
+        case .url, .code, .token: return !linked
+        case nil: return false
+        }
+    }
+
+    /// The submit, set into the rig's last row: no ground or shell of its own,
+    /// divided off by one hairline, lit in the accent when it can be pressed.
+    private var rigSubmit: some View {
+        Button { submit() } label: {
+            HStack(spacing: 8) {
+                Text(buttonLabel)
+                Image(systemName: "arrow.right")
+            }
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(canSubmit ? Palette.accent : Palette.inkFaint)
+            .padding(.horizontal, 18)
+            .frame(maxHeight: .infinity)
+            .background(Palette.accent.opacity(canSubmit ? 0.12 : 0.04))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .overlay(alignment: .leading) {
+            Rectangle().fill(Palette.accent.opacity(0.18)).frame(width: 1)
+        }
+        // A pair link filled the form and stopped: ring the one press left.
+        .overlay {
+            if linkArmed {
+                Rectangle()
+                    .strokeBorder(Palette.accent, lineWidth: 2)
+                    .allowsHitTesting(false)
+            }
+        }
+        .disabled(!canSubmit)
+        .focused($focus, equals: .submit)
+        .keyboardShortcut(.defaultAction)
+    }
+
+    private var pairingHelpButton: some View {
+        Button { pairingHelp = true } label: {
+            Image(systemName: "questionmark.circle")
+                .font(.system(size: 12))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Palette.inkFaint)
+        .help("Where the pairing code comes from")
+        .popover(isPresented: $pairingHelp) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Run this on the machine hosting squelchd:")
+                    .font(.system(size: 12))
+                Text("squelchd pair")
+                    .font(Typo.mono(13))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Palette.canvas))
+            }
+            .padding(16)
+        }
+    }
+
+    /// The gate's quiet way out, beside whatever second chance this route has.
+    @ViewBuilder private var gateSecondaryAction: some View {
+        if hostingChoice == .hosted {
+            Button(signInOpened ? "Open sign in again" : "Sign in with Gmail") {
+                signInOpened = true
+                Opener.open(Hosted.signIn(theme: colorScheme))
+            }
+                .buttonStyle(.plain)
+                .font(.system(size: 12))
+                .foregroundStyle(Palette.inkDim)
+        } else if hostingChoice == .selfHosted {
+            Button("Need help setting up a server?") { gateStep = .selfHostGuide }
+                .buttonStyle(.plain)
+                .font(.system(size: 12))
+                .foregroundStyle(Palette.inkDim)
+        }
+    }
+
+    @ViewBuilder private var bottomActions: some View {
+        if purpose == .gate {
+            HStack(spacing: 12) {
+                Button("Back") { goBack() }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Palette.inkDim)
+                    .disabled(busy)
+                Spacer()
+                gateSecondaryAction
+            }
+        } else {
+            sheetActions
+        }
+    }
+
+    private var sheetActions: some View {
         HStack(spacing: 12) {
-            Button(purpose == .addAccount ? "cancel" : "back") { goBack() }
+            Button("cancel") { goBack() }
                 .disabled(busy)
             Spacer()
             Button(buttonLabel) { submit() }
@@ -492,43 +766,49 @@ struct ConnectView: View {
                 .foregroundStyle(Palette.inkFaint)
                 .padding(.top, -10)
 
-            VStack(alignment: .leading, spacing: 10) {
-                Label(URL(string: url)?.host ?? url, systemImage: "link")
-                    .font(.system(size: 12))
-                    .foregroundStyle(Palette.inkDim)
-                    .lineLimit(2)
-                    .textSelection(.enabled)
-                DisclosureGroup("Pairing details", isExpanded: $showingPairingDetails) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Field(label: "Server URL") {
-                            TextField("Server URL", text: urlBinding)
-                                .textFieldStyle(.plain)
-                                .autocorrectionDisabled()
-                                .focused($focus, equals: .url)
-                        }
-                        Field(label: "Pairing code") {
-                            TextField("XXXX-XXXX", text: codeBinding)
-                                .textFieldStyle(.plain)
-                                .font(Typo.mono(12))
-                                .autocorrectionDisabled()
-                                .focused($focus, equals: .code)
-                                .onSubmit { submit() }
-                        }
+            pairingDetails
+        }
+    }
+
+    /// The server a pair link named, with its URL and code folded away for
+    /// the one case that needs them: a rejected code, corrected by hand.
+    private var pairingDetails: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(URL(string: url)?.host ?? url, systemImage: "link")
+                .font(.system(size: 12))
+                .foregroundStyle(Palette.inkDim)
+                .lineLimit(2)
+                .textSelection(.enabled)
+            DisclosureGroup("Pairing details", isExpanded: $showingPairingDetails) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Field(label: "Server URL") {
+                        TextField("Server URL", text: urlBinding)
+                            .textFieldStyle(.plain)
+                            .autocorrectionDisabled()
+                            .focused($focus, equals: .url)
                     }
-                    .padding(.top, 10)
-                    // A rejected code is corrected HERE, so the fields it
-                    // lives in open the moment there is something to correct.
-                    .onChange(of: pairError) { _, error in
-                        if error != nil { showingPairingDetails = true }
+                    Field(label: "Pairing code") {
+                        TextField("XXXX-XXXX", text: codeBinding)
+                            .textFieldStyle(.plain)
+                            .font(Typo.mono(12))
+                            .autocorrectionDisabled()
+                            .focused($focus, equals: .code)
+                            .onSubmit { submit() }
                     }
                 }
-                .font(.system(size: 11))
-                .foregroundStyle(Palette.inkFaint)
+                .padding(.top, 10)
+                // A rejected code is corrected HERE, so the fields it
+                // lives in open the moment there is something to correct.
+                .onChange(of: pairError) { _, error in
+                    if error != nil { showingPairingDetails = true }
+                }
             }
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: 12).fill(Palette.canvas.opacity(0.3)))
+            .font(.system(size: 11))
+            .foregroundStyle(Palette.inkFaint)
         }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Palette.canvas.opacity(0.3)))
     }
 
     private var pairForm: some View {
@@ -542,29 +822,7 @@ struct ConnectView: View {
                     .onSubmit { focus = .code }
             }
             VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 5) {
-                    FieldLabel("pairing code")
-                    if hostingChoice == .selfHosted {
-                        Button { pairingHelp = true } label: {
-                            Image(systemName: "questionmark.circle")
-                                .font(.system(size: 11))
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(Palette.inkFaint)
-                        .popover(isPresented: $pairingHelp) {
-                            VStack(alignment: .leading, spacing: 10) {
-                                Text("Run this on the machine hosting squelchd:")
-                                    .font(.system(size: 12))
-                                Text("squelchd pair")
-                                    .font(Typo.mono(13))
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 7)
-                                    .background(RoundedRectangle(cornerRadius: 8).fill(Palette.canvas))
-                            }
-                            .padding(16)
-                        }
-                    }
-                }
+                FieldLabel("pairing code")
                 TextField("XXXX-XXXX", text: codeBinding)
                     .textFieldStyle(.plain)
                     // Monospaced so a code read off a terminal lines up with
@@ -610,7 +868,15 @@ struct ConnectView: View {
         }
     }
 
+    /// Sentence case at the gate, where it sits under the intro's type; the
+    /// sheet keeps the app's lowercase chrome.
     private var buttonLabel: String {
+        let label = rawButtonLabel
+        guard purpose == .gate, let first = label.first else { return label }
+        return first.uppercased() + label.dropFirst()
+    }
+
+    private var rawButtonLabel: String {
         if claiming { return "pairing…" }
         if adding || store.connStatus == .connecting { return "testing…" }
         // The claim is done and only its probe is outstanding, so the button
@@ -810,9 +1076,12 @@ struct ConnectView: View {
     }
 }
 
-/// One connection choice: hosted login/signup, with self-hosting secondary.
+/// The sign-in gate, set on the intro's own stage: the same scene behind it,
+/// the same masthead and type, so finishing the intro changes the words and
+/// nothing else. One hosted door, sign in with Gmail, with self-hosting as the
+/// quieter way in beneath it.
 private struct WelcomeGate: View {
-    @Environment(\.colorScheme) private var colorScheme
+    let wide: Bool
     /// Present only when the gate is up because a saved connection could
     /// not be restored: the retry belongs on this screen too, since back
     /// from the form lands here.
@@ -820,46 +1089,88 @@ private struct WelcomeGate: View {
     var retrying = false
     let login: () -> Void
     let selfHostedLogin: () -> Void
-    @State private var browserOpened = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("Welcome to Passband.")
-                .font(Typo.serif(40, weight: .medium))
-                .foregroundStyle(Palette.ink)
-            Text("Log in to your account or get started.")
+            VStack(alignment: .leading, spacing: 18) {
+                Text("One last step.")
+                    .font(Typo.serif(wide ? 33 : 27))
+                    .foregroundStyle(Palette.inkDim)
+                    .modifier(IntroEntrance(delay: 0.04))
+                Text("Bring your inbox.")
+                    .font(Typo.hero(wide ? 49 : 36))
+                    .foregroundStyle(Palette.ink)
+                    .modifier(IntroEntrance(delay: 0.14))
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
+
+            Text("Sign in with the Google account whose mail you want Passband to sort. New here? The same button gets you set up.")
                 .font(.system(size: 15))
                 .foregroundStyle(Palette.inkDim)
-                .padding(.top, 8)
+                .lineSpacing(5)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 22)
+                .modifier(IntroEntrance(delay: 0.24))
 
-            HStack(spacing: 14) {
-                RouteOption(symbol: "person.crop.circle", title: "Log in", action: login)
-                RouteOption(symbol: "person.badge.plus", title: "Sign up") {
-                    browserOpened = true
-                    Opener.open(Hosted.signUp(theme: colorScheme))
-                }
+            // Inline in a window; on a phone they are the stage's footer,
+            // pinned to the bottom (ConnectView.loginSteps).
+            if wide {
+                WelcomeActions(
+                    retrySaved: retrySaved, retrying: retrying,
+                    login: login, selfHostedLogin: selfHostedLogin)
+                    .padding(.top, 32)
+                    .modifier(IntroEntrance(delay: 0.32))
             }
-            .padding(.top, 30)
+        }
+    }
+}
+
+/// The welcome screen's two doors: Sign in with Gmail, and self-hosting as the
+/// quieter option beneath it.
+private struct WelcomeActions: View {
+    var retrySaved: (() -> Void)? = nil
+    var retrying = false
+    let login: () -> Void
+    let selfHostedLogin: () -> Void
+    /// A column's measure in a window; the full width of a phone's footer.
+    var maxWidth: CGFloat = 340
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Button(action: login) {
+                HStack(spacing: 9) {
+                    Image(systemName: "envelope.fill")
+                    Text("Sign in with Gmail")
+                    Spacer(minLength: 0)
+                    Image(systemName: "arrow.right")
+                }
+                .font(.system(size: 14, weight: .semibold))
+                .padding(.vertical, 9)
+                .padding(.horizontal, 8)
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Palette.accent)
+            .keyboardShortcut(.defaultAction)
 
             Button(action: selfHostedLogin) {
-                Text("Self-hosted login")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(Palette.inkDim)
-                    .frame(maxWidth: .infinity, minHeight: 42)
-                    .contentShape(Rectangle())
+                HStack(spacing: 9) {
+                    Image(systemName: "server.rack")
+                    Text("Use a self-hosted server")
+                    Spacer(minLength: 0)
+                }
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Palette.inkDim)
+                .padding(.vertical, 10)
+                .padding(.horizontal, 16)
+                .frame(maxWidth: .infinity)
+                .contentShape(Rectangle())
             }
-                .buttonStyle(.plain)
-                .background(RoundedRectangle(cornerRadius: 12).fill(Palette.canvas.opacity(0.3)))
-                .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Palette.hairline, lineWidth: 0.5))
-                .padding(.top, 14)
-
-            if browserOpened {
-                Text("Continue in your browser. You’ll return here when you’re ready.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(Palette.inkDim)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.top, 10)
-            }
+            .buttonStyle(.plain)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Palette.canvas.opacity(0.3)))
+            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
 
             if let retrySaved {
                 Button(retrying ? "Trying saved connection…" : "Try saved connection again", action: retrySaved)
@@ -867,46 +1178,10 @@ private struct WelcomeGate: View {
                     .font(.system(size: 12))
                     .foregroundStyle(Palette.inkDim)
                     .disabled(retrying)
-                    .padding(.top, 18)
+                    .padding(.top, 6)
             }
         }
-        .padding(34)
-        #if os(macOS)
-            .frame(width: 600)
-        #else
-            .frame(maxWidth: 600)
-        #endif
-        .passbandGlass(.chrome, cornerRadius: 24, tint: Palette.glassTint.opacity(0.35))
-        .shadow(color: .black.opacity(0.3), radius: 50, y: 24)
-    }
-}
-
-private struct RouteOption: View {
-    let symbol: String
-    let title: String
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 11) {
-                Image(systemName: symbol)
-                    .font(.system(size: 21, weight: .medium))
-                    .foregroundStyle(Palette.accent)
-                    .frame(width: 30)
-                Text(title)
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(Palette.ink)
-                    .fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: 0)
-            }
-            .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
-            .padding(.horizontal, 15)
-            .padding(.vertical, 8)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .background(RoundedRectangle(cornerRadius: 16).fill(Palette.canvas.opacity(0.62)))
-        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(Palette.hairline, lineWidth: 0.75))
+        .frame(maxWidth: maxWidth, alignment: .leading)
     }
 }
 
@@ -914,62 +1189,72 @@ private struct RouteOption: View {
 /// daemon to a pairing code, with copyable commands and an explicit handoff to
 /// the form once the server is running.
 private struct SelfHostGuide: View {
+    let wide: Bool
     let back: () -> Void
     let continueToForm: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text("set up your server")
-                .font(Typo.serif(34, weight: .medium))
-                .foregroundStyle(Palette.ink)
-            Text("Run squelchd on this Mac, a NAS, or a server you control.")
-                .font(.system(size: 13))
-                .foregroundStyle(Palette.inkFaint)
-                .padding(.top, 5)
+            VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Set up your server.")
+                        .font(Typo.hero(wide ? 44 : 34))
+                        .foregroundStyle(Palette.ink)
+                        .accessibilityAddTraits(.isHeader)
+                    Text("Run squelchd on this Mac, a NAS, or a server you control. Three commands and you’re in.")
+                        .font(.system(size: 15))
+                        .foregroundStyle(Palette.inkDim)
+                        .lineSpacing(5)
+                }
+                .fixedSize(horizontal: false, vertical: true)
+                .modifier(IntroEntrance(delay: 0.04))
 
-            VStack(spacing: 12) {
-                SetupStep(
-                    number: 1,
-                    title: "install squelchd",
-                    detail: "Pull the public image for amd64 or arm64.",
-                    command: "docker pull ghcr.io/braelyn-ai/squelchd")
-                SetupStep(
-                    number: 2,
-                    title: "authorize gmail",
-                    detail: "Complete Google's one-time consent on the server.",
-                    command: "squelchd auth")
-                SetupStep(
-                    number: 3,
-                    title: "pair this device",
-                    detail: "Mint the short code the next screen accepts.",
-                    command: "squelchd pair")
-            }
-            .padding(.top, 22)
+                VStack(spacing: 16) {
+                    SetupStep(
+                        number: 1,
+                        title: "Install squelchd",
+                        detail: "Pull the public image for amd64 or arm64.",
+                        command: "docker pull ghcr.io/braelyn-ai/squelchd")
+                    SetupStep(
+                        number: 2,
+                        title: "Authorize Gmail",
+                        detail: "Complete Google's one-time consent on the server.",
+                        command: "squelchd auth")
+                    SetupStep(
+                        number: 3,
+                        title: "Pair this device",
+                        detail: "Mint the short code the next screen accepts.",
+                        command: "squelchd pair")
+                }
+                .padding(.top, 28)
+                .modifier(IntroEntrance(delay: 0.16))
 
-            Button("view detailed instructions on GitHub") {
-                Opener.open(
-                    "https://github.com/braelyn-ai/squelch/blob/main/docs/GETTING-STARTED.md")
-            }
-            .buttonStyle(.textAction)
-            .padding(.top, 16)
+                Button("View detailed instructions on GitHub") {
+                    Opener.open(
+                        "https://github.com/braelyn-ai/squelch/blob/main/docs/GETTING-STARTED.md")
+                }
+                .buttonStyle(.textAction)
+                .padding(.top, 18)
 
-            HStack {
-                Button("back", action: back)
-                Spacer()
-                Button("my server is running", action: continueToForm)
+                HStack(spacing: 12) {
+                    Button("Back", action: back)
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Palette.inkDim)
+                    Spacer()
+                    Button(action: continueToForm) {
+                        HStack(spacing: 9) {
+                            Text("My server is running")
+                            Image(systemName: "arrow.right")
+                        }
+                        .font(.system(size: 13, weight: .semibold))
+                        .padding(.vertical, 7)
+                        .padding(.horizontal, 8)
+                    }
                     .buttonStyle(.borderedProminent)
                     .tint(Palette.accent)
+                    .keyboardShortcut(.defaultAction)
+                }
+                .padding(.top, 28)
             }
-            .padding(.top, 22)
-        }
-        .padding(34)
-        #if os(macOS)
-            .frame(width: 620)
-        #else
-            .frame(maxWidth: 620)
-        #endif
-        .passbandGlass(.chrome, cornerRadius: 24, tint: Palette.glassTint.opacity(0.35))
-        .shadow(color: .black.opacity(0.3), radius: 50, y: 24)
     }
 }
 
@@ -989,10 +1274,11 @@ private struct SetupStep: View {
                 .background(Circle().fill(Palette.accent))
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Palette.ink)
                 Text(detail)
-                    .font(.system(size: 11))
-                    .foregroundStyle(Palette.inkFaint)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Palette.inkDim)
                 HStack(spacing: 8) {
                     Text(command)
                         .font(Typo.mono(11))
@@ -1008,7 +1294,7 @@ private struct SetupStep: View {
                 }
                 .padding(.horizontal, 9)
                 .padding(.vertical, 6)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Palette.canvas.opacity(0.65)))
+                .background(RoundedRectangle(cornerRadius: 8).fill(Palette.canvas.opacity(0.9)))
                 .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Palette.hairline, lineWidth: 0.75))
                 .padding(.top, 2)
             }
@@ -1044,8 +1330,74 @@ private struct SetupThemeToggle: View {
     }
 }
 
-/// A labelled input well. Near-opaque on purpose: a fully translucent field
-/// over a busy wallpaper leaves typed text unreadable.
+/// The gate's machined form: one dark piece edged in the accent, with slots
+/// cut in it. Lights as ONE instrument while any slot holds focus, because
+/// typing into it and arming its submit are the same act.
+private struct ConnectRig<Content: View>: View {
+    let lit: Bool
+    @ViewBuilder var content: Content
+    @State private var hovering = false
+
+    var body: some View {
+        let active = lit || hovering
+        VStack(spacing: 0) { content }
+            .background(
+                LinearGradient(
+                    colors: [Palette.canvas.opacity(0.94), Palette.canvas.opacity(0.98)],
+                    startPoint: .top, endPoint: .bottom))
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(Palette.accent.opacity(active ? 0.62 : 0.22), lineWidth: 1))
+            .shadow(color: Palette.accent.opacity(active ? 0.3 : 0), radius: 18)
+            .shadow(color: .black.opacity(0.35), radius: 16, y: 10)
+            .animation(.easeOut(duration: 0.3), value: active)
+            .onHover { hovering = $0 }
+    }
+}
+
+/// The hairline between two of the rig's slots.
+private struct RigDivider: View {
+    var body: some View {
+        Rectangle().fill(Palette.accent.opacity(0.3)).frame(height: 1)
+    }
+}
+
+/// One slot in the rig: the field, and its name on the trailing edge. The
+/// live slot gets a lit edge down its leading side, so tabbing between them
+/// shows which one is taking the typing.
+private struct RigSlot<Field: View>: View {
+    let label: String
+    let focused: Bool
+    @ViewBuilder var field: Field
+
+    var body: some View {
+        HStack(spacing: 10) {
+            field
+                .textFieldStyle(.plain)
+                .font(.system(size: 14))
+                .foregroundStyle(Palette.ink)
+            Text(label)
+                .font(Typo.micro)
+                .foregroundStyle(Palette.inkFaint)
+                .textCase(.lowercase)
+                .accessibilityHidden(true)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 13)
+        .overlay(alignment: .leading) {
+            Rectangle()
+                .fill(Palette.accent.opacity(focused ? 0.7 : 0))
+                .frame(width: 2)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(label)
+    }
+}
+
+/// A labelled input well. Near-opaque on purpose: a translucent field over a
+/// busy wallpaper, or over the first-run squelch scene, leaves typed text
+/// unreadable.
 struct Field<Content: View>: View {
     let label: String
     @ViewBuilder var content: Content
@@ -1081,7 +1433,7 @@ extension View {
             .padding(.vertical, 8)
             .background(
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(Palette.canvas.opacity(0.65))
+                    .fill(Palette.canvas.opacity(0.9))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 9, style: .continuous)

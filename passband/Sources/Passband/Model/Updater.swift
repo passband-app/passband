@@ -19,6 +19,7 @@
 import AppKit
 import Combine
 import Sparkle
+import UserNotifications
 
 /// Where the update flow has got to, as the card needs to see it. `available`
 /// is the ONLY phase that waits on a human; everything past it is progress the
@@ -65,7 +66,17 @@ final class Updater: NSObject, ObservableObject, SPUUserDriver {
     @Published private(set) var canCheck = false
 
     /// What the card draws.
-    @Published private(set) var phase: UpdatePhase = .idle
+    @Published private(set) var phase: UpdatePhase = .idle {
+        // The banner announces the card, so it goes when the card does (Later,
+        // an install, a failed download). Left behind, it is a click that
+        // opens a window with nothing in it.
+        didSet {
+            if phase == .idle, oldValue != .idle {
+                UNUserNotificationCenter.current()
+                    .removeDeliveredNotifications(withIdentifiers: ["passband.update"])
+            }
+        }
+    }
 
     /// Sparkle's question, parked until the human answers it. `install` is the
     /// card's one button; `dismiss` is Later, which brings the update back on
@@ -192,7 +203,25 @@ final class Updater: NSObject, ObservableObject, SPUUserDriver {
         }
         choice = reply
         consented = false
-        phase = .available(version: appcastItem.displayVersionString)
+        let version = appcastItem.displayVersionString
+        phase = .available(version: version)
+        // The card only speaks to someone looking at the window. A scheduled
+        // check usually lands while Passband sits behind other apps or with its
+        // window closed, so the news goes out as a banner too, once per
+        // version: Later brings the card back on every later check, and a
+        // banner each time would be nagging. A check the human asked for gets
+        // none, because they are already watching the answer.
+        if !state.userInitiated, Self.bannered != version {
+            Self.bannered = version
+            Task { await Notifier.shared.postUpdate(version: version) }
+        }
+    }
+
+    /// The last version a banner went out for. Persisted so a relaunch does
+    /// not announce the same release twice.
+    private static var bannered: String? {
+        get { UserDefaults.standard.string(forKey: "passband.update.bannered") }
+        set { UserDefaults.standard.set(newValue, forKey: "passband.update.bannered") }
     }
 
     func showUpdateNotFoundWithError(_ error: Error, acknowledgement: @escaping () -> Void) {

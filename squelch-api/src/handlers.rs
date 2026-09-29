@@ -17,12 +17,13 @@ use serde_json::json;
 use squelch_core::CoreError;
 use squelch_core::config::{CACHE_READ_INPUT_MULT, CACHE_WRITE_INPUT_MULT};
 use squelch_core::store::{
-    ActionMessageRef, Draft, FtsQuery, NewAuditEntry, OutboundAttachmentMeta, SearchDiagnostics,
-    SearchFilter, SearchSort, SitrepBand, SpamScope, SqliteStore, Store,
+    ActionMessageRef, Draft, DraftKey, FtsQuery, NewAuditEntry, OutboundAttachmentMeta,
+    SearchDiagnostics, SearchFilter, SearchSort, SitrepBand, SpamScope, SqliteStore, Store,
 };
 use squelch_core::sync::{LABEL_INBOX, LABEL_SPAM, decode_raw_b64url, parse_internal_date};
 use squelch_core::triage::llm::Usage;
 use squelch_core::triage::rule_infer;
+use squelch_core::triage::rule_suggest;
 use squelch_core::types::{
     AccountId, AttentionStatus, Disposition, GroupMode, ShredStats, Tier, TriageAxis,
 };
@@ -966,7 +967,7 @@ pub async fn delete_compose_attachment(
     })
     .await?;
     if deleted {
-        Ok(Json(json!({ "status": "deleted", "id": id })))
+        Ok((no_store(), Json(json!({ "status": "deleted", "id": id }))))
     } else {
         Err(ApiError::not_found())
     }
@@ -977,9 +978,16 @@ pub async fn delete_compose_attachment(
 /// whole send rather than going out without it, because the sender reviewed a
 /// tray and the mail must carry what the tray showed. Duplicated ids collapse
 /// to one file — one row is one part.
+///
+/// ANOTHER DRAFT'S FILE IS "GONE" TOO: a send may carry only files that are
+/// unclaimed or claimed by `draft_id`, the draft it consumes. The claim path
+/// already refuses to steal a claimed row; without the same rule here a send
+/// naming a foreign id would carry that file AND consume it on success,
+/// leaving the other draft pointing at nothing.
 async fn load_send_attachments(
     state: &ApiState,
     ids: &[i64],
+    draft_id: Option<i64>,
     target: Option<String>,
 ) -> Result<Vec<MailAttachment>, ApiError> {
     if ids.is_empty() {
@@ -998,7 +1006,7 @@ async fn load_send_attachments(
     let sizes = {
         let wanted = wanted.clone();
         store_call(state, move |store, account_id| {
-            store.outbound_attachment_sizes(account_id, &wanted)
+            store.outbound_attachment_sizes(account_id, draft_id, &wanted)
         })
         .await?
     };
@@ -1029,7 +1037,7 @@ async fn load_send_attachments(
         ));
     }
     let rows = store_call(state, move |store, account_id| {
-        store.outbound_attachments(account_id, &wanted)
+        store.outbound_attachments(account_id, draft_id, &wanted)
     })
     .await?;
     if rows.len() != count {
@@ -1080,12 +1088,12 @@ fn attachment_text_kinds(attachments: &[MailAttachment]) -> Vec<&'static str> {
 /// The staged files a send CONSUMED, dropped once the mail is away — the same
 /// contract as `discard_sent_draft`, and the same best-effort posture: the
 /// mail has left, so a failed cleanup is logged and never fails the request.
-async fn discard_sent_attachments(state: &ApiState, ids: Vec<i64>) {
+async fn discard_sent_attachments(state: &ApiState, draft_id: Option<i64>, ids: Vec<i64>) {
     if ids.is_empty() {
         return;
     }
     if store_call(state, move |store, account_id| {
-        store.delete_outbound_attachments(account_id, &ids)
+        store.delete_outbound_attachments(account_id, draft_id, &ids)
     })
     .await
     .is_err()
@@ -1913,6 +1921,93 @@ fn may_resolve_sender_mail(resolved: &ResolvedDisposition, sweep: bool) -> bool 
     sweep && resolved.explicit && resolved.disposition == Disposition::Squelch
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SuggestRuleQuery {
+    sender: String,
+}
+
+/// GET /client/rules/suggest?sender=addr: the sentence the owner might write
+/// about this sender, for the rule card to offer as a placeholder. Always 200;
+/// `suggestion` is null when there is no model, too little history, or no
+/// clear pattern. It is only ever SHOWN: the owner accepts it with tab and
+/// saves it themselves, and its disposition is then inferred from the owner's
+/// sentence like any other. See [`squelch_core::triage::rule_suggest`].
+pub async fn suggest_rule(
+    State(state): State<ApiState>,
+    Query(params): Query<SuggestRuleQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    // Validated before anything else, so a client bug answers the same 400
+    // whether or not this daemon has a model.
+    let sender = params.sender.trim().to_lowercase();
+    if sender.is_empty() {
+        return Err(ApiError::bad_request("sender must not be empty"));
+    }
+    let none = || (no_store(), Json(serde_json::json!({ "suggestion": null })));
+    let Some(client) = state.rule_suggest.clone() else {
+        return Ok(none());
+    };
+    let addr = sender.clone();
+    let digest = store_call(&state, move |store, account_id| {
+        // The runaway guard: past the day's cap the route answers null
+        // without spending. Read from the same ledger the calls bill into.
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        let spent: u64 = store
+            .list_usage_by_category(account_id, 1)?
+            .into_iter()
+            .filter(|(c, _)| c == squelch_core::metrics::RULE_SUGGEST_USAGE_CATEGORY)
+            .flat_map(|(_, days)| days)
+            .filter(|d| d.day == today)
+            .map(|d| d.calls)
+            .sum();
+        if spent >= u64::from(rule_suggest::DAILY_CAP) {
+            return Ok(None);
+        }
+        let history = store.sender_rule_digest(account_id, &addr, rule_suggest::HISTORY_LIMIT)?;
+        let rules = store.list_sender_rules(account_id)?;
+        Ok(Some((history, rules)))
+    })
+    .await?;
+    let Some((history, rules)) = digest else {
+        return Ok(none());
+    };
+    let existing: Vec<String> = rules
+        .into_iter()
+        .filter(|r| {
+            !r.want_text.trim().is_empty()
+                && squelch_core::triage::rules::glob_match(&r.match_pattern, &sender)
+        })
+        .map(|r| r.want_text)
+        .collect();
+    let (suggestion, usage) = rule_suggest::suggest_rule(
+        &client,
+        &rule_suggest::SuggestInput {
+            from_addr: &sender,
+            existing_rules: &existing,
+            history: &history,
+        },
+    )
+    .await;
+    if let Some(u) = usage {
+        let _ = store_call(&state, move |store, account_id| {
+            let day = Utc::now().format("%Y-%m-%d").to_string();
+            if let Err(e) = store.extract_bump_usage(
+                account_id,
+                &day,
+                squelch_core::metrics::RULE_SUGGEST_USAGE_CATEGORY,
+                u.into(),
+            ) {
+                eprintln!("squelch: rule suggestion usage ledger bump failed ({e})");
+            }
+            Ok(())
+        })
+        .await;
+    }
+    Ok((
+        no_store(),
+        Json(serde_json::json!({ "suggestion": suggestion })),
+    ))
+}
+
 pub async fn create_rule(
     State(state): State<ApiState>,
     Json(body): Json<CreateRuleBody>,
@@ -2039,12 +2134,17 @@ pub async fn delete_rule(
     }
 }
 
-// --- GET/PUT/DELETE /client/drafts ------------------------------------------
+// --- GET/POST/PUT/DELETE /client/drafts -------------------------------------
 //
 // Drafts are LOCAL and human-door only: nothing here is synced to Gmail Drafts
 // and no draft ever leaves the machine. Hence NO AUDIT ROWS anywhere in this
 // section — the audit log is the ledger of reveals and Gmail writes, and a
 // composition that never left is neither.
+//
+// Keys: a reply draft is one per replied-to message and a forward draft one per
+// forwarded message (both via the keyed `PUT /client/drafts`); new-message
+// drafts are MANY per account, created by `POST /client/drafts` and edited by id
+// through `PUT /client/drafts/{id}`.
 
 /// One draft on the wire. `to_addr` is spelled `to` here: the field name the
 /// composer sends and the send endpoint uses.
@@ -2052,6 +2152,8 @@ pub async fn delete_rule(
 struct DraftView {
     id: i64,
     reply_to_message_id: Option<i64>,
+    /// The forwarded message, for a forward draft. Always present as a key.
+    forward_of_message_id: Option<i64>,
     to: String,
     /// The other two recipient lists, spelled the way the send endpoint spells
     /// them. Always present, `""` when there are none, so a client need not
@@ -2068,13 +2170,27 @@ struct DraftView {
     attachments: Vec<OutboundAttachmentView>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+    /// Picker context from the replied-to / forwarded message: its thread,
+    /// subject, and sender (`parent_from` is the display name when there is
+    /// one, else the address; `parent_from_addr` is always the bare address).
+    /// Always present as keys, `null` for plain new mail.
+    thread_id: Option<String>,
+    parent_subject: Option<String>,
+    parent_from: Option<String>,
+    parent_from_addr: Option<String>,
 }
 
 impl From<Draft> for DraftView {
     fn from(d: Draft) -> Self {
+        let parent_from = d
+            .parent_from_name
+            .clone()
+            .filter(|n| !n.trim().is_empty())
+            .or_else(|| d.parent_from_addr.clone());
         Self {
             id: d.id,
             reply_to_message_id: d.reply_to_message_id,
+            forward_of_message_id: d.forward_of_message_id,
             to: d.to_addr,
             cc: d.cc_addr,
             bcc: d.bcc_addr,
@@ -2087,6 +2203,10 @@ impl From<Draft> for DraftView {
                 .collect(),
             created_at: d.created_at,
             updated_at: d.updated_at,
+            thread_id: d.thread_id,
+            parent_subject: d.parent_subject,
+            parent_from,
+            parent_from_addr: d.parent_from_addr,
         }
     }
 }
@@ -2104,9 +2224,37 @@ fn no_store() -> HeaderMap {
     headers
 }
 
-pub async fn list_drafts(State(state): State<ApiState>) -> Result<impl IntoResponse, ApiError> {
+/// `GET /client/drafts` query. `forwards` is an OPT-IN that only a client
+/// which understands forward drafts sends: an app predating them restores
+/// "the first row with no reply key" as its new message, and a forward row
+/// matches that, so it would open ⌘N on the forward's subject and note with
+/// the original silently gone. Hidden rows are still stored and still
+/// consumed by a forward send; they are only kept out of an old app's list.
+#[derive(Debug, Default, Deserialize)]
+pub struct ListDraftsQuery {
+    #[serde(default, deserialize_with = "query_flag")]
+    forwards: bool,
+}
+
+/// A query-string flag: `1` or `true` is on, anything else (or absent) off.
+/// A plain `bool` would 400 on the `1` the client sends.
+fn query_flag<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    let raw = String::deserialize(d)?;
+    Ok(raw == "1" || raw.eq_ignore_ascii_case("true"))
+}
+
+pub async fn list_drafts(
+    State(state): State<ApiState>,
+    Query(q): Query<ListDraftsQuery>,
+) -> Result<impl IntoResponse, ApiError> {
     let drafts = store_call(&state, |store, account_id| store.list_drafts(account_id)).await?;
-    let items: Vec<DraftView> = drafts.into_iter().map(DraftView::from).collect();
+    // Filtered here, not in the store: the hole is a wire-compat one, and the
+    // store's own callers (a forward send discarding its draft) see every row.
+    let items: Vec<DraftView> = drafts
+        .into_iter()
+        .filter(|d| q.forwards || d.forward_of_message_id.is_none())
+        .map(DraftView::from)
+        .collect();
     Ok((no_store(), Json(items)))
 }
 
@@ -2215,10 +2363,23 @@ pub async fn get_senders(
 
 #[derive(Debug, Deserialize)]
 pub struct DraftBody {
-    /// The message being replied to; absent or null addresses the account's
-    /// single new-message draft.
+    /// The message being replied to. With `forward_of_message_id` also absent,
+    /// the key-less PUT edits the NEWEST new-message draft (created when there
+    /// is none): the single-slot behaviour an app predating many drafts expects.
     #[serde(default)]
     reply_to_message_id: Option<i64>,
+    /// The message being forwarded: one draft per forwarded message, like
+    /// replies. At most one of the two keys may be set.
+    #[serde(default)]
+    forward_of_message_id: Option<i64>,
+    #[serde(flatten)]
+    fields: DraftFieldsBody,
+}
+
+/// The composition half of a draft body, shared by the keyed `PUT
+/// /client/drafts`, `POST /client/drafts`, and `PUT /client/drafts/{id}`.
+#[derive(Debug, Deserialize)]
+pub struct DraftFieldsBody {
     /// Every text field is optional — a half-composed draft is the normal case,
     /// so a missing (or null) field stores "" rather than 400ing.
     #[serde(default)]
@@ -2243,29 +2404,23 @@ pub struct DraftBody {
     attachment_ids: Option<Vec<i64>>,
 }
 
-/// `PUT /client/drafts` — save the draft for one key (reply target, or the
-/// new-message slot). Idempotent by key: a second PUT edits the same row.
-pub async fn put_draft(
-    State(state): State<ApiState>,
-    Json(body): Json<DraftBody>,
-) -> Result<impl IntoResponse, ApiError> {
-    // Resolve ownership independently from external-agent access. A human may
-    // draft a reply to any of their messages, including authentication mail.
-    if let Some(parent) = body.reply_to_message_id {
-        resolve_target(&state, parent).await?;
-    }
-    let reply_to = body.reply_to_message_id;
+/// Write one draft under `key` and apply its attachment claims, all in one
+/// store call. `None` only for a [`DraftKey::NewById`] miss.
+async fn save_draft(
+    state: &ApiState,
+    key: DraftKey,
+    body: DraftFieldsBody,
+) -> Result<Option<Draft>, ApiError> {
     let to = body.to.unwrap_or_default();
     let cc = body.cc.unwrap_or_default();
     let bcc = body.bcc.unwrap_or_default();
     let subject = body.subject.unwrap_or_default();
     let text = body.body.unwrap_or_default();
-
     let attachment_ids = body.attachment_ids;
-    let draft = store_call(&state, move |store, account_id| {
-        let mut draft = store.upsert_draft(
+    store_call(state, move |store, account_id| {
+        let Some(mut draft) = store.upsert_draft(
             account_id,
-            reply_to,
+            key,
             squelch_core::store::DraftFields {
                 to_addr: &to,
                 cc_addr: &cc,
@@ -2274,7 +2429,10 @@ pub async fn put_draft(
                 body: &text,
             },
             Utc::now(),
-        )?;
+        )?
+        else {
+            return Ok(None);
+        };
         // Claim under the same store call, then re-read: the row the upsert
         // returned was read before the claim and would list the OLD files.
         if let Some(ids) = attachment_ids {
@@ -2283,9 +2441,62 @@ pub async fn put_draft(
                 draft = fresh;
             }
         }
-        Ok(draft)
+        Ok(Some(draft))
     })
-    .await?;
+    .await
+}
+
+/// `PUT /client/drafts` — save the draft for one KEY: a reply target, a
+/// forwarded message, or (neither) the newest new-message draft, for apps that
+/// predate many drafts. Idempotent by key: a second PUT edits the same row.
+pub async fn put_draft(
+    State(state): State<ApiState>,
+    Json(body): Json<DraftBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let key = match (body.reply_to_message_id, body.forward_of_message_id) {
+        (Some(_), Some(_)) => {
+            return Err(ApiError::bad_request(
+                "a draft is a reply or a forward, not both",
+            ));
+        }
+        (Some(parent), None) => DraftKey::Reply(parent),
+        (None, Some(parent)) => DraftKey::Forward(parent),
+        (None, None) => DraftKey::NewLatest,
+    };
+    // Resolve ownership independently from external-agent access. A human may
+    // draft a reply to (or a forward of) any of their messages, including
+    // authentication mail.
+    if let DraftKey::Reply(parent) | DraftKey::Forward(parent) = key {
+        resolve_target(&state, parent).await?;
+    }
+    let draft = save_draft(&state, key, body.fields)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    Ok((no_store(), Json(DraftView::from(draft))))
+}
+
+/// `POST /client/drafts` — start a NEW new-message draft. Always inserts; the
+/// returned `id` is what later saves address through `PUT /client/drafts/{id}`.
+pub async fn create_draft(
+    State(state): State<ApiState>,
+    Json(body): Json<DraftFieldsBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let draft = save_draft(&state, DraftKey::NewCreate, body)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    Ok((no_store(), Json(DraftView::from(draft))))
+}
+
+/// `PUT /client/drafts/{id}` — edit one draft by id, whatever its key (the key
+/// is left untouched). Another account's id and an unknown id are the same 404.
+pub async fn update_draft(
+    State(state): State<ApiState>,
+    Path(id): Path<i64>,
+    Json(body): Json<DraftFieldsBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let draft = save_draft(&state, DraftKey::NewById(id), body)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
     Ok((no_store(), Json(DraftView::from(draft))))
 }
 
@@ -2300,7 +2511,7 @@ pub async fn delete_draft(
     })
     .await?;
     if deleted {
-        Ok(Json(json!({ "status": "deleted", "id": id })))
+        Ok((no_store(), Json(json!({ "status": "deleted", "id": id }))))
     } else {
         Err(ApiError::not_found())
     }
@@ -2510,7 +2721,7 @@ pub async fn get_stats(State(state): State<ApiState>) -> Result<impl IntoRespons
         .await?;
 
     // tokens/1e6 * per-MTok price, over input+output plus the prompt-cache
-    // split (write 1.25x / read 0.1x of the input price). Switching the model
+    // split (CACHE_WRITE_INPUT_MULT / CACHE_READ_INPUT_MULT of the input price). Switching the model
     // means updating stage2_price_*_per_mtok or this drifts.
     let est_cost_usd_today = (usage.input_tokens as f64 / 1_000_000.0)
         * state.stage2_price_in_per_mtok
@@ -2634,6 +2845,12 @@ pub async fn get_stats(State(state): State<ApiState>) -> Result<impl IntoRespons
     // daemon ignores the key and mails the words without the files — so the
     // client gates the attach affordances on this.
     body["compose_attachments"] = json!(true);
+    // And for many drafts: whether POST /client/drafts, PUT /client/drafts/{id}
+    // and `forward_of_message_id` on the keyed PUT exist. Same silent-failure
+    // reasoning: an old daemon IGNORES `forward_of_message_id` on the keyed PUT
+    // (serde default) and would overwrite its single new-message draft with a
+    // forward, so the client must not write those shapes without this flag.
+    body["drafts_v2"] = json!(true);
     Ok(Json(body))
 }
 
@@ -2855,9 +3072,7 @@ pub async fn get_usage(
                 state.stage2_price_in_per_mtok,
                 state.stage2_price_out_per_mtok,
             )
-        } else if name == squelch_core::metrics::NOTIFY_USAGE_CATEGORY
-            || name == squelch_core::triage::access::USAGE_CATEGORY
-        {
+        } else if squelch_core::metrics::runs_notify_model(name) {
             (
                 state.notify_model.as_ref(),
                 state.notify_price_in_per_mtok,
@@ -3244,13 +3459,21 @@ fn write_error(e: &WriteError) -> ApiError {
             "write credential not configured; run `squelchd auth --write`",
         ),
         WriteError::Invalid(m) => ApiError::bad_request(m.clone()),
+        // Nothing reached Gmail: the mailbox is in a quota hold. 503 so the
+        // app reads it as "not now" rather than "Gmail rejected this".
+        WriteError::Paced { retry_in_secs } => ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("Gmail is pacing this mailbox. Try again in {retry_in_secs}s."),
+        ),
         WriteError::Api { .. } | WriteError::Transport(_) => {
             ApiError::new(StatusCode::BAD_GATEWAY, "gmail request failed")
         }
     }
 }
 
-/// Look up the (non-sealed) action target for a local message id.
+/// Look up the action target for a local message id. UNFILTERED: a sealed or
+/// restricted message resolves like any other (only another account's id or an
+/// unknown one fails), so any sealed gate belongs to the caller.
 async fn resolve_target(state: &ApiState, message_id: i64) -> Result<ActionMessageRef, ApiError> {
     store_call(state, move |store, account_id| {
         store.action_message_ref(account_id, message_id)
@@ -3848,7 +4071,7 @@ async fn finish_send(
             if let Some(draft_id) = draft_id {
                 discard_sent_draft(state, draft_id).await;
             }
-            discard_sent_attachments(state, attachment_ids.to_vec()).await;
+            discard_sent_attachments(state, draft_id, attachment_ids.to_vec()).await;
             audit_action(state, "send", target.clone(), &outcome).await;
             let echo_message_id = echo_sent(state, client, target, &sent).await;
             if let (Some((token, _)), Some(message_id)) = (&tracker, echo_message_id) {
@@ -3960,7 +4183,8 @@ pub async fn action_send(
     // THE FILES ARE READ FIRST, so a send naming a file that is gone is refused
     // before the guard spends anything — and so the guard can read them: a
     // text attachment is scanned exactly as a forward's would be.
-    let attachments = load_send_attachments(&state, &body.attachment_ids, target.clone()).await?;
+    let attachments =
+        load_send_attachments(&state, &body.attachment_ids, body.draft_id, target.clone()).await?;
     let mut matches = guard::scan_kinds(&body.body);
     for kind in attachment_text_kinds(&attachments) {
         if !matches.contains(&kind) {
@@ -4291,7 +4515,7 @@ async fn fan_out_send(
     if let Some(draft_id) = body.draft_id {
         discard_sent_draft(state, draft_id).await;
     }
-    discard_sent_attachments(state, body.attachment_ids.clone()).await;
+    discard_sent_attachments(state, body.draft_id, body.attachment_ids.clone()).await;
 
     Ok(Json(json!({
         "status": "sending",

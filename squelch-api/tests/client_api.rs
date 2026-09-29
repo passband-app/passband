@@ -2073,6 +2073,105 @@ async fn an_archive_books_against_the_mailbox_gmail_budget() {
     );
 }
 
+fn archive_app(
+    base: String,
+    budget: Arc<squelch_core::gmail_budget::GmailBudget>,
+) -> (axum::Router, i64) {
+    let (state, store, acct) = state_with(|store, acct| {
+        let m = store
+            .upsert_message(&msg(acct, "gmail-paced", "t1", "hi", "body"))
+            .unwrap();
+        store
+            .set_triage(
+                m,
+                acct,
+                80,
+                Tier::Signal,
+                Sensitivity::Normal,
+                None,
+                "",
+                "",
+                None,
+            )
+            .unwrap();
+    });
+    let message_id = store.search(acct, "hi", 10, 0).unwrap()[0].id;
+    let app = router(
+        state
+            .with_write_test_harness(Arc::new(StubCreds), base)
+            .with_gmail_budget(budget),
+    );
+    (app, message_id)
+}
+
+/// A quota refusal on a WRITE (a send is the most expensive call there is)
+/// slows the mailbox's shared budget, so the sync loop backs off too.
+#[tokio::test]
+async fn a_quota_refused_archive_slows_the_mailbox_budget() {
+    use squelch_core::config::GmailQuotaProfile;
+    use squelch_core::gmail_budget::GmailBudget;
+    use std::time::Duration;
+
+    let (base, handle) = mock_gmail_seq(vec![(
+        403,
+        r#"{"error":{"details":[{"reason":"RATE_LIMIT_EXCEEDED"}]}}"#.to_string(),
+    )])
+    .await;
+    let budget = Arc::new(
+        GmailBudget::with_unit(GmailQuotaProfile::Standard, Duration::from_micros(10))
+            .with_adaptation(Duration::ZERO, Duration::from_secs(3600)),
+    );
+    let (app, message_id) = archive_app(base, budget.clone());
+    let resp = app
+        .oneshot(authed_json(
+            "POST",
+            "/client/actions/archive",
+            serde_json::json!({ "message_id": message_id, "confirm": true }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(resp.status(), StatusCode::OK);
+    handle.await.unwrap();
+    assert_eq!(budget.unit(), Duration::from_micros(20));
+}
+
+/// During a refusal hold a human's archive is answered at once with 503 and
+/// when to retry, and nothing is sent to Gmail: it must not sit out a
+/// one-minute hold while the app's 15 s request timeout calls it failed.
+#[tokio::test]
+async fn an_archive_during_a_quota_hold_is_told_to_retry_without_sending() {
+    use squelch_core::config::GmailQuotaProfile;
+    use squelch_core::gmail_budget::GmailBudget;
+    use std::time::{Duration, Instant};
+
+    let (base, _handle) = mock_gmail(1).await;
+    let budget = Arc::new(
+        GmailBudget::with_unit(GmailQuotaProfile::Standard, Duration::ZERO)
+            .with_adaptation(Duration::from_secs(60), Duration::from_secs(3600)),
+    );
+    budget.note_quota_refusal(None);
+    let (app, message_id) = archive_app(base, budget);
+    let started = Instant::now();
+    let resp = app
+        .oneshot(authed_json(
+            "POST",
+            "/client/actions/archive",
+            serde_json::json!({ "message_id": message_id, "confirm": true }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "must answer at once, not wait out the hold"
+    );
+    let body = body_json(resp).await;
+    assert!(
+        body.to_string().contains("Try again in"),
+        "the app should be told when to retry: {body}"
+    );
+}
+
 #[tokio::test]
 async fn human_can_archive_restricted_mail() {
     let (base, handle) = mock_gmail(1).await;
@@ -5413,10 +5512,11 @@ async fn stats_expose_stage2_usage_and_cost() {
     assert_eq!(s2["output_tokens_today"], 200_000);
     assert_eq!(s2["cache_creation_tokens_today"], 200_000);
     assert_eq!(s2["cache_read_tokens_today"], 1_000_000);
-    // cost = 5.0*(1e6/1e6) + 25.0*(0.2e6/1e6)
-    //      + 5.0*1.25*(0.2e6/1e6) + 5.0*0.1*(1e6/1e6) = 5.0 + 5.0 + 1.25 + 0.5
+    // cost = 4.0*(1e6/1e6) + 20.0*(0.2e6/1e6)
+    //      + 4.0*2.0*(0.2e6/1e6) + 4.0*0.05*(1e6/1e6) = 4.0 + 4.0 + 1.6 + 0.2
+    // (Opus 5.5 prices; 1-hour cache writes at 2x, reads at 0.05x)
     let cost = s2["est_cost_usd_today"].as_f64().unwrap();
-    assert!((cost - 11.75).abs() < 1e-9, "expected 11.75, got {cost}");
+    assert!((cost - 9.8).abs() < 1e-9, "expected 9.8, got {cost}");
 }
 
 #[tokio::test]
@@ -5546,15 +5646,16 @@ async fn usage_returns_rows_totals_and_is_bearer_gated() {
     assert_eq!(totals["output_tokens"], 200_000);
     assert_eq!(totals["cache_creation_tokens"], 400_000);
     assert_eq!(totals["cache_read_tokens"], 2_000_000);
-    // cost = 5.0*(1e6/1e6) + 25.0*(0.2e6/1e6)
-    //      + 5.0*1.25*(0.4e6/1e6) + 5.0*0.1*(2e6/1e6) = 5.0 + 5.0 + 2.5 + 1.0
+    // cost = 4.0*(1e6/1e6) + 20.0*(0.2e6/1e6)
+    //      + 4.0*2.0*(0.4e6/1e6) + 4.0*0.05*(2e6/1e6) = 4.0 + 4.0 + 3.2 + 0.4
+    // (Opus 5.5 prices; cache writes at the 1-hour TTL's 2x, reads at 0.05x)
     let cost = totals["est_cost_usd"].as_f64().unwrap();
-    assert!((cost - 13.5).abs() < 1e-9, "expected 13.5, got {cost}");
+    assert!((cost - 11.6).abs() < 1e-9, "expected 11.6, got {cost}");
 
     // Stage-1 and Stage-2 appear as separate usage categories.
-    assert_eq!(json["model"], "claude-opus-5");
-    assert_eq!(json["categories"]["stage2"]["model"], "claude-opus-5");
-    assert_eq!(json["categories"]["stage1"]["model"], "claude-opus-5");
+    assert_eq!(json["model"], "claude-opus-5-5");
+    assert_eq!(json["categories"]["stage2"]["model"], "claude-opus-5-5");
+    assert_eq!(json["categories"]["stage1"]["model"], "claude-opus-5-5");
 
     // Bearer-gated: no token => 401.
     let req = Request::builder()
@@ -6369,12 +6470,12 @@ async fn triage_config_get_default_shape() {
 
     // Stage-2 escalation model label. SAME model as Stage-1: escalation buys
     // context and reasoning depth, not a different reader.
-    assert_eq!(json["stage2_model"], "claude-opus-5");
+    assert_eq!(json["stage2_model"], "claude-opus-5-5");
 
     // Stage-1 block: GLOBAL-only cap (default 500), "default" source, null
     // tokens/call (empty ledger), and prices.
     let s1 = &json["stage1"];
-    assert_eq!(s1["model"], "claude-opus-5");
+    assert_eq!(s1["model"], "claude-opus-5-5");
     assert_eq!(s1["global_daily_cap"], 500);
     assert_eq!(s1["source"], "default");
     assert_eq!(s1["avg_calls_per_day"], 0.0);
@@ -7069,11 +7170,12 @@ async fn put_draft(app: &axum::Router, body: Value) -> Value {
     body_json(resp).await
 }
 
-/// The current draft list as a JSON array.
+/// The current draft list as a JSON array, as the current client asks for it
+/// (forward drafts included).
 async fn list_drafts(app: &axum::Router) -> Value {
     let resp = app
         .clone()
-        .oneshot(authed("GET", "/client/drafts"))
+        .oneshot(authed("GET", "/client/drafts?forwards=1"))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -7130,7 +7232,7 @@ async fn put_draft_defaults_missing_text_fields_and_keys_new_mail_on_null() {
     let draft = put_draft(&app, serde_json::json!({ "to": "bob@example.com" })).await;
     assert!(
         draft["reply_to_message_id"].is_null(),
-        "no parent => the new-message slot"
+        "no parent => a new-message draft (the newest, created when none)"
     );
     assert_eq!(
         draft["subject"], "",
@@ -7182,6 +7284,57 @@ async fn human_can_save_draft_for_restricted_parent_but_unknown_still_fails() {
         );
     }
     assert_eq!(store.list_drafts(acct).unwrap().len(), 1);
+    assert_eq!(list_drafts(&app).await.as_array().map(Vec::len), Some(1));
+}
+
+/// The forward key resolves its parent through the same unfiltered lookup as
+/// the reply key: a sealed parent is the human's to forward-draft, an unknown
+/// one is still a 404.
+#[tokio::test]
+async fn human_can_save_forward_draft_for_restricted_parent_but_unknown_still_fails() {
+    let Harness { app, store, acct } = harness(|store, acct| {
+        let s = store
+            .upsert_message(&msg(acct, "gmail-sealed", "t9", "code", "123456"))
+            .unwrap();
+        store
+            .set_triage(
+                s,
+                acct,
+                90,
+                Tier::Noise,
+                Sensitivity::Sealed,
+                Some(SealedKind::Otp),
+                "",
+                "",
+                None,
+            )
+            .unwrap();
+    });
+    let sealed_id = store.sealed_messages(acct).unwrap()[0].id;
+
+    for parent in [sealed_id, 999_999] {
+        let resp = app
+            .clone()
+            .oneshot(authed_json(
+                "PUT",
+                "/client/drafts",
+                serde_json::json!({ "forward_of_message_id": parent, "body": "fwd" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            if parent == sealed_id {
+                StatusCode::OK
+            } else {
+                StatusCode::NOT_FOUND
+            },
+            "human access and missing parent are distinct"
+        );
+    }
+    let drafts = store.list_drafts(acct).unwrap();
+    assert_eq!(drafts.len(), 1);
+    assert_eq!(drafts[0].forward_of_message_id, Some(sealed_id));
     assert_eq!(list_drafts(&app).await.as_array().map(Vec::len), Some(1));
 }
 
@@ -7433,6 +7586,18 @@ async fn draft_routes_require_bearer_auth() {
             .uri("/client/drafts/1")
             .body(Body::empty())
             .unwrap(),
+        common::json_request(
+            "POST",
+            "/client/drafts",
+            &serde_json::json!({ "to": "a@example.com" }),
+            false,
+        ),
+        common::json_request(
+            "PUT",
+            "/client/drafts/1",
+            &serde_json::json!({ "to": "a@example.com" }),
+            false,
+        ),
     ];
     for req in unauthed {
         let uri = req.uri().clone();
@@ -7444,6 +7609,347 @@ async fn draft_routes_require_bearer_auth() {
             "{method} {uri} must be behind auth"
         );
     }
+}
+
+/// Send one draft request and hand back `(status, json)`.
+async fn draft_call(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let resp = app
+        .clone()
+        .oneshot(authed_json(method, uri, body))
+        .await
+        .unwrap();
+    let status = resp.status();
+    if status == StatusCode::OK {
+        assert_eq!(
+            resp.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store",
+            "{method} {uri} must be no-store"
+        );
+    }
+    (status, body_json(resp).await)
+}
+
+/// Every key a `DraftView` must carry, null or not, so a client never has to
+/// tell a missing field from a daemon too old to have it.
+const DRAFT_VIEW_KEYS: [&str; 15] = [
+    "id",
+    "reply_to_message_id",
+    "forward_of_message_id",
+    "to",
+    "cc",
+    "bcc",
+    "subject",
+    "body",
+    "attachments",
+    "created_at",
+    "updated_at",
+    "thread_id",
+    "parent_subject",
+    "parent_from",
+    "parent_from_addr",
+];
+
+#[tokio::test]
+async fn post_drafts_creates_distinct_rows_and_put_by_id_edits_one() {
+    let Harness { app, store, acct } = harness(|_, _| {});
+    let (s1, a) = draft_call(
+        &app,
+        "POST",
+        "/client/drafts",
+        serde_json::json!({ "to": "bob@example.com", "subject": "One", "body": "1" }),
+    )
+    .await;
+    let (s2, b) = draft_call(
+        &app,
+        "POST",
+        "/client/drafts",
+        serde_json::json!({ "to": "carol@example.com", "subject": "Two", "body": "2" }),
+    )
+    .await;
+    assert_eq!((s1, s2), (StatusCode::OK, StatusCode::OK));
+    assert_ne!(a["id"], b["id"], "a second new mail is a second draft");
+    let obj = a.as_object().unwrap();
+    for key in DRAFT_VIEW_KEYS {
+        assert!(obj.contains_key(key), "DraftView lacks `{key}`: {a}");
+    }
+    for key in [
+        "reply_to_message_id",
+        "forward_of_message_id",
+        "thread_id",
+        "parent_subject",
+        "parent_from",
+        "parent_from_addr",
+    ] {
+        assert!(a[key].is_null(), "plain new mail has no `{key}`");
+    }
+    assert_eq!(a["attachments"], serde_json::json!([]));
+
+    let a_id = a["id"].as_i64().unwrap();
+    let (s, edited) = draft_call(
+        &app,
+        "PUT",
+        &format!("/client/drafts/{a_id}"),
+        serde_json::json!({ "to": "bob@example.com", "subject": "One", "body": "1 again", "cc": "x@example.com" }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(edited["id"], a["id"]);
+    assert_eq!(edited["created_at"], a["created_at"]);
+    assert_eq!(edited["body"], "1 again");
+    assert_eq!(edited["cc"], "x@example.com");
+
+    let all = list_drafts(&app).await;
+    let all = all.as_array().unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0]["id"], a["id"], "the edited draft is newest");
+    assert_eq!(store.list_drafts(acct).unwrap().len(), 2);
+    assert!(
+        store.list_audit(acct, 10).unwrap().is_empty(),
+        "never audited"
+    );
+}
+
+#[tokio::test]
+async fn put_draft_by_id_is_the_same_404_for_unknown_and_another_accounts_id() {
+    let Harness { app, store, .. } = harness(|_, _| {});
+    let other = store.ensure_account("other@example.com").unwrap();
+    let theirs = store
+        .upsert_draft(
+            other,
+            squelch_core::store::DraftKey::NewCreate,
+            squelch_core::store::DraftFields {
+                body: "theirs",
+                ..Default::default()
+            },
+            chrono::Utc::now(),
+        )
+        .unwrap()
+        .unwrap();
+    let (s_theirs, j_theirs) = draft_call(
+        &app,
+        "PUT",
+        &format!("/client/drafts/{}", theirs.id),
+        serde_json::json!({ "body": "mine now" }),
+    )
+    .await;
+    let (s_unknown, j_unknown) = draft_call(
+        &app,
+        "PUT",
+        "/client/drafts/999999",
+        serde_json::json!({ "body": "x" }),
+    )
+    .await;
+    assert_eq!(s_theirs, StatusCode::NOT_FOUND);
+    assert_eq!(s_unknown, StatusCode::NOT_FOUND);
+    assert_eq!(j_theirs, j_unknown, "indistinguishable");
+    assert!(j_theirs["error"].is_string());
+    // The miss wrote nothing, on either account.
+    assert_eq!(
+        store.draft_by_id(other, theirs.id).unwrap().unwrap().body,
+        "theirs"
+    );
+    assert_eq!(list_drafts(&app).await.as_array().map(Vec::len), Some(0));
+}
+
+#[tokio::test]
+async fn keyless_put_edits_the_newest_new_message_draft_for_old_apps() {
+    let mut parent = 0;
+    let Harness { app, .. } = harness(|store, acct| parent = seed_draft_parent(store, acct));
+    // A reply draft never counts as the new-message slot.
+    put_draft(
+        &app,
+        serde_json::json!({ "reply_to_message_id": parent, "body": "r" }),
+    )
+    .await;
+    let (_, older) = draft_call(
+        &app,
+        "POST",
+        "/client/drafts",
+        serde_json::json!({ "body": "older" }),
+    )
+    .await;
+    let (_, newer) = draft_call(
+        &app,
+        "POST",
+        "/client/drafts",
+        serde_json::json!({ "body": "newer" }),
+    )
+    .await;
+    // A forward saved AFTER both: the newest row, and never the keyless target.
+    let forward = put_draft(
+        &app,
+        serde_json::json!({ "forward_of_message_id": parent, "body": "fwd" }),
+    )
+    .await;
+    let edited = put_draft(&app, serde_json::json!({ "body": "old app typed" })).await;
+    assert_eq!(
+        edited["id"], newer["id"],
+        "the NEWEST PLAIN new-message row"
+    );
+    assert!(edited["forward_of_message_id"].is_null());
+    let all = list_drafts(&app).await;
+    let all = all.as_array().unwrap();
+    assert_eq!(all.len(), 4);
+    let old_row = all.iter().find(|d| d["id"] == older["id"]).unwrap();
+    assert_eq!(old_row["body"], "older", "the older draft is untouched");
+    let fwd_row = all.iter().find(|d| d["id"] == forward["id"]).unwrap();
+    assert_eq!(fwd_row["body"], "fwd", "the forward draft is untouched");
+    let new_row = all.iter().find(|d| d["id"] == newer["id"]).unwrap();
+    assert_eq!(new_row["body"], "old app typed");
+}
+
+#[tokio::test]
+async fn forward_drafts_are_keyed_per_message_and_carry_parent_context() {
+    let mut parent = 0;
+    let Harness { app, .. } = harness(|store, acct| parent = seed_draft_parent(store, acct));
+    let first = put_draft(
+        &app,
+        serde_json::json!({ "forward_of_message_id": parent, "to": "carol@example.com", "body": "fyi" }),
+    )
+    .await;
+    assert_eq!(first["forward_of_message_id"], parent);
+    assert!(first["reply_to_message_id"].is_null());
+    assert_eq!(first["thread_id"], "t-draft");
+    assert_eq!(first["parent_subject"], "Lunch?");
+    assert!(first["parent_from"].is_string());
+    assert!(first["parent_from_addr"].as_str().unwrap().contains('@'));
+    let second = put_draft(
+        &app,
+        serde_json::json!({ "forward_of_message_id": parent, "to": "carol@example.com", "body": "fyi!" }),
+    )
+    .await;
+    assert_eq!(second["id"], first["id"], "one forward draft per message");
+    // A reply to the same message is its own row, with the same context.
+    let reply = put_draft(
+        &app,
+        serde_json::json!({ "reply_to_message_id": parent, "body": "r" }),
+    )
+    .await;
+    assert_ne!(reply["id"], first["id"]);
+    assert_eq!(reply["parent_subject"], "Lunch?");
+    assert_eq!(list_drafts(&app).await.as_array().map(Vec::len), Some(2));
+
+    // Both keys at once is a 400; an unknown forward parent is a 404.
+    let (s, j) = draft_call(
+        &app,
+        "PUT",
+        "/client/drafts",
+        serde_json::json!({ "reply_to_message_id": parent, "forward_of_message_id": parent }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert!(j["error"].is_string());
+    let (s, _) = draft_call(
+        &app,
+        "PUT",
+        "/client/drafts",
+        serde_json::json!({ "forward_of_message_id": 999_999 }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert_eq!(list_drafts(&app).await.as_array().map(Vec::len), Some(2));
+}
+
+/// An app predating forward drafts restores the first row with no reply key
+/// as its new message, so a forward row must not reach it: listed only to a
+/// client that opts in with `forwards=1`.
+#[tokio::test]
+async fn forward_drafts_are_listed_only_with_forwards_opt_in() {
+    let mut parent = 0;
+    let Harness { app, .. } = harness(|store, acct| parent = seed_draft_parent(store, acct));
+    let fwd = put_draft(
+        &app,
+        serde_json::json!({ "forward_of_message_id": parent, "body": "fyi" }),
+    )
+    .await;
+    let reply = put_draft(
+        &app,
+        serde_json::json!({ "reply_to_message_id": parent, "body": "r" }),
+    )
+    .await;
+
+    let with = list_drafts(&app).await;
+    let ids: Vec<&Value> = with.as_array().unwrap().iter().map(|d| &d["id"]).collect();
+    assert!(ids.contains(&&fwd["id"]), "opted in: the forward is listed");
+    assert!(ids.contains(&&reply["id"]));
+
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", "/client/drafts"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let without = body_json(resp).await;
+    let ids: Vec<&Value> = without
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| &d["id"])
+        .collect();
+    assert!(
+        !ids.contains(&&fwd["id"]),
+        "an old app never sees the forward"
+    );
+    assert!(ids.contains(&&reply["id"]), "only forwards are hidden");
+}
+
+#[tokio::test]
+async fn stats_advertise_drafts_v2() {
+    let Harness { app, .. } = harness(|_, _| {});
+    let resp = app.oneshot(authed("GET", "/client/stats")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["drafts_v2"], true);
+}
+
+#[tokio::test]
+async fn a_forward_send_discards_the_forward_draft_it_consumed() {
+    let (base, handle) = mock_gmail_seq(vec![
+        (200, original_raw_response("<p>chart</p>")),
+        (200, "{}".to_string()),
+    ])
+    .await;
+    let Harness { app, store, acct } = app_with_writes(base, |store, acct| {
+        seed_one_signal(
+            store,
+            acct,
+            "gmail-original",
+            "thread-77",
+            "Quarterly numbers",
+        );
+    });
+    let id = store.search(acct, "quarterly", 10, 0).unwrap()[0].id;
+    let draft = put_draft(
+        &app,
+        serde_json::json!({ "forward_of_message_id": id, "to": "carol@example.com", "body": "worth a read" }),
+    )
+    .await;
+    let resp = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            "/client/actions/send",
+            serde_json::json!({
+                "forward_of_message_id": id,
+                "to": "carol@example.com",
+                "body": "worth a read",
+                "confirm": true,
+                "draft_id": draft["id"]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(handle.await.unwrap().len(), 2);
+    assert_eq!(
+        list_drafts(&app).await.as_array().map(Vec::len),
+        Some(0),
+        "the forward send consumed its draft"
+    );
 }
 
 #[tokio::test]
@@ -10036,6 +10542,149 @@ async fn a_send_naming_a_file_that_is_gone_is_refused_before_gmail() {
     );
 }
 
+/// A send may carry only files that are unclaimed or claimed by the draft it
+/// consumes. Another draft's file is "no longer staged" as far as this send
+/// is concerned: refused before Gmail, and the file stays with its draft
+/// (a send that carried it would have consumed it on success).
+#[tokio::test]
+async fn a_send_naming_another_drafts_file_is_refused_and_the_file_survives() {
+    let (base, handle) = mock_gmail(0).await;
+    let Harness { app, store, acct } = app_with_writes(base, |_, _| {});
+    let theirs = stage(&app, "theirs.pdf", "application/pdf", "t1", b"T").await["id"]
+        .as_i64()
+        .unwrap();
+    let (status, holder) = draft_call(
+        &app,
+        "POST",
+        "/client/drafts",
+        serde_json::json!({ "body": "holder", "attachment_ids": [theirs] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(holder["attachments"].as_array().map(Vec::len), Some(1));
+    let (status, other) = draft_call(
+        &app,
+        "POST",
+        "/client/drafts",
+        serde_json::json!({ "body": "other" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // From another draft, and from no draft at all: both refused.
+    for draft_id in [other["id"].clone(), Value::Null] {
+        let resp = app
+            .clone()
+            .oneshot(authed_json(
+                "POST",
+                "/client/actions/send",
+                serde_json::json!({
+                    "to": "alice@example.com",
+                    "body": "see attached",
+                    "confirm": true,
+                    "draft_id": draft_id,
+                    "attachment_ids": [theirs]
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "draft_id {draft_id}"
+        );
+        let err = body_json(resp).await["error"].as_str().unwrap().to_string();
+        assert!(err.contains("no longer staged"), "{err}");
+    }
+    assert_eq!(handle.await.unwrap().len(), 0, "nothing reached Gmail");
+    let audit = store.list_audit(acct, 10).unwrap();
+    assert_eq!(
+        audit
+            .iter()
+            .filter(|a| a.action == "send"
+                && a.detail.as_deref() == Some("rejected:attachment_missing"))
+            .count(),
+        2
+    );
+    assert!(
+        store.outbound_attachment(acct, theirs).unwrap().is_some(),
+        "the file survives"
+    );
+    let holder_now = store
+        .draft_by_id(acct, holder["id"].as_i64().unwrap())
+        .unwrap()
+        .expect("the holder draft survives");
+    assert_eq!(
+        holder_now.attachments.len(),
+        1,
+        "still attached to its draft"
+    );
+    assert_eq!(list_drafts(&app).await.as_array().map(Vec::len), Some(2));
+}
+
+#[tokio::test]
+async fn a_send_carries_its_own_drafts_file_and_consumes_it() {
+    let (base, handle) = mock_gmail(1).await;
+    let Harness { app, store, acct } = app_with_writes(base, |_, _| {});
+    let mine = stage(&app, "mine.pdf", "application/pdf", "m1", b"MINE").await["id"]
+        .as_i64()
+        .unwrap();
+    let (_, draft) = draft_call(
+        &app,
+        "POST",
+        "/client/drafts",
+        serde_json::json!({ "body": "mine", "attachment_ids": [mine] }),
+    )
+    .await;
+    let resp = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            "/client/actions/send",
+            serde_json::json!({
+                "to": "alice@example.com",
+                "body": "see attached",
+                "confirm": true,
+                "draft_id": draft["id"],
+                "attachment_ids": [mine]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let reqs = handle.await.unwrap();
+    assert!(sent_mime(&reqs[0]).contains("filename=\"mine.pdf\""));
+    assert!(store.outbound_attachment(acct, mine).unwrap().is_none());
+    assert_eq!(list_drafts(&app).await.as_array().map(Vec::len), Some(0));
+}
+
+#[tokio::test]
+async fn a_draftless_send_carries_an_unclaimed_file_and_consumes_it() {
+    let (base, handle) = mock_gmail(1).await;
+    let Harness { app, store, acct } = app_with_writes(base, |_, _| {});
+    let loose = stage(&app, "loose.pdf", "application/pdf", "l1", b"LOOSE").await["id"]
+        .as_i64()
+        .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            "/client/actions/send",
+            serde_json::json!({
+                "to": "alice@example.com",
+                "body": "see attached",
+                "confirm": true,
+                "attachment_ids": [loose]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let reqs = handle.await.unwrap();
+    assert!(sent_mime(&reqs[0]).contains("filename=\"loose.pdf\""));
+    assert!(store.outbound_attachment(acct, loose).unwrap().is_none());
+}
+
 #[tokio::test]
 async fn the_guard_reads_a_staged_text_file() {
     let (base, handle) = mock_gmail(0).await;
@@ -10444,4 +11093,234 @@ async fn grouped_recall_expands_without_repeating_hits_or_returning_done_early()
             "every recalled hit should be served in {mode}"
         );
     }
+}
+
+// --- GET /client/rules/suggest ----------------------------------------------
+
+/// One inbound message from `from` with `subject`, triaged at `sensitivity`.
+fn seed_suggest_msg(
+    store: &SqliteStore,
+    acct: i64,
+    gmail: &str,
+    from: &str,
+    subject: &str,
+    sensitivity: Sensitivity,
+) {
+    let mut m = msg(acct, gmail, gmail, subject, "body");
+    m.from_addr = from.to_string();
+    let id = store.upsert_message(&m).unwrap();
+    let kind = (sensitivity == Sensitivity::Sealed).then_some(SealedKind::Otp);
+    store
+        .set_triage(id, acct, 10, Tier::Noise, sensitivity, kind, "", "", None)
+        .unwrap();
+}
+
+/// A state whose rule suggester points at a mock answering `suggestion`.
+async fn app_with_rule_suggestion(
+    suggestion: &'static str,
+    seed: impl FnOnce(&SqliteStore, i64),
+) -> Harness {
+    let body = format!(
+        r#"{{"content":[{{"type":"text","text":"{{\"suggestion\":\"{suggestion}\"}}"}}],"stop_reason":"end_turn","usage":{{"input_tokens":40,"output_tokens":6}}}}"#
+    );
+    app_with_suggest_body(body, seed).await
+}
+
+/// The suggester wired to a mock that answers every request with `body`.
+async fn app_with_suggest_body(body: String, seed: impl FnOnce(&SqliteStore, i64)) -> Harness {
+    use squelch_core::config::Stage2Provider;
+    use squelch_core::triage::rule_suggest::RuleSuggestClient;
+
+    let url = spawn_classifier_mock(200, body).await;
+    let (state, store, acct) = state_with(seed);
+    let state = state.with_rule_suggestion(Some(RuleSuggestClient::new(
+        reqwest::Client::new(),
+        url,
+        "sk-test",
+        Stage2Provider::Anthropic,
+        "claude-haiku-4-5",
+        None,
+    )));
+    Harness {
+        app: router(state),
+        store,
+        acct,
+    }
+}
+
+fn usage_categories(store: &SqliteStore, acct: i64) -> Vec<String> {
+    store
+        .list_usage_by_category(acct, 30)
+        .unwrap()
+        .into_iter()
+        .map(|(c, _)| c)
+        .collect()
+}
+
+#[tokio::test]
+async fn rule_suggestion_is_cleaned_and_billed_to_its_own_category() {
+    let Harness { app, store, acct } =
+        app_with_rule_suggestion("only order confirmations.", |store, acct| {
+            for (g, s) in [("g1", "Your order shipped"), ("g2", "New in the store")] {
+                seed_suggest_msg(store, acct, g, "news@shop.com", s, Sensitivity::Normal);
+            }
+        })
+        .await;
+
+    let resp = app
+        .oneshot(authed("GET", "/client/rules/suggest?sender=News@Shop.com"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["suggestion"], "only order confirmations");
+    assert_eq!(
+        usage_categories(&store, acct),
+        vec!["rule_suggest".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn rule_suggestion_is_null_without_a_model_or_without_history() {
+    // No suggester on the default harness.
+    let Harness { app, .. } = harness(|store, acct| {
+        for g in ["g1", "g2", "g3"] {
+            seed_suggest_msg(store, acct, g, "a@b.com", "hi", Sensitivity::Normal);
+        }
+    });
+    let resp = app
+        .oneshot(authed("GET", "/client/rules/suggest?sender=a@b.com"))
+        .await
+        .unwrap();
+    assert_eq!(body_json(resp).await["suggestion"], Value::Null);
+
+    // A suggester, but one message is not a pattern: no call, no spend.
+    let Harness { app, store, acct } = app_with_rule_suggestion("mute them", |store, acct| {
+        seed_suggest_msg(store, acct, "g1", "a@b.com", "hi", Sensitivity::Normal);
+    })
+    .await;
+    let resp = app
+        .oneshot(authed("GET", "/client/rules/suggest?sender=a@b.com"))
+        .await
+        .unwrap();
+    assert_eq!(body_json(resp).await["suggestion"], Value::Null);
+    assert!(usage_categories(&store, acct).is_empty());
+}
+
+#[tokio::test]
+async fn sealed_mail_never_reaches_the_rule_suggester() {
+    // The digest IS the suggester's input, so a sealed subject absent from it
+    // cannot reach the model. Two sealed rows alone must not even clear the
+    // history floor.
+    let Harness { app, store, acct } = app_with_rule_suggestion("mute them", |store, acct| {
+        seed_suggest_msg(
+            store,
+            acct,
+            "g1",
+            "bank@b.com",
+            "code 111",
+            Sensitivity::Sealed,
+        );
+        seed_suggest_msg(
+            store,
+            acct,
+            "g2",
+            "bank@b.com",
+            "code 222",
+            Sensitivity::Sealed,
+        );
+        seed_suggest_msg(
+            store,
+            acct,
+            "g3",
+            "bank@b.com",
+            "statement",
+            Sensitivity::Normal,
+        );
+    })
+    .await;
+    let digest = store.sender_rule_digest(acct, "bank@b.com", 15).unwrap();
+    assert_eq!(
+        digest
+            .iter()
+            .map(|r| r.subject.as_str())
+            .collect::<Vec<_>>(),
+        vec!["statement"]
+    );
+    let resp = app
+        .oneshot(authed("GET", "/client/rules/suggest?sender=bank@b.com"))
+        .await
+        .unwrap();
+    assert_eq!(body_json(resp).await["suggestion"], Value::Null);
+    assert!(usage_categories(&store, acct).is_empty());
+}
+
+#[tokio::test]
+async fn rule_suggestion_rejects_an_empty_sender_with_or_without_a_model() {
+    let Harness { app, .. } = harness(|_, _| {});
+    let resp = app
+        .oneshot(authed("GET", "/client/rules/suggest?sender=%20"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "no model");
+
+    let Harness { app, .. } = app_with_rule_suggestion("mute them", |_, _| {}).await;
+    let resp = app
+        .oneshot(authed("GET", "/client/rules/suggest?sender=%20"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "with a model");
+}
+
+#[tokio::test]
+async fn rule_suggestion_stops_spending_at_the_daily_cap() {
+    use squelch_core::store::UsageTokens;
+    use squelch_core::triage::rule_suggest::DAILY_CAP;
+
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let Harness { app, store, acct } = app_with_rule_suggestion("mute them", |store, acct| {
+        for g in ["g1", "g2", "g3"] {
+            seed_suggest_msg(store, acct, g, "a@b.com", "hi", Sensitivity::Normal);
+        }
+        for _ in 0..DAILY_CAP {
+            store
+                .extract_bump_usage(acct, &today, "rule_suggest", UsageTokens::default())
+                .unwrap();
+        }
+    })
+    .await;
+    let resp = app
+        .oneshot(authed("GET", "/client/rules/suggest?sender=a@b.com"))
+        .await
+        .unwrap();
+    assert_eq!(body_json(resp).await["suggestion"], Value::Null);
+    let calls: u64 = store
+        .list_usage_by_category(acct, 1)
+        .unwrap()
+        .into_iter()
+        .flat_map(|(_, days)| days)
+        .map(|d| d.calls)
+        .sum();
+    assert_eq!(calls, u64::from(DAILY_CAP), "no call past the cap");
+}
+
+#[tokio::test]
+async fn a_garbled_suggestion_is_null_but_still_billed() {
+    // The provider answered and charged for it; the answer just does not parse.
+    let body = r#"{"content":[{"type":"text","text":"not json"}],"stop_reason":"end_turn","usage":{"input_tokens":40,"output_tokens":6}}"#.to_string();
+    let Harness { app, store, acct } = app_with_suggest_body(body, |store, acct| {
+        for g in ["g1", "g2"] {
+            seed_suggest_msg(store, acct, g, "a@b.com", "hi", Sensitivity::Normal);
+        }
+    })
+    .await;
+    let resp = app
+        .oneshot(authed("GET", "/client/rules/suggest?sender=a@b.com"))
+        .await
+        .unwrap();
+    assert_eq!(body_json(resp).await["suggestion"], Value::Null);
+    assert_eq!(
+        usage_categories(&store, acct),
+        vec!["rule_suggest".to_string()]
+    );
 }

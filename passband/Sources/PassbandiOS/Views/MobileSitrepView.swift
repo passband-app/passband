@@ -36,12 +36,11 @@
 // your mail and is holding (MobileRecordsView's bar carries the key now, dot and
 // all).
 //
-// WITH ONE EXCEPTION, AND IT IS THE TOP OF THIS COLUMN. A code that just landed
-// is not a lookup — you are standing at a login form holding the phone the code
-// is on — so it does not wait behind a glyph on another tab. It raises a card
-// ABOVE the hero, reveals from there, and disappears when it goes stale. That
-// card is the only thing on this screen allowed to outrank the greeting, and it
-// is allowed because it is the one thing here that expires.
+// THE URGENT CASE COMES IN BY NOTIFICATION. A code that just landed is not a
+// lookup — you are standing at a login form holding the phone the code is on —
+// and its banner is the fast path: a tap opens the login-codes page straight
+// from wherever you were (`AppStore.requestAuthPage`), and a reveal there raises
+// AuthCodeModal over the whole shell.
 
 import SwiftUI
 
@@ -77,7 +76,6 @@ struct MobileSitrepView: View {
                     senders: Reading.prune(
                         store.zones.reading, resolved: store.resolvedIds),
                     cursor: cursor)
-                AgentRecordsZone()
                 footnote
             }
             .padding(.horizontal, 16)

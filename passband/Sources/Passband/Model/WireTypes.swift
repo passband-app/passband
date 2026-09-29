@@ -757,6 +757,12 @@ struct CreateRuleBody: Codable, Sendable {
     var sweep: Bool? = nil
 }
 
+/// `GET /client/rules/suggest`. Null when the daemon has no model, too little
+/// history, or no clear pattern.
+struct RuleSuggestion: Codable, Sendable {
+    var suggestion: String?
+}
+
 /// POST /client/rules and PUT /client/rules/{id}.
 struct CreatedRule: Codable, Sendable {
     var rule_id: Int
@@ -970,6 +976,13 @@ struct StoreStats: Codable, Sendable, Hashable {
     /// the key and mails the words without the files. See
     /// `AppStore.composeAttachmentsAvailable`.
     var compose_attachments: Bool?
+    /// Whether this daemon keys new-message drafts by id (many per account,
+    /// POST /client/drafts + PUT /client/drafts/{id}). ABSENT on an older
+    /// daemon, which keeps ONE new-message slot, and absence reads as no: the
+    /// new routes would 404 there, and the old nil-key PUT is the only write
+    /// that means anything. See `AppStore.draftsV2Available` and
+    /// `DraftSaver.save`, which also has to tell "no" from "not asked yet".
+    var drafts_v2: Bool?
 }
 
 /// The 30-day re-walk the daemon falls back to when Gmail's history cursor
@@ -1475,8 +1488,25 @@ struct UnsubResolutionResult: Codable, Sendable {
 /// spelling of the field, not the store's `to_addr`.
 struct DraftView: Codable, Sendable, Identifiable, Hashable {
     var id: Int
-    /// The message this answers. nil = the account's single new-message draft.
+    /// The message this answers. nil on a forward and on plain new mail, which
+    /// on a `drafts_v2` daemon is one of MANY rows told apart by `id` (an older
+    /// daemon still holds at most one).
     var reply_to_message_id: Int?
+    /// The message this passes on. Mutually exclusive with
+    /// `reply_to_message_id`; both nil is a plain new message.
+    ///
+    /// THIS AND THE FOUR BELOW ARE OPTIONAL for the reason `cc` is: an older
+    /// daemon sends no such keys, and a decode that failed over them would
+    /// lose every draft rather than the context it could not describe.
+    var forward_of_message_id: Int?
+    /// The parent's thread, so the picker can open a reply draft where it
+    /// belongs. nil for plain new mail, and for a parent no longer stored.
+    var thread_id: String?
+    /// The parent's subject and sender, for the picker's `re:` / `fwd:` line.
+    /// Display only; nothing is sent from them.
+    var parent_subject: String?
+    var parent_from: String?
+    var parent_from_addr: String?
     var to: String
     /// The other two lists. A draft that could not hold these would silently
     /// lose the audience of a bcc send. OPTIONAL here for exactly one reason:
@@ -1508,6 +1538,10 @@ struct OutboundAttachment: Codable, Sendable, Identifiable, Hashable {
 
 struct DraftBody: Codable, Sendable {
     var reply_to_message_id: Int?
+    /// The forward key, one row per forwarded message like replies. nil is
+    /// OMITTED from the JSON (synthesized Codable skips a nil optional), so an
+    /// older daemon never sees the key at all.
+    var forward_of_message_id: Int?
     var to: String
     /// Sent unconditionally, `""` and all: unlike the SEND route, absence has
     /// no second meaning here — nothing is ever derived into a draft — and a
@@ -1518,6 +1552,19 @@ struct DraftBody: Codable, Sendable {
     var body: String
     /// The staged files this draft holds — EXACTLY these, so a file taken out
     /// of the tray is released by the next save. Always sent, `[]` included.
+    var attachment_ids: [Int]
+}
+
+/// POST /client/drafts and PUT /client/drafts/{id}: a plain new-message draft,
+/// named by the ROUTE (create, or this id) rather than by a key in the body.
+/// Same field rules as `DraftBody`: everything always sent, `""` and `[]`
+/// included, so an emptied field is said rather than left stale.
+struct NewDraftBody: Codable, Sendable {
+    var to: String
+    var cc: String
+    var bcc: String
+    var subject: String
+    var body: String
     var attachment_ids: [Int]
 }
 

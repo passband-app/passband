@@ -132,7 +132,7 @@ struct ReleaseNotesTests {
         // A hotfix or an early bump answers with the last thing that shipped
         // rather than with nothing.
         expect(
-            ReleaseNotes.newest(atOrBelow: "0.0.9")?.version == table.first?.version,
+            ReleaseNotes.newest(atOrBelow: "99.0.0")?.version == table.first?.version,
             "a build past the table answers with the newest note")
         expect(
             ReleaseNotes.newest(atOrBelow: "0.0.0") == nil,

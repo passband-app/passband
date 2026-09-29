@@ -276,6 +276,18 @@ struct MainShell: View {
             let composeWidth = max(420, geo.size.width / 2)
 
         ZStack(alignment: .topLeading) {
+            // THE QUIET BOARD: the sitrep with nothing on it sits on the live
+            // P7 squelch. Drawn HERE, under the rail and the traffic lights,
+            // so it fills the window rather than the page; and OUTSIDE the
+            // layer below, because that layer blurs under a modal and a
+            // blurred live Metal layer stutters. Not while an email is open:
+            // the sitrep stays mounted under the reader, and a scene nobody
+            // can see would keep rendering behind it.
+            if QuietBoard.shared.isQuiet && store.threadId == nil {
+                ClearScene()
+                    .ignoresSafeArea()
+                    .transition(.opacity)
+            }
             // EVERYTHING A MODAL SITS ON TOP OF, blurred as one layer while a
             // modal is up. Blurring is what keeps the app visible behind ⌘K:
             // layout and colour survive a defocus, a material scrim paints
@@ -419,6 +431,8 @@ struct MainShell: View {
         // sitrep that reports them and the action layer that draws on them.
         .coordinateSpace(.named(tourSpace))
         .animation(.easeOut(duration: 0.18), value: store.modalOverlayOpen)
+        // Mail landing on a quiet board fades the scene out, never cuts it.
+        .animation(.easeInOut(duration: 0.9), value: QuietBoard.shared.isQuiet)
         .animation(.smooth(duration: 0.22), value: store.sideView)
         // The BOOL, never the ComposeState: the state changes on every
         // keystroke, and animating that would smear typing.
@@ -488,8 +502,7 @@ struct MainShell: View {
         // ahead of the lowercase ⌘K above.
         bindings.append(
             KeyBinding("K", "new ask chat", meta: true, allowInInput: true) {
-                store.assistant.clear()
-                store.askBarOpen = true
+                store.newAskChat()
             })
         // Global, not list-only: `/`, `\` and `?` must work on every surface,
         // including the sitrep the app lands on. All three stay input-guarded

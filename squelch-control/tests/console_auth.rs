@@ -278,6 +278,7 @@ impl Harness {
             auth_url: format!("{google}/authorize"),
             profile_url: format!("{google}/profile"),
             userinfo_url: format!("{google}/userinfo"),
+            alert_webhook_url: None,
             // Console auth never touches the LLM gateway; feature off.
             bifrost: None,
             // Nor the waitlist: with it off, those routes are not mounted.
@@ -1122,7 +1123,10 @@ async fn an_app_login_with_no_mailbox_here_says_so_and_mints_nothing() {
     let (status, _, body) = h.run_app_login().await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert!(body.contains("No Passband mailbox"), "{body}");
-    // No code, no link, nothing minted.
+    // The app has one sign-in door for everybody, so a newcomer lands here and
+    // needs the way to signup: this deployment's own form, nothing echoed.
+    assert!(body.contains(r#"href="/""#), "{body}");
+    // No code, no pairing link, nothing minted.
     assert!(!body.contains(PAIR_CODE), "{body}");
     assert!(!body.contains("passband://"), "{body}");
     assert!(

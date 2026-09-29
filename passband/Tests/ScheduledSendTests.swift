@@ -33,6 +33,16 @@ struct ScheduledSendTests {
         aCancelsUndoRebuildsTheSchedule()
         anUndoNeverSendsSoonerThanAsked()
         aTombstoneOutlivesOnlyTheFetchesThatCouldCarryIt()
+        aTombstoneWaitsForTheOldestFetchInTheAir()
+        // Review round four.
+        theEditorTakesTheCaretOncePerRequest()
+        aFanOutReopensWithItsAudience()
+        aPullBackNeverSilentlyReplacesAKeyedDraft()
+        aFailureToastsOnceAcrossLaunches()
+        anEmptyOutboxIsStillAskedNowAndThen()
+        theCursorFollowsItsRow()
+        aRowGmailMayHaveIsNeverResentBlind()
+        aFanOutRowSaysWhoItIsFor()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -470,6 +480,235 @@ struct ScheduledSendTests {
         t.endFetch(during)
     }
 
+    /// THE FLOOR IS THE OLDEST FETCH IN THE AIR. Fetches land out of order: a
+    /// younger one landing first must not prune a tombstone an older one,
+    /// still out, may yet carry. Fails if `prune` floors at the fetch that
+    /// just landed; the counts fail if `prune` is gone altogether.
+    static func aTombstoneWaitsForTheOldestFetchInTheAir() {
+        var t = Tombstones()
+        let old = t.beginFetch()
+        t.gone(4)
+        let young = t.beginFetch()
+        t.endFetch(young)
+        check(t.hides(4, fetchedAt: old), "the older fetch still drops the row")
+        equal(t.count, 1, "kept while that fetch is out")
+        t.endFetch(old)
+        equal(t.count, 0, "pruned once it lands")
+        t.gone(9)
+        equal(t.count, 0, "nothing in the air: pruned at once")
+    }
+
+    // MARK: - review round four
+
+    /// M1: the inline reply's editor takes the caret back when the palette
+    /// closes over it, once per close, and never on a plain re-render.
+    static func theEditorTakesTheCaretOncePerRequest() {
+        check(EditorRefocus.returns(from: 1, to: nil, slot: 1), "palette closed over this slot")
+        check(!EditorRefocus.returns(from: 2, to: nil, slot: 1), "another slot's palette")
+        check(!EditorRefocus.returns(from: nil, to: 1, slot: 1), "opening is not returning")
+        check(!EditorRefocus.returns(from: 1, to: 2, slot: 1), "moved, not closed")
+        var seen = 0
+        check(!EditorRefocus.take(0, seen: &seen), "the mount's token is not a request")
+        check(EditorRefocus.take(1, seen: &seen), "a bump is")
+        check(!EditorRefocus.take(1, seen: &seen), "answered once, not per render")
+        check(EditorRefocus.take(2, seen: &seen), "the next close is a new request")
+    }
+
+    /// M3: an individual group sends no `to`, so the reopened composer takes
+    /// its pill from the composer it came from, or from the group itself.
+    static func aFanOutReopensWithItsAudience() {
+        var r = ScheduledRequest()
+        r.group_id = 42
+        r.body = "hi all"
+        let crew = SendGroup(
+            id: 42, name: "Book club", slug: "book-club", mode: .individual, note: "",
+            member_count: 6, members: nil, last_sent_at: nil, created_at: "", updated_at: "")
+        let fromGroup = ComposeState.reopened(
+            request: r, attachments: [], sendAt: nil, group: crew)
+        equal(fromGroup.to, "#book-club", "the token, from the group")
+        equal(fromGroup.groupMode, .individual, "the mode")
+        equal(fromGroup.groupName, "Book club", "the name")
+        equal(fromGroup.groupId, 42, "and the id on the wire")
+        let body = json(SendBody(compose: fromGroup, override: false, draftId: nil))
+        check(body["to"] == nil, "still no `to` when rescheduled")
+        equal(body["group_id"] as? Int, 42, "the audience rides as group_id")
+
+        var base = ComposeState()
+        base.to = "#book-club"
+        base.groupId = 42
+        base.groupMode = .individual
+        base.groupName = "Book club"
+        let fromBase = ComposeState.reopened(request: r, attachments: [], sendAt: nil, base: base)
+        equal(fromBase.to, "#book-club", "the undo takes the base's token")
+        equal(fromBase.groupName, "Book club", "and its name")
+
+        let lost = ComposeState.reopened(request: r, attachments: [], sendAt: nil)
+        equal(lost.to, "", "a group nobody can describe leaves the field empty")
+        equal(lost.groupId, 42, "but the id still addresses it")
+
+        // A `to` group was expanded into real addresses: those stand.
+        var expanded = r
+        expanded.to = "ana@x.test, bo@x.test"
+        var toGroup = crew
+        toGroup.mode = .to
+        let listed = ComposeState.reopened(
+            request: expanded, attachments: [], sendAt: nil, group: toGroup)
+        equal(listed.to, "ana@x.test, bo@x.test", "an expanded group keeps its addresses")
+        equal(listed.groupMode, .to, "and learns its mode")
+        // A group whose id is not the request's lends nothing.
+        var other = crew
+        other.id = 7
+        let wrong = ComposeState.reopened(request: r, attachments: [], sendAt: nil, group: other)
+        equal(wrong.to, "", "another group's token never lands")
+        equal(wrong.groupName, nil, "nor its name")
+    }
+
+    /// M2: which pull-backs would PUT over a keyed row holding somebody's words.
+    static func aPullBackNeverSilentlyReplacesAKeyedDraft() {
+        var reply = ComposeState()
+        reply.replyToMessageId = 10
+        var forward = ComposeState()
+        forward.forwardOfMessageId = 20
+        let fresh = ComposeState()
+        let replyRow = draft(id: 1, replyTo: 10)
+        let forwardRow = draft(id: 2, forwardOf: 20)
+        let newRow = draft(id: 3)
+        let all = [replyRow, forwardRow, newRow]
+        check(
+            PullBackDraft.wouldReplace(reply, drafts: [replyRow], open: [], keyedNewMail: false),
+            "a reply over the parent's draft")
+        check(
+            !PullBackDraft.wouldReplace(reply, drafts: [forwardRow, newRow], open: [], keyedNewMail: false),
+            "a reply with no draft to that parent")
+        check(
+            !PullBackDraft.wouldReplace(
+                reply, drafts: [draft(id: 4, replyTo: 11)], open: [], keyedNewMail: false),
+            "another parent's draft is another row")
+        check(
+            PullBackDraft.wouldReplace(forward, drafts: [forwardRow], open: [], keyedNewMail: false),
+            "a forward over the original's draft")
+        check(
+            !PullBackDraft.wouldReplace(forward, drafts: [replyRow], open: [], keyedNewMail: false),
+            "a forward is keyed by its original, not a parent")
+        check(
+            !PullBackDraft.wouldReplace(fresh, drafts: all, open: [], keyedNewMail: false),
+            "new mail on drafts_v2 is a row of its own")
+        check(
+            PullBackDraft.wouldReplace(fresh, drafts: [newRow], open: [], keyedNewMail: true),
+            "new mail on the one nil-keyed row")
+        // An open composer about to flush into the same row counts too.
+        var typing = ComposeState()
+        typing.replyToMessageId = 10
+        check(
+            PullBackDraft.wouldReplace(reply, drafts: [], open: [typing], keyedNewMail: false),
+            "an open reply to the same parent")
+        var forwardOpen = ComposeState()
+        forwardOpen.forwardOfMessageId = 10
+        check(
+            !PullBackDraft.wouldReplace(reply, drafts: [], open: [forwardOpen], keyedNewMail: false),
+            "a forward OF the parent is not a reply to it")
+        check(
+            !PullBackDraft.wouldReplace(reply, drafts: [], open: [reply], keyedNewMail: false),
+            "the composer itself is not a rival")
+        equal(
+            ScheduleCopy.replacesDraft(forward: false),
+            "your unsent draft to this thread will be replaced when you type", "the reply toast")
+        check(
+            !ScheduleCopy.replacesDraft(forward: true).contains("\u{2014}")
+                && !ScheduleCopy.replacesDraft(forward: false).contains("\u{2014}"),
+            "no em dashes")
+    }
+
+    /// Minor 2: the ledger survives a relaunch (the store saves `keys` per
+    /// account) and stays bounded.
+    static func aFailureToastsOnceAcrossLaunches() {
+        var first = ScheduledFailures()
+        let failed = row(id: 3, state: "failed", lastError: "failed:gmail")
+        equal(first.fresh([failed]).map(\.id), [3], "toasts the first time")
+        var relaunched = ScheduledFailures(keys: first.keys)
+        equal(relaunched.fresh([failed]).map(\.id), [], "and not after a relaunch")
+        var big = ScheduledFailures()
+        for i in 0..<(ScheduledFailures.cap + 5) {
+            _ = big.fresh([row(id: i, state: "failed")])
+        }
+        equal(big.keys.count, ScheduledFailures.cap, "bounded")
+        equal(big.fresh([row(id: 0, state: "failed")]).map(\.id), [0], "the oldest fell off")
+        equal(
+            big.fresh([row(id: ScheduledFailures.cap + 4, state: "failed")]).map(\.id), [],
+            "the newest are kept")
+        equal(ScheduledFailures(keys: big.keys + ["x@y"]).keys.count, ScheduledFailures.cap,
+            "a loaded ledger is bounded too")
+    }
+
+    /// Minor 3: a known-empty outbox is still asked every five minutes, so a
+    /// row another device scheduled turns up here.
+    static func anEmptyOutboxIsStillAskedNowAndThen() {
+        let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+        check(ScheduledPoll.due(knownEmpty: false, loadedAt: t0, now: t0), "not empty: every tick")
+        check(ScheduledPoll.due(knownEmpty: true, loadedAt: nil, now: t0), "never loaded: ask")
+        check(
+            !ScheduledPoll.due(knownEmpty: true, loadedAt: t0, now: t0.addingTimeInterval(60)),
+            "empty a minute ago: skip")
+        check(
+            ScheduledPoll.due(
+                knownEmpty: true, loadedAt: t0,
+                now: t0.addingTimeInterval(ScheduledPoll.emptyEvery)),
+            "empty five minutes ago: ask again")
+    }
+
+    /// Minor 8: the Sent cursor through a listing that changed under it.
+    static func theCursorFollowsItsRow() {
+        equal(ScheduledCursor.reanchor(1, old: [5, 6, 7], new: [4, 5, 6, 7]), 2, "a row inserted above")
+        equal(ScheduledCursor.reanchor(2, old: [5, 6, 7], new: [6, 7]), 1, "a row dropped above")
+        equal(ScheduledCursor.reanchor(1, old: [5, 6, 7], new: [5, 7]), 1, "its own row gone: the next")
+        equal(ScheduledCursor.reanchor(2, old: [5, 6, 7], new: [5, 6]), 1, "the last one gone: clamped")
+        equal(ScheduledCursor.reanchor(0, old: [5], new: []), 0, "the group emptied")
+        equal(ScheduledCursor.reanchor(4, old: [5, 6], new: [5, 6, 7]), 5, "a sent row keeps its mail")
+        equal(ScheduledCursor.reanchor(4, old: [5, 6], new: [6]), 3, "and the other way")
+        equal(ScheduledCursor.reanchor(0, old: [5, 6], new: [5, 6]), 0, "nothing moved")
+    }
+
+    /// Minors 5 and 9: a row an earlier claim may have put in Gmail is never
+    /// re-POSTed by an undo, and a reopened composer says so, or says the
+    /// time has passed, before anyone presses a key.
+    static func aRowGmailMayHaveIsNeverResentBlind() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let future = "2027-06-01T08:00:00Z"
+        let past = "2026-01-01T08:00:00Z"
+        check(!ScheduledCancelUndo.mayHaveReachedGmail(row()), "a fresh row")
+        check(ScheduledCancelUndo.mayHaveReachedGmail(row(attempts: 1)), "a claimed row")
+        check(
+            ScheduledCancelUndo.mayHaveReachedGmail(row(state: "failed", maybeSent: true)),
+            "a maybe-sent row")
+        equal(ScheduledCancelUndo.reopenError(row(sendAt: future), now: now), nil, "nothing to say")
+        equal(
+            ScheduledCancelUndo.reopenError(row(sendAt: past, state: "failed"), now: now),
+            ScheduleCopy.timePassed, "a failed row's time has gone by")
+        equal(
+            ScheduledCancelUndo.reopenError(
+                row(sendAt: past, state: "failed", maybeSent: true), now: now),
+            ScheduleCopy.mayHaveReachedGmail, "the Gmail doubt outranks the clock")
+        equal(
+            ScheduledCancelUndo.reopenError(row(sendAt: future, attempts: 2), now: now),
+            ScheduleCopy.mayHaveReachedGmail, "a retrying row too")
+        check(!ScheduleCopy.mayHaveReachedGmail.contains("\u{2014}"), "no em dash")
+    }
+
+    /// M3, the row half: new mail with an empty `to` is a fan-out or bcc only.
+    static func aFanOutRowSaysWhoItIsFor() {
+        equal(ScheduledRowCopy.emptyRecipient(groupName: "Book club"), "Book club", "known group")
+        equal(ScheduledRowCopy.emptyRecipient(groupName: nil), "group or bcc", "unknown")
+        equal(ScheduledRowCopy.emptyRecipient(groupName: "  "), "group or bcc", "blank name")
+    }
+
+    static func draft(id: Int, replyTo: Int? = nil, forwardOf: Int? = nil) -> DraftView {
+        DraftView(
+            id: id, reply_to_message_id: replyTo, forward_of_message_id: forwardOf,
+            thread_id: nil, parent_subject: nil, parent_from: nil, parent_from_addr: nil,
+            to: "", cc: nil, bcc: nil, subject: "", body: "words",
+            created_at: "", updated_at: "", attachments: nil)
+    }
+
     // MARK: - fixtures
 
     /// A new message with every field a send states: a stated (empty) cc, a
@@ -529,4 +768,10 @@ struct ScheduledSendTests {
             print("  FAIL \(what): got \(String(describing: got)), want \(String(describing: want))")
         }
     }
+}
+
+// The app's `String.trimmed` lives in Views/ConnectView.swift, which this pure
+// suite does not build; GroupToken reads it.
+extension String {
+    var trimmed: String { trimmingCharacters(in: .whitespacesAndNewlines) }
 }

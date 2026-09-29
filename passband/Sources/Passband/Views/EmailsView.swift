@@ -93,8 +93,10 @@ struct EmailsView: View {
     }
     /// The outbox row the keys may act on: under the keyboard cursor or the
     /// pointer, the same `actionable` rule every verb here keeps.
+    /// A `sending` row is never actionable: it is in Gmail's hands.
     private var actionableScheduled: ScheduledSendView? {
-        actionable ? selectedScheduled : nil
+        guard actionable, let row = selectedScheduled, row.state != "sending" else { return nil }
+        return row
     }
     /// Action keys are inert unless something is actually highlighted.
     private var actionable: Bool { kbActive || hovering }
@@ -156,6 +158,14 @@ struct EmailsView: View {
         }
         .onChange(of: rowCount) { _, count in
             index = max(0, min(index, count - 1))
+        }
+        // A poll that adds or drops an outbox row shifts every position under
+        // it; the cursor follows the row it was on (`ScheduledCursor`), or the
+        // next Enter / `s` / `x` would act on somebody else's mail.
+        .onChange(of: store.scheduledRows.map(\.id)) { old, new in
+            guard mode == .sent else { return }
+            let count = new.count + sent.count
+            index = max(0, min(ScheduledCursor.reanchor(index, old: old, new: new), count - 1))
         }
         // A mode switch replaces every row, so the cursor cannot keep its index —
         // it would land on an unrelated email, and the verbs act on the highlight.
@@ -240,6 +250,7 @@ struct EmailsView: View {
             ForEach(Array(scheduled.enumerated()), id: \.element.id) { i, row in
                 ScheduledRow(
                     row: row,
+                    groupName: store.scheduledGroupNames[row.id],
                     selected: kbActive && i == index,
                     onHover: {
                         hovering = true
@@ -639,8 +650,9 @@ struct EmailsView: View {
                 guard actionable else { return }
                 if mode == .sent {
                     // An outbox row goes back into the composer it came from.
+                    // A `sending` one takes no Enter: it is in Gmail's hands.
                     if let row = selectedScheduled {
-                        store.pullBackScheduled(row)
+                        if row.state != "sending" { store.pullBackScheduled(row) }
                         return
                     }
                     guard let item = selectedSent else { return }
@@ -689,12 +701,13 @@ struct EmailsView: View {
             // pages. `s` sends it on the worker's next tick; `x` cancels it
             // behind the undo toast, and so do Backspace / Delete, the keys
             // the drafts page deletes a draft with.
-            KeyBinding(declining: "s", "send scheduled mail now") {
+            // EXACT CASE, both: a shifted S or X is not the verb.
+            KeyBinding(declining: "s", "send scheduled mail now", exactCase: true) {
                 guard let row = actionableScheduled else { return false }
                 store.sendScheduledNow(row)
                 return true
             },
-            KeyBinding(declining: "x", "cancel scheduled mail") {
+            KeyBinding(declining: "x", "cancel scheduled mail", exactCase: true) {
                 guard let row = actionableScheduled else { return false }
                 store.cancelScheduledRow(row)
                 return true

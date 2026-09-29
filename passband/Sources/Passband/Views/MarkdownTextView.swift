@@ -24,6 +24,10 @@ struct MarkdownTextView: NSViewRepresentable {
     /// Grab the cursor when the editor appears. Same affordance as the plain
     /// editors this replaces: `r` must land the caret in the body.
     var autofocus = false
+    /// Take the caret AGAIN, after mount: each new value is one request
+    /// (`EditorRefocus.take`). The inline reply bumps it when the time palette
+    /// closes over it.
+    var refocus = 0
     var disabled = false
     /// Files dropped ON THE EDITOR, with the UTF-16 offset of the drop point,
     /// so a picture lands where it was let go rather than at the end. nil
@@ -84,6 +88,10 @@ struct MarkdownTextView: NSViewRepresentable {
         view.onDropFiles = onDropFiles
         view.onPasteImage = onPasteImage
         view.onDropHover = onDropHover
+        if EditorRefocus.take(refocus, seen: &context.coordinator.focusSeen) {
+            // After the overlay that had the caret has unmounted.
+            DispatchQueue.main.async { view.window?.makeFirstResponder(view) }
+        }
         // Only external changes (a draft restore) land here — the coordinator
         // wrote user edits into the binding already, and re-setting the string
         // for those would throw away the selection.
@@ -117,7 +125,13 @@ struct MarkdownTextView: NSViewRepresentable {
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: MarkdownTextView
-        init(_ parent: MarkdownTextView) { self.parent = parent }
+        /// The last `refocus` answered; starts at the mount's, which
+        /// `autofocus` covers.
+        var focusSeen: Int
+        init(_ parent: MarkdownTextView) {
+            self.parent = parent
+            self.focusSeen = parent.refocus
+        }
 
         func textDidChange(_ notification: Notification) {
             guard let view = notification.object as? HighlightingTextView else { return }

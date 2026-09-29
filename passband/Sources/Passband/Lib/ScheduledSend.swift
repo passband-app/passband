@@ -46,6 +46,45 @@ enum ScheduleCopy {
 
     /// The clock's help text, and the chord it prints on the Mac.
     static let clockHelp = "send later"
+
+    /// A pulled-back or un-cancelled mail whose earlier try MAY have reached
+    /// Gmail (`ScheduledCancelUndo.mayHaveReachedGmail`). Said in the composer
+    /// rather than acted on: the daemon's search-before-send guarded the row,
+    /// and a fresh one has no such guard, so the person looks first.
+    static let mayHaveReachedGmail =
+        "the last try may have reached Gmail. check Sent before sending again"
+
+    /// A pulled-back mail would take over a keyed draft row somebody else's
+    /// words live in (`PullBackDraft.wouldReplace`), so its autosave waits for
+    /// a keystroke and this says what that keystroke will do.
+    static func replacesDraft(forward: Bool) -> String {
+        forward
+            ? "your unsent forward of this email will be replaced when you type"
+            : "your unsent draft to this thread will be replaced when you type"
+    }
+}
+
+/// THE CARET'S WAY BACK after the time palette closes. The palette's field had
+/// it, and a composer left with nothing focused hands the next letter typed to
+/// the reader's verbs (`e` done, `h` remind, `c` compose). The pane refocuses
+/// through `FocusState`; the inline reply's only field is the platform editor,
+/// which takes the caret on mount alone, so it is handed a counter to watch.
+enum EditorRefocus {
+    /// Whether this picker change is the palette closing over `slot`'s
+    /// composer: open for it before, closed now.
+    static func returns<Slot: Equatable>(from old: Slot?, to new: Slot?, slot: Slot) -> Bool {
+        old == slot && new == nil
+    }
+
+    /// Whether the editor owes a focus for `token`, marking it paid. The
+    /// editor starts `seen` at the token it mounted with, so a mount (which
+    /// has `autofocus` for that) never counts as a request, and a re-render
+    /// that did not bump the token never steals the caret back.
+    static func take(_ token: Int, seen: inout Int) -> Bool {
+        guard token != seen else { return false }
+        seen = token
+        return true
+    }
 }
 
 /// What a failed undo of a schedule means. The DELETE is the undo; a 409 is
@@ -210,26 +249,97 @@ enum ScheduledRowCopy {
         return "cancelled scheduled mail"
     }
 
+    /// Line one of a NEW mail row whose `to` is empty. The daemon only files
+    /// such a mail as a fan-out (its audience travels as `group_id`, which the
+    /// listing does not carry) or a bcc-only send, so "no recipient" would be
+    /// wrong about both. The group's name when this app scheduled it and
+    /// still remembers; otherwise the truth, which is one of the two.
+    static func emptyRecipient(groupName: String?) -> String {
+        if let name = groupName?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+            return name
+        }
+        return "group or bcc"
+    }
+
     static let alreadySending = "already being sent"
     static let sendingNow = "sending now"
     static let noLongerScheduled = "that mail is no longer scheduled"
 }
 
-/// Which failed rows have toasted this app run. Keyed by id AND `created_at`:
-/// outbox ids are reused (no AUTOINCREMENT), and a new row failing under an old
-/// row's id is a new failure somebody has to hear about. Per account: the
-/// store clears it with the account, because ids mean nothing across daemons.
+/// Which failed rows have toasted. Keyed by id AND `created_at`: outbox ids are
+/// reused (no AUTOINCREMENT), and a new row failing under an old row's id is a
+/// new failure somebody has to hear about. Per account: ids mean nothing
+/// across daemons.
+///
+/// REMEMBERED ACROSS LAUNCHES (the store keeps `keys` per account in
+/// UserDefaults). A failed row stays listed for 30 days, and a toast on every
+/// launch and every account switch for a month is not "once", it is nagging
+/// about mail the person already heard about. Bounded to the newest `cap`
+/// keys, oldest dropped first: a row old enough to fall off has long been
+/// swept from the listing too.
 struct ScheduledFailures: Sendable, Equatable {
+    static let cap = 200
+
+    /// Toasted keys, oldest first.
+    private(set) var keys: [String] = []
     private var seen: Set<String> = []
+
+    init(keys: [String] = []) {
+        let kept = Array(keys.suffix(Self.cap))
+        self.keys = kept
+        self.seen = Set(kept)
+    }
+
+    static func key(_ row: ScheduledSendView) -> String { "\(row.id)@\(row.created_at)" }
 
     /// The failed rows in `rows` that have not toasted yet, marked as toasted.
     mutating func fresh(_ rows: [ScheduledSendView]) -> [ScheduledSendView] {
-        rows.filter { row in
-            row.state == "failed" && seen.insert("\(row.id)@\(row.created_at)").inserted
+        let out = rows.filter { row in
+            row.state == "failed" && seen.insert(Self.key(row)).inserted
         }
+        guard !out.isEmpty else { return out }
+        keys.append(contentsOf: out.map(Self.key))
+        if keys.count > Self.cap {
+            for gone in keys.prefix(keys.count - Self.cap) { seen.remove(gone) }
+            keys.removeFirst(keys.count - Self.cap)
+        }
+        return out
     }
 
-    mutating func clear() { seen = [] }
+    mutating func clear() { self = ScheduledFailures() }
+}
+
+/// Whether the sitrep tick asks for the outbox. Every tick while it holds
+/// anything; once a listing came back EMPTY, only every `emptyEvery`: nothing
+/// this app does can fill it without clearing the flag, but ANOTHER device
+/// can, and a row scheduled from the phone must still toast here if it fails.
+enum ScheduledPoll {
+    static let emptyEvery: TimeInterval = 300
+
+    static func due(knownEmpty: Bool, loadedAt: Date?, now: Date = Date()) -> Bool {
+        guard knownEmpty, let loadedAt else { return true }
+        return now.timeIntervalSince(loadedAt) >= emptyEvery
+    }
+}
+
+/// THE SENT PAGE'S CURSOR through an outbox listing that changed under it. The
+/// cursor is an index over the outbox rows and then the sent rows, and a poll
+/// that inserts or drops an outbox row shifts every position after it: left
+/// alone, the highlight (and the Enter, `s` and `x` that act on it) would land
+/// on a different mail. Anchored by identity instead: an outbox row keeps its
+/// row wherever it moved, a sent row keeps its place after the group.
+enum ScheduledCursor {
+    static func reanchor(_ index: Int, old: [Int], new: [Int]) -> Int {
+        guard index >= 0 else { return index }
+        if index < old.count {
+            // Still listed: follow it. Gone: stay put, clamped to the group,
+            // so the cursor lands on the next outbox row rather than jumping
+            // into the sent mail (or past the end, when the group emptied).
+            if let moved = new.firstIndex(of: old[index]) { return moved }
+            return new.isEmpty ? 0 : min(index, new.count - 1)
+        }
+        return max(0, index + new.count - old.count)
+    }
 }
 
 /// The undo of a cancel from the Sent page: put the mail back in the outbox.
@@ -260,5 +370,51 @@ enum ScheduledCancelUndo {
         -> Bool
     {
         sendAt.timeIntervalSince(now) > margin
+    }
+
+    /// A row an earlier claim may have put in Gmail: the sticky `maybe_sent`,
+    /// or any attempt at all. The daemon searches Gmail before it sends such
+    /// a row again; a re-POST is a NEW row with no history, so it would send
+    /// blind. These never re-POST from an undo: they reopen in the composer
+    /// with `ScheduleCopy.mayHaveReachedGmail` for the person to check first.
+    static func mayHaveReachedGmail(_ row: ScheduledSendView) -> Bool {
+        row.maybe_sent == true || row.attempts > 0
+    }
+
+    /// What a composer reopened from this row says before anyone presses a
+    /// key: the Gmail doubt first (it is the one that can cost a second copy),
+    /// then a time that has already gone by (a failed row's, or one due while
+    /// the person looked), so the chip is not a past time with nothing beside
+    /// it until ⌘↵ finds out. nil when there is nothing to say.
+    static func reopenError(_ row: ScheduledSendView, now: Date = Date()) -> String? {
+        if mayHaveReachedGmail(row) { return ScheduleCopy.mayHaveReachedGmail }
+        if let at = Fmt.date(row.send_at), at <= now { return ScheduleCopy.timePassed }
+        return nil
+    }
+}
+
+/// A PULLED-BACK MAIL AND THE KEYED DRAFT ROW IT WOULD LAND ON. A reply's
+/// draft is one row per parent and a forward's one per original (new mail too,
+/// on a daemon without `drafts_v2`), so the reopened composer's first autosave
+/// PUTs over whatever that row holds: somebody's unsent reply to the same
+/// thread, silently gone. When such a row (or an open composer saving to it)
+/// holds words, the store does not arm the save; the person's first edit does,
+/// and a toast says so before then.
+enum PullBackDraft {
+    /// `drafts`: the daemon's rows. `open`: the composers on screen that hold
+    /// content (their close flush writes the same row). `keyedNewMail`: new
+    /// mail shares the one nil-keyed row (an older daemon).
+    static func wouldReplace(
+        _ state: ComposeState, drafts: [DraftView], open: [ComposeState], keyedNewMail: Bool
+    ) -> Bool {
+        let original = state.forwardOfMessageId
+        let parent = original == nil ? state.replyToMessageId : nil
+        guard original != nil || parent != nil || keyedNewMail else { return false }
+        func same(reply: Int?, forward: Int?) -> Bool {
+            if let original { return forward == original }
+            return forward == nil && reply == parent
+        }
+        return drafts.contains { same(reply: $0.reply_to_message_id, forward: $0.forward_of_message_id) }
+            || open.contains { $0.id != state.id && same(reply: $0.replyToMessageId, forward: $0.forwardOfMessageId) }
     }
 }

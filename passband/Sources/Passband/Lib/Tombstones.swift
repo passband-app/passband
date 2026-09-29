@@ -57,6 +57,11 @@ struct Tombstones: Sendable, Equatable {
     /// it settles one way or the other.
     mutating func leaving(_ id: Int) { stones[id] = .max }
 
+    /// How many tombstones are held. The ledger's size, for test.sh: pruning
+    /// is invisible through `hides` by design, and a ledger that never pruned
+    /// would grow for the whole account session.
+    var count: Int { stones.count }
+
     /// Whether this id's DELETE is still on the wire.
     func isLeaving(_ id: Int) -> Bool { stones[id] == .max }
 

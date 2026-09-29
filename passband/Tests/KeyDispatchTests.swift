@@ -35,6 +35,7 @@ struct KeyDispatchTests {
         shiftIsSpelledOutForNamedKeysOnly()
         aChordAndItsBareTwinCoexist()
         aChordNeverFallsBackToItsBareTwin()
+        anExactCaseBindingSitsTheFoldOut()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -144,6 +145,25 @@ struct KeyDispatchTests {
         }
         stage([[chord("Enter", "save")]]) {
             equal(press("Enter"), [], "and a bare press never reaches a chord binding")
+        }
+    }
+
+    /// The Sent page's `s` / `x` and the clock's ⌘⇧L: a binding marked
+    /// `exactCase` answers its own spelling and nothing the fold would hand it.
+    static func anExactCaseBindingSitsTheFoldOut() {
+        let exact = { (key: String, tag: String, meta: Bool) in
+            KeyBinding(declining: key, tag, meta: meta, allowInInput: meta, exactCase: true) {
+                ran.append(tag)
+                return true
+            }
+        }
+        stage([[exact("s", "send-now", false)]]) {
+            equal(press("s"), ["send-now"], "s is the verb")
+            equal(press("S"), [], "shift-S is not")
+        }
+        stage([[exact("L", "send-later", true)]]) {
+            equal(press("L", meta: true), ["send-later"], "⌘⇧L opens the palette")
+            equal(press("l", meta: true), [], "a bare ⌘L does not")
         }
     }
 

@@ -147,6 +147,7 @@ run_suite scheduled-send \
   Sources/Passband/Lib/Recipients.swift \
   Sources/Passband/Lib/AttachmentKinds.swift \
   Sources/Passband/Lib/ComposeAttachments.swift \
+  Sources/Passband/Model/GroupToken.swift \
   Sources/Passband/Model/ComposeState.swift \
   Sources/Passband/Lib/ScheduledSend.swift \
   Sources/Passband/Lib/Tombstones.swift \

@@ -15,6 +15,8 @@ import SwiftUI
 
 struct ScheduledRow: View {
     let row: ScheduledSendView
+    /// A fan-out's group, when this app scheduled it (`AppStore.scheduledGroupNames`).
+    var groupName: String? = nil
     let selected: Bool
     let onHover: () -> Void
     let onOpen: () -> Void
@@ -34,11 +36,12 @@ struct ScheduledRow: View {
             onHoverChange: { if $0 { onHover() } },
             action: {
                 onHover()
-                onOpen()
+                // A `sending` row is in Gmail's hands: nothing to pull back.
+                if row.state != "sending" { onOpen() }
             }
         ) { _, _ in
             CompositionSummary(
-                scheduled: row, slotWidth: Self.slotWidth,
+                scheduled: row, groupName: groupName, slotWidth: Self.slotWidth,
                 notice: ScheduledRowCopy.reasonLine(row),
                 noticeColor: failed ? Palette.danger : Palette.inkFaint
             ) {

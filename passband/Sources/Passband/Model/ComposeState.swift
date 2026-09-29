@@ -342,9 +342,19 @@ extension ComposeState {
     /// makes a new row (and re-claims these files, which the cancel released).
     /// Reusing the old identity would hand `DraftSaver` the consumed row's id
     /// out of its `resolved` map.
+    ///
+    /// A FAN-OUT'S AUDIENCE IS NOT IN THE REQUEST'S `to`. `SendBody(compose:)`
+    /// sends none for an individual group (the `#slug` token is a client
+    /// encoding the daemon refuses), so the request names it by `group_id`
+    /// alone, and a composer rebuilt from `to` would come back addressed to
+    /// nobody: no pill, and an Esc that saves a draft with no audience at all.
+    /// The token comes back from `base` when this app still has the composer,
+    /// else from `group`, the group `group_id` names as the daemon describes it
+    /// now (fetched by the caller; nil when it is gone or unreachable, and
+    /// then the id still rides on the wire, so a reschedule still reaches it).
     static func reopened(
         request r: ScheduledRequest, attachments: [OutboundAttachment], sendAt: Date?,
-        base: ComposeState? = nil
+        base: ComposeState? = nil, group: SendGroup? = nil
     ) -> ComposeState {
         var state = ComposeState()
         if let base {
@@ -364,6 +374,19 @@ extension ComposeState {
         // daemon was deriving it, and the reopened reply derives it again.
         state.recipientsStated = r.cc != nil
         state.groupId = r.group_id
+        if let gid = r.group_id, state.to.isEmpty {
+            if let base, base.groupId == gid, base.groupMode == .individual {
+                state.to = base.to
+            } else if let group, group.id == gid, group.mode == .individual {
+                state.to = GroupToken.encode(group)
+            }
+        }
+        // The pill's name and mode, from the daemon's own answer when there
+        // is one: fresher than `base`, which only knows the group as it was.
+        if let gid = r.group_id, let group, group.id == gid {
+            state.groupMode = group.mode
+            state.groupName = group.name
+        }
         state.subject = r.subject ?? ""
         state.body = r.body ?? ""
         state.includeTracker = r.include_tracker ?? false

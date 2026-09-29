@@ -1,5 +1,7 @@
-// SEND LATER. The clock in a composer's left cluster (attach, track, clock:
-// "how this mail goes out"), and the time palette it opens.
+// SEND LATER. The clock icon just left of a composer's send verb, and the time
+// palette it opens. Beside the verb because it changes what the verb does: a
+// pick turns the icon into a `Tue 9am ×` chip in the same spot, and "send"
+// beside it into "schedule".
 //
 // THE PALETTE IS THE REMIND PALETTE'S SIBLING, not a second engine: the same
 // `RemindTimes.match` answers "send when" exactly as it answers "remind me
@@ -37,18 +39,27 @@ struct ScheduleClock: View {
     }
 
     var body: some View {
-        if store.scheduledSendAvailable {
+        // A SET TIME STAYS VISIBLE even if the gate goes off under it (a
+        // reconnect to an older daemon): the verbs already read "send" then,
+        // and the chip's × is the way to clear what no longer applies.
+        if store.scheduledSendAvailable || sendAt != nil {
             Group {
                 if let sendAt {
                     setChip(sendAt)
-                } else {
+                } else if store.scheduledSendAvailable {
+                    // JUST THE ICON. The words and the chord are the help
+                    // text; the chip a pick turns it into says the rest.
                     Button { store.schedulePicker = slot } label: {
-                        clockLabel(text: "send later", symbol: "clock", on: false)
+                        Image(systemName: "clock")
+                            .font(.system(size: 13, weight: .regular))
+                            .foregroundStyle(Palette.inkFaint)
+                            .frame(width: 22, height: 22)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .pointingHand()
-                    .help(ScheduleCopy.clockHelp)
-                    .accessibilityLabel("Send later")
+                    .help(Self.help)
+                    .accessibilityLabel(Self.help)
                 }
             }
             #if !os(macOS)
@@ -64,16 +75,26 @@ struct ScheduleClock: View {
     /// back to "send".
     private func setChip(_ sendAt: Date) -> some View {
         HStack(spacing: 4) {
-            Button { store.schedulePicker = slot } label: {
+            Button {
+                if store.scheduledSendAvailable { store.schedulePicker = slot }
+            } label: {
                 HStack(spacing: 3) {
                     Image(systemName: "clock.fill").font(.system(size: 9, weight: .semibold))
-                    Text(ScheduleCopy.chip(sendAt))
+                    // A minute tick: "today 9:00" has to become "yesterday"
+                    // or a weekday across midnight while the composer sits
+                    // open, and nothing else re-renders the chip.
+                    TimelineView(.everyMinute) { context in
+                        Text(ScheduleCopy.chip(sendAt, now: context.date))
+                    }
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .pointingHand()
-            .help("goes out \(RemindTimes.detail(sendAt)) · click to change")
+            .help(
+                store.scheduledSendAvailable
+                    ? "goes out \(RemindTimes.detail(sendAt)) · click to change"
+                    : "this account cannot schedule mail. it will send now")
             .accessibilityLabel("Scheduled for \(RemindTimes.detail(sendAt)), change")
             Button { store.setSendAt(slot, nil) } label: {
                 Image(systemName: "xmark")
@@ -88,20 +109,15 @@ struct ScheduleClock: View {
         .modifier(ClockCapsule(on: true))
     }
 
-    /// Chip's own shape (Design/Glass.swift), with room for the chord: the
-    /// clock is the one control in the cluster with a key, and a key nobody
-    /// can see is a key nobody learns.
-    private func clockLabel(text: String, symbol: String, on: Bool) -> some View {
-        HStack(spacing: 3) {
-            Image(systemName: symbol).font(.system(size: 9, weight: .semibold))
-            Text(text)
-            #if os(macOS)
-                Text(Self.chord)
-                    .font(Typo.mono(9, weight: .medium))
-                    .opacity(0.6)
-            #endif
-        }
-        .modifier(ClockCapsule(on: on))
+    /// The icon's help text and accessibility label: "send later ⌘⇧L" on
+    /// the Mac, where the chord is how anyone learns it; the words alone on
+    /// a phone, which has no chord.
+    static var help: String {
+        #if os(macOS)
+            "\(ScheduleCopy.clockHelp) \(chord)"
+        #else
+            ScheduleCopy.clockHelp
+        #endif
     }
 
     #if !os(macOS)

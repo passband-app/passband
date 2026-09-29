@@ -13,6 +13,9 @@
 // reaches the send route, which is what makes a token that failed to resolve
 // loud instead of silently dropped.
 //
+// Pure: the resolve half, which asks the daemon, is `GroupToken.resolve` in
+// Model/AppStore.swift, so test.sh can build the encoding with no client.
+//
 // The token is a CLIENT ENCODING and nothing more. What actually goes on the
 // wire is `group_id`; this exists so that closing the composer and reopening it
 // does not lose which audience you were writing to.
@@ -47,21 +50,5 @@ enum GroupToken {
     /// and the picker never produces a second one.
     static func firstSlug(in value: String) -> String? {
         value.split(separator: ",").lazy.compactMap { slug(String($0)) }.first
-    }
-
-    /// Re-resolve a token to the group it names, for a draft restored after the
-    /// composer that wrote it is long gone.
-    ///
-    /// Matches on the SLUG exactly, against the daemon's own search. A rename
-    /// changes the slug, so a restored draft naming the old one resolves to
-    /// nothing — which is correct and is why the composer renders an unresolved
-    /// pill as a problem rather than quietly picking the nearest match. Guessing
-    /// which audience someone meant is not a thing to do with an irreversible
-    /// action.
-    static func resolve(_ slug: String) async -> SendGroup? {
-        guard let hits = try? await APIClient.shared.searchGroups(slug, limit: 25) else {
-            return nil
-        }
-        return hits.first { $0.slug == slug }
     }
 }

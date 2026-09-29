@@ -1611,6 +1611,8 @@ final class AppStore {
         scheduledRefresh = nil
         scheduledTombstones.clear()
         scheduledFailures.clear()
+        scheduledFailuresAccount = nil
+        scheduledGroupNames = [:]
         outboxKnownEmpty = false
         scheduledBusy = []
         authRings = []
@@ -3354,8 +3356,7 @@ final class AppStore {
     /// which is how a keyed row was always matched and still covers one whose
     /// id never reached the client.
     func isHeld(_ draft: DraftView) -> Bool {
-        let states = Array(heldSends.values.map(\.state)) + Array(releasing.values.map(\.state))
-        if states.contains(where: { $0.draftId == draft.id }) { return true }
+        if waitingSends.contains(where: { $0.state.draftId == draft.id }) { return true }
         if firingDraftIds.contains(draft.id) { return true }
         if detachedDrafts.values.contains(where: { $0 == draft.id }) { return true }
         if let parent = draft.reply_to_message_id, holdsDraft(replyTo: parent) { return true }
@@ -3731,6 +3732,18 @@ final class AppStore {
     /// they fire. Still the switch's to park (see `parkHeldSends`): until the
     /// request is built, the account can change under them.
     private var releasing: [UUID: HeldSend] = [:]
+    /// Scheduled mails between the composer closing and their POST leaving:
+    /// `fireSchedule` is waiting for the draft saves to settle. The composer
+    /// is gone and its last keystrokes live only here (`noteSent` dropped the
+    /// debounced save), so the switch and quit park these exactly as they
+    /// park `releasing`, or the tail of the typing goes with the account.
+    private var scheduling: [UUID: HeldSend] = [:]
+
+    /// Every mail the store holds that has not reached the wire, whatever
+    /// door it is leaving by. What `holdsDraft` and `isHeld` read.
+    private var waitingSends: [HeldSend] {
+        Array(heldSends.values) + Array(releasing.values) + Array(scheduling.values)
+    }
     /// The reply keys of mails ON THE WIRE, whose draft rows exist until the
     /// send returns. Forwards are not in it (their key is a different column,
     /// and nil here means the old daemon's new-message slot); see
@@ -3747,14 +3760,14 @@ final class AppStore {
 
     /// Whether any mail is waiting out its hold or waiting to fire. What quit
     /// asks before it lets the app go (see `AppDelegate`).
-    var hasHeldSends: Bool { !heldSends.isEmpty || !releasing.isEmpty }
+    var hasHeldSends: Bool { !heldSends.isEmpty || !releasing.isEmpty || !scheduling.isEmpty }
 
     /// Whether a held or sending mail owns the draft row for this reply key
     /// (nil = the ONE new-message row of an older daemon; on a `drafts_v2`
     /// daemon new mail is matched by id instead, see `isHeld`). A forward's
     /// row is a different key; see `holdsDraft(forwardOf:)`.
     private func holdsDraft(replyTo: Int?) -> Bool {
-        (Array(heldSends.values) + Array(releasing.values)).contains {
+        waitingSends.contains {
             $0.state.replyToMessageId == replyTo && $0.state.forwardOfMessageId == nil
         } || firingReplyKeys.contains(replyTo)
     }
@@ -3762,7 +3775,7 @@ final class AppStore {
     /// Whether a held or sending forward owns the draft row keyed to this
     /// forwarded message (`drafts_v2` daemons; older ones never have one).
     private func holdsDraft(forwardOf original: Int) -> Bool {
-        (Array(heldSends.values) + Array(releasing.values)).contains {
+        waitingSends.contains {
             $0.state.forwardOfMessageId == original
         } || firingForwardKeys.contains(original)
     }
@@ -3790,35 +3803,37 @@ final class AppStore {
     /// park, but no toast, because the window it would appear in is going
     /// away. The mail is on the drafts page on the next launch.
     ///
-    /// A SCHEDULED MAIL HAS NOTHING HERE TO PARK. `scheduleCompose` holds
-    /// nothing: the POST leaves the moment the composer closes, and from the
-    /// 201 on the mail is the daemon's, in the outbox, cancellable from Sent
-    /// on any account switch or relaunch. The one window is the POST itself
-    /// (one round trip, after the draft saves settle): an account switch
-    /// inside it is caught by `fireSchedule`'s epoch checks and reported, and
-    /// a quit inside it leaves the draft the composer had autosaved, which the
-    /// POST would have consumed. Nothing is gained by waiting for it here.
+    /// A SCHEDULED MAIL is parked too while it waits for the draft saves to
+    /// settle (`scheduling`): its last keystrokes exist nowhere else. From the
+    /// moment its POST leaves it is not here any more: the draft row the
+    /// autosave wrote is still there until the POST consumes it, and from
+    /// the 201 on the mail is the daemon's, in the outbox, cancellable from
+    /// Sent on any account. An account switch inside the POST is caught by
+    /// `fireSchedule`'s epoch check and reported.
     func parkHeldSends(save: Bool = true, quitting: Bool = false) {
-        let parked = Array(heldSends.values) + Array(releasing.values)
+        let scheduled = Set(scheduling.keys)
+        let parked = Array(heldSends) + Array(releasing) + Array(scheduling)
         heldSends = [:]
         releasing = [:]
-        for held in parked {
+        scheduling = [:]
+        for (key, held) in parked {
+            let verb = scheduled.contains(key) ? "not scheduled" : "not sent"
             undos.removeAll { $0.id == held.undoId }
             let state = withDetachedDraft(held.state)
             holding.remove(state.id)
             if !save {
-                pushToast("not sent: its account was removed", .error)
+                pushToast("\(verb): its account was removed", .error)
             } else if state.forwardOfMessageId != nil && !draftsV2Available {
                 // Not saved on this daemon (see `DraftSaver.save`), so no
                 // promise of one.
                 if !quitting {
-                    pushToast("not sent: you switched accounts while it was waiting", .error)
+                    pushToast("\(verb): you switched accounts while it was waiting", .error)
                 }
             } else {
                 DraftSaver.shared.saveDetached(held.slot, state)
                 if !quitting {
                     pushToast(
-                        "not sent: you switched accounts. It is in that account's drafts", .error)
+                        "\(verb): you switched accounts. It is in that account's drafts", .error)
                 }
             }
         }
@@ -4138,15 +4153,21 @@ final class AppStore {
         if schedulePicker == slot { schedulePicker = nil }
         let held = HeldSend(
             state: closing, slot: slot, override: override, threadId: threadId, epoch: epoch)
-        Task { [weak self] in await self?.fireSchedule(held, at: sendAt) }
+        // Parked in `scheduling` until the POST leaves, where an account
+        // switch or a quit starting now still finds it (see `parkHeldSends`).
+        let key = UUID()
+        scheduling[key] = held
+        Task { [weak self] in await self?.fireSchedule(key, at: sendAt) }
     }
 
-    private func fireSchedule(_ held: HeldSend, at sendAt: Date) async {
+    private func fireSchedule(_ key: UUID, at sendAt: Date) async {
         // A DRAFT SAVE STILL ON THE WIRE owns the id this POST has to name, or
         // the daemon files the mail and leaves its draft behind (a new-message
         // create that lands after the POST would be a second copy of mail
         // that is already scheduled). Same wait `release` makes.
         await DraftSaver.shared.settle()
+        // Gone = an account switch or a quit parked it as a draft, and said so.
+        guard let held = scheduling.removeValue(forKey: key) else { return }
         guard held.epoch == epoch else {
             pushToast("not scheduled: the account changed while it was on its way", .error)
             return
@@ -4197,6 +4218,11 @@ final class AppStore {
             }
             // A new row in the outbox: the Sent page and the tick look again.
             noteOutboxChanged()
+            // The listing has no `group_id`, so a fan-out's row would have no
+            // name to show; this app knows it, for as long as it runs.
+            if state.groupMode == .individual, let name = state.groupName {
+                scheduledGroupNames[created.id] = name
+            }
             let e = epoch
             // `messageId: -1`: this undo resolves nothing on the sitrep.
             pushUndo(kind: .schedule, messageId: -1, label: ScheduleCopy.scheduledToast(sendAt)) {
@@ -4268,8 +4294,17 @@ final class AppStore {
     /// `drafts.id`, so this is the generation-tagged ledger, NEVER a permanent
     /// set; the rule is `Tombstones`.
     private var scheduledTombstones = Tombstones()
-    /// Which failed rows have toasted this run, for this account.
+    /// Which failed rows have toasted, for this account: loaded from and saved
+    /// to `scheduledFailuresKey` by `freshFailures`, so a failure toasts once,
+    /// not once per launch. `scheduledFailuresAccount` is whose they are; nil
+    /// = not loaded yet (a fresh launch, or an account switch).
     private var scheduledFailures = ScheduledFailures()
+    private var scheduledFailuresAccount: UUID?
+    private static let scheduledFailuresKeyBase = "passband.scheduled.failuresToasted"
+    /// The group name of each fan-out this app scheduled, by outbox id: the
+    /// listing carries no `group_id`, so without this a fan-out's row could
+    /// only say "group or bcc" (`ScheduledRowCopy.emptyRecipient`).
+    private(set) var scheduledGroupNames: [Int: String] = [:]
     /// The last listing came back EMPTY and nothing has been scheduled since:
     /// the sitrep tick has nothing to watch and skips the request. Everything
     /// that can put a row in the outbox clears it.
@@ -4301,11 +4336,33 @@ final class AppStore {
     /// The sitrep tick's ask, so a row that FAILS while the person is
     /// elsewhere still toasts. There is no event for it (docs/SCHEDULED-SEND.md
     /// §5: no SSE), and the Sent page only refreshes while it is on screen.
-    /// Skipped once the outbox is known empty, so an account that never
-    /// schedules anything pays one request per connect, not one per tick.
+    /// Slowed to one ask per `ScheduledPoll.emptyEvery` once the outbox is
+    /// known empty, so an account that never schedules anything pays one
+    /// request per five minutes, not one per tick, while a row another device
+    /// scheduled still turns up (and toasts, if it fails).
     func pollScheduled() async {
-        guard scheduledSendAvailable, !outboxKnownEmpty else { return }
+        guard scheduledSendAvailable,
+            ScheduledPoll.due(knownEmpty: outboxKnownEmpty, loadedAt: scheduledLoadedAt)
+        else { return }
         await refreshScheduled()
+    }
+
+    /// `scheduledFailures.fresh`, against the ledger of the account live NOW,
+    /// written back when it changed. Scoped like the other per-account
+    /// ledgers (`RecentSearchStore`): ids mean nothing across daemons.
+    private func freshFailures(_ rows: [ScheduledSendView]) -> [ScheduledSendView] {
+        guard let account = AccountManager.shared.activeId else {
+            return scheduledFailures.fresh(rows)
+        }
+        let key = AccountIndex.scopedKey(Self.scheduledFailuresKeyBase, account)
+        if scheduledFailuresAccount != account {
+            scheduledFailures = ScheduledFailures(
+                keys: UserDefaults.standard.stringArray(forKey: key) ?? [])
+            scheduledFailuresAccount = account
+        }
+        let fresh = scheduledFailures.fresh(rows)
+        if !fresh.isEmpty { UserDefaults.standard.set(scheduledFailures.keys, forKey: key) }
+        return fresh
     }
 
     private func performScheduledRefresh() async {
@@ -4323,10 +4380,11 @@ final class AppStore {
         if next != scheduledRows { scheduledRows = next }
         scheduledLoadedAt = Date()
         outboxKnownEmpty = listed?.isEmpty ?? false
-        // ONCE PER ROW PER RUN. The first listing of a run toasts a row that
-        // failed while the app was closed, which is the point: nobody has
-        // been told yet.
-        for row in scheduledFailures.fresh(next) {
+        // ONCE PER ROW. The first listing of a run toasts a row that failed
+        // while the app was closed, which is the point: nobody has been told
+        // yet. One that already toasted, in this run or an earlier one, stays
+        // quiet.
+        for row in freshFailures(next) {
             pushToast(ScheduledRowCopy.failedToast(row), .error)
         }
     }
@@ -4392,8 +4450,11 @@ final class AppStore {
     ///   agent's hand-off does the same), rather than being lost.
     /// - NEW MAIL loads into the pane. One already open there is closed
     ///   through `closeCompose`, which keeps it in drafts, as `openDraft` does.
+    ///
+    /// A `sending` row takes none of this (nor `s` nor `x`): it is in Gmail's
+    /// hands, and the daemon would 409 each of them anyway.
     func pullBackScheduled(_ row: ScheduledSendView) {
-        guard !scheduledBusy.contains(row.id) else { return }
+        guard row.state != "sending", !scheduledBusy.contains(row.id) else { return }
         let e = epoch
         let index = holdScheduledRow(row.id)
         Task {
@@ -4422,19 +4483,32 @@ final class AppStore {
             }
             scheduledBusy.remove(row.id)
             scheduledTombstones.gone(row.id)
-            openPulledBack(
-                ComposeState.reopened(
-                    request: cancelled.request ?? Self.fallbackRequest(row),
-                    attachments: cancelled.attachments, sendAt: Fmt.date(row.send_at),
-                    base: base),
-                threadId: row.thread_id)
+            let request = cancelled.request ?? Self.fallbackRequest(row)
+            let group = await groupOf(request)
+            guard e == epoch else { return }
+            var state = ComposeState.reopened(
+                request: request, attachments: cancelled.attachments,
+                sendAt: Fmt.date(row.send_at), base: base, group: group)
+            // Said before anyone presses a key: an earlier try that may have
+            // reached Gmail, or a time already gone by (a failed row's).
+            state.error = ScheduledCancelUndo.reopenError(row)
+            scheduledGroupNames[row.id] = nil
+            await openPulledBack(state, threadId: row.thread_id, epoch: e)
         }
+    }
+
+    /// The group a request's `group_id` names, as the daemon describes it now:
+    /// what `ComposeState.reopened` rebuilds a fan-out's pill from. nil for a
+    /// request without one, and for a group that is gone or unreachable.
+    private func groupOf(_ request: ScheduledRequest) async -> SendGroup? {
+        guard let id = request.group_id else { return nil }
+        return try? await APIClient.shared.group(id)
     }
 
     /// `s` on an outbox row: send it on the worker's next tick. 202 is QUEUED,
     /// not sent, so the toast says "sending now" and the listing shows it go.
     func sendScheduledNow(_ row: ScheduledSendView) {
-        guard !scheduledBusy.contains(row.id) else { return }
+        guard row.state != "sending", !scheduledBusy.contains(row.id) else { return }
         let e = epoch
         scheduledBusy.insert(row.id)
         Task {
@@ -4461,7 +4535,7 @@ final class AppStore {
     /// handed back (`uncancelScheduled`). The toast appears when the DELETE
     /// lands, because until then there is nothing to undo.
     func cancelScheduledRow(_ row: ScheduledSendView) {
-        guard !scheduledBusy.contains(row.id) else { return }
+        guard row.state != "sending", !scheduledBusy.contains(row.id) else { return }
         let e = epoch
         let index = holdScheduledRow(row.id)
         Task {
@@ -4511,19 +4585,25 @@ final class AppStore {
         guard e == epoch else { throw HoldError.alreadySent }
         let request = cancelled.request ?? Self.fallbackRequest(row)
         let sendAt = Fmt.date(row.send_at)
-        if let sendAt, ScheduledCancelUndo.canReschedule(at: sendAt) {
+        // NOT A ROW GMAIL MAY ALREADY HAVE. The daemon searched Gmail before
+        // sending such a row again; the re-POST would be a new row with no
+        // history, sent blind. It reopens instead, saying why.
+        if !ScheduledCancelUndo.mayHaveReachedGmail(row), let sendAt,
+            ScheduledCancelUndo.canReschedule(at: sendAt)
+        {
             do {
-                _ = try await APIClient.shared.scheduleSend(
+                let created = try await APIClient.shared.scheduleSend(
                     ScheduledCancelUndo.body(request), at: sendAt)
                 guard e == epoch else { return }
+                if let name = scheduledGroupNames.removeValue(forKey: row.id) {
+                    scheduledGroupNames[created.id] = name
+                }
                 noteOutboxChanged()
                 await refreshScheduled(force: true)
                 return
             } catch {
                 guard e == epoch else { throw error }
-                var state = ComposeState.reopened(
-                    request: request, attachments: cancelled.attachments, sendAt: sendAt,
-                    base: await forwardBase(row.forward_of_message_id))
+                var state = await reopenedRow(row, request, cancelled)
                 if let api = error as? APIError, api.kind == .guardBlocked {
                     // As `putBack` does for a blocked send: the verdict shows,
                     // and ⌘⇧↵ reads "schedule anyway".
@@ -4531,17 +4611,30 @@ final class AppStore {
                 } else {
                     state.error = errText(error, "could not schedule it again")
                 }
-                guard e == epoch else { throw error }
-                openPulledBack(state, threadId: row.thread_id)
-                throw error
+                guard e == epoch else { return }
+                // RETURNS, not rethrows: the mail is back on screen and its
+                // composer says what went wrong. An "undo failed" toast beside
+                // it would be a second, contradicting account of one event.
+                await openPulledBack(state, threadId: row.thread_id, epoch: e)
+                return
             }
         }
-        var state = ComposeState.reopened(
-            request: request, attachments: cancelled.attachments, sendAt: sendAt,
-            base: await forwardBase(row.forward_of_message_id))
-        state.error = ScheduleCopy.timePassed
+        var state = await reopenedRow(row, request, cancelled)
+        state.error = ScheduledCancelUndo.reopenError(row) ?? ScheduleCopy.timePassed
         guard e == epoch else { return }
-        openPulledBack(state, threadId: row.thread_id)
+        await openPulledBack(state, threadId: row.thread_id, epoch: e)
+    }
+
+    /// A cancelled row as the composer it reopens into, display state and all
+    /// (the forwarded original, the fan-out's group).
+    private func reopenedRow(
+        _ row: ScheduledSendView, _ request: ScheduledRequest, _ cancelled: ScheduledCancel
+    ) async -> ComposeState {
+        let base = await forwardBase(row.forward_of_message_id)
+        let group = await groupOf(request)
+        return ComposeState.reopened(
+            request: request, attachments: cancelled.attachments, sendAt: Fmt.date(row.send_at),
+            base: base, group: group)
     }
 
     /// The display half of a forward's composer (the original under the note,
@@ -4580,13 +4673,40 @@ final class AppStore {
     /// the autosave is ARMED (`noteChange`, as `putBack` does): the cancel
     /// released the files' claim, and the draft the save writes is what
     /// claims them again before the unclaimed sweep can.
-    private func openPulledBack(_ state: ComposeState, threadId: String?) {
+    ///
+    /// EXCEPT OVER SOMEBODY'S WORDS. A reply's draft row is one per parent, a
+    /// forward's one per original (and new mail's one, on a daemon without
+    /// `drafts_v2`), so an armed save would PUT this mail over an unsent
+    /// draft to the same thread without a word. When such a row holds
+    /// anything, or an open composer is about to flush into it, the save is
+    /// left unarmed until the person's first edit arms it the ordinary way,
+    /// and a toast says what that edit will do (`PullBackDraft`). The list
+    /// is refetched first: the cache may be minutes old.
+    private func openPulledBack(_ state: ComposeState, threadId: String?, epoch e: Int) async {
+        var replaces = false
+        if state.replyToMessageId != nil || state.forwardOfMessageId != nil || !draftsV2Available {
+            await refreshDrafts()
+            guard e == epoch else { return }
+            replaces = PullBackDraft.wouldReplace(
+                state, drafts: draftsRows,
+                open: [compose, inlineReply].compactMap { $0 }.filter(DraftSaver.hasContent),
+                keyedNewMail: !draftsV2Available)
+        }
+        func arm(_ slot: DraftSaver.Slot) {
+            if replaces {
+                DraftSaver.shared.noteOpened(slot)
+                pushToast(ScheduleCopy.replacesDraft(forward: state.forwardOfMessageId != nil))
+            } else {
+                DraftSaver.shared.noteChange(slot)
+            }
+        }
         if state.replyToMessageId != nil, let threadId {
             // Through `openThread`, which flushes any inline reply already
             // open (it is somebody's words) before this one takes the slot.
             openThread(threadId)
             inlineReply = state
-            DraftSaver.shared.noteChange(.inlineReply)
+            arm(.inlineReply)
+            Analytics.capture("compose_opened", ["kind": state.analyticsKind])
             return
         }
         // Through `closeCompose`, so the one being replaced says "kept in
@@ -4594,7 +4714,7 @@ final class AppStore {
         closeCompose()
         if sideView.isOpen { closeSide() }
         compose = state
-        DraftSaver.shared.noteChange(.compose)
+        arm(.compose)
         Analytics.capture("compose_opened", ["kind": state.analyticsKind])
     }
 
@@ -5004,5 +5124,23 @@ final class AppStore {
     /// until the refresh. No restore thunk — the write has already succeeded.
     func removeFromStanding(_ messageId: Int) {
         sitrep.standing.removeAll { $0.id == messageId }
+    }
+}
+
+extension GroupToken {
+    /// Re-resolve a token to the group it names, for a draft restored after the
+    /// composer that wrote it is long gone.
+    ///
+    /// Matches on the SLUG exactly, against the daemon's own search. A rename
+    /// changes the slug, so a restored draft naming the old one resolves to
+    /// nothing — which is correct and is why the composer renders an unresolved
+    /// pill as a problem rather than quietly picking the nearest match. Guessing
+    /// which audience someone meant is not a thing to do with an irreversible
+    /// action.
+    static func resolve(_ slug: String) async -> SendGroup? {
+        guard let hits = try? await APIClient.shared.searchGroups(slug, limit: 25) else {
+            return nil
+        }
+        return hits.first { $0.slug == slug }
     }
 }

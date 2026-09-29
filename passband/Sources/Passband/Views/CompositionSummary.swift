@@ -29,6 +29,10 @@ struct CompositionSummary<Trailing: View>: View {
     /// go. The subject stays, so the row still says which mail it is.
     var notice: String?
     var noticeColor: Color = Palette.inkFaint
+    /// Line one of new mail with nobody in `to`. A draft really has no
+    /// recipient then; an outbox row does (a fan-out, or bcc only), and says
+    /// so through `ScheduledRowCopy.emptyRecipient`.
+    var emptyTo = "no recipient"
     @ViewBuilder let trailing: () -> Trailing
 
     private enum Kind { case new, reply, forward }
@@ -86,7 +90,7 @@ struct CompositionSummary<Trailing: View>: View {
     private var who: some View {
         switch kind {
         case .new:
-            Text(names.isEmpty ? "no recipient" : names)
+            Text(names.isEmpty ? emptyTo : names)
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(names.isEmpty ? Palette.inkFaintest : Palette.ink)
                 .lineLimit(1)
@@ -177,14 +181,15 @@ extension CompositionSummary {
 
     /// A mail in the outbox.
     init(
-        scheduled row: ScheduledSendView, slotWidth: CGFloat, notice: String?,
-        noticeColor: Color, @ViewBuilder trailing: @escaping () -> Trailing
+        scheduled row: ScheduledSendView, groupName: String?, slotWidth: CGFloat,
+        notice: String?, noticeColor: Color, @ViewBuilder trailing: @escaping () -> Trailing
     ) {
         self.init(
             to: row.to, subject: row.subject, text: row.body,
             replyTo: row.reply_to_message_id, forwardOf: row.forward_of_message_id,
             parentSubject: row.parent_subject, parentFrom: row.parent_from,
             fileCount: row.attachments.count, slotWidth: slotWidth, notice: notice,
-            noticeColor: noticeColor, trailing: trailing)
+            noticeColor: noticeColor,
+            emptyTo: ScheduledRowCopy.emptyRecipient(groupName: groupName), trailing: trailing)
     }
 }

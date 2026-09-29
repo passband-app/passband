@@ -40,6 +40,9 @@ struct MarkdownTextView: UIViewRepresentable {
     /// keyboard with it. Same affordance as the Mac's: a reply must land the
     /// caret in the body rather than being a box you have to go tap.
     var autofocus = false
+    /// The Mac's refocus request, the same way: each new value takes the
+    /// caret again after mount (`EditorRefocus.take`).
+    var refocus = 0
     var disabled = false
     /// The Mac editor's drop and paste hooks, accepted here so the composers
     /// pass them without forking on platform. A phone has nothing to drop
@@ -88,6 +91,9 @@ struct MarkdownTextView: UIViewRepresentable {
         // not. Without this the delegate writes into the first render's binding.
         context.coordinator.parent = self
         view.isEditable = !disabled
+        if EditorRefocus.take(refocus, seen: &context.coordinator.focusSeen) {
+            DispatchQueue.main.async { view.becomeFirstResponder() }
+        }
         // Only external changes (a draft restore) land here — the coordinator
         // wrote user edits into the binding already, and re-setting the text for
         // those would throw away the selection.
@@ -107,8 +113,13 @@ struct MarkdownTextView: UIViewRepresentable {
     final class Coordinator: NSObject, UITextViewDelegate {
         var parent: MarkdownTextView
         weak var view: HighlightingTextView?
+        /// The last `refocus` answered; starts at the mount's.
+        var focusSeen: Int
 
-        init(_ parent: MarkdownTextView) { self.parent = parent }
+        init(_ parent: MarkdownTextView) {
+            self.parent = parent
+            self.focusSeen = parent.refocus
+        }
 
         func textViewDidChange(_ textView: UITextView) {
             guard let view = textView as? HighlightingTextView else { return }

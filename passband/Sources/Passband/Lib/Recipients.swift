@@ -336,7 +336,11 @@ extension Recipients {
         // is still in the conversation, and marking that as an addition and a
         // removal would cry wolf on the one signal this exists for.
         let here = current.keys
-        let before = previous?.keys
+        // A predecessor that named NOBODY (a blind copy, `undisclosed-
+        // recipients:;`) is no baseline either: its audience is its sender
+        // alone, and diffing against that would mark everyone on the next
+        // message as newly added.
+        let before = previous.flatMap { $0.recipients.all.isEmpty ? nil : $0.keys }
 
         var added = 0
         var removed = 0

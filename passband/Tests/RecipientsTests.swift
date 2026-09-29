@@ -34,6 +34,7 @@ struct RecipientsTests {
         readingMarksWhoJoinedAndWhoWasDropped()
         aMoveBetweenHeadersIsNotAChange()
         anUnreadPredecessorMarksNobody()
+        aPredecessorThatNamedNobodyMarksNobody()
         aReplyDoesNotDropItsOwnAuthorOrAddTheLastOne()
         aBlindCopyNeverGhosts()
         aDroppedPayloadYieldsOnlyAddresses()
@@ -311,6 +312,16 @@ struct RecipientsTests {
         equal(d.added, 0, "no marks without something to compare against")
         equal(d.changed, false, "and no self-opening block")
         equal(d.lines[0].people.map(\.mark), [.present, .present], "everyone plain")
+    }
+
+    /// A newsletter that reached you as a Bcc names nobody. The reply after it
+    /// is not "everyone joined".
+    static func aPredecessorThatNamedNobodyMarksNobody() {
+        let d = Recipients.reading(
+            audience(to: "you@x.test", cc: "ann@x.test, bob@x.test"), me: nil,
+            previous: audience(from: "news@x.test"))
+        equal(d.added, 0, "nobody is new against a message that named nobody")
+        equal(d.changed, false, "and the block stays shut")
     }
 
     static func names(_ line: RecipientLine) -> [String] { line.people.map(\.name) }

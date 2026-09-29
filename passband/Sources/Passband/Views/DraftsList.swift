@@ -1,50 +1,38 @@
-// The composer's drafts picker: the popover behind the "drafts" button in the
-// composer's header, beside the kind label. The kind label says what this mail
-// IS; the button beside it answers "which mail is this", so it sits there and
-// not in the footer, whose left cluster is how a mail goes out.
+// The composer's drafts page: the second page of the compose pane, behind the
+// drafts control in its header. Same strip, same header, the body swaps: the
+// fields, editor and footer step aside and the list takes the whole pane.
 //
-// A popover, not a page: small, dense, one scroller. Every draft the daemon
-// holds is listed newest first, except mail a held send owns (the store keeps
-// those out; see `AppStore.listedDrafts`). The one the open composer is
-// editing stays in the list, marked "editing" and inert, so the count on the
-// button and the rows under it never disagree about what exists.
+// A PAGE, NOT A POPOVER. The popover it replaced was a bubble a third of the
+// pane wide hanging off a small word, with its own focus fight (the body's
+// text view kept the keyboard behind it) and its own height hack (a scroller
+// in a popover has none). As the pane's content none of that exists: the
+// text views are unmounted, so there is nothing to steal keys from, and the
+// list simply fills the pane.
 //
-// KEYS (Mac): arrows move the cursor, Enter opens, Backspace/Delete deletes
-// behind the store's undo toast, Esc closes THIS and not the composer. The
-// picker pushes `.modal` and registers its bindings on appear, AFTER the
-// composer's own `.modal` set, and dispatch walks the newest set first, so
-// its Escape wins while it is up and the composer's is back the moment it
-// unmounts.
+// THE FIRST ROW IS THE WAY BACK. "start a new message" (or "back to your
+// message", when the composer holds something) sits on top, selected by
+// default, so a ⌘N that landed here (see `AppStore.openComposeNew`) is one
+// Enter from a blank composer. Below it every draft the daemon holds, newest
+// edit first, minus mail a held send owns (`AppStore.listedDrafts`). The one
+// this pane is editing stays listed, marked "editing" and inert, so the count
+// in the header and the rows here never disagree about what exists.
 //
-// FOCUS: left alone, the composer's text view keeps first responder behind
-// a popover, so a letter typed with the picker open lands in the body
-// underneath. The picker takes focus itself on appear (`pickerFocused`),
-// which makes the popover's window key and moves first responder off the
-// body. The bindings still opt into input, as a backstop: should the focus
-// ever fail to take, a picker whose arrows went to the body would be a
-// picker you cannot drive. That is also why Backspace/Delete decline (see
-// `bindings`) on an inert row or an empty list: with the body possibly
-// still listening, a keystroke the picker cannot use must reach it.
+// KEYS (Mac), registered in the pane's own `.modal` context: arrows move the
+// cursor over inert rows, Enter opens, Backspace/Delete deletes behind the
+// store's undo toast, Esc goes back to the composer when it holds something
+// and closes the pane when it does not (a blank ⌘N that landed here has
+// nothing to go back to). None of them opt into input: on this page there is
+// no text field to share keys with. The pane's own Escape declines while
+// this page is up, so which set registered first does not matter.
 
 import SwiftUI
 
-struct DraftsPicker: View {
+struct DraftsList: View {
     @Environment(AppStore.self) private var store
-    /// Close the popover. Called before opening a draft too: opening a reply
-    /// closes the pane composer this popover hangs off.
-    let onClose: () -> Void
 
+    /// 0 is the new-message row; `i` above it is `rows[i - 1]`.
     @State private var cursor = 0
     @State private var loaded = false
-    /// The rows' real height, measured. A ScrollView has no height of its
-    /// own, so under only a `maxHeight` the Mac popover sized itself to the
-    /// first frame (the loading note) and never grew when the rows arrived:
-    /// one row, half of it clipped. The scroller gets this height outright,
-    /// capped, and scrolls only past the cap.
-    @State private var listHeight: CGFloat = 0
-    /// Set on appear, so the popover takes the keyboard from the composer's
-    /// body; see the header.
-    @FocusState private var pickerFocused: Bool
 
     /// Newest first, by the edit rather than the creation: the draft you
     /// touched last is the one you are most likely back for.
@@ -54,80 +42,96 @@ struct DraftsPicker: View {
         }
     }
 
+    /// Whether the composer behind this page holds anything to go back to:
+    /// words, a saved row, or a parent (a reply or forward is somebody's
+    /// mail even untouched). Decides the first row's words and what Esc does.
+    private var returning: Bool {
+        guard let compose = store.compose else { return false }
+        return DraftSaver.hasContent(compose) || compose.draftId != nil
+            || compose.replyToMessageId != nil || compose.forwardOfMessageId != nil
+    }
+
+    private var kindWord: String {
+        if store.compose?.forwardOfMessageId != nil { return "forward" }
+        return store.compose?.replyToMessageId != nil ? "reply" : "message"
+    }
+
+    private static let newRowID = "drafts-list-new-message"
+
     var body: some View {
         let rows = rows
-        VStack(alignment: .leading, spacing: 2) {
-            Text("drafts")
-                .font(Typo.sectionLabel)
-                .foregroundStyle(Palette.inkFaint)
-                .textCase(.uppercase)
-                .padding(.horizontal, 11)
-                .padding(.top, 9)
-                .padding(.bottom, 3)
+        VStack(alignment: .leading, spacing: 0) {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 1) {
+                        NewMessageRow(
+                            label: returning ? "back to your \(kindWord)" : "start a new message",
+                            returning: returning,
+                            selected: cursor == 0,
+                            onHover: { cursor = 0 },
+                            onOpen: back
+                        )
+                        .id(Self.newRowID)
 
-            // "No other drafts" also when the only row is the one being
-            // edited: that row is listed, but it is not another draft.
-            if rows.isEmpty && !loaded {
-                note("loading…")
-            } else if rows.isEmpty {
-                note("no other drafts")
-            } else {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        VStack(spacing: 1) {
+                        Text("drafts")
+                            .font(Typo.sectionLabel)
+                            .foregroundStyle(Palette.inkFaint)
+                            .textCase(.uppercase)
+                            .padding(.horizontal, 11)
+                            .padding(.top, 16)
+                            .padding(.bottom, 5)
+
+                        if rows.isEmpty {
+                            note(loaded ? "no other drafts" : "loading…")
+                        } else {
                             ForEach(Array(rows.enumerated()), id: \.element.id) { index, draft in
                                 DraftRow(
                                     draft: draft,
                                     inert: store.isInert(draft),
-                                    selected: index == cursor,
-                                    onHover: { cursor = index },
+                                    selected: cursor == index + 1,
+                                    onHover: { cursor = index + 1 },
                                     onOpen: { open(draft) },
                                     onDelete: { delete(draft) }
                                 )
                                 .id(draft.id)
                             }
+                            // "No other drafts" also when the only row is the
+                            // one being edited: listed, but not another draft.
                             if rows.allSatisfy({ store.isInert($0) }) {
                                 note("no other drafts").padding(.top, 4)
                             }
                         }
-                        .padding(.horizontal, 5)
-                        .padding(.bottom, 5)
-                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
-                            listHeight = $0
-                        }
                     }
-                    #if os(macOS)
-                    // Floor for the first frame, before the measure lands.
-                    .frame(height: min(max(listHeight, 44), 340))
-                    #endif
-                    .onChange(of: cursor) { _, next in
-                        guard rows.indices.contains(next) else { return }
-                        proxy.scrollTo(rows[next].id)
+                    // 7 + the row's own 11 puts every row's text on the
+                    // header's 18pt edge.
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .onChange(of: cursor) { _, next in
+                    if next == 0 {
+                        proxy.scrollTo(Self.newRowID)
+                    } else if rows.indices.contains(next - 1) {
+                        proxy.scrollTo(rows[next - 1].id)
                     }
                 }
             }
-        }
-        #if os(macOS)
-            .frame(width: 420)
-            .focusable()
-            .focusEffectDisabled()
-            .focused($pickerFocused)
-            .onAppear { pickerFocused = true }
-        #else
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .presentationDetents([.medium, .large])
-        #endif
-        .keyContext(.modal)
+
+            #if os(macOS)
+                hints
+            #endif
+        }
         .keyBindings(.modal, bindings(rows))
         .task {
             await store.refreshDrafts()
             loaded = true
-            // Start on the first row that can be opened: the newest is often
-            // the one this composer is editing.
-            cursor = step(from: -1, by: 1, in: self.rows) ?? 0
         }
         .onChange(of: rows.count) { _, count in
-            cursor = min(cursor, max(count - 1, 0))
+            if cursor > count { cursor = count }
+            if cursor > 0, store.isInert(rows[cursor - 1]) {
+                cursor = step(from: cursor, by: -1, in: rows) ?? 0
+            }
         }
     }
 
@@ -136,12 +140,43 @@ struct DraftsPicker: View {
             .font(Typo.micro)
             .foregroundStyle(Palette.inkFaintest)
             .padding(.horizontal, 11)
-            .padding(.bottom, 11)
+            .padding(.vertical, 6)
+    }
+
+    #if os(macOS)
+        /// One muted line where the composer's footer was: this page's keys.
+        /// Delete only while a draft is under the cursor, because a hint for a
+        /// key that does nothing here is worse than none.
+        private var hints: some View {
+            HStack(spacing: 4) {
+                KeyHint(["↑", "↓"], "move")
+                dot
+                KeyHint("↵", "open")
+                if cursor > 0 {
+                    dot
+                    KeyHint("⌫", "delete")
+                }
+                dot
+                KeyHint("esc", returning ? "back" : "close")
+                Spacer()
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
+            .overlay(alignment: .top) { Hairline() }
+        }
+
+        private var dot: some View {
+            Text("·").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
+        }
+    #endif
+
+    /// Back to the composer, as it is: blank, or whatever was written.
+    private func back() {
+        store.compose?.page = .compose
     }
 
     private func open(_ draft: DraftView) {
         guard !store.isInert(draft) else { return }
-        onClose()
         store.openDraft(draft)
     }
 
@@ -150,42 +185,46 @@ struct DraftsPicker: View {
         store.deleteDraft(draft)
     }
 
-    /// The next row the cursor may rest on, stepping over inert rows: the
-    /// one being edited cannot be opened or deleted, so landing on it would
-    /// be a keystroke that does nothing. nil at either end.
+    /// The next cursor position, stepping over inert rows: the one being
+    /// edited cannot be opened or deleted, so landing on it would be a
+    /// keystroke that does nothing. The new-message row (0) is always a stop.
+    /// nil past either end.
     private func step(from index: Int, by delta: Int, in rows: [DraftView]) -> Int? {
         var i = index + delta
-        while rows.indices.contains(i) {
-            if !store.isInert(rows[i]) { return i }
+        while i >= 0 && i <= rows.count {
+            if i == 0 || !store.isInert(rows[i - 1]) { return i }
             i += delta
         }
         return nil
     }
 
     private func bindings(_ rows: [DraftView]) -> [KeyBinding] {
-        let current = rows.indices.contains(cursor) ? rows[cursor] : nil
+        let current = cursor > 0 && rows.indices.contains(cursor - 1) ? rows[cursor - 1] : nil
         return [
-            KeyBinding("Escape", "close drafts", allowInInput: true) { onClose() },
-            KeyBinding("ArrowDown", "next draft", allowInInput: true) {
+            KeyBinding("Escape", "back to the message") {
+                if returning { back() } else { store.closeCompose() }
+            },
+            KeyBinding("ArrowDown", "next draft") {
                 if let next = step(from: cursor, by: 1, in: rows) { cursor = next }
             },
-            KeyBinding("ArrowUp", "previous draft", allowInInput: true) {
+            KeyBinding("ArrowUp", "previous draft") {
                 if let next = step(from: cursor, by: -1, in: rows) { cursor = next }
             },
-            // DECLINED, not swallowed, on no row or an inert one (the draft
-            // this composer is editing): the key then goes on to whatever
-            // else wants it rather than vanishing into a no-op.
-            KeyBinding(declining: "Enter", "open draft", allowInInput: true) {
-                guard let current, !store.isInert(current) else { return false }
-                open(current)
-                return true
+            KeyBinding("Enter", "open draft") {
+                if cursor == 0 {
+                    back()
+                } else if let current {
+                    open(current)
+                }
             },
-            KeyBinding(declining: "Backspace", "delete draft", allowInInput: true) {
+            // DECLINED on the new-message row or an inert one: nothing to
+            // delete, so the key goes on rather than vanishing into a no-op.
+            KeyBinding(declining: "Backspace", "delete draft") {
                 guard let current, !store.isInert(current) else { return false }
                 delete(current)
                 return true
             },
-            KeyBinding(declining: "Delete", "delete draft", allowInInput: true) {
+            KeyBinding(declining: "Delete", "delete draft") {
                 guard let current, !store.isInert(current) else { return false }
                 delete(current)
                 return true
@@ -194,8 +233,49 @@ struct DraftsPicker: View {
     }
 }
 
+/// The list's first row: back to the composer. One line in the drafts rows'
+/// metrics, its glyph in their relation slot, so it reads as the head of the
+/// same column rather than a button parked above it.
+private struct NewMessageRow: View {
+    let label: String
+    let returning: Bool
+    let selected: Bool
+    let onHover: () -> Void
+    let onOpen: () -> Void
+
+    var body: some View {
+        ListRow(
+            selected: selected, cornerRadius: 8, hPadding: 11, vPadding: 8,
+            onHoverChange: { if $0 { onHover() } },
+            action: {
+                onHover()
+                onOpen()
+            }
+        ) { _, _ in
+            HStack(alignment: .center, spacing: 9) {
+                Image(systemName: returning ? "arrow.uturn.backward" : "square.and.pencil")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Palette.accent)
+                    .frame(width: 26, alignment: .trailing)
+                Text(label)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Palette.ink)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                #if os(macOS)
+                    Kbd("⌘N")
+                #endif
+            }
+        }
+    }
+}
+
 /// One draft, in SentRow's envelope and metrics, laid out on two lines
-/// because a popover is a third of the sent page's width.
+/// because the pane is half the sent page's width, and a phone less.
+///
+/// NO LEFT ACCENT BAR, which SentRow still draws: a one-sided bar on a
+/// rounded selection reads as decoration, and the selection fill already
+/// says which row the keys act on.
 ///
 /// THE SLOT SAYS THE RELATION. SentRow puts "to" in a fixed-width slot before
 /// the recipient; here the same slot carries `to` / `re` / `fwd`, and what
@@ -274,16 +354,8 @@ private struct DraftRow: View {
         }
         .allowsHitTesting(!inert)
         .opacity(inert ? 0.62 : 1)
-        .overlay(alignment: .leading) {
-            if selected && !inert {
-                RoundedRectangle(cornerRadius: 1)
-                    .fill(Palette.accent)
-                    .frame(width: 2)
-                    .padding(.vertical, 4)
-            }
-        }
-        // The phone's way to delete, and a second way on the Mac: there is
-        // no Backspace on a touch screen.
+        // The phone's way to delete (a long press), and a second way on the
+        // Mac: there is no Backspace on a touch screen.
         .contextMenu {
             if !inert {
                 Button("open") { onOpen() }

@@ -464,6 +464,12 @@ struct ComposeState: Sendable, Equatable {
     /// INLINE is not recorded here — the body says, by carrying the file's
     /// `cid:` marker or not (see `ComposeMarkers`).
     var attachments: [ComposeAttachment] = []
+    /// WHICH PAGE OF THE PANE IS SHOWING: the composer, or the drafts list
+    /// that swaps in for its body (`DraftsList`). The pane's own navigation,
+    /// nothing about the mail: it never reaches the wire and is never
+    /// autosaved (`DraftSaver`'s payload is a closed list of mail fields).
+    /// The inline reply has no drafts page and leaves it at `.compose`.
+    var page: ComposePage = .compose
 
     /// The daemon ids of every file that has finished staging: what a draft
     /// save and a send name.
@@ -503,6 +509,12 @@ struct ComposeState: Sendable, Equatable {
         if forwardOfMessageId != nil { return "forward" }
         return replyToMessageId == nil ? "new" : "reply"
     }
+}
+
+/// The compose pane's two pages; see `ComposeState.page`.
+enum ComposePage: Sendable, Equatable {
+    case compose
+    case drafts
 }
 
 /// The email currently being reclassified by the `v` palette.
@@ -830,7 +842,7 @@ final class AppStore {
 
     /// The account's saved drafts as last fetched, newest edits first as the
     /// daemon lists them, MINUS any whose delete is waiting out its undo. A
-    /// cache for the composer's drafts button and picker, filled by
+    /// cache for the composer's drafts control and drafts page, filled by
     /// `refreshDrafts` and by the ⌘N restore's own fetch, so the count is there
     /// without a second round trip. Held sends are NOT filtered out here,
     /// because which rows are held changes by the second; `listedDrafts` and
@@ -2975,17 +2987,84 @@ final class AppStore {
     /// "the" draft to restore is the most recently edited one, and only when
     /// that edit was within `restoreWindow`: a ⌘N minutes after an Esc is
     /// picking up where you left off, a ⌘N tomorrow is a new mail. Older drafts
-    /// are the picker's. An older daemon keeps its one slot and today's rule.
+    /// live on the pane's drafts page. An older daemon keeps its one slot and
+    /// today's rule.
     ///
-    /// The pane opens BLANK and immediately, because the keypress has to feel
-    /// instant; the saved draft lands into it a round-trip later, and only if
-    /// nothing has been typed in the meantime (see `restoreNewMessage`).
+    /// THE LANDING RULE, on a `drafts_v2` daemon:
+    ///
+    /// 1. A plain new draft edited in the last five minutes: restored, and the
+    ///    pane shows the composer.
+    /// 2. None that recent, but at least one OTHER draft exists (any kind, not
+    ///    held, not the one open): the pane lands on its DRAFTS PAGE, with
+    ///    "start a new message" selected, so ⌘N then Enter is still a blank
+    ///    composer and the older mail is one glance away instead of hidden.
+    /// 3. No drafts at all: the blank composer.
+    ///
+    /// Rules 1 and 2 only ever touch the untouched blank composer this call
+    /// opened: typing into it before the list lands wins.
+    ///
+    /// A SECOND ⌘N while the pane is on its drafts page flips it back to the
+    /// composer, as it is. On the composer page a repeat does nothing.
+    ///
+    /// THE CACHE DECIDES THE FIRST FRAME, THE FETCH CORRECTS IT. The pane
+    /// opens BLANK and immediately, because the keypress has to feel instant,
+    /// and it opens on the page the same rule picks from `draftsRows` as it
+    /// stands (`newMessagePage`), so a ⌘N with older drafts waiting does not
+    /// flash the composer first. The saved draft lands a round-trip later
+    /// (see `restoreNewMessage`), and that fetch re-runs the rule: it may
+    /// flip the list to the composer (a fresh candidate turned up, restored
+    /// into the untouched composer as ever) or the composer to the list (the
+    /// cache was empty or stale). Only while the page is still the one the
+    /// cache picked: a page the reader changed in the meantime is theirs.
     func openComposeNew() {
         // A composer already up is not something a repeated `c` — or the menu
         // item behind ⌘N — gets to blank out. Same rule as the inline reply.
-        guard compose == nil else { return }
-        openCompose(ComposeState())
-        Task { await restoreNewMessage() }
+        // Except for the page it is on: ⌘N from the drafts list means the
+        // composer, and the list's own first row says so with a ⌘N chip.
+        if var open = compose {
+            if open.page == .drafts {
+                open.page = .compose
+                compose = open
+            }
+            return
+        }
+        var state = ComposeState()
+        state.page = newMessagePage(in: draftsRows)
+        openCompose(state)
+        let opened = state.page
+        Task { await restoreNewMessage(openedOn: opened) }
+    }
+
+    /// The newest plain new-message draft edited within `restoreWindow`, not
+    /// owned by a held send and not waiting out a delete: rule 1's candidate.
+    /// `drafts_v2` only; the one-slot rule lives in `restoreNewMessage`.
+    private func recentNewDraft(in rows: [DraftView]) -> DraftView? {
+        // Plain new mail only (a reply or forward row belongs to its parent),
+        // never one a held send owns or one whose delete is in its undo
+        // window, and the NEWEST edit of what is left.
+        let candidates = rows.filter {
+            $0.reply_to_message_id == nil && $0.forward_of_message_id == nil
+                && !isHeld($0) && !isDeleting($0.id)
+        }
+        guard
+            let newest = candidates.max(by: {
+                (Fmt.date($0.updated_at) ?? .distantPast)
+                    < (Fmt.date($1.updated_at) ?? .distantPast)
+            }),
+            let edited = Fmt.date(newest.updated_at),
+            Date().timeIntervalSince(edited) <= Self.restoreWindow
+        else { return nil }
+        return newest
+    }
+
+    /// Which page a fresh ⌘N belongs on, by the landing rule at
+    /// `openComposeNew`, judged against `rows` (the cache, or a fetch just
+    /// adopted into it). A pane with no composer open has no inert rows, so
+    /// `otherDrafts` is every listed draft.
+    private func newMessagePage(in rows: [DraftView]) -> ComposePage {
+        guard draftsV2Available else { return .compose }
+        if recentNewDraft(in: rows) != nil { return .compose }
+        return otherDrafts.isEmpty ? .compose : .drafts
     }
 
     /// `f` in the reader — pass THIS message on to someone else, in the pane
@@ -3015,7 +3094,7 @@ final class AppStore {
     /// - `restoreForward` instead, on a `drafts_v2` daemon: the row keyed by
     ///   THIS message's id. KEYED PER TARGET, like a reply's, so `f` twice on
     ///   the same message reopens the same draft rather than starting a second
-    ///   one, and the picker's forward row lands here too (`openDraft`).
+    ///   one, and the drafts page's forward row lands here too (`openDraft`).
     /// - On an older daemon no autosave at all: its drafts wire cannot record
     ///   what is being forwarded, so a saved forward would come back as an
     ///   ordinary new message with the original silently gone. See
@@ -3113,13 +3192,13 @@ final class AppStore {
 
     /// How recent a new-message draft's last edit must be for ⌘N to restore it
     /// (the user's call). Past this the composer opens blank and the draft
-    /// waits in the picker.
+    /// waits on the drafts page.
     static let restoreWindow: TimeInterval = 5 * 60
 
     /// Fill the just-opened new-message composer from its saved draft. Silent on
     /// failure: a restore that cannot happen leaves a blank composer, which is
     /// what the reader asked for anyway.
-    private func restoreNewMessage() async {
+    private func restoreNewMessage(openedOn opened: ComposePage) async {
         let e = epoch
         // No verdict on the daemon yet, no rule to apply: which rows count as
         // candidates depends on whether it keeps one slot or many. WAIT for it
@@ -3144,25 +3223,9 @@ final class AppStore {
         guard e == epoch else { return }
         // The fetch doubles as the drafts button's count; see `draftsRows`.
         adoptDraftsRows(rows)
-        let draft: DraftView
+        let draft: DraftView?
         if draftsV2Available {
-            // Plain new mail only (a reply or forward row belongs to its
-            // parent), never one a held send owns or one whose delete is in its
-            // undo window, and the NEWEST edit of what is left.
-            let now = Date()
-            let candidates = rows.filter {
-                $0.reply_to_message_id == nil && $0.forward_of_message_id == nil
-                    && !isHeld($0) && !isDeleting($0.id)
-            }
-            guard
-                let newest = candidates.max(by: {
-                    (Fmt.date($0.updated_at) ?? .distantPast)
-                        < (Fmt.date($1.updated_at) ?? .distantPast)
-                }),
-                let edited = Fmt.date(newest.updated_at),
-                now.timeIntervalSince(edited) <= Self.restoreWindow
-            else { return }
-            draft = newest
+            draft = recentNewDraft(in: rows)
         } else {
             guard !holdsDraft(replyTo: nil),
                 let only = rows.first(where: { $0.reply_to_message_id == nil })
@@ -3187,7 +3250,26 @@ final class AppStore {
             // orphan its upload and cut its marker.
             next.attachments.isEmpty
         else { return }
+        // THE FETCH CORRECTS THE CACHE'S PAGE (see `openComposeNew`), but
+        // only a page nobody has touched since: a reader who already went
+        // back to the composer, or to the list, keeps where they went.
+        let corrected = next.page == opened
+        guard let draft else {
+            // Nothing recent to pick up. Older mail waiting lands on the
+            // drafts page (rule 2); none at all is the blank composer, which
+            // also takes back a list the stale cache opened onto nothing.
+            // `otherDrafts` is this fetch, minus held rows and the one open
+            // (none: this composer has no row yet).
+            let page: ComposePage =
+                draftsV2Available && !otherDrafts.isEmpty ? .drafts : .compose
+            if corrected, next.page != page {
+                next.page = page
+                compose = next
+            }
+            return
+        }
         fill(&next, from: draft)
+        if corrected { next.page = .compose }
         compose = next
         await resolveDraftGroup()
     }
@@ -3223,7 +3305,7 @@ final class AppStore {
     /// this flag does not need to.
     var draftsV2Available: Bool { sitrep.stats?.drafts_v2 == true }
 
-    /// Fetch the drafts list into `draftsRows`. The picker calls it on open.
+    /// Fetch the drafts list into `draftsRows`. The drafts page calls it on open.
     ///
     /// SETTLES FIRST: a composer closed a moment ago flushed its last save as a
     /// fire-and-forget task, and listing before it lands would show the draft
@@ -3257,19 +3339,19 @@ final class AppStore {
         pendingDraftDeletes[id] != nil || deletedDraftIds.contains(id)
     }
 
-    /// What the picker lists: the cache minus rows a held or sending mail
+    /// What the drafts page lists: the cache minus rows a held or sending mail
     /// owns. Those are mail on its way out, and opening one would put it in a
-    /// composer one ⌘Enter from going out twice. Inert rows STAY (the picker
+    /// composer one ⌘Enter from going out twice. Inert rows STAY (the drafts page
     /// marks them "editing"); see `isInert`.
     var listedDrafts: [DraftView] { draftsRows.filter { !isHeld($0) } }
 
-    /// The drafts the picker can actually open: `listedDrafts` minus the ones
-    /// already open in a composer. Its count is the drafts button's number.
+    /// The drafts the page can actually open: `listedDrafts` minus the ones
+    /// already open in a composer. Its count is the header control's number.
     var otherDrafts: [DraftView] { listedDrafts.filter { !isInert($0) } }
 
     /// Whether this row is the draft an open composer (the pane OR the
     /// reader's inline reply) is editing, by id or by its reply/forward key.
-    /// The picker shows it marked "editing" and will neither open nor delete
+    /// The drafts page shows it marked "editing" and will neither open nor delete
     /// it.
     ///
     /// Delete is the one that matters: the composer's close flush would
@@ -3295,7 +3377,7 @@ final class AppStore {
     }
 
     /// Whether a held or sending mail owns this row. Its send deletes it; until
-    /// then neither the picker nor the ⌘N restore may offer it.
+    /// then neither the drafts page nor the ⌘N restore may offer it.
     ///
     /// By id first, from every place a held mail's id can be: its own state
     /// (held, releasing, or on the wire), and `detachedDrafts`, where the id
@@ -3315,17 +3397,18 @@ final class AppStore {
         return false
     }
 
-    /// Open a saved draft from the picker.
+    /// Open a saved draft from the drafts page.
     ///
     /// A REPLY opens where it belongs: the thread, with the inline reply
     /// restored through the ordinary `r` chain (`pendingReplyMessageId` →
     /// the viewer → `openInlineReply` → `restoreReply`). Nothing new, so a
-    /// reply opened from the picker and one opened by `r` cannot differ.
+    /// reply opened from the drafts page and one opened by `r` cannot differ.
     ///
-    /// PLAIN NEW MAIL replaces the pane composer. The one being replaced is
-    /// FLUSHED, not closed: it autosaves like any Esc would, and it will be in
-    /// the picker next time. (The open composer's own draft is inert, so
-    /// "open the draft I am already in" cannot reach here.)
+    /// PLAIN NEW MAIL loads into THIS pane, on its composer page. The one
+    /// being replaced is FLUSHED, not closed: it autosaves like any Esc
+    /// would, and it will be on the drafts page next time. (The open
+    /// composer's own draft is inert, so "open the draft I am already in"
+    /// cannot reach here.)
     ///
     /// A FORWARD needs the original it forwards, which the row names only by
     /// id: the composer shows the message underneath the note, and titles
@@ -3373,9 +3456,11 @@ final class AppStore {
         // `fill` for why the draft's recipients must not be the seed.
         // `openCompose` also marks the slot opened, so a glance that types
         // nothing writes nothing and does not bump the draft's `updated_at`.
+        // A fresh state, so the pane leaves the drafts page for the composer.
         openCompose(ComposeState())
         guard var next = compose else { return }
         fill(&next, from: draft)
+        next.page = .compose
         // A saved draft states its own audience: it was a new message when it
         // was typed, and new messages are addressed by hand.
         next.recipientsStated = true
@@ -3403,7 +3488,7 @@ final class AppStore {
     /// daemon, so it is never pruned, only cleared with the account.
     private var deletedDraftIds: Set<Int> = []
 
-    /// Delete a draft from the picker, with the app's five-second undo.
+    /// Delete a draft from the drafts page, with the app's five-second undo.
     ///
     /// HELD, not deleted-then-recreated: the row leaves the list now and the
     /// DELETE goes out when the window closes, so an undo is only ever "do not
@@ -3705,7 +3790,7 @@ final class AppStore {
     ///
     /// `quitting: true` is ⌘Q inside the hold (see `AppDelegate`): the same
     /// park, but no toast, because the window it would appear in is going
-    /// away. The mail is in the drafts picker on the next launch.
+    /// away. The mail is on the drafts page on the next launch.
     func parkHeldSends(save: Bool = true, quitting: Bool = false) {
         let parked = Array(heldSends.values) + Array(releasing.values)
         heldSends = [:]

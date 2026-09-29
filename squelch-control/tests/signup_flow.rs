@@ -142,6 +142,10 @@ struct Recorder {
     /// tenant the poller must leave for the next pass.
     devices_paired: BTreeMap<String, Option<String>>,
     devices_unavailable: Vec<String>,
+    /// The `text` of every post to the operator's webhook, which this mock
+    /// serves at `/hook` so every harness has alerts wired the way production
+    /// does.
+    alerts: Vec<String>,
 }
 
 type Shared = Arc<Mutex<Recorder>>;
@@ -229,6 +233,18 @@ fn json_status(status: StatusCode, reason: &str) -> Response {
 /// A mock warden implementing the control -> warden contract, v2.
 async fn spawn_warden(rec: Shared) -> String {
     let app = Router::new()
+        // Not the warden's: the operator's Slack webhook, served from this
+        // mock only so the harness needs no fourth server.
+        .route(
+            "/hook",
+            post(
+                |AxumState(rec): AxumState<Shared>, body: String| async move {
+                    let parsed: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+                    rec.lock().unwrap().alerts.push(str_field(&parsed, "text"));
+                    "ok"
+                },
+            ),
+        )
         .route(
             "/v1/tenants",
             post(
@@ -634,6 +650,7 @@ impl Harness {
             // profile endpoint, which is what its own grant permits. The console
             // login is the one that reads userinfo (`tests/console_auth.rs`).
             userinfo_url: format!("{google}/userinfo"),
+            alert_webhook_url: Some(format!("{warden_url}/hook")),
             // The struct is constructed directly, so an http mock URL is fine
             // here; `from_env` is where https is enforced.
             bifrost: bifrost_url.map(|url| BifrostConfig {
@@ -1277,6 +1294,58 @@ async fn a_mailed_invite_stamps_the_row_it_was_minted_for() {
         id_after, &analytics_id,
         "signing up is not a new person: the id is the one they were minted"
     );
+}
+
+/// The alerts, end to end through the real handler: a half-finished signup
+/// reaches the operator with the label and where to look, the finished retry
+/// reaches them too, and neither carries the mailbox. 2026-09-28 was a
+/// half-finished signup that nobody heard about until the person said so.
+#[tokio::test]
+async fn the_operator_hears_about_a_half_finished_signup_and_its_retry() {
+    let h = Harness::new().await;
+    h.rec.lock().unwrap().fail_credentials = true;
+    let invite = h.invite_code.clone();
+
+    let (status, body) = h.run_signup("ada", &invite).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    let alerts = alerts_after(&h.rec, 1).await;
+    assert!(alerts[0].contains("Signup half-finished"), "{}", alerts[0]);
+    assert!(alerts[0].contains("`ada`"), "{}", alerts[0]);
+    assert!(
+        alerts[0].contains("kubectl -n tenants get events | grep ada"),
+        "{}",
+        alerts[0]
+    );
+
+    h.rec.lock().unwrap().fail_credentials = false;
+    let (status, body) = h.run_signup("ada", &invite).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let alerts = alerts_after(&h.rec, 2).await;
+    assert!(
+        alerts[1].contains("New tenant provisioned: `ada`"),
+        "{}",
+        alerts[1]
+    );
+
+    for a in &alerts {
+        assert!(!a.contains(MAILBOX), "the mailbox reached the webhook: {a}");
+        assert!(!a.contains('@'), "an address-shaped token in: {a}");
+    }
+}
+
+/// The webhook is posted from a spawned task, so a test waits for it rather
+/// than racing it. Two seconds is forever for a loopback post.
+async fn alerts_after(rec: &Shared, n: usize) -> Vec<String> {
+    for _ in 0..200 {
+        {
+            let r = rec.lock().unwrap();
+            if r.alerts.len() >= n {
+                return r.alerts.clone();
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("expected {n} alerts, got {:?}", rec.lock().unwrap().alerts);
 }
 
 /// A failure on call 2 is the state wire v2 invents, so it gets the most

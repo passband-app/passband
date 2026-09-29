@@ -173,6 +173,9 @@ top, all defaulted: `SQUELCH_CONTROL_LLM_BUDGET_USD` ($5) and
 `SQUELCH_CONTROL_ASSISTANT_BUDGET_USD` ($10) and
 `SQUELCH_CONTROL_ASSISTANT_MODELS` (haiku + opus) for the assistant key
 the Passband app's relay chats spend against.
+`SQUELCH_CONTROL_ALERT_WEBHOOK_URL` is the `#passband-signups` Slack
+webhook: failed and finished signups post there (label only, never the
+mailbox). Unset, they are log lines, which is how 2026-09-28 went unnoticed.
 Full table: `squelch-control/README.md`.
 
 ### The Postgres cutover (one-time, then delete this section)

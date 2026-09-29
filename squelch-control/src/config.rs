@@ -249,6 +249,11 @@ pub struct Config {
     /// means those routes are NOT MOUNTED at all (a 404, not a 403), because a
     /// deployment with no admin token must not answer at an admin URL.
     pub waitlist: Option<WaitlistConfig>,
+    /// The operator's Slack incoming webhook, when this deployment has one.
+    /// `None` means signups that end half-finished are only log lines, which is
+    /// how 2026-09-28 went unnoticed until the person signing up said so. A
+    /// SECRET: the URL is the whole credential, so `Debug` redacts it.
+    pub alert_webhook_url: Option<String>,
 }
 
 /// The Bifrost governance settings: where the gateway is, the admin
@@ -369,6 +374,10 @@ impl std::fmt::Debug for Config {
             // WaitlistConfig's own Debug redacts the admin token and the
             // Resend key.
             .field("waitlist", &self.waitlist)
+            .field(
+                "alert_webhook_url",
+                &self.alert_webhook_url.as_ref().map(|_| "<redacted>"),
+            )
             .finish()
     }
 }
@@ -507,6 +516,7 @@ impl Config {
             userinfo_url: GOOGLE_USERINFO_URL.to_string(),
             bifrost,
             waitlist,
+            alert_webhook_url: alert_webhook_from(var("SQUELCH_CONTROL_ALERT_WEBHOOK_URL"))?,
         })
     }
 
@@ -796,6 +806,33 @@ fn parse_models(name: &str, raw: &str) -> Result<Vec<String>, ConfigError> {
     Ok(models)
 }
 
+/// The alert webhook, validated: unset is off, and anything set must be an
+/// https URL with a host and no userinfo.
+///
+/// NOT [`canonical_origin`]: a Slack webhook's path IS the credential
+/// (`/services/T../B../<secret>`), so a path is required here where that
+/// function refuses one. https only, no local-dev exception, because the URL is
+/// a bearer and what rides it names tenants. The error never echoes the value.
+fn alert_webhook_from(raw: Option<String>) -> Result<Option<String>, ConfigError> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let bad = |why: &str| {
+        ConfigError::invalid(format!("invalid SQUELCH_CONTROL_ALERT_WEBHOOK_URL: {why}"))
+    };
+    let url = url::Url::parse(&raw).map_err(|_| bad("not a URL"))?;
+    if url.scheme() != "https" {
+        return Err(bad("must be https"));
+    }
+    if url.host_str().is_none() {
+        return Err(bad("no host"));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(bad("userinfo is not allowed"));
+    }
+    Ok(Some(url.to_string()))
+}
+
 /// Parse, validate, and canonicalize an origin (`https://host[:port]`).
 ///
 /// A path, query, fragment, or userinfo would each survive into a redirect URI
@@ -940,6 +977,27 @@ mod tests {
                 allowed_origin: DEFAULT_WAITLIST_ORIGIN.into(),
                 resend_url: RESEND_URL.into(),
             }),
+            alert_webhook_url: Some("https://hooks.slack.com/services/T0/B0/WEBHOOK-SECRET".into()),
+        }
+    }
+
+    #[test]
+    fn alert_webhook_is_optional_https_and_never_echoed() {
+        assert_eq!(alert_webhook_from(None).unwrap(), None);
+        let url = "https://hooks.slack.com/services/T0/B0/SECRET";
+        assert_eq!(
+            alert_webhook_from(Some(url.into())).unwrap().as_deref(),
+            Some(url)
+        );
+        for bad in [
+            "http://hooks.slack.com/services/T0/B0/SECRET",
+            "hooks.slack.com/services/T0/B0/SECRET",
+            "https://user:SECRET@hooks.slack.com/x",
+        ] {
+            let e = alert_webhook_from(Some(bad.into()))
+                .unwrap_err()
+                .to_string();
+            assert!(!e.contains("SECRET"), "{e}");
         }
     }
 
@@ -1042,6 +1100,7 @@ mod tests {
         assert!(!rendered.contains("BIFROST-ADMIN-VALUE"), "{rendered}");
         assert!(!rendered.contains("ADMIN-PAGE-TOKEN-VALUE"), "{rendered}");
         assert!(!rendered.contains("RESEND-API-KEY-VALUE"), "{rendered}");
+        assert!(!rendered.contains("WEBHOOK-SECRET"), "{rendered}");
         // The database URL is redacted WHOLE, not partly: it carries the
         // password, and there is no half of a connection string worth printing
         // badly enough to risk spelling the other half.

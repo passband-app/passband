@@ -33,6 +33,7 @@
 
 pub mod activation;
 pub mod admin;
+pub mod alert;
 mod appearance;
 pub mod bifrost;
 pub mod config;

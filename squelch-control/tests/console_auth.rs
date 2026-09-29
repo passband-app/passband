@@ -278,6 +278,7 @@ impl Harness {
             auth_url: format!("{google}/authorize"),
             profile_url: format!("{google}/profile"),
             userinfo_url: format!("{google}/userinfo"),
+            alert_webhook_url: None,
             // Console auth never touches the LLM gateway; feature off.
             bifrost: None,
             // Nor the waitlist: with it off, those routes are not mounted.

@@ -111,6 +111,7 @@ use axum::{
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
+use crate::alert;
 use crate::config::OUTBOUND_TIMEOUT;
 use crate::cookie::{self, SessionClaim};
 use crate::invites;
@@ -1248,6 +1249,11 @@ pub async fn oauth_callback(
         Err(WardenError::AlreadyProvisioned) => {
             release().await;
             log_orphaned_vks(&label, vk_id.as_deref(), assistant_vk_id.as_deref());
+            state.alert(alert::signup_already_provisioned(
+                &label,
+                vk_id.as_deref(),
+                assistant_vk_id.as_deref(),
+            ));
             return done(pages::problem(
                 StatusCode::CONFLICT,
                 "That mailbox is already set up",
@@ -1260,6 +1266,12 @@ pub async fn oauth_callback(
             // hold has to go back now rather than in ten minutes.
             release().await;
             log_orphaned_vks(&label, vk_id.as_deref(), assistant_vk_id.as_deref());
+            state.alert(alert::signup_incomplete(
+                &label,
+                &e.to_string(),
+                vk_id.as_deref(),
+                assistant_vk_id.as_deref(),
+            ));
             return done(incomplete_problem());
         }
     };
@@ -1283,6 +1295,11 @@ pub async fn oauth_callback(
             "PROVISIONED BUT NOT RECORDED: the tenant is running in the cluster and has no control-plane row"
         );
         log_orphaned_vks(&label, vk_id.as_deref(), assistant_vk_id.as_deref());
+        state.alert(alert::signup_not_recorded(
+            &label,
+            vk_id.as_deref(),
+            assistant_vk_id.as_deref(),
+        ));
         let detail = match e {
             StoreError::LabelTaken | StoreError::AccountTaken => {
                 "That username or account was claimed while you were signing in. Get in touch and we will sort it out."
@@ -1388,6 +1405,7 @@ pub async fn oauth_callback(
     }
 
     tracing::info!(label = %label, "tenant provisioned");
+    state.alert(alert::signup_provisioned(&label));
 
     // No pairing code on this page: the app's own onboarding signs in and
     // pairs through /app/auth, which is also where the analytics id joins the

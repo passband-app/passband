@@ -2991,7 +2991,7 @@ final class AppStore {
         // A composer already up is not something a repeated `c` — or the menu
         // item behind ⌘N — gets to blank out. Same rule as the inline reply.
         // Except for the page it is on: ⌘N from the drafts list means the
-        // composer, and the list's own first row says so with a ⌘N chip.
+        // composer, and the header's back control says so.
         if var open = compose {
             if open.page == .drafts {
                 open.page = .compose

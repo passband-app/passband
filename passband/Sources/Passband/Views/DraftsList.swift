@@ -9,13 +9,14 @@
 // text views are unmounted, so there is nothing to steal keys from, and the
 // list simply fills the pane.
 //
-// THE FIRST ROW IS THE WAY BACK. "start a new message" (or "back to your
-// message", when the composer holds something) sits on top, selected by
-// default, so a ⌘N that landed here (see `AppStore.openComposeNew`) is one
-// Enter from a blank composer. Below it every draft the daemon holds, newest
-// edit first, minus mail a held send owns (`AppStore.listedDrafts`). The one
-// this pane is editing stays listed, marked "editing" and inert, so the count
-// in the header and the rows here never disagree about what exists.
+// THE HEADER IS THE WAY BACK. Its control reads "back to new message" (or
+// "back to your reply") while this page is up, and Esc does the same, so the
+// list itself is only drafts: every one the daemon holds, newest edit first,
+// minus mail a held send owns (`AppStore.listedDrafts`). An earlier cut put a
+// "start a new message" row on top as well; the user dropped it (2026-09-29)
+// as saying the header's thing twice. The one this pane is editing stays
+// listed, marked "editing" and inert, so the count in the header and the
+// rows here never disagree about what exists.
 //
 // KEYS (Mac), registered in the pane's own `.modal` context: arrows move the
 // cursor over inert rows, Enter opens, Backspace/Delete deletes behind the
@@ -30,7 +31,7 @@ import SwiftUI
 struct DraftsList: View {
     @Environment(AppStore.self) private var store
 
-    /// 0 is the new-message row; `i` above it is `rows[i - 1]`.
+    /// An index into `rows`; meaningless while the list is empty.
     @State private var cursor = 0
     @State private var loaded = false
 
@@ -44,7 +45,7 @@ struct DraftsList: View {
 
     /// Whether the composer behind this page holds anything to go back to:
     /// words, a saved row, or a parent (a reply or forward is somebody's
-    /// mail even untouched). Decides the first row's words and what Esc does.
+    /// mail even untouched). Decides what Esc does and how the hint names it.
     /// The row id through `DraftSaver.currentDraftId`, as `isInert` reads it:
     /// a first save that came back after the slot last changed counts too.
     private var returning: Bool {
@@ -54,36 +55,12 @@ struct DraftsList: View {
             || compose.replyToMessageId != nil || compose.forwardOfMessageId != nil
     }
 
-    private var kindWord: String {
-        if store.compose?.forwardOfMessageId != nil { return "forward" }
-        return store.compose?.replyToMessageId != nil ? "reply" : "message"
-    }
-
-    private static let newRowID = "drafts-list-new-message"
-
     var body: some View {
         let rows = rows
         VStack(alignment: .leading, spacing: 0) {
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 1) {
-                        NewMessageRow(
-                            label: returning ? "back to your \(kindWord)" : "start a new message",
-                            returning: returning,
-                            selected: cursor == 0,
-                            onHover: { cursor = 0 },
-                            onOpen: back
-                        )
-                        .id(Self.newRowID)
-
-                        Text("drafts")
-                            .font(Typo.sectionLabel)
-                            .foregroundStyle(Palette.inkFaint)
-                            .textCase(.uppercase)
-                            .padding(.horizontal, 11)
-                            .padding(.top, 16)
-                            .padding(.bottom, 5)
-
                         if rows.isEmpty {
                             note(loaded ? "no other drafts" : "loading…")
                         } else {
@@ -91,8 +68,8 @@ struct DraftsList: View {
                                 DraftRow(
                                     draft: draft,
                                     inert: store.isInert(draft),
-                                    selected: cursor == index + 1,
-                                    onHover: { cursor = index + 1 },
+                                    selected: cursor == index,
+                                    onHover: { cursor = index },
                                     onOpen: { open(draft) },
                                     onDelete: { delete(draft) }
                                 )
@@ -112,11 +89,7 @@ struct DraftsList: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .onChange(of: cursor) { _, next in
-                    if next == 0 {
-                        proxy.scrollTo(Self.newRowID)
-                    } else if rows.indices.contains(next - 1) {
-                        proxy.scrollTo(rows[next - 1].id)
-                    }
+                    if rows.indices.contains(next) { proxy.scrollTo(rows[next].id) }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -131,9 +104,12 @@ struct DraftsList: View {
             loaded = true
         }
         .onChange(of: rows.count) { _, count in
-            if cursor > count { cursor = count }
-            if cursor > 0, store.isInert(rows[cursor - 1]) {
-                cursor = step(from: cursor, by: -1, in: rows) ?? 0
+            // Rows arrived or left under the cursor: keep it on a row that
+            // can be opened, preferring the one just above where it was.
+            if cursor >= count { cursor = max(count - 1, 0) }
+            if rows.indices.contains(cursor), store.isInert(rows[cursor]) {
+                cursor = step(from: cursor, by: -1, in: rows)
+                    ?? step(from: cursor, by: 1, in: rows) ?? cursor
             }
         }
     }
@@ -155,7 +131,7 @@ struct DraftsList: View {
                 KeyHint(["↑", "↓"], "move")
                 dot
                 KeyHint("↵", "open")
-                if cursor > 0 {
+                if rows.indices.contains(cursor), !store.isInert(rows[cursor]) {
                     dot
                     KeyHint("⌫", "delete")
                 }
@@ -190,19 +166,18 @@ struct DraftsList: View {
 
     /// The next cursor position, stepping over inert rows: the one being
     /// edited cannot be opened or deleted, so landing on it would be a
-    /// keystroke that does nothing. The new-message row (0) is always a stop.
-    /// nil past either end.
+    /// keystroke that does nothing. nil past either end.
     private func step(from index: Int, by delta: Int, in rows: [DraftView]) -> Int? {
         var i = index + delta
-        while i >= 0 && i <= rows.count {
-            if i == 0 || !store.isInert(rows[i - 1]) { return i }
+        while rows.indices.contains(i) {
+            if !store.isInert(rows[i]) { return i }
             i += delta
         }
         return nil
     }
 
     private func bindings(_ rows: [DraftView]) -> [KeyBinding] {
-        let current = cursor > 0 && rows.indices.contains(cursor - 1) ? rows[cursor - 1] : nil
+        let current = rows.indices.contains(cursor) ? rows[cursor] : nil
         return [
             KeyBinding("Escape", returning ? "back to the message" : "close") {
                 if returning { back() } else { store.closeCompose() }
@@ -214,14 +189,10 @@ struct DraftsList: View {
                 if let next = step(from: cursor, by: -1, in: rows) { cursor = next }
             },
             KeyBinding("Enter", "open draft") {
-                if cursor == 0 {
-                    back()
-                } else if let current {
-                    open(current)
-                }
+                if let current { open(current) }
             },
-            // DECLINED on the new-message row or an inert one: nothing to
-            // delete, so the key goes on rather than vanishing into a no-op.
+            // DECLINED on an empty list or an inert row: nothing to delete,
+            // so the key goes on rather than vanishing into a no-op.
             KeyBinding(declining: "Backspace", "delete draft") {
                 guard let current, !store.isInert(current) else { return false }
                 delete(current)
@@ -233,43 +204,6 @@ struct DraftsList: View {
                 return true
             },
         ]
-    }
-}
-
-/// The list's first row: back to the composer. One line in the drafts rows'
-/// metrics, its glyph in their relation slot, so it reads as the head of the
-/// same column rather than a button parked above it.
-private struct NewMessageRow: View {
-    let label: String
-    let returning: Bool
-    let selected: Bool
-    let onHover: () -> Void
-    let onOpen: () -> Void
-
-    var body: some View {
-        ListRow(
-            selected: selected, cornerRadius: 8, hPadding: 11, vPadding: 8,
-            onHoverChange: { if $0 { onHover() } },
-            action: {
-                onHover()
-                onOpen()
-            }
-        ) { _, _ in
-            HStack(alignment: .center, spacing: 9) {
-                Image(systemName: returning ? "arrow.uturn.backward" : "square.and.pencil")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Palette.accent)
-                    .frame(width: 26, alignment: .trailing)
-                Text(label)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(Palette.ink)
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                #if os(macOS)
-                    Kbd("⌘N")
-                #endif
-            }
-        }
     }
 }
 

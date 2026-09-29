@@ -294,39 +294,6 @@ private struct DraftRow: View {
     let onOpen: () -> Void
     let onDelete: () -> Void
 
-    private enum Kind { case new, reply, forward }
-
-    private var kind: Kind {
-        if draft.forward_of_message_id != nil { return .forward }
-        return draft.reply_to_message_id != nil ? .reply : .new
-    }
-
-    private var slot: String {
-        switch kind {
-        case .new: "to"
-        case .reply: "re"
-        case .forward: "fwd"
-        }
-    }
-
-    private var names: String {
-        SenderID.recipients(draft.to)
-            .map { SenderCache.resolved($0).displayName }
-            .joined(separator: ", ")
-    }
-
-    /// The first line with words on it, skipping quoted mail, so a reply's
-    /// snippet is what you wrote rather than what you were answering.
-    private var snippet: String {
-        draft.body
-            .split(whereSeparator: \.isNewline)
-            .lazy
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .first { !$0.isEmpty && !$0.hasPrefix(">") } ?? ""
-    }
-
-    private var fileCount: Int { draft.attachments?.count ?? 0 }
-
     var body: some View {
         ListRow(
             selected: selected && !inert, cornerRadius: 8, hPadding: 11, vPadding: 6,
@@ -338,21 +305,19 @@ private struct DraftRow: View {
                 onOpen()
             }
         ) { _, _ in
-            HStack(alignment: .firstTextBaseline, spacing: 9) {
-                Text(slot)
-                    .font(Typo.micro)
-                    .foregroundStyle(Palette.inkFaintest)
-                    .textCase(.uppercase)
-                    .frame(width: 26, alignment: .trailing)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        who
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        trailing
-                    }
-                    detail
+            // The slot, the who, the subject and snippet and the file count
+            // are `CompositionSummary`, shared with the outbox's rows on
+            // Sent; the editing mark and the age are this row's own.
+            CompositionSummary(draft: draft) {
+                if inert {
+                    Text("editing")
+                        .font(Typo.micro)
+                        .foregroundStyle(Palette.accent)
                 }
+                Text(Fmt.relAge(draft.updated_at))
+                    .font(Typo.num(10))
+                    .foregroundStyle(Palette.inkFaintest)
+                    .frame(minWidth: 26, alignment: .trailing)
             }
         }
         .allowsHitTesting(!inert)
@@ -365,95 +330,5 @@ private struct DraftRow: View {
                 Button("delete", role: .destructive) { onDelete() }
             }
         }
-    }
-
-    /// Line one: who it is to, or what it answers.
-    @ViewBuilder
-    private var who: some View {
-        switch kind {
-        case .new:
-            Text(names.isEmpty ? "no recipient" : names)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(names.isEmpty ? Palette.inkFaintest : Palette.ink)
-                .lineLimit(1)
-                .truncationMode(.middle)
-        case .reply, .forward:
-            HStack(alignment: .firstTextBaseline, spacing: 5) {
-                Text(parentSubject)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(Palette.ink)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .layoutPriority(1)
-                if let from = draft.parent_from?.trimmed, !from.isEmpty {
-                    Text(from)
-                        .font(Typo.rowSub)
-                        .foregroundStyle(Palette.inkFaintest)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                }
-            }
-        }
-    }
-
-    private var parentSubject: String {
-        let s = draft.parent_subject?.trimmed ?? ""
-        return s.isEmpty ? "(no subject)" : s
-    }
-
-    /// Line two: the subject and the first line of the body. A reply or
-    /// forward with no subject of its own shows none: the daemon titles it
-    /// from the parent, which line one already names.
-    @ViewBuilder
-    private var detail: some View {
-        let subject = draft.subject.trimmed
-        let showSubject = !subject.isEmpty || kind == .new
-        if showSubject || !snippet.isEmpty {
-            HStack(spacing: 6) {
-                if showSubject {
-                    Text(subject.isEmpty ? "(no subject)" : subject)
-                        .font(Typo.rowSub)
-                        .foregroundStyle(subject.isEmpty ? Palette.inkFaintest : Palette.inkDim)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .layoutPriority(1)
-                }
-                if !snippet.isEmpty {
-                    Text(snippet)
-                        .font(Typo.rowSub)
-                        .foregroundStyle(Palette.inkFaintest)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    /// Files, the editing mark, and the age, right-aligned on line one.
-    private var trailing: some View {
-        HStack(spacing: 7) {
-            if fileCount > 0 {
-                HStack(spacing: 2) {
-                    Image(systemName: "paperclip")
-                        .font(.system(size: 9, weight: .semibold))
-                    Text("\(fileCount)")
-                        .font(Typo.num(10))
-                }
-                .foregroundStyle(Palette.inkFaint)
-                .accessibilityLabel(fileCount == 1 ? "1 file" : "\(fileCount) files")
-            }
-            if inert {
-                Text("editing")
-                    .font(Typo.micro)
-                    .foregroundStyle(Palette.accent)
-            }
-            Text(Fmt.relAge(draft.updated_at))
-                .font(Typo.num(10))
-                .foregroundStyle(Palette.inkFaintest)
-                .frame(minWidth: 26, alignment: .trailing)
-        }
-        .fixedSize()
-        .layoutPriority(3)
     }
 }

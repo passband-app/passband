@@ -285,8 +285,13 @@ struct RefreshError: Equatable, Sendable {
 /// `schedule` is NOT held: the mail is already in the daemon's outbox when its
 /// toast appears, and its inverse is a real call, the DELETE that pulls it
 /// back into the composer (see `AppStore.scheduleCompose`).
+///
+/// `scheduledCancel` is not held either: the DELETE has gone out, and its
+/// inverse re-POSTs the request it handed back (see
+/// `AppStore.cancelScheduledRow`).
 enum UndoKind: Sendable {
-    case archive, done, label, ruleDelete, groupDelete, remind, send, draftDelete, schedule
+    case archive, done, label, ruleDelete, groupDelete, remind, send, draftDelete, schedule,
+        scheduledCancel
 
     /// Whether firing this undo changes anything the sitrep shows, and so
     /// whether `fireUndo` un-hides a resolved id and pulls the poller. The two
@@ -296,7 +301,7 @@ enum UndoKind: Sendable {
     var touchesSitrep: Bool {
         switch self {
         case .archive, .done, .label, .ruleDelete, .groupDelete, .remind: true
-        case .send, .draftDelete, .schedule: false
+        case .send, .draftDelete, .schedule, .scheduledCancel: false
         }
     }
 }
@@ -1597,7 +1602,17 @@ final class AppStore {
         // account's fetch still in the air removes its own entry when it
         // lands, and a rewound counter would let it prune the new account's
         // tombstones early.
-        draftTombstones = [:]
+        draftTombstones.clear()
+        // The outbox is the old daemon's rows, ids and all, and so is what has
+        // already toasted. A pull-back or cancel still on the wire reports to
+        // nobody (each checks the epoch).
+        scheduledRows = []
+        scheduledLoadedAt = nil
+        scheduledRefresh = nil
+        scheduledTombstones.clear()
+        scheduledFailures.clear()
+        outboxKnownEmpty = false
+        scheduledBusy = []
         authRings = []
         authQueue = []
         tracking = nil
@@ -2382,10 +2397,18 @@ final class AppStore {
 
     var sentPage: Loadable<[SentItem]> { sentRows }
 
+    /// THE WHOLE SENT PAGE: the sent listing and the outbox pinned above it,
+    /// side by side, so one refresh fetches both (docs/SCHEDULED-SEND.md §6).
+    func refreshSent(force: Bool = false) async {
+        async let outbox: Void = refreshScheduled(force: force)
+        await refreshSentMail(force: force)
+        await outbox
+    }
+
     /// Same TTL-plus-join shape as `refreshMail`, for the same reasons: a
     /// revisit inside the window is free, and a mount landing on the same tick
     /// as the poll costs one fetch rather than two.
-    func refreshSent(force: Bool = false) async {
+    private func refreshSentMail(force: Bool = false) async {
         if !force, let loadedAt = sentLoadedAt,
             Date().timeIntervalSince(loadedAt) < Self.mailTTL
         {
@@ -3243,64 +3266,30 @@ final class AppStore {
         draftsRows = rows
     }
 
-    /// Bumped each time a draft row is known to have LEFT the daemon: a
-    /// DELETE that came back, or a send that took its row with it. A list
-    /// fetch records it when it leaves, which is how a landing fetch tells
-    /// "left before that row went" from "left after". See `draftTombstones`.
-    private var draftsGeneration = 0
-    /// Draft ids that left the daemon this account session, each with the
-    /// generation its removal completed at (`Int.max` while the DELETE is
-    /// still on the wire). A fetch that left BEFORE that generation may still
-    /// carry the row, and adopting it would resurrect a draft the reader
-    /// deleted (or sent) and watched go; a fetch that left AT or after it
-    /// cannot, so whatever it lists under that id is a NEW row.
-    ///
-    /// Which does happen: `drafts.id` is an `INTEGER PRIMARY KEY` without
-    /// AUTOINCREMENT, so deleting the highest-id draft and creating another
-    /// hands the same id straight back. A tombstone kept forever hid that
-    /// brand-new draft from the list and every restore until relaunch. So
-    /// each one is pruned as soon as no fetch that could carry the old row is
-    /// still in the air (`pruneDraftTombstones`).
-    private var draftTombstones: [Int: Int] = [:]
-    /// The start generations of list fetches still in the air, one entry per
-    /// fetch. A tombstone outlives the OLDEST of them, not merely the one that
-    /// just landed: fetches can land out of order, and a slow one that left
-    /// before the delete would otherwise land after a fast one pruned it.
-    private var draftFetchesInFlight: [Int] = []
+    /// Draft ids that left the daemon this account session, and which list
+    /// fetches may still carry them. A fetch that left BEFORE a row went may
+    /// still list it, and adopting it would resurrect a draft the reader
+    /// deleted (or sent) and watched go; one that left after lists whatever
+    /// that id is NOW, which is a new row: `drafts.id` is reused. The whole
+    /// rule, and why a permanent set was wrong, is `Tombstones`.
+    private var draftTombstones = Tombstones()
 
     /// The one way this store lists drafts: the daemon's rows minus every one
     /// that is gone as far as the reader knows (see `isGone`), filtered HERE,
     /// while this fetch's own entry still holds its tombstones in place. Nil
     /// on failure, which every caller treats as "keep what you had".
     private func fetchDrafts() async -> [DraftView]? {
-        let start = draftsGeneration
-        draftFetchesInFlight.append(start)
-        defer {
-            if let i = draftFetchesInFlight.firstIndex(of: start) {
-                draftFetchesInFlight.remove(at: i)
-            }
-            pruneDraftTombstones()
-        }
+        let start = draftTombstones.beginFetch()
+        defer { draftTombstones.endFetch(start) }
         guard let rows = try? await APIClient.shared.listDrafts() else { return nil }
         return rows.filter { !isGone($0.id, fetchedAt: start) }
-    }
-
-    /// Drop every tombstone no fetch still in the air could need: one whose
-    /// removal completed at or before the oldest in-flight fetch's start
-    /// (or at all, with none in flight). A DELETE still on the wire is
-    /// `Int.max` and stays.
-    private func pruneDraftTombstones() {
-        let floor = draftFetchesInFlight.min() ?? draftsGeneration
-        draftTombstones = draftTombstones.filter { $0.value > floor }
     }
 
     /// A draft row just left the daemon (its DELETE came back, or its send
     /// did): stamp its tombstone with a fresh generation, so fetches already
     /// in the air still drop it and later ones do not.
     private func noteDraftGone(_ id: Int) {
-        draftsGeneration += 1
-        draftTombstones[id] = draftsGeneration
-        pruneDraftTombstones()
+        draftTombstones.gone(id)
     }
 
     /// Whether a row a fetch that left at generation `start` listed is gone
@@ -3308,15 +3297,14 @@ final class AppStore {
     /// left the daemon after that fetch did.
     private func isGone(_ id: Int, fetchedAt start: Int) -> Bool {
         if pendingDraftDeletes[id] != nil { return true }
-        guard let gone = draftTombstones[id] else { return false }
-        return gone > start
+        return draftTombstones.hides(id, fetchedAt: start)
     }
 
     /// Whether this draft id's delete is in its undo window or on the wire.
     /// Rows from `fetchDrafts` are already filtered; this is for the checks
     /// made after, when a delete may have started since the list landed.
     private func isDeleting(_ id: Int) -> Bool {
-        pendingDraftDeletes[id] != nil || draftTombstones[id] == .max
+        pendingDraftDeletes[id] != nil || draftTombstones.isLeaving(id)
     }
 
     /// What the drafts page lists: the cache minus rows a held or sending mail
@@ -3548,8 +3536,8 @@ final class AppStore {
             }
             return
         }
-        // `Int.max` while on the wire: every fetch drops it until it lands.
-        draftTombstones[id] = .max
+        // Hidden from every fetch while on the wire, until it lands.
+        draftTombstones.leaving(id)
         do {
             try await APIClient.shared.deleteDraft(id)
             if e == epoch { noteDraftGone(id) }
@@ -3560,7 +3548,7 @@ final class AppStore {
             guard e == epoch else { return }
             // The row is still on the daemon, so it goes back in the list
             // rather than hiding until the next fetch pretends it came back.
-            draftTombstones[id] = nil
+            draftTombstones.revive(id)
             if !draftsRows.contains(where: { $0.id == id }) {
                 draftsRows.insert(pending.draft, at: min(pending.index, draftsRows.count))
             }
@@ -4207,6 +4195,8 @@ final class AppStore {
                 draftsRows.removeAll { $0.id == draftId }
                 noteDraftGone(draftId)
             }
+            // A new row in the outbox: the Sent page and the tick look again.
+            noteOutboxChanged()
             let e = epoch
             // `messageId: -1`: this undo resolves nothing on the sitrep.
             pushUndo(kind: .schedule, messageId: -1, label: ScheduleCopy.scheduledToast(sendAt)) {
@@ -4242,6 +4232,9 @@ final class AppStore {
             throw error
         }
         guard e == epoch else { return }
+        // Off the Sent page too, if a listing already carried it.
+        scheduledRows.removeAll { $0.id == id }
+        scheduledTombstones.gone(id)
         // A request the daemon could no longer parse comes back null. The row
         // is cancelled either way, so reopen from what this app remembers
         // rather than lose the mail: the same builder, fed the body this
@@ -4257,6 +4250,352 @@ final class AppStore {
         back.state = ComposeState.reopened(
             request: request, attachments: cancelled.attachments, sendAt: sendAt, base: held.state)
         putBack(back, error: nil)
+    }
+
+    // MARK: - the outbox, on the Sent page
+
+    /// The daemon's outbox as last fetched (`scheduled`, `sending`, `failed`),
+    /// next to go first, MINUS any row the reader has pulled back or cancelled
+    /// (see `scheduledTombstones`). The Sent page pins these above the sent
+    /// mail. Filled by `refreshScheduled`, which `refreshSent` runs beside the
+    /// sent listing so one Sent refresh fetches both.
+    private(set) var scheduledRows: [ScheduledSendView] = []
+    /// Freshness + in-flight fetch, the outbox's half of `sentLoadedAt`/`sentRefresh`.
+    private var scheduledLoadedAt: Date?
+    private var scheduledRefresh: Task<Void, Never>?
+    /// Outbox ids that left the daemon this account session (cancelled, or
+    /// pulled back into a composer). `scheduled_sends.id` is reused like
+    /// `drafts.id`, so this is the generation-tagged ledger, NEVER a permanent
+    /// set; the rule is `Tombstones`.
+    private var scheduledTombstones = Tombstones()
+    /// Which failed rows have toasted this run, for this account.
+    private var scheduledFailures = ScheduledFailures()
+    /// The last listing came back EMPTY and nothing has been scheduled since:
+    /// the sitrep tick has nothing to watch and skips the request. Everything
+    /// that can put a row in the outbox clears it.
+    private var outboxKnownEmpty = false
+    /// Rows with a pull-back, cancel or send-now on the wire. A second Enter
+    /// on the same row while its DELETE is out would fire a second DELETE and
+    /// report a 404 for mail that is sitting in a composer.
+    private var scheduledBusy: Set<Int> = []
+
+    /// Same TTL-plus-join shape as `refreshSent`, for the same reasons. A
+    /// daemon without an outbox is never asked (the route would 404).
+    func refreshScheduled(force: Bool = false) async {
+        guard scheduledSendAvailable else { return }
+        if !force, let loadedAt = scheduledLoadedAt,
+            Date().timeIntervalSince(loadedAt) < Self.mailTTL
+        {
+            return
+        }
+        if let running = scheduledRefresh {
+            await running.value
+            if !force { return }
+        }
+        let refresh = Task { await performScheduledRefresh() }
+        scheduledRefresh = refresh
+        await refresh.value
+        if scheduledRefresh == refresh { scheduledRefresh = nil }
+    }
+
+    /// The sitrep tick's ask, so a row that FAILS while the person is
+    /// elsewhere still toasts. There is no event for it (docs/SCHEDULED-SEND.md
+    /// §5: no SSE), and the Sent page only refreshes while it is on screen.
+    /// Skipped once the outbox is known empty, so an account that never
+    /// schedules anything pays one request per connect, not one per tick.
+    func pollScheduled() async {
+        guard scheduledSendAvailable, !outboxKnownEmpty else { return }
+        await refreshScheduled()
+    }
+
+    private func performScheduledRefresh() async {
+        let e = epoch
+        let start = scheduledTombstones.beginFetch()
+        let listed = try? await APIClient.shared.listScheduled()
+        // Filtered while this fetch's own entry still holds its tombstones in
+        // place, then released, on EVERY path (an old account's fetch too).
+        let kept = listed?.filter { !scheduledTombstones.hides($0.id, fetchedAt: start) }
+        scheduledTombstones.endFetch(start)
+        // Silent on failure, like the drafts cache: the rows on screen stay.
+        guard e == epoch, let kept else { return }
+        let next = ScheduledRowCopy.ordered(kept)
+        // Assigned only on a real change: the tick re-runs this.
+        if next != scheduledRows { scheduledRows = next }
+        scheduledLoadedAt = Date()
+        outboxKnownEmpty = listed?.isEmpty ?? false
+        // ONCE PER ROW PER RUN. The first listing of a run toasts a row that
+        // failed while the app was closed, which is the point: nobody has
+        // been told yet.
+        for row in scheduledFailures.fresh(next) {
+            pushToast(ScheduledRowCopy.failedToast(row), .error)
+        }
+    }
+
+    /// Something was just put in (or back in) the outbox: the tick must look
+    /// again, and the next Sent refresh must not be swallowed by the TTL.
+    private func noteOutboxChanged() {
+        outboxKnownEmpty = false
+        scheduledLoadedAt = nil
+    }
+
+    /// Take a row off the page NOW, before its DELETE lands, and hide it from
+    /// any listing in the air. Returns where it sat, for putting it back.
+    private func holdScheduledRow(_ id: Int) -> Int {
+        let index = scheduledRows.firstIndex { $0.id == id } ?? scheduledRows.count
+        scheduledRows.removeAll { $0.id == id }
+        scheduledTombstones.leaving(id)
+        scheduledBusy.insert(id)
+        return index
+    }
+
+    /// The DELETE did not take the row: it is still on the daemon, so it goes
+    /// back where it was rather than hiding until a listing says otherwise.
+    private func restoreScheduledRow(_ row: ScheduledSendView, at index: Int) {
+        scheduledTombstones.revive(row.id)
+        if !scheduledRows.contains(where: { $0.id == row.id }) {
+            scheduledRows.insert(row, at: min(index, scheduledRows.count))
+        }
+    }
+
+    /// What a failed outbox verb says, and whether the row is still there.
+    /// 409 is the worker holding it (Gmail's hands); 404 is sent, cancelled
+    /// elsewhere, or swept: either way no longer scheduled.
+    private func reportScheduledFailure(_ error: Error, _ fallback: String) -> Bool {
+        let api = error as? APIError
+        if api?.status == 409 {
+            pushToast(ScheduledRowCopy.alreadySending, .error)
+            return true
+        }
+        if api?.kind == .notFound {
+            pushToast(ScheduledRowCopy.noLongerScheduled, .error)
+            return false
+        }
+        pushToast(errText(error, fallback), .error)
+        return true
+    }
+
+    /// Enter / click on an outbox row: PULL IT BACK into the composer it came
+    /// from. DELETE the row, and open the request it hands back with its time
+    /// still set, so ⌘↵ reschedules and Esc keeps it in drafts.
+    ///
+    /// `openDraft`'s branching, fed from the request instead of a `DraftView`:
+    ///
+    /// - A FORWARD needs the original it forwards, for the composer to show
+    ///   under the note. Fetched FIRST, before the DELETE, so nothing slow
+    ///   stands between the row leaving the outbox and the composer opening.
+    ///   A failed fetch still opens the forward, without the quote on
+    ///   screen: the daemon quotes it from the id either way, and the mail is
+    ///   already out of the outbox, so there is nowhere else for it to go.
+    /// - A REPLY opens where it belongs: its thread, with the inline reply
+    ///   filled. One whose parent this daemon no longer describes (no
+    ///   `thread_id`) opens in the pane instead, which takes replies (the
+    ///   agent's hand-off does the same), rather than being lost.
+    /// - NEW MAIL loads into the pane. One already open there is closed
+    ///   through `closeCompose`, which keeps it in drafts, as `openDraft` does.
+    func pullBackScheduled(_ row: ScheduledSendView) {
+        guard !scheduledBusy.contains(row.id) else { return }
+        let e = epoch
+        let index = holdScheduledRow(row.id)
+        Task {
+            let base = await forwardBase(row.forward_of_message_id)
+            guard e == epoch else { return }
+            let cancelled: ScheduledCancel
+            do {
+                cancelled = try await APIClient.shared.cancelScheduled(row.id)
+            } catch {
+                guard e == epoch else { return }
+                scheduledBusy.remove(row.id)
+                if reportScheduledFailure(error, "could not pull that back") {
+                    restoreScheduledRow(row, at: index)
+                } else {
+                    scheduledTombstones.gone(row.id)
+                }
+                await refreshScheduled(force: true)
+                return
+            }
+            // The account changed while the DELETE was out: the row is
+            // cancelled on the daemon just left, and this mailbox's composer
+            // is no place for it.
+            guard e == epoch else {
+                pushToast("the account changed: that mail was cancelled, not reopened", .error)
+                return
+            }
+            scheduledBusy.remove(row.id)
+            scheduledTombstones.gone(row.id)
+            openPulledBack(
+                ComposeState.reopened(
+                    request: cancelled.request ?? Self.fallbackRequest(row),
+                    attachments: cancelled.attachments, sendAt: Fmt.date(row.send_at),
+                    base: base),
+                threadId: row.thread_id)
+        }
+    }
+
+    /// `s` on an outbox row: send it on the worker's next tick. 202 is QUEUED,
+    /// not sent, so the toast says "sending now" and the listing shows it go.
+    func sendScheduledNow(_ row: ScheduledSendView) {
+        guard !scheduledBusy.contains(row.id) else { return }
+        let e = epoch
+        scheduledBusy.insert(row.id)
+        Task {
+            do {
+                try await APIClient.shared.sendScheduledNow(row.id)
+                guard e == epoch else { return }
+                pushToast(ScheduledRowCopy.sendingNow, .success)
+            } catch {
+                guard e == epoch else { return }
+                _ = reportScheduledFailure(error, "could not send it now")
+            }
+            scheduledBusy.remove(row.id)
+            await refreshScheduled(force: true)
+        }
+    }
+
+    /// `x` / Backspace on an outbox row: cancel it outright, with the app's
+    /// five-second undo.
+    ///
+    /// NOT HELD, unlike a draft delete, and deliberately: a held cancel of a
+    /// row due inside the window would let the worker send it while the
+    /// person watches the toast that says it is cancelled. So the DELETE goes
+    /// out now and the undo puts the mail back, from the request the DELETE
+    /// handed back (`uncancelScheduled`). The toast appears when the DELETE
+    /// lands, because until then there is nothing to undo.
+    func cancelScheduledRow(_ row: ScheduledSendView) {
+        guard !scheduledBusy.contains(row.id) else { return }
+        let e = epoch
+        let index = holdScheduledRow(row.id)
+        Task {
+            let cancelled: ScheduledCancel
+            do {
+                cancelled = try await APIClient.shared.cancelScheduled(row.id)
+            } catch {
+                guard e == epoch else { return }
+                scheduledBusy.remove(row.id)
+                if reportScheduledFailure(error, "could not cancel that") {
+                    restoreScheduledRow(row, at: index)
+                } else {
+                    scheduledTombstones.gone(row.id)
+                }
+                await refreshScheduled(force: true)
+                return
+            }
+            guard e == epoch else { return }
+            scheduledBusy.remove(row.id)
+            scheduledTombstones.gone(row.id)
+            // `messageId: -1`: this undo resolves nothing on the sitrep, and
+            // an outbox id shares the Int space with message ids.
+            pushUndo(
+                kind: .scheduledCancel, messageId: -1,
+                label: ScheduledRowCopy.cancelledLabel(row)
+            ) { [weak self] in
+                guard let self else { throw HoldError.alreadySent }
+                try await self.uncancelScheduled(row, cancelled, epoch: e)
+            }
+        }
+    }
+
+    /// THE CANCEL'S UNDO: put the mail back in the outbox at the time it had,
+    /// by re-POSTing the request the DELETE returned (a new row, a new id;
+    /// the files it held are re-claimed by the same POST).
+    ///
+    /// NEVER SOONER THAN ASKED. A time already here (a failed row, or one due
+    /// inside the undo window) is not re-POSTed, since the daemon refuses the
+    /// past and "now" would make an undo send mail. That mail reopens in the
+    /// composer, time shown and flagged, for the person to pick again. A
+    /// re-POST the daemon refuses (the guard judges it afresh, since a
+    /// verdict does not survive a cancel) reopens it the same way, so an
+    /// undo that could not reschedule never costs the mail.
+    private func uncancelScheduled(
+        _ row: ScheduledSendView, _ cancelled: ScheduledCancel, epoch e: Int
+    ) async throws {
+        guard e == epoch else { throw HoldError.alreadySent }
+        let request = cancelled.request ?? Self.fallbackRequest(row)
+        let sendAt = Fmt.date(row.send_at)
+        if let sendAt, ScheduledCancelUndo.canReschedule(at: sendAt) {
+            do {
+                _ = try await APIClient.shared.scheduleSend(
+                    ScheduledCancelUndo.body(request), at: sendAt)
+                guard e == epoch else { return }
+                noteOutboxChanged()
+                await refreshScheduled(force: true)
+                return
+            } catch {
+                guard e == epoch else { throw error }
+                var state = ComposeState.reopened(
+                    request: request, attachments: cancelled.attachments, sendAt: sendAt,
+                    base: await forwardBase(row.forward_of_message_id))
+                if let api = error as? APIError, api.kind == .guardBlocked {
+                    // As `putBack` does for a blocked send: the verdict shows,
+                    // and ⌘⇧↵ reads "schedule anyway".
+                    state.guardKinds = api.guardKinds ?? parseGuardKinds(api.message)
+                } else {
+                    state.error = errText(error, "could not schedule it again")
+                }
+                guard e == epoch else { throw error }
+                openPulledBack(state, threadId: row.thread_id)
+                throw error
+            }
+        }
+        var state = ComposeState.reopened(
+            request: request, attachments: cancelled.attachments, sendAt: sendAt,
+            base: await forwardBase(row.forward_of_message_id))
+        state.error = ScheduleCopy.timePassed
+        guard e == epoch else { return }
+        openPulledBack(state, threadId: row.thread_id)
+    }
+
+    /// The display half of a forward's composer (the original under the note,
+    /// and the subject it is titled from), fetched by id. nil for anything
+    /// that is not a forward, and for an original no longer here.
+    private func forwardBase(_ original: Int?) async -> ComposeState? {
+        guard let original,
+            let envelope = try? await APIClient.shared.getMessage(original),
+            let message = envelope.thread.messages.first(where: { $0.id == envelope.message_id })
+        else { return nil }
+        var base = ComposeState()
+        let subject = (message.subject ?? envelope.thread.subject).trimmed
+        base.forwardedSubject = subject.isEmpty ? nil : subject
+        base.forwardedMessage = message
+        return base
+    }
+
+    /// A cancel whose request the daemon could not parse answers `null`. The
+    /// listing row is the next best record of the mail: its words, its parent
+    /// and its files, though not its copy lists, which the row does not carry.
+    /// (Such a row fails as `failed:request` at fire time anyway.)
+    private static func fallbackRequest(_ row: ScheduledSendView) -> ScheduledRequest {
+        var r = ScheduledRequest()
+        r.reply_to_message_id = row.reply_to_message_id
+        r.forward_of_message_id = row.forward_of_message_id
+        r.to = row.to.isEmpty ? nil : row.to
+        r.subject = row.subject.isEmpty ? nil : row.subject
+        r.body = row.body
+        r.body_format = "markdown"
+        r.attachment_ids = row.attachments.map(\.id)
+        return r
+    }
+
+    /// Open a composer rebuilt from the outbox. The reply goes into its
+    /// thread's inline composer, anything else into the pane, and in both
+    /// the autosave is ARMED (`noteChange`, as `putBack` does): the cancel
+    /// released the files' claim, and the draft the save writes is what
+    /// claims them again before the unclaimed sweep can.
+    private func openPulledBack(_ state: ComposeState, threadId: String?) {
+        if state.replyToMessageId != nil, let threadId {
+            // Through `openThread`, which flushes any inline reply already
+            // open (it is somebody's words) before this one takes the slot.
+            openThread(threadId)
+            inlineReply = state
+            DraftSaver.shared.noteChange(.inlineReply)
+            return
+        }
+        // Through `closeCompose`, so the one being replaced says "kept in
+        // drafts" exactly when an Esc on it would have.
+        closeCompose()
+        if sideView.isOpen { closeSide() }
+        compose = state
+        DraftSaver.shared.noteChange(.compose)
+        Analytics.capture("compose_opened", ["kind": state.analyticsKind])
     }
 
     // MARK: - assistant relay

@@ -65,16 +65,36 @@ struct EmailsView: View {
     /// Sent rows are NOT filtered against `resolvedIds`: a resolve is an inbox
     /// verdict, and it must never delete a record of something you sent.
     private var sent: [SentItem] { sentPage.value ?? [] }
+    /// THE OUTBOX, pinned above the sent mail (docs/SCHEDULED-SEND.md §6),
+    /// next to go first. Empty on every other page, so the cursor arithmetic
+    /// below is the old arithmetic everywhere but Sent, and on Sent whenever
+    /// nothing is scheduled.
+    private var scheduled: [ScheduledSendView] { mode == .sent ? store.scheduledRows : [] }
 
     private var selected: AttentionUpdate? { rows[safe: index] }
-    private var selectedSent: SentItem? { sent[safe: index] }
+    /// ONE CURSOR over both groups on Sent: positions `0..<scheduled.count`
+    /// are the outbox, the rest are the sent rows after it.
+    private var selectedScheduled: ScheduledSendView? { scheduled[safe: index] }
+    private var selectedSent: SentItem? { sent[safe: index - scheduled.count] }
     /// However many rows the page on screen has — the cursor's only bound.
-    private var rowCount: Int { mode == .sent ? sent.count : rows.count }
+    private var rowCount: Int { mode == .sent ? scheduled.count + sent.count : rows.count }
     /// The row under the cursor as the two things every page can answer: the
     /// message id (a `.task` key, and the scroll target) and the thread to warm.
+    /// An outbox row answers only when it has a thread (a reply's), which is
+    /// the thread a pull-back opens.
     private var cursorRow: (id: Int, threadId: String)? {
-        if mode == .sent { return selectedSent.map { ($0.id, $0.thread_id) } }
+        if mode == .sent {
+            if let row = selectedScheduled {
+                return row.thread_id.map { (row.id, $0) }
+            }
+            return selectedSent.map { ($0.id, $0.thread_id) }
+        }
         return selected.map { ($0.id, $0.thread_id) }
+    }
+    /// The outbox row the keys may act on: under the keyboard cursor or the
+    /// pointer, the same `actionable` rule every verb here keeps.
+    private var actionableScheduled: ScheduledSendView? {
+        actionable ? selectedScheduled : nil
     }
     /// Action keys are inert unless something is actually highlighted.
     private var actionable: Bool { kbActive || hovering }
@@ -204,9 +224,75 @@ struct EmailsView: View {
         return "Your email provider filtered nothing in the last 30 days."
     }
 
+    /// The Sent page: the outbox group, then the sent rows.
+    @ViewBuilder private var sentList: some View {
+        scheduledGroup
+        sentRows
+    }
+
+    /// THE OUTBOX GROUP, headed "scheduled" in the app's section-label style
+    /// and absent when there is nothing in it (then the page is exactly the
+    /// sent list it always was). When it shows, a "sent" label heads the rows
+    /// under it, or the first sent mail would read as one more scheduled one.
+    @ViewBuilder private var scheduledGroup: some View {
+        if !scheduled.isEmpty {
+            SentSectionLabel("scheduled", top: 2)
+            ForEach(Array(scheduled.enumerated()), id: \.element.id) { i, row in
+                ScheduledRow(
+                    row: row,
+                    selected: kbActive && i == index,
+                    onHover: {
+                        hovering = true
+                        kbActive = false
+                        index = i
+                    },
+                    onOpen: { store.pullBackScheduled(row) },
+                    onSendNow: { store.sendScheduledNow(row) },
+                    onCancel: { store.cancelScheduledRow(row) }
+                )
+                .id(Self.scheduledRowId(row.id))
+                #if !os(macOS)
+                    // The thumb's two verbs. Cancel on the trailing edge and
+                    // NOT a full swipe: it has an undo, but a flick past a row
+                    // is not a decision about somebody's mail. Send now on
+                    // the leading edge, never full-swipe either: it is the
+                    // one verb here with no undo at all.
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        if row.state != "sending" {
+                            Button(role: .destructive) {
+                                Haptics.commit()
+                                store.cancelScheduledRow(row)
+                            } label: {
+                                Label("cancel", systemImage: "xmark")
+                            }
+                        }
+                    }
+                    .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                        if row.state != "sending" {
+                            Button {
+                                Haptics.commit()
+                                store.sendScheduledNow(row)
+                            } label: {
+                                Label("send now", systemImage: "paperplane")
+                            }
+                            .tint(Palette.accent)
+                        }
+                    }
+                #endif
+            }
+            SentSectionLabel("sent", top: 14)
+        }
+    }
+
+    /// An outbox row's scroll target. A string, so it can never collide with
+    /// a sent row's message id in the same scroll view.
+    private static func scheduledRowId(_ id: Int) -> String { "scheduled-\(id)" }
+
     /// The sent rows, same three gated notes. The reader opens with NO queue:
     /// "done + next" walks a triage list, and there is nothing to finish here.
-    @ViewBuilder private var sentList: some View {
+    /// Their cursor positions start after the outbox group's.
+    @ViewBuilder private var sentRows: some View {
+        let offset = scheduled.count
         if let error = sentPage.error, sentPage.value == nil {
             BandNote(error)
         } else if sentPage.value == nil {
@@ -217,11 +303,11 @@ struct EmailsView: View {
             ForEach(Array(sent.enumerated()), id: \.element.id) { i, item in
                 SentRow(
                     item: item,
-                    selected: kbActive && i == index,
+                    selected: kbActive && i + offset == index,
                     onHover: {
                         hovering = true
                         kbActive = false
-                        index = i
+                        index = i + offset
                     },
                     onOpen: { store.openThread(item.thread_id) }
                 )
@@ -231,8 +317,12 @@ struct EmailsView: View {
     }
 
     /// The scroll target for a row position on whichever page is showing.
-    private func rowId(at i: Int) -> Int? {
-        mode == .sent ? sent[safe: i]?.id : rows[safe: i]?.id
+    private func rowId(at i: Int) -> AnyHashable? {
+        if mode == .sent {
+            if let row = scheduled[safe: i] { return Self.scheduledRowId(row.id) }
+            return sent[safe: i - scheduled.count]?.id
+        }
+        return rows[safe: i]?.id
     }
 
     private var hasRows: Bool { page.value != nil && page.error == nil && !rows.isEmpty }
@@ -548,6 +638,11 @@ struct EmailsView: View {
             KeyBinding("Enter", "drill in") {
                 guard actionable else { return }
                 if mode == .sent {
+                    // An outbox row goes back into the composer it came from.
+                    if let row = selectedScheduled {
+                        store.pullBackScheduled(row)
+                        return
+                    }
                     guard let item = selectedSent else { return }
                     // No queue: "done + next" walks a triage list, and sent mail
                     // has nothing to finish.
@@ -588,6 +683,33 @@ struct EmailsView: View {
                     RemindTarget(
                         messageId: u.id, sender: u.sender, subject: u.one_line,
                         remindAt: u.remind_at))
+            },
+            // THE OUTBOX ROW'S TWO VERBS, bound on Sent only and DECLINED
+            // anywhere else, so neither letter means anything on the other
+            // pages. `s` sends it on the worker's next tick; `x` cancels it
+            // behind the undo toast, and so do Backspace / Delete, the keys
+            // the drafts page deletes a draft with.
+            KeyBinding(declining: "s", "send scheduled mail now") {
+                guard let row = actionableScheduled else { return false }
+                store.sendScheduledNow(row)
+                return true
+            },
+            KeyBinding(declining: "x", "cancel scheduled mail") {
+                guard let row = actionableScheduled else { return false }
+                store.cancelScheduledRow(row)
+                return true
+            },
+            // AHEAD of the reminder lens's Backspace, and declining, so that
+            // binding is untouched: the two never share a page.
+            KeyBinding(declining: "Backspace", "cancel scheduled mail") {
+                guard let row = actionableScheduled else { return false }
+                store.cancelScheduledRow(row)
+                return true
+            },
+            KeyBinding(declining: "Delete", "cancel scheduled mail") {
+                guard let row = actionableScheduled else { return false }
+                store.cancelScheduledRow(row)
+                return true
             },
             // Cancel a reminder WITHOUT reopening the mail — it was resolved
             // when the reminder was set, and "I do not need to see this again"
@@ -637,6 +759,28 @@ struct EmailsView: View {
         // frame regardless; this keeps it out of the cached page too, so the
         // next poll cannot briefly hand it back.
         store.removeFromMail(u.id)
+    }
+}
+
+/// A group heading inside the Sent list, in the drafts page's section style.
+/// Its 11pt inset puts the words on the rows' text edge.
+private struct SentSectionLabel: View {
+    let text: String
+    let top: CGFloat
+    init(_ text: String, top: CGFloat) {
+        self.text = text
+        self.top = top
+    }
+
+    var body: some View {
+        Text(text)
+            .font(Typo.sectionLabel)
+            .foregroundStyle(Palette.inkFaint)
+            .textCase(.uppercase)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 11)
+            .padding(.top, top)
+            .padding(.bottom, 5)
     }
 }
 

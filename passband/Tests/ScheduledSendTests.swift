@@ -24,6 +24,15 @@ struct ScheduledSendTests {
         aConflictIsAlreadySent()
         theChipAndTheToastReadAsAWallClock()
         theListingDecodes()
+        // The Sent page's half.
+        eachRowStateSaysWhatItIs()
+        aFailedRowSaysWhy()
+        relUntilCountsDown()
+        theOutboxSitsInFireOrder()
+        aFailureToastsOncePerRow()
+        aCancelsUndoRebuildsTheSchedule()
+        anUndoNeverSendsSoonerThanAsked()
+        aTombstoneOutlivesOnlyTheFetchesThatCouldCarryIt()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -231,6 +240,199 @@ struct ScheduledSendTests {
             decode(ScheduledCreated.self, #"{"id":9,"send_at":"2027-01-15T08:00:00Z"}"#)?.id, 9,
             "201")
         equal(decode(ScheduledNow.self, #"{"status":"queued","id":9}"#)?.status, "queued", "202")
+    }
+
+
+    // MARK: - the Sent page: rows
+
+    static func row(
+        id: Int = 3, sendAt: String = "2026-10-04T13:00:00Z", state: String = "scheduled",
+        attempts: Int = 0, lastError: String? = nil, created: String = "2026-10-01T08:00:00Z"
+    ) -> ScheduledSendView {
+        ScheduledSendView(
+            id: id, send_at: sendAt, state: state, attempts: attempts, last_error: lastError,
+            to: "ana@x.test", subject: "lunch", body: "see you", reply_to_message_id: nil,
+            forward_of_message_id: nil, attachments: [], thread_id: nil, parent_subject: nil,
+            parent_from: nil, parent_from_addr: nil, created_at: created, updated_at: created)
+    }
+
+    static func utc() -> Calendar {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "UTC")!
+        cal.locale = Locale(identifier: "en_US_POSIX")
+        return cal
+    }
+
+    static func eachRowStateSaysWhatItIs() {
+        let cal = utc()
+        // Sunday 4 Oct 2026, 10:00 UTC; the row fires at 13:00.
+        let now = date(cal, 2026, 10, 4, 10, 0)
+        typealias T = ScheduledRowCopy.Trailing
+        equal(
+            ScheduledRowCopy.trailing(row(), now: now, calendar: cal),
+            T(text: "today 1pm · in 3h", tone: .quiet), "scheduled: the chip and the countdown")
+        equal(
+            ScheduledRowCopy.trailing(
+                row(sendAt: "2026-10-06T09:00:00Z"), now: now, calendar: cal),
+            T(text: "Tue 9am · in 2d", tone: .quiet), "later in the week")
+        equal(
+            ScheduledRowCopy.trailing(
+                row(attempts: 1, lastError: "failed:gmail"), now: now, calendar: cal),
+            T(text: "retrying", tone: .busy), "a claim behind it: retrying, not the backoff's time")
+        equal(
+            ScheduledRowCopy.trailing(row(state: "sending", attempts: 1), now: now, calendar: cal),
+            T(text: "sending", tone: .busy), "sending")
+        equal(
+            ScheduledRowCopy.trailing(
+                row(state: "failed", attempts: 3, lastError: "failed:gmail"), now: now,
+                calendar: cal),
+            T(text: "didn't send", tone: .danger), "failed")
+        equal(
+            ScheduledRowCopy.trailing(
+                row(state: "failed", attempts: 1, lastError: "failed:recovery"), now: now,
+                calendar: cal),
+            T(text: "may have sent", tone: .danger),
+            "failed:recovery never says didn't send: it may have")
+    }
+
+    static func aFailedRowSaysWhy() {
+        equal(
+            ScheduledRowCopy.reasonLine(row(state: "failed", lastError: "failed:gmail")),
+            "Gmail refused it", "failed: the human reason on line two")
+        equal(
+            ScheduledRowCopy.reasonLine(row(state: "failed", lastError: "failed:recovery")),
+            "may have been sent, check Sent", "recovery")
+        equal(
+            ScheduledRowCopy.reasonLine(
+                row(attempts: 1, lastError: "rejected:no_write_credential")),
+            "sending is not connected, reconnect your account", "a retry says why it waits")
+        equal(ScheduledRowCopy.reasonLine(row()), nil, "a plain scheduled row says nothing")
+        equal(
+            ScheduledRowCopy.reasonLine(row(state: "sending", lastError: "failed:gmail")), nil,
+            "a sending row neither")
+        equal(
+            ScheduledRowCopy.reason("failed:something_new"), "something went wrong",
+            "an unknown code is never shown raw")
+        equal(
+            ScheduledRowCopy.failedToast(row(state: "failed", lastError: "failed:gmail")),
+            "didn't send: Gmail refused it", "the toast")
+        equal(
+            ScheduledRowCopy.failedToast(row(state: "failed", lastError: "failed:recovery")),
+            "may have been sent, check Sent", "the recovery toast does not say didn't send")
+        for text in [
+            ScheduledRowCopy.failedToast(row(state: "failed", lastError: "failed:gmail")),
+            ScheduledRowCopy.alreadySending, ScheduledRowCopy.sendingNow,
+            ScheduledRowCopy.noLongerScheduled,
+        ] {
+            check(!text.contains("\u{2014}"), "no em dash: \(text)")
+        }
+    }
+
+    static func relUntilCountsDown() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        equal(Fmt.relUntil(now.addingTimeInterval(5 * 60), now: now), "in 5m", "minutes")
+        equal(Fmt.relUntil(now.addingTimeInterval(3 * 3600), now: now), "in 3h", "hours")
+        equal(Fmt.relUntil(now.addingTimeInterval(2 * 86400), now: now), "in 2d", "days")
+        equal(Fmt.relUntil(now.addingTimeInterval(20), now: now), "now", "under a minute")
+        equal(Fmt.relUntil(now.addingTimeInterval(-600), now: now), "now", "gone by")
+        equal(
+            Fmt.relAge(now, now: now.addingTimeInterval(3 * 3600)), "3h",
+            "the same span relAge reads the other way")
+    }
+
+    static func theOutboxSitsInFireOrder() {
+        let rows = [
+            row(id: 1, sendAt: "2026-10-05T09:00:00Z"),
+            row(id: 7, sendAt: "2026-10-04T13:00:00Z"),
+            row(id: 2, sendAt: "2026-10-04T13:00:00Z"),
+            row(id: 4, sendAt: "not a date"),
+        ]
+        equal(
+            ScheduledRowCopy.ordered(rows).map(\.id), [2, 7, 1, 4],
+            "oldest send_at first, id breaks ties, an unparseable time last")
+    }
+
+    static func aFailureToastsOncePerRow() {
+        var seen = ScheduledFailures()
+        let failed = row(id: 3, state: "failed", lastError: "failed:gmail")
+        let listing = [row(id: 1), failed, row(id: 5, state: "sending")]
+        equal(seen.fresh(listing).map(\.id), [3], "the failed row toasts")
+        equal(seen.fresh(listing).map(\.id), [], "and not on the next tick")
+        equal(seen.fresh([failed]).map(\.id), [], "nor on a listing with only it")
+        // Ids are reused: a NEW row under the same id that fails is news.
+        let reused = row(
+            id: 3, state: "failed", lastError: "failed:gmail", created: "2026-10-09T08:00:00Z")
+        equal(seen.fresh([reused]).map(\.id), [3], "a reused id is a new failure")
+        seen.clear()
+        equal(seen.fresh([failed]).map(\.id), [3], "an account switch forgets")
+    }
+
+    static func aCancelsUndoRebuildsTheSchedule() {
+        // The DELETE's request, as the daemon returns it: override_guard and
+        // confirm STRIPPED.
+        let raw = """
+            {"status":"cancelled","id":9,
+             "request":{"reply_to_message_id":5,"cc":"","bcc":"dana@x.test",
+               "body":"yes","body_format":"markdown","include_tracker":true,
+               "reply_all":true,"attachment_ids":[12,11],"group_id":4},
+             "attachments":[]}
+            """
+        guard let cancelled = decode(ScheduledCancel.self, raw),
+            let request = cancelled.request
+        else { return }
+        let body = ScheduledCancelUndo.body(request)
+        let wire = json(ScheduleBody(send: body, send_at: "2027-01-15T08:00:00Z"))
+        equal(wire["reply_to_message_id"] as? Int, 5, "the parent")
+        equal(wire["cc"] as? String, "", "a stated empty cc stays stated")
+        equal(wire["bcc"] as? String, "dana@x.test", "bcc")
+        check(wire["to"] == nil, "no to: a reply still derives it")
+        check(wire["subject"] == nil, "no subject: still derived")
+        equal(wire["body"] as? String, "yes", "body")
+        equal(wire["body_format"] as? String, "markdown", "format")
+        equal(wire["confirm"] as? Bool, true, "confirm is the client's to set")
+        check(wire["override_guard"] == nil, "never a carried-over override")
+        check(wire["draft_id"] == nil, "no draft")
+        equal(wire["include_tracker"] as? Bool, true, "tracker")
+        equal(wire["reply_all"] as? Bool, true, "reply all")
+        equal(wire["attachment_ids"] as? [Int], [12, 11], "the files, in the request's order")
+        equal(wire["group_id"] as? Int, 4, "attribution")
+        equal(wire["send_at"] as? String, "2027-01-15T08:00:00Z", "and the time beside it")
+    }
+
+    static func anUndoNeverSendsSoonerThanAsked() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        check(
+            ScheduledCancelUndo.canReschedule(at: now.addingTimeInterval(3600), now: now),
+            "an hour out: re-POST at that time")
+        check(
+            !ScheduledCancelUndo.canReschedule(at: now.addingTimeInterval(5), now: now),
+            "due inside the POST's trip: reopen instead")
+        check(
+            !ScheduledCancelUndo.canReschedule(at: now.addingTimeInterval(-60), now: now),
+            "a failed row's past time: reopen instead")
+    }
+
+    static func aTombstoneOutlivesOnlyTheFetchesThatCouldCarryIt() {
+        var t = Tombstones()
+        let before = t.beginFetch()
+        t.leaving(3)
+        check(t.hides(3, fetchedAt: before), "on the wire: hidden from every fetch")
+        check(t.isLeaving(3), "and known to be leaving")
+        t.gone(3)
+        let after = t.beginFetch()
+        check(t.hides(3, fetchedAt: before), "a fetch that left before still drops it")
+        check(!t.hides(3, fetchedAt: after), "one that left after lists the reused id")
+        t.endFetch(before)
+        t.endFetch(after)
+        let later = t.beginFetch()
+        check(!t.hides(3, fetchedAt: later), "pruned once no fetch could carry it")
+        t.endFetch(later)
+        // A failed DELETE shows the row again.
+        let during = t.beginFetch()
+        t.leaving(8)
+        t.revive(8)
+        check(!t.hides(8, fetchedAt: during), "revived")
+        t.endFetch(during)
     }
 
     // MARK: - fixtures

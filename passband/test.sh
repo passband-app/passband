@@ -132,7 +132,10 @@ run_suite compose-attachments \
 # Scheduled send, the composer's half: the verb the button prints, the closed
 # list a draft saves (the send time is NOT on it), the schedule body being the
 # send body plus a time, and the composer an undo reopens from the daemon's
-# cancel. Every one of these is wrong only in somebody's outbox, later.
+# cancel. And the Sent page's half: what an outbox row says in each state, the
+# order it sits in, a failure toasting once, a cancel's undo rebuilding the
+# schedule, and the tombstone ledger drafts and the outbox share. Every one of
+# these is wrong only in somebody's outbox, later.
 # ComposeState lives in its own pure file for exactly this suite.
 run_suite scheduled-send \
   Sources/Passband/Model/SubjectText.swift \
@@ -146,6 +149,7 @@ run_suite scheduled-send \
   Sources/Passband/Lib/ComposeAttachments.swift \
   Sources/Passband/Model/ComposeState.swift \
   Sources/Passband/Lib/ScheduledSend.swift \
+  Sources/Passband/Lib/Tombstones.swift \
   Tests/ScheduledSendTests.swift
 
 # The blocking re-triage modal's state machine. Pure value logic, so it builds

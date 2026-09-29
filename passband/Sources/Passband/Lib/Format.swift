@@ -82,6 +82,16 @@ enum Fmt {
         return "\(Int(mo.rounded()))mo"
     }
 
+    /// The other direction: how long UNTIL `then`, for a time still to come.
+    /// "in 5m", "in 3h", "in 2d". The same units and rounding as `relAge`, so
+    /// a row that reads "3h" ago and one that reads "in 3h" mean the same span.
+    /// A time already here (or gone by) is "now": the worker is about to pick
+    /// it up, and "in 0m" would be a countdown to nothing.
+    static func relUntil(_ then: Date, now: Date = Date()) -> String {
+        let span = relAge(now, now: then)
+        return span == "now" ? "now" : "in \(span)"
+    }
+
     /// Human byte size for attachment cards, e.g. "812 B", "34 KB", "2.4 MB".
     static func humanSize(_ bytes: Int?) -> String {
         guard let bytes, bytes >= 0 else { return "—" }

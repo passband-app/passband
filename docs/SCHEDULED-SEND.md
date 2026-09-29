@@ -78,9 +78,14 @@ Gmail call, because the user is present to answer:
 2. `send_at` must be in the future, else 400 (a past date is a client bug,
    same rule as reminders). Also `send_at` at most 1 year out.
 3. Every `attachment_ids` entry resolves, else 400 `rejected:attachment_missing`.
-4. The outbound guard runs on `body` NOW. A verdict is a 422 exactly as on a
-   send; `override_guard: true` persists in `request` and the fire path does
-   NOT re-scan (content is frozen, the answer would be the same).
+4. The outbound guard runs NOW. A verdict is a 422 exactly as on a send;
+   `override_guard: true` persists in `request` and the fire path does NOT
+   re-scan (content is frozen, the answer would be the same). For a FORWARD
+   the scan today also covers the original message, which `forward_send`
+   fetches on the write token mid-send; so the schedule handler fetches the
+   original itself, unions its kinds with the note's and the attachments',
+   and judges once here. The worker then calls `perform_send` with
+   `SendGuard::Settled` for every kind of send.
 5. `write_client` must exist, else 403 (no point queueing a mail that can
    never go out).
 6. Mint `message_id_header`.
@@ -95,6 +100,16 @@ Response `201 {"id", "send_at"}`.
 
 Group `individual` fan-out is refused for v1 (`400 rejected:group_fanout`);
 `to`/`bcc` mode groups are fine because the composer already expanded them.
+
+Step 1 of the build (a01c6f3) fixed the shapes the handler and worker use:
+`validate_send(&SendBody) -> Result<(), SendFailure>` is pure (the caller
+audits), `perform_send(state, body, attachments, SendGuard, message_id)
+-> Result<SendOutcome, SendFailure>`, and `SendFailure.reason` is the audit
+detail string (`failed:gmail`, `rejected:no_write_credential`, ...), which
+is exactly what `last_error` stores. Fan-out keeps answering 200 (the doc
+comment on `group_id` saying 202 was never true). `find_by_rfc822_msgid`
+passes `includeSpamTrash=true` so a mail the user trashed inside the lease
+window still counts as sent.
 
 ## 4. Firing (the worker)
 

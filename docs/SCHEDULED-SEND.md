@@ -8,14 +8,18 @@ Locked 2026-09-26. §2 through §5 are the contract the build waves carry.
 
 ## 1. Why not drafts
 
-A draft is a mutable autosave of words. A scheduled send is a frozen,
-guard-checked, attachment-claimed send REQUEST with a state machine
-(scheduled, sending, sent, failed) and a lease. Drafts store none of group,
-tracker, reply-all, or override, and the branch `drafts` (in flight
-2026-09-26, see §10) is widening them into a many-rows picker, which makes
-them even less of a queue: nothing in a draft says "the user is done with
-this." So it is its own table, and scheduling CONSUMES the draft it came
-from (§3 step 7). Drafts stay the composer's autosave.
+Drafts (PR #289) are now many per account, addressed by id, with one per
+reply target and one per forwarded message. So "one draft per account" is no
+longer the reason. The reason is the KEYED UPSERT: `PUT /client/drafts` edits
+a row by its key (`Reply(parent)`, `Forward(parent)`, or "newest keyless row"
+for an old app), and DraftSaver autosaves through those keys. A scheduled
+reply parked as a draft row would be silently rewritten the next time the
+user opened a reply to the same message, and an older app's key-less PUT
+could overwrite a scheduled new message. A frozen, guard-checked request with
+a lease and a state machine must be unreachable by any autosave path, so it
+is its own table. Scheduling CONSUMES the draft it came from (§3 step 7);
+cancelling hands the request back to the composer, whose next autosave makes
+it a draft again.
 
 ## 2. Data
 
@@ -51,7 +55,11 @@ deserializes to expose `to`, `subject`, `reply_to_message_id`,
 ### `outbound_attachments.scheduled_send_id`
 
 New nullable column (migrate.rs, `add_column_if_missing`), a second claim
-beside `draft_id`. The 24h unclaimed sweep skips rows with either claim.
+beside `draft_id`. PR #289 spelled the claim predicate once as
+`outbound::CLAIMED` (`draft_id IS NOT NULL`); this becomes
+`draft_id IS NOT NULL OR scheduled_send_id IS NOT NULL`, and `sweep` gains a
+second orphan arm (rows whose `scheduled_send_id` names no row). The comment
+on `CLAIMED` already says exactly this.
 Scheduling moves the claim from the draft to the row; the send consumes the
 files exactly as today (`discard_sent_attachments`); cancel releases them
 back to unclaimed (they then follow the composer's normal lifetime because
@@ -76,9 +84,11 @@ Gmail call, because the user is present to answer:
 5. `write_client` must exist, else 403 (no point queueing a mail that can
    never go out).
 6. Mint `message_id_header`.
-7. Insert the row `scheduled`; move attachment claims; delete `draft_id` if
-   given (the draft is consumed by scheduling, not by sending: from here the
-   row IS the composition).
+7. Insert the row `scheduled`; move attachment claims; `delete_draft` by
+   `draft_id` if given (the draft is consumed by scheduling, not by sending:
+   from here the row IS the composition). The client passes
+   `DraftSaver.currentDraftId(of:)`, not `state.draftId`: PR #289 resolves a
+   late create's id into `resolved`, and only that accessor sees it.
 8. Audit `schedule` with ids only.
 
 Response `201 {"id", "send_at"}`.
@@ -128,8 +138,8 @@ follow-up if it ever bites.
 
 | route | does |
 |---|---|
-| `GET /client/scheduled` | rows in `scheduled`/`sending`/`failed`, oldest `send_at` first, with `to`, `subject`, `reply_to_message_id`, `forward_of_message_id`, `send_at`, `state`, `last_error`, `attempts`, `attachment_count` |
-| `DELETE /client/scheduled/{id}` | `scheduled` or `failed` → `cancelled`, releases attachment claims, returns the full `request` so the client can reopen it in the composer. A `sending` row is 409 (it is in Gmail's hands) |
+| `GET /client/scheduled` | rows in `scheduled`/`sending`/`failed`, oldest `send_at` first, with `to`, `subject`, `reply_to_message_id`, `forward_of_message_id`, `send_at`, `state`, `last_error`, `attempts`, `attachments`, plus the parent context PR #289's `DRAFT_SELECT` LEFT JOIN computes for the picker (`thread_id`, `parent_subject`, `parent_from`, `parent_from_addr`). Lift that join into a shared helper rather than pasting it |
+| `DELETE /client/scheduled/{id}` | `scheduled` or `failed` → `cancelled`, releases attachment claims back to unclaimed, returns the full `request` so the client can reopen it in the composer. A `sending` row is 409 (it is in Gmail's hands). No server-side draft is created: the composer's next autosave does that through the normal keyed/by-id path, and re-claims the files (well inside the 24h unclaimed TTL) |
 | `POST /client/scheduled/{id}/now` | `scheduled`/`failed` → `send_at = now`; the next tick sends it. 202 |
 | `/client/stats` | gains `scheduled_send: true`. The client hides every schedule door without it (same trap as `compose_attachments`: an old daemon must not 404 a click) |
 
@@ -179,12 +189,21 @@ in `Palette.danger` with the reason. Keys on a scheduled row:
 
 - Enter / click: pull it back into the composer (DELETE + open with the
   request and time). The row disappears; ⌘↵ in the composer reschedules.
+  Opening reuses PR #289's `openDraft`/`fill(_:from:)` machinery (a reply
+  needs its thread open, a forward its original; both are handled there),
+  fed from the returned request instead of a `DraftView`.
 - `s` (or the row's "send now" verb): `POST .../now`.
 - `x` / delete: cancel outright, toast with undo (undo = re-POST the
-  returned request).
+  returned request). Same shape as PR #289's `pendingDraftDeletes` +
+  `keepDraft` + `fireDraftDelete`: generalize that trio over the two kinds
+  rather than growing a second copy.
 
 Rows are `ScheduledRow`, a sibling of `SentRow`; j/k walk both groups as one
 list. The Sent refresh fetches both listings in one `refreshSent`.
+`ScheduledRow` shows the same who / subject / snippet / file-count line the
+picker's `DraftRow` shows; extract those sub-views into one summary view
+both rows use, and only the trailing cell differs (fire time and state here,
+edit time there).
 
 ## 7. Daemon refactor that comes first
 
@@ -224,28 +243,35 @@ request.
 3. **Follow-up PR, immediately after**: undo-send moves onto the outbox.
    `sendWithUndo` becomes `POST /client/scheduled` with `send_at = now + 5s`
    and undo = DELETE + `putBack`. Kills the memory-only `heldSends`, and
-   with it the Cmd-Q-inside-the-hold silent drop, `parkHeldSends`, and the
-   epoch guard. The worker tick would need to drop to ~2s for the hold to
+   with it the Cmd-Q-inside-the-hold silent drop, `parkHeldSends` (both the
+   account-switch and the `quitting:` arm), PR #289's
+   `applicationShouldTerminate` wait (marked TEMPORARY there for exactly
+   this), `isHeld`/`holdsDraft`, `firingDraftIds`, and the epoch guard. The worker tick would need to drop to ~2s for the hold to
    feel like 5s; or the client POSTs with `now` and the row carries a
    `not_before` the worker honors. Decide then.
 4. Later: iOS long-press on Send, a very-late cap, daemon roll + release
    note (the stats gate makes either ship order safe).
 
-## 10. Concurrent work: branch `drafts`
+## 10. What PR #289 (drafts) left for this
 
-Another session is building the drafts feature on branch `drafts`
-(worktree `.claude/worktrees/drafts`, same base `f3c0be6`). Three overlaps:
+Reviewed 2026-09-28 against `origin/drafts`. The nudges landed: Cancel is
+gone from the footer, the picker sits in the header with the "how a mail
+goes out" reasoning written down, the claim predicate is one constant, and
+quit-parking is a thin `parkHeldSends(quitting:)` marked temporary. Drafts
+merges first; this branch (docs only so far) rebases.
 
-- **Same footer.** Drafts adds a picker button IN the composer. This branch
-  drops Cancel and adds the clock on the left. Whichever merges second
-  rebases through `ComposePane.swift`'s footer. Design-wise the left
-  cluster would read attach / track / clock / drafts. The drafts picker is
-  "which mail is this," not "how it goes out," so it arguably belongs in the
-  header beside the kind label instead. Not decided.
-- **Same bug, two fixes.** Drafts parks held sends as drafts on quit. §9
-  step 3 moves the hold into the outbox so the mail still SENDS. Both can
-  land; the outbox one supersedes the park. Once step 3 ships, the
-  quit-parking path becomes dead code and should come out.
-- **Drafts schema moves.** Drafts drops `idx_drafts_new` and adds
-  `forward_of_message_id`. Nothing here depends on either; §3 step 7 deletes
-  the consumed draft by id whatever its key shape.
+Reused directly:
+
+- daemon: `CLAIMED` + `sweep` (one edit each), `delete_draft` by id, the
+  `DRAFT_SELECT` parent-context join, the `drafts_v2` stats-gate shape,
+  `no_store()` on every response.
+- client: `openDraft`/`fill(_:from:)` to pull a request back into the
+  composer, the `pendingDraftDeletes` undo trio, `DraftRow`'s summary line,
+  `DraftSaver.currentDraftId(of:)`, `awaitVerdict` for the stats gate.
+
+Not touched by drafts, still owed here: the `perform_send` split, the
+outbox table and worker, Message-ID minting and the `rfc822msgid` lookup,
+the time palette (from `RemindTimes`), the Sent pinned group.
+
+Footer conflict is now trivial: drafts removed the Cancel button; this adds
+the clock on the left. Different hunks.

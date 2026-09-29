@@ -12,18 +12,24 @@
 // retype an address they already got right:
 //
 // - DRAG THE PILL onto another field. The direct one: the thing on screen is
-//   the person, and you put them where they go. The WELL is the target, not
-//   the pills in it, because an empty Bcc has nothing to aim at and that is
-//   exactly the field people drag to. On the Mac the drag is an AppKit view's
-//   (`PillDragHandle`), for a reason `Glass.WindowConfigurator` explains.
-// - Click the pill and take the MOVE BAR: `→ cc`, `→ bcc`, `remove`. Selection
-//   lands on PRESS, so the bar is already open under a hand that has started
-//   to drag.
-// - Right-click it (long-press on a phone) for the same verbs in a menu.
+//   the person, and you put them where they go. The pill itself travels — the
+//   one in the row hides while it is in the air — and the WELL is the target,
+//   not the pills in it, because an empty Bcc has nothing to aim at and that
+//   is exactly the field people drag to; every field unfolds for the duration
+//   so it is there to aim at. On the Mac both ends of the drag are AppKit
+//   views (`PillDragHandle`, `PillDropWell`), for a reason
+//   `Glass.WindowConfigurator` explains.
+// - Right-click it (long-press on a phone) for the verbs in a menu.
+// - Click it and press Backspace to remove it: a click selects the pill, the
+//   way the second-stage backspace does.
 //
-// Every door ends with the address in exactly one header. The bar and the menu
-// go through `Recipients.move`; a drop writes this field's list back through
-// its binding, and the owner's `Recipients.set` takes the newcomer out of the
+// There used to be a MOVE BAR under a selected pill offering the same verbs as
+// the menu. It went when the drag arrived: three doors to one act is findable,
+// a row of verbs under every click is furniture.
+//
+// Every door ends with the address in exactly one header. The menu goes
+// through `Recipients.move`; a drop writes this field's list back through its
+// binding, and the owner's `Recipients.set` takes the newcomer out of the
 // other two. An address left in To while the sender believes it went out blind
 // is the one outcome worth writing a whole type to prevent.
 //
@@ -32,8 +38,8 @@
 // what in the payload is an address; the rest is refused rather than pilled.
 //
 // The surfaces that hold ONE list — the share sheet, a group's membership — pass
-// no `moves`: no bar, no menu, no drag handle, because there is nowhere to move
-// anybody to. They still take a drop, since an address can arrive from outside.
+// no `moves`: no menu, no drag handle, because there is nowhere to move anybody
+// to. They still take a drop, since an address can arrive from outside.
 //
 // Autocomplete rides the fragment: every keystroke asks the daemon for
 // Sent-derived contacts — people the user has actually written to — and the
@@ -69,6 +75,10 @@ struct RecipientMoves {
     /// Is this address already on the message ANYWHERE? Autocomplete asks, so it
     /// never re-offers somebody who is currently blind-copied.
     let addressed: (String) -> Bool
+    /// A pill has been picked up (`true`) or let go (`false`). The owner
+    /// unfolds every field for the duration, so the drag has somewhere to land,
+    /// and folds the empty ones back when it ends.
+    var dragging: (Bool) -> Void = { _ in }
 }
 
 struct RecipientField<F: Hashable>: View {
@@ -138,9 +148,7 @@ struct RecipientField<F: Hashable>: View {
                             .opacity(dropTargeted ? 1 : 0)
                     )
                     .animation(.easeOut(duration: 0.12), value: dropTargeted)
-                    .dropDestination(for: String.self) { items, _ in
-                        accept(dropped: items)
-                    } isTargeted: { dropTargeted = $0 }
+                    .modifier(dropWell)
             } else {
                 VStack(alignment: .leading, spacing: 5) {
                     HStack(spacing: 8) {
@@ -155,17 +163,8 @@ struct RecipientField<F: Hashable>: View {
                                 .strokeBorder(Palette.accent, lineWidth: dropTargeted ? 1.5 : 0)
                         )
                         .animation(.easeOut(duration: 0.12), value: dropTargeted)
-                        .dropDestination(for: String.self) { items, _ in
-                            accept(dropped: items)
-                        } isTargeted: { dropTargeted = $0 }
+                        .modifier(dropWell)
                 }
-            }
-
-            // The verbs for the pill under the caret. Only with one selected, so
-            // an ordinary addressing pass never sees them.
-            if let moves, let selectedPill, let addr = pills[safe: selectedPill] {
-                moveBar(addr, moves)
-                    .modifier(InlineFieldTuck(active: inline))
             }
 
             if suggestionCount > 0 {
@@ -222,33 +221,17 @@ struct RecipientField<F: Hashable>: View {
         }
     }
 
-    /// The selected pill's verbs, in the field's own micro voice. The two
-    /// destinations are the OTHER two headers — moving a Cc to Cc is not an
-    /// offer worth making.
-    private func moveBar(_ addr: String, _ moves: RecipientMoves) -> some View {
-        HStack(spacing: 6) {
-            ForEach(RecipientSlot.allCases.filter { $0 != moves.slot }, id: \.self) { destination in
-                Button("→ \(destination.label)") {
-                    selectedPill = nil
-                    moves.move(addr, destination)
-                }
-                .buttonStyle(.plain)
-                .font(Typo.micro)
-                .foregroundStyle(Palette.accent)
-                .pointingHand()
-            }
-            Text("·").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
-            Button("remove") {
-                selectedPill = nil
-                moves.remove(addr)
-            }
-            .buttonStyle(.plain)
-            .font(Typo.micro)
-            .foregroundStyle(Palette.danger)
-            .pointingHand()
-            Spacer(minLength: 0)
-        }
-        .padding(.leading, 2)
+    /// This field as a drop target: lit while a drag hovers, and fed whatever
+    /// lands. What takes the drop is platform-specific (see `RecipientDropWell`)
+    /// but what happens to it is not: `accept(dropped:)`.
+    private var dropWell: RecipientDropWell {
+        RecipientDropWell(
+            targeted: $dropTargeted,
+            accepts: { payload in
+                let here = Set(pills.map(Recipients.key))
+                return Recipients.dropped(payload).contains { !here.contains(Recipients.key($0)) }
+            },
+            drop: { accept(dropped: $0) })
     }
 
     /// Every keystroke and paste lands here. Commas ALWAYS commit the token
@@ -581,18 +564,20 @@ private struct RecipientPill: View {
     private var unresolved: Bool { group == nil && GroupToken.isToken(addr) }
 
     @Environment(\.colorScheme) private var colorScheme
+    /// This pill is the one on the cursor. The copy in the row hides for the
+    /// duration, so what the sender sees is the pill itself moving, not a
+    /// ghost of it leaving one behind.
+    @State private var inFlight = false
 
     var body: some View {
         let pill = chrome(
             Button(action: onTap) { face }
-                // PRESS, not release. A pill looks draggable — a small object
-                // with a person's name on it — and dragging is the first thing
-                // people try. Where it can drag (below), the move bar is
-                // already open under the hand that started to; where it cannot,
-                // the reach that matters is the one that catches somebody
-                // mid-attempt.
+                // PRESS, not release: a click selects the pill at once (the
+                // second-stage backspace's target), and a press that turns
+                // into a drag has already done so.
                 .buttonStyle(PressToSelect(onPress: onTap))
         )
+        .opacity(inFlight ? 0 : 1)
         .pointingHand()
         .help(unresolved ? "this group could not be found; pick it again" : addr)
         // The same verbs the move bar offers, where a right-click (long-press on
@@ -622,9 +607,20 @@ private struct RecipientPill: View {
                 // view that owns the left mouse is the one thing AppKit
                 // consults on that question.
                 pill.overlay(
-                    PillDragHandle(addr: addr, onPress: onTap) {
+                    PillDragHandle(
+                        addr: addr, onPress: onTap,
+                        onDrag: { active in
+                            inFlight = active
+                            moves?.dragging(active)
+                        }
+                    ) {
+                        // The pill as it looks right now, on an opaque base:
+                        // its own fill is a tint over the well, and a tint
+                        // alone over the page reads as a ghost.
                         let renderer = ImageRenderer(
-                            content: chrome(face).environment(\.colorScheme, colorScheme))
+                            content: chrome(face)
+                                .background(Capsule().fill(Palette.canvas))
+                                .environment(\.colorScheme, colorScheme))
                         renderer.scale = NSScreen.main?.backingScaleFactor ?? 2
                         return renderer.nsImage
                     })
@@ -737,6 +733,8 @@ private struct PressToSelect: ButtonStyle {
     private struct PillDragHandle: NSViewRepresentable {
         let addr: String
         let onPress: () -> Void
+        /// The session starting (`true`) and ending (`false`), however it ends.
+        let onDrag: (Bool) -> Void
         /// The drag image, rendered on demand: the pill's look at the moment it
         /// is picked up, selection ring and all.
         let preview: @MainActor () -> NSImage?
@@ -752,6 +750,7 @@ private struct PressToSelect: ButtonStyle {
         private func update(_ view: PillHandleView) {
             view.addr = addr
             view.onPress = onPress
+            view.onDrag = onDrag
             view.preview = preview
         }
     }
@@ -759,6 +758,7 @@ private struct PressToSelect: ButtonStyle {
     final class PillHandleView: NSView, NSDraggingSource {
         var addr = ""
         var onPress: () -> Void = {}
+        var onDrag: (Bool) -> Void = { _ in }
         var preview: @MainActor () -> NSImage? = { nil }
         /// Where the mouse went down, while it is still down and has not yet
         /// travelled far enough to be a drag.
@@ -771,19 +771,28 @@ private struct PressToSelect: ButtonStyle {
         /// the way it is for every other control in the shell.
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
-        /// Claim the left button and nothing else. AppKit hit-tests with the
-        /// event being dispatched as `NSApp.currentEvent`, which is what lets a
-        /// view answer differently for a right-click than for a left one.
+        /// Claim the mouse, except when it is plainly not ours. AppKit hit-tests
+        /// with the event being dispatched as `NSApp.currentEvent`, which is
+        /// what lets a view answer differently for a right-click than for a
+        /// left one: right-click and control-click go to the SwiftUI context
+        /// menu under us, hover to its tooltip and pointing hand. Everything
+        /// else — including a hit-test with no current event to read — is
+        /// claimed, because claiming is the whole job.
         override func hitTest(_ point: NSPoint) -> NSView? {
-            guard let event = NSApp.currentEvent else { return nil }
-            switch event.type {
-            case .leftMouseDown, .leftMouseDragged, .leftMouseUp:
-                // Control-click is a context-menu request, and the menu is
-                // SwiftUI's.
-                return event.modifierFlags.contains(.control) ? nil : super.hitTest(point)
-            default:
-                return nil
+            let event = NSApp.currentEvent
+            var ours = true
+            if let event {
+                switch event.type {
+                case .rightMouseDown, .rightMouseUp, .rightMouseDragged,
+                    .mouseMoved, .mouseEntered, .mouseExited, .cursorUpdate:
+                    ours = false
+                case .leftMouseDown where event.modifierFlags.contains(.control):
+                    ours = false
+                default:
+                    break
+                }
             }
+            return ours ? super.hitTest(point) : nil
         }
 
         override func mouseDown(with event: NSEvent) {
@@ -797,6 +806,7 @@ private struct PressToSelect: ButtonStyle {
             // A few points of slop, so a slightly unsteady click stays a click.
             guard hypot(now.x - start.x, now.y - start.y) >= 4 else { return }
             pressedAt = nil
+            onDrag(true)
             // Plain text, the most portable thing an address can be: the wells
             // read it as `String`, and so does any other app.
             let item = NSDraggingItem(pasteboardWriter: addr as NSString)
@@ -807,6 +817,15 @@ private struct PressToSelect: ButtonStyle {
 
         override func mouseUp(with event: NSEvent) { pressedAt = nil }
 
+        /// Landed or not: the row's copy of the pill comes back (to be removed
+        /// by the source field's re-parse a moment later, if it landed), and
+        /// the owner folds the empty fields.
+        func draggingSession(
+            _ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation
+        ) {
+            onDrag(false)
+        }
+
         /// Within the app a drop is a MOVE — the destination field's write takes
         /// the person out of the source — and either verb is offered so the
         /// well's SwiftUI drop can accept under whichever it asks for. Into
@@ -815,6 +834,117 @@ private struct PressToSelect: ButtonStyle {
             _ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext
         ) -> NSDragOperation {
             context == .withinApplication ? [.move, .copy] : .copy
+        }
+    }
+#endif
+
+// MARK: - drop well
+
+/// A field's surface as a drop target. One name across platforms so the field
+/// body reads the same; the mechanics differ underneath.
+///
+/// On the Mac it is an AppKit view (`PillDropWell`) BEHIND the surface, for the
+/// same reason the drag source is one: the pill on the cursor is an
+/// `NSDraggingSession` carrying plain text, and an `NSView` registered for that
+/// type is the destination AppKit finds for it, deepest-registered-view-wins,
+/// with no SwiftUI translation layer between the two ends to fail quietly.
+/// Behind rather than over, so a click on a pill or in the caret's space still
+/// reaches them. Elsewhere it is SwiftUI's own `dropDestination`.
+///
+/// `accepts` is asked on every hover, not only at the drop: a well that will not
+/// take the payload shows the refusing cursor as the pill crosses it, instead of
+/// lighting up and then doing nothing.
+private struct RecipientDropWell: ViewModifier {
+    @Binding var targeted: Bool
+    /// Would this payload change anything here? Decides the cursor: a pill
+    /// dragged over its own field, or prose with nobody in it, is refused up
+    /// front rather than accepted and then ignored.
+    let accepts: (String) -> Bool
+    let drop: ([String]) -> Bool
+
+    func body(content: Content) -> some View {
+        #if os(macOS)
+            content.background(PillDropWell(targeted: $targeted, accepts: accepts, drop: drop))
+        #else
+            content.dropDestination(for: String.self) { items, _ in
+                drop(items)
+            } isTargeted: { targeted = $0 }
+        #endif
+    }
+}
+
+#if os(macOS)
+    private struct PillDropWell: NSViewRepresentable {
+        @Binding var targeted: Bool
+        let accepts: (String) -> Bool
+        let drop: ([String]) -> Bool
+
+        func makeNSView(context: Context) -> PillDropWellView {
+            let view = PillDropWellView()
+            view.registerForDraggedTypes([.string])
+            update(view)
+            return view
+        }
+
+        func updateNSView(_ view: PillDropWellView, context: Context) { update(view) }
+
+        private func update(_ view: PillDropWellView) {
+            view.onTargeted = { [targeted = $targeted] in
+                if targeted.wrappedValue != $0 { targeted.wrappedValue = $0 }
+            }
+            view.accepts = accepts
+            view.drop = drop
+        }
+    }
+
+    final class PillDropWellView: NSView {
+        var onTargeted: (Bool) -> Void = { _ in }
+        var accepts: (String) -> Bool = { _ in false }
+        var drop: ([String]) -> Bool = { _ in false }
+
+        /// Not a window handle. This view sits behind the well's padding, and
+        /// SwiftUI routes a click on the SwiftUI content over it (pills, caret
+        /// space, label) past it; a click on the bare padding reaches it, and
+        /// must not pick up the window. It is deliberately NOT hidden from
+        /// `hitTest` altogether: AppKit finds a drag's destination by walking
+        /// the view tree for the deepest view registered for the drag's types,
+        /// and a view that hides from hit-testing is a view one cannot be sure
+        /// that walk still sees.
+        override var mouseDownCanMoveWindow: Bool { false }
+
+        private func payload(_ sender: NSDraggingInfo) -> String? {
+            sender.draggingPasteboard.string(forType: .string)
+        }
+
+        /// The verb the source offered that we mean: a pill from the next field
+        /// over is MOVED (its field lets go of it when we write); text from
+        /// another app is copied, there being nothing of ours to let go of.
+        private func operation(for sender: NSDraggingInfo) -> NSDragOperation {
+            guard let text = payload(sender), accepts(text) else { return [] }
+            let offered = sender.draggingSourceOperationMask
+            if offered.contains(.move) { return .move }
+            if offered.contains(.copy) { return .copy }
+            return offered.contains(.generic) ? .generic : []
+        }
+
+        override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+            let op = operation(for: sender)
+            onTargeted(!op.isEmpty)
+            return op
+        }
+
+        override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+            operation(for: sender)
+        }
+
+        override func draggingExited(_ sender: NSDraggingInfo?) { onTargeted(false) }
+
+        override func draggingEnded(_ sender: NSDraggingInfo) { onTargeted(false) }
+
+        override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+            onTargeted(false)
+            guard let text = payload(sender) else { return false }
+            return drop([text])
         }
     }
 #endif
@@ -956,7 +1086,8 @@ struct RecipientFields<F: Hashable>: View {
                             recipients = next
                             focus.wrappedValue = field(slot)
                         },
-                        addressed: { recipients.slot(of: $0) != nil }),
+                        addressed: { recipients.slot(of: $0) != nil },
+                        dragging: { active in dragging(active) }),
                     accessory: slot == .to ? AnyView(toggles) : nil,
                     inline: inline)
             }
@@ -994,6 +1125,27 @@ struct RecipientFields<F: Hashable>: View {
                     // beside them until the pointer says otherwise.
                     .pointingHand()
                     .accessibilityLabel(shown(slot) ? "hide \(slot.label)" : "add \(slot.label)")
+            }
+        }
+    }
+
+    /// A PILL IN THE AIR UNFOLDS THE WHOLE HEADER. The fields people drag TO are
+    /// the folded ones — nobody picks up a pill to drop it back where it was —
+    /// so cc and bcc open the moment a drag begins, empty or not, and stay open
+    /// until it ends. Then whichever are empty fold back, the drop having landed
+    /// or not; the header returns to saying only what the message carries.
+    ///
+    /// The fold waits a turn: a drop writes through the destination's binding
+    /// during the drop, and the session's end arrives right behind it, before
+    /// SwiftUI has necessarily committed the write we are about to read.
+    private func dragging(_ active: Bool) {
+        if active {
+            withAnimation(.easeOut(duration: 0.15)) { revealed.formUnion(Self.optional) }
+        } else {
+            DispatchQueue.main.async {
+                withAnimation(.easeOut(duration: 0.15)) {
+                    revealed = revealed.filter { !recipients[$0].trimmed.isEmpty }
+                }
             }
         }
     }

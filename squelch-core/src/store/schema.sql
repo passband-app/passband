@@ -26,14 +26,28 @@ CREATE TABLE IF NOT EXISTS messages (
     -- storage is fine, serving is guarded.
     body_html   TEXT,
     is_sent     INTEGER NOT NULL DEFAULT 0,
-    -- DISPLAY RECIPIENTS of mail the user SENT: the To + Cc + Bcc mailboxes as
-    -- the headers spelled them, comma-joined `Name <addr>` (bare addr with no
-    -- display name). NULL on received mail — a message the user did not send
-    -- has no "to" worth showing — and NULL on sent rows ingested before this
-    -- column existed, which the one-shot recipients backfill fills in. Empty
-    -- string means "looked, and the headers named nobody". Consumed ONLY by the
-    -- human door's sent listing; the agent door has no sent surface at all.
+    -- DISPLAY RECIPIENTS, one column per header: the mailboxes as the headers
+    -- spelled them, comma-joined `Name <addr>` (bare addr with no display
+    -- name). Empty string means "looked, and the headers named nobody"; NULL
+    -- means NOBODY HAS LOOKED YET, which is what the one-shot recipients
+    -- backfill queue reads (`cc_addrs IS NULL`, the column every filled row
+    -- gains together with the other two).
+    --
+    -- ON EVERY MESSAGE, not just sent mail: a reader that shows who a message
+    -- was from and not who else it went to cannot tell a note from a broadcast,
+    -- and "was I the only one asked?" is the question a thread is opened with.
+    -- Both are served through the human door only — the agent door's
+    -- `SanitizedMessage` carries no recipients at all (docs/SECURITY.md), so a
+    -- display name written by a stranger never reaches /mcp.
     to_addrs    TEXT,
+    cc_addrs    TEXT,
+    -- BCC IS SENT MAIL'S ALONE, and structurally so: `set_message_recipients`
+    -- writes NULL here for anything with `is_sent = 0`, whatever a caller
+    -- passes. Gmail strips the header on delivery and keeps it on the sender's
+    -- own copy, so on the user's own mail this is the blind list they chose; on
+    -- received mail a `Bcc:` header is at best the sender's leak and at worst
+    -- forged, and in neither case is it "who this went to".
+    bcc_addrs   TEXT,
     -- Raw `List-Unsubscribe` header value, NULL when absent. Consumed ONLY by
     -- the human door's unsubscribe endpoint.
     list_unsubscribe TEXT,

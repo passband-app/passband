@@ -103,6 +103,38 @@ struct ThreadViewer: View {
 
     enum ConfirmMode: Equatable { case ask, noLink }
 
+    /// SEEDED FROM THE CACHE, SYNCHRONOUSLY. The prefetch machinery exists so
+    /// that a click renders without a round trip — and it did, except for one
+    /// frame: the cache was only consulted in `.task`, which runs AFTER the
+    /// first render, so every open painted "loading thread…" once and then
+    /// swapped in the mail. On a done+next that frame was also the one the
+    /// walk-in animation started from. Seeding the state here means the first
+    /// frame after the click is the thread.
+    ///
+    /// `load()` still runs and still calls `adopt` for the same cached view:
+    /// the store-side bookkeeping (consuming the focus request, publishing
+    /// the summary) and the minimap's marks (which read the height memory)
+    /// need the environment and observation, which an initializer must not
+    /// touch. Everything `adopt` derives is memoized, so that pass is cheap,
+    /// and the rail landing a frame after the mail is not a flash anybody
+    /// sees.
+    ///
+    /// NOTHING OBSERVABLE IS READ HERE. An initializer runs inside the
+    /// parent's body evaluation, and the parent is the window shell; the
+    /// seed is a plain, untracked value the store decided at `openThread`
+    /// (see AppStore.ReaderSeed) for exactly that reason. A direct open has
+    /// no seed and arrives through `focusedMessageView`, as before.
+    init(threadId: String) {
+        self.threadId = threadId
+        let seed = MainActor.assumeIsolated { AppStore.shared.readerSeed }
+        guard let seed, seed.threadId == threadId else { return }
+        _thread = State(initialValue: seed.view)
+        _loading = State(initialValue: false)
+        _style = State(initialValue: seed.style)
+        _styledFor = State(initialValue: threadId)
+        _index = State(initialValue: seed.index)
+    }
+
     /// What a measuring pass is FOR. Any of the three changing means the
     /// heights on file answer a question nobody is asking any more: another
     /// thread, another message in this one, another column width.
@@ -393,7 +425,7 @@ struct ThreadViewer: View {
                 // RootView flies the whole reader, and this must not fly it twice.
                 .offset(flight.offset(in: CGSize(
                     width: cardWidth + Self.stackGap, height: reader.size.height)))
-                .scaleEffect(flight.scale)
+                // No scale on a card full of web frames — see RootView.
                 .opacity(flight.opacity)
                 .background(alignment: .topLeading) {
                     if stacked, let next = store.nextQueuedThread {
@@ -692,7 +724,15 @@ struct ThreadViewer: View {
                                 MessageCard(
                                     message: m, style: style, position: i,
                                     selected: i == index, ruled: i > 0,
-                                    opens: opens[m.id] ?? []
+                                    opens: opens[m.id] ?? [],
+                                    me: store.stats?.account_email,
+                                    // The message before this one IN THE THREAD,
+                                    // which is the order this stack is already in
+                                    // (oldest first). The first message has none,
+                                    // and gets no marks: "everyone here is new"
+                                    // is a claim, and nothing precedes it.
+                                    previousRecipients: i > 0
+                                        ? messages[i - 1].audience : nil
                                 ) {
                                     index = i
                                 }
@@ -1125,13 +1165,27 @@ struct ThreadViewer: View {
     /// bubble is capped at its own narrower measure and inset on both. The
     /// measuring pass has to render at exactly this or every height it takes is
     /// an answer to a different question.
-    private var bodyWidth: CGFloat {
-        guard columnWidth > 0 else { return 0 }
+    private var bodyWidth: CGFloat { Self.bodyWidth(column: columnWidth, style: style) }
+
+    /// The width a body lays out at inside a column of this width.
+    static func bodyWidth(column: CGFloat, style: ThreadStyle) -> CGFloat {
+        guard column > 0 else { return 0 }
         switch style {
-        case .classic: return max(0, columnWidth - MessageCard.bodyInset)
+        case .classic: return max(0, column - MessageCard.bodyInset)
         case .bubbles:
-            return max(0, min(columnWidth, Self.bubbleWidth) - MessageCard.bodyInset * 2)
+            return max(0, min(column, Self.bubbleWidth) - MessageCard.bodyInset * 2)
         }
+    }
+
+    /// The body width the NEXT reader will lay out at, for a frame rendered
+    /// before there is a reader: the column the last one declared, or — before
+    /// any has — the capped measure, which is what a window wide enough to
+    /// read in gives. A wrong guess is not a wrong render: an adopted frame
+    /// re-reports at the width it is mounted at (`__passbandResend`).
+    static func expectedBodyWidth(style: ThreadStyle) -> CGFloat {
+        let declared = FrameHeights.shared.width
+        let column = declared > 0 ? declared : Self.columnWidth - Self.columnPadding * 2
+        return bodyWidth(column: column, style: style)
     }
 
     /// The mail's measure. The dismissible gutter is defined as the complement
@@ -1411,11 +1465,7 @@ struct ThreadViewer: View {
     }
 
     /// Includes single-email Reading cards and Reading mail opened elsewhere.
-    private var isReadingMail: Bool {
-        store.readingMail || store.zones.reading.contains { sender in
-            sender.items.contains { $0.thread_id == threadId }
-        }
-    }
+    private var isReadingMail: Bool { Self.isReadingMail(threadId, store) }
 
     /// `b` walks the radio: same choice, keyboard spelling.
     private func toggleStyle() { chooseStyle(style.flipped) }
@@ -1458,9 +1508,19 @@ struct ThreadViewer: View {
     /// because the caller is `adopt`, which is holding the thread it is about to
     /// install and has not installed it yet.
     private func resolvedStyle(_ messages: [ClientMessage]) -> ThreadStyle {
-        if isReadingMail { return .classic }
-        if let pinned = styles.style(threadId) { return pinned }
-        if let fixed = prefs.threadStyle.fixed { return fixed }
+        Self.resolveStyle(threadId: threadId, messages: messages, readingMail: isReadingMail)
+    }
+
+    /// The same answer, askable WITHOUT a mounted reader: the initializer
+    /// seeds from it, and the frame pre-renderer (FramePrewarmer) has to draw
+    /// the newest message under the style the reader will choose, or its
+    /// frame is filed under a key the reader never asks for.
+    static func resolveStyle(
+        threadId: String, messages: [ClientMessage], readingMail: Bool
+    ) -> ThreadStyle {
+        if readingMail { return .classic }
+        if let pinned = ThreadStyleLedger.shared.style(threadId) { return pinned }
+        if let fixed = Prefs.shared.threadStyle.fixed { return fixed }
         // The participation veto, asked BEFORE the samples exist: it reads
         // `is_sent` alone, and the thread that fails it — which is most mail —
         // should not pay for quote-splitting and markup-scanning every body it
@@ -1469,12 +1529,21 @@ struct ThreadViewer: View {
         return ThreadStyle.automatic(messages.map(sample))
     }
 
+    /// Whether this thread is Reading-zone mail (drawn full width, never as
+    /// chat), asked of the store rather than of a view's environment so the
+    /// initializer and the pre-renderer can ask too.
+    static func isReadingMail(_ threadId: String, _ store: AppStore) -> Bool {
+        store.readingMail || store.zones.reading.contains { sender in
+            sender.items.contains { $0.thread_id == threadId }
+        }
+    }
+
     /// A message reduced to what the guess asks about. The fresh length is the
     /// message WITHOUT the history it is quoting — the same split PlainBody
     /// collapses behind the chip, because "how long is this message" and "how
     /// much of it is this message" are the same question. In UTF-8 bytes, for
     /// the reason `chatMedianBytes` gives.
-    private func sample(_ m: ClientMessage) -> ThreadStyle.Sample {
+    private static func sample(_ m: ClientMessage) -> ThreadStyle.Sample {
         ThreadStyle.Sample(
             // `is_sent` and not `fromMe`: the accessor answers the drawing
             // question, where an unknown side is drawn as theirs. The guess
@@ -2049,9 +2118,13 @@ struct ThreadViewer: View {
 /// bar seams at the rail's edge again.
 struct ReaderBackdrop: View {
     var body: some View {
+        // OPAQUE, deliberately. This was a 0.97 fill over `.regularMaterial`,
+        // and a material is a live blur of whatever is under it: the whole
+        // board, glass cards and all, re-sampled every frame the reader was
+        // on screen and every frame it moved — for three per cent of a colour
+        // nobody could tell from the flat one. The flat one it is.
         Rectangle()
-            .fill(Palette.readerBackground.opacity(0.97))
-            .background(.regularMaterial)
+            .fill(Palette.readerBackground)
     }
 }
 
@@ -2099,7 +2172,10 @@ extension View {
                     if let message = preview?.messages.last {
                         MessageCard(
                             message: message, style: .classic, position: 0,
-                            selected: false, ruled: false, opens: [], onSelect: {})
+                            selected: false, ruled: false, opens: [],
+                            // A glimpse of the NEXT thread: no "you" rewrite and
+                            // no diff against a message it is not beside.
+                            me: nil, previousRecipients: nil, onSelect: {})
                     } else {
                         MessageSenderHeading(sender: row.senderString)
                             .padding(.leading, MessageCard.bodyInset)
@@ -2192,6 +2268,16 @@ private struct MessageCard: View, Equatable {
     /// Recorded opens of this message, when it is one of the user's own tracked
     /// sends. Empty for everything else, which renders no mark.
     nonisolated let opens: [MessageOpen]
+    /// The account's own address, which the recipient lines render as "you".
+    /// Part of the comparison below because it arrives asynchronously (the first
+    /// `/client/stats` of the session), and a card that kept the older callback's
+    /// nil would go on spelling the reader's own address at them.
+    nonisolated let me: String?
+    /// The RECIPIENTS OF THE MESSAGE BEFORE THIS ONE, which is what makes the
+    /// block able to say somebody was added or quietly dropped. `nil` on the
+    /// first message of a thread and on any predecessor whose headers were never
+    /// read — see `MessageRecipients`.
+    nonisolated let previousRecipients: MessageAudience?
     let onSelect: () -> Void
 
     /// The gutter the rules live in, which every body is inset by. Named
@@ -2206,6 +2292,7 @@ private struct MessageCard: View, Equatable {
     nonisolated static func == (a: MessageCard, b: MessageCard) -> Bool {
         a.message == b.message && a.style == b.style && a.position == b.position
             && a.selected == b.selected && a.ruled == b.ruled && a.opens == b.opens
+            && a.me == b.me && a.previousRecipients == b.previousRecipients
     }
 
     /// Which side of the conversation this is. Only the chat style asks.
@@ -2306,15 +2393,28 @@ private struct MessageCard: View, Equatable {
     // MARK: - the email card's header
 
     private var cardHeader: some View {
-        HStack(spacing: 9) {
-            MessageSenderHeading(sender: message.senderString)
-            Spacer(minLength: 8)
-            spamChip
-            attentionChip
-            ReadReceiptMark(opens: opens)
-            Text(Fmt.dateTime(message.received_at))
-                .font(Typo.num(11))
-                .foregroundStyle(Palette.inkFaintest)
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 9) {
+                // Click for the contact card, right-click to copy. On the loaded
+                // card only: the peek placeholder is a stand-in, not a person.
+                MessageSenderHeading(sender: message.senderString)
+                    .contactCard(for: message.senderString)
+                Spacer(minLength: 8)
+                spamChip
+                attentionChip
+                ReadReceiptMark(opens: opens)
+                Text(Fmt.dateTime(message.received_at))
+                    .font(Typo.num(11))
+                    .foregroundStyle(Palette.inkFaintest)
+            }
+            // WHO ELSE WAS ON IT, under the sender and indented past the avatar
+            // so the two read as one block: this message came FROM that person
+            // and went TO these. Renders nothing when the daemon sent no
+            // recipients, so an older daemon draws exactly the old header.
+            MessageRecipients(
+                message: message, previous: previousRecipients, me: me, compact: false
+            )
+            .padding(.leading, 25)
         }
     }
 
@@ -2327,20 +2427,34 @@ private struct MessageCard: View, Equatable {
     /// daemon (which draws everything as theirs), and the mark already no-ops on
     /// empty opens — a gate would only hide receipts the card shows.
     private var caption: some View {
-        HStack(spacing: 6) {
-            if !mine {
-                Avatar(sender: message.senderString, size: 17)
+        VStack(alignment: side, spacing: 1) {
+            HStack(spacing: 6) {
+                HStack(spacing: 6) {
+                    if !mine {
+                        Avatar(sender: message.senderString, size: 17)
+                    }
+                    Text(SenderCache.resolved(message.senderString).displayName)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Palette.inkDim)
+                        .lineLimit(1)
+                }
+                .contactCard(for: message.senderString)
+                spamChip
+                attentionChip
+                ReadReceiptMark(opens: opens)
+                Text(captionTime)
+                    .font(Typo.num(10))
+                    .foregroundStyle(Palette.inkFaintest)
             }
-            Text(SenderCache.resolved(message.senderString).displayName)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Palette.inkDim)
-                .lineLimit(1)
-            spamChip
-            attentionChip
-            ReadReceiptMark(opens: opens)
-            Text(captionTime)
-                .font(Typo.num(10))
-                .foregroundStyle(Palette.inkFaintest)
+            // THE SAME LINES A CARD GETS, one point smaller, and hung from the
+            // same edge as the bubble under them: a block sitting under the
+            // user's own right-aligned bubble but pinned to the left of the
+            // column reads as somebody else's.
+            MessageRecipients(
+                message: message, previous: previousRecipients, me: me, compact: true,
+                edge: side
+            )
+            .frame(maxWidth: ThreadViewer.bubbleWidth, alignment: edge)
         }
     }
 
@@ -2466,11 +2580,48 @@ private struct MessageCard: View, Equatable {
     /// and counting it here would take the tile away from a photo nothing draws.
     /// Only a body that actually names a cid pays for the extra pass.
     private var inBodyImages: Set<Int> {
-        guard let html = message.html, !html.isEmpty,
-            html.range(of: "cid:", options: .caseInsensitive) != nil
-        else { return [] }
-        let body = message.allowsTrackers ? html : Trackers.strip(html).html
-        return CidImages.referencedAttachmentIDs(html: body, attachments: message.attachmentList)
+        guard let html = message.html, !html.isEmpty else { return [] }
+        return InBodyImages.shared.ids(
+            messageId: message.id, html: html, allowTrackers: message.allowsTrackers,
+            attachments: message.attachmentList)
+    }
+}
+
+/// WHICH PARTS A BODY ALREADY SHOWS, remembered per message. The answer is a
+/// substring probe for the many bodies with no `cid:` in them, and a full
+/// tracker-strip regex pass for the few that have one — and it was being
+/// taken in `MessageCard.body`, on the main thread, on every evaluation of
+/// every card that names a cid. Keyed on the message id and the body's
+/// length, so a healed body (blank-body heal replaces the html under the same
+/// id) misses and is scanned again.
+@MainActor
+final class InBodyImages {
+    static let shared = InBodyImages()
+    private struct Key: Hashable {
+        let message: Int
+        let length: Int
+        let allowTrackers: Bool
+    }
+    private var memo = LRUMap<Key, Set<Int>>(limit: 400)
+    private init() {}
+
+    /// Account switch: message ids are one daemon's.
+    func wipe() { memo = LRUMap<Key, Set<Int>>(limit: 400) }
+
+    func ids(messageId: Int, html: String, allowTrackers: Bool, attachments: [Attachment])
+        -> Set<Int>
+    {
+        let key = Key(message: messageId, length: html.utf8.count, allowTrackers: allowTrackers)
+        if let known = memo.get(key) { return known }
+        let found: Set<Int>
+        if html.range(of: "cid:", options: .caseInsensitive) == nil {
+            found = []
+        } else {
+            let body = allowTrackers ? html : Trackers.strip(html).html
+            found = CidImages.referencedAttachmentIDs(html: body, attachments: attachments)
+        }
+        memo.set(key, found)
+        return found
     }
 }
 
@@ -2626,7 +2777,9 @@ struct PlainBody: View {
     @State private var open = false
 
     var body: some View {
-        let split = Quotes.splitText(content)
+        // Memoized: the split is a regex walk of every line, and this body is
+        // evaluated whenever the card is.
+        let split = Quotes.splitTextMemoized(content)
         VStack(alignment: .leading, spacing: 8) {
             Text(split.quoted == nil ? content : split.visible)
                 .font(.system(size: 13.5))

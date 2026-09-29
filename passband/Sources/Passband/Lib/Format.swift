@@ -23,6 +23,12 @@ enum Fmt {
     /// A failed parse is cached too — the same bad stamp must not re-parse.
     nonisolated(unsafe) private static var dateCache = LRUMap<String, Date?>(limit: dateCacheCap)
     private static let dateCacheLock = NSLock()
+    /// The deadline chip's "MMM d". Guarded by `dateCacheLock`.
+    private static let monthDay: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MMM d"
+        return f
+    }()
     private static let dateCacheCap = 4000
 
     static func date(_ iso: String?) -> Date? {
@@ -147,10 +153,15 @@ enum Fmt {
             let days = calendar.dateComponents([.day], from: day, to: today).day ?? 0
             if days > 0 { return DeadlineChip(text: "\(days)d PAST DUE", overdue: true) }
             if days == 0 { return DeadlineChip(text: "due today", overdue: false) }
-            let formatter = DateFormatter()
+            // ONE formatter, under the date cache's lock (a DateFormatter is
+            // not safe to share without one). Building one per call cost a
+            // fraction of a millisecond of ICU setup, and this is called for
+            // every dated row on the board and in the inbox, on every render.
+            dateCacheLock.lock()
+            defer { dateCacheLock.unlock() }
+            let formatter = monthDay
             formatter.calendar = calendar
             formatter.timeZone = calendar.timeZone
-            formatter.dateFormat = "MMM d"
             let label = formatter.string(from: day)
             return DeadlineChip(text: "due \(label)", overdue: false)
         }

@@ -112,15 +112,11 @@ struct EmailsView: View {
         // being shown is refreshed, so the noise page costs nothing until you go
         // there. The store's short TTL is what makes the mount half free when a
         // tick just landed; the tick half always outruns it and refreshes for real.
-        .task(id: RefreshKey(tick: store.lastRefresh, mode: mode, reminders: reminders)) {
-            if reminders {
-                await store.refreshReminders()
-            } else if mode == .sent {
-                await store.refreshSent()
-            } else {
-                await store.refreshMail(mode)
-            }
-        }
+        // IN A LEAF, not on this body: the tick is a new Date every ten
+        // seconds, and a body that reads it re-evaluates every ten seconds —
+        // five hundred rows' worth of view values, for a fetch that usually
+        // finds nothing new. The leaf's body is a zero-size rectangle.
+        .background { MailRefreshKeeper(mode: mode, reminders: reminders) }
         // ASK FOR THE SPAM FOLDER ON ENTRY, and only on entry. Keyed on the mode
         // alone rather than on the poll tick: the daemon does not track that
         // folder, so this is a real Gmail round trip and it costs one per visit
@@ -353,17 +349,17 @@ struct EmailsView: View {
         /// is no noise count occupying the slot. See the chip's own note.
         private var showSpamDoor: Bool {
             guard store.spamDoorVisible else { return false }
-            let noise = store.sitrep.stats?.tier_counts["noise"] ?? 0
+            let noise = store.stats?.tier_counts["noise"] ?? 0
             return mode == .noise || (mode == .inbox && noise == 0)
         }
         /// The count beside it, when there is one to show.
         private var spamDoorCount: Int? {
-            store.sitrep.stats?.spam.flatMap { $0 > 0 ? $0 : nil }
+            store.stats?.spam.flatMap { $0 > 0 ? $0 : nil }
         }
 
         private var phoneHeader: some View {
             @Bindable var store = store
-            let noise = store.sitrep.stats?.tier_counts["noise"] ?? 0
+            let noise = store.stats?.tier_counts["noise"] ?? 0
 
             return HStack(spacing: 10) {
                 GlassSegmented(
@@ -421,7 +417,7 @@ struct EmailsView: View {
     private var desktopHeader: some View {
         @Bindable var store = store
         let signal = store.sitrep.standing.count + store.sitrep.new.count + store.sitrep.open.count
-        let noise = store.sitrep.stats?.tier_counts["noise"] ?? 0
+        let noise = store.stats?.tier_counts["noise"] ?? 0
 
         return HStack(spacing: 10) {
             // NO MODE LABEL BESIDE THE WORDMARK. It said what the segmented
@@ -473,7 +469,7 @@ struct EmailsView: View {
                             // not track this folder, so before the first visit
                             // there is no count to show and a "0" would be a
                             // claim nobody has checked.
-                            if let spam = store.sitrep.stats?.spam, spam > 0 {
+                            if let spam = store.stats?.spam, spam > 0 {
                                 Text("\(spam)")
                                     .font(Typo.num(12, weight: .bold))
                                     .foregroundStyle(
@@ -494,7 +490,7 @@ struct EmailsView: View {
                         .font(Typo.micro).foregroundStyle(Palette.warn)
                         .help(err.message)
                 } else {
-                    Text("· last checked: \(Fmt.lastChecked(store.sitrep.stats?.last_surfaced_at))")
+                    Text("· last checked: \(Fmt.lastChecked(store.stats?.last_surfaced_at))")
                         .font(Typo.micro).foregroundStyle(Palette.inkFaintest)
                 }
             }
@@ -623,12 +619,6 @@ struct EmailsView: View {
 
     /// `.task(id:)` key: a poll tick and a mode switch both have to refetch, and a
     /// tuple of the two cannot be Hashable.
-    private struct RefreshKey: Hashable {
-        var tick: Date?
-        var mode: MailMode
-        var reminders: Bool
-    }
-
     private func moveByKey(_ delta: Int) {
         kbActive = true
         index = max(0, min(rowCount - 1, index + delta))
@@ -662,5 +652,38 @@ struct BandNote: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 12)
             .padding(.vertical, 18)
+    }
+}
+
+
+/// Refreshes the page being shown on mount, on every poll tick, and on a mode
+/// switch. Only the page being shown, so the noise page costs nothing until
+/// you go there. The store's short TTL is what makes the mount half free when
+/// a tick just landed; the tick half always outruns it and refreshes for
+/// real. A view of its own so that reading the tick invalidates nothing but
+/// itself — see the call site in EmailsView.
+private struct MailRefreshKeeper: View {
+    @Environment(AppStore.self) private var store
+    let mode: MailMode
+    let reminders: Bool
+
+    private struct RefreshKey: Hashable {
+        var tick: Date?
+        var mode: MailMode
+        var reminders: Bool
+    }
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .task(id: RefreshKey(tick: store.lastRefresh, mode: mode, reminders: reminders)) {
+                if reminders {
+                    await store.refreshReminders()
+                } else if mode == .sent {
+                    await store.refreshSent()
+                } else {
+                    await store.refreshMail(mode)
+                }
+            }
     }
 }

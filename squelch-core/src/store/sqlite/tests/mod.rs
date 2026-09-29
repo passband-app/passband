@@ -10,6 +10,7 @@ mod groups;
 mod messages;
 mod migrate;
 mod notify;
+mod people;
 mod rules;
 mod scheduled;
 mod search;

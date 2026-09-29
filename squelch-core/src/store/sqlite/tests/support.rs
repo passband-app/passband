@@ -71,6 +71,8 @@ pub(super) fn triaged(account_id: AccountId, gmail: &str, thread: &str) -> Triag
             is_sent: false,
             is_spam: false,
             to_addrs: None,
+            cc_addrs: None,
+            bcc_addrs: None,
             list_unsubscribe: None,
             list_unsub_one_click: false,
             auth_pass: None,
@@ -130,9 +132,19 @@ impl TriagedBuilder {
         self.msg.is_spam = is_spam;
         self
     }
-    /// Sent mail's display recipients, as the ingest path renders them.
+    /// Display recipients, as the ingest path renders them. One setter per
+    /// header, because that is how they are stored and read back.
     pub(super) fn to_addrs(mut self, to: &str) -> Self {
         self.msg.to_addrs = Some(to.to_string());
+        self
+    }
+    pub(super) fn cc_addrs(mut self, cc: &str) -> Self {
+        self.msg.cc_addrs = Some(cc.to_string());
+        self
+    }
+    /// Only ever kept on sent mail — the store drops it for anything else.
+    pub(super) fn bcc_addrs(mut self, bcc: &str) -> Self {
+        self.msg.bcc_addrs = Some(bcc.to_string());
         self
     }
     pub(super) fn list_unsubscribe(mut self, header: &str, one_click: bool) -> Self {

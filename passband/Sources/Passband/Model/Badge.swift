@@ -50,11 +50,21 @@ enum Badge {
     /// The whole contract: given the standing band, put its due-today count on
     /// the app icon. Zero clears the badge rather than drawing a "0" — an icon
     /// wearing a zero is a notification that nothing happened.
+    /// What the icon was last told. nil = never told this session, so the
+    /// first confirmation always goes through (the notification extension
+    /// may have written a stale count while the app was closed).
+    private static var lastSet: Int?
+
     static func refresh(_ standing: [AttentionUpdate]) {
         set(NeedToday.count(standing))
     }
 
     static func set(_ count: Int) {
+        // The dock is asked once per CHANGE. The poller confirms the count on
+        // every tick on purpose (see SitrepPoller), but a confirmation of the
+        // number already on the icon has nothing to tell the window server.
+        if lastSet == count { return }
+        lastSet = count
         #if os(macOS)
             // `badgeLabel` is the dock's own text, so the empty case is nil and
             // not "0" or "": either of those draws the red pill anyway.

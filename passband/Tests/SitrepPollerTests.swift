@@ -20,7 +20,7 @@ struct SitrepPollerTests {
 
         api.finish(1)
         _ = await old.value
-        expect(store.sitrep.stats == nil, "stale response must not populate practice")
+        expect(store.stats == nil, "stale response must not populate practice")
         expect(Badge.refreshes == 0, "stale response must not update badge")
         expect(store.lastRefresh == nil, "stale response must not mark a refresh")
 
@@ -29,7 +29,7 @@ struct SitrepPollerTests {
         expect(api.requests == 2, "old completion must not clear the new in-flight task")
         api.finish(2)
         _ = await (fresh.value, joined.value)
-        expect(store.sitrep.stats?.total == 2, "fresh fixture response reaches the board")
+        expect(store.stats?.total == 2, "fresh fixture response reaches the board")
         expect(Badge.refreshes == 1, "only the current request has side effects")
 
         // stop() itself protects the store, even without an epoch bump.
@@ -38,7 +38,7 @@ struct SitrepPollerTests {
         poller.stop()
         api.finish(3)
         _ = await canceled.value
-        expect(store.sitrep.stats?.total == 2, "canceled response is ignored without an epoch change")
+        expect(store.stats?.total == 2, "canceled response is ignored without an epoch change")
 
         let failed = Task { await poller.pull() }
         await until { api.requests == 4 }
@@ -94,7 +94,6 @@ struct SitrepData: Equatable {
     var standing: [AttentionUpdate] = []
     var new: [AttentionUpdate] = []
     var open: [AttentionUpdate] = []
-    var stats: Stats?
     var sealed: [Int] = []
     var totalCount: Int?
 }
@@ -103,6 +102,7 @@ enum ErrorKind { case unknown }
 struct APIError: Error { var message: String; var kind: ErrorKind }
 struct RefreshError { var message: String; var kind: ErrorKind }
 @MainActor final class AppStore {
+    var stats: Stats?
     static let shared = AppStore()
     var connStatus = ConnectionStatus.connected
     var epoch = 0

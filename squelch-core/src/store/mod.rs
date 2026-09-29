@@ -264,7 +264,8 @@ pub struct SealedBody {
 /// The Gmail ids + header fields an action endpoint needs to act on a message,
 /// and no body. HUMAN-DOOR-ONLY: produced solely by
 /// [`SqliteStore::action_message_ref`](sqlite::SqliteStore::action_message_ref),
-/// which excludes sealed rows in SQL so an action can never target sealed mail.
+/// which does NOT filter sealed or restricted rows (see its doc for where the
+/// human-door and agent-door gates actually live).
 #[derive(Debug, Clone)]
 pub struct ActionMessageRef {
     /// Local message id.
@@ -1220,10 +1221,10 @@ pub struct SentMessage {
     pub opens: i64,
 }
 
-/// A sent message still missing its display recipients, for the one-shot
-/// recipients backfill. Carries only what the Gmail metadata fetch needs.
+/// A message still missing its display recipients, for the one-shot recipients
+/// backfill. Carries only what the Gmail metadata fetch needs.
 #[derive(Debug, Clone)]
-pub struct SentMissingRecipients {
+pub struct MessageMissingRecipients {
     pub message_id: i64,
     pub gmail_msg_id: String,
 }
@@ -1997,14 +1998,14 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
         offset: u32,
     ) -> Result<Vec<SentMessage>>;
 
-    /// Up to `limit` sent messages with no `to_addrs` yet, newest-first: the
-    /// queue for the one-shot recipients backfill (rows ingested before the
-    /// column existed).
-    fn sent_missing_recipients(
+    /// Up to `limit` messages whose headers have never been read for recipients,
+    /// newest-first: the queue for the one-shot recipients backfill. Sent AND
+    /// received, because the reader shows To and Cc on both.
+    fn messages_missing_recipients(
         &self,
         account_id: AccountId,
         limit: u32,
-    ) -> Result<Vec<SentMissingRecipients>>;
+    ) -> Result<Vec<MessageMissingRecipients>>;
 
     /// One chunk of the blank-body heal's queue: among the `limit` newest
     /// inbound, non-spam, non-sealed messages with `id < before_id` that carry
@@ -2027,15 +2028,20 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
         limit: u32,
     ) -> Result<BlankBodyScan>;
 
-    /// Set one SENT message's display recipients; `false` when no such sent row
-    /// exists. `""` is a legitimate value — it records that the headers were read
+    /// Set one message's display recipients, per header; `false` when no such row
+    /// exists. `""` is a legitimate value — it records that the header was read
     /// and named nobody, which is what takes the row out of the backfill queue.
-    /// Received mail is never touched (`is_sent = 1` is in the predicate).
-    fn set_message_to_addrs(
+    ///
+    /// `bcc_addrs` is stored ONLY on sent mail; on a received row the
+    /// implementation writes NULL whatever is passed, because a `Bcc:` header
+    /// there is the sender's leak or a forgery rather than "who this went to".
+    fn set_message_recipients(
         &self,
         account_id: AccountId,
         message_id: i64,
         to_addrs: &str,
+        cc_addrs: &str,
+        bcc_addrs: &str,
     ) -> Result<bool>;
 
     /// Append a row to the human-door audit log. Returns the new row id.

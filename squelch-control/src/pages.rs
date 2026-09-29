@@ -1004,7 +1004,7 @@ pub fn admin_page(pending: &[UserRow], approved: &[UserRow], error: Option<&str>
         "Waitlist",
         &format!(
             r#"<section class="hero">
-<h1>Waitlist</h1>
+<h1 data-text="Waitlist">Waitlist</h1>
 <p class="sr">{waiting_count} waiting, {approved_count} approved recently,
 {accepted_count} of those signed up, {active_count} of those active</p>
 </section>

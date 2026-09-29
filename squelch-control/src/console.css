@@ -5,8 +5,8 @@
    funnel is drawn as the scope the landing page opens on, from the real
    counts; everything under it is lists and buttons, and stays quiet.
 
-   ONE MOVEMENT, ON ARRIVAL: the trace draws and the markers settle. Nothing
-   loops. This page is read every day by one person pressing buttons, and a
+   ONE MOVEMENT, ON ARRIVAL: the trace draws and the markers settle. The
+   only thing that loops is the heading's glitch, which is brief and rare. This page is read every day by one person pressing buttons, and a
    thing that keeps moving at the edge of the eye is a thing in the way.
 
    NO SCRIPT, NO FETCH. The CSP is `default-src 'none'` with inline style
@@ -59,6 +59,25 @@ body.console main:has(.scope) { max-width: 64rem; }
 
 .console .hero { margin: 0 0 1.5rem; }
 .console .hero h1 { font-size: clamp(3rem, 7vw, 4.75rem); letter-spacing: -0.035em; line-height: 0.95; }
+/* THE ONE LOOP ON THE PAGE, kept because it is the one the operator asked
+   to keep: every few seconds the heading slips out of lock for a frame, in
+   two channels that have not quite agreed, and snaps back. It is a copy of
+   the heading's own text drawn over it (the `data-text` attribute), so it is
+   decoration a screen reader never reads twice. */
+.console .hero h1 { position: relative; }
+.console .hero h1::before, .console .hero h1::after { content: attr(data-text); position: absolute;
+  inset: 0; mix-blend-mode: screen; pointer-events: none; opacity: 0;
+  animation: split 5.5s steps(1) infinite; }
+.console .hero h1::before { color: rgba(255, 122, 104, 0.8); }
+.console .hero h1::after { color: rgba(79, 192, 138, 0.8); animation-delay: -0.12s; }
+@keyframes split {
+  0%, 100% { transform: none; opacity: 0; clip-path: inset(0 0 0 0); }
+  2% { transform: translate(-6px, 1px); opacity: 0.6; clip-path: inset(10% 0 55% 0); }
+  4% { transform: translate(5px, -2px); clip-path: inset(62% 0 8% 0); }
+  6% { transform: translate(-2px, 0); clip-path: inset(30% 0 40% 0); }
+  8% { opacity: 0; transform: none; }
+  61% { opacity: 0.5; transform: translate(4px, 0); clip-path: inset(70% 0 5% 0); }
+  63% { opacity: 0; transform: none; } }
 
 /* THE SCOPE. The funnel as a noise floor with four carriers standing out of
    it, one per rung, their heights the real counts on a log scale so one busy
@@ -203,5 +222,6 @@ body.console main:has(.scope) { max-width: 64rem; }
 @media (prefers-reduced-motion: reduce) {
   .console .scope .trace { animation: none; stroke-dashoffset: 0; }
   .console .mkr { animation: none; }
+  .console .hero h1::before, .console .hero h1::after { display: none; }
   .console * { transition: none !important; }
 }

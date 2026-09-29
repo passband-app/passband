@@ -923,7 +923,13 @@ private struct BoardWarmKeeper: View {
     var body: some View {
         Color.clear
             .frame(width: 0, height: 0)
-            .onChange(of: store.lastRefresh) { _, _ in SitrepView.warmBoard(threadIds) }
+            // THE VISIBLE ROWS ONLY. The whole band is warmed when the list
+            // changes; re-warming all two hundred every tick would start a
+            // thirty-second trickle every ten seconds and, when the TTL
+            // lapsed, refetch every collapsed row nobody can click.
+            .onChange(of: store.lastRefresh) { _, _ in
+                SitrepView.warmBoard(Array(threadIds.prefix(eyesVisible)))
+            }
     }
 }
 

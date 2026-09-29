@@ -113,38 +113,26 @@ struct ThreadViewer: View {
     ///
     /// `load()` still runs and still calls `adopt` for the same cached view:
     /// the store-side bookkeeping (consuming the focus request, publishing
-    /// the summary) needs the environment, which an initializer cannot read.
-    /// Everything derived here is memoized, so the second pass is cheap.
+    /// the summary) and the minimap's marks (which read the height memory)
+    /// need the environment and observation, which an initializer must not
+    /// touch. Everything `adopt` derives is memoized, so that pass is cheap,
+    /// and the rail landing a frame after the mail is not a flash anybody
+    /// sees.
     ///
-    /// The direct-open path (`focusedMessageView`) is seeded the same way; it
-    /// is the one route that must never READ the prefetch cache (see
-    /// AppStore.openMessage), and it does not — it reads the store's own copy.
+    /// NOTHING OBSERVABLE IS READ HERE. An initializer runs inside the
+    /// parent's body evaluation, and the parent is the window shell; the
+    /// seed is a plain, untracked value the store decided at `openThread`
+    /// (see AppStore.ReaderSeed) for exactly that reason. A direct open has
+    /// no seed and arrives through `focusedMessageView`, as before.
     init(threadId: String) {
         self.threadId = threadId
-        let seed: ClientThreadView? = MainActor.assumeIsolated {
-            let store = AppStore.shared
-            if let direct = store.focusedMessageView, direct.thread_id == threadId {
-                return direct
-            }
-            return ThreadPrefetch.shared.cached(threadId)
-        }
-        guard let seed else { return }
-        let chosen = MainActor.assumeIsolated {
-            Self.resolveStyle(
-                threadId: threadId, messages: seed.messages,
-                readingMail: Self.isReadingMail(threadId, AppStore.shared))
-        }
-        _thread = State(initialValue: seed)
+        let seed = MainActor.assumeIsolated { AppStore.shared.readerSeed }
+        guard let seed, seed.threadId == threadId else { return }
+        _thread = State(initialValue: seed.view)
         _loading = State(initialValue: false)
-        _style = State(initialValue: chosen)
+        _style = State(initialValue: seed.style)
         _styledFor = State(initialValue: threadId)
-        _marks = State(initialValue: MainActor.assumeIsolated {
-            Self.marks(for: seed.messages, style: chosen)
-        })
-        _index = State(initialValue: MainActor.assumeIsolated {
-            ThreadOpeningFocus.index(
-                messageIds: seed.messages.map(\.id), requested: AppStore.shared.focusedMessageId)
-        })
+        _index = State(initialValue: seed.index)
     }
 
     /// What a measuring pass is FOR. Any of the three changing means the
@@ -2551,6 +2539,9 @@ final class InBodyImages {
     }
     private var memo = LRUMap<Key, Set<Int>>(limit: 400)
     private init() {}
+
+    /// Account switch: message ids are one daemon's.
+    func wipe() { memo = LRUMap<Key, Set<Int>>(limit: 400) }
 
     func ids(messageId: Int, html: String, allowTrackers: Bool, attachments: [Attachment])
         -> Set<Int>

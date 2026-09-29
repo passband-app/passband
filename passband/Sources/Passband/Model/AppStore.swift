@@ -1707,6 +1707,10 @@ final class AppStore {
         ThreadPrefetch.shared.wipe()
         // The queue of frames being rendered ahead: thread ids, one daemon's.
         FramePrewarmer.shared.wipe()
+        // Two memos keyed on message ids: which prepared body a message has,
+        // and which parts its body already shows.
+        PreparedKeyMemo.shared.wipe()
+        InBodyImages.shared.wipe()
         HeroCache.shared.wipe()
         AttachmentThumbs.shared.wipe()
         ComposeAttach.wipe()
@@ -1869,6 +1873,23 @@ final class AppStore {
     var focusedMessageId: Int?
     var focusedMessageView: ClientThreadView?
 
+    /// WHAT THE READER MOUNTS WITH, decided here, once, at `openThread` — the
+    /// cached thread and the style and landing index resolved for it — so
+    /// that `ThreadViewer.init` can seed its state without reading anything
+    /// observable. It cannot: a view's initializer runs inside its PARENT's
+    /// body evaluation, and every observable read made there is tracked by
+    /// the parent. Resolving the style in the initializer made the whole
+    /// window shell a reader of the reading zone and the focus request, and
+    /// re-ran the style guess over every message each time the shell was
+    /// evaluated. UNTRACKED, deliberately: the reader reads it in `init`.
+    struct ReaderSeed {
+        let threadId: String
+        let view: ClientThreadView
+        let style: ThreadStyle
+        let index: Int
+    }
+    @ObservationIgnored private(set) var readerSeed: ReaderSeed?
+
     func openMessage(_ messageId: Int) {
         let openedEpoch = epoch
         Task {
@@ -1916,6 +1937,18 @@ final class AppStore {
         arrivals.reset(to: threadId)
         self.threadQueue = queue
         self.readingMail = readingMail
+        // The seed, after `readingMail` (the style reads it) and before the
+        // view mounts. A direct open (`openMessage`) has no cached view yet
+        // and hands the reader its copy through `focusedMessageView` instead.
+        readerSeed = ThreadPrefetch.shared.cached(threadId).map { view in
+            ReaderSeed(
+                threadId: threadId, view: view,
+                style: ThreadViewer.resolveStyle(
+                    threadId: threadId, messages: view.messages,
+                    readingMail: ThreadViewer.isReadingMail(threadId, self)),
+                index: ThreadOpeningFocus.index(
+                    messageIds: view.messages.map(\.id), requested: focusMessage))
+        }
         // An ordinary open puts the reader straight in the window — opening an
         // email is a jump. Only done+next passes an edge, and it walks the
         // reader home itself a frame later.

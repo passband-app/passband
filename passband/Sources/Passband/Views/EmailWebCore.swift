@@ -307,7 +307,13 @@ struct EmailWebView: View {
                 guard !bubble, previous > 0, abs(width - previous) > 0.5, measured,
                     sizing != .opening
                 else { return }
-                restartSizing(userDriven: false)
+                // Straight to `.settling`, not back to `.opening`: a reflow
+                // starts no navigation, so nothing would ever move the machine
+                // on from `.waiting` and the document's final word would be
+                // dropped. Settling takes the next report and stops, and the
+                // offscreen pass (keyed on the width) re-measures behind it.
+                sizing = .settling
+                sizingIsUserDriven = false
             }
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             // The speech tail, on the DOCUMENT's outer bottom corner, in the
@@ -1124,6 +1130,15 @@ final class EmailFrameCoordinator: NSObject {
 
     /// Give the frame up: to the pool if it is worth keeping, otherwise to
     /// the teardown path.
+    /// Give the frame up to the teardown path unconditionally — for a frame
+    /// that must not be parked whatever state its load is in.
+    func drop(_ webView: WKWebView) {
+        guard let relay else { return }
+        relay.owner = nil
+        self.relay = nil
+        WebFramePool.discard(WebFramePool.Entry(webView: webView, relay: relay))
+    }
+
     func release(_ webView: WKWebView, prerendered: Bool = false) {
         guard let relay else { return }
         relay.owner = nil
@@ -1764,6 +1779,15 @@ final class PreparedKeyMemo: @unchecked Sendable {
     private var entries = LRUMap<Identity, Int>(limit: 600)
     private init() {}
 
+    /// Account switch: the keys are message ids, one daemon's. A survivor
+    /// would hand another account's message the first one's prepared body
+    /// on an id-and-length collision.
+    func wipe() {
+        lock.lock()
+        defer { lock.unlock() }
+        entries = LRUMap<Identity, Int>(limit: 600)
+    }
+
     func key(message: String?, html: String, allowTrackers: Bool, attachments: [Attachment]) -> Int {
         guard let message else {
             return EmailWebView.Prepared.cacheKey(html, allowTrackers, attachments)
@@ -1868,11 +1892,26 @@ final class FramePrewarmer {
     }
 
     private func render(_ threadId: String, gen: Int) async {
+        let store = AppStore.shared
+        // NOT DURING A FLIGHT. The board's list changes the moment done+next
+        // resolves a row, and that used to start a content-process load in
+        // the middle of the very animation this is meant to keep smooth.
+        // Wait it out, and a beat more so a click landing right after a list
+        // change is served before the next document starts.
+        while store.threadFlight != .settled {
+            try? await Task.sleep(for: .milliseconds(100))
+            guard gen == generation else { return }
+        }
+        try? await Task.sleep(for: .milliseconds(250))
+        guard gen == generation else { return }
+        // The open thread's newest message is mounted — its frame is checked
+        // out, so the pool cannot see it, and rendering a second copy would
+        // only be discarded when the first comes back.
+        guard store.threadId != threadId else { return }
         guard let view = try? await ThreadPrefetch.shared.fetch(threadId),
             gen == generation, view.cache_allowed == true,
             let message = view.messages.last, let html = message.html, !html.isEmpty
         else { return }
-        let store = AppStore.shared
         let style = ThreadViewer.resolveStyle(
             threadId: threadId, messages: view.messages,
             readingMail: ThreadViewer.isReadingMail(threadId, store))
@@ -1931,11 +1970,15 @@ final class FramePrewarmer {
                 once.run { continuation.resume(returning: false) }
             }
         }
-        // `onLoaded` also fires for a FAILED navigation (documentDidFail);
-        // `release` checks the relay's own `loaded` and discards the rest.
+        // A frame that did not land in time, or landed for an account that
+        // has since been switched away, is DROPPED, never parked: `release`
+        // would park it if the navigation happened to finish between the
+        // deadline firing and this task resuming, and a parked frame that
+        // is then gutted is a blank card on the next click. `onLoaded` also
+        // fires for a FAILED navigation (documentDidFail); `release` checks
+        // the relay's own `loaded` for that case.
         guard landed, gen == generation else {
-            coordinator.release(webView)  // discards: not loaded, or parks a finished one
-            if !landed { WebFramePool.discard(entry) }
+            coordinator.drop(webView)
             return
         }
         coordinator.release(webView, prerendered: true)

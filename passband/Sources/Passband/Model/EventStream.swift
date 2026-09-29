@@ -240,7 +240,10 @@ final class EventStream {
         -> AsyncStream<(SSEFrame, Event?)>
     {
         AsyncStream { continuation in
-            let producer = Task.detached(priority: .utility) {
+            // Default priority, not utility: the consumer is the main actor
+            // waiting on this, and a producer scheduled behind everything
+            // else is a banner that arrives seconds late on a busy machine.
+            let producer = Task.detached(priority: .medium) {
                 var parser = SSEParser()
                 let decoder = JSONDecoder()
                 // Split by hand rather than with `bytes.lines`: AsyncLineSequence

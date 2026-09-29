@@ -192,7 +192,25 @@ final class Updater: NSObject, ObservableObject, SPUUserDriver {
         }
         choice = reply
         consented = false
-        phase = .available(version: appcastItem.displayVersionString)
+        let version = appcastItem.displayVersionString
+        phase = .available(version: version)
+        // The card only speaks to someone looking at the window. A scheduled
+        // check usually lands while Passband sits behind other apps or with its
+        // window closed, so the news goes out as a banner too, once per
+        // version: Later brings the card back on every later check, and a
+        // banner each time would be nagging. A check the human asked for gets
+        // none, because they are already watching the answer.
+        if !state.userInitiated, Self.bannered != version {
+            Self.bannered = version
+            Task { await Notifier.shared.postUpdate(version: version) }
+        }
+    }
+
+    /// The last version a banner went out for. Persisted so a relaunch does
+    /// not announce the same release twice.
+    private static var bannered: String? {
+        get { UserDefaults.standard.string(forKey: "passband.update.bannered") }
+        set { UserDefaults.standard.set(newValue, forKey: "passband.update.bannered") }
     }
 
     func showUpdateNotFoundWithError(_ error: Error, acknowledgement: @escaping () -> Void) {

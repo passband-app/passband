@@ -491,6 +491,17 @@ struct SitrepView: View {
                 guard eyesActionable, let u = reachable[safe: cursor.index] else { return }
                 store.openThread(u.thread_id, queue: eyesWalk(store))
             },
+            // Space STARTS the walk: no highlight needed, so it is the one key
+            // that works the moment the page opens. A row the cursor is on still
+            // wins, so it never jumps back past where you arrowed to. Declines on
+            // an empty board so Space keeps scrolling the page.
+            KeyBinding(declining: "Space", "start with the first item") {
+                let walk = eyesWalk(store)
+                let u = eyesActionable ? reachable[safe: cursor.index] : walk.first
+                guard let u else { return false }
+                store.openThread(u.thread_id, queue: walk)
+                return true
+            },
             // Same guard as every other verb here — inert unless a row is
             // actually highlighted. Reply opens the email and composes inside it,
             // and hands over the same walk Enter does, so `E` keeps working from

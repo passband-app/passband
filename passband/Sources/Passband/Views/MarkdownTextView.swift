@@ -61,7 +61,7 @@ struct MarkdownTextView: NSViewRepresentable {
         // at the top, above it, not after it where setString parks it.
         view.setSelectedRange(NSRange(location: 0, length: 0))
 
-        let scroll = NSScrollView()
+        let scroll = EditorScrollView()
         scroll.documentView = view
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
@@ -103,6 +103,9 @@ struct MarkdownTextView: NSViewRepresentable {
             // — ⌘Z after a drop would then cut a marker in half, or throw
             // past the end of a body a tray click had shortened.
             if Prefs.shared.isBodyUntouched(view.string) {
+                // `string =` bypasses the undo manager; anything recorded
+                // before it names ranges in a body that is no longer here.
+                context.coordinator.undo.removeAllActions()
                 view.string = text
                 view.rehighlight()
                 view.setSelectedRange(NSRange(location: 0, length: 0))
@@ -115,15 +118,64 @@ struct MarkdownTextView: NSViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
-    final class Coordinator: NSObject, NSTextViewDelegate {
+    @MainActor final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: MarkdownTextView
         init(_ parent: MarkdownTextView) { self.parent = parent }
+
+        /// THIS EDITOR'S OWN HISTORY. Left to itself the text view registers
+        /// into the window's undo manager, the one SwiftUI hands the whole
+        /// shell, and ⌘Z typed here did not take back what was typed here.
+        /// One stack per editor also means undo never reaches past this
+        /// message into a field, or a composer, that is gone.
+        let undo = UndoManager()
+
+        func undoManager(for view: NSTextView) -> UndoManager? { undo }
 
         func textDidChange(_ notification: Notification) {
             guard let view = notification.object as? HighlightingTextView else { return }
             parent.text = view.string
             view.rehighlight()
         }
+    }
+}
+
+/// THE EDITOR IS NOT A WINDOW HANDLE, and the only answer AppKit hears in
+/// time is the WINDOW's. The shell window moves by its background, and with
+/// `isMovableByWindowBackground` on at the moment of the mouse-down, a drag
+/// into the editor moved the window — even with the text view, its clip view
+/// and this scroller all answering no to `mouseDownCanMoveWindow` (logged on
+/// a real mouse: every view under the pointer said no, and the window moved).
+/// The decision is made before the event reaches any view or monitor, so it
+/// has to be settled BEFORE the click: the flag goes off while the pointer is
+/// over the editor, and back on when it leaves.
+final class EditorScrollView: NSScrollView {
+    private var hover: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hover { removeTrackingArea(hover) }
+        let area = NSTrackingArea(
+            rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self)
+        addTrackingArea(area)
+        hover = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        super.mouseEntered(with: event)
+        window?.isMovableByWindowBackground = false
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        window?.isMovableByWindowBackground = true
+    }
+
+    /// Leaving the window mid-hover (the composer closing under the pointer)
+    /// sends no exit; the window is a handle again without us.
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil { window?.isMovableByWindowBackground = true }
+        super.viewWillMove(toWindow: newWindow)
     }
 }
 
@@ -167,6 +219,34 @@ final class HighlightingTextView: NSTextView {
         let target = ComposeMarkers.caretAfterEdit(old: old, new: text, caret: caret)
         setSelectedRange(NSRange(location: target, length: 0))
         scrollRangeToVisible(NSRange(location: target, length: 0))
+    }
+
+    // MARK: - undo
+
+    /// ⌘Z AND ⇧⌘Z ARE THE EDITOR'S while it has the caret. The Inbox menu
+    /// binds ⌘Z too ("Undo Last Action", for a done or a send), and a menu
+    /// key equivalent is a race a text view should not have to win: the key
+    /// window is asked before the menu bar, so answering here settles it.
+    /// Claimed even with nothing to undo — a spare ⌘Z while writing must not
+    /// quietly bring back a thread marked done a moment ago.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard window?.firstResponder === self,
+            event.charactersIgnoringModifiers?.lowercased() == "z"
+        else { return super.performKeyEquivalent(with: event) }
+        let chord = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        // Read-only while a send is in flight: the chord is still ours (it
+        // must not fall through to the Inbox undo), but the body stays put.
+        if !isEditable, chord == .command || chord == [.command, .shift] { return true }
+        switch chord {
+        case .command:
+            if undoManager?.canUndo == true { undoManager?.undo() }
+            return true
+        case [.command, .shift]:
+            if undoManager?.canRedo == true { undoManager?.redo() }
+            return true
+        default:
+            return super.performKeyEquivalent(with: event)
+        }
     }
 
     // MARK: - files in

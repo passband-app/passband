@@ -435,12 +435,59 @@ extension ButtonStyle where Self == TextActionStyle {
                 // needs to be picked up rather than clicked has to be an
                 // AppKit view that says no: see `PillDragHandle`.
                 window.isMovableByWindowBackground = true
+                Self.keepTextSelectable(in: window)
                 // Restoration can hand the window back already fullscreen,
                 // before any transition our observers could hear.
                 WindowState.shared.isFullscreen = window.styleMask.contains(.fullScreen)
                 Self.hideTitlebarDecoration(in: window)
             }
             return view
+        }
+
+        /// A DRAG IN TEXT SELECTS; it does not move the window. A text view
+        /// that draws no background is non-opaque, and a non-opaque view
+        /// answers yes to `mouseDownCanMoveWindow` by default, so with the
+        /// window movable by its background a drag across text can pick the
+        /// window up instead of the words.
+        ///
+        /// THIS IS THE SECOND LINE, NOT THE FIRST. AppKit reads the window's
+        /// flag before the mouse-down reaches any view or monitor, so what
+        /// this sets only governs the NEXT click; the editor turns the flag
+        /// off on hover, ahead of its click (`EditorScrollView`). What this
+        /// catches is the text we do not own — SwiftUI's fields and their
+        /// field editors — from the second click on: each left mouse-down
+        /// turns background-moving off when it lands on text, and back on
+        /// otherwise.
+        /// One monitor for the app's life: the configurator can be remade
+        /// when the root view is, and a second monitor would only repeat
+        /// the first. It reads the CURRENT shell window, so a remade window
+        /// is the one it serves.
+        private static var textMonitor: Any?
+        private static weak var shellWindow: NSWindow?
+
+        private static func keepTextSelectable(in window: NSWindow) {
+            shellWindow = window
+            guard textMonitor == nil else { return }
+            textMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { event in
+                guard let window = shellWindow, event.window === window,
+                    let content = window.contentView
+                else { return event }
+                // `hitTest` takes a point in the receiver's superview, which
+                // for the content view is the frame view: window coordinates.
+                let hit = content.hitTest(event.locationInWindow)
+                window.isMovableByWindowBackground = !isText(hit)
+                return event
+            }
+        }
+
+        private static func isText(_ view: NSView?) -> Bool {
+            var node = view
+            while let v = node {
+                if v is NSTextView || v is NSTextField { return true }
+                if let scroll = v as? NSScrollView, scroll.documentView is NSTextView { return true }
+                node = v.superview
+            }
+            return false
         }
 
         /// Hide the glass chip macOS 26 paints behind the traffic lights

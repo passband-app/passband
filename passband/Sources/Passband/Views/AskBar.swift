@@ -475,7 +475,17 @@ struct AskBar: View {
         // marks the slot opened (untouched), which would make an Esc before
         // the first keystroke drop the mail and nothing say so. Marking it
         // changed arms the autosave and makes the close flush keep it.
-        DraftSaver.shared.noteChange(.compose)
+        //
+        // BUT ONLY FOR PLAIN NEW MAIL. A reply saves under its parent's key,
+        // one row per parent, and the pane composer never restores a reply
+        // draft, so arming a reply hand-off would autosave one debounce later
+        // and silently OVERWRITE a reply the person already had saved for that
+        // parent (the reason `AgentTools.saveDraft` refuses an occupied slot).
+        // Unarmed, the reply's first keystroke arms it, and by then the person
+        // is editing on purpose.
+        if action.replyToMessageId == nil {
+            DraftSaver.shared.noteChange(.compose)
+        }
         session.resolve(action.id, .editedInComposer)
         onClose()
     }

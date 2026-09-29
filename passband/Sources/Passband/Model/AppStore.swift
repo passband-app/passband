@@ -283,6 +283,18 @@ struct RefreshError: Equatable, Sendable {
 /// window closes, so its inverse is not deleting (see `AppStore.deleteDraft`).
 enum UndoKind: Sendable {
     case archive, done, label, ruleDelete, groupDelete, remind, send, draftDelete
+
+    /// Whether firing this undo changes anything the sitrep shows, and so
+    /// whether `fireUndo` un-hides a resolved id and pulls the poller. The two
+    /// held kinds do not: a held send never reached the daemon and a held
+    /// draft delete never touched a message, so their undo is "do nothing",
+    /// and a sitrep round trip for it is pure cost.
+    var touchesSitrep: Bool {
+        switch self {
+        case .archive, .done, .label, .ruleDelete, .groupDelete, .remind: true
+        case .send, .draftDelete: false
+        }
+    }
 }
 
 /// A queued undo. `revert` is the exact inverse call to fire on `u`/toast-click;
@@ -3594,15 +3606,15 @@ final class AppStore {
     ///
     /// A FORWARD needs the original it forwards, which the row names only by
     /// id: the composer shows the message underneath the note, and titles
-    /// itself from it. So the pane is closed (flushed, like any Esc), the
-    /// message fetched, and the forward opened through `openComposeForward`,
-    /// whose `restoreForward` fills it from this row exactly as a second `f`
-    /// on that message would.
+    /// itself from it. So the message is fetched FIRST, and only once it is in
+    /// hand is the pane closed (flushed, like any Esc) and the forward opened
+    /// through `openComposeForward`, whose `restoreForward` fills it from this
+    /// row exactly as a second `f` on that message would. A failed fetch
+    /// leaves the pane as it was, still on the drafts page, with a toast:
+    /// closing first would have left the person with nothing on screen.
     func openDraft(_ draft: DraftView) {
         guard !isInert(draft), !isHeld(draft), pendingDraftDeletes[draft.id] == nil else { return }
         if let original = draft.forward_of_message_id {
-            // Closed FIRST: the forward opener refuses over an open composer.
-            closeCompose()
             let e = epoch
             Task {
                 let envelope = try? await APIClient.shared.getMessage(original)
@@ -3616,6 +3628,13 @@ final class AppStore {
                     pushToast("that message is no longer here", .error)
                     return
                 }
+                // The person moved on during the fetch (back to a composer
+                // page, say): what is on screen now is theirs, not this
+                // click's to replace.
+                if let open = compose, open.page != .drafts { return }
+                // Closed only NOW, with the original in hand: the forward
+                // opener refuses over an open composer.
+                closeCompose()
                 openComposeForward(message: message, fallbackSubject: envelope.thread.subject)
             }
             return
@@ -3813,8 +3832,16 @@ final class AppStore {
         // Refresh the cache behind the close (it settles first, so it sees
         // this flush land), so the drafts button's count is right the next
         // time a composer opens rather than one close behind. Epoch-guarded
-        // inside. Only when something may have changed.
-        if closing != nil { Task { await refreshDrafts() } }
+        // inside. Only when this close could have CHANGED the set: it queued
+        // a write, the composer already had a row, or it was closed from the
+        // drafts page (where rows are opened and deleted). A glance at an
+        // empty composer changes nothing and costs no round trip.
+        if let closing,
+            queued || DraftSaver.shared.currentDraftId(of: closing) != nil
+                || closing.page == .drafts
+        {
+            Task { await refreshDrafts() }
+        }
     }
 
     /// Open the reader's inline reply on a specific message. Never resets a
@@ -4518,12 +4545,13 @@ final class AppStore {
             // every list that hides resolved ids — otherwise an undo looks like
             // it did nothing until the next poll. Harmless for undo kinds that
             // never resolved anything: the id simply is not in the set.
-            resolvedIds.remove(entry.messageId)
+            // Only for a kind that resolved something: see `touchesSitrep`.
+            if entry.kind.touchesSitrep { resolvedIds.remove(entry.messageId) }
             pushToast("undone: \(entry.label)", .info)
             Analytics.capture("undo_fired", ["kind": String(describing: entry.kind)])
             // The bands dropped the row optimistically and the next poll is up
             // to 10s out — pull now, or the undo reads as broken on the sitrep.
-            await SitrepPoller.shared.pull()
+            if entry.kind.touchesSitrep { await SitrepPoller.shared.pull() }
         } catch {
             guard e == epoch else { return }
             pushToast("undo failed: \(entry.label)", .error)

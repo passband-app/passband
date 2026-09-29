@@ -309,7 +309,7 @@ Remove `Lib/Ranking.swift` scoring and the competing `Prefs.rankWeight` slider. 
 
 Update `AppStore` standing/new/open band state to one FYE list. Adapt `SitrepView`, `MobileSitrepView`, `SitrepPoller`, `Newsletters.swift`, `SitrepZones`, `WireTypes`, `TriageTargets`, `Notifier`, notification extension, and onboarding fixtures. Counts/badges must use a documented server aggregate; `NeedToday` deadline/importance logic cannot independently decide attention membership.
 
-Preserve explicit rule-editor `sweep` as a separate user action on existing mail if offered; saving a preference alone enqueues evaluation rather than directly rewriting tiers. Rule exceptions replace UI wording that implies a rule always governs. Keep record cards, correction palette mechanics, account switching, reader and cache infrastructure with revised inputs.
+Preserve explicit rule-editor `sweep` as a separate user action on existing mail if offered; saving a preference alone applies to mail that arrives after it: it neither rewrites tiers nor re-triages stored mail. Rule exceptions replace UI wording that implies a rule always governs. Keep record cards, correction palette mechanics, account switching, reader and cache infrastructure with revised inputs.
 
 Audit TUI, MCP, control/CLI, desktop bridge, and debug endpoints for legacy DTO use. Public agent APIs must use access-checked new projections, not translate new placements back through legacy importance thresholds. Human actions on restricted mail must work too; the read endpoint alone is insufficient.
 

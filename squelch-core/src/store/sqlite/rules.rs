@@ -153,8 +153,7 @@ impl SqliteStore {
         disposition: Disposition,
     ) -> Result<bool> {
         validate_sender_rule(want_text, disposition)?;
-        let mut connection = self.lock()?;
-        let conn = connection.transaction()?;
+        let conn = self.lock()?;
         // Retargeting this rule onto a pattern another rule already owns trips
         // UNIQUE(account_id, match_pattern); map it to InvalidInput so the door
         // returns a 4xx the user can act on instead of a 500.
@@ -173,7 +172,6 @@ impl SqliteStore {
                 ],
             )
             .map_err(map_pattern_conflict)?;
-        conn.commit()?;
         Ok(n > 0)
     }
 
@@ -221,13 +219,11 @@ impl SqliteStore {
     }
 
     pub(super) fn delete_sender_rule(&self, account_id: AccountId, id: i64) -> Result<bool> {
-        let mut connection = self.lock()?;
-        let conn = connection.transaction()?;
+        let conn = self.lock()?;
         let n = conn.execute(
             "DELETE FROM sender_rules WHERE account_id=?1 AND id=?2",
             params![account_id, id],
         )?;
-        conn.commit()?;
         Ok(n > 0)
     }
 

@@ -79,11 +79,19 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // backfilled: NULL is the safe reading (no tracking-pixel bypass), and a
     // re-sync refills it through the message upsert.
     add_column_if_missing(conn, "messages", "auth_pass", "INTEGER")?;
-    // Display recipients of sent mail. NULL on every pre-existing row, which is
-    // exactly the recipients-backfill queue predicate (`is_sent=1 AND to_addrs
-    // IS NULL`); the backfill runs from the sync engine, over the network, so it
+    // Display recipients, one column per header. NULL on every pre-existing row,
+    // which is exactly the recipients-backfill queue predicate (`cc_addrs IS
+    // NULL`); the backfill runs from the sync engine, over the network, so it
     // cannot live in this synchronous seam.
+    //
+    // `cc_addrs` is the queue's predicate and not `to_addrs` deliberately:
+    // `to_addrs` has been filling for sent mail since before the split, holding
+    // To+Cc+Bcc mashed into one string, and those rows need re-reading too — a
+    // predicate keyed on the old column would call them done and leave the Cc
+    // list rendered as though everyone on it had been in To.
     add_column_if_missing(conn, "messages", "to_addrs", "TEXT")?;
+    add_column_if_missing(conn, "messages", "cc_addrs", "TEXT")?;
+    add_column_if_missing(conn, "messages", "bcc_addrs", "TEXT")?;
     // Gmail's own spam verdict. 0 on every pre-existing row, which is the honest
     // reading: this daemon never fetched the SPAM label before, so nothing
     // already stored came from it. The first sync after the upgrade backfills
@@ -1108,39 +1116,55 @@ fn clear_stale_no_extractor_markers(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// ONE-SHOT (and resumable): fill `message_recipients` from the `to_addrs`
+/// ONE-SHOT (and resumable): fill `message_recipients` from the recipient
 /// display strings already on disk.
 ///
 /// Local and parse-only — no network, unlike the recipients sweep in the sync
-/// engine that produced `to_addrs` in the first place. Rows whose `to_addrs` is
-/// NULL are not candidates here: they are that sweep's queue, and it writes the
-/// index itself as it fills them.
+/// engine that produced those strings in the first place. Rows with no
+/// recipients stored at all are not candidates here: they are that sweep's
+/// queue, and it writes the index itself as it fills them.
 ///
-/// An EMPTY `to_addrs` ("looked, and the headers named nobody") yields no rows
-/// and therefore stays a candidate forever. That is a handful of rows parsing to
+/// ALL THREE HEADERS, because the index answers "did this message go to that
+/// address" and a Cc'd or Bcc'd recipient received the mail exactly like a To'd
+/// one. Pre-split rows carry all three in `to_addrs` already (it held To+Cc+Bcc
+/// mashed together), and the concatenation below is a no-op on them.
+///
+/// EMPTY strings ("looked, and the headers named nobody") yield no rows and
+/// therefore stay candidates forever. That is a handful of rows parsing to
 /// nothing on each open, which is cheaper than a done-flag per account for a
 /// table this seam scans once.
 fn backfill_message_recipients(conn: &Connection) -> Result<()> {
     if !tables_exist(conn, &["messages", "message_recipients"])?
-        || !has_columns(conn, "messages", &["to_addrs", "is_sent"])?
+        || !has_columns(
+            conn,
+            "messages",
+            &["to_addrs", "cc_addrs", "bcc_addrs", "is_sent"],
+        )?
     {
         return Ok(());
     }
-    let rows: Vec<(i64, i64, String)> = conn
+    let rows: Vec<(i64, i64, String, String, String)> = conn
         .prepare(
-            "SELECT m.id, m.account_id, m.to_addrs FROM messages m
+            "SELECT m.id, m.account_id, COALESCE(m.to_addrs, ''),
+                    COALESCE(m.cc_addrs, ''), COALESCE(m.bcc_addrs, '')
+             FROM messages m
              WHERE m.is_sent = 1
-               AND m.to_addrs IS NOT NULL
-               AND m.to_addrs != ''
+               AND (m.to_addrs IS NOT NULL OR m.cc_addrs IS NOT NULL)
+               AND (COALESCE(m.to_addrs, '') != ''
+                    OR COALESCE(m.cc_addrs, '') != ''
+                    OR COALESCE(m.bcc_addrs, '') != '')
                AND NOT EXISTS (
                    SELECT 1 FROM message_recipients r
                    WHERE r.account_id = m.account_id AND r.message_id = m.id)",
         )?
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
 
-    for (message_id, account_id, to_addrs) in rows {
-        for addr in crate::sync::ingest::parse_stored_recipients(&to_addrs) {
+    for (message_id, account_id, to, cc, bcc) in rows {
+        let joined = crate::sync::ingest::join_recipient_lists(&[&to, &cc, &bcc]);
+        for addr in crate::sync::ingest::parse_stored_recipients(&joined) {
             conn.execute(
                 "INSERT OR IGNORE INTO message_recipients(account_id, message_id, addr)
                  VALUES(?1,?2,?3)",

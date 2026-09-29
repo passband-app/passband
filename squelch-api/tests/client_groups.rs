@@ -213,10 +213,10 @@ async fn history_for_an_unknown_group_is_404_not_an_empty_page() {
 #[tokio::test]
 async fn history_answers_with_mail_that_predates_the_group() {
     let h = harness(|store, acct| {
-        // Seeded WITHOUT recipients, then filled through `set_message_to_addrs`
+        // Seeded WITHOUT recipients, then filled through `set_message_recipients`
         // — the recipients-backfill sweep's own entry point, which is how every
-        // sent row that predates the column gets its display recipients AND its
-        // normalized index. Seeding the column directly would skip the index and
+        // sent row that predates the columns gets its display recipients AND its
+        // normalized index. Seeding the columns directly would skip the index and
         // test a state the daemon cannot actually produce.
         let id = store
             .upsert_message(&sent_msg(acct, "g1", "t1", "Update #1", ""))
@@ -234,8 +234,10 @@ async fn history_answers_with_mail_that_predates_the_group() {
                 None,
             )
             .unwrap();
+        // Ann was written to and Bo was copied in; the index answers for both,
+        // because both received the mail.
         store
-            .set_message_to_addrs(acct, id, "Ann <ann@fund.com>, bo@fund.com")
+            .set_message_recipients(acct, id, "Ann <ann@fund.com>", "bo@fund.com", "")
             .unwrap();
     });
 

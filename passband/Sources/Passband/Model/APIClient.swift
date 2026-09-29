@@ -352,6 +352,12 @@ actor APIClient {
         try await get("/client/senders", query: ["q": q, "limit": String(limit)])
     }
 
+    /// The reader's contact card for one address. A daemon older than the
+    /// route answers 404, which the card treats as "no history to show".
+    func person(_ addr: String) async throws -> PersonCard {
+        try await get("/client/person", query: ["addr": addr])
+    }
+
     /// The sent page: mail the user WROTE, newest first, already ordered by the
     /// daemon. HUMAN DOOR ONLY, like everything else on this client — the agent
     /// door has no route that enumerates what its principal has sent.

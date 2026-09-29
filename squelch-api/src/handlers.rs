@@ -2361,6 +2361,131 @@ pub async fn get_senders(
     Ok((no_store(), Json(items)))
 }
 
+// --- GET /client/person ------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct PersonQuery {
+    addr: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PersonReceivedView {
+    count: i64,
+    first_at: String,
+    last_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PersonSentView {
+    count: i64,
+    last_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PersonRuleView {
+    id: i64,
+    match_pattern: String,
+    want_text: String,
+    disposition: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PersonGroupView {
+    id: i64,
+    name: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PersonThreadView {
+    thread_id: String,
+    subject: String,
+    last_at: String,
+}
+
+/// The wire shape of the reader's contact card. The optional parts are ABSENT,
+/// never null, when there is nothing to say: no mail from them, never written
+/// to, no rule covers them.
+#[derive(Debug, Serialize)]
+pub struct PersonView {
+    addr: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    display_name: Option<String>,
+    is_self: bool,
+    known_contact: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    received: Option<PersonReceivedView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sent: Option<PersonSentView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rule: Option<PersonRuleView>,
+    groups: Vec<PersonGroupView>,
+    recent_threads: Vec<PersonThreadView>,
+}
+
+/// GET /client/person?addr= — everything the store knows about one address,
+/// for the contact card a click on a sender opens in the reader.
+///
+/// HUMAN DOOR ONLY, like contacts and senders: it answers "how often do I write
+/// to this person, and they to me", which is the correspondent graph the agent
+/// door is never handed. ONE address per call and no listing mode, so it cannot
+/// be walked into a directory dump without already knowing every address.
+/// Sealed mail is absent from every count and list on it (see
+/// `SqliteStore::person_record`). `no-store`, for the same reason as senders.
+pub async fn get_person(
+    State(state): State<ApiState>,
+    Query(params): Query<PersonQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let addr = params.addr.trim().to_string();
+    // An RFC 5321 path tops out at 256 octets; anything longer is not an
+    // address a message could have come from.
+    if addr.is_empty() || !addr.contains('@') || addr.len() > 320 {
+        return Err(ApiError::bad_request("addr must be an email address"));
+    }
+    let p = store_call(&state, move |store, account_id| {
+        store.person_record(account_id, &addr)
+    })
+    .await?;
+    let view = PersonView {
+        addr: p.addr,
+        display_name: p.display_name,
+        is_self: p.is_self,
+        known_contact: p.known_contact,
+        received: p.received.map(|r| PersonReceivedView {
+            count: r.count,
+            first_at: r.first_at.to_rfc3339(),
+            last_at: r.last_at.to_rfc3339(),
+        }),
+        sent: p.sent.map(|s| PersonSentView {
+            count: s.count,
+            last_at: s.last_at.map(|d| d.to_rfc3339()),
+        }),
+        rule: p.rule.map(|r| PersonRuleView {
+            id: r.id,
+            match_pattern: r.match_pattern,
+            want_text: r.want_text,
+            disposition: r.disposition.as_str(),
+        }),
+        groups: p
+            .groups
+            .into_iter()
+            .map(|g| PersonGroupView {
+                id: g.id,
+                name: g.name,
+            })
+            .collect(),
+        recent_threads: p
+            .recent_threads
+            .into_iter()
+            .map(|t| PersonThreadView {
+                thread_id: t.thread_id,
+                subject: t.subject,
+                last_at: t.last_at.to_rfc3339(),
+            })
+            .collect(),
+    };
+    Ok((no_store(), Json(view)))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct DraftBody {
     /// The message being replied to. With `forward_of_message_id` also absent,

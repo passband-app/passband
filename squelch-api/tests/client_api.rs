@@ -5784,6 +5784,89 @@ async fn thread_response_carries_html_field() {
     assert_eq!(msgs[1]["subject"], "Re: Newsletter - unsubscribe?");
 }
 
+/// The recipients the reader draws its To/Cc/Bcc block from, end to end: parsed
+/// at ingest into three columns, served per message on the human door.
+///
+/// THE ABSENCES ARE THE ASSERTIONS. A row whose headers nobody has read yet must
+/// arrive with the keys MISSING rather than empty, because the client draws the
+/// two states the same and the daemon does not: absent is "the recipients sweep
+/// has not reached this row", empty is "read, and the header named nobody", and
+/// a client that saw "" for both would claim the second on evidence of the first.
+#[tokio::test]
+async fn thread_response_carries_recipients_per_header() {
+    let Harness { app, .. } = harness(|store, acct| {
+        let mut inbound = msg(acct, "g-1", "t-r", "Pricing", "text");
+        inbound.to_addrs = Some("Me <me@example.com>, \"Doe, Jane\" <jane@x.test>".into());
+        inbound.cc_addrs = Some("team@x.test".into());
+        // Present on the wire from a caller that had no business setting it: the
+        // store drops a Bcc on anything not sent, so it must not come back.
+        inbound.bcc_addrs = Some("leaked@x.test".into());
+        let a = store.upsert_message(&inbound).unwrap();
+
+        let mut outbound = msg(acct, "g-2", "t-r", "Re: Pricing", "reply");
+        outbound.is_sent = true;
+        outbound.from_addr = "me@example.com".into();
+        outbound.to_addrs = Some("jane@x.test".into());
+        outbound.cc_addrs = Some(String::new());
+        outbound.bcc_addrs = Some("Ana <ana@x.test>".into());
+        let b = store.upsert_message(&outbound).unwrap();
+
+        // A third message nobody has read the headers of yet.
+        let c = store
+            .upsert_message(&msg(acct, "g-3", "t-r", "Re: Pricing", "later"))
+            .unwrap();
+
+        for id in [a, b, c] {
+            store
+                .set_triage(
+                    id,
+                    acct,
+                    0,
+                    Tier::Noise,
+                    Sensitivity::Normal,
+                    None,
+                    "",
+                    "",
+                    None,
+                )
+                .unwrap();
+        }
+    });
+
+    let resp = app
+        .oneshot(authed("GET", "/client/thread/t-r"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let msgs = json["messages"].as_array().unwrap();
+    assert_eq!(msgs.len(), 3);
+
+    assert_eq!(
+        msgs[0]["to_addrs"], "Me <me@example.com>, \"Doe, Jane\" <jane@x.test>",
+        "the quoting that keeps a lastname-first name one person survives the wire"
+    );
+    assert_eq!(msgs[0]["cc_addrs"], "team@x.test");
+    assert!(
+        msgs[0].get("bcc_addrs").is_none(),
+        "a Bcc on received mail is the sender's leak or a forgery, and is never stored"
+    );
+
+    assert_eq!(msgs[1]["to_addrs"], "jane@x.test");
+    assert_eq!(msgs[1]["cc_addrs"], "", "read, and the header named nobody");
+    assert_eq!(
+        msgs[1]["bcc_addrs"], "Ana <ana@x.test>",
+        "the user's own blind copy"
+    );
+
+    for key in ["to_addrs", "cc_addrs", "bcc_addrs"] {
+        assert!(
+            msgs[2].get(key).is_none(),
+            "an unread row carries no {key} at all, the shape an older daemon sends"
+        );
+    }
+}
+
 // --- UNSUBSCRIBE endpoints ---------------------------------------------------
 
 /// Seed a message carrying explicit List-Unsubscribe fields; return its id. The
@@ -9622,6 +9705,107 @@ async fn senders_autocomplete_ranks_prefix_then_volume_and_hides_spam_and_sent()
         .oneshot(
             Request::builder()
                 .uri("/client/senders?q=dan")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn person_card_reports_one_address_without_its_sealed_mail() {
+    // WIRE CONTRACT: GET /client/person?addr= returns {addr, display_name?,
+    // is_self, known_contact, received?, sent?, rule?, groups, recent_threads}.
+    // Sealed mail is in no count and no list; optional parts are ABSENT when
+    // there is nothing to say; the response is no-store; no token, no card.
+    let Harness { app, .. } = harness(|store, acct| {
+        let seed = |gmail: &str, thread: &str, subject: &str| {
+            let mut m = msg(acct, gmail, thread, subject, "body");
+            m.from_addr = "dan@example.com".to_string();
+            m.from_name = Some("Dan Smith".to_string());
+            m
+        };
+        store.upsert_message(&seed("g1", "t1", "lunch?")).unwrap();
+        store.upsert_message(&seed("g2", "t2", "the deck")).unwrap();
+        let sealed = store
+            .upsert_message(&seed("g3", "t3", "your pangolin code"))
+            .unwrap();
+        store
+            .set_triage(
+                sealed,
+                acct,
+                50,
+                Tier::Signal,
+                Sensitivity::Sealed,
+                Some(SealedKind::Otp),
+                "",
+                "",
+                None,
+            )
+            .unwrap();
+    });
+
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", "/client/person?addr=Dan%40Example.com"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-store"
+    );
+    let card = body_json(resp).await;
+    assert_eq!(card["display_name"], "Dan Smith");
+    assert_eq!(card["is_self"], false);
+    assert_eq!(
+        card["received"]["count"], 2,
+        "the sealed message is not counted"
+    );
+    assert!(card["received"]["first_at"].is_string());
+    let subjects: Vec<&str> = card["recent_threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["subject"].as_str().unwrap())
+        .collect();
+    assert!(!subjects.contains(&"your pangolin code"), "{subjects:?}");
+    assert_eq!(subjects.len(), 2);
+    // Never written to and no rule: absent, not null.
+    let obj = card.as_object().unwrap();
+    assert!(
+        !obj.contains_key("sent") && !obj.contains_key("rule"),
+        "{card}"
+    );
+
+    // A stranger is an empty card, not an error; your own address says so.
+    let resp = app
+        .clone()
+        .oneshot(authed(
+            "GET",
+            "/client/person?addr=nobody%40nowhere.example",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let card = body_json(resp).await;
+    assert!(!card.as_object().unwrap().contains_key("received"));
+    assert_eq!(card["recent_threads"].as_array().unwrap().len(), 0);
+
+    for uri in [
+        "/client/person?addr=",
+        "/client/person?addr=dan",
+        "/client/person",
+    ] {
+        let resp = app.clone().oneshot(authed("GET", uri)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{uri}");
+    }
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/client/person?addr=dan%40example.com")
                 .body(Body::empty())
                 .unwrap(),
         )

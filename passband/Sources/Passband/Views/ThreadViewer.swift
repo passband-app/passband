@@ -724,7 +724,15 @@ struct ThreadViewer: View {
                                 MessageCard(
                                     message: m, style: style, position: i,
                                     selected: i == index, ruled: i > 0,
-                                    opens: opens[m.id] ?? []
+                                    opens: opens[m.id] ?? [],
+                                    me: store.sitrep.stats?.account_email,
+                                    // The message before this one IN THE THREAD,
+                                    // which is the order this stack is already in
+                                    // (oldest first). The first message has none,
+                                    // and gets no marks: "everyone here is new"
+                                    // is a claim, and nothing precedes it.
+                                    previousRecipients: i > 0
+                                        ? messages[i - 1].audience : nil
                                 ) {
                                     index = i
                                 }
@@ -2164,7 +2172,10 @@ extension View {
                     if let message = preview?.messages.last {
                         MessageCard(
                             message: message, style: .classic, position: 0,
-                            selected: false, ruled: false, opens: [], onSelect: {})
+                            selected: false, ruled: false, opens: [],
+                            // A glimpse of the NEXT thread: no "you" rewrite and
+                            // no diff against a message it is not beside.
+                            me: nil, previousRecipients: nil, onSelect: {})
                     } else {
                         MessageSenderHeading(sender: row.senderString)
                             .padding(.leading, MessageCard.bodyInset)
@@ -2257,6 +2268,16 @@ private struct MessageCard: View, Equatable {
     /// Recorded opens of this message, when it is one of the user's own tracked
     /// sends. Empty for everything else, which renders no mark.
     nonisolated let opens: [MessageOpen]
+    /// The account's own address, which the recipient lines render as "you".
+    /// Part of the comparison below because it arrives asynchronously (the first
+    /// `/client/stats` of the session), and a card that kept the older callback's
+    /// nil would go on spelling the reader's own address at them.
+    nonisolated let me: String?
+    /// The RECIPIENTS OF THE MESSAGE BEFORE THIS ONE, which is what makes the
+    /// block able to say somebody was added or quietly dropped. `nil` on the
+    /// first message of a thread and on any predecessor whose headers were never
+    /// read — see `MessageRecipients`.
+    nonisolated let previousRecipients: MessageAudience?
     let onSelect: () -> Void
 
     /// The gutter the rules live in, which every body is inset by. Named
@@ -2271,6 +2292,7 @@ private struct MessageCard: View, Equatable {
     nonisolated static func == (a: MessageCard, b: MessageCard) -> Bool {
         a.message == b.message && a.style == b.style && a.position == b.position
             && a.selected == b.selected && a.ruled == b.ruled && a.opens == b.opens
+            && a.me == b.me && a.previousRecipients == b.previousRecipients
     }
 
     /// Which side of the conversation this is. Only the chat style asks.
@@ -2371,15 +2393,28 @@ private struct MessageCard: View, Equatable {
     // MARK: - the email card's header
 
     private var cardHeader: some View {
-        HStack(spacing: 9) {
-            MessageSenderHeading(sender: message.senderString)
-            Spacer(minLength: 8)
-            spamChip
-            attentionChip
-            ReadReceiptMark(opens: opens)
-            Text(Fmt.dateTime(message.received_at))
-                .font(Typo.num(11))
-                .foregroundStyle(Palette.inkFaintest)
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 9) {
+                // Click for the contact card, right-click to copy. On the loaded
+                // card only: the peek placeholder is a stand-in, not a person.
+                MessageSenderHeading(sender: message.senderString)
+                    .contactCard(for: message.senderString)
+                Spacer(minLength: 8)
+                spamChip
+                attentionChip
+                ReadReceiptMark(opens: opens)
+                Text(Fmt.dateTime(message.received_at))
+                    .font(Typo.num(11))
+                    .foregroundStyle(Palette.inkFaintest)
+            }
+            // WHO ELSE WAS ON IT, under the sender and indented past the avatar
+            // so the two read as one block: this message came FROM that person
+            // and went TO these. Renders nothing when the daemon sent no
+            // recipients, so an older daemon draws exactly the old header.
+            MessageRecipients(
+                message: message, previous: previousRecipients, me: me, compact: false
+            )
+            .padding(.leading, 25)
         }
     }
 
@@ -2392,20 +2427,34 @@ private struct MessageCard: View, Equatable {
     /// daemon (which draws everything as theirs), and the mark already no-ops on
     /// empty opens — a gate would only hide receipts the card shows.
     private var caption: some View {
-        HStack(spacing: 6) {
-            if !mine {
-                Avatar(sender: message.senderString, size: 17)
+        VStack(alignment: side, spacing: 1) {
+            HStack(spacing: 6) {
+                HStack(spacing: 6) {
+                    if !mine {
+                        Avatar(sender: message.senderString, size: 17)
+                    }
+                    Text(SenderCache.resolved(message.senderString).displayName)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Palette.inkDim)
+                        .lineLimit(1)
+                }
+                .contactCard(for: message.senderString)
+                spamChip
+                attentionChip
+                ReadReceiptMark(opens: opens)
+                Text(captionTime)
+                    .font(Typo.num(10))
+                    .foregroundStyle(Palette.inkFaintest)
             }
-            Text(SenderCache.resolved(message.senderString).displayName)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Palette.inkDim)
-                .lineLimit(1)
-            spamChip
-            attentionChip
-            ReadReceiptMark(opens: opens)
-            Text(captionTime)
-                .font(Typo.num(10))
-                .foregroundStyle(Palette.inkFaintest)
+            // THE SAME LINES A CARD GETS, one point smaller, and hung from the
+            // same edge as the bubble under them: a block sitting under the
+            // user's own right-aligned bubble but pinned to the left of the
+            // column reads as somebody else's.
+            MessageRecipients(
+                message: message, previous: previousRecipients, me: me, compact: true,
+                edge: side
+            )
+            .frame(maxWidth: ThreadViewer.bubbleWidth, alignment: edge)
         }
     }
 

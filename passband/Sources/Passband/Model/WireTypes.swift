@@ -286,6 +286,23 @@ struct ClientMessage: Codable, Sendable, Identifiable, Hashable, SenderStringCon
     /// subject have to name the message rather than the conversation it landed
     /// in — the daemon's own fallback quotes this same header.
     var subject: String?
+    /// WHO ELSE WAS ON THIS MESSAGE, one field per header, each a comma-joined
+    /// `Name <addr>` list exactly as the header spelled it. ABSENT on a daemon
+    /// too old to send them, and absent on a row whose headers have never been
+    /// read (the daemon's one-shot recipients sweep is still walking back
+    /// through the mailbox) — both draw nothing, which is what the reader did
+    /// before these existed.
+    ///
+    /// `""` is the DIFFERENT statement that the header was read and named
+    /// nobody. It also draws nothing; the distinction is the daemon's, and the
+    /// client is careful not to collapse the two on its way past.
+    ///
+    /// `bcc_addrs` only ever arrives on mail this account sent. The daemon
+    /// refuses to keep a `Bcc:` header on received mail, where it is the
+    /// sender's leak or a forgery rather than who the mail went to.
+    var to_addrs: String?
+    var cc_addrs: String?
+    var bcc_addrs: String?
     var attachments: [Attachment]?
     /// True for a message the USER authored, false for anything received.
     /// ABSENT on an older daemon, which reads as unknown — and unknown is
@@ -1454,6 +1471,48 @@ struct SenderHit: Codable, Sendable, Equatable, Identifiable {
     var last_received_at: String
 
     var id: String { addr }
+}
+
+/// GET /client/person?addr= — the reader's contact card: everything the daemon
+/// knows about one address. The optional parts are ABSENT when there is
+/// nothing to say (no mail from them, never written to, no rule), and sealed
+/// mail is in no count and no list on it.
+struct PersonCard: Codable, Sendable, Equatable {
+    struct Received: Codable, Sendable, Equatable {
+        var count: Int
+        var first_at: String
+        var last_at: String
+    }
+    struct Sent: Codable, Sendable, Equatable {
+        var count: Int
+        var last_at: String?
+    }
+    struct Rule: Codable, Sendable, Equatable {
+        var id: Int
+        var match_pattern: String
+        var want_text: String
+        var disposition: Disposition
+    }
+    struct Group: Codable, Sendable, Equatable, Identifiable {
+        var id: Int
+        var name: String
+    }
+    struct RecentThread: Codable, Sendable, Equatable, Identifiable {
+        var thread_id: String
+        var subject: String
+        var last_at: String
+        var id: String { thread_id }
+    }
+
+    var addr: String
+    var display_name: String?
+    var is_self: Bool
+    var known_contact: Bool
+    var received: Received?
+    var sent: Sent?
+    var rule: Rule?
+    var groups: [Group]
+    var recent_threads: [RecentThread]
 }
 
 struct StatusResult: Codable, Sendable {

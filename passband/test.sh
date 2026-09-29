@@ -205,7 +205,16 @@ run_suite share-nudge \
 # an app, because every way it can go wrong is invisible on screen: a list split
 # on the wrong comma, or an address left in To while the sender believes it went
 # out blind.
+# The composer's list grammar AND the reader's side of it — one type, because
+# two splitters would eventually disagree about `"Doe, John" <j@x>`. Display
+# names come from SenderIdentity, which is why its (pure) dependencies ride
+# along here.
 run_suite recipients \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Format.swift \
+  Sources/Passband/Lib/AsyncMemo.swift \
+  Sources/Passband/Lib/SenderIdentity.swift \
   Sources/Passband/Lib/Recipients.swift \
   Tests/RecipientsTests.swift
 

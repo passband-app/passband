@@ -1448,6 +1448,8 @@ fn count_inbound_since_counts_only_received_in_window() {
             is_sent: sent,
             is_spam: false,
             to_addrs: None,
+            cc_addrs: None,
+            bcc_addrs: None,
             list_unsubscribe: None,
             list_unsub_one_click: false,
             auth_pass: None,

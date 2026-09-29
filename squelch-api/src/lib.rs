@@ -197,6 +197,9 @@ fn client_router(state: ApiState) -> Router {
         // Sender autocomplete for the search field's `from:` operator: who
         // writes to the user. Human door only, for the reason contacts is.
         .route("/client/senders", get(handlers::get_senders))
+        // The reader's contact card: one address, everything known about it.
+        // Human door only, for the reason contacts is.
+        .route("/client/person", get(handlers::get_person))
         .merge(groups::routes())
         .route("/client/sealed", get(handlers::list_sealed))
         .route(

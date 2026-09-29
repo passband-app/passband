@@ -259,6 +259,16 @@ their attachments. However many drafts an account holds (one per reply target,
 one per forwarded message, any number of new-message drafts), they are served
 only on `/client/drafts`, are never audited, and have no MCP surface.
 
+**Recipients and the contact card are human-door data.** To and Cc are stored
+for every message and Bcc only for the account's own sends. The store enforces
+the Bcc rule in SQL, because on received mail that header is a leak or a
+forgery. They ride on `ClientMessage` beside `html`; the agent door's
+`SanitizedMessage` has no recipient fields at all. `GET /client/person` (the
+reader's contact card) answers for one address at a time, excludes sealed mail
+from every count and list, and has no MCP counterpart. The contacts seed stays
+sent-only, so being copied in beside a stranger never earns them the
+known-contact floor.
+
 ## 4b. Provider spam
 
 **Invariant.** Mail the provider filed as spam is stored and readable on one

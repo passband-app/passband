@@ -230,10 +230,17 @@ pub struct SyncConfig {
     /// half idle. Overlapping the GETs lets the budget be the only limiter,
     /// which is what it is for.
     ///
-    /// 4, not more, because every in-flight message is a raw RFC 822 body held
-    /// in memory until it is ingested, and a message can be tens of megabytes.
-    /// The first backfill is already the peak of a hosted pod's life (see
-    /// `crate::mem`), so the width is a memory knob as much as a speed one.
+    /// 2, MEASURED. On a real mailbox (805 INBOX + 9 SENT over 30 days, release
+    /// build, 2026-09-28) the window took 333 s at width 1, 226 s at width 2 and
+    /// 228 s at width 4: from two onward the shared Gmail budget (about four
+    /// `messages.get` a second under the Standard profile) is the only limiter,
+    /// so a wider window buys nothing. What it costs is memory: every in-flight
+    /// message is a raw RFC 822 body held until it is ingested, plus its base64
+    /// carrier, and a message can be tens of megabytes. The first backfill is
+    /// already the peak of a hosted pod's life (see `crate::mem`), and an
+    /// OOM-kill there is a crash LOOP, not a crash: the restart re-lists the
+    /// same window in the same order and dies at the same message. Two is the
+    /// whole speed gain at half the exposure of four.
     /// Env: SQUELCH_FETCH_CONCURRENCY. 0 is read as 1.
     pub fetch_concurrency: usize,
     /// HOW MANY SPAM MESSAGES one on-demand spam sync will fetch, newest first.
@@ -257,7 +264,7 @@ impl Default for SyncConfig {
             gmail_quota_profile: GmailQuotaProfile::Standard,
             backfill_days: 30,
             poll_secs: 5,
-            fetch_concurrency: 4,
+            fetch_concurrency: 2,
             spam_max: 200,
         }
     }
@@ -2415,7 +2422,7 @@ mod tests {
         let c = Config::default();
         assert_eq!(c.sync.backfill_days, 30);
         assert_eq!(c.sync.poll_secs, 5);
-        assert_eq!(c.sync.fetch_concurrency, 4);
+        assert_eq!(c.sync.fetch_concurrency, 2);
         assert!(c.client_id.is_none());
     }
 

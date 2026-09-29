@@ -274,8 +274,9 @@ tick behind the usual 5s TTL. A newly `failed` row toasts once per app run.
 
 The **cancel button is gone**. Esc closes, and the footer stops saying it.
 
-A **clock** joins attach and track on the left: those three are "how this
-mail goes out." Clicking it opens a time palette built on `RemindTimes`:
+A **clock icon** sits in the right cluster immediately left of the Send
+button (user decision 2026-09-29; it began life in the left cluster beside
+attach and track). No label; the tooltip reads "send later ⌘⇧L". Clicking it opens a time palette built on `RemindTimes`:
 typed natural language ("tomorrow 9am", "monday", "in 2h") plus a pinned
 list of picks, every row showing its absolute time, re-pinned if a pick has
 gone by. Picking a time:
@@ -306,11 +307,15 @@ in a group headed "scheduled" (hidden when empty). Each row: to, subject,
 and the fire time as "Tue 9:00 · in 3h". A `failed` row shows "didn't send"
 in `Palette.danger` with the reason. Keys on a scheduled row:
 
-- Enter / click: pull it back into the composer (DELETE + open with the
-  request and time). The row disappears; ⌘↵ in the composer reschedules.
-  Opening reuses PR #289's `openDraft`/`fill(_:from:)` machinery (a reply
-  needs its thread open, a forward its original; both are handled there),
-  fed from the returned request instead of a `DraftView`.
+- Enter / click: open the mail READ-ONLY, as scheduled (user decision
+  2026-09-29): a preview pane in the reader's slot showing to/cc/bcc,
+  subject, the body rendered through the composer's own
+  `/client/markdown/preview`, the attachments, and the fire time, with
+  three verbs: `edit`, `send now`, `cancel`. Esc closes the preview and the
+  mail STAYS scheduled. Only `edit` pulls it back into the composer
+  (cancel + reopen with the request and time, via PR #289's
+  `openDraft`/`fill(_:from:)` machinery; a reply needs its thread open, a
+  forward its original). Nothing about opening a row moves it to drafts.
 - `s` (or the row's "send now" verb): `POST .../now`.
 - `x` / delete: cancel outright, toast with undo (undo = re-POST the
   returned request). Same shape as PR #289's `pendingDraftDeletes` +

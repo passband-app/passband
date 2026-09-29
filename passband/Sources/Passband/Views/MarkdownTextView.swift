@@ -103,6 +103,9 @@ struct MarkdownTextView: NSViewRepresentable {
             // — ⌘Z after a drop would then cut a marker in half, or throw
             // past the end of a body a tray click had shortened.
             if Prefs.shared.isBodyUntouched(view.string) {
+                // `string =` bypasses the undo manager; anything recorded
+                // before it names ranges in a body that is no longer here.
+                context.coordinator.undo.removeAllActions()
                 view.string = text
                 view.rehighlight()
                 view.setSelectedRange(NSRange(location: 0, length: 0))
@@ -115,9 +118,18 @@ struct MarkdownTextView: NSViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
-    final class Coordinator: NSObject, NSTextViewDelegate {
+    @MainActor final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: MarkdownTextView
         init(_ parent: MarkdownTextView) { self.parent = parent }
+
+        /// THIS EDITOR'S OWN HISTORY. Left to itself the text view registers
+        /// into the window's undo manager, the one SwiftUI hands the whole
+        /// shell, and ⌘Z typed here did not take back what was typed here.
+        /// One stack per editor also means undo never reaches past this
+        /// message into a field, or a composer, that is gone.
+        let undo = UndoManager()
+
+        func undoManager(for view: NSTextView) -> UndoManager? { undo }
 
         func textDidChange(_ notification: Notification) {
             guard let view = notification.object as? HighlightingTextView else { return }
@@ -167,6 +179,31 @@ final class HighlightingTextView: NSTextView {
         let target = ComposeMarkers.caretAfterEdit(old: old, new: text, caret: caret)
         setSelectedRange(NSRange(location: target, length: 0))
         scrollRangeToVisible(NSRange(location: target, length: 0))
+    }
+
+    // MARK: - undo
+
+    /// ⌘Z AND ⇧⌘Z ARE THE EDITOR'S while it has the caret. The Inbox menu
+    /// binds ⌘Z too ("Undo Last Action", for a done or a send), and a menu
+    /// key equivalent is a race a text view should not have to win: the key
+    /// window is asked before the menu bar, so answering here settles it.
+    /// Claimed even with nothing to undo — a spare ⌘Z while writing must not
+    /// quietly bring back a thread marked done a moment ago.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard window?.firstResponder === self,
+            event.charactersIgnoringModifiers?.lowercased() == "z"
+        else { return super.performKeyEquivalent(with: event) }
+        let chord = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        switch chord {
+        case .command:
+            if undoManager?.canUndo == true { undoManager?.undo() }
+            return true
+        case [.command, .shift]:
+            if undoManager?.canRedo == true { undoManager?.redo() }
+            return true
+        default:
+            return super.performKeyEquivalent(with: event)
+        }
     }
 
     // MARK: - files in

@@ -435,12 +435,46 @@ extension ButtonStyle where Self == TextActionStyle {
                 // needs to be picked up rather than clicked has to be an
                 // AppKit view that says no: see `PillDragHandle`.
                 window.isMovableByWindowBackground = true
+                Self.keepTextSelectable(in: window)
                 // Restoration can hand the window back already fullscreen,
                 // before any transition our observers could hear.
                 WindowState.shared.isFullscreen = window.styleMask.contains(.fullScreen)
                 Self.hideTitlebarDecoration(in: window)
             }
             return view
+        }
+
+        /// A DRAG IN TEXT SELECTS; it does not move the window. A text view
+        /// that draws no background is non-opaque, and a non-opaque view
+        /// answers yes to `mouseDownCanMoveWindow` by default — so with the
+        /// window movable by its background, a drag across the composer's body
+        /// (or a focused field's editor, or the bare scroller below short
+        /// text) picked the window up instead of the words. Every text surface
+        /// in the shell is SwiftUI or a representable we do not subclass all
+        /// of, so the answer is settled here, once: each left mouse-down turns
+        /// background-moving off when it lands on text, and back on otherwise.
+        /// A local monitor runs before the window's `sendEvent`, which is
+        /// where AppKit makes that call.
+        private static func keepTextSelectable(in window: NSWindow) {
+            NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak window] event in
+                guard let window, event.window === window, let content = window.contentView
+                else { return event }
+                // `hitTest` takes a point in the receiver's superview, which
+                // for the content view is the frame view: window coordinates.
+                let hit = content.hitTest(event.locationInWindow)
+                window.isMovableByWindowBackground = !isText(hit)
+                return event
+            }
+        }
+
+        private static func isText(_ view: NSView?) -> Bool {
+            var node = view
+            while let v = node {
+                if v is NSTextView || v is NSTextField { return true }
+                if let scroll = v as? NSScrollView, scroll.documentView is NSTextView { return true }
+                node = v.superview
+            }
+            return false
         }
 
         /// Hide the glass chip macOS 26 paints behind the traffic lights

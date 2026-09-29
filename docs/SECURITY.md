@@ -255,7 +255,9 @@ on MCP, never audit file contents, and use `no-store`. Byte responses use the sa
 content-type whitelist, `nosniff`, and attachment disposition as inbound files.
 The outbound guard scans text and message parts at send time; binary files are
 not scanned. Restricting external-agent access does not delete human drafts or
-their attachments.
+their attachments. However many drafts an account holds (one per reply target,
+one per forwarded message, any number of new-message drafts), they are served
+only on `/client/drafts`, are never audited, and have no MCP surface.
 
 **Recipients and the contact card are human-door data.** To and Cc are stored
 for every message and Bcc only for the account's own sends. The store enforces

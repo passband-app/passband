@@ -26,10 +26,18 @@
 // MobileRootView presents this same view at `.large` off the same
 // `store.compose`, so opening, restoring, autosaving and sending are one code
 // path on both platforms. What is fenced below is the DESKTOP FURNITURE only —
-// the keys printed beside the footer's verbs (there is no Esc to promise), and
+// the keys printed beside the footer's verbs, and
 // the pane's glass edge and its leftward shadow (a sheet brings its own
 // ground). The ceremony itself, both phases of it, is shared and untouched: a
 // phone drives it with the same footer buttons, minus their keys.
+//
+// TWO PAGES, ONE STRIP. The drafts control beside the kind label flips
+// `ComposeState.page`: on `.drafts` the header stays and the body (fields,
+// editor, footer) swaps for `DraftsList`, full width, with the composer kept
+// exactly as it was underneath, one Enter or one click on the control away.
+// A ⌘N with no recent draft to restore but older ones waiting LANDS on that
+// page (see `AppStore.openComposeNew`). The header says which page is up: the
+// title reads "drafts" and the control turns into the way back.
 
 import SwiftUI
 
@@ -64,31 +72,14 @@ struct ComposePane: View {
             VStack(alignment: .leading, spacing: 0) {
                 header(compose)
 
-                VStack(alignment: .leading, spacing: 12) {
-                    editPane(compose)
-                    // A held send came back blocked: the verdict, and with it
-                    // the override in the footer.
-                    if guarded {
-                        GuardVerdictBox(kinds: compose.guardKinds)
-                    }
-                    if let error = compose.error {
-                        Text(error).font(Typo.micro).foregroundStyle(Palette.danger)
-                    }
+                if compose.page == .drafts {
+                    // THE DRAFTS PAGE: the list IS the body, and brings its
+                    // own muted key line where the footer was. No send and no
+                    // attach here: neither acts on a list.
+                    DraftsList()
+                } else {
+                    composerPage(compose)
                 }
-                .padding(.horizontal, 18)
-                .padding(.vertical, 14)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-
-                // NO FOOTER ON A PHONE, unless the guard blocked a send. Send
-                // went to the header and cancel to the drag-down gesture, and a
-                // bar left behind with nothing in it would still cost its own
-                // height between the editor and the keyboard. A blocked send
-                // needs the override, and the override deserves a wide target.
-                #if os(macOS)
-                    footer(compose)
-                #else
-                    if guarded { footer(compose) }
-                #endif
             }
             // FULL SCREEN IS A COLUMN, not the window: a line of mail as wide
             // as a monitor is unreadable. The reader's own measure, so a mail
@@ -108,14 +99,62 @@ struct ComposePane: View {
             .keyContext(.modal)
             .keyBindings(.modal, bindings)
             .onAppear { focusedField = .recipient(.to) }
+            // Back from the drafts page (or a draft opened from it): the
+            // fields remounted with nothing focused, so put the caret where
+            // the mail still needs something, the way opening does.
+            .onChange(of: compose.page) { _, page in
+                guard page == .compose else { return }
+                refocus()
+            }
+            .onChange(of: compose.id) { _, _ in
+                if store.compose?.page == .compose { refocus() }
+            }
             // ANYWHERE ON THE PANE: a file let go over the subject line or
             // the tray still lands.
             .composeDropTarget(.compose, targeted: $dropTargeted)
         }
     }
 
+    /// The first field still empty, else the subject: the body is a platform
+    /// text view outside `FocusState`, so the subject is the nearest stop.
+    private func refocus() {
+        guard let compose = store.compose else { return }
+        focusedField = compose.to.trimmed.isEmpty ? .recipient(.to) : .subject
+    }
+
+    /// Page one: the fields, the editor, and the footer that sends them.
+    @ViewBuilder
+    private func composerPage(_ compose: ComposeState) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            editPane(compose)
+            // A held send came back blocked: the verdict, and with it
+            // the override in the footer.
+            if guarded {
+                GuardVerdictBox(kinds: compose.guardKinds)
+            }
+            if let error = compose.error {
+                Text(error).font(Typo.micro).foregroundStyle(Palette.danger)
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 14)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+        // NO FOOTER ON A PHONE, unless the guard blocked a send. Send
+        // went to the header and cancel to the drag-down gesture, and a
+        // bar left behind with nothing in it would still cost its own
+        // height between the editor and the keyboard. A blocked send
+        // needs the override, and the override deserves a wide target.
+        #if os(macOS)
+            footer(compose)
+        #else
+            if guarded { footer(compose) }
+        #endif
+    }
+
     private func header(_ compose: ComposeState) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
+        let onList = compose.page == .drafts
+        return HStack(alignment: .firstTextBaseline, spacing: 8) {
             // THE SERIF MOMENT. A sheet has no chrome around it — it IS the
             // screen — so the phone spends Newsreader here, once, on the word
             // that names what you are doing.
@@ -124,22 +163,31 @@ struct ComposePane: View {
             // "COMPOSE" in the engraved, width-expanded label face with the kind
             // whispered beside it, which said the same thing twice in two
             // voices, the louder one the less useful.
+            //
+            // ON THE DRAFTS PAGE the title names the page instead, in the
+            // same voice and the same spot, and the control beside it becomes
+            // the way back: the header reads as a two-way switch without
+            // growing a second row of tabs.
             #if os(macOS)
-                Text(kindLabel(compose))
+                Text(onList ? "drafts" : kindLabel(compose))
                     .font(Typo.zoneTitle)
                     .foregroundStyle(Palette.ink)
+                draftsToggle(compose)
             #else
-                Text("compose")
+                Text(onList ? "drafts" : "compose")
                     .font(Typo.serif(24, weight: .medium))
                     .foregroundStyle(Palette.ink)
-                Text(kindLabel(compose))
-                    .font(Typo.micro)
-                    .foregroundStyle(Palette.inkFaintest)
+                if !onList {
+                    Text(kindLabel(compose))
+                        .font(Typo.micro)
+                        .foregroundStyle(Palette.inkFaintest)
+                }
+                draftsToggle(compose)
             #endif
             Spacer()
-            // NO `Esc close` CHIP ON THE MAC. The footer's cancel button names
-            // the same key, and the header saying it too made three places on
-            // one pane promising Esc.
+            // NO `Esc close` CHIP, AND NO CANCEL BUTTON IN THE FOOTER EITHER.
+            // Esc closes this pane like every other panel in the app; saying
+            // so in a chip or a button was the pane promising one key twice.
             #if os(macOS)
                 expandButton
             #else
@@ -165,10 +213,14 @@ struct ComposePane: View {
                 // ATTACH RIDES BESIDE IT, because the footer it has on the Mac
                 // is not here. The inline reply already offers it on a phone;
                 // a new message that could not take a file was the odd one out.
-                AttachButton(slot: .compose)
-                Button("send") { send(override: false) }
-                    .buttonStyle(.glassProminent)
-                    .tint(Palette.accent)
+                //
+                // NEITHER ON THE DRAFTS PAGE: a list has nothing to send.
+                if !onList {
+                    AttachButton(slot: .compose)
+                    Button("send") { send(override: false) }
+                        .buttonStyle(.glassProminent)
+                        .tint(Palette.accent)
+                }
             #endif
         }
         .padding(.horizontal, 18)
@@ -198,6 +250,56 @@ struct ComposePane: View {
             .accessibilityLabel(expanded ? "Exit full screen" : "Full screen")
         }
     #endif
+
+    /// THE DRAFTS CONTROL, beside the title: the kind label says what this
+    /// mail is, and this answers which one. It sits in the header rather than
+    /// the footer because the footer's left cluster is how a mail goes out
+    /// (attach, track), and this is not that.
+    ///
+    /// A TOGGLE between the pane's two pages, in one spot, so a second click
+    /// undoes the first. On the composer it counts the drafts you could open
+    /// from here (the one this pane is editing is not "another draft"); at
+    /// zero the word stays, muted, so the door does not come and go as you
+    /// type. On the drafts page it is the way back, in the accent, naming
+    /// what it goes back to. Hidden on a daemon without the drafts list
+    /// (`draftsV2Available`).
+    @ViewBuilder
+    private func draftsToggle(_ compose: ComposeState) -> some View {
+        if store.draftsV2Available {
+            let onList = compose.page == .drafts
+            let count = store.otherDrafts.count
+            Button {
+                patch { $0.page = onList ? .compose : .drafts }
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: onList ? "arrow.uturn.backward" : "square.stack")
+                        .font(.system(size: 9, weight: .semibold))
+                    Text(onList ? "back to \(kindLabel(compose))" : Self.draftsLabel(count))
+                }
+                .font(Typo.micro)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(
+                onList ? Palette.accent : count == 0 ? Palette.inkFaintest : Palette.inkFaint
+            )
+            .pointingHand()
+            .help(onList ? "back to the message" : "saved drafts")
+            .accessibilityLabel(
+                onList
+                    ? "Back to \(kindLabel(compose))"
+                    : count == 0 ? "Drafts" : "\(Self.draftsLabel(count)), show list")
+        }
+    }
+
+    /// "drafts" / "1 draft" / "3 drafts".
+    static func draftsLabel(_ count: Int) -> String {
+        switch count {
+        case 0: "drafts"
+        case 1: "1 draft"
+        default: "\(count) drafts"
+        }
+    }
 
     /// Which of the three this composer is, in the header's lowercase voice.
     private func kindLabel(_ compose: ComposeState) -> String {
@@ -310,10 +412,6 @@ struct ComposePane: View {
                 TrackerToggle(on: bindFlag(\.includeTracker))
             #endif
             Spacer()
-            #if os(macOS)
-                Button { store.closeCompose() } label: { keyed("cancel", "esc") }
-                    .buttonStyle(.glass)
-            #endif
             // Past a blocked verdict the plain send stays (the match may have
             // been edited out) and the override stands beside it in danger red:
             // two acts, never one button that quietly means both.
@@ -555,12 +653,20 @@ struct ComposePane: View {
     /// field.
     private var bindings: [KeyBinding] {
         [
-            KeyBinding("Escape", "cancel", allowInInput: true) { store.closeCompose() },
+            // DECLINES ON THE DRAFTS PAGE: there Esc means "back", which the
+            // list decides (`DraftsList`), whichever set registered first.
+            KeyBinding(declining: "Escape", "cancel", allowInInput: true) {
+                guard store.compose?.page != .drafts else { return false }
+                store.closeCompose()
+                return true
+            },
             // THE ASK BAR IS A MODAL ON TOP OF THIS PANE, in the same key
             // context, and binds only Escape: a ⌘Enter typed into its field
             // falls through to here, and must not send the mail underneath.
             KeyBinding(declining: "Enter", "send", meta: true, allowInInput: true) {
-                guard !store.askBarOpen else { return false }
+                // Not from the drafts page: the mail being sent is not on
+                // screen, and a send should never be of something unseen.
+                guard !store.askBarOpen, store.compose?.page != .drafts else { return false }
                 send(override: false)
                 return true
             },
@@ -570,7 +676,9 @@ struct ComposePane: View {
                 // THE ASK BAR IS A MODAL ON TOP OF THIS PANE, and KeyMonitor
                 // walks the sets newest-first; a chord typed into its field
                 // must not send THROUGH the outbound guard from under it.
-                guard !store.askBarOpen, guarded else { return false }
+                guard !store.askBarOpen, guarded, store.compose?.page != .drafts else {
+                    return false
+                }
                 send(override: true)
                 return true
             },

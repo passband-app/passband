@@ -146,8 +146,11 @@ enum Analytics {
         Set(MainView.allCases.map(\.rawValue)).union([
             // compose_send / compose_opened
             "new", "reply", "forward", "sent", "guard_blocked", "forbidden", "failure",
-            // undo_fired kinds
+            // undo_fired kinds: `String(describing:)` of every UndoKind case.
+            // Listed by hand, so a new case must land here too or its undo
+            // trips the debug assert.
             "archive", "done", "label", "ruleDelete", "groupDelete", "remind", "send",
+            "draftDelete",
             // group_* modes — how an audience is addressed. "individual" is the
             // only one that is not also a header name.
             "to", "bcc", "individual",

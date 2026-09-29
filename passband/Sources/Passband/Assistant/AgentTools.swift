@@ -481,14 +481,62 @@ enum AgentTools {
         return !domain.contains("*")
     }
 
+    /// Drafts the assistant has created this app session (new mail AND
+    /// replies), and the most it may; see `saveDraft`. Process-lifetime on
+    /// purpose: a restart is a person's act, and an account switch is not a
+    /// reason to allow more.
+    @MainActor private static var draftsCreated = 0
+    private static let draftCap = 3
+
     @MainActor
     private static func saveDraft(_ input: [String: JSONValue]) async throws -> ToolOutcome {
         guard let body = string(input, "body") else {
             return failure("missing body", summary: "draft failed")
         }
         let replyTo = int(input, "reply_to_message_id")
-        // THE DRAFT SLOT BELONGS TO THE PERSON. Drafts are keyed by
-        // (account, reply_to_message_id) — nil being THE one new-message slot —
+        let to = string(input, "to") ?? ""
+        let cc = string(input, "cc") ?? ""
+        let bcc = string(input, "bcc") ?? ""
+        let subject = string(input, "subject") ?? ""
+        // CAPPED, every kind, because nothing else bounds it: each call mints
+        // a row, a new message's always and a reply's for every parent that
+        // has none yet, so a prompt-injected loop ("draft a reply to each of
+        // these 40 threads") would bury the person's picker in mail nobody
+        // asked for. Three per app session is more than a real conversation
+        // needs; past it, the person decides.
+        guard draftsCreated < draftCap else {
+            return failure(
+                "\(draftCap) drafts already saved this session; ask the user to send "
+                    + "or discard one",
+                summary: "draft failed")
+        }
+        if replyTo == nil {
+            // NEW MAIL, under the same three-way gate as `DraftSaver.save`, and
+            // for the same reason: with no stats verdict yet, the old nil-key
+            // PUT against a `drafts_v2` daemon would overwrite the person's
+            // newest draft, and the new route against an old daemon 404s.
+            guard let stats = AppStore.shared.sitrep.stats else {
+                return failure(
+                    "still connecting to the mail daemon; try again in a moment",
+                    summary: "draft failed")
+            }
+            if stats.drafts_v2 == true {
+                // A daemon that keeps many new-message drafts: this one is a
+                // row of its OWN, so it cannot land on anything the person
+                // typed and there is no slot to check first. (The old check
+                // refused whenever ANY new-message draft existed, which is now
+                // the normal state.) The cap above is what bounds it instead.
+                let draft = try await APIClient.shared.createDraft(
+                    to: to, cc: cc, bcc: bcc, subject: subject, body: body)
+                draftsCreated += 1
+                return ok(
+                    row(["draft_id": draft.id, "reply_to_message_id": draft.reply_to_message_id]),
+                    summary: "saved a draft")
+            }
+        }
+        // THE DRAFT SLOT BELONGS TO THE PERSON. Replies (and, on an older
+        // daemon, new mail) are keyed by (account, reply_to_message_id), nil
+        // being that daemon's one new-message slot,
         // and the PUT is an upsert, the same row the composers autosave into.
         // Writing over a half-composed message destroys it on screen AND on the
         // server, and there is no undo for a lost draft. The agent may fill an
@@ -511,9 +559,9 @@ enum AgentTools {
                 summary: "a draft already exists there")
         }
         let draft = try await APIClient.shared.putDraft(
-            replyToMessageId: replyTo, to: string(input, "to") ?? "",
-            cc: string(input, "cc") ?? "", bcc: string(input, "bcc") ?? "",
-            subject: string(input, "subject") ?? "", body: body)
+            replyToMessageId: replyTo, to: to, cc: cc, bcc: bcc, subject: subject, body: body)
+        // Only an empty slot reaches here, so this was a create: it counts.
+        draftsCreated += 1
         return ok(
             row(["draft_id": draft.id, "reply_to_message_id": draft.reply_to_message_id]),
             summary: "saved a draft")

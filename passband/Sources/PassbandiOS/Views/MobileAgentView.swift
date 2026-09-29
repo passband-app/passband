@@ -446,6 +446,12 @@ struct MobileAgentView: View {
                 bcc: action.bcc ?? "",
                 subject: action.subject ?? "",
                 body: action.body ?? ""))
+        // A HAND-OFF IS COMPOSED CONTENT: the words are on screen because the
+        // reader asked the agent for them and chose to edit them. `openCompose`
+        // marks the slot opened (untouched), which would make an Esc before
+        // the first keystroke drop the mail and nothing say so. Marking it
+        // changed arms the autosave and makes the close flush keep it.
+        DraftSaver.shared.noteChange(.compose)
         session.resolve(action.id, .editedInComposer)
         focused = false
     }

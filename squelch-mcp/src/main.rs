@@ -151,4 +151,54 @@ mod tests {
         let server = SquelchServer::new(store, "me@localhost").expect("server");
         assert_eq!(server.tool_count(), 7, "expected exactly 7 MCP tools");
     }
+
+    /// Drafts are human-door only (docs/SECURITY.md §4): the agent door must
+    /// never grow a tool that names them, however many kinds of draft exist.
+    ///
+    /// A NAME CHECK ALONE IS WEAK: a tool called `search` or `get_email` could
+    /// quietly fold drafts (or their staged files) into what it returns, and
+    /// the tool list would look exactly as clean. So the crate's own source is
+    /// read too and must not reach the draft or staged-upload store surface at
+    /// all — `draft` covers `drafts`, `list_drafts`, `draft_by_id`,
+    /// `upsert_draft` and `delete_draft`. This test module is cut off before
+    /// the scan, since it has to spell the needles.
+    #[test]
+    fn no_mcp_tool_touches_drafts() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("in-memory store"));
+        let server = SquelchServer::new(store, "me@localhost").expect("server");
+        let names = server.tool_names();
+        assert_eq!(names.len(), 7);
+        assert!(
+            names.iter().all(|n| !n.to_lowercase().contains("draft")),
+            "an MCP tool names drafts: {names:?}"
+        );
+
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut scanned = 0;
+        for entry in std::fs::read_dir(&src).expect("read squelch-mcp/src") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("read source");
+            let text = if path.file_name().and_then(|n| n.to_str()) == Some("main.rs") {
+                text.split("#[cfg(test)]")
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned()
+            } else {
+                text
+            };
+            let text = text.to_lowercase();
+            for needle in ["draft", "outbound_attachment"] {
+                assert!(
+                    !text.contains(needle),
+                    "{} references `{needle}`: the agent door must not reach drafts",
+                    path.display()
+                );
+            }
+            scanned += 1;
+        }
+        assert!(scanned >= 3, "scanned only {scanned} source files");
+    }
 }

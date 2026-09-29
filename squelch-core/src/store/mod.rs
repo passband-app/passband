@@ -549,9 +549,10 @@ pub struct TrackedMessage {
     pub from_addr: String,
 }
 
-/// One local draft: an unsent composition addressed either at a message being
-/// replied to, or at the account's single new-message slot
-/// (`reply_to_message_id: None`).
+/// One local draft: an unsent composition keyed by the message it replies to,
+/// by the message it forwards, or (both keys `None`) a new message, of which an
+/// account may hold any number, each addressed by its own `id`. A row carries
+/// at most one of the two keys.
 ///
 /// HUMAN-DOOR ONLY — produced by
 /// [`SqliteStore::upsert_draft`](sqlite::SqliteStore::upsert_draft) and friends
@@ -561,8 +562,11 @@ pub struct TrackedMessage {
 pub struct Draft {
     pub id: i64,
     pub account_id: AccountId,
-    /// The message this replies to; `None` is the new-message draft.
+    /// The message this replies to; `None` when it is not a reply.
     pub reply_to_message_id: Option<i64>,
+    /// The message this forwards; `None` when it is not a forward. Never set
+    /// together with `reply_to_message_id`.
+    pub forward_of_message_id: Option<i64>,
     pub to_addr: String,
     /// The other two recipient lists, comma-joined exactly like `to_addr`. `""`
     /// when there are none, which is every draft written before the columns
@@ -579,10 +583,44 @@ pub struct Draft {
     /// First save of this draft; an edit keeps it.
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Context from the replied-to / forwarded message, for a drafts picker:
+    /// its thread, subject and sender. All `None` for plain new mail, and for a
+    /// draft whose parent is no longer stored.
+    pub thread_id: Option<String>,
+    pub parent_subject: Option<String>,
+    pub parent_from_addr: Option<String>,
+    pub parent_from_name: Option<String>,
+}
+
+/// Which draft row a save addresses. Taken by
+/// [`SqliteStore::upsert_draft`](sqlite::SqliteStore::upsert_draft).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DraftKey {
+    /// The one draft replying to this message: edited in place when it exists.
+    Reply(i64),
+    /// The one draft forwarding this message: edited in place when it exists.
+    Forward(i64),
+    /// One existing draft by id, whatever it is keyed by (the key itself is
+    /// left untouched). Missing, or another account's, is `None`.
+    NewById(i64),
+    /// A fresh new-message draft: always inserts.
+    NewCreate,
+    /// OLD-CLIENT COMPATIBILITY for a key-less `PUT /client/drafts`: the newest
+    /// new-message draft (neither key set) is edited, created when there is
+    /// none. From an app that predates many drafts, that is exactly the old
+    /// single-slot behaviour. MIXED-VERSION COST: an older app edits whichever
+    /// keyless plain draft is newest, possibly one a newer app has open
+    /// elsewhere; last writer wins, rows never pile up. Kept short by shipping
+    /// the app with the daemon. The same older app would READ a forward draft
+    /// as its new message (it restores the first row with no reply key), so
+    /// `GET /client/drafts` lists forward rows only to a client that sends
+    /// `forwards=1`.
+    NewLatest,
 }
 
 /// The COMPOSITION half of a draft: everything the composer holds, with the
-/// keys (`account_id`, `reply_to_message_id`) left out. Taken by
+/// keys (`account_id`, `reply_to_message_id`, `forward_of_message_id`, `id`)
+/// left out. Taken by
 /// [`SqliteStore::upsert_draft`](sqlite::SqliteStore::upsert_draft) as one
 /// value rather than as five adjacent `&str` parameters, and that is the whole
 /// reason it exists: five strings in a row is a transposition waiting to

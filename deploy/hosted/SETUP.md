@@ -820,9 +820,9 @@ The gateway, on Railway:
 
    **A model is allow-listed twice, and the second list is the one that gets
    forgotten.** A virtual key's `allowed_models` is matched against the id
-   the daemon sent (`anthropic/claude-opus-5`). The provider key's `models`
+   the daemon sent (`anthropic/claude-opus-5-5`). The provider key's `models`
    is matched *after* the provider prefix is resolved away
-   (`claude-opus-5`). A model in the first and not the second answers **400
+   (`claude-opus-5-5`). A model in the first and not the second answers **400
    `no keys found that support model: <model>`** — not `no keys found for
    provider`, which is the different failure of a virtual key with no
    `key_ids`.

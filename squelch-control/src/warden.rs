@@ -1039,7 +1039,8 @@ impl HttpWarden {
     }
 }
 
-/// Hold the warden's pairing answer to the shape the success page can render.
+/// Hold the warden's pairing answer to the shape a page can render (the app
+/// sign-in page shows it; signup's success page no longer does).
 ///
 /// The `deep_link` is checked but NOT used: [`crate::pages`] rebuilds it from
 /// the validated code and this deployment's own base domain, so a warden that

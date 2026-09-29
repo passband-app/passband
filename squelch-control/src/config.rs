@@ -135,11 +135,13 @@ pub const MAX_LLM_BUDGET_USD: f64 = 1_000.0;
 /// hosted daemon sends the `anthropic/` prefix only once it is rolled onto a
 /// warden config that sets `SQUELCH_WARDEN_LLM_STAGE1_MODEL`. Carrying both is
 /// what lets a rolled daemon and an unrolled one share one key mid-roll.
-/// `claude-opus-5` is in here because that is what the warden's stage models
+/// `claude-opus-5-5` is in here because that is what the warden's stage models
 /// name: a default that omitted it would mint keys that 403 the real triage
-/// call. Drop the bare half once the whole fleet is past the roll.
-pub const DEFAULT_LLM_MODELS: &str = "claude-haiku-4-5,claude-sonnet-5,claude-opus-5,\
-     anthropic/claude-haiku-4-5,anthropic/claude-sonnet-5,anthropic/claude-opus-5";
+/// call. `claude-opus-5` stays for the daemons still on it mid-roll and for
+/// the blackbox canary until its model moves. Drop the bare half once the
+/// whole fleet is past the roll.
+pub const DEFAULT_LLM_MODELS: &str = "claude-haiku-4-5,claude-sonnet-5,claude-opus-5,claude-opus-5-5,\
+     anthropic/claude-haiku-4-5,anthropic/claude-sonnet-5,anthropic/claude-opus-5,anthropic/claude-opus-5-5";
 
 /// The monthly spend a tenant's ASSISTANT key is minted with when
 /// `SQUELCH_CONTROL_ASSISTANT_BUDGET_USD` says nothing. Higher than triage's:

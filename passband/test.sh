@@ -274,6 +274,14 @@ run_suite usage-series \
   Sources/Passband/Lib/UsageSeries.swift \
   Tests/UsageSeriesTests.swift
 
+# The clear board: the streak of clear days and the tally under the carrier.
+run_suite clear-board \
+  Sources/Passband/Lib/UsageSeries.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Lib/ClearBoard.swift \
+  Tests/ClearBoardTests.swift
+
 # The rules page's shape. The nesting, the labels that drop the `*@` and the
 # selection order are all only reachable from a mailbox with several rules on
 # one domain — the one this was built against has eleven rules on eleven

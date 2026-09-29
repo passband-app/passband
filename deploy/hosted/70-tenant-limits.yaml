@@ -19,8 +19,14 @@
 #
 # A tenant refused by the quota shows up as a provision that times out waiting
 # for a pod (`500 not_ready`), with the reason in
-# `kubectl -n tenants describe replicaset`. That is the signal to add capacity
-# or raise these numbers, in that order.
+# `kubectl -n tenants get events` / `describe replicaset` and NOT in the
+# warden's log. That is the signal to add capacity or raise these numbers, in
+# that order. The Grafana "tenants quota near full" alert is meant to say so
+# before a signup finds out (deploy/monitoring/README.md).
+#
+# HOSTED PASSBAND DOES NOT RUN THESE NUMBERS. `carrier` is patched to thirty
+# tenants on top of this file; applying it there drops the cap back to five.
+# See deploy/hosted/PRODUCTION.md, "How many tenants fit".
 apiVersion: v1
 kind: LimitRange
 metadata:

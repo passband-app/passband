@@ -1086,11 +1086,16 @@ impl GmailWriteClient {
     }
 }
 
-/// `messages.list` narrowed to one `Message-ID`. The id is percent-encoded
-/// whole: it carries `<`, `>` and `@`, and `rfc822msgid:` needs the brackets to
-/// reach Gmail intact rather than as a malformed query string.
+/// `messages.list` narrowed to one `Message-ID`. THE BRACKETS COME OFF: the
+/// header value is `<id@passband>`, but Gmail's `rfc822msgid:` operator takes
+/// the bare `id@passband`, and searching with the brackets in finds NOTHING.
+/// Proven live on 2026-09-29: a mail the daemon had just sent came back
+/// "not found" with them and was requeued as maybe-sent. What is left still
+/// carries `@` and the colon of the operator, so the whole term is
+/// percent-encoded and nothing can end the value or open a parameter.
 fn rfc822msgid_search_url(base: &str, msgid: &str) -> String {
-    let q = percent_encode(&format!("rfc822msgid:{msgid}"));
+    let bare = msgid.trim().trim_start_matches('<').trim_end_matches('>');
+    let q = percent_encode(&format!("rfc822msgid:{bare}"));
     format!("{base}/messages?q={q}&maxResults=1&includeSpamTrash=true")
 }
 
@@ -4018,12 +4023,17 @@ mod tests {
     // ---- scheduled send: the minted Message-ID and its recovery search ------
 
     #[test]
-    fn rfc822msgid_search_encodes_the_brackets_and_the_at() {
+    fn rfc822msgid_search_drops_the_brackets_and_encodes_the_at() {
         let url = rfc822msgid_search_url("https://g.test/me", "<a.b-c_1~@passband>");
         assert_eq!(
             url,
-            "https://g.test/me/messages?q=rfc822msgid%3A%3Ca.b-c_1~%40passband%3E\
+            "https://g.test/me/messages?q=rfc822msgid%3Aa.b-c_1~%40passband\
              &maxResults=1&includeSpamTrash=true"
+        );
+        // A bare id, or one with stray whitespace, searches the same.
+        assert_eq!(
+            rfc822msgid_search_url("https://g.test/me", " a.b-c_1~@passband "),
+            url
         );
         // Nothing that could end the value or open another parameter survives.
         let q = url.split("?q=").nth(1).unwrap().split('&').next().unwrap();
@@ -4047,7 +4057,7 @@ mod tests {
         let req = handle.await.unwrap();
         assert_eq!(got.as_deref(), Some("gm-77"));
         assert!(req.starts_with("GET "), "a search is a GET");
-        assert!(req.contains("/messages?q=rfc822msgid%3A%3Cx%40passband%3E&maxResults=1"));
+        assert!(req.contains("/messages?q=rfc822msgid%3Ax%40passband&maxResults=1"));
         assert!(
             req.contains("authorization: Bearer WRITE-TOKEN")
                 || req.contains("Authorization: Bearer WRITE-TOKEN")

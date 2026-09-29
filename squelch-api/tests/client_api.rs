@@ -12510,7 +12510,7 @@ async fn a_send_that_may_have_gone_is_searched_for_before_it_is_sent_again() {
         1,
         "EXACTLY ONE send hit Gmail"
     );
-    assert!(reqs[1].contains("rfc822msgid%3A%3Cambiguous%40passband%3E"));
+    assert!(reqs[1].contains("rfc822msgid%3Aambiguous%40passband"));
     let row = store.scheduled_send_by_id(acct, id).unwrap().unwrap();
     assert_eq!(row.state, ScheduledSendState::Sent);
     assert_eq!(row.attempts, 2);
@@ -12628,7 +12628,7 @@ async fn recovery_settles_a_mail_gmail_already_has_without_resending_it() {
     assert_eq!((report.recovered_sent, report.sent), (1, 0), "{report:?}");
     let reqs = gmail.await.unwrap();
     assert_eq!(reqs.len(), 2);
-    assert!(reqs[0].contains("rfc822msgid%3A%3Ccrashed%40passband%3E"));
+    assert!(reqs[0].contains("rfc822msgid%3Acrashed%40passband"));
     assert!(reqs[1].contains("/messages/gm-9"));
     assert!(
         !reqs.iter().any(|r| r.contains("/messages/send")),
@@ -13554,7 +13554,7 @@ async fn a_row_that_failed_on_an_ambiguous_last_attempt_is_searched_before_send_
     let reqs = gmail.await.unwrap();
     assert!(reqs[0].contains("/messages/send"));
     assert!(
-        reqs[1].contains("rfc822msgid%3A%3Clast%40passband%3E"),
+        reqs[1].contains("rfc822msgid%3Alast%40passband"),
         "send-now's FIRST request is the search"
     );
     assert_eq!(

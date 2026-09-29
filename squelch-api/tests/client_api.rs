@@ -9223,6 +9223,107 @@ async fn senders_autocomplete_ranks_prefix_then_volume_and_hides_spam_and_sent()
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
+#[tokio::test]
+async fn person_card_reports_one_address_without_its_sealed_mail() {
+    // WIRE CONTRACT: GET /client/person?addr= returns {addr, display_name?,
+    // is_self, known_contact, received?, sent?, rule?, groups, recent_threads}.
+    // Sealed mail is in no count and no list; optional parts are ABSENT when
+    // there is nothing to say; the response is no-store; no token, no card.
+    let Harness { app, .. } = harness(|store, acct| {
+        let seed = |gmail: &str, thread: &str, subject: &str| {
+            let mut m = msg(acct, gmail, thread, subject, "body");
+            m.from_addr = "dan@example.com".to_string();
+            m.from_name = Some("Dan Smith".to_string());
+            m
+        };
+        store.upsert_message(&seed("g1", "t1", "lunch?")).unwrap();
+        store.upsert_message(&seed("g2", "t2", "the deck")).unwrap();
+        let sealed = store
+            .upsert_message(&seed("g3", "t3", "your pangolin code"))
+            .unwrap();
+        store
+            .set_triage(
+                sealed,
+                acct,
+                50,
+                Tier::Signal,
+                Sensitivity::Sealed,
+                Some(SealedKind::Otp),
+                "",
+                "",
+                None,
+            )
+            .unwrap();
+    });
+
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", "/client/person?addr=Dan%40Example.com"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-store"
+    );
+    let card = body_json(resp).await;
+    assert_eq!(card["display_name"], "Dan Smith");
+    assert_eq!(card["is_self"], false);
+    assert_eq!(
+        card["received"]["count"], 2,
+        "the sealed message is not counted"
+    );
+    assert!(card["received"]["first_at"].is_string());
+    let subjects: Vec<&str> = card["recent_threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["subject"].as_str().unwrap())
+        .collect();
+    assert!(!subjects.contains(&"your pangolin code"), "{subjects:?}");
+    assert_eq!(subjects.len(), 2);
+    // Never written to and no rule: absent, not null.
+    let obj = card.as_object().unwrap();
+    assert!(
+        !obj.contains_key("sent") && !obj.contains_key("rule"),
+        "{card}"
+    );
+
+    // A stranger is an empty card, not an error; your own address says so.
+    let resp = app
+        .clone()
+        .oneshot(authed(
+            "GET",
+            "/client/person?addr=nobody%40nowhere.example",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let card = body_json(resp).await;
+    assert!(!card.as_object().unwrap().contains_key("received"));
+    assert_eq!(card["recent_threads"].as_array().unwrap().len(), 0);
+
+    for uri in [
+        "/client/person?addr=",
+        "/client/person?addr=dan",
+        "/client/person",
+    ] {
+        let resp = app.clone().oneshot(authed("GET", uri)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{uri}");
+    }
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/client/person?addr=dan%40example.com")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
 // --- search: diagnostics, legs and the as-you-type prefix -------------------
 //
 // The additions of docs/SEARCH.md §4.8. They are what lets a client tell "no

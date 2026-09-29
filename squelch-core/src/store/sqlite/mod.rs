@@ -23,6 +23,7 @@ mod messages;
 mod migrate;
 mod notify;
 mod outbound;
+pub mod people;
 mod rules;
 mod search;
 mod senders;

@@ -1449,6 +1449,48 @@ struct SenderHit: Codable, Sendable, Equatable, Identifiable {
     var id: String { addr }
 }
 
+/// GET /client/person?addr= — the reader's contact card: everything the daemon
+/// knows about one address. The optional parts are ABSENT when there is
+/// nothing to say (no mail from them, never written to, no rule), and sealed
+/// mail is in no count and no list on it.
+struct PersonCard: Codable, Sendable, Equatable {
+    struct Received: Codable, Sendable, Equatable {
+        var count: Int
+        var first_at: String
+        var last_at: String
+    }
+    struct Sent: Codable, Sendable, Equatable {
+        var count: Int
+        var last_at: String?
+    }
+    struct Rule: Codable, Sendable, Equatable {
+        var id: Int
+        var match_pattern: String
+        var want_text: String
+        var disposition: Disposition
+    }
+    struct Group: Codable, Sendable, Equatable, Identifiable {
+        var id: Int
+        var name: String
+    }
+    struct RecentThread: Codable, Sendable, Equatable, Identifiable {
+        var thread_id: String
+        var subject: String
+        var last_at: String
+        var id: String { thread_id }
+    }
+
+    var addr: String
+    var display_name: String?
+    var is_self: Bool
+    var known_contact: Bool
+    var received: Received?
+    var sent: Sent?
+    var rule: Rule?
+    var groups: [Group]
+    var recent_threads: [RecentThread]
+}
+
 struct StatusResult: Codable, Sendable {
     var status: String
     var message_id: Int?

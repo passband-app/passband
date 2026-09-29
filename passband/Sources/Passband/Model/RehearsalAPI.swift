@@ -145,6 +145,13 @@ actor RehearsalAPI {
             data = try encode(SearchPage(items: hits, match_kind: "keyword", sort: query["sort"]))
         case ("GET", "/client/sealed"), ("GET", "/client/marketing"), ("GET", "/client/drafts"), ("GET", "/client/groups"), ("GET", "/client/unsubscribes"), ("GET", "/client/audit"), ("GET", "/client/triage-feedback"), ("GET", "/client/contacts"), ("GET", "/client/senders"):
             data = Data("[]".utf8)
+        case ("GET", "/client/person"):
+            // The practice inbox has no history behind its senders: the card
+            // shows who they are and nothing else.
+            data = try json([
+                "addr": query["addr"] ?? "", "is_self": false, "known_contact": false,
+                "groups": [Any](), "recent_threads": [Any](),
+            ])
         case ("GET", "/client/sent"):
             data = try json(["items": []])
         case ("GET", "/client/invites"):

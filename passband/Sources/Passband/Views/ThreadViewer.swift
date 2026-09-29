@@ -2291,7 +2291,10 @@ private struct MessageCard: View, Equatable {
 
     private var cardHeader: some View {
         HStack(spacing: 9) {
+            // Click for the contact card, right-click to copy. On the loaded
+            // card only: the peek placeholder is a stand-in, not a person.
             MessageSenderHeading(sender: message.senderString)
+                .contactCard(for: message.senderString)
             Spacer(minLength: 8)
             spamChip
             attentionChip
@@ -2312,13 +2315,16 @@ private struct MessageCard: View, Equatable {
     /// empty opens — a gate would only hide receipts the card shows.
     private var caption: some View {
         HStack(spacing: 6) {
-            if !mine {
-                Avatar(sender: message.senderString, size: 17)
+            HStack(spacing: 6) {
+                if !mine {
+                    Avatar(sender: message.senderString, size: 17)
+                }
+                Text(SenderCache.resolved(message.senderString).displayName)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Palette.inkDim)
+                    .lineLimit(1)
             }
-            Text(SenderCache.resolved(message.senderString).displayName)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Palette.inkDim)
-                .lineLimit(1)
+            .contactCard(for: message.senderString)
             spamChip
             attentionChip
             ReadReceiptMark(opens: opens)

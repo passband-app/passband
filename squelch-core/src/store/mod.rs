@@ -750,6 +750,18 @@ pub enum CancelOutcome {
     NotFound,
 }
 
+/// The picker context of the stored message a composition replies to or
+/// forwards: the same four columns a [`Draft`] carries flat, read by the same
+/// account-pinned join. Every field is `None` for new mail and for a parent
+/// that is no longer stored.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ParentContext {
+    pub thread_id: Option<String>,
+    pub subject: Option<String>,
+    pub from_addr: Option<String>,
+    pub from_name: Option<String>,
+}
+
 /// One non-confident triage row queued for the Stage-2 LLM pass, with message
 /// context and the matched Filtered-rule's `want_text`. Produced by
 /// [`Store::stage2_queue`], whose predicate (`model_used IS NULL AND

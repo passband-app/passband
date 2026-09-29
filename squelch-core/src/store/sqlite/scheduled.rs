@@ -8,9 +8,12 @@
 //! worker whose lease already lapsed and was recovered), and a guarded UPDATE
 //! is what makes the loser a no-op instead of a resurrection.
 
+use super::drafts::{PARENT_COLS, parent_join};
 use super::outbound::{move_claims_to_scheduled, release_scheduled_claims, scheduled_attachments};
 use super::*;
-use crate::store::{ATTACHMENT_MISSING, CancelOutcome, ScheduledSend, ScheduledSendState};
+use crate::store::{
+    ATTACHMENT_MISSING, CancelOutcome, ParentContext, ScheduledSend, ScheduledSendState,
+};
 
 /// The row shape, in [`map_scheduled`]'s order. Shared by the SELECTs and the
 /// claim's `RETURNING`, so the two cannot drift.
@@ -207,6 +210,59 @@ impl SqliteStore {
             "state IN ('scheduled', 'sending', 'failed')",
             None,
         )
+    }
+
+    /// [`Self::list_scheduled_sends`] with each row's PARENT CONTEXT: the
+    /// replied-to or forwarded message's thread, subject and sender, through
+    /// the same account-pinned join drafts use ([`parent_join`]). The parent
+    /// id lives inside the frozen `request`, so it is read out with
+    /// `json_extract` (a reply's id, else a forward's). Same rows, same order.
+    pub fn list_scheduled_sends_with_parent(
+        &self,
+        account_id: AccountId,
+    ) -> Result<Vec<(ScheduledSend, ParentContext)>> {
+        let conn = self.lock()?;
+        // Qualified: `messages` shares column names (`id`, `subject`, ...).
+        let cols = SCHEDULED_COLS
+            .split(',')
+            .map(|c| format!("s.{}", c.trim()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        // GUARDED BY `json_valid`: `json_extract` RAISES on malformed JSON,
+        // and one corrupt row (which the worker fails as `failed:request`
+        // and which then stays listed, `failed`) would otherwise 500 the
+        // whole listing for good. CASE is evaluated lazily, so an invalid
+        // request joins nothing.
+        let join = parent_join(
+            "s",
+            "CASE WHEN json_valid(s.request) THEN
+                 COALESCE(json_extract(s.request, '$.reply_to_message_id'),
+                          json_extract(s.request, '$.forward_of_message_id'))
+             END",
+        );
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {cols}, {PARENT_COLS}
+             FROM scheduled_sends s
+             {join}
+             WHERE s.account_id = ?1 AND s.state IN ('scheduled', 'sending', 'failed')
+             ORDER BY s.send_at ASC, s.id ASC"
+        ))?;
+        let base = SCHEDULED_COLS.split(',').count();
+        let rows = stmt.query_map(params![account_id], |r| {
+            let send = map_scheduled(r)?;
+            let parent = ParentContext {
+                thread_id: r.get(base)?,
+                subject: r.get(base + 1)?,
+                from_addr: r.get(base + 2)?,
+                from_name: r.get(base + 3)?,
+            };
+            Ok((send, parent))
+        })?;
+        let mut out = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        for (row, _) in &mut out {
+            row.attachments = scheduled_attachments(&conn, account_id, row.id)?;
+        }
+        Ok(out)
     }
 
     /// THE WORKER'S CLAIM (contract §4 step 2): the oldest due `scheduled` row
@@ -406,10 +462,13 @@ impl SqliteStore {
 
     /// HUMAN-DOOR ONLY (`POST /client/scheduled/{id}/now`): `scheduled` or
     /// `failed` → `scheduled` with `send_at = now`; the next tick sends it.
-    /// `attempts` and `last_error` are kept: a failed row gets ONE more
-    /// attempt, and fails again at once if it does not go (no fresh retry
-    /// budget behind the user's back). `false` for a row in any other state,
-    /// an unknown id or another account's.
+    ///
+    /// A `failed` row starts a FRESH RETRY BUDGET (`attempts = 0`,
+    /// `last_error` cleared): the user looked at "didn't send" and explicitly
+    /// asked again, and a row that kept `attempts = 3` would fail terminally
+    /// on its very next hiccup without a single retry. A `scheduled` row keeps
+    /// both: pulling a pending retry forward is not a new request. `false` for
+    /// a row in any other state, an unknown id or another account's.
     pub fn send_scheduled_now(
         &self,
         account_id: AccountId,
@@ -419,7 +478,9 @@ impl SqliteStore {
         let conn = self.lock()?;
         let n = conn.execute(
             "UPDATE scheduled_sends
-             SET state = 'scheduled', send_at = ?3, lease_until = NULL, updated_at = ?3
+             SET state = 'scheduled', send_at = ?3, lease_until = NULL, updated_at = ?3,
+                 attempts = CASE WHEN state = 'failed' THEN 0 ELSE attempts END,
+                 last_error = CASE WHEN state = 'failed' THEN NULL ELSE last_error END
              WHERE account_id = ?1 AND id = ?2 AND state IN ('scheduled', 'failed')",
             params![account_id, id, now.to_rfc3339()],
         )?;

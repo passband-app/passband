@@ -11324,3 +11324,985 @@ async fn a_garbled_suggestion_is_null_but_still_billed() {
         vec!["rule_suggest".to_string()]
     );
 }
+
+// --- scheduled send: /client/scheduled and the worker -------------------------
+
+use squelch_core::store::ScheduledSendState;
+
+/// A harness plus the state under it, so a test can drive the router AND run
+/// the worker's pass over the same store. `base` wires a write credential at a
+/// mock Gmail; `None` is a daemon with none.
+fn scheduled_rig(
+    base: Option<String>,
+    seed: impl FnOnce(&SqliteStore, i64),
+) -> (Harness, ApiState) {
+    let (state, store, acct) = state_with(seed);
+    let state = match base {
+        Some(base) => state.with_write_test_harness(Arc::new(StubCreds), base),
+        None => state,
+    };
+    (
+        Harness {
+            app: router(state.clone()),
+            store,
+            acct,
+        },
+        state,
+    )
+}
+
+fn in_minutes(minutes: i64) -> String {
+    (chrono::Utc::now() + chrono::Duration::minutes(minutes)).to_rfc3339()
+}
+
+fn rfc3339(v: &Value) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(v.as_str().expect("an RFC3339 string"))
+        .unwrap()
+        .with_timezone(&chrono::Utc)
+}
+
+/// One call on the outbox door. EVERY response there is `no-store`, the
+/// refusals too, so every call asserts it.
+async fn outbox(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let req = match body {
+        Some(b) => authed_json(method, uri, b),
+        None => authed(method, uri),
+    };
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    assert_eq!(
+        resp.headers()
+            .get(header::CACHE_CONTROL)
+            .map(|v| v.to_str().unwrap()),
+        Some("no-store"),
+        "{method} {uri} ({status}) must be no-store"
+    );
+    (status, body_json(resp).await)
+}
+
+/// Audit details under `action`, newest first.
+fn audited(store: &SqliteStore, acct: i64, action: &str) -> Vec<String> {
+    store
+        .list_audit(acct, 200)
+        .unwrap()
+        .into_iter()
+        .filter(|a| a.action == action)
+        .filter_map(|a| a.detail)
+        .collect()
+}
+
+/// A due row straight into the store: a cold send to Alice, `send_at` a
+/// minute ago, so the next pass claims it.
+fn due_row(store: &SqliteStore, acct: i64, request: &str, msgid: &str) -> i64 {
+    let now = chrono::Utc::now();
+    store
+        .insert_scheduled_send(
+            acct,
+            request,
+            now - chrono::Duration::minutes(1),
+            msgid,
+            now,
+        )
+        .unwrap()
+        .id
+}
+
+const COLD_REQUEST: &str =
+    r#"{"to":"alice@example.com","subject":"Hi","body":"see you Tuesday","confirm":true}"#;
+
+/// Gmail's answer to the echo's `format=raw` read-back of a sent message.
+fn echo_response(id: &str) -> String {
+    format!(
+        "{{\"id\":\"{id}\",\"threadId\":\"thread-new\",\
+           \"internalDate\":\"1783591200000\",\"raw\":\"{}\"}}",
+        sent_reply_raw_b64()
+    )
+}
+
+#[tokio::test]
+async fn scheduling_freezes_the_request_and_consumes_the_draft() {
+    let (base, _gmail) = mock_gmail(0).await;
+    let (Harness { app, store, acct }, _) = scheduled_rig(Some(base), |_, _| {});
+    let file = stage(&app, "plan.pdf", "application/pdf", "p1", b"PLAN").await["id"]
+        .as_i64()
+        .unwrap();
+    let (_, draft) = draft_call(
+        &app,
+        "POST",
+        "/client/drafts",
+        serde_json::json!({ "to": "bob@example.com", "body": "later", "attachment_ids": [file] }),
+    )
+    .await;
+    let draft_id = draft["id"].as_i64().unwrap();
+
+    let send_at = in_minutes(90);
+    let (status, created) = outbox(
+        &app,
+        "POST",
+        "/client/scheduled",
+        Some(serde_json::json!({
+            "to": "bob@example.com",
+            "cc": "",
+            "subject": "The plan",
+            "body": "see **attached**",
+            "body_format": "markdown",
+            "include_tracker": true,
+            "attachment_ids": [file],
+            "draft_id": draft_id,
+            "confirm": true,
+            "send_at": send_at,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_i64().unwrap();
+    assert_eq!(rfc3339(&created["send_at"]), rfc3339(&Value::from(send_at)));
+
+    // The draft is CONSUMED by scheduling; its file now belongs to the row.
+    assert!(store.draft_by_id(acct, draft_id).unwrap().is_none());
+    assert!(store.outbound_attachment(acct, file).unwrap().is_some());
+    let row = store.scheduled_send_by_id(acct, id).unwrap().unwrap();
+    assert_eq!(
+        (row.state, row.attempts),
+        (ScheduledSendState::Scheduled, 0)
+    );
+    assert_eq!(
+        row.attachments.iter().map(|a| a.id).collect::<Vec<_>>(),
+        vec![file]
+    );
+    assert!(row.message_id_header.starts_with('<'));
+    assert!(row.message_id_header.ends_with("@passband>"));
+    // Another draft cannot take the file off the row.
+    let (_, other) = draft_call(
+        &app,
+        "POST",
+        "/client/drafts",
+        serde_json::json!({ "body": "steal", "attachment_ids": [file] }),
+    )
+    .await;
+    assert_eq!(other["attachments"], serde_json::json!([]));
+
+    // The FROZEN REQUEST: the send body as posted, `confirm` true, `draft_id`
+    // and `send_at` gone, a stated-empty `cc` kept (it clears a derivation).
+    let stored: Value = serde_json::from_str(&row.request).unwrap();
+    assert_eq!(
+        stored,
+        serde_json::json!({
+            "to": "bob@example.com",
+            "cc": "",
+            "subject": "The plan",
+            "body": "see **attached**",
+            "body_format": "markdown",
+            "include_tracker": true,
+            "attachment_ids": [file],
+            "confirm": true,
+        })
+    );
+    assert_eq!(audited(&store, acct, "schedule"), vec![format!("ok:{id}")]);
+}
+
+#[tokio::test]
+async fn scheduling_refuses_what_a_send_would_and_a_bad_date() {
+    let (base, _gmail) = mock_gmail(0).await;
+    let (Harness { app, store, acct }, _) = scheduled_rig(Some(base), |_, _| {});
+    let post = |body: Value| {
+        let app = app.clone();
+        async move { outbox(&app, "POST", "/client/scheduled", Some(body)).await }
+    };
+    let cold = |send_at: Option<String>| {
+        let mut v = serde_json::json!({
+            "to": "bob@example.com",
+            "body": "hi",
+            "confirm": true,
+        });
+        if let Some(at) = send_at {
+            v["send_at"] = Value::from(at);
+        }
+        v
+    };
+
+    // A past date is a client bug; so is a date past a year; and none at all.
+    for body in [
+        cold(Some(in_minutes(-5))),
+        cold(Some(in_minutes(60 * 24 * 367))),
+        cold(Some("tomorrow at 9".into())),
+        cold(None),
+    ] {
+        let (status, _) = post(body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+    // The send route's own ordered refusals, audited under `schedule`.
+    let mut unconfirmed = cold(Some(in_minutes(60)));
+    unconfirmed["confirm"] = Value::from(false);
+    assert_eq!(post(unconfirmed).await.0, StatusCode::BAD_REQUEST);
+    let mut missing = cold(Some(in_minutes(60)));
+    missing["attachment_ids"] = serde_json::json!([987_654]);
+    assert_eq!(post(missing).await.0, StatusCode::BAD_REQUEST);
+
+    // An `individual` group fans out, and one Message-ID cannot name N mails.
+    let member = |addr: &str| squelch_core::store::sqlite::groups::NewGroupMember {
+        addr: addr.into(),
+        display_name: None,
+    };
+    let fanout = store
+        .create_send_group(
+            acct,
+            "Each",
+            squelch_core::types::GroupMode::Individual,
+            "",
+            &[member("ann@fund.com"), member("bo@fund.com")],
+        )
+        .unwrap();
+    let mut body = cold(Some(in_minutes(60)));
+    body["group_id"] = Value::from(fanout);
+    assert_eq!(post(body).await.0, StatusCode::BAD_REQUEST);
+    // A bcc group is one message the composer addressed: fine, and the id
+    // rides along for attribution at fire time.
+    let bcc = store
+        .create_send_group(
+            acct,
+            "Blind",
+            squelch_core::types::GroupMode::Bcc,
+            "",
+            &[member("ann@fund.com"), member("bo@fund.com")],
+        )
+        .unwrap();
+    let body = serde_json::json!({
+        "group_id": bcc,
+        "bcc": "ann@fund.com, bo@fund.com",
+        "body": "hi all",
+        "confirm": true,
+        "send_at": in_minutes(60),
+    });
+    let (status, created) = post(body).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let rows = store.list_scheduled_sends(acct).unwrap();
+    assert_eq!(
+        rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+        vec![created["id"].as_i64().unwrap()],
+        "no refusal left a row"
+    );
+    let details = audited(&store, acct, "schedule");
+    for want in [
+        "rejected:send_at",
+        "rejected:confirm",
+        "rejected:attachment_missing",
+        "rejected:group_fanout",
+    ] {
+        assert!(details.iter().any(|d| d == want), "{want} in {details:?}");
+    }
+    assert_eq!(
+        details.iter().filter(|d| *d == "rejected:send_at").count(),
+        4
+    );
+}
+
+#[tokio::test]
+async fn scheduling_without_a_write_credential_is_403() {
+    let (Harness { app, store, acct }, _) = scheduled_rig(None, |_, _| {});
+    let (status, _) = outbox(
+        &app,
+        "POST",
+        "/client/scheduled",
+        Some(serde_json::json!({
+            "to": "bob@example.com",
+            "body": "hi",
+            "confirm": true,
+            "send_at": in_minutes(60),
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(store.list_scheduled_sends(acct).unwrap().is_empty());
+    assert_eq!(
+        audited(&store, acct, "schedule"),
+        vec!["rejected:no_write_credential".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn the_guard_judges_a_scheduled_send_when_it_is_scheduled() {
+    let (base, _gmail) = mock_gmail(0).await;
+    let (Harness { app, store, acct }, _) = scheduled_rig(Some(base), |_, _| {});
+    let secret = "-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY-----";
+    let mut body = serde_json::json!({
+        "to": "bob@example.com",
+        "body": format!("here it is\n{secret}"),
+        "confirm": true,
+        "send_at": in_minutes(60),
+    });
+    let (status, err) = outbox(&app, "POST", "/client/scheduled", Some(body.clone())).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(err["error"].as_str().unwrap().contains("pem_block"));
+    assert!(store.list_scheduled_sends(acct).unwrap().is_empty());
+
+    // The override is given NOW and persists: the fire path never re-asks.
+    body["override_guard"] = Value::from(true);
+    let (status, created) = outbox(&app, "POST", "/client/scheduled", Some(body)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let row = store
+        .scheduled_send_by_id(acct, created["id"].as_i64().unwrap())
+        .unwrap()
+        .unwrap();
+    let stored: Value = serde_json::from_str(&row.request).unwrap();
+    assert_eq!(stored["override_guard"], true);
+
+    let details = audited(&store, acct, "schedule");
+    assert!(details.iter().any(|d| d == "blocked:guard"));
+    assert!(
+        details
+            .iter()
+            .any(|d| d.starts_with("guard_override:") && d.contains("pem_block"))
+    );
+    assert!(
+        audited(&store, acct, "send").is_empty(),
+        "nothing was sent, so nothing is on the send ledger"
+    );
+}
+
+#[tokio::test]
+async fn a_scheduled_forward_reads_and_judges_its_original_now() {
+    let secret = "-----BEGIN RSA PRIVATE KEY-----";
+    let (base, gmail) = mock_gmail_seq(vec![
+        (200, original_raw_response(&format!("<pre>{secret}</pre>"))),
+        (200, original_raw_response(&format!("<pre>{secret}</pre>"))),
+    ])
+    .await;
+    let (Harness { app, store, acct }, _) = scheduled_rig(Some(base), |store, acct| {
+        seed_one_signal(
+            store,
+            acct,
+            "gmail-original",
+            "thread-77",
+            "Quarterly numbers",
+        );
+    });
+    let original = store.search(acct, "quarterly", 10, 0).unwrap()[0].id;
+    let mut body = serde_json::json!({
+        "forward_of_message_id": original,
+        "to": "carol@example.com",
+        "body": "thought you should see this",
+        "confirm": true,
+        "send_at": in_minutes(60),
+    });
+    // A clean note around someone else's secret: blocked on the ORIGINAL.
+    let (status, _) = outbox(&app, "POST", "/client/scheduled", Some(body.clone())).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    body["override_guard"] = Value::from(true);
+    let (status, _) = outbox(&app, "POST", "/client/scheduled", Some(body)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let reqs = gmail.await.unwrap();
+    assert_eq!(reqs.len(), 2, "the original was read at each schedule");
+    assert!(reqs.iter().all(|r| r.contains("/messages/gmail-original")));
+    assert!(!reqs.iter().any(|r| r.contains("/messages/send")));
+    assert!(
+        audited(&store, acct, "schedule")
+            .iter()
+            .any(|d| d == "blocked:guard")
+    );
+}
+
+#[tokio::test]
+async fn the_outbox_lists_what_is_owed_an_outcome_with_its_parent() {
+    let (base, _gmail) = mock_gmail(0).await;
+    let (Harness { app, store, acct }, _) = scheduled_rig(Some(base), |store, acct| {
+        seed_one_signal(store, acct, "gmail-parent", "thread-77", "Lunch?");
+    });
+    let parent = store.search(acct, "lunch", 10, 0).unwrap()[0].id;
+    let (status, reply) = outbox(
+        &app,
+        "POST",
+        "/client/scheduled",
+        Some(serde_json::json!({
+            "reply_to_message_id": parent,
+            "body": "yes, noon works",
+            "confirm": true,
+            "send_at": in_minutes(30),
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let reply_id = reply["id"].as_i64().unwrap();
+
+    let now = chrono::Utc::now();
+    let row_at = |minutes: i64, tag: &str| {
+        store
+            .insert_scheduled_send(
+                acct,
+                &format!(
+                    r#"{{"to":"{tag}@example.com","subject":"{tag}","body":"b","confirm":true}}"#
+                ),
+                now + chrono::Duration::minutes(minutes),
+                &format!("<{tag}@passband>"),
+                now,
+            )
+            .unwrap()
+            .id
+    };
+    // A failed row (out of retries) still lists: it waits for the user.
+    let failed = row_at(-10, "failed");
+    for _ in 0..3 {
+        store
+            .claim_due_scheduled_send(acct, now, chrono::Duration::seconds(120))
+            .unwrap()
+            .unwrap();
+        store
+            .settle_scheduled_retry(
+                acct,
+                failed,
+                now - chrono::Duration::minutes(1),
+                "failed:gmail",
+                now,
+            )
+            .unwrap();
+    }
+    store
+        .claim_due_scheduled_send(acct, now, chrono::Duration::seconds(120))
+        .unwrap()
+        .unwrap();
+    store
+        .settle_scheduled_failed(acct, failed, "failed:gmail", now)
+        .unwrap();
+    // Sent and cancelled rows do not.
+    let sent = row_at(-5, "sent");
+    store
+        .claim_due_scheduled_send(acct, now, chrono::Duration::seconds(120))
+        .unwrap()
+        .unwrap();
+    store
+        .settle_scheduled_sent(acct, sent, Some(1), Some("t"), now)
+        .unwrap();
+    let cancelled = row_at(40, "cancelled");
+    store.cancel_scheduled_send(acct, cancelled, now).unwrap();
+    let later = row_at(60, "later");
+
+    let (status, list) = outbox(&app, "GET", "/client/scheduled", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let items = list.as_array().unwrap();
+    assert_eq!(
+        items
+            .iter()
+            .map(|i| i["id"].as_i64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![failed, reply_id, later],
+        "oldest send_at first; sent and cancelled hidden"
+    );
+    for item in items {
+        for key in [
+            "id",
+            "send_at",
+            "state",
+            "attempts",
+            "last_error",
+            "to",
+            "subject",
+            "body",
+            "reply_to_message_id",
+            "forward_of_message_id",
+            "attachments",
+            "thread_id",
+            "parent_subject",
+            "parent_from",
+            "parent_from_addr",
+            "created_at",
+            "updated_at",
+        ] {
+            assert!(item.get(key).is_some(), "{key} missing from {item}");
+        }
+    }
+    assert_eq!(items[0]["state"], "failed");
+    assert_eq!(items[0]["attempts"], 4);
+    assert_eq!(items[0]["last_error"], "failed:gmail");
+    assert_eq!(items[0]["to"], "failed@example.com");
+    assert_eq!(items[0]["subject"], "failed");
+
+    let r = &items[1];
+    assert_eq!(r["state"], "scheduled");
+    assert_eq!(r["reply_to_message_id"], parent);
+    assert_eq!(r["to"], "", "a reply's audience derives at fire time");
+    assert_eq!(r["body"], "yes, noon works");
+    assert_eq!(r["thread_id"], "thread-77");
+    assert_eq!(r["parent_subject"], "Lunch?");
+    assert_eq!(r["parent_from"], "Alice");
+    assert_eq!(r["parent_from_addr"], "alice@example.com");
+    assert_eq!(r["attachments"], serde_json::json!([]));
+    assert_eq!(items[2]["thread_id"], Value::Null);
+}
+
+#[tokio::test]
+async fn cancelling_hands_the_request_and_its_files_back() {
+    let (base, _gmail) = mock_gmail(0).await;
+    let (Harness { app, store, acct }, _) = scheduled_rig(Some(base), |_, _| {});
+    let file = stage(&app, "plan.pdf", "application/pdf", "p1", b"PLAN").await["id"]
+        .as_i64()
+        .unwrap();
+    let (_, created) = outbox(
+        &app,
+        "POST",
+        "/client/scheduled",
+        Some(serde_json::json!({
+            "to": "bob@example.com",
+            "body": "later",
+            "attachment_ids": [file],
+            "confirm": true,
+            "send_at": in_minutes(60),
+        })),
+    )
+    .await;
+    let id = created["id"].as_i64().unwrap();
+
+    let (status, cancelled) =
+        outbox(&app, "DELETE", &format!("/client/scheduled/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cancelled["status"], "cancelled");
+    assert_eq!(cancelled["id"], id);
+    assert_eq!(
+        cancelled["request"],
+        serde_json::json!({
+            "to": "bob@example.com",
+            "body": "later",
+            "attachment_ids": [file],
+            "confirm": true,
+        }),
+        "the request as a JSON OBJECT, ready for the composer"
+    );
+    assert_eq!(cancelled["attachments"][0]["id"], file);
+    assert_eq!(cancelled["attachments"][0]["filename"], "plan.pdf");
+    // UNCLAIMED again: the composer's next autosave can take it.
+    let (_, draft) = draft_call(
+        &app,
+        "POST",
+        "/client/drafts",
+        serde_json::json!({ "body": "later", "attachment_ids": [file] }),
+    )
+    .await;
+    assert_eq!(draft["attachments"][0]["id"], file);
+    assert_eq!(
+        audited(&store, acct, "schedule.cancel"),
+        vec!["ok".to_string()]
+    );
+
+    // Twice is the same 404 as an unknown id and as another account's row.
+    let (status, again) = outbox(&app, "DELETE", &format!("/client/scheduled/{id}"), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (_, unknown) = outbox(&app, "DELETE", "/client/scheduled/987654", None).await;
+    assert_eq!(again, unknown);
+    let other = store.ensure_account("other@example.com").unwrap();
+    let theirs = due_row(&store, other, COLD_REQUEST, "<theirs@passband>");
+    let (status, foreign) =
+        outbox(&app, "DELETE", &format!("/client/scheduled/{theirs}"), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(foreign, unknown);
+    assert_eq!(
+        store
+            .scheduled_send_by_id(other, theirs)
+            .unwrap()
+            .unwrap()
+            .state,
+        ScheduledSendState::Scheduled
+    );
+
+    // A row in Gmail's hands cannot be pulled back.
+    let busy = due_row(&store, acct, COLD_REQUEST, "<busy@passband>");
+    store
+        .claim_due_scheduled_send(acct, chrono::Utc::now(), chrono::Duration::seconds(120))
+        .unwrap()
+        .unwrap();
+    let (status, err) = outbox(&app, "DELETE", &format!("/client/scheduled/{busy}"), None).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(
+        err["error"]
+            .as_str()
+            .unwrap()
+            .contains("already being sent")
+    );
+}
+
+#[tokio::test]
+async fn send_now_queues_the_row_and_gives_a_failed_one_a_fresh_budget() {
+    let (base, _gmail) = mock_gmail(0).await;
+    let (Harness { app, store, acct }, _) = scheduled_rig(Some(base), |_, _| {});
+    let (_, created) = outbox(
+        &app,
+        "POST",
+        "/client/scheduled",
+        Some(serde_json::json!({
+            "to": "bob@example.com",
+            "body": "later",
+            "confirm": true,
+            "send_at": in_minutes(90),
+        })),
+    )
+    .await;
+    let id = created["id"].as_i64().unwrap();
+    let (status, queued) = outbox(&app, "POST", &format!("/client/scheduled/{id}/now"), None).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(queued, serde_json::json!({ "status": "queued", "id": id }));
+    let row = store.scheduled_send_by_id(acct, id).unwrap().unwrap();
+    assert!(row.send_at <= chrono::Utc::now());
+
+    // A failed row starts over: the user asked again.
+    let failed = due_row(&store, acct, COLD_REQUEST, "<failed@passband>");
+    let now = chrono::Utc::now();
+    store
+        .claim_due_scheduled_send(acct, now, chrono::Duration::seconds(120))
+        .unwrap();
+    store
+        .claim_due_scheduled_send(acct, now, chrono::Duration::seconds(120))
+        .unwrap();
+    store
+        .settle_scheduled_failed(acct, failed, "failed:gmail", now)
+        .unwrap();
+    let row = store.scheduled_send_by_id(acct, failed).unwrap().unwrap();
+    assert_eq!(row.state, ScheduledSendState::Failed);
+    let (status, _) = outbox(
+        &app,
+        "POST",
+        &format!("/client/scheduled/{failed}/now"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let row = store.scheduled_send_by_id(acct, failed).unwrap().unwrap();
+    assert_eq!(
+        (row.state, row.attempts, row.last_error),
+        (ScheduledSendState::Scheduled, 0, None)
+    );
+
+    let (status, _) = outbox(&app, "POST", "/client/scheduled/987654/now", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        audited(&store, acct, "schedule.now"),
+        vec![
+            "failed:not_found".to_string(),
+            "ok".to_string(),
+            "ok".to_string()
+        ]
+    );
+}
+
+#[tokio::test]
+async fn stats_advertise_scheduled_send() {
+    let Harness { app, .. } = harness(|_, _| {});
+    let resp = app.oneshot(authed("GET", "/client/stats")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["scheduled_send"], true);
+}
+
+#[tokio::test]
+async fn the_outbox_needs_the_bearer() {
+    let Harness { app, .. } = harness(|_, _| {});
+    for (method, uri) in [
+        ("GET", "/client/scheduled"),
+        ("POST", "/client/scheduled"),
+        ("DELETE", "/client/scheduled/1"),
+        ("POST", "/client/scheduled/1/now"),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{method} {uri}");
+    }
+}
+
+/// TWO DOORS: the outbox is human-door only. The agent door is another crate,
+/// so it is checked the way its own drafts test checks it: its source must
+/// not reach the outbox table or its store surface at all.
+#[test]
+fn the_agent_door_never_reaches_the_outbox() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../squelch-mcp/src");
+    let mut scanned = 0;
+    for entry in std::fs::read_dir(&src).expect("read squelch-mcp/src") {
+        let path = entry.expect("dir entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path)
+            .expect("read source")
+            .to_lowercase();
+        assert!(
+            !text.contains("scheduled"),
+            "{} mentions `scheduled`: the agent door must not reach the outbox",
+            path.display()
+        );
+        scanned += 1;
+    }
+    assert!(scanned >= 3, "scanned only {scanned} source files");
+}
+
+#[tokio::test]
+async fn the_worker_sends_a_due_row_with_its_minted_message_id() {
+    let (base, gmail) = mock_gmail_seq(vec![
+        (
+            200,
+            "{\"id\":\"sent-1\",\"threadId\":\"thread-new\"}".to_string(),
+        ),
+        (200, echo_response("sent-1")),
+    ])
+    .await;
+    let (Harness { app, store, acct }, state) = scheduled_rig(Some(base), |_, _| {});
+    let file = stage(&app, "plan.pdf", "application/pdf", "p1", b"PLAN").await["id"]
+        .as_i64()
+        .unwrap();
+    let schedule = |minutes: i64, attachment_ids: Value| {
+        let app = app.clone();
+        async move {
+            outbox(
+                &app,
+                "POST",
+                "/client/scheduled",
+                Some(serde_json::json!({
+                    "to": "alice@example.com",
+                    "subject": "Hi",
+                    "body": "see you Tuesday",
+                    "attachment_ids": attachment_ids,
+                    "confirm": true,
+                    "send_at": in_minutes(minutes),
+                })),
+            )
+            .await
+            .1["id"]
+                .as_i64()
+                .unwrap()
+        }
+    };
+    let due = schedule(60, serde_json::json!([file])).await;
+    let not_due = schedule(120, serde_json::json!([])).await;
+    let (status, _) = outbox(&app, "POST", &format!("/client/scheduled/{due}/now"), None).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let msgid = store
+        .scheduled_send_by_id(acct, due)
+        .unwrap()
+        .unwrap()
+        .message_id_header;
+
+    let report = squelch_api::run_scheduled_send_pass(&state).await;
+    assert_eq!(report.sent, 1, "{report:?}");
+    assert_eq!((report.retried, report.failed), (0, 0));
+
+    let reqs = gmail.await.unwrap();
+    assert_eq!(reqs.len(), 2, "one send, one echo read-back");
+    assert!(reqs[0].contains("/messages/send"));
+    let mime = sent_mime(&reqs[0]);
+    assert!(
+        mime.contains(&format!("Message-ID: {msgid}\r\n")),
+        "the minted id rides the wire"
+    );
+    assert!(mime.contains("filename=\"plan.pdf\""));
+
+    let row = store.scheduled_send_by_id(acct, due).unwrap().unwrap();
+    assert_eq!(row.state, ScheduledSendState::Sent);
+    assert_eq!(row.attempts, 1);
+    assert!(row.sent_message_id.is_some(), "the echo's local id");
+    assert_eq!(row.sent_thread_id.as_deref(), Some("thread-new"));
+    assert!(row.attachments.is_empty());
+    assert!(
+        store.outbound_attachment(acct, file).unwrap().is_none(),
+        "the file went with the mail"
+    );
+    let untouched = store.scheduled_send_by_id(acct, not_due).unwrap().unwrap();
+    assert_eq!(
+        (untouched.state, untouched.attempts),
+        (ScheduledSendState::Scheduled, 0)
+    );
+
+    // ONE ledger row for the send, carrying the marker.
+    let sends = audited(&store, acct, "send");
+    assert_eq!(sends, vec![format!("scheduled:{due}:ok")]);
+
+    let (_, list) = outbox(&app, "GET", "/client/scheduled", None).await;
+    assert_eq!(
+        list.as_array().unwrap().len(),
+        1,
+        "only the not-yet-due row"
+    );
+}
+
+#[tokio::test]
+async fn a_failing_send_backs_off_twice_then_fails() {
+    let (base, gmail) = mock_gmail_seq(vec![
+        (500, "{\"error\":\"backend\"}".to_string()),
+        (500, "{\"error\":\"backend\"}".to_string()),
+        (500, "{\"error\":\"backend\"}".to_string()),
+    ])
+    .await;
+    let (Harness { store, acct, .. }, state) = scheduled_rig(Some(base), |_, _| {});
+    let id = due_row(&store, acct, COLD_REQUEST, "<retry@passband>");
+
+    let before = chrono::Utc::now();
+    let report = squelch_api::run_scheduled_send_pass(&state).await;
+    assert_eq!((report.sent, report.retried, report.failed), (0, 1, 0));
+    let row = store.scheduled_send_by_id(acct, id).unwrap().unwrap();
+    assert_eq!(row.state, ScheduledSendState::Scheduled);
+    assert_eq!(row.attempts, 1);
+    assert_eq!(row.last_error.as_deref(), Some("failed:gmail"));
+    let wait = row.send_at - before;
+    assert!(
+        wait >= chrono::Duration::seconds(115) && wait <= chrono::Duration::seconds(130),
+        "2^1 minutes: {wait}"
+    );
+
+    // Pulled forward (keeping its budget), it fails again: 2^2 minutes.
+    let before = chrono::Utc::now();
+    assert!(store.send_scheduled_now(acct, id, before).unwrap());
+    squelch_api::run_scheduled_send_pass(&state).await;
+    let row = store.scheduled_send_by_id(acct, id).unwrap().unwrap();
+    assert_eq!(
+        (row.state, row.attempts),
+        (ScheduledSendState::Scheduled, 2)
+    );
+    let wait = row.send_at - before;
+    assert!(
+        wait >= chrono::Duration::seconds(235) && wait <= chrono::Duration::seconds(250),
+        "2^2 minutes: {wait}"
+    );
+
+    // The third failure is terminal and waits for the user.
+    assert!(
+        store
+            .send_scheduled_now(acct, id, chrono::Utc::now())
+            .unwrap()
+    );
+    let report = squelch_api::run_scheduled_send_pass(&state).await;
+    assert_eq!(report.failed, 1);
+    let row = store.scheduled_send_by_id(acct, id).unwrap().unwrap();
+    assert_eq!(row.state, ScheduledSendState::Failed);
+    assert_eq!(row.attempts, 3);
+    assert_eq!(row.last_error.as_deref(), Some("failed:gmail"));
+    assert_eq!(gmail.await.unwrap().len(), 3);
+    // `perform_send` audited each refusal once; the worker added none.
+    assert_eq!(
+        audited(&store, acct, "send"),
+        vec!["failed:gmail".to_string(); 3]
+    );
+}
+
+/// A `sending` row whose lease has already lapsed: claimed ten minutes ago
+/// under a two-minute lease, the shape a worker that died mid-send leaves.
+fn lapsed_row(store: &SqliteStore, acct: i64, msgid: &str) -> i64 {
+    let id = due_row(store, acct, COLD_REQUEST, msgid);
+    store
+        .claim_due_scheduled_send(
+            acct,
+            chrono::Utc::now() - chrono::Duration::seconds(30),
+            chrono::Duration::seconds(1),
+        )
+        .unwrap()
+        .expect("claimed");
+    id
+}
+
+#[tokio::test]
+async fn recovery_settles_a_mail_gmail_already_has_without_resending_it() {
+    let (base, gmail) = mock_gmail_seq(vec![
+        (
+            200,
+            "{\"messages\":[{\"id\":\"gm-9\",\"threadId\":\"thread-new\"}]}".to_string(),
+        ),
+        (200, echo_response("gm-9")),
+    ])
+    .await;
+    let (Harness { store, acct, .. }, state) = scheduled_rig(Some(base), |_, _| {});
+    let id = lapsed_row(&store, acct, "<crashed@passband>");
+
+    let report = squelch_api::run_scheduled_send_pass(&state).await;
+    assert_eq!((report.recovered_sent, report.sent), (1, 0), "{report:?}");
+    let reqs = gmail.await.unwrap();
+    assert_eq!(reqs.len(), 2);
+    assert!(reqs[0].contains("rfc822msgid%3A%3Ccrashed%40passband%3E"));
+    assert!(reqs[1].contains("/messages/gm-9"));
+    assert!(
+        !reqs.iter().any(|r| r.contains("/messages/send")),
+        "EXACTLY ONCE: no second send"
+    );
+    let row = store.scheduled_send_by_id(acct, id).unwrap().unwrap();
+    assert_eq!(row.state, ScheduledSendState::Sent);
+    assert!(row.sent_message_id.is_some());
+    assert_eq!(row.sent_thread_id.as_deref(), Some("thread-new"));
+    assert_eq!(
+        audited(&store, acct, "send"),
+        vec![format!("scheduled:{id}:recovered")]
+    );
+}
+
+#[tokio::test]
+async fn recovery_requeues_a_mail_gmail_never_saw_and_sends_it_in_the_same_pass() {
+    let (base, gmail) = mock_gmail_seq(vec![
+        (200, "{\"resultSizeEstimate\":0}".to_string()),
+        (
+            200,
+            "{\"id\":\"sent-2\",\"threadId\":\"thread-new\"}".to_string(),
+        ),
+        (200, echo_response("sent-2")),
+    ])
+    .await;
+    let (Harness { store, acct, .. }, state) = scheduled_rig(Some(base), |_, _| {});
+    let id = lapsed_row(&store, acct, "<never@passband>");
+
+    let report = squelch_api::run_scheduled_send_pass(&state).await;
+    assert_eq!((report.requeued, report.sent), (1, 1), "{report:?}");
+    let reqs = gmail.await.unwrap();
+    assert_eq!(reqs.len(), 3);
+    assert!(reqs[0].contains("rfc822msgid"));
+    assert!(reqs[1].contains("/messages/send"));
+    assert!(sent_mime(&reqs[1]).contains("Message-ID: <never@passband>\r\n"));
+    let row = store.scheduled_send_by_id(acct, id).unwrap().unwrap();
+    assert_eq!(row.state, ScheduledSendState::Sent);
+    assert_eq!(row.attempts, 2, "the lapsed attempt counted");
+}
+
+#[tokio::test]
+async fn recovery_that_cannot_ask_gmail_decides_nothing() {
+    let (base, gmail) = mock_gmail_seq(vec![(500, "{}".to_string())]).await;
+    let (Harness { store, acct, .. }, state) = scheduled_rig(Some(base), |_, _| {});
+    let id = lapsed_row(&store, acct, "<unknown@passband>");
+
+    let report = squelch_api::run_scheduled_send_pass(&state).await;
+    assert!(report.is_idle(), "{report:?}");
+    assert_eq!(gmail.await.unwrap().len(), 1, "one search, no send");
+    assert_eq!(
+        store.scheduled_send_by_id(acct, id).unwrap().unwrap().state,
+        ScheduledSendState::Sending,
+        "could not ask is never did not go out"
+    );
+}
+
+#[tokio::test]
+async fn a_corrupt_request_fails_without_a_send() {
+    let (Harness { store, acct, .. }, state) = scheduled_rig(None, |_, _| {});
+    let id = due_row(&store, acct, "not json {", "<corrupt@passband>");
+    let report = squelch_api::run_scheduled_send_pass(&state).await;
+    assert_eq!(report.failed, 1);
+    let row = store.scheduled_send_by_id(acct, id).unwrap().unwrap();
+    assert_eq!(row.state, ScheduledSendState::Failed);
+    assert_eq!(row.last_error.as_deref(), Some("failed:request"));
+    assert!(audited(&store, acct, "send").is_empty());
+}
+
+#[tokio::test]
+async fn a_missing_write_credential_is_a_retry_not_a_drop() {
+    let (Harness { store, acct, .. }, state) = scheduled_rig(None, |_, _| {});
+    let id = due_row(&store, acct, COLD_REQUEST, "<nocred@passband>");
+    let report = squelch_api::run_scheduled_send_pass(&state).await;
+    assert_eq!(report.retried, 1);
+    let row = store.scheduled_send_by_id(acct, id).unwrap().unwrap();
+    assert_eq!(row.state, ScheduledSendState::Scheduled);
+    assert_eq!(
+        row.last_error.as_deref(),
+        Some("rejected:no_write_credential")
+    );
+}

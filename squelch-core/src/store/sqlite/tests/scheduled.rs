@@ -4,7 +4,9 @@
 use super::super::migrate::migrate;
 use super::super::*;
 use super::support::*;
-use crate::store::{ATTACHMENT_MISSING, CancelOutcome, ScheduledSend, ScheduledSendState};
+use crate::store::{
+    ATTACHMENT_MISSING, CancelOutcome, ParentContext, ScheduledSend, ScheduledSendState,
+};
 
 /// A fixed base instant, so every clock move is asserted, not raced.
 fn t(minutes: i64) -> DateTime<Utc> {
@@ -223,17 +225,19 @@ fn retry_failed_requeue_and_sent_each_move_only_a_sending_row() {
         "a failed row is not the worker's any more"
     );
 
-    // Send now puts it back in line for the next tick; then it sends.
+    // Send now puts it back in line for the next tick with a FRESH retry
+    // budget (the user asked again); then it sends.
     assert!(store.send_scheduled_now(acct, r.id, t(20)).unwrap());
     let row = store.scheduled_send_by_id(acct, r.id).unwrap().unwrap();
     assert_eq!(
-        (row.state, row.send_at),
-        (ScheduledSendState::Scheduled, t(20))
+        (row.state, row.send_at, row.attempts, row.last_error),
+        (ScheduledSendState::Scheduled, t(20), 0, None)
     );
-    store
+    let claimed = store
         .claim_due_scheduled_send(acct, t(20), LEASE)
         .unwrap()
         .unwrap();
+    assert_eq!(claimed.attempts, 1, "the budget restarted from zero");
     assert!(
         !store.send_scheduled_now(acct, r.id, t(20)).unwrap(),
         "a sending row cannot be pulled forward"
@@ -696,4 +700,108 @@ fn an_older_db_gains_the_scheduled_claim_column_and_reopens_idempotently() {
     assert_eq!(claims(&store, "cid-old"), Some((None, Some(row.id))));
     drop(store);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn send_now_on_a_pending_retry_keeps_its_budget() {
+    let (store, acct) = store();
+    let r = schedule(&store, acct, "retry", t(1));
+    store
+        .claim_due_scheduled_send(acct, t(1), LEASE)
+        .unwrap()
+        .unwrap();
+    assert!(
+        store
+            .settle_scheduled_retry(acct, r.id, t(3), "failed:gmail", t(1))
+            .unwrap()
+    );
+    // Pulling a pending retry forward is not a new request: attempts and the
+    // reason stay, only the clock moves.
+    assert!(store.send_scheduled_now(acct, r.id, t(2)).unwrap());
+    let row = store.scheduled_send_by_id(acct, r.id).unwrap().unwrap();
+    assert_eq!(
+        (
+            row.state,
+            row.send_at,
+            row.attempts,
+            row.last_error.as_deref()
+        ),
+        (ScheduledSendState::Scheduled, t(2), 1, Some("failed:gmail"))
+    );
+}
+
+#[test]
+fn the_outbox_listing_carries_the_parent_context_drafts_carry() {
+    let (store, acct) = store();
+    let parent = triaged(acct, "g1", "t1").ingest(&store);
+    let other = store.ensure_account("other@example.com").unwrap();
+    let theirs = triaged(other, "g2", "t2").ingest(&store);
+
+    let reply = store
+        .insert_scheduled_send(
+            acct,
+            &format!(r#"{{"reply_to_message_id":{parent},"body":"yes"}}"#),
+            t(3),
+            "<r@passband>",
+            t(0),
+        )
+        .unwrap();
+    let fwd = store
+        .insert_scheduled_send(
+            acct,
+            &format!(r#"{{"forward_of_message_id":{parent},"to":"b@x","body":""}}"#),
+            t(2),
+            "<f@passband>",
+            t(0),
+        )
+        .unwrap();
+    // An id that exists only on another account borrows nothing.
+    let borrowed = store
+        .insert_scheduled_send(
+            acct,
+            &format!(r#"{{"reply_to_message_id":{theirs},"body":"x"}}"#),
+            t(4),
+            "<b@passband>",
+            t(0),
+        )
+        .unwrap();
+    let cold = schedule(&store, acct, "cold", t(1));
+    // A corrupt request must not take the whole listing down with it.
+    let corrupt = store
+        .insert_scheduled_send(acct, "not json {", t(5), "<c@passband>", t(0))
+        .unwrap();
+    // Settled rows are not listed, exactly as `list_scheduled_sends`.
+    let gone = schedule(&store, acct, "gone", t(0));
+    assert!(matches!(
+        store.cancel_scheduled_send(acct, gone.id, t(0)).unwrap(),
+        CancelOutcome::Cancelled(_)
+    ));
+
+    let listed = store.list_scheduled_sends_with_parent(acct).unwrap();
+    let ids: Vec<i64> = listed.iter().map(|(s, _)| s.id).collect();
+    assert_eq!(
+        ids,
+        vec![cold.id, fwd.id, reply.id, borrowed.id, corrupt.id]
+    );
+    assert_eq!(
+        ids,
+        store
+            .list_scheduled_sends(acct)
+            .unwrap()
+            .iter()
+            .map(|s| s.id)
+            .collect::<Vec<_>>(),
+        "same rows, same order as the plain listing"
+    );
+    let parent_ctx = ParentContext {
+        thread_id: Some("t1".into()),
+        subject: Some("Lunch?".into()),
+        from_addr: Some("alice@example.com".into()),
+        from_name: Some("Alice".into()),
+    };
+    assert_eq!(listed[0].1, ParentContext::default(), "new mail has none");
+    assert_eq!(listed[1].1, parent_ctx, "a forward's original");
+    assert_eq!(listed[2].1, parent_ctx, "a reply's parent");
+    assert_eq!(listed[3].1, ParentContext::default());
+    assert_eq!(listed[4].1, ParentContext::default());
 }

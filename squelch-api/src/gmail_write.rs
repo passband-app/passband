@@ -115,6 +115,17 @@ pub struct ReplyParts {
     /// [`build_reply_rfc822`] describes. `is_inline` is decided by the caller
     /// against `body_html` — see [`mark_inline`].
     pub attachments: Vec<MailAttachment>,
+    /// This message's own `Message-ID`, angle brackets included
+    /// (`<uuid@passband>`). `None` writes no header and Gmail mints one, which
+    /// is every send made while the user waits: the bytes are exactly what
+    /// they were before this field existed.
+    ///
+    /// `Some` is the SCHEDULED send (docs/SCHEDULED-SEND.md §4). Gmail keeps a
+    /// client-supplied Message-ID, and that is what makes "did the send that
+    /// crashed mid-flight go out?" answerable afterwards with an
+    /// `rfc822msgid:` search — the whole double-send defense. The id is minted
+    /// by the caller at schedule time, never here.
+    pub message_id: Option<String>,
 }
 
 /// Escape text for interpolation into HTML markup or a double-quoted attribute
@@ -272,6 +283,7 @@ pub fn build_reply_rfc822(parts: &ReplyParts) -> Result<Vec<u8>, WriteError> {
         ("Subject", parts.subject.as_str()),
         ("In-Reply-To", parts.in_reply_to.as_deref().unwrap_or("")),
         ("References", parts.references.as_deref().unwrap_or("")),
+        ("Message-ID", parts.message_id.as_deref().unwrap_or("")),
     ] {
         if val.contains('\r') || val.contains('\n') {
             return Err(WriteError::Invalid(format!(
@@ -302,6 +314,11 @@ pub fn build_reply_rfc822(parts: &ReplyParts) -> Result<Vec<u8>, WriteError> {
     }
     if let Some(refs) = parts.references.as_deref().filter(|s| !s.is_empty()) {
         out.push_str(&format!("References: {refs}\r\n"));
+    }
+    // Absent or empty writes nothing, so an unscheduled send's bytes are
+    // untouched (see `ReplyParts::message_id`).
+    if let Some(mid) = parts.message_id.as_deref().filter(|s| !s.is_empty()) {
+        out.push_str(&format!("Message-ID: {mid}\r\n"));
     }
     // Bodies: normalize bare LFs to CRLF for RFC822 line endings.
     let text = parts.body.replace("\r\n", "\n").replace('\n', "\r\n");
@@ -1050,6 +1067,59 @@ impl GmailWriteClient {
             internal_date: msg.internal_date,
         })
     }
+
+    /// The Gmail id of the message whose `Message-ID` header is `msgid`, or
+    /// `None` when the mailbox holds no such message. On the WRITE token, like
+    /// every other call here (gmail.modify grants read).
+    ///
+    /// THIS IS THE SCHEDULED SEND'S RECOVERY QUESTION (docs/SCHEDULED-SEND.md
+    /// §4): a row left `sending` by a crash either went out or did not, and the
+    /// Message-ID minted at schedule time is the only thing that can tell the
+    /// two apart. A wrong `None` is a double send, so the search includes Spam
+    /// and Trash — a mail the user binned inside the lease window still went
+    /// out. An error is an error, never "not found": the caller must not
+    /// retry a send it could not rule out.
+    pub async fn find_by_rfc822_msgid(&self, msgid: &str) -> Result<Option<String>, WriteError> {
+        let url = rfc822msgid_search_url(&self.base, msgid);
+        let list: MessageIdList = self.get_json(&url).await?;
+        Ok(list.messages.into_iter().next().map(|m| m.id))
+    }
+}
+
+/// `messages.list` narrowed to one `Message-ID`. The id is percent-encoded
+/// whole: it carries `<`, `>` and `@`, and `rfc822msgid:` needs the brackets to
+/// reach Gmail intact rather than as a malformed query string.
+fn rfc822msgid_search_url(base: &str, msgid: &str) -> String {
+    let q = percent_encode(&format!("rfc822msgid:{msgid}"));
+    format!("{base}/messages?q={q}&maxResults=1&includeSpamTrash=true")
+}
+
+/// RFC 3986 percent-encoding for a query value: unreserved characters pass,
+/// every other byte becomes `%XX`. Hand-rolled because it is eight lines and
+/// the one query it serves is fully covered by tests.
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// `messages.list`'s answer, reduced to the ids. Gmail OMITS `messages`
+/// entirely on no match (it does not send an empty list), hence the default.
+#[derive(Debug, serde::Deserialize)]
+struct MessageIdList {
+    #[serde(default)]
+    messages: Vec<MessageIdEntry>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct MessageIdEntry {
+    id: String,
 }
 
 /// The default reply recipient: the original sender's address.
@@ -1323,6 +1393,9 @@ pub struct ForwardParts {
     /// as it does on a reply.
     pub pixel_url: Option<String>,
     pub original: ForwardedOriginal,
+    /// The forward's own `Message-ID`, same rules as [`ReplyParts::message_id`]:
+    /// `None` writes no header (today's bytes), `Some` is a scheduled send.
+    pub message_id: Option<String>,
 }
 
 /// The `---------- Forwarded message ---------` header line every mail client
@@ -1927,6 +2000,7 @@ pub fn build_forward_rfc822(parts: &ForwardParts) -> Result<Vec<u8>, WriteError>
         ("Cc", parts.cc.as_deref().unwrap_or("")),
         ("Bcc", parts.bcc.as_deref().unwrap_or("")),
         ("Subject", parts.subject.as_str()),
+        ("Message-ID", parts.message_id.as_deref().unwrap_or("")),
     ] {
         if val.contains('\r') || val.contains('\n') {
             return Err(WriteError::Invalid(format!(
@@ -1980,6 +2054,9 @@ pub fn build_forward_rfc822(parts: &ForwardParts) -> Result<Vec<u8>, WriteError>
         out.push_str(&format!("Bcc: {bcc}\r\n"));
     }
     out.push_str(&format!("Subject: {}\r\n", parts.subject));
+    if let Some(mid) = parts.message_id.as_deref().filter(|s| !s.is_empty()) {
+        out.push_str(&format!("Message-ID: {mid}\r\n"));
+    }
     if parts.original.attachments.is_empty() {
         out.push_str(&format!(
             "Content-Type: multipart/alternative; boundary=\"{alt}\"\r\n"
@@ -2504,6 +2581,7 @@ mod tests {
             body_html: None,
             pixel_url: None,
             attachments: Vec::new(),
+            message_id: None,
         };
         let raw = build_reply_rfc822(&parts).unwrap();
         let s = String::from_utf8(raw).unwrap();
@@ -2528,6 +2606,7 @@ mod tests {
             body_html: None,
             pixel_url: None,
             attachments: Vec::new(),
+            message_id: None,
         };
         assert!(matches!(
             build_reply_rfc822(&parts),
@@ -2548,6 +2627,7 @@ mod tests {
             body_html: Some("<div><strong>bold</strong> text</div>".into()),
             pixel_url: None,
             attachments: Vec::new(),
+            message_id: None,
         };
         let s = String::from_utf8(build_reply_rfc822(&parts).unwrap()).unwrap();
         assert!(
@@ -2575,6 +2655,7 @@ mod tests {
             body_html: None,
             pixel_url: None,
             attachments: Vec::new(),
+            message_id: None,
         }
     }
 
@@ -2719,6 +2800,7 @@ mod tests {
             body_html: Some("<p>x</p>".into()),
             pixel_url: None,
             attachments: Vec::new(),
+            message_id: None,
         };
         assert!(matches!(
             build_reply_rfc822(&parts),
@@ -2739,6 +2821,7 @@ mod tests {
             body_html: None,
             pixel_url: None,
             attachments: Vec::new(),
+            message_id: None,
         };
         assert!(matches!(
             build_reply_rfc822(&parts),
@@ -2831,6 +2914,7 @@ mod tests {
             note_html: None,
             pixel_url: None,
             original: parse_forwarded_original(&fixture_original_raw()).unwrap(),
+            message_id: None,
         }
     }
 
@@ -3929,6 +4013,148 @@ mod tests {
             }
             other => panic!("expected Api error, got {other:?}"),
         }
+    }
+
+    // ---- scheduled send: the minted Message-ID and its recovery search ------
+
+    #[test]
+    fn rfc822msgid_search_encodes_the_brackets_and_the_at() {
+        let url = rfc822msgid_search_url("https://g.test/me", "<a.b-c_1~@passband>");
+        assert_eq!(
+            url,
+            "https://g.test/me/messages?q=rfc822msgid%3A%3Ca.b-c_1~%40passband%3E\
+             &maxResults=1&includeSpamTrash=true"
+        );
+        // Nothing that could end the value or open another parameter survives.
+        let q = url.split("?q=").nth(1).unwrap().split('&').next().unwrap();
+        for raw in ['<', '>', '@', ':', ' ', '&', '='] {
+            assert!(!q.contains(raw), "{raw:?} must be encoded");
+        }
+        assert_eq!(percent_encode("a b&c=d"), "a%20b%26c%3Dd");
+    }
+
+    #[tokio::test]
+    async fn find_by_rfc822_msgid_returns_the_hit() {
+        let (base, handle) = mock_once(
+            200,
+            "{\"messages\":[{\"id\":\"gm-77\",\"threadId\":\"t-1\"}],\"resultSizeEstimate\":1}",
+        )
+        .await;
+        let got = client(base)
+            .find_by_rfc822_msgid("<x@passband>")
+            .await
+            .unwrap();
+        let req = handle.await.unwrap();
+        assert_eq!(got.as_deref(), Some("gm-77"));
+        assert!(req.starts_with("GET "), "a search is a GET");
+        assert!(req.contains("/messages?q=rfc822msgid%3A%3Cx%40passband%3E&maxResults=1"));
+        assert!(
+            req.contains("authorization: Bearer WRITE-TOKEN")
+                || req.contains("Authorization: Bearer WRITE-TOKEN")
+        );
+    }
+
+    #[tokio::test]
+    async fn find_by_rfc822_msgid_reads_an_absent_messages_key_as_none() {
+        // Gmail's real no-match answer: no `messages` key at all.
+        let (base, handle) = mock_once(200, "{\"resultSizeEstimate\":0}").await;
+        let got = client(base)
+            .find_by_rfc822_msgid("<x@passband>")
+            .await
+            .unwrap();
+        handle.await.unwrap();
+        assert_eq!(got, None);
+    }
+
+    #[tokio::test]
+    async fn find_by_rfc822_msgid_reads_an_empty_list_as_none() {
+        let (base, handle) = mock_once(200, "{\"messages\":[]}").await;
+        let got = client(base)
+            .find_by_rfc822_msgid("<x@passband>")
+            .await
+            .unwrap();
+        handle.await.unwrap();
+        assert_eq!(got, None);
+    }
+
+    #[tokio::test]
+    async fn find_by_rfc822_msgid_surfaces_an_error_never_a_none() {
+        // "Could not ask" must not read as "did not go out": that is a resend.
+        let (base, handle) = mock_once(500, "{}").await;
+        let got = client(base).find_by_rfc822_msgid("<x@passband>").await;
+        handle.await.unwrap();
+        assert!(matches!(got, Err(WriteError::Api { status: 500, .. })));
+    }
+
+    #[test]
+    fn a_minted_message_id_adds_exactly_one_header_and_nothing_else() {
+        let id = "<0b7e-4f@passband>";
+        let header = format!("Message-ID: {id}\r\n");
+        // Plain, threaded (the parent's id rides In-Reply-To: it must not be
+        // confused with ours), and multipart with a pixel.
+        let mut threaded = bare_parts("hi");
+        threaded.in_reply_to = Some("<parent@x>".into());
+        threaded.references = Some("<root@x> <parent@x>".into());
+        let mut html = bare_parts("hi");
+        html.body_html = Some("<p>hi</p>".into());
+        html.pixel_url = Some("https://t.test/t/tok".into());
+        for base in [bare_parts("hi"), threaded, html] {
+            let without = String::from_utf8(build_reply_rfc822(&base).unwrap()).unwrap();
+            let mut with_id = base.clone();
+            with_id.message_id = Some(id.into());
+            let with = String::from_utf8(build_reply_rfc822(&with_id).unwrap()).unwrap();
+            let head = with.split("\r\n\r\n").next().unwrap();
+            assert_eq!(
+                head.lines()
+                    .filter(|l| l.starts_with("Message-ID:"))
+                    .count(),
+                1
+            );
+            assert!(head.contains(&header));
+            assert_eq!(with.replacen(&header, "", 1), without);
+            assert!(!without.contains("Message-ID:"), "None writes no header");
+        }
+        // Empty is None, same as every other optional header.
+        let mut empty = bare_parts("hi");
+        empty.message_id = Some(String::new());
+        assert_eq!(
+            build_reply_rfc822(&empty).unwrap(),
+            build_reply_rfc822(&bare_parts("hi")).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_minted_message_id_rides_a_forward_the_same_way() {
+        let id = "<fwd-1@passband>";
+        let header = format!("Message-ID: {id}\r\n");
+        let without = String::from_utf8(build_forward_rfc822(&fwd_parts("see")).unwrap()).unwrap();
+        let mut parts = fwd_parts("see");
+        parts.message_id = Some(id.into());
+        let with = String::from_utf8(build_forward_rfc822(&parts).unwrap()).unwrap();
+        let head = with.split("\r\n\r\n").next().unwrap();
+        assert_eq!(
+            head.lines()
+                .filter(|l| l.starts_with("Message-ID:"))
+                .count(),
+            1
+        );
+        assert_eq!(with.replacen(&header, "", 1), without);
+    }
+
+    #[test]
+    fn a_message_id_carrying_crlf_is_refused_not_repaired() {
+        let mut reply = bare_parts("hi");
+        reply.message_id = Some("<a@passband>\r\nBcc: evil@x".into());
+        assert!(matches!(
+            build_reply_rfc822(&reply),
+            Err(WriteError::Invalid(_))
+        ));
+        let mut fwd = fwd_parts("see");
+        fwd.message_id = Some("<a@passband>\nBcc: evil@x".into());
+        assert!(matches!(
+            build_forward_rfc822(&fwd),
+            Err(WriteError::Invalid(_))
+        ));
     }
 
     // ---- attachments on a COMPOSED message ---------------------------------

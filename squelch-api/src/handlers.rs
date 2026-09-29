@@ -4062,7 +4062,7 @@ async fn finish_send(
     draft_id: Option<i64>,
     attachment_ids: &[i64],
     target: Option<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<SendOutcome, SendFailure> {
     match client.send(raw, thread_id.as_deref()).await {
         Ok(sent) => {
             if let Some(id) = resolve {
@@ -4080,51 +4080,153 @@ async fn finish_send(
             // A send with no thread of its own — a cold send, or a forward —
             // falls back to the thread Gmail just created, so the client can
             // open what it just sent.
-            Ok(Json(json!({
-                "status": "sent",
-                "echo_message_id": echo_message_id,
-                "thread_id": thread_id.or(sent.thread_id),
-            })))
+            Ok(SendOutcome::Sent {
+                echo_message_id,
+                thread_id: thread_id.or(sent.thread_id),
+            })
         }
         Err(e) => {
             if let Some((token, _)) = &tracker {
                 discard_tracker(state, token, target.clone()).await;
             }
             audit_action(state, "send", target, "failed:gmail").await;
-            Err(write_error(&e))
+            Err(SendFailure::new("failed:gmail", write_error(&e)))
         }
     }
 }
 
-pub async fn action_send(
-    State(state): State<ApiState>,
-    Json(body): Json<SendBody>,
-) -> Result<impl IntoResponse, ApiError> {
-    // AUDIT TARGET: the stored message this send is ABOUT — the original for a
-    // forward, the parent for a reply, nothing at all for a cold send.
-    let target = body
-        .forward_of_message_id
-        .or(body.reply_to_message_id)
-        .map(|id| id.to_string());
+/// What a send that got past every refusal answered, as data rather than as
+/// the response body, so a caller outside a request (the scheduled-send
+/// worker, docs/SCHEDULED-SEND.md §4) can settle its row from the same values
+/// `POST /client/actions/send` puts on the wire. [`SendOutcome::to_json`] is
+/// that wire shape, key for key.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum SendOutcome {
+    /// One message, away. `echo_message_id` is the local copy when the echo
+    /// landed; `thread_id` is the parent's, or the one Gmail just created.
+    Sent {
+        echo_message_id: Option<i64>,
+        thread_id: Option<String>,
+    },
+    /// An `individual` group fan-out, handed to its job (the `202`).
+    Sending {
+        group_send_id: i64,
+        recipients: usize,
+    },
+}
 
+impl SendOutcome {
+    /// The JSON `action_send` answers with. THE BYTES ARE THE CONTRACT: the
+    /// Swift client decodes these exact keys, and the send tests pin them.
+    pub(crate) fn to_json(&self) -> serde_json::Value {
+        match self {
+            SendOutcome::Sent {
+                echo_message_id,
+                thread_id,
+            } => json!({
+                "status": "sent",
+                "echo_message_id": echo_message_id,
+                "thread_id": thread_id,
+            }),
+            SendOutcome::Sending {
+                group_send_id,
+                recipients,
+            } => json!({
+                "status": "sending",
+                "group_send_id": group_send_id,
+                "recipients": recipients,
+            }),
+        }
+    }
+}
+
+/// Why a send did not go out: the `ApiError` the request path answers with,
+/// UNCHANGED, plus a REDACTED reason for a caller with no response to write
+/// it into (a scheduled row's `last_error`).
+///
+/// `reason` is the audit detail the refusal already wrote (`failed:gmail`,
+/// `rejected:no_write_credential`, ...), so the ledger and the row say the same
+/// thing. The few refusals that write no audit row (a group that no longer
+/// resolves, a store read failing) still get a reason; it is simply not in the
+/// ledger. NEVER content, only these fixed strings.
+#[derive(Debug)]
+pub(crate) struct SendFailure {
+    pub(crate) reason: &'static str,
+    pub(crate) error: ApiError,
+}
+
+impl SendFailure {
+    fn new(reason: &'static str, error: ApiError) -> Self {
+        Self { reason, error }
+    }
+}
+
+/// The request path answers with the error as it always has; the reason was
+/// already written to the ledger where there is one.
+impl From<SendFailure> for ApiError {
+    fn from(f: SendFailure) -> Self {
+        f.error
+    }
+}
+
+/// What [`perform_send`] still owes the outbound guard.
+///
+/// A plain send is judged BEFORE it gets there (by `action_send`, or at
+/// schedule time), so it owes nothing. A FORWARD'S VERDICT WAITS on the
+/// original, which is only read inside the send: most of what it sends is
+/// somebody else's mail. That is the one case the core itself must judge.
+#[derive(Debug)]
+pub(crate) enum SendGuard {
+    /// Judge a forward once, after its original is fetched, over these kinds
+    /// (the note's and the staged files') unioned with the original's. The
+    /// request path.
+    ForwardOwed(Vec<&'static str>),
+    /// Already judged, and `override_guard` already honored where it applied.
+    /// NOTHING RE-SCANS: the scheduled-send worker fires a frozen request
+    /// whose answer was given when the user was there to give it.
+    Settled,
+}
+
+/// AUDIT TARGET for a send: the stored message it is ABOUT — the original for
+/// a forward, the parent for a reply, nothing at all for a cold send.
+fn send_target(body: &SendBody) -> Option<String> {
+    body.forward_of_message_id
+        .or(body.reply_to_message_id)
+        .map(|id| id.to_string())
+}
+
+/// The ordered refusals every send passes before anything is read or spent:
+/// confirm, not both reply and forward, a body, a forward's `to`, reply-all's
+/// parent, no unresolved `#group`, no group on a reply or forward.
+///
+/// PURE, so it can run anywhere a `SendBody` is judged: `action_send` now,
+/// and scheduling (docs/SCHEDULED-SEND.md §3 step 1), which audits under its
+/// own action. The caller writes the audit row from `reason`; THE ORDER IS
+/// PART OF THE CONTRACT, because it decides which refusal a body with two
+/// problems gets.
+pub(crate) fn validate_send(body: &SendBody) -> Result<(), SendFailure> {
     if !body.confirm {
-        audit_action(&state, "send", target, "rejected:confirm").await;
-        return Err(ApiError::bad_request(CONFIRM_HINT));
+        return Err(SendFailure::new(
+            "rejected:confirm",
+            ApiError::bad_request(CONFIRM_HINT),
+        ));
     }
     // A send is a reply OR a forward, never both: they disagree about threading,
     // about the subject, and about whose conversation the mail joins.
     if body.forward_of_message_id.is_some() && body.reply_to_message_id.is_some() {
-        audit_action(&state, "send", target, "rejected:forward_and_reply").await;
-        return Err(ApiError::bad_request(
-            "a send is either a reply or a forward, not both",
+        return Err(SendFailure::new(
+            "rejected:forward_and_reply",
+            ApiError::bad_request("a send is either a reply or a forward, not both"),
         ));
     }
     // AN EMPTY NOTE IS A LEGITIMATE FORWARD — "here, look at this" is most of
     // what forwarding is for, and the original is the body. Every other send
     // still needs something typed in it.
     if body.forward_of_message_id.is_none() && body.body.trim().is_empty() {
-        audit_action(&state, "send", target, "rejected:empty_body").await;
-        return Err(ApiError::bad_request("send requires a non-empty body"));
+        return Err(SendFailure::new(
+            "rejected:empty_body",
+            ApiError::bad_request("send requires a non-empty body"),
+        ));
     }
     // A forward derives NOTHING about its audience from the original: everyone
     // on it is someone the mail already reached. The recipient is the one thing
@@ -4132,16 +4234,18 @@ pub async fn action_send(
     if body.forward_of_message_id.is_some()
         && body.to.as_deref().map(str::trim).unwrap_or("").is_empty()
     {
-        audit_action(&state, "send", target, "rejected:no_recipient").await;
-        return Err(ApiError::bad_request("forward requires `to`"));
+        return Err(SendFailure::new(
+            "rejected:no_recipient",
+            ApiError::bad_request("forward requires `to`"),
+        ));
     }
     // Reply-all has nothing to widen without a parent to read the audience off.
     // Checked here, with the other body validations, so it costs no Gmail call.
     // (This is also what refuses reply_all on a forward: no parent, no widening.)
     if body.reply_all && body.reply_to_message_id.is_none() {
-        audit_action(&state, "send", target, "rejected:reply_all_no_parent").await;
-        return Err(ApiError::bad_request(
-            "reply_all requires `reply_to_message_id`",
+        return Err(SendFailure::new(
+            "rejected:reply_all_no_parent",
+            ApiError::bad_request("reply_all requires `reply_to_message_id`"),
         ));
     }
 
@@ -4155,8 +4259,7 @@ pub async fn action_send(
         .flatten()
     {
         if let Err(e) = group_send::reject_unresolved_tokens(list) {
-            audit_action(&state, "send", target, "rejected:unresolved_group").await;
-            return Err(e);
+            return Err(SendFailure::new("rejected:unresolved_group", e));
         }
     }
 
@@ -4166,10 +4269,29 @@ pub async fn action_send(
     if body.group_id.is_some()
         && (body.reply_to_message_id.is_some() || body.forward_of_message_id.is_some())
     {
-        audit_action(&state, "send", target, "rejected:group_on_reply").await;
-        return Err(ApiError::bad_request(
-            "a group is addressed by a new message, not by a reply or a forward",
+        return Err(SendFailure::new(
+            "rejected:group_on_reply",
+            ApiError::bad_request(
+                "a group is addressed by a new message, not by a reply or a forward",
+            ),
         ));
+    }
+    Ok(())
+}
+
+/// `POST /client/actions/send`: validate, read the staged files, judge, send.
+///
+/// The judging stays HERE and out of [`perform_send`], because the scheduled
+/// path judges at schedule time and must never be asked again at fire time.
+pub async fn action_send(
+    State(state): State<ApiState>,
+    Json(body): Json<SendBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let target = send_target(&body);
+
+    if let Err(f) = validate_send(&body) {
+        audit_action(&state, "send", target, f.reason).await;
+        return Err(f.into());
     }
 
     // OUTBOUND GUARD: report only REDACTED kinds, never the matched text. Scanned
@@ -4191,30 +4313,70 @@ pub async fn action_send(
             matches.push(kind);
         }
     }
-    if body.forward_of_message_id.is_none()
-        && let Some(err) =
+    let owed = if body.forward_of_message_id.is_some() {
+        SendGuard::ForwardOwed(matches)
+    } else {
+        if let Some(err) =
             guard_verdict(&state, &matches, body.override_guard, target.clone()).await
-    {
-        return Err(err);
-    }
+        {
+            return Err(err);
+        }
+        SendGuard::Settled
+    };
 
-    let client = match write_client(&state) {
+    let outcome = perform_send(&state, &body, attachments, owed, None).await?;
+    // 200 for a fan-out too, as it always has been: the Groups page reads
+    // `status: "sending"`, not the code.
+    Ok(Json(outcome.to_json()))
+}
+
+/// Everything a send does once it has been validated and judged: resolve the
+/// write client, derive the audience, subject and threading from the parent,
+/// mint the tracker, render, build the RFC822, send, and settle
+/// ([`finish_send`]). Shared by `action_send` and the scheduled-send worker,
+/// which is why it takes no request and writes no response.
+///
+/// `attachments` are the files [`load_send_attachments`] resolved for
+/// `body.attachment_ids`. `owed` is what the outbound guard is still owed (see
+/// [`SendGuard`]). `message_id` is the scheduled send's minted `Message-ID`,
+/// written onto the outgoing message; `None` lets Gmail mint one, which is
+/// every send made while the user waits.
+///
+/// Dispatch: a FORWARD goes to [`forward_send`] (unthreaded, reads the
+/// original). An `individual` GROUP goes to [`fan_out_send`], which answers
+/// [`SendOutcome::Sending`] and IGNORES `message_id` (one id cannot name N
+/// messages; scheduling refuses a fan-out for v1). Everything else, a reply or
+/// a cold send, possibly attributed to a `to`/`bcc` group, is composed here.
+///
+/// Audit rows, the attachment-scaled Gmail timeout and the echo budget are
+/// exactly what `action_send` had before this was pulled out of it.
+pub(crate) async fn perform_send(
+    state: &ApiState,
+    body: &SendBody,
+    attachments: Vec<MailAttachment>,
+    owed: SendGuard,
+    message_id: Option<&str>,
+) -> Result<SendOutcome, SendFailure> {
+    let target = send_target(body);
+
+    let client = match write_client(state) {
         Ok(c) => c,
         Err(e) => {
-            audit_action(&state, "send", target, "rejected:no_write_credential").await;
-            return Err(e);
+            audit_action(state, "send", target, "rejected:no_write_credential").await;
+            return Err(SendFailure::new("rejected:no_write_credential", e));
         }
     };
 
     if let Some(original_id) = body.forward_of_message_id {
         return forward_send(
-            &state,
-            &body,
+            state,
+            body,
             &client,
             target,
             original_id,
-            matches,
+            owed,
             attachments,
+            message_id,
         )
         .await;
     }
@@ -4223,24 +4385,28 @@ pub async fn action_send(
     // and the write credential is known good — so a fan-out that is going to be
     // refused is refused before any of it has gone.
     let audience = match body.group_id {
-        Some(group_id) => Some(group_send::resolve(&state, group_id).await?),
+        Some(group_id) => Some(
+            group_send::resolve(state, group_id)
+                .await
+                .map_err(|e| SendFailure::new("failed:group", e))?,
+        ),
         None => None,
     };
     if let Some(audience) = &audience
         && audience.mode == GroupMode::Individual
     {
-        return fan_out_send(&state, &body, audience, attachments).await;
+        return fan_out_send(state, body, audience, attachments).await;
     }
 
     let (parent, thread_id) = match body.reply_to_message_id {
-        Some(id) => match resolve_target(&state, id).await {
+        Some(id) => match resolve_target(state, id).await {
             Ok(m) => {
                 let tid = m.thread_id.clone();
                 (Some(m), Some(tid))
             }
             Err(e) => {
-                audit_action(&state, "send", target, "failed:target").await;
-                return Err(e);
+                audit_action(state, "send", target, "failed:target").await;
+                return Err(SendFailure::new("failed:target", e));
             }
         },
         None => (None, None),
@@ -4257,11 +4423,14 @@ pub async fn action_send(
             // quietly falling back to reply-to-sender would send to fewer people
             // than the user reviewed. Fail loudly instead.
             Err(_) if body.reply_all => {
-                audit_action(&state, "send", target, "failed:gmail").await;
-                return Err(ApiError::new(
-                    StatusCode::BAD_GATEWAY,
-                    "could not read the original message's recipients; \
-                     reply-all was not sent",
+                audit_action(state, "send", target, "failed:gmail").await;
+                return Err(SendFailure::new(
+                    "failed:gmail",
+                    ApiError::new(
+                        StatusCode::BAD_GATEWAY,
+                        "could not read the original message's recipients; \
+                         reply-all was not sent",
+                    ),
                 ));
             }
             Err(_) => None,
@@ -4286,7 +4455,7 @@ pub async fn action_send(
             // Whose address to leave off the copy list. Unreadable (which the
             // account row makes near-impossible) only costs self-exclusion: the
             // user is copied on their own reply rather than the send failing.
-            let own = store_call(&state, |store, account_id| store.account_email(account_id))
+            let own = store_call(state, |store, account_id| store.account_email(account_id))
                 .await
                 .unwrap_or_default();
             Some(derive_reply_recipients(h, &own, body.reply_all))
@@ -4313,26 +4482,31 @@ pub async fn action_send(
             // refuses an empty `To`, and a mail addressed to nobody visible
             // reads to a recipient's client as a header it cannot render.
             (_, None) if !bcc_requested.trim().is_empty() => {
-                match store_call(&state, |store, account_id| store.account_email(account_id)).await
-                {
+                match store_call(state, |store, account_id| store.account_email(account_id)).await {
                     Ok(own) if !own.trim().is_empty() => own,
                     // The account row is what every other surface reads the
                     // user's own address from, so this is near-impossible. It
                     // still fails the send rather than composing something
                     // half-addressed.
                     _ => {
-                        audit_action(&state, "send", target, "rejected:no_recipient").await;
-                        return Err(ApiError::bad_request(
-                            "a bcc-only send needs this account's own address, \
-                             which could not be read",
+                        audit_action(state, "send", target, "rejected:no_recipient").await;
+                        return Err(SendFailure::new(
+                            "rejected:no_recipient",
+                            ApiError::bad_request(
+                                "a bcc-only send needs this account's own address, \
+                                 which could not be read",
+                            ),
                         ));
                     }
                 }
             }
             (_, None) => {
-                audit_action(&state, "send", target, "rejected:no_recipient").await;
-                return Err(ApiError::bad_request(
-                    "send requires `to` (or `reply_to_message_id` to derive it)",
+                audit_action(state, "send", target, "rejected:no_recipient").await;
+                return Err(SendFailure::new(
+                    "rejected:no_recipient",
+                    ApiError::bad_request(
+                        "send requires `to` (or `reply_to_message_id` to derive it)",
+                    ),
                 ));
             }
         },
@@ -4368,12 +4542,7 @@ pub async fn action_send(
         });
 
     // Last thing before composing, so every rejection above costs no token.
-    let tracker = mint_tracker(
-        &state,
-        body.include_tracker.unwrap_or(false),
-        target.clone(),
-    )
-    .await;
+    let tracker = mint_tracker(state, body.include_tracker.unwrap_or(false), target.clone()).await;
 
     // Kept back for the group-send record, which is written after `subject` has
     // moved into the MIME parts.
@@ -4397,15 +4566,16 @@ pub async fn action_send(
         body_html,
         pixel_url: tracker.as_ref().map(|(_, url)| url.clone()),
         attachments,
+        message_id: message_id.map(str::to_string),
     };
     let raw = match build_reply_rfc822(&parts) {
         Ok(r) => r,
         Err(e) => {
             if let Some((token, _)) = &tracker {
-                discard_tracker(&state, token, target.clone()).await;
+                discard_tracker(state, token, target.clone()).await;
             }
-            audit_action(&state, "send", target, "rejected:compose").await;
-            return Err(write_error(&e));
+            audit_action(state, "send", target, "rejected:compose").await;
+            return Err(SendFailure::new("rejected:compose", write_error(&e)));
         }
     };
 
@@ -4424,7 +4594,7 @@ pub async fn action_send(
         "ok".to_string()
     };
     let result = finish_send(
-        &state,
+        state,
         &client,
         &raw,
         thread_id,
@@ -4442,12 +4612,14 @@ pub async fn action_send(
     // message that the composer addressed itself, so all the daemon adds is the
     // record that this was that group — which is what makes the history entry
     // exact ("12 of 12, sent as bcc") instead of inferred from its recipients.
-    if let (Some(audience), Ok(sent)) = (&audience, &result) {
-        let echo = sent
-            .0
-            .get("echo_message_id")
-            .and_then(serde_json::Value::as_i64);
-        group_send::record_single(&state, audience, subject_for_record, echo).await;
+    if let (
+        Some(audience),
+        Ok(SendOutcome::Sent {
+            echo_message_id, ..
+        }),
+    ) = (&audience, &result)
+    {
+        group_send::record_single(state, audience, subject_for_record, *echo_message_id).await;
     }
     result
 }
@@ -4463,7 +4635,7 @@ async fn fan_out_send(
     body: &SendBody,
     audience: &group_send::GroupAudience,
     attachments: Vec<MailAttachment>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<SendOutcome, SendFailure> {
     let target = Some(audience.group_id.to_string());
     let subject = body
         .subject
@@ -4505,7 +4677,7 @@ async fn fan_out_send(
                 discard_tracker(state, token, target.clone()).await;
             }
             audit_action(state, "send", target, "failed:fan_out_start").await;
-            return Err(e);
+            return Err(SendFailure::new("failed:fan_out_start", e));
         }
     };
 
@@ -4517,11 +4689,10 @@ async fn fan_out_send(
     }
     discard_sent_attachments(state, body.draft_id, body.attachment_ids.clone()).await;
 
-    Ok(Json(json!({
-        "status": "sending",
-        "group_send_id": group_send_id,
-        "recipients": recipients,
-    })))
+    Ok(SendOutcome::Sending {
+        group_send_id,
+        recipients,
+    })
 }
 
 /// The largest original a forward will carry, in DECODED RFC822 bytes.
@@ -4556,21 +4727,26 @@ fn forward_raw_too_large(len: usize) -> bool {
 ///   memory of the message and the bytes on the wire are the original.
 /// - The fetch failing is LOUD (502), like reply-all's audience read: what is
 ///   forwarded IS the request, so there is nothing to degrade to.
+///
+/// `owed` is [`SendGuard::ForwardOwed`] on the request path. `Settled` skips
+/// the scan outright: that forward was judged before it was queued.
+#[allow(clippy::too_many_arguments)]
 async fn forward_send(
     state: &ApiState,
     body: &SendBody,
     client: &GmailWriteClient,
     target: Option<String>,
     original_id: i64,
-    note_kinds: Vec<&'static str>,
+    owed: SendGuard,
     attachments: Vec<MailAttachment>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+    message_id: Option<&str>,
+) -> Result<SendOutcome, SendFailure> {
     // Sealed and unknown ids are the same 404 every message-target route returns.
     let original_ref = match resolve_target(state, original_id).await {
         Ok(m) => m,
         Err(e) => {
             audit_action(state, "send", target, "failed:target").await;
-            return Err(e);
+            return Err(SendFailure::new("failed:target", e));
         }
     };
 
@@ -4584,7 +4760,10 @@ async fn forward_send(
         // "no write credential" handling fires.
         Err(e @ WriteError::MissingCredential(_)) => {
             audit_action(state, "send", target, "rejected:no_write_credential").await;
-            return Err(write_error(&e));
+            return Err(SendFailure::new(
+                "rejected:no_write_credential",
+                write_error(&e),
+            ));
         }
         Err(_) => Vec::new(),
     };
@@ -4596,9 +4775,12 @@ async fn forward_send(
     let staged: usize = attachments.iter().map(|a| a.data.len()).sum();
     if forward_raw_too_large(raw.len() + staged) {
         audit_action(state, "send", target, "rejected:too_large").await;
-        return Err(ApiError::new(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "original message is too large to forward",
+        return Err(SendFailure::new(
+            "rejected:too_large",
+            ApiError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "original message is too large to forward",
+            ),
         ));
     }
     // Empty bytes, undecodable bytes and unparseable bytes are one outcome:
@@ -4608,58 +4790,68 @@ async fn forward_send(
         .flatten()
     else {
         audit_action(state, "send", target, "failed:fetch_original").await;
-        return Err(ApiError::new(
-            StatusCode::BAD_GATEWAY,
-            "could not fetch the original message; forward was not sent",
+        return Err(SendFailure::new(
+            "failed:fetch_original",
+            ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                "could not fetch the original message; forward was not sent",
+            ),
         ));
     };
 
-    // ONE verdict over the note AND what it quotes (kinds only, deduped).
-    //
-    // BOTH VIEWS OF THE ORIGINAL ARE SCANNED. When a text/plain part exists,
-    // mail-parser hands back exactly that part and never converts the html
-    // alternative down — so a message whose text half is innocuous and whose html
-    // half holds the PEM block would ship with the secret unread. The html view
-    // goes through the same html-to-text converter mail-parser uses internally,
-    // which is what makes the scan see the words a recipient would see.
-    let html_text = original
-        .html
-        .as_deref()
-        .map(mail_parser::decoders::html::html_to_text)
-        .unwrap_or_default();
-    //
-    // AND SO ARE TEXT ATTACHMENTS. A PEM key pasted into `notes.txt` and dragged
-    // onto a mail is the same exfil shape as one pasted into the body — arguably
-    // the more natural one — and scanning only the bodies let it through while
-    // this code called forwarding the classic exfil shape. Every `text/*` part
-    // is scanned as text, and so is every `message/*` part — an attached email
-    // ("see the thread below") is plain RFC822 text carrying whatever its bodies
-    // carried. mail-parser has already transcoded text parts to UTF-8, so the
-    // lossy conversion below only ever fires on genuinely broken bytes.
-    // BINARY PARTS STAY UNSCANNED (a key inside a zip or an `id_rsa` with no
-    // text mime passes): the guard is a seatbelt against the accident, not a DLP
-    // boundary, and it is overridable by design.
-    let mut kinds = note_kinds;
-    let attachment_text: Vec<String> = original
-        .attachments
-        .iter()
-        .filter(|a| {
-            let mime = a.mime.to_ascii_lowercase();
-            mime.starts_with("text/") || mime.starts_with("message/")
-        })
-        .map(|a| String::from_utf8_lossy(&a.data).into_owned())
-        .collect();
-    for kind in guard::scan_kinds(&original.text)
-        .into_iter()
-        .chain(guard::scan_kinds(&html_text))
-        .chain(attachment_text.iter().flat_map(|t| guard::scan_kinds(t)))
-    {
-        if !kinds.contains(&kind) {
-            kinds.push(kind);
+    'verdict: {
+        // A forward judged before it was queued is not judged again; nothing
+        // below is read for any other reason, so it is skipped whole.
+        let SendGuard::ForwardOwed(note_kinds) = owed else {
+            break 'verdict;
+        };
+        // ONE verdict over the note AND what it quotes (kinds only, deduped).
+        //
+        // BOTH VIEWS OF THE ORIGINAL ARE SCANNED. When a text/plain part exists,
+        // mail-parser hands back exactly that part and never converts the html
+        // alternative down — so a message whose text half is innocuous and whose html
+        // half holds the PEM block would ship with the secret unread. The html view
+        // goes through the same html-to-text converter mail-parser uses internally,
+        // which is what makes the scan see the words a recipient would see.
+        let html_text = original
+            .html
+            .as_deref()
+            .map(mail_parser::decoders::html::html_to_text)
+            .unwrap_or_default();
+        //
+        // AND SO ARE TEXT ATTACHMENTS. A PEM key pasted into `notes.txt` and dragged
+        // onto a mail is the same exfil shape as one pasted into the body — arguably
+        // the more natural one — and scanning only the bodies let it through while
+        // this code called forwarding the classic exfil shape. Every `text/*` part
+        // is scanned as text, and so is every `message/*` part — an attached email
+        // ("see the thread below") is plain RFC822 text carrying whatever its bodies
+        // carried. mail-parser has already transcoded text parts to UTF-8, so the
+        // lossy conversion below only ever fires on genuinely broken bytes.
+        // BINARY PARTS STAY UNSCANNED (a key inside a zip or an `id_rsa` with no
+        // text mime passes): the guard is a seatbelt against the accident, not a DLP
+        // boundary, and it is overridable by design.
+        let mut kinds = note_kinds;
+        let attachment_text: Vec<String> = original
+            .attachments
+            .iter()
+            .filter(|a| {
+                let mime = a.mime.to_ascii_lowercase();
+                mime.starts_with("text/") || mime.starts_with("message/")
+            })
+            .map(|a| String::from_utf8_lossy(&a.data).into_owned())
+            .collect();
+        for kind in guard::scan_kinds(&original.text)
+            .into_iter()
+            .chain(guard::scan_kinds(&html_text))
+            .chain(attachment_text.iter().flat_map(|t| guard::scan_kinds(t)))
+        {
+            if !kinds.contains(&kind) {
+                kinds.push(kind);
+            }
         }
-    }
-    if let Some(err) = guard_verdict(state, &kinds, body.override_guard, target.clone()).await {
-        return Err(err);
+        if let Some(err) = guard_verdict(state, &kinds, body.override_guard, target.clone()).await {
+            return Err(SendFailure::new("blocked:guard", err));
+        }
     }
 
     // Validated non-empty before any Gmail spend (see `action_send`).
@@ -4699,6 +4891,7 @@ async fn forward_send(
         note_html,
         pixel_url: tracker.as_ref().map(|(_, url)| url.clone()),
         original,
+        message_id: message_id.map(str::to_string),
     };
     let raw = match build_forward_rfc822(&parts) {
         Ok(r) => r,
@@ -4707,7 +4900,7 @@ async fn forward_send(
                 discard_tracker(state, token, target.clone()).await;
             }
             audit_action(state, "send", target, "rejected:compose").await;
-            return Err(write_error(&e));
+            return Err(SendFailure::new("rejected:compose", write_error(&e)));
         }
     };
 
@@ -5371,5 +5564,82 @@ mod cursor_tests {
         for bad in ["@@notbase64@@", "b2ZmOjIy=", "b2ZmOjIyM", "", "b", "aGk"] {
             assert_eq!(cursor::decode_offset(bad), None, "{bad:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod send_split_tests {
+    use super::*;
+
+    fn body(v: serde_json::Value) -> SendBody {
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn validation_refuses_in_the_documented_order() {
+        // Each body carries every problem from its row down, so only the order
+        // decides which reason comes back.
+        let cases = [
+            (
+                json!({"body": "", "forward_of_message_id": 1, "reply_to_message_id": 2}),
+                "rejected:confirm",
+            ),
+            (
+                json!({"confirm": true, "body": "", "forward_of_message_id": 1, "reply_to_message_id": 2}),
+                "rejected:forward_and_reply",
+            ),
+            (
+                json!({"confirm": true, "body": " ", "reply_all": true, "to": "#g"}),
+                "rejected:empty_body",
+            ),
+            (
+                json!({"confirm": true, "body": "", "forward_of_message_id": 1, "reply_all": true}),
+                "rejected:no_recipient",
+            ),
+            (
+                json!({"confirm": true, "body": "x", "reply_all": true, "to": "#g"}),
+                "rejected:reply_all_no_parent",
+            ),
+            (
+                json!({"confirm": true, "body": "x", "bcc": "#investors", "group_id": 1, "reply_to_message_id": 2}),
+                "rejected:unresolved_group",
+            ),
+            (
+                json!({"confirm": true, "body": "x", "group_id": 1, "reply_to_message_id": 2}),
+                "rejected:group_on_reply",
+            ),
+        ];
+        for (v, want) in cases {
+            let got = validate_send(&body(v.clone())).unwrap_err();
+            assert_eq!(got.reason, want, "{v}");
+            assert_eq!(got.error.status, StatusCode::BAD_REQUEST, "{v}");
+        }
+        // An uncommented forward is a send.
+        assert!(
+            validate_send(&body(
+                json!({"confirm": true, "body": "", "forward_of_message_id": 1, "to": "a@b.c"})
+            ))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn outcomes_serialize_to_the_wire_shape_action_send_always_had() {
+        let sent = SendOutcome::Sent {
+            echo_message_id: None,
+            thread_id: Some("t1".into()),
+        };
+        assert_eq!(
+            sent.to_json(),
+            json!({"status": "sent", "echo_message_id": null, "thread_id": "t1"})
+        );
+        let sending = SendOutcome::Sending {
+            group_send_id: 7,
+            recipients: 3,
+        };
+        assert_eq!(
+            sending.to_json(),
+            json!({"status": "sending", "group_send_id": 7, "recipients": 3})
+        );
     }
 }

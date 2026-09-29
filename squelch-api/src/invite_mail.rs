@@ -188,6 +188,7 @@ pub fn compose(to: &str, subject: &str, body: &str) -> ReplyParts {
         // this daemon; here it is simply not offered.
         pixel_url: None,
         attachments: Vec::new(),
+        message_id: None,
     }
 }
 

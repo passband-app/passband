@@ -68,6 +68,8 @@ struct InlineReply: View {
 
     private var compose: ComposeState? { store.inlineReply }
     private var guarded: Bool { !(compose?.guardKinds.isEmpty ?? true) }
+    /// A send time is set: the verbs say "schedule" (see `ScheduleCopy`).
+    private var scheduled: Bool { compose?.sendAt != nil }
     /// The message being answered. nil = nothing to answer, which renders as no
     /// composer at all.
     private var parent: ClientMessage? {
@@ -260,6 +262,10 @@ struct InlineReply: View {
             #if os(macOS)
                 TrackerToggle(on: bindFlag(\.includeTracker))
             #endif
+            // When it goes, on both platforms: the clock is the one option a
+            // phone reply keeps beside attach, because "send this tomorrow
+            // morning" is exactly what a reply typed at midnight wants.
+            ScheduleClock(slot: .inlineReply)
         }
     }
 
@@ -366,8 +372,10 @@ struct InlineReply: View {
 
     #if os(macOS)
         private var hints: [KeyHint] {
-            var hints = [KeyHint("⌘enter", "send")]
-            if guarded { hints.append(KeyHint("⌘⇧enter", "send anyway")) }
+            var hints = [KeyHint("⌘enter", ScheduleCopy.sendVerb(scheduled: scheduled))]
+            if guarded {
+                hints.append(KeyHint("⌘⇧enter", ScheduleCopy.overrideVerb(scheduled: scheduled)))
+            }
             hints.append(KeyHint("esc", "dismiss"))
             return hints
         }
@@ -386,11 +394,11 @@ struct InlineReply: View {
                 Button(ComposeLabels.dismiss) { store.closeInlineReply() }
                     .buttonStyle(.glass)
                 if guarded {
-                    Button("send anyway") { send(override: true) }
+                    Button(ScheduleCopy.overrideVerb(scheduled: scheduled)) { send(override: true) }
                         .buttonStyle(.glassProminent)
                         .tint(Palette.danger)
                 }
-                Button("send") { send(override: false) }
+                Button(ScheduleCopy.sendVerb(scheduled: scheduled)) { send(override: false) }
                     .buttonStyle(.glassProminent)
                     .tint(Palette.accent)
             }
@@ -417,6 +425,14 @@ struct InlineReply: View {
             KeyBinding(declining: "shift+Enter", "send anyway", meta: true, allowInInput: true) {
                 guard !store.askBarOpen, guarded else { return false }
                 send(override: true)
+                return true
+            },
+            // The clock's chord, as in the pane (`ScheduleClock.chord`).
+            KeyBinding(
+                declining: ScheduleClock.chordKey, "send later", meta: true, allowInInput: true
+            ) {
+                guard !store.askBarOpen, store.scheduledSendAvailable else { return false }
+                store.schedulePicker = .inlineReply
                 return true
             },
         ]
@@ -472,7 +488,8 @@ struct InlineReply: View {
         store.inlineReply = next
     }
 
-    /// Same two checks as the pane composer, then the same hold.
+    /// Same two checks as the pane composer, then the same hold, or with a
+    /// time set the same outbox.
     private func send(override: Bool) {
         guard let compose = store.inlineReply else { return }
         // Same seed rule as the pane: an untouched signature is an empty body.
@@ -486,6 +503,10 @@ struct InlineReply: View {
             patch { $0.error = problem }
             return
         }
-        store.sendWithUndo(.inlineReply, override: override)
+        if compose.sendAt != nil {
+            store.scheduleCompose(.inlineReply, override: override)
+        } else {
+            store.sendWithUndo(.inlineReply, override: override)
+        }
     }
 }

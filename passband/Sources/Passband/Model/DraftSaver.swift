@@ -443,47 +443,8 @@ final class DraftSaver {
         return true
     }
 
-    /// EVERYTHING A DRAFT HOLDS, and the only place a save reads a composer's
-    /// fields from. A CLOSED LIST: the words (to, cc, bcc, subject, body), the
-    /// files that finished staging, and the reply/forward key that says which
-    /// row they belong to.
-    ///
-    /// A draft saves WORDS, NEVER INTENTS. Nothing that says what should HAPPEN
-    /// to the mail belongs here: not a scheduled "send at", not the tracker
-    /// switch, not a guard override, not a group's send mode. A draft is
-    /// reopened and read by a person before anything is done with it, and an
-    /// intent restored from a row would act without that read (a future
-    /// `ComposeState.sendAt` depends on this list staying closed). Widening it
-    /// is a design change, not a field addition.
-    struct DraftPayload {
-        let replyToMessageId: Int?
-        let forwardOfMessageId: Int?
-        let to: String
-        let cc: String
-        let bcc: String
-        let subject: String
-        let body: String
-        let attachmentIds: [Int]
-
-        init(_ state: ComposeState) {
-            replyToMessageId = state.replyToMessageId
-            forwardOfMessageId = state.forwardOfMessageId
-            to = state.to
-            cc = state.cc
-            bcc = state.bcc
-            subject = state.subject
-            // WITHOUT the markers of files that are not staged: a composer
-            // closed mid-upload flushes here, its file goes to the sweep, and a
-            // restored body pointing at a part that does not exist would be a
-            // marker nobody can remove from the tray. Once the upload lands,
-            // the save it arms writes the marker back.
-            body = ComposeMarkers.bodyWithoutUnstaged(state.body, state.attachments)
-            // The files that have finished staging: the draft's claim on them
-            // is what keeps them past the sweep. One still uploading is
-            // claimed by the save its landing arms.
-            attachmentIds = state.stagedAttachmentIds
-        }
-    }
+    // `DraftPayload`, the closed list of what a save reads, lives beside
+    // `ComposeState` in ComposeState.swift, so test.sh can hold it to that list.
 
     /// A `drafts_v2` new-message save: edit the row by id, or mint one.
     ///

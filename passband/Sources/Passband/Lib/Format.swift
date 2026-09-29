@@ -203,6 +203,36 @@ enum Fmt {
         return shortDate(iso).lowercased()
     }
 
+    /// When a scheduled mail goes, at chip size: "today 6pm", "tomorrow 9am",
+    /// "Tue 9am" inside the week, "Oct 12 9am" past it. The same voice as
+    /// `remindChip`, minus its countdown: a send time is read as a WALL CLOCK
+    /// ("it goes out Tuesday morning"), and "in 17h" would make the reader do
+    /// the arithmetic the chip exists to save. Uncached, like `dateTime(_:)`:
+    /// a Date is not a stable cache key.
+    static func sendAtChip(
+        _ then: Date, now: Date = Date(), calendar: Calendar = .current
+    ) -> String {
+        let time = clock(then, calendar: calendar)
+        if calendar.isDate(then, inSameDayAs: now) { return "today \(time)" }
+        if let tomorrow = calendar.date(byAdding: .day, value: 1, to: now),
+            calendar.isDate(then, inSameDayAs: tomorrow)
+        {
+            return "tomorrow \(time)"
+        }
+        let days =
+            calendar.dateComponents(
+                [.day], from: calendar.startOfDay(for: now), to: calendar.startOfDay(for: then)
+            ).day ?? 0
+        var style = Date.FormatStyle.dateTime
+        style.calendar = calendar
+        style.timeZone = calendar.timeZone
+        style.locale = calendar.locale ?? .current
+        if days > 0, days < 7 {
+            return "\(then.formatted(style.weekday(.abbreviated))) \(time)"
+        }
+        return "\(then.formatted(style.month(.abbreviated).day())) \(time)"
+    }
+
     /// Compact wall clock: "9am", "6:30pm". Hand-built rather than run through a
     /// date style because at chip size ":00 AM" is three characters of nothing —
     /// and because 12-hour is what every other string in this app assumes.

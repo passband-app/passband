@@ -18,6 +18,15 @@ enum SendOutcome: Sendable {
     case failure(String)
 }
 
+/// What a schedule attempt came back as: the send's verdicts, with the outbox
+/// row in place of a sent message. `forbidden` carries the daemon's words.
+enum ScheduleOutcome: Sendable {
+    case scheduled(ScheduledCreated)
+    case guardBlocked([String])
+    case forbidden(String)
+    case failure(String)
+}
+
 @MainActor
 enum ComposeSubmit {
     /// Submit a draft. `override` is the explicit SECOND act after a
@@ -31,50 +40,10 @@ enum ComposeSubmit {
     /// then there is nothing to delete.
     static func fire(_ c: ComposeState, override: Bool) async -> SendOutcome {
         do {
-            let result = try await APIClient.shared.actionSend(
-                body: c.body, replyToMessageId: c.replyToMessageId,
-                // Empty = "derive it": on a reply the daemon reads the recipient
-                // off the parent message.
-                //
-                // A FAN-OUT SENDS NO `to` AT ALL. The field holds only the
-                // `#slug` token, which is a client-side draft encoding the daemon
-                // refuses on sight — the audience travels as `groupId`, and the
-                // daemon reads the membership itself.
-                to: (c.groupMode == .individual || c.to.isEmpty) ? nil : c.to,
-                // THE ONE FIELD WHERE `""` AND ABSENT DIFFER, and the flag is
-                // what tells them apart: a composer whose fields state the
-                // audience sends its copy list whatever it holds, emptied
-                // included, while one still waiting on the daemon's derivation
-                // sends nothing and lets the daemon derive. Asserting an empty
-                // Cc we never had would narrow a reply-all to one person.
-                cc: c.recipientsStated ? c.cc : nil,
-                // Never derived, so this is simply what the sender typed.
-                bcc: c.bcc.isEmpty ? nil : c.bcc,
-                // Attribution for an expanded to/bcc group; the whole audience
-                // for a fan-out. Never set beside a reply or a forward — those
-                // have an audience already, and the daemon refuses the pair.
-                groupId: c.replyToMessageId == nil && c.forwardOfMessageId == nil
-                    ? c.groupId : nil,
-                // nil, never "": the daemon reads Some("") as an explicit blank
-                // subject and would send the reply untitled.
-                subject: c.subject.isEmpty ? nil : c.subject,
-                overrideGuard: override, draftId: c.draftId,
-                // The composer's own switch, every time — the daemon's stored
-                // default is a client preference it never applies itself.
-                includeTracker: c.includeTracker,
-                // Only a reply can widen: `reply_all` names a parent to widen
-                // FROM, so a new message carrying it would be asking the daemon
-                // to derive a recipient set out of nothing.
-                replyAll: c.replyToMessageId != nil && c.replyAll,
-                // The whole of a forward on the wire: the daemon quotes the
-                // original and re-attaches its files from this id. Never set
-                // beside `reply_to_message_id` — the two are mutually exclusive
-                // server-side, and nothing in the client can produce both (a
-                // composer is opened as one or the other and never converts).
-                forwardOfMessageId: c.forwardOfMessageId,
-                // Tray order. Every id must still resolve on the daemon or the
-                // send is refused — the tray is the promise.
-                attachmentIds: c.stagedAttachmentIds,
+            // The body is `SendBody(compose:)`, the ONE mapping a schedule
+            // uses too; see there for why each field is what it is.
+            let result = try await APIClient.shared.send(
+                SendBody(compose: c, override: override, draftId: c.draftId),
                 attachmentBytes: c.attachments.reduce(0) { $0 + $1.size })
             capture(c, override, "sent")
             return .sent(result)
@@ -90,6 +59,36 @@ enum ComposeSubmit {
         }
     }
 
+    /// Put the composer in the daemon's outbox for `sendAt`. The same body a
+    /// send carries (plus `send_at`), and the same verdicts: the outbound
+    /// guard runs NOW, on the schedule, while the sender is here to answer
+    /// it, and `override` is the same explicit second act.
+    ///
+    /// `draftId` is `DraftSaver.currentDraftId(of:)`, read by the caller after
+    /// the saves in flight have settled: the daemon deletes that draft in the
+    /// same transaction that files the mail, so the draft cannot outlive it.
+    static func schedule(
+        _ c: ComposeState, at sendAt: Date, override: Bool, draftId: Int?
+    ) async -> ScheduleOutcome {
+        do {
+            let created = try await APIClient.shared.scheduleSend(
+                SendBody(compose: c, override: override, draftId: draftId), at: sendAt,
+                attachmentBytes: c.attachments.reduce(0) { $0 + $1.size })
+            capture(c, override, "scheduled")
+            return .scheduled(created)
+        } catch let apiError as APIError where apiError.kind == .guardBlocked {
+            capture(c, override, "guard_blocked")
+            return .guardBlocked(apiError.guardKinds ?? [])
+        } catch let apiError as APIError where apiError.kind == .forbidden {
+            capture(c, override, "forbidden")
+            // The daemon's own sentence, which names the missing credential.
+            return .forbidden(apiError.message)
+        } catch {
+            capture(c, override, "failure")
+            return .failure(errText(error, "could not schedule it"))
+        }
+    }
+
     /// Outcome shape only — the draft's content never rides along.
     ///
     /// `group_mode` is the audience SHAPE and nothing about who is in it: whether
@@ -101,6 +100,10 @@ enum ComposeSubmit {
             "outcome": outcome,
             "override": override,
             "tracked": c.includeTracker,
+            // Whether it went to the outbox rather than out. A bool, so a
+            // guard verdict on a schedule is still told from one on a send
+            // without a second outcome vocabulary.
+            "scheduled": c.sendAt != nil,
             // Whether the send used the copy lists at all — booleans, so
             // nothing about WHO is anywhere near this (see Analytics' closed
             // string vocabulary).

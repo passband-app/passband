@@ -399,6 +399,8 @@ struct RuleEditor: View {
     /// What the card opened on BEFORE any draft was laid over it. Leaving the
     /// card back on these values is not a draft, it is nothing written.
     private let pristine: RuleDraft
+    /// When this card appeared; see `dismissFromScrim`.
+    @State private var openedAt = Date()
 
     private enum FocusTarget { case pattern, want }
 
@@ -430,7 +432,7 @@ struct RuleEditor: View {
                 advanced: request.sender == nil)
         }
         pristine = start
-        let shown = draft ?? start
+        let shown = draft.flatMap { $0.origin == start.fingerprint ? $0 : nil } ?? start
         _pattern = State(initialValue: shown.pattern)
         _want = State(initialValue: shown.want)
         _disposition = State(initialValue: shown.disposition)
@@ -452,7 +454,7 @@ struct RuleEditor: View {
     }
 
     var body: some View {
-        OverlayScrim(onDismiss: dismiss) {
+        OverlayScrim(onDismiss: dismissFromScrim) {
             ModalCard(width: 470) {
                 header
                 alreadyInEffect
@@ -781,7 +783,20 @@ struct RuleEditor: View {
             unchanged
             ? nil
             : RuleDraft(
-                pattern: pattern, want: want, disposition: disposition, advanced: advanced)
+                pattern: pattern, want: want, disposition: disposition, advanced: advanced,
+                origin: pristine.fingerprint)
+    }
+
+    /// The scrim's click, ignored for a double-click's length after the card
+    /// appears. The rules page used to open a rule on a double-click and now
+    /// opens it on one, so a hand that still double-clicks puts its second
+    /// click wherever the row was, which is usually the scrim, and would shut
+    /// the card it just opened.
+    private func dismissFromScrim() {
+        #if os(macOS)
+            guard Date().timeIntervalSince(openedAt) > NSEvent.doubleClickInterval else { return }
+        #endif
+        dismiss()
     }
 
     /// A rule in the in-effect strip, clicked: this card gives way to that

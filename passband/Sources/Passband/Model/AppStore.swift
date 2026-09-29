@@ -565,6 +565,16 @@ struct RuleDraft {
     var want: String
     var disposition: Disposition?
     var advanced: Bool
+    /// What the card started from when this draft was written. A draft only
+    /// comes back over the SAME starting point: a rule edited somewhere else
+    /// since (the assistant, another device) opens on its new values, not
+    /// under a draft that would quietly revert them on save.
+    var origin: String = ""
+
+    /// The fields that decide whether two cards start from the same place.
+    var fingerprint: String {
+        [pattern, want, disposition?.rawValue ?? "auto"].joined(separator: "\u{0}")
+    }
 }
 
 /// What the group editor was opened with. `group` nil is a create; present is an

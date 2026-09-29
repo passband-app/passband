@@ -297,7 +297,7 @@ async fn send_one(
         .send(&raw, None)
         .await
         .map_err(|_| "gmail refused the message".to_string())?;
-    Ok(crate::handlers::echo_sent(state, client, None, &sent).await)
+    Ok(crate::handlers::echo_sent(state, client, None, &sent, None).await)
 }
 
 /// Write one recipient's outcome. Best-effort in the sense that a failed write

@@ -429,7 +429,10 @@ with fewer files than the tray showed), `rejected:attachment_cid_clash` (two sta
 files carry one `content_id`, so the body's reference would resolve to a coin flip),
 `failed:fetch_original` (the forwarded
 original could not be read back, so nothing was sent), `rejected:compose`,
-`failed:gmail`, `ok`, `ok:forward`):
+`paced` (the mailbox's Gmail budget held a call on the way, the send itself, a
+forward's original or a reply's parent, so nothing was posted; answered 503),
+`failed:gmail`, `ok`, `ok:forward`). A fired scheduled send's `send.echo` detail
+is marked `scheduled:<id>:` exactly as its `send` row is:
 
 | `send.echo` detail | meaning |
 | --- | --- |
@@ -470,7 +473,14 @@ writes the ordinary `send` row, marked with its outbox row:
 | `schedule.now` · `ok` / `rejected:sending` / `failed:not_found` | queued for the next tick / in Gmail's hands (409) / nothing to queue (404). |
 | `send` · `scheduled:<id>:<outcome>` | a fired row went out; `<outcome>` is the plain send's (`ok`, `ok:forward`, `ok:bcc:N`, ...). |
 | `send` · `scheduled:<id>:recovered` | Gmail already held the row's Message-ID (a lapsed lease, or a re-fire after an ambiguous failure): settled, NOT sent again. |
-| `send` · `scheduled:<id>:failed:*` / `scheduled:<id>:rejected:*` | a fired row's refusal, the plain send's detail marked with the row. |
+| `send` · `scheduled:<id>:failed:*` / `scheduled:<id>:rejected:*` / `scheduled:<id>:paced` | a fired row's refusal, the plain send's detail marked with the row. `paced` spent no attempt. |
+| `send` · `scheduled:<id>:failed:request` / `failed:attachment_missing` / `failed:crash_loop` / `failed:recovery` / `failed:group_fanout` | a TERMINAL outcome the worker decided without reaching the send (so no plain send row exists to mark): an unreadable request, a lost file, a row that kept dying mid-send, a recovery or pre-fire search never able to ask Gmail, an (unreachable) fan-out. The worker writes these itself. |
+| `send` · `scheduled:<id>:rejected:no_write_credential` / `failed:search` / `failed:store` | a worker-side attempt that never reached the send: no credential before the pre-fire search, the search refused (a revoked grant surfaces here, or a 4xx), the row's files unreadable. Each spends an attempt. |
+| `send.echo` · `scheduled:<id>:<detail>` | the echo of a fired or recovered row, the plain detail marked with the row. |
+
+The fire-time grace deferral (`recovery:grace`) and an unreachable pre-fire
+search (`recovery:unreachable`) are "not now" answers that spend no attempt and
+write no ledger row; the listing's `last_error` says why the row waits.
 
 ## 6. The embedded assistant
 

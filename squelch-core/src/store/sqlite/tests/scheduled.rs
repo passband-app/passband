@@ -6,7 +6,7 @@ use super::super::*;
 use super::support::*;
 use crate::store::{
     ATTACHMENT_MISSING, CancelOutcome, MAX_SCHEDULED_PER_ACCOUNT, ParentContext,
-    SCHEDULED_MAX_ATTEMPTS, ScheduledSend, ScheduledSendState, TOO_MANY_SCHEDULED,
+    SCHEDULED_MAX_ATTEMPTS, ScheduledSend, ScheduledSendState, SearchClock, TOO_MANY_SCHEDULED,
 };
 
 /// A fixed base instant, so every clock move is asserted, not raced.
@@ -230,7 +230,7 @@ fn retry_failed_requeue_and_sent_each_move_only_a_sending_row() {
     assert!(claimed.maybe_sent, "the flag is sticky across claims");
     assert!(
         store
-            .settle_scheduled_failed(acct, r.id, 3, "no write credential", t(14))
+            .settle_scheduled_failed(acct, r.id, 3, "no write credential", false, t(14))
             .unwrap()
     );
     let row = store.scheduled_send_by_id(acct, r.id).unwrap().unwrap();
@@ -476,7 +476,7 @@ fn cancel_releases_files_and_a_sending_row_refuses() {
 
     // A failed row cancels too.
     store
-        .settle_scheduled_failed(acct, s.id, 1, "http 500", t(62))
+        .settle_scheduled_failed(acct, s.id, 1, "http 500", false, t(62))
         .unwrap();
     assert!(matches!(
         store.cancel_scheduled_send(acct, s.id, t(63)).unwrap(),
@@ -639,7 +639,7 @@ fn every_outbox_query_is_account_scoped() {
     );
     assert!(
         !store
-            .unclaim_scheduled_send(other, row.id, 1, t(99), "x", t(99))
+            .unclaim_scheduled_send(other, row.id, 1, t(99), "x", SearchClock::Reset, t(99))
             .unwrap()
     );
     assert!(
@@ -649,7 +649,7 @@ fn every_outbox_query_is_account_scoped() {
     );
     assert!(
         !store
-            .settle_scheduled_failed(other, row.id, 1, "x", t(99))
+            .settle_scheduled_failed(other, row.id, 1, "x", false, t(99))
             .unwrap()
     );
     assert!(
@@ -869,10 +869,10 @@ fn a_settle_from_an_older_claim_is_a_no_op() {
             .settle_scheduled_retry(acct, r.id, 1, t(9), "failed:gmail", false, t(6))
             .unwrap(),
         store
-            .settle_scheduled_failed(acct, r.id, 1, "failed:gmail", t(6))
+            .settle_scheduled_failed(acct, r.id, 1, "failed:gmail", false, t(6))
             .unwrap(),
         store
-            .unclaim_scheduled_send(acct, r.id, 1, t(9), "paced", t(6))
+            .unclaim_scheduled_send(acct, r.id, 1, t(9), "paced", SearchClock::Reset, t(6))
             .unwrap(),
         store
             .defer_scheduled_recovery(acct, r.id, 1, t(9), "x", t(6))
@@ -1011,7 +1011,7 @@ fn an_attempt_that_never_started_does_not_count() {
         .unwrap();
     assert!(
         store
-            .unclaim_scheduled_send(acct, r.id, 1, t(2), "paced", t(0))
+            .unclaim_scheduled_send(acct, r.id, 1, t(2), "paced", SearchClock::Reset, t(0))
             .unwrap()
     );
     let row = store.scheduled_send_by_id(acct, r.id).unwrap().unwrap();
@@ -1038,7 +1038,7 @@ fn the_sweep_takes_month_old_failed_rows_and_released_leftovers() {
         .unwrap()
         .unwrap();
     store
-        .settle_scheduled_failed(acct, failed.id, 1, "failed:gmail", t(1))
+        .settle_scheduled_failed(acct, failed.id, 1, "failed:gmail", false, t(1))
         .unwrap();
     // A file a cancel released and nobody re-claimed.
     let g = stage(&store, acct, "cid-released");
@@ -1236,4 +1236,122 @@ fn fn_bodies(src: &str, prefix: &str) -> Vec<String> {
         }
     }
     out
+}
+
+#[test]
+fn a_failed_row_remembers_it_may_have_gone_and_when_its_attempt_ended() {
+    let (store, acct) = store();
+    let r = schedule(&store, acct, "f", t(0));
+    store
+        .claim_due_scheduled_send(acct, t(0), LEASE)
+        .unwrap()
+        .unwrap();
+    // The claim stamps nothing: the fire needs the PREVIOUS attempt's end.
+    assert_eq!(
+        store
+            .scheduled_send_by_id(acct, r.id)
+            .unwrap()
+            .unwrap()
+            .last_attempt_at,
+        None
+    );
+    assert!(
+        store
+            .settle_scheduled_failed(acct, r.id, 1, "failed:gmail", true, t(3))
+            .unwrap()
+    );
+    let row = store.scheduled_send_by_id(acct, r.id).unwrap().unwrap();
+    assert!(row.maybe_sent, "an ambiguous last attempt is recorded");
+    assert_eq!(row.last_attempt_at, Some(t(3)));
+
+    // Send-now grants a fresh budget and KEEPS both: the row is still owed a
+    // search, a grace after its attempt ended.
+    assert!(store.send_scheduled_now(acct, r.id, t(4)).unwrap());
+    let row = store.scheduled_send_by_id(acct, r.id).unwrap().unwrap();
+    assert_eq!(
+        (row.attempts, row.maybe_sent, row.last_attempt_at),
+        (0, true, Some(t(3)))
+    );
+
+    // A later failure that says "definitely not sent" never clears the flag.
+    store
+        .claim_due_scheduled_send(acct, t(4), LEASE)
+        .unwrap()
+        .unwrap();
+    store
+        .settle_scheduled_failed(acct, r.id, 1, "failed:request", false, t(5))
+        .unwrap();
+    let row = store.scheduled_send_by_id(acct, r.id).unwrap().unwrap();
+    assert!(row.maybe_sent, "sticky");
+    assert_eq!(row.last_attempt_at, Some(t(5)));
+}
+
+#[test]
+fn the_pre_fire_search_clock_starts_once_and_stops_when_a_search_answers() {
+    let (store, acct) = store();
+    let r = schedule(&store, acct, "s", t(0));
+    let claim = |at| {
+        store
+            .claim_due_scheduled_send(acct, at, LEASE)
+            .unwrap()
+            .unwrap()
+    };
+    let unclaim = |at, clock| {
+        assert!(
+            store
+                .unclaim_scheduled_send(acct, r.id, 1, at, "recovery:unreachable", clock, at)
+                .unwrap()
+        );
+        store.scheduled_send_by_id(acct, r.id).unwrap().unwrap()
+    };
+    claim(t(0));
+    let row = unclaim(t(1), SearchClock::Start);
+    assert_eq!(row.search_deferred_since, Some(t(1)));
+    let claimed = claim(t(1));
+    assert_eq!(
+        claimed.search_deferred_since,
+        Some(t(1)),
+        "the claim hands the clock to the fire"
+    );
+    let row = unclaim(t(3), SearchClock::Start);
+    assert_eq!(
+        row.search_deferred_since,
+        Some(t(1)),
+        "a running clock keeps its start"
+    );
+    claim(t(3));
+    let row = unclaim(t(5), SearchClock::Keep);
+    assert_eq!(row.search_deferred_since, Some(t(1)));
+    claim(t(5));
+    let row = unclaim(t(7), SearchClock::Reset);
+    assert_eq!(row.search_deferred_since, None);
+
+    // A retry settle stops it too, and stamps the attempt's end.
+    claim(t(7));
+    unclaim(t(8), SearchClock::Start);
+    claim(t(8));
+    store
+        .settle_scheduled_retry(acct, r.id, 1, t(10), "failed:gmail", true, t(9))
+        .unwrap();
+    let row = store.scheduled_send_by_id(acct, r.id).unwrap().unwrap();
+    assert_eq!(
+        (row.search_deferred_since, row.last_attempt_at),
+        (None, Some(t(9)))
+    );
+}
+
+#[test]
+fn a_requeue_stamps_the_lapsed_leases_end_as_the_attempts_end() {
+    let (store, acct) = store();
+    let r = schedule(&store, acct, "q", t(0));
+    store
+        .claim_due_scheduled_send(acct, t(0), LEASE)
+        .unwrap()
+        .unwrap();
+    store
+        .requeue_scheduled_send(acct, r.id, 1, t(20), t(15))
+        .unwrap();
+    let row = store.scheduled_send_by_id(acct, r.id).unwrap().unwrap();
+    assert_eq!(row.last_attempt_at, Some(t(0) + LEASE));
+    assert_eq!(row.lease_until, None);
 }

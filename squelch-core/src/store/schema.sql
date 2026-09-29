@@ -1179,6 +1179,15 @@ CREATE TABLE IF NOT EXISTS scheduled_sends (
     -- Not before this may recovery ask Gmail about a lapsed `sending` row
     -- again (set when a search could not be made). Added by migrate.rs too.
     recover_at        TEXT,
+    -- When the row's last attempt ENDED (its retry or failed settle; a lapsed
+    -- lease's end on a requeue). A `maybe_sent` row is not fired again before
+    -- this plus the recovery grace, whoever pulled it forward. Added by
+    -- migrate.rs.
+    last_attempt_at   TEXT,
+    -- The first time a pre-fire search could not be made, kept across the
+    -- "not now" deferrals that follow it, so an unreachable search gives up
+    -- instead of deferring forever. NULL once a search answers. Migrate.rs.
+    search_deferred_since TEXT,
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL
 );

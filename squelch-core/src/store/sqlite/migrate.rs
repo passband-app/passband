@@ -130,6 +130,11 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
         "INTEGER NOT NULL DEFAULT 0",
     )?;
     add_column_if_missing(conn, "scheduled_sends", "recover_at", "TEXT")?;
+    // The fire-time grace and the pre-fire search's give-up clock. NULL is the
+    // honest reading for both: no attempt's end is known (the grace does not
+    // hold a row back), and no search is being waited out.
+    add_column_if_missing(conn, "scheduled_sends", "last_attempt_at", "TEXT")?;
+    add_column_if_missing(conn, "scheduled_sends", "search_deferred_since", "TEXT")?;
     // MANY NEW-MESSAGE DRAFTS. The old single-slot index made a second
     // new-message draft a constraint violation; new mail is keyed by row id now.
     // No dedupe is owed: that index guaranteed at most one nil-keyed row.

@@ -11956,7 +11956,7 @@ async fn the_outbox_lists_what_is_owed_an_outcome_with_its_parent() {
         .unwrap()
         .unwrap();
     store
-        .settle_scheduled_failed(acct, failed, 2, "failed:gmail", now)
+        .settle_scheduled_failed(acct, failed, 2, "failed:gmail", false, now)
         .unwrap();
     // Sent and cancelled rows do not.
     let sent = row_at(-5, "sent");
@@ -12164,7 +12164,7 @@ async fn send_now_queues_the_row_and_gives_a_failed_one_a_fresh_budget() {
         .settle_scheduled_retry(acct, id, 1, now, "failed:gmail", false, now)
         .unwrap();
     store
-        .settle_scheduled_failed(acct, failed, 1, "failed:gmail", now)
+        .settle_scheduled_failed(acct, failed, 1, "failed:gmail", false, now)
         .unwrap();
     let row = store.scheduled_send_by_id(acct, failed).unwrap().unwrap();
     assert_eq!(row.state, ScheduledSendState::Failed);
@@ -12365,9 +12365,16 @@ async fn the_worker_sends_a_due_row_with_its_minted_message_id() {
         (ScheduledSendState::Scheduled, 0)
     );
 
-    // ONE ledger row for the send, carrying the marker.
+    // ONE ledger row for the send, carrying the marker, and so does its echo.
     let sends = audited(&store, acct, "send");
     assert_eq!(sends, vec![format!("scheduled:{due}:ok")]);
+    assert_eq!(
+        audited(&store, acct, "send.echo"),
+        vec![format!(
+            "scheduled:{due}:ok:{}",
+            row.sent_message_id.unwrap()
+        )]
+    );
 
     let (_, list) = outbox(&app, "GET", "/client/scheduled", None).await;
     assert_eq!(
@@ -12471,12 +12478,24 @@ async fn a_send_that_may_have_gone_is_searched_for_before_it_is_sent_again() {
         "the retry waits out the indexing grace, not two minutes"
     );
 
+    // Send-now moves `send_at`, not the grace: the fire hands the claim back
+    // (asking nothing) until the attempt is five minutes behind it.
     assert!(
         store
             .send_scheduled_now(acct, id, chrono::Utc::now())
             .unwrap()
     );
     let report = squelch_api::run_scheduled_send_pass(&state).await;
+    assert_eq!(
+        (report.deferred, report.recovered_sent),
+        (1, 0),
+        "{report:?}"
+    );
+    // Past the grace (the worker's clock stepped on), it asks, and finds it.
+    let later = state
+        .clone()
+        .with_worker_clock_skew(chrono::Duration::minutes(6));
+    let report = squelch_api::run_scheduled_send_pass(&later).await;
     assert_eq!((report.recovered_sent, report.sent), (1, 0), "{report:?}");
     let reqs = gmail.await.unwrap();
     assert_eq!(
@@ -12501,17 +12520,14 @@ async fn a_send_that_may_have_gone_is_searched_for_before_it_is_sent_again() {
 async fn a_re_fire_that_cannot_search_sends_nothing_and_spends_no_attempt() {
     let (base, gmail) = mock_gmail_seq(vec![(503, "{}".to_string())]).await;
     let (Harness { store, acct, .. }, state) = scheduled_rig(Some(base), |_, _| {});
-    let id = due_row(&store, acct, COLD_REQUEST, "<unsure@passband>");
-    // A lapsed attempt that recovery did not find: `maybe_sent`, attempts 1.
-    let claimed = store
-        .claim_due_scheduled_send(acct, chrono::Utc::now(), chrono::Duration::seconds(120))
-        .unwrap()
-        .unwrap();
+    // A lapsed attempt that recovery did not find: `maybe_sent`, attempts 1,
+    // its lease long enough ago that the grace is out.
+    let id = lapsed_row(&store, acct, "<unsure@passband>", 10);
     store
         .requeue_scheduled_send(
             acct,
             id,
-            claimed.attempts,
+            1,
             chrono::Utc::now() - chrono::Duration::seconds(1),
             chrono::Utc::now(),
         )
@@ -12556,6 +12572,11 @@ async fn a_paced_mailbox_spends_no_attempt() {
         (ScheduledSendState::Scheduled, 0, Some("paced"))
     );
     assert!(!row.maybe_sent, "nothing was posted");
+    // The ledger says what the row says: paced, not a Gmail failure.
+    assert_eq!(
+        audited(&store, acct, "send"),
+        vec![format!("scheduled:{id}:paced")]
+    );
 }
 
 /// A `sending` row whose lease lapsed `ago` minutes before now: the shape a
@@ -12613,6 +12634,13 @@ async fn recovery_settles_a_mail_gmail_already_has_without_resending_it() {
     assert_eq!(
         audited(&store, acct, "send"),
         vec![format!("scheduled:{id}:recovered")]
+    );
+    assert_eq!(
+        audited(&store, acct, "send.echo"),
+        vec![format!(
+            "scheduled:{id}:ok:{}",
+            row.sent_message_id.unwrap()
+        )]
     );
 }
 
@@ -12697,6 +12725,12 @@ async fn a_row_that_keeps_dying_mid_send_stops_at_its_last_attempt() {
     let row = store.scheduled_send_by_id(acct, id).unwrap().unwrap();
     assert_eq!(row.state, ScheduledSendState::Failed);
     assert_eq!(row.last_error.as_deref(), Some("failed:crash_loop"));
+    assert!(row.maybe_sent, "one miss in a trailing index is not proof");
+    // The worker decided this one without `perform_send`: it audits it.
+    assert_eq!(
+        audited(&store, acct, "send"),
+        vec![format!("scheduled:{id}:failed:crash_loop")]
+    );
 }
 
 #[tokio::test]
@@ -12754,7 +12788,11 @@ async fn a_corrupt_request_fails_without_a_send() {
     let row = store.scheduled_send_by_id(acct, id).unwrap().unwrap();
     assert_eq!(row.state, ScheduledSendState::Failed);
     assert_eq!(row.last_error.as_deref(), Some("failed:request"));
-    assert!(audited(&store, acct, "send").is_empty());
+    // No send was attempted, and the ledger still says why the row stopped.
+    assert_eq!(
+        audited(&store, acct, "send"),
+        vec![format!("scheduled:{id}:failed:request")]
+    );
 }
 
 #[tokio::test]
@@ -13396,4 +13434,396 @@ async fn scheduling_consumes_a_reply_draft_and_a_forward_draft_by_id() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
     assert!(store.draft_by_id(acct, fwd_id).unwrap().is_none());
+}
+
+/// A due row whose earlier attempt MAY have gone (`maybe_sent`), its lapsed
+/// lease ten minutes behind it so the fire-time grace is long out: the shape
+/// recovery leaves after a "not found".
+fn maybe_sent_row(store: &SqliteStore, acct: i64, msgid: &str) -> i64 {
+    let id = lapsed_row(store, acct, msgid, 10);
+    let now = chrono::Utc::now();
+    store
+        .requeue_scheduled_send(acct, id, 1, now - chrono::Duration::seconds(1), now)
+        .unwrap();
+    id
+}
+
+#[tokio::test]
+async fn a_send_now_inside_the_grace_neither_searches_nor_sends() {
+    // The ambiguous 500 lands; the user hits "send now" straight away.
+    let (base, gmail) = mock_gmail_seq(vec![(500, "{\"error\":\"backend\"}".to_string())]).await;
+    let (Harness { store, acct, .. }, state) = scheduled_rig(Some(base), |_, _| {});
+    let id = due_row(&store, acct, COLD_REQUEST, "<hasty@passband>");
+    squelch_api::run_scheduled_send_pass(&state).await;
+    let ended = store
+        .scheduled_send_by_id(acct, id)
+        .unwrap()
+        .unwrap()
+        .last_attempt_at
+        .expect("the attempt's end is stamped");
+
+    assert!(
+        store
+            .send_scheduled_now(acct, id, chrono::Utc::now())
+            .unwrap()
+    );
+    let report = squelch_api::run_scheduled_send_pass(&state).await;
+    assert_eq!(
+        (report.deferred, report.sent, report.recovered_sent),
+        (1, 0, 0),
+        "{report:?}"
+    );
+    let reqs = gmail.await.unwrap();
+    assert_eq!(reqs.len(), 1, "the one send; no search, no second send");
+    let row = store.scheduled_send_by_id(acct, id).unwrap().unwrap();
+    assert_eq!(row.state, ScheduledSendState::Scheduled);
+    assert_eq!(row.attempts, 1, "the held-back claim spent nothing");
+    assert_eq!(row.last_error.as_deref(), Some("recovery:grace"));
+    assert_eq!(
+        row.send_at,
+        ended + chrono::Duration::minutes(5),
+        "it comes back exactly when the grace is out"
+    );
+    assert!(row.maybe_sent);
+}
+
+#[tokio::test]
+async fn a_row_that_failed_on_an_ambiguous_last_attempt_is_searched_before_send_now() {
+    let (base, gmail) = mock_gmail_seq(vec![
+        // Its third and last attempt: Gmail took it and answered 500.
+        (500, "{\"error\":\"backend\"}".to_string()),
+        // Send-now, past the grace: asked first, and it was there.
+        (
+            200,
+            "{\"messages\":[{\"id\":\"gm-3\",\"threadId\":\"thread-new\"}]}".to_string(),
+        ),
+        (200, echo_response("gm-3")),
+    ])
+    .await;
+    let (Harness { store, acct, .. }, state) = scheduled_rig(Some(base), |_, _| {});
+    let id = due_row(&store, acct, COLD_REQUEST, "<last@passband>");
+    // Two definitely-not-sent attempts before it (a 4xx each).
+    for attempts in 1..3 {
+        let now = chrono::Utc::now();
+        store
+            .claim_due_scheduled_send(acct, now, chrono::Duration::seconds(120))
+            .unwrap()
+            .unwrap();
+        store
+            .settle_scheduled_retry(
+                acct,
+                id,
+                attempts,
+                now - chrono::Duration::seconds(1),
+                "failed:gmail",
+                false,
+                now,
+            )
+            .unwrap();
+    }
+    let report = squelch_api::run_scheduled_send_pass(&state).await;
+    assert_eq!(report.failed, 1, "{report:?}");
+    let row = store.scheduled_send_by_id(acct, id).unwrap().unwrap();
+    assert_eq!(
+        (row.state, row.attempts, row.last_error.as_deref()),
+        (ScheduledSendState::Failed, 3, Some("failed:gmail"))
+    );
+    assert!(row.maybe_sent, "the last attempt may have gone");
+
+    assert!(
+        store
+            .send_scheduled_now(acct, id, chrono::Utc::now())
+            .unwrap()
+    );
+    let later = state
+        .clone()
+        .with_worker_clock_skew(chrono::Duration::minutes(6));
+    let report = squelch_api::run_scheduled_send_pass(&later).await;
+    assert_eq!((report.recovered_sent, report.sent), (1, 0), "{report:?}");
+    let reqs = gmail.await.unwrap();
+    assert!(reqs[0].contains("/messages/send"));
+    assert!(
+        reqs[1].contains("rfc822msgid%3A%3Clast%40passband%3E"),
+        "send-now's FIRST request is the search"
+    );
+    assert_eq!(
+        reqs.iter().filter(|r| r.contains("/messages/send")).count(),
+        1,
+        "EXACTLY ONE send"
+    );
+    assert_eq!(
+        store.scheduled_send_by_id(acct, id).unwrap().unwrap().state,
+        ScheduledSendState::Sent
+    );
+}
+
+#[tokio::test]
+async fn a_row_recovery_gave_up_on_is_searched_before_send_now() {
+    let (Harness { store, acct, .. }, state) = scheduled_rig(None, |_, _| {});
+    let id = lapsed_row(&store, acct, "<gaveup@passband>", 31);
+    let report = squelch_api::run_scheduled_send_pass(&state).await;
+    assert_eq!(report.failed, 1, "{report:?}");
+    let row = store.scheduled_send_by_id(acct, id).unwrap().unwrap();
+    assert_eq!(row.last_error.as_deref(), Some("failed:recovery"));
+    assert!(
+        row.maybe_sent,
+        "recovery never got to ask: it may have gone"
+    );
+    assert_eq!(
+        audited(&store, acct, "send"),
+        vec![format!("scheduled:{id}:failed:recovery")]
+    );
+
+    // The credential comes back; the user hits send now.
+    let (base, gmail) = mock_gmail_seq(vec![
+        (
+            200,
+            "{\"messages\":[{\"id\":\"gm-r\",\"threadId\":\"thread-new\"}]}".to_string(),
+        ),
+        (200, echo_response("gm-r")),
+    ])
+    .await;
+    let state = state
+        .with_write_test_harness(Arc::new(StubCreds), base)
+        .with_worker_clock_skew(chrono::Duration::minutes(6));
+    assert!(
+        store
+            .send_scheduled_now(acct, id, chrono::Utc::now())
+            .unwrap()
+    );
+    let report = squelch_api::run_scheduled_send_pass(&state).await;
+    assert_eq!((report.recovered_sent, report.sent), (1, 0), "{report:?}");
+    let reqs = gmail.await.unwrap();
+    assert!(
+        reqs[0].contains("rfc822msgid"),
+        "the first request is the search"
+    );
+    assert!(!reqs.iter().any(|r| r.contains("/messages/send")));
+}
+
+#[tokio::test]
+async fn a_search_the_credential_refuses_spends_attempts_and_fails() {
+    // A revoked write grant surfaces only when a token is fetched, which the
+    // pre-fire search is the first thing to do: an attempt, not a "not now".
+    let (state, store, acct) = state_with(|_, _| {});
+    let state = state.with_write_test_harness(Arc::new(DeadCreds), "http://127.0.0.1:1".into());
+    let id = maybe_sent_row(&store, acct, "<revoked@passband>");
+
+    let report = squelch_api::run_scheduled_send_pass(&state).await;
+    assert_eq!((report.retried, report.deferred), (1, 0), "{report:?}");
+    let row = store.scheduled_send_by_id(acct, id).unwrap().unwrap();
+    assert_eq!(
+        (row.state, row.attempts, row.last_error.as_deref()),
+        (
+            ScheduledSendState::Scheduled,
+            2,
+            Some("rejected:no_write_credential")
+        )
+    );
+    // The third attempt, past the grace its retry waits out, is the last.
+    let later = state.with_worker_clock_skew(chrono::Duration::minutes(6));
+    let report = squelch_api::run_scheduled_send_pass(&later).await;
+    assert_eq!(report.failed, 1, "{report:?}");
+    let row = store.scheduled_send_by_id(acct, id).unwrap().unwrap();
+    assert_eq!(
+        (row.state, row.attempts, row.last_error.as_deref()),
+        (
+            ScheduledSendState::Failed,
+            3,
+            Some("rejected:no_write_credential")
+        )
+    );
+    assert!(row.maybe_sent, "still owed a search");
+    assert_eq!(
+        audited(&store, acct, "send"),
+        vec![format!("scheduled:{id}:rejected:no_write_credential"); 2]
+    );
+}
+
+#[tokio::test]
+async fn a_search_that_can_never_be_made_gives_up_instead_of_deferring_forever() {
+    // Nothing listens: every search is a transport error, "not now".
+    let (state, store, acct) = state_with(|_, _| {});
+    let state = state.with_write_test_harness(Arc::new(StubCreds), "http://127.0.0.1:1".into());
+    let id = maybe_sent_row(&store, acct, "<offline@passband>");
+
+    let report = squelch_api::run_scheduled_send_pass(&state).await;
+    assert_eq!(report.deferred, 1, "{report:?}");
+    let first = store.scheduled_send_by_id(acct, id).unwrap().unwrap();
+    assert_eq!(first.attempts, 1, "no attempt spent");
+    assert_eq!(first.last_error.as_deref(), Some("recovery:unreachable"));
+    let since = first.search_deferred_since.expect("the clock started");
+
+    // Ten minutes on, still deferring, and the clock keeps its start.
+    let report = squelch_api::run_scheduled_send_pass(
+        &state
+            .clone()
+            .with_worker_clock_skew(chrono::Duration::minutes(10)),
+    )
+    .await;
+    assert_eq!(report.deferred, 1, "{report:?}");
+    let row = store.scheduled_send_by_id(acct, id).unwrap().unwrap();
+    assert_eq!(row.search_deferred_since, Some(since));
+
+    // Past the give-up: the user decides.
+    let report = squelch_api::run_scheduled_send_pass(
+        &state.with_worker_clock_skew(chrono::Duration::minutes(31)),
+    )
+    .await;
+    assert_eq!(report.failed, 1, "{report:?}");
+    let row = store.scheduled_send_by_id(acct, id).unwrap().unwrap();
+    assert_eq!(
+        (row.state, row.last_error.as_deref(), row.maybe_sent),
+        (ScheduledSendState::Failed, Some("failed:recovery"), true)
+    );
+    assert_eq!(
+        audited(&store, acct, "send"),
+        vec![format!("scheduled:{id}:failed:recovery")]
+    );
+}
+
+#[tokio::test]
+async fn a_re_fire_with_no_credential_is_audited_as_the_retry_it_is() {
+    let (Harness { store, acct, .. }, state) = scheduled_rig(None, |_, _| {});
+    let id = maybe_sent_row(&store, acct, "<nokey@passband>");
+    let report = squelch_api::run_scheduled_send_pass(&state).await;
+    assert_eq!(report.retried, 1, "{report:?}");
+    assert_eq!(
+        audited(&store, acct, "send"),
+        vec![format!("scheduled:{id}:rejected:no_write_credential")]
+    );
+}
+
+#[tokio::test]
+async fn a_paced_read_of_a_forwards_original_hands_the_attempt_back() {
+    use squelch_core::config::GmailQuotaProfile;
+    use squelch_core::gmail_budget::GmailBudget;
+    let (base, _gmail) = mock_gmail(0).await;
+    let budget = Arc::new(
+        GmailBudget::with_unit(GmailQuotaProfile::Standard, std::time::Duration::ZERO)
+            .with_adaptation(
+                std::time::Duration::from_secs(600),
+                std::time::Duration::from_secs(600),
+            ),
+    );
+    budget.note_quota_refusal(None);
+    let (Harness { store, acct, .. }, state) = scheduled_rig(Some(base), |store, acct| {
+        seed_one_signal(store, acct, "gmail-original", "thread-77", "Quarterly");
+    });
+    let state = state.with_gmail_budget(budget);
+    let original = store.search(acct, "quarterly", 10, 0).unwrap()[0].id;
+    let request = format!(
+        r#"{{"forward_of_message_id":{original},"to":"c@example.com","body":"fyi","confirm":true}}"#
+    );
+    let id = due_row(&store, acct, &request, "<fwdpaced@passband>");
+
+    let report = squelch_api::run_scheduled_send_pass(&state).await;
+    assert_eq!((report.deferred, report.retried), (1, 0), "{report:?}");
+    let row = store.scheduled_send_by_id(acct, id).unwrap().unwrap();
+    assert_eq!(
+        (row.state, row.attempts, row.last_error.as_deref()),
+        (ScheduledSendState::Scheduled, 0, Some("paced")),
+        "not `failed:fetch_original`, and no attempt spent"
+    );
+    assert_eq!(
+        audited(&store, acct, "send"),
+        vec![format!("scheduled:{id}:paced")]
+    );
+}
+
+#[tokio::test]
+async fn a_fired_forward_whose_original_is_gone_is_marked_in_the_ledger() {
+    let (base, _gmail) = mock_gmail_seq(vec![(404, "{}".to_string())]).await;
+    let (Harness { store, acct, .. }, state) = scheduled_rig(Some(base), |store, acct| {
+        seed_one_signal(store, acct, "gmail-original", "thread-77", "Quarterly");
+    });
+    let original = store.search(acct, "quarterly", 10, 0).unwrap()[0].id;
+    let request = format!(
+        r#"{{"forward_of_message_id":{original},"to":"c@example.com","body":"fyi","confirm":true}}"#
+    );
+    let id = due_row(&store, acct, &request, "<fwdgone@passband>");
+    let report = squelch_api::run_scheduled_send_pass(&state).await;
+    assert_eq!(report.retried, 1, "{report:?}");
+    assert_eq!(
+        audited(&store, acct, "send"),
+        vec![format!("scheduled:{id}:failed:fetch_original")]
+    );
+    let row = store.scheduled_send_by_id(acct, id).unwrap().unwrap();
+    assert_eq!(row.last_error.as_deref(), Some("failed:fetch_original"));
+    assert!(!row.maybe_sent, "nothing was posted");
+}
+
+#[tokio::test]
+async fn a_fired_group_send_records_who_it_went_to_not_who_is_in_the_group_now() {
+    let (base, _gmail) = mock_gmail_seq(vec![
+        (
+            200,
+            "{\"id\":\"sent-m\",\"threadId\":\"thread-new\"}".to_string(),
+        ),
+        (200, echo_response("sent-m")),
+    ])
+    .await;
+    let (Harness { app, store, acct }, state) = scheduled_rig(Some(base), |_, _| {});
+    let member = |addr: &str| squelch_core::store::sqlite::groups::NewGroupMember {
+        addr: addr.into(),
+        display_name: None,
+    };
+    let group = store
+        .create_send_group(
+            acct,
+            "Fund",
+            squelch_core::types::GroupMode::Bcc,
+            "",
+            &[member("ann@fund.com"), member("bo@fund.com")],
+        )
+        .unwrap();
+    let (status, created) = outbox(
+        &app,
+        "POST",
+        "/client/scheduled",
+        Some(serde_json::json!({
+            "group_id": group,
+            "bcc": "ann@fund.com, bo@fund.com",
+            "subject": "Update",
+            "body": "hi all",
+            "confirm": true,
+            "send_at": in_minutes(60),
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_i64().unwrap();
+
+    // Since: bo left, carol and dan joined. Three members now, two recipients.
+    store
+        .update_send_group(
+            acct,
+            group,
+            "Fund",
+            squelch_core::types::GroupMode::Bcc,
+            "",
+            &[
+                member("ann@fund.com"),
+                member("carol@fund.com"),
+                member("dan@fund.com"),
+            ],
+        )
+        .unwrap();
+    store
+        .send_scheduled_now(acct, id, chrono::Utc::now())
+        .unwrap();
+    let report = squelch_api::run_scheduled_send_pass(&state).await;
+    assert_eq!(report.sent, 1, "{report:?}");
+
+    let history = store.group_history(acct, group, 10, 0).unwrap();
+    let recorded: Vec<_> = history
+        .iter()
+        .filter(|h| h.group_send_id.is_some())
+        .collect();
+    assert_eq!(recorded.len(), 1, "{history:?}");
+    assert_eq!(
+        (recorded[0].reached, recorded[0].group_size),
+        (2, 2),
+        "ann and bo got it; carol and dan never did"
+    );
 }

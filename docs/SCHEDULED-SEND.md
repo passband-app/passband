@@ -44,6 +44,8 @@ plain `CREATE TABLE IF NOT EXISTS` in `schema.sql` (no migrate.rs column).
 | `sent_thread_id` | TEXT |
 | `maybe_sent` | INTEGER 0/1, STICKY: an earlier attempt may have reached Gmail (§4) |
 | `recover_at` | TEXT, recovery does not ask Gmail about this `sending` row before it (§4) |
+| `last_attempt_at` | TEXT, when the last attempt ENDED (its retry or failed settle; a requeue stamps the lapsed lease's end). A `maybe_sent` row is not fired before this + `RECOVERY_GRACE` (§4) |
+| `search_deferred_since` | TEXT, the first "could not ask" of a pre-fire search still unanswered; the give-up clock (§4) |
 | `created_at`, `updated_at` | TEXT |
 
 Index: `(account_id, state, send_at)`.
@@ -134,12 +136,12 @@ Constants (squelch-api `scheduled_send.rs`, squelch-core `store/mod.rs`):
 | name | value | why |
 |---|---|---|
 | `SCHEDULED_LEASE_BASE` | 180 s | the pre-fire search, the parent read (or a forward's original), the 5 s echo, each bounded by the write client's 60 s |
-| lease per row | base + `send_budget(estimate)` | estimate = files × 4/3 + request bytes + 4 KB, plus 20 MiB × 4/3 for a forward; a 25 MB attachment set is ~15 min |
-| `RECOVERY_GRACE` | 5 min | Gmail's search index trails a send; recovery only asks about a lease that lapsed this long ago, and a "not found" requeues this far out |
+| lease per row | base + `send_budget(estimate)` | estimate = files × 1.37 (base64 with a CRLF every 76 chars, not a flat 4/3) + request bytes + 4 KB, plus 20 MiB × 1.37 for a forward; a 25 MB attachment set is ~15 min |
+| `RECOVERY_GRACE` | 5 min | Gmail's search index trails a send; recovery only asks about a lease that lapsed this long ago, a "not found" requeues this far out, and a `maybe_sent` row is not FIRED before `last_attempt_at` + this, whatever `send_at` says (a send-now included): the fire hands the claim back, no attempt spent, `last_error = recovery:grace`, `send_at` = the grace's end |
 | `RECOVERY_RETRY` | 60 s | a recovery search that could not be made is not retried before this (`recover_at`) |
-| `RECOVERY_GIVE_UP` | 30 min past the lease | a `sending` row recovery never managed to ask about goes `failed:recovery` |
+| `RECOVERY_GIVE_UP` | 30 min | a `sending` row recovery never managed to ask about goes `failed:recovery` this long past its lease; a pre-fire search that stays unreachable goes `failed:recovery` this long after its first "could not ask" (`search_deferred_since`). Both keep `maybe_sent` |
 | `SCHEDULED_MAX_ATTEMPTS` | 3 | the claim counts; the claim also refuses a row already at it |
-| `MAX_PER_PASS` | 20 claims | a backlog drains over ticks, interruptibly |
+| `MAX_PER_PASS` | 20 | claims per pass, and rows recovery asks about per pass: a backlog drains over ticks, interruptibly |
 | not-now retry | 2 min | pacing and an unreachable pre-fire search come back this far out WITHOUT spending an attempt |
 
 Per tick:
@@ -152,13 +154,15 @@ Per tick:
      with `maybe_sent` set. NOT sent in the same pass: the re-fire searches
      once more first (step 3), so a slow index gets two looks.
    - Not found, `attempts >= 3`: `failed`, `failed:crash_loop` (a row whose
-     send keeps killing the worker stops).
+     send keeps killing the worker stops). It stays `maybe_sent`: one miss in
+     a trailing index is not proof.
    - Could not ask (no credential, search error): stays `sending`, lease
      untouched, `last_error` = `rejected:no_write_credential` or
      `recovery:unreachable`, `recover_at = now + 60s`. Past
      `RECOVERY_GIVE_UP` it goes `failed` with `failed:recovery`; such a row
      MAY have been sent, and the client says so. "Send now" on it searches
      before it sends (it is `maybe_sent`).
+   At most `MAX_PER_PASS` rows are asked about per pass.
    This is why the daemon mints the Message-ID: it is the only thing that
    makes "did it go out?" answerable, and it is the whole double-send defense.
 2. **Claim** one due row atomically, in one IMMEDIATE transaction: the oldest
@@ -170,10 +174,20 @@ Per tick:
    `MAX_PER_PASS`, or shutdown.
 3. **Pre-fire search.** A row with `maybe_sent` set (an earlier attempt failed
    after the post, or its lease lapsed and recovery did not find it) is asked
-   about by Message-ID BEFORE it is sent again. Found: settled as in step 1,
-   no send. Not found: sent. Could not ask: nothing sent, the claim handed
-   back WITHOUT spending the attempt, `last_error = recovery:unreachable`,
-   next try in 2 min. A row never marked goes straight to the send.
+   about by Message-ID BEFORE it is sent again. First the GRACE, enforced
+   here and not by `send_at` (which a send-now moves): inside
+   `last_attempt_at + RECOVERY_GRACE` the claim is handed back untried
+   (`recovery:grace`). Then the search. Found: settled as in step 1, no send.
+   Not found: sent. Could not ask, two kinds:
+   - REFUSED (no credential, which is where a revoked write grant first
+     surfaces; a 4xx other than 429): an attempt like any other, spent and
+     backed off (`rejected:no_write_credential` / `failed:search`), `failed`
+     after the third, still `maybe_sent`.
+   - UNREACHABLE (transport, 5xx, 429, pacing): nothing sent, the claim handed
+     back WITHOUT spending the attempt, `last_error = recovery:unreachable`,
+     next try in 2 min; `RECOVERY_GIVE_UP` after the first such answer it goes
+     `failed:recovery`, still `maybe_sent`.
+   A row never marked goes straight to the send.
 4. **Send** through `perform_send(state, body, files, SendGuard::Settled,
    Some(Fire))`. Recipients, subject and threading derive from the parent at
    fire time, as today. `group_id` is ATTRIBUTION ONLY at fire time: the
@@ -186,17 +200,27 @@ Per tick:
    echo, and the ONE `send` row `perform_send` wrote reads
    `scheduled:<id>:<outcome>`. Failure → `perform_send` wrote the ledger row,
    marked `scheduled:<id>:<reason>`, and classified it:
-   - `paced` (Gmail's budget held the call, nothing posted): back to
-     `scheduled` in 2 min, attempt handed back, `last_error = paced`.
+   - `paced` (Gmail's budget held a call, the send's or the forward
+     original's or the reply parent's read; nothing posted): back to
+     `scheduled` in 2 min, attempt handed back, `last_error = paced`, and the
+     ledger row says `paced` too.
    - `maybe_sent` (a transport error or a 5xx from `messages.send`, i.e. after
      the post): the row is marked `maybe_sent` and waits at least
      `RECOVERY_GRACE`, so its re-fire's search can see it.
    - everything else (validation, no credential, the parent read, a 4xx):
      definitely not sent; retried without a search.
    If `attempts < 3`, back to `scheduled` with `send_at` pushed by
-   `2^attempts` minutes (or the grace) and `last_error`; else `failed`. A 403
+   `2^attempts` minutes (or the grace) and `last_error`; else `failed`, and a
+   `maybe_sent` answer on that last attempt is KEPT on the failed row (send-now
+   resets the attempts, never the flag). A 403
    (write credential gone) is a failure like any other; the row waits for a
    retry and the user sees "didn't send" plus the reason.
+   Outcomes the worker decides WITHOUT reaching `perform_send` (an unreadable
+   request, a lost file, a crash loop, a recovery or search that gave up, the
+   pre-fire search's refusals) are written to the ledger by the worker, same
+   `scheduled:<id>:<reason>` shape; the "not now" deferrals are not.
+   Attribution: a fired `group_id` records the frozen `to`/`bcc` as its
+   recipients (who the mail went to), not the group's members at fire time.
 6. **Sweep**: `sent`/`cancelled` rows after 7 days, `failed` rows (and their
    files) after 30, then the staged-file sweep, so files a cancel released
    and nobody re-claimed go at their one-day TTL even if no composer runs.
@@ -220,7 +244,7 @@ message (and how long after the send it starts to).
 |---|---|
 | `GET /client/scheduled` | rows in `scheduled`/`sending`/`failed`, oldest `send_at` first, with `to`, `subject`, `reply_to_message_id`, `forward_of_message_id`, `send_at`, `state`, `last_error`, `attempts`, `attachments`, plus the parent context PR #289's `DRAFT_SELECT` LEFT JOIN computes for the picker (`thread_id`, `parent_subject`, `parent_from`, `parent_from_addr`). Lift that join into a shared helper rather than pasting it |
 | `DELETE /client/scheduled/{id}` | `scheduled` or `failed` → `cancelled`, releases attachment claims back to unclaimed, returns the `request` so the client can reopen it in the composer, WITHOUT `override_guard` and `confirm` (the client sets `confirm` itself, and a reschedule is judged by the guard again). A `sending` row is 409 (it is in Gmail's hands). No server-side draft is created: the composer's next autosave does that through the normal keyed/by-id path, and re-claims the files (well inside the 24h unclaimed TTL) |
-| `POST /client/scheduled/{id}/now` | `scheduled`/`failed` → `send_at = now`; the next tick sends it. 202. A `sending` row is 409, the same answer a cancel gets; `sent`/`cancelled`/unknown is 404 |
+| `POST /client/scheduled/{id}/now` | `scheduled`/`failed` → `send_at = now`; the next tick sends it. 202. A `maybe_sent` row still waits out `RECOVERY_GRACE` from its last attempt and is searched for first (§4 step 3): "now" moves the clock, never the double-send defense. A `sending` row is 409, the same answer a cancel gets; `sent`/`cancelled`/unknown is 404 |
 | `/client/stats` | gains `scheduled_send: true`. The client hides every schedule door without it (same trap as `compose_attachments`: an old daemon must not 404 a click) |
 
 Rows in `sent` and `cancelled` are swept after 7 days, `failed` rows after
@@ -333,7 +357,11 @@ request.
    feel like 5s; or the client POSTs with `now` and the row carries a
    `not_before` the worker honors. Decide then.
 4. Later: iOS long-press on Send, a very-late cap, daemon roll + release
-   note (the stats gate makes either ship order safe).
+   note (the stats gate makes either ship order safe). Rolling BACK to a
+   binary without `last_attempt_at` / `search_deferred_since` (or without the
+   fire-time grace) would re-fire `maybe_sent` rows without the grace and
+   without the bounded search: acceptable only because the feature has never
+   shipped, so no such row exists in the field yet.
 
 ## 10. What PR #289 (drafts) left for this
 

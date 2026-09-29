@@ -753,10 +753,31 @@ pub struct ScheduledSend {
     /// or a 5xx AFTER the send was posted, or a lapsed lease). Every later
     /// fire asks Gmail for `message_id_header` before sending again.
     pub maybe_sent: bool,
+    /// When the last attempt ENDED: stamped by its retry or failed settle (a
+    /// requeue stamps the lapsed lease's end). Not by the claim, which would
+    /// overwrite the very value the fire needs and which, for a large upload,
+    /// can precede the post by a whole lease. A `maybe_sent` row is not fired
+    /// before this plus the recovery grace, so its search can see the mail.
+    pub last_attempt_at: Option<DateTime<Utc>>,
+    /// The first "could not search" deferral of a pre-fire search still
+    /// unanswered, or `None`. The give-up clock for that search.
+    pub search_deferred_since: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     /// The files this row has claimed, upload order. Metadata only.
     pub attachments: Vec<OutboundAttachmentMeta>,
+}
+
+/// What an unclaim does to a row's pre-fire search clock
+/// ([`ScheduledSend::search_deferred_since`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchClock {
+    /// The search answered (or none was owed): the clock stops.
+    Reset,
+    /// The search could not be made: the clock starts, unless it is running.
+    Start,
+    /// The search was not tried (the fire-time grace): left as it is.
+    Keep,
 }
 
 /// What [`SqliteStore::cancel_scheduled_send`](sqlite::SqliteStore::cancel_scheduled_send)

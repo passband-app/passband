@@ -35,7 +35,7 @@ use crate::gmail_write::{
     ForwardParts, ForwardedOriginal, GmailWriteClient, MailAttachment, ReplyParts, SentRef,
     WriteError, addrs_excluding, build_forward_rfc822, build_references, build_reply_rfc822,
     cc_excluding, count_addrs, derive_reply_recipients, forward_subject, mark_inline,
-    parse_forwarded_original, reply_subject,
+    parse_addr_list, parse_forwarded_original, reply_subject,
 };
 use crate::group_send;
 use crate::guard;
@@ -3969,18 +3969,21 @@ pub struct SendBody {
 ///
 /// AUDIT (contract, docs/SECURITY.md §5): action `send.echo`, detail
 /// `skipped:no_id` | `skipped:sealed` | `failed:fetch` | `failed:ingest` |
-/// `ok:<local id>`.
+/// `ok:<local id>`, each marked `scheduled:<id>:` when `fire` names the
+/// outbox row the mail went out from (see [`fired`]), as its `send` row is.
 pub(crate) async fn echo_sent(
     state: &ApiState,
     client: &GmailWriteClient,
     target: Option<String>,
     sent: &SentRef,
+    fire: Option<Fire<'_>>,
 ) -> Option<i64> {
+    let echo_audit = |detail: &str| fired(fire, detail);
     let gmail_msg_id = match sent.id.as_deref() {
         Some(id) => id.to_string(),
         // Gmail echoed no id: nothing to fetch back.
         None => {
-            audit_action(state, "send.echo", target, "skipped:no_id").await;
+            audit_action(state, "send.echo", target, &echo_audit("skipped:no_id")).await;
             return None;
         }
     };
@@ -3998,12 +4001,12 @@ pub(crate) async fn echo_sent(
         Ok(Ok(f)) => f,
         Ok(Err(e)) => {
             eprintln!("squelch-api: echo of sent message {gmail_msg_id} failed to fetch: {e}");
-            audit_action(state, "send.echo", target, "failed:fetch").await;
+            audit_action(state, "send.echo", target, &echo_audit("failed:fetch")).await;
             return None;
         }
         Err(_elapsed) => {
             eprintln!("squelch-api: echo of sent message {gmail_msg_id} timed out");
-            audit_action(state, "send.echo", target, "failed:fetch").await;
+            audit_action(state, "send.echo", target, &echo_audit("failed:fetch")).await;
             return None;
         }
     };
@@ -4011,7 +4014,7 @@ pub(crate) async fn echo_sent(
         Ok(bytes) => bytes,
         Err(e) => {
             eprintln!("squelch-api: echo of sent message {gmail_msg_id} failed to decode: {e}");
-            audit_action(state, "send.echo", target, "failed:fetch").await;
+            audit_action(state, "send.echo", target, &echo_audit("failed:fetch")).await;
             return None;
         }
     };
@@ -4019,7 +4022,7 @@ pub(crate) async fn echo_sent(
     // would ingest as a message with no headers and no body. Nothing to echo.
     if raw.is_empty() {
         eprintln!("squelch-api: echo of sent message {gmail_msg_id} returned no bytes");
-        audit_action(state, "send.echo", target, "failed:fetch").await;
+        audit_action(state, "send.echo", target, &echo_audit("failed:fetch")).await;
         return None;
     }
 
@@ -4044,19 +4047,25 @@ pub(crate) async fn echo_sent(
 
     match ingested {
         Ok(Some(local_id)) => {
-            audit_action(state, "send.echo", target, &format!("ok:{local_id}")).await;
+            audit_action(
+                state,
+                "send.echo",
+                target,
+                &echo_audit(&format!("ok:{local_id}")),
+            )
+            .await;
             Some(local_id)
         }
         // The outbound copy tripped seal detection, so core committed nothing: a
         // sealed row in the thread would 404 the whole thread the user is reading.
         // The reply shows up on the next backfill instead.
         Ok(None) => {
-            audit_action(state, "send.echo", target, "skipped:sealed").await;
+            audit_action(state, "send.echo", target, &echo_audit("skipped:sealed")).await;
             None
         }
         Err(_) => {
             eprintln!("squelch-api: echo of sent message {log_id} failed to ingest");
-            audit_action(state, "send.echo", target, "failed:ingest").await;
+            audit_action(state, "send.echo", target, &echo_audit("failed:ingest")).await;
             None
         }
     }
@@ -4248,7 +4257,7 @@ async fn finish_send(
             }
             discard_sent_attachments(state, draft_id, attachment_ids.to_vec()).await;
             audit_action(state, "send", target.clone(), &outcome).await;
-            let echo_message_id = echo_sent(state, client, target, &sent).await;
+            let echo_message_id = echo_sent(state, client, target, &sent, fire).await;
             if let (Some((token, _)), Some(message_id)) = (&tracker, echo_message_id) {
                 link_tracker(state, token, message_id).await;
             }
@@ -4264,8 +4273,11 @@ async fn finish_send(
             if let Some((token, _)) = &tracker {
                 discard_tracker(state, token, target.clone()).await;
             }
-            audit_action(state, "send", target, &fired(fire, "failed:gmail")).await;
-            Err(SendFailure::after_post("failed:gmail", &e))
+            // The ledger says what the row will: `paced` when the budget held
+            // the call (nothing posted), `failed:gmail` for Gmail's answer.
+            let failure = SendFailure::after_post("failed:gmail", &e);
+            audit_action(state, "send", target, &fired(fire, failure.reason)).await;
+            Err(failure)
         }
     }
 }
@@ -4352,9 +4364,23 @@ impl SendFailure {
         }
     }
 
+    /// Gmail's budget held a call on the way to the send (the send itself, a
+    /// forward's original, a reply's parent): nothing was posted, and the
+    /// reason is `paced` wherever it happened, so the ledger, the row and
+    /// §4.5's "no attempt spent" all agree.
+    fn paced(e: &WriteError) -> Self {
+        let mut f = Self::new(PACED, write_error(e));
+        f.paced = true;
+        f
+    }
+
     /// A failure answered by `messages.send` itself, classified by whether
-    /// the post may have landed.
+    /// the post may have landed. A paced send is [`Self::paced`], whatever
+    /// `reason` the caller had for a real failure.
     fn after_post(reason: &'static str, e: &WriteError) -> Self {
+        if matches!(e, WriteError::Paced { .. }) {
+            return Self::paced(e);
+        }
         let mut f = Self::new(reason, write_error(e));
         match e {
             // A transport error can come after Gmail took the whole body (a
@@ -4362,7 +4388,7 @@ impl SendFailure {
             // is Google saying it does not know how it went.
             WriteError::Transport(_) => f.maybe_sent = true,
             WriteError::Api { status, .. } if *status >= 500 => f.maybe_sent = true,
-            WriteError::Paced { .. } => f.paced = true,
+            WriteError::Paced { .. } => {}
             // A 4xx is refused before anything is sent; no credential and bad
             // input never reached the post at all.
             WriteError::Api { .. } | WriteError::MissingCredential(_) | WriteError::Invalid(_) => {}
@@ -4370,6 +4396,9 @@ impl SendFailure {
         f
     }
 }
+
+/// The reason (and audit detail) of a send Gmail's budget held: nothing posted.
+pub(crate) const PACED: &str = "paced";
 
 /// The request path answers with the error as it always has; the reason was
 /// already written to the ledger where there is one.
@@ -4694,6 +4723,15 @@ pub(crate) async fn perform_send(
     let parent_hdrs = match &parent {
         Some(p) => match client.parent_headers(&p.gmail_msg_id).await {
             Ok(h) => Some(h),
+            // PACED IS "NOT NOW", for a plain reply too: the send right behind
+            // this read would be held by the same budget, and degrading to an
+            // unthreaded reply with no derived audience because Gmail asked
+            // us to wait would be the wrong mail, not a late one. A fired
+            // reply hands its attempt back.
+            Err(e @ WriteError::Paced { .. }) => {
+                audit_action(state, "send", target, &fired(fire, PACED)).await;
+                return Err(SendFailure::paced(&e));
+            }
             // Threading is best-effort — an unthreaded reply still reaches the
             // right person. REPLY-ALL IS NOT: the audience IS the request, and
             // quietly falling back to reply-to-sender would send to fewer people
@@ -4902,15 +4940,19 @@ pub(crate) async fn perform_send(
         // as ONE message: record it the way it went (bcc when the frozen
         // request carried blind copies, else to), not the way the group reads
         // now.
-        let recorded = if fire.is_some() && audience.mode == GroupMode::Individual {
+        //
+        // And WHO it went to is the frozen request's `to`/`bcc`, the lists the
+        // mail was actually addressed with, not the group's membership now: a
+        // member added since never got this mail, and one removed since did.
+        let recorded = if fire.is_some() {
             group_send::GroupAudience {
                 group_id: audience.group_id,
-                mode: if bcc_requested.trim().is_empty() {
-                    GroupMode::To
-                } else {
-                    GroupMode::Bcc
+                mode: match audience.mode {
+                    GroupMode::Individual if bcc_requested.trim().is_empty() => GroupMode::To,
+                    GroupMode::Individual => GroupMode::Bcc,
+                    mode => mode,
                 },
-                addrs: audience.addrs.clone(),
+                addrs: frozen_addrs(body),
             }
         } else {
             group_send::GroupAudience {
@@ -4922,6 +4964,23 @@ pub(crate) async fn perform_send(
         group_send::record_single(state, &recorded, subject_for_record, *echo_message_id).await;
     }
     result
+}
+
+/// The addresses a frozen request named in `to` and `bcc`, bare, in order,
+/// each once (case-insensitively): who a fired group send actually reached.
+fn frozen_addrs(body: &SendBody) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for list in [body.to.as_deref(), body.bcc.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        for addr in parse_addr_list(list) {
+            if !out.iter().any(|a| a.eq_ignore_ascii_case(&addr)) {
+                out.push(addr);
+            }
+        }
+    }
+    out
 }
 
 /// A fan-out: one message per member, run as a job because twelve serial sends
@@ -5060,6 +5119,14 @@ pub(crate) async fn read_forward_original(
                 "rejected:no_write_credential",
                 write_error(&e),
             ));
+        }
+        // PACING IS NOT A MISSING ORIGINAL. The budget held the read and
+        // nothing was asked of Gmail: "not now", which a fired forward hands
+        // its attempt back for (docs/SCHEDULED-SEND.md §4 step 5), rather than
+        // a `failed:fetch_original` that spends one.
+        Err(e @ WriteError::Paced { .. }) => {
+            audit_action(state, action, target, &fired(fire, PACED)).await;
+            return Err(SendFailure::paced(&e));
         }
         Err(_) => Vec::new(),
     };
@@ -5993,6 +6060,36 @@ mod send_split_tests {
         assert_eq!(
             sending.to_json(),
             json!({"status": "sending", "group_send_id": 7, "recipients": 3})
+        );
+    }
+
+    #[test]
+    fn a_fired_group_is_attributed_to_the_addresses_the_request_named() {
+        // `to` and `bcc` as they were frozen, bare, each once: who the mail
+        // actually went to, whatever the group says now.
+        let b = body(json!({
+            "to": "\"Ann, A.\" <ann@fund.com>",
+            "bcc": "bo@fund.com, ANN@fund.com",
+            "body": "hi"
+        }));
+        assert_eq!(frozen_addrs(&b), vec!["ann@fund.com", "bo@fund.com"]);
+        assert!(frozen_addrs(&body(json!({ "body": "hi" }))).is_empty());
+    }
+
+    #[test]
+    fn a_paced_send_is_paced_not_a_gmail_failure() {
+        let f = SendFailure::after_post("failed:gmail", &WriteError::Paced { retry_in_secs: 3 });
+        assert_eq!((f.reason, f.paced, f.maybe_sent), (PACED, true, false));
+        let f = SendFailure::after_post(
+            "failed:gmail",
+            &WriteError::Api {
+                status: 503,
+                message: String::new(),
+            },
+        );
+        assert_eq!(
+            (f.reason, f.paced, f.maybe_sent),
+            ("failed:gmail", false, true)
         );
     }
 }

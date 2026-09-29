@@ -13,14 +13,14 @@ use super::outbound::{move_claims_to_scheduled, release_scheduled_claims, schedu
 use super::*;
 use crate::store::{
     ATTACHMENT_MISSING, CancelOutcome, MAX_SCHEDULED_PER_ACCOUNT, ParentContext,
-    SCHEDULED_MAX_ATTEMPTS, ScheduledSend, ScheduledSendState, TOO_MANY_SCHEDULED,
+    SCHEDULED_MAX_ATTEMPTS, ScheduledSend, ScheduledSendState, SearchClock, TOO_MANY_SCHEDULED,
 };
 
 /// The row shape, in [`map_scheduled`]'s order. Shared by the SELECTs and the
 /// claim's `RETURNING`, so the two cannot drift.
 const SCHEDULED_COLS: &str = "id, account_id, request, send_at, state, lease_until, attempts,
         last_error, message_id_header, sent_message_id, sent_thread_id, created_at, updated_at,
-        maybe_sent";
+        maybe_sent, last_attempt_at, search_deferred_since";
 
 /// How long a settled (`sent`/`cancelled`) row is kept before the sweep.
 pub const SCHEDULED_SETTLED_TTL: chrono::Duration = chrono::Duration::days(7);
@@ -56,6 +56,8 @@ fn map_scheduled(r: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduledSend> {
         created_at: dt(r, 11)?,
         updated_at: dt(r, 12)?,
         maybe_sent: r.get::<_, i64>(13)? != 0,
+        last_attempt_at: dt_opt(r, 14)?,
+        search_deferred_since: dt_opt(r, 15)?,
         attachments: Vec::new(),
     })
 }
@@ -133,9 +135,11 @@ fn insert_row(
 }
 
 impl SqliteStore {
-    /// HUMAN-DOOR ONLY (`POST /client/scheduled`): insert one `scheduled` row
-    /// and nothing else. See [`Self::schedule_send`] for the one-transaction
-    /// form the handler wants (row + file claims + draft consumed).
+    /// TEST HOOK: insert one `scheduled` row and nothing else. The handler
+    /// uses [`Self::schedule_send`] (row + file claims + draft consumed, one
+    /// transaction). `pub` only because squelch-api's integration tests seed
+    /// rows with it.
+    #[doc(hidden)]
     pub fn insert_scheduled_send(
         &self,
         account_id: AccountId,
@@ -413,6 +417,7 @@ impl SqliteStore {
         let n = conn.execute(
             "UPDATE scheduled_sends
              SET state = 'sent', lease_until = NULL, recover_at = NULL,
+                 search_deferred_since = NULL,
                  sent_message_id = ?4, sent_thread_id = ?5, updated_at = ?6
              WHERE account_id = ?1 AND id = ?2 AND state = 'sending' AND attempts = ?3",
             params![
@@ -432,6 +437,8 @@ impl SqliteStore {
     /// for the listing. `maybe_sent` says the attempt failed AFTER the mail was
     /// posted to Gmail; it is OR-ed into the row's sticky flag, so every later
     /// fire asks Gmail first. `last_error` is a REDACTED reason, never content.
+    /// `now` is stamped as `last_attempt_at` (the attempt ENDED now), and the
+    /// pre-fire search clock stops: whatever this attempt was, it got past it.
     /// `false` when the row is not `sending` under that claim.
     #[allow(clippy::too_many_arguments)]
     pub fn settle_scheduled_retry(
@@ -448,7 +455,8 @@ impl SqliteStore {
         let n = conn.execute(
             "UPDATE scheduled_sends
              SET state = 'scheduled', lease_until = NULL, recover_at = NULL, send_at = ?4,
-                 last_error = ?5, maybe_sent = MAX(maybe_sent, ?6), updated_at = ?7
+                 last_error = ?5, maybe_sent = MAX(maybe_sent, ?6), last_attempt_at = ?7,
+                 search_deferred_since = NULL, updated_at = ?7
              WHERE account_id = ?1 AND id = ?2 AND state = 'sending' AND attempts = ?3",
             params![
                 account_id,
@@ -466,9 +474,12 @@ impl SqliteStore {
     /// An attempt that NEVER STARTED, so it must not count: `sending` →
     /// `scheduled` at `next_send_at` under claim `attempts`, with the claim's
     /// increment taken back. For the two answers that say "not now" rather
-    /// than "this mail failed": Gmail's budget pacing the mailbox, and a
-    /// pre-fire search that could not be made. `false` when the row is not
-    /// `sending` under that claim.
+    /// than "this mail failed": Gmail's budget pacing the mailbox, a pre-fire
+    /// search that could not be made, and a `maybe_sent` row still inside its
+    /// grace. `search` moves the pre-fire search's give-up clock
+    /// ([`SearchClock`]); `last_attempt_at` is untouched (no attempt ran).
+    /// `false` when the row is not `sending` under that claim.
+    #[allow(clippy::too_many_arguments)]
     pub fn unclaim_scheduled_send(
         &self,
         account_id: AccountId,
@@ -476,14 +487,23 @@ impl SqliteStore {
         attempts: u32,
         next_send_at: DateTime<Utc>,
         last_error: &str,
+        search: SearchClock,
         now: DateTime<Utc>,
     ) -> Result<bool> {
+        let clock = match search {
+            SearchClock::Reset => "NULL",
+            SearchClock::Start => "COALESCE(search_deferred_since, ?6)",
+            SearchClock::Keep => "search_deferred_since",
+        };
         let conn = self.lock()?;
         let n = conn.execute(
-            "UPDATE scheduled_sends
-             SET state = 'scheduled', lease_until = NULL, recover_at = NULL, send_at = ?4,
-                 last_error = ?5, attempts = MAX(attempts - 1, 0), updated_at = ?6
-             WHERE account_id = ?1 AND id = ?2 AND state = 'sending' AND attempts = ?3",
+            &format!(
+                "UPDATE scheduled_sends
+                 SET state = 'scheduled', lease_until = NULL, recover_at = NULL, send_at = ?4,
+                     last_error = ?5, attempts = MAX(attempts - 1, 0),
+                     search_deferred_since = {clock}, updated_at = ?6
+                 WHERE account_id = ?1 AND id = ?2 AND state = 'sending' AND attempts = ?3"
+            ),
             params![
                 account_id,
                 id,
@@ -498,23 +518,39 @@ impl SqliteStore {
 
     /// Out of retries: `sending` → `failed` under claim `attempts`, lease
     /// cleared. The row waits for the user (send now, or cancel). `last_error`
-    /// is a REDACTED reason. `false` when the row is not `sending` under that
-    /// claim.
+    /// is a REDACTED reason.
+    ///
+    /// `maybe_sent` is OR-ed into the sticky flag exactly as a retry does: a
+    /// row that failed on an attempt that MAY have reached Gmail (an ambiguous
+    /// last post, a crash loop, a recovery that never got to ask) must be
+    /// searched for before "send now" sends it, or the fresh budget send-now
+    /// grants would post it blind. `now` is stamped as `last_attempt_at`.
+    /// `false` when the row is not `sending` under that claim.
+    #[allow(clippy::too_many_arguments)]
     pub fn settle_scheduled_failed(
         &self,
         account_id: AccountId,
         id: i64,
         attempts: u32,
         last_error: &str,
+        maybe_sent: bool,
         now: DateTime<Utc>,
     ) -> Result<bool> {
         let conn = self.lock()?;
         let n = conn.execute(
             "UPDATE scheduled_sends
              SET state = 'failed', lease_until = NULL, recover_at = NULL, last_error = ?4,
-                 updated_at = ?5
+                 maybe_sent = MAX(maybe_sent, ?5), last_attempt_at = ?6,
+                 search_deferred_since = NULL, updated_at = ?6
              WHERE account_id = ?1 AND id = ?2 AND state = 'sending' AND attempts = ?3",
-            params![account_id, id, attempts, last_error, now.to_rfc3339()],
+            params![
+                account_id,
+                id,
+                attempts,
+                last_error,
+                maybe_sent as i64,
+                now.to_rfc3339()
+            ],
         )?;
         Ok(n > 0)
     }
@@ -523,7 +559,9 @@ impl SqliteStore {
     /// `send_at` under claim `attempts`, lease cleared, `attempts` UNCHANGED
     /// (the lapsed attempt already counted), and `maybe_sent` set: the lapsed
     /// attempt may still surface in Gmail's index, so the re-fire asks again
-    /// before it sends. `false` when the row is not `sending` under that claim.
+    /// before it sends. `last_attempt_at` becomes the lapsed lease's end (the
+    /// latest the lost attempt can have posted). `false` when the row is not
+    /// `sending` under that claim.
     pub fn requeue_scheduled_send(
         &self,
         account_id: AccountId,
@@ -535,8 +573,9 @@ impl SqliteStore {
         let conn = self.lock()?;
         let n = conn.execute(
             "UPDATE scheduled_sends
-             SET state = 'scheduled', lease_until = NULL, recover_at = NULL, send_at = ?4,
-                 maybe_sent = 1, updated_at = ?5
+             SET state = 'scheduled', last_attempt_at = COALESCE(lease_until, ?5),
+                 lease_until = NULL, recover_at = NULL, send_at = ?4,
+                 maybe_sent = 1, search_deferred_since = NULL, updated_at = ?5
              WHERE account_id = ?1 AND id = ?2 AND state = 'sending' AND attempts = ?3",
             params![
                 account_id,
@@ -643,6 +682,10 @@ impl SqliteStore {
     /// on its very next hiccup without a single retry. A `scheduled` row keeps
     /// both: pulling a pending retry forward is not a new request. `false` for
     /// a row in any other state, an unknown id or another account's.
+    ///
+    /// NOT A WAY PAST THE GRACE: `maybe_sent` and `last_attempt_at` are kept,
+    /// and the worker holds a `maybe_sent` row back until its grace is out
+    /// whatever `send_at` says, so the search it owes can see the mail.
     pub fn send_scheduled_now(
         &self,
         account_id: AccountId,
@@ -654,7 +697,9 @@ impl SqliteStore {
             "UPDATE scheduled_sends
              SET state = 'scheduled', send_at = ?3, lease_until = NULL, updated_at = ?3,
                  attempts = CASE WHEN state = 'failed' THEN 0 ELSE attempts END,
-                 last_error = CASE WHEN state = 'failed' THEN NULL ELSE last_error END
+                 last_error = CASE WHEN state = 'failed' THEN NULL ELSE last_error END,
+                 search_deferred_since =
+                     CASE WHEN state = 'failed' THEN NULL ELSE search_deferred_since END
              WHERE account_id = ?1 AND id = ?2 AND state IN ('scheduled', 'failed')",
             params![account_id, id, now.to_rfc3339()],
         )?;

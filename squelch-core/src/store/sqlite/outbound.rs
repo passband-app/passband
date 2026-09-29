@@ -3,7 +3,7 @@
 //! every function here enforces one piece of.
 
 use super::*;
-use crate::store::{ATTACHMENT_MISSING, OutboundAttachment, OutboundAttachmentMeta};
+use crate::store::{OutboundAttachment, OutboundAttachmentMeta};
 
 /// How long an UNCLAIMED upload lives. A file is unclaimed between its upload
 /// and the composer's next autosave — one debounce tick in the ordinary case —
@@ -319,9 +319,11 @@ impl SqliteStore {
         self.sendable_sizes(account_id, draft_id, None, ids)
     }
 
-    /// [`Self::outbound_attachment_sizes`] for the scheduled-send worker; see
+    /// [`Self::outbound_attachment_sizes`] for a scheduled send; see
     /// [`Self::scheduled_outbound_attachments`] for why it is its own door.
-    pub fn scheduled_outbound_attachment_sizes(
+    /// The worker reads the files whole, so only the tests ask for this.
+    #[cfg(test)]
+    pub(crate) fn scheduled_outbound_attachment_sizes(
         &self,
         account_id: AccountId,
         scheduled_send_id: i64,
@@ -433,7 +435,11 @@ impl SqliteStore {
     /// `CoreError::InvalidInput("attachment_missing")`, which the handler maps
     /// to `400 rejected:attachment_missing`. A mail scheduled with fewer files
     /// than the user reviewed is the failure this table exists to refuse.
-    pub fn claim_attachments_for_scheduled_send(
+    ///
+    /// The handler moves claims inside [`Self::schedule_send`]'s own
+    /// transaction; this standalone door is for the tests.
+    #[cfg(test)]
+    pub(crate) fn claim_attachments_for_scheduled_send(
         &self,
         account_id: AccountId,
         scheduled_send_id: i64,
@@ -446,7 +452,9 @@ impl SqliteStore {
         sweep(&tx, account_id, now)?;
         if !move_claims_to_scheduled(&tx, account_id, scheduled_send_id, ids, from_draft)? {
             // Dropping `tx` rolls the partial move back.
-            return Err(CoreError::InvalidInput(ATTACHMENT_MISSING.into()));
+            return Err(CoreError::InvalidInput(
+                crate::store::ATTACHMENT_MISSING.into(),
+            ));
         }
         tx.commit()?;
         Ok(())
@@ -455,7 +463,9 @@ impl SqliteStore {
     /// Hand every file scheduled send `scheduled_send_id` holds back to
     /// unclaimed, with the unclaimed clock restarted at `now` (see
     /// [`release_scheduled_claims`]). The cancel path does this inside its own
-    /// transaction; this is the standalone door.
+    /// transaction; this standalone door is a TEST HOOK, `pub` only because
+    /// squelch-api's integration tests strand a row's files with it.
+    #[doc(hidden)]
     pub fn release_scheduled_send_attachments(
         &self,
         account_id: AccountId,

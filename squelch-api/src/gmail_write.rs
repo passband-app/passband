@@ -577,7 +577,7 @@ fn addr_is_emittable(addr: &str) -> bool {
 /// mean here, survives unchanged. Anything that comes back still carrying a
 /// character it must not is DROPPED rather than repaired — a mangled recipient
 /// is worse than a missing one.
-fn parse_addr_list(value: &str) -> Vec<String> {
+pub(crate) fn parse_addr_list(value: &str) -> Vec<String> {
     if value.trim().is_empty() {
         return Vec::new();
     }

@@ -2561,6 +2561,27 @@ mod tests {
 
     const BROKER: &str = "https://auth.passband.email";
 
+    /// PID 1 in the image stops on SIGTERM or not at all: the stop future must
+    /// resolve on it, not only on Ctrl-C.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_stop_future_resolves_on_sigterm() {
+        use tokio::signal::unix::{SignalKind, signal};
+        // Held for the whole test, so the process has a SIGTERM handler before
+        // the signal is raised whatever the timing below: the default
+        // disposition would kill the test binary.
+        let _keep = signal(SignalKind::terminate()).expect("a SIGTERM handler");
+        let stop = tokio::spawn(stop_requested());
+        // Let the spawned future register its own handler before the signal.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // SAFETY: signalling our own pid; the handler above is installed.
+        assert_eq!(unsafe { libc::kill(libc::getpid(), libc::SIGTERM) }, 0);
+        tokio::time::timeout(std::time::Duration::from_secs(5), stop)
+            .await
+            .expect("stop_requested resolved on SIGTERM")
+            .unwrap();
+    }
+
     /// Every flag off, for tests that vary one at a time.
     fn bare_auth_args() -> AuthArgs {
         AuthArgs {

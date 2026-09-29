@@ -221,6 +221,28 @@ pub struct SyncConfig {
     /// How often (seconds) the incremental poll loop calls `history.list`; one
     /// poll batch is the coalesced batch.
     pub poll_secs: u64,
+    /// HOW MANY `messages.get` CALLS ARE IN FLIGHT AT ONCE while a window of
+    /// mail is fetched (the first backfill, a catch-up, a history walk).
+    ///
+    /// The fetch used to be one GET at a time, each awaited to completion and
+    /// then its embedding awaited too, before the next was even started. That
+    /// serialised network latency behind CPU work and left the Gmail budget
+    /// half idle. Overlapping the GETs lets the budget be the only limiter,
+    /// which is what it is for.
+    ///
+    /// 2, MEASURED. On a real mailbox (805 INBOX + 9 SENT over 30 days, release
+    /// build, 2026-09-28) the window took 333 s at width 1, 226 s at width 2 and
+    /// 228 s at width 4: from two onward the shared Gmail budget (about four
+    /// `messages.get` a second under the Standard profile) is the only limiter,
+    /// so a wider window buys nothing. What it costs is memory: every in-flight
+    /// message is a raw RFC 822 body held until it is ingested, plus its base64
+    /// carrier, and a message can be tens of megabytes. The first backfill is
+    /// already the peak of a hosted pod's life (see `crate::mem`), and an
+    /// OOM-kill there is a crash LOOP, not a crash: the restart re-lists the
+    /// same window in the same order and dies at the same message. Two is the
+    /// whole speed gain at half the exposure of four.
+    /// Env: SQUELCH_FETCH_CONCURRENCY. 0 is read as 1.
+    pub fetch_concurrency: usize,
     /// HOW MANY SPAM MESSAGES one on-demand spam sync will fetch, newest first.
     ///
     /// The spam folder is not walked by the poll loop at all (see
@@ -242,6 +264,7 @@ impl Default for SyncConfig {
             gmail_quota_profile: GmailQuotaProfile::Standard,
             backfill_days: 30,
             poll_secs: 5,
+            fetch_concurrency: 2,
             spam_max: 200,
         }
     }
@@ -1856,6 +1879,10 @@ impl Config {
         env_override("SQUELCH_BACKFILL_DAYS", &mut self.sync.backfill_days);
         env_override("SQUELCH_POLL_SECS", &mut self.sync.poll_secs);
         env_override(
+            "SQUELCH_FETCH_CONCURRENCY",
+            &mut self.sync.fetch_concurrency,
+        );
+        env_override(
             "SQUELCH_GMAIL_QUOTA_PROFILE",
             &mut self.sync.gmail_quota_profile,
         );
@@ -2410,6 +2437,7 @@ mod tests {
         let c = Config::default();
         assert_eq!(c.sync.backfill_days, 30);
         assert_eq!(c.sync.poll_secs, 5);
+        assert_eq!(c.sync.fetch_concurrency, 2);
         assert!(c.client_id.is_none());
     }
 

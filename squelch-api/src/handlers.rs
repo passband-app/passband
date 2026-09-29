@@ -2598,7 +2598,7 @@ pub async fn get_stats(State(state): State<ApiState>) -> Result<impl IntoRespons
         .await?;
 
     // tokens/1e6 * per-MTok price, over input+output plus the prompt-cache
-    // split (write 1.25x / read 0.1x of the input price). Switching the model
+    // split (CACHE_WRITE_INPUT_MULT / CACHE_READ_INPUT_MULT of the input price). Switching the model
     // means updating stage2_price_*_per_mtok or this drifts.
     let est_cost_usd_today = (usage.input_tokens as f64 / 1_000_000.0)
         * state.stage2_price_in_per_mtok

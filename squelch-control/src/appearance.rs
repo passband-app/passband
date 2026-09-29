@@ -1,5 +1,6 @@
 //! Account-page appearance: `?theme=light` or `?theme=dark` overrides a
-//! session cookie, with light as the default. The cookie survives the Google
+//! session cookie, with DARK as the default: the account pages wear the
+//! landing page, and the landing page is always night. The cookie survives the Google
 //! round trip and form retries; it is a preference, never an auth credential.
 
 use axum::{
@@ -13,8 +14,8 @@ const COOKIE_NAME: &str = "passband_theme";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Theme {
-    #[default]
     Light,
+    #[default]
     Dark,
 }
 
@@ -139,8 +140,9 @@ mod tests {
     #[tokio::test]
     async fn query_overrides_cookie_and_invalid_values_are_not_reflected() {
         for (query, cookie, expected) in [
-            ("", "", "light"),
-            ("?theme=dark", "", "dark"),
+            ("", "", "dark"),
+            ("?theme=light", "", "light"),
+            ("", "passband_theme=light", "light"),
             ("?theme=light", "passband_theme=dark", "light"),
             ("?theme=dark", "passband_theme=light", "dark"),
             ("", "passband_theme=dark", "dark"),
@@ -148,7 +150,7 @@ mod tests {
             (
                 "?theme=%22%3E%3Cscript%3E",
                 "passband_theme=invalid",
-                "light",
+                "dark",
             ),
         ] {
             let response = app(false)
@@ -252,6 +254,6 @@ mod tests {
         let (light, dark) = tokio::join!(render(Theme::Light), render(Theme::Dark));
         assert_eq!(light, Theme::Light);
         assert_eq!(dark, Theme::Dark);
-        assert_eq!(current(), Theme::Light);
+        assert_eq!(current(), Theme::Dark);
     }
 }

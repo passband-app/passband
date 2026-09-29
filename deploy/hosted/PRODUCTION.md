@@ -203,6 +203,17 @@ monthly dollar budget and installed through the warden as that tenant's
 `<label>-llm` Secret. Bifrost swaps in the real key, meters the spend on its
 volume, and refuses a tenant that has blown its budget.
 
+**Content logging stays OFF.** Every request through this gateway is the text
+of somebody's mail, and Bifrost's defaults are to log it: `enable_logging` on,
+`disable_content_logging` off, `log_retention_days` 365, all into
+`/app/data/logs.db` on the volume. In September 2026 that file was 7.36 GB. The
+setting lives in Bifrost's UI config database, not in an env var, so it
+survives redeploys and is invisible to `railway variables`: check it in the UI
+under Config → Logs. Keep request logging for token and spend metadata if
+wanted, with **content logging disabled**. `passband.app/trust` and `/privacy`
+both promise that request and response bodies are not retained, so turning
+content logging back on makes both pages false.
+
 The cluster half of the feature is the `SQUELCH_WARDEN_LLM_*` block in
 `15-warden-config.yaml`: `SQUELCH_WARDEN_LLM_BASE_URL` (the feature gate — the warden
 refuses to boot if any of the rest are set without it),
@@ -216,8 +227,8 @@ separate multi-day outages.
 
 | Where | Spelling it matches | Written by |
 |---|---|---|
-| Virtual key `allowed_models` | the id the daemon sent, `anthropic/claude-opus-5` | `squelch-control llm mint` |
-| Provider key `models` | the same id with the provider resolved away, `claude-opus-5` | `squelch-control llm sync` |
+| Virtual key `allowed_models` | the id the daemon sent, `anthropic/claude-opus-5-5` | `squelch-control llm mint` |
+| Provider key `models` | the same id with the provider resolved away, `claude-opus-5-5` | `squelch-control llm sync` |
 
 A model present in the first and absent from the second answers **400 `no keys
 found that support model: <model>`**. Nothing about that failure is visible
@@ -1406,6 +1417,54 @@ will be.
 DR drill is `systemctl mask litestream.service litestream-config.timer` — on a
 fresh box, a re-provisioned tenant creates an empty database that litestream
 would happily stream over the real history.
+
+## Erasing a tenant (a deletion request)
+
+**Cancelling is not erasing.** Warden's `DELETE` takes the workload down and
+keeps the identity, the sealed credential and the volume, so a reopen is a
+re-consent rather than a re-sync. A deletion request needs every copy gone, and
+nothing does that on its own: the R2 backups in particular are sealed to the
+**fleet** backup key, not the tenant's, so destroying the tenant's identity does
+not make them unreadable, and litestream never deletes the prefix of a tenant it
+has stopped listing. This is the whole list, in order. The public promise this
+keeps is on `passband.app/trust` and `/privacy`: done within 30 days of the
+request.
+
+1. **Cancel.** `DELETE /v1/tenants/<label>` (see above). The mailbox stops
+   serving and the gateway key Secret goes with the workload.
+2. **Revoke the gateway key** in Bifrost (Governance → Virtual Keys, the one
+   named for `<label>`), so the credential is dead and not merely unmounted.
+3. **Delete the volume and the Secrets.**
+   ```sh
+   kubectl -n tenants delete pvc <label>-data
+   kubectl -n tenants delete secret <label>-identity <label>-credential
+   ```
+   The PVC delete removes the directory under `/mnt/tenant-data`, which is how
+   litestream stops replicating it.
+4. **Wait for litestream to drop it** (the config timer runs every 2 minutes),
+   and confirm before touching R2. Deleting the prefix while litestream still
+   lists the database lets it write a fresh generation straight back:
+   ```sh
+   grep -c '<label>' /etc/litestream.yml   # must print 0
+   ```
+5. **Delete the R2 prefix** (R2 credentials exported as in `SETUP.md` §11):
+   ```sh
+   aws --endpoint-url "https://${LITESTREAM_R2_ENDPOINT}" \
+       s3 rm "s3://${LITESTREAM_R2_BUCKET}/tenants/<label>/" --recursive
+   aws --endpoint-url "https://${LITESTREAM_R2_ENDPOINT}" \
+       s3 ls "s3://${LITESTREAM_R2_BUCKET}/tenants/<label>/"   # must print nothing
+   ```
+6. **Delete the control-plane rows** (Railway Postgres): the `tenants` row for
+   `<label>`, the `users` row whose `tenant_label` is `<label>`, and any
+   `waitlist` row for the same address. `invite_codes.used_by_label` keeps only
+   the label, which after this names nothing.
+7. **Let the rest age out, and say so.** Hetzner's root-disk snapshots hold the
+   k3s datastore, so the deleted Secrets survive in them for up to 7 days;
+   nothing there holds mail. Analytics events are keyed to `analytics_id`, not
+   the address; delete the PostHog person for it if the request asks.
+
+Not yet exercised end to end on production. The first real request is the
+drill: run it against a throwaway tenant first if one is to hand.
 
 ## Open items
 

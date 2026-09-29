@@ -10,6 +10,8 @@
 #   APPLE_APP_PASSWORD       app-specific password for notarytool
 #   SPARKLE_PRIVATE_KEY      the EdDSA private key (generate_keys -x output)
 #   TAP_PUSH_TOKEN           fine-grained PAT, contents:write on homebrew-tap
+#   RELEASES_PUSH_TOKEN      fine-grained PAT, contents:write on passband-releases
+#                            (TEMPORARY, see the "Mirror" step)
 name: release-passband-mac
 
 on:
@@ -103,6 +105,27 @@ jobs:
           gh release create "$GITHUB_REF_NAME" "passband/build/Passband-$VERSION.zip" \
             --title "Passband $VERSION" \
             --notes-file "$NOTES"
+
+      # TEMPORARY, while this repo is private: its release assets 404 for the
+      # public, so every download (Sparkle, the site's button, Homebrew) goes
+      # through passband.app/download to a public, releases-only mirror
+      # instead (passband-site/server.ts). BEFORE the appcast on purpose: if
+      # the mirror upload fails, the feed never advertises a zip nobody can
+      # fetch. To undo when the repo is public again: delete this step, point
+      # server.ts back at this repo, and delete braelyn-ai/passband-releases.
+      - name: Mirror the zip to the public releases repo
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_PUSH_TOKEN }}
+        run: |
+          VERSION=$(cat passband/VERSION)
+          if [ -z "$GH_TOKEN" ]; then
+            echo "RELEASES_PUSH_TOKEN is not set: downloads would 404, refusing to publish the appcast" >&2
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" "passband/build/Passband-$VERSION.zip" \
+            --repo braelyn-ai/passband-releases \
+            --title "Passband $VERSION" \
+            --notes "Passband for Mac $VERSION. Existing installs update automatically. New installs: unzip and drag to Applications, or \`brew install --cask braelyn-ai/tap/passband\`."
 
       # The feed lists exactly the zips in releases/, so hydrate it with every
       # previously shipped archive — the workflow is stateless, the releases

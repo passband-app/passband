@@ -332,10 +332,11 @@ private enum IntroNight {
 struct IntroSceneBackdrop: View {
     let engaged: Bool
     let wide: Bool
+    var paused = false
 
     var body: some View {
         ZStack {
-            SquelchSceneView(engaged: engaged)
+            SquelchSceneView(engaged: engaged, paused: paused)
                 .ignoresSafeArea()
             LinearGradient(
                 stops: [

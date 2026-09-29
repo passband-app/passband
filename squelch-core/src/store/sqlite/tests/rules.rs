@@ -330,3 +330,72 @@ fn set_sender_rule_audited_rolls_back_rule_when_audit_fails() {
     // The rule write must have been rolled back.
     assert_eq!(store.list_sender_rules(acct).unwrap().len(), 0);
 }
+
+/// A rule change re-runs the sender's recent mail and whatever still holds
+/// attention, not the sender's whole history: the queue is priced per
+/// investigation, and one click used to fan out to every stored issue.
+#[test]
+fn a_preference_change_requeues_recent_and_open_mail_only() {
+    let (store, acct) = store();
+    let now = Utc::now();
+    let recent = triaged(acct, "recent", "t-recent")
+        .from("news@daily.example")
+        .received_at(now - chrono::Duration::days(3))
+        .seed(&store);
+    let old = triaged(acct, "old", "t-old")
+        .from("news@daily.example")
+        .received_at(now - chrono::Duration::days(200))
+        .seed(&store);
+    let old_open = triaged(acct, "old-open", "t-old-open")
+        .from("news@daily.example")
+        .received_at(now - chrono::Duration::days(200))
+        .seed(&store);
+    let other_sender = triaged(acct, "other", "t-other")
+        .from("friend@example.com")
+        .received_at(now - chrono::Duration::days(1))
+        .seed(&store);
+    {
+        let conn = store.lock().unwrap();
+        for id in [recent, old, old_open, other_sender] {
+            conn.execute(
+                "INSERT INTO agent_message_state(account_id,message_id,content_snapshot) VALUES(?1,?2,'{}')",
+                params![acct, id],
+            )
+            .unwrap();
+        }
+        // The old message whose thread is still on FYE.
+        conn.execute(
+            "INSERT INTO agent_thread_attention(decision_message_id,account_id,thread_id,message_id,show_in_fye,attention_json,relevant_activity)
+             VALUES(?1,?2,'t-old-open',?1,1,'{}',?3)",
+            params![old_open, acct, now.to_rfc3339()],
+        )
+        .unwrap();
+    }
+    store
+        .set_sender_rule(
+            acct,
+            "*@daily.example",
+            "reading only",
+            Disposition::Filtered,
+        )
+        .unwrap();
+    let queued: Vec<i64> = {
+        let conn = store.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT message_id FROM agent_triage_jobs
+                 WHERE account_id=?1 AND trigger LIKE 'preference:%' ORDER BY message_id",
+            )
+            .unwrap();
+        stmt.query_map(params![acct], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap()
+    };
+    let mut expected = vec![recent, old_open];
+    expected.sort_unstable();
+    assert_eq!(
+        queued, expected,
+        "recent + open re-run; old and other senders do not"
+    );
+}

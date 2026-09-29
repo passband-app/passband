@@ -222,7 +222,7 @@ export function createScope(
 
   const step = (dt: number) => {
     time += dt;
-    const target = ease((progress - 0.12) / 0.55);
+    const target = ease((progress - 0.08) / 0.45);
     engage += (target - engage) * (1 - Math.exp(-dt * 4));
     for (const s of spikes) {
       s.life -= dt * s.decay;
@@ -243,7 +243,7 @@ export function createScope(
   // Reduced motion: one settled frame at the current progress, redrawn when
   // the scroll moves rather than animated.
   const still = () => {
-    engage = ease((progress - 0.12) / 0.55);
+    engage = ease((progress - 0.08) / 0.45);
     opts.onReadout(engage);
     resize();
     draw(1 / 60, true);

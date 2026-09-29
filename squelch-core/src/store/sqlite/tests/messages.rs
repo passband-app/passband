@@ -1971,3 +1971,54 @@ fn blank_body_messages_judges_blankness_in_rust_over_inbound_html_mail_only() {
     walked.sort();
     assert_eq!(walked, want, "chunked walk finds exactly the same rows");
 }
+
+/// Inbound mail that a SENT walk saw first (Gmail has served it that way) keeps
+/// the sender's leaked `Bcc:` in the row once the INBOX sighting pins `is_sent`
+/// to 0. The reader must still never be handed it: Bcc is served on the
+/// account's own mail only.
+#[test]
+fn the_thread_view_never_serves_a_bcc_on_mail_the_account_did_not_write() {
+    let (store, acct) = store();
+    let id = triaged(acct, "g-leak", "t-leak")
+        .from("stranger@elsewhere.com")
+        .is_sent(true)
+        .bcc_addrs("blind@third-party.com")
+        .seed(&store);
+    triaged(acct, "g-leak", "t-leak")
+        .from("stranger@elsewhere.com")
+        .seed(&store);
+    let view = store.thread_view_with_html(acct, "t-leak").unwrap();
+    let m = view.messages.iter().find(|m| m.id == id).unwrap();
+    assert!(!m.is_sent, "the INBOX sighting pinned it to received");
+    assert_eq!(m.bcc_addrs, None, "a stranger's Bcc header is never served");
+
+    // The user's own send keeps its blind list on the wire.
+    let own = triaged(acct, "s-own", "t-own")
+        .from("me@example.com")
+        .is_sent(true)
+        .bcc_addrs("Ana <ana@example.com>")
+        .seed(&store);
+    let view = store.thread_view_with_html(acct, "t-own").unwrap();
+    let m = view.messages.iter().find(|m| m.id == own).unwrap();
+    assert_eq!(m.bcc_addrs.as_deref(), Some("Ana <ana@example.com>"));
+}
+
+/// A message whose headers were read and named no Cc is DONE for the
+/// recipients backfill; only a never-read row (NULL) is queued.
+#[test]
+fn a_read_message_with_no_cc_is_not_in_the_backfill_queue() {
+    let (store, acct) = store();
+    let read = triaged(acct, "g-read", "t1")
+        .to_addrs("me@example.com")
+        .cc_addrs("")
+        .seed(&store);
+    let unread = triaged(acct, "g-unread", "t2").seed(&store);
+    let queued: Vec<i64> = store
+        .messages_missing_recipients(acct, 50)
+        .unwrap()
+        .into_iter()
+        .map(|m| m.message_id)
+        .collect();
+    assert!(!queued.contains(&read), "{queued:?}");
+    assert!(queued.contains(&unread), "{queued:?}");
+}

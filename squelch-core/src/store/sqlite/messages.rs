@@ -632,12 +632,20 @@ impl SqliteStore {
                     // the way to the client, which draws neither but must not
                     // turn one into the other.
                     //
-                    // `bcc_addrs` needs no guard here: the store refuses to keep
-                    // a Bcc on a received row, so a NULL is what every one of
-                    // them holds.
+                    // `bcc_addrs` IS SERVED ONLY ON THE ACCOUNT'S OWN MAIL, by
+                    // the same authorship bit the bubbles align on. The writers
+                    // gate on the INCOMING `is_sent`, and Gmail has served
+                    // inbound mail through a SENT walk: that sighting stores the
+                    // sender's leaked or forged `Bcc:` before the INBOX sighting
+                    // pins `is_sent` to 0. Refusing it here holds whatever the
+                    // row says.
                     to_addrs: r.get(13)?,
                     cc_addrs: r.get(14)?,
-                    bcc_addrs: r.get(15)?,
+                    bcc_addrs: if r.get::<_, i64>(16)? != 0 {
+                        r.get(15)?
+                    } else {
+                        None
+                    },
                     // The computed authorship bit above: a boolean expression
                     // guarded against NULL on both sides, so every row answers.
                     is_sent: r.get::<_, i64>(16)? != 0,

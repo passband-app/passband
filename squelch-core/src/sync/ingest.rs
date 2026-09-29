@@ -976,9 +976,20 @@ pub fn ingest(
             collect_mailboxes(bcc, &mut bcc_mailboxes);
         }
     }
-    let to_addrs = format_recipients(&to_mailboxes);
-    let cc_addrs = format_recipients(&cc_mailboxes);
-    let bcc_addrs = format_recipients(&bcc_mailboxes);
+    // READ-AND-EMPTY IS "", NOT NONE. Once the headers parsed, a missing `Cc:`
+    // is the statement "named nobody", and the recipients backfill keys its
+    // queue on `cc_addrs IS NULL`: writing None here would park every Cc-less
+    // arrival in that queue for good, one wasted metadata GET per message per
+    // sweep, and a sweep that can never mark itself done. None stays reserved
+    // for a raw that did not parse, which genuinely has not been read. Bcc is
+    // only ever "read" on the user's own sends.
+    let read = parsed.is_some();
+    let listed = |mailboxes: &[(String, Option<String>)], was_read: bool| {
+        format_recipients(mailboxes).or_else(|| was_read.then(String::new))
+    };
+    let to_addrs = listed(&to_mailboxes, read);
+    let cc_addrs = listed(&cc_mailboxes, read);
+    let bcc_addrs = listed(&bcc_mailboxes, read && fetched.is_sent);
 
     // EVERYONE THIS MESSAGE NAMED, as one list, for the two consumers that ask
     // "who did this go to" rather than "which header were they on": the contacts
@@ -1632,7 +1643,7 @@ mod tests {
     /// header" — never `Some("")`, which is the backfill's "looked, nobody named"
     /// and is what takes a row out of its queue.
     #[test]
-    fn an_absent_header_is_none_rather_than_an_empty_list() {
+    fn an_absent_header_on_a_parsed_message_is_read_and_empty() {
         let eml = "From: alice@friends.com\r\n\
                    To: me@example.com\r\n\
                    Subject: no cc here\r\n\
@@ -1642,7 +1653,10 @@ mod tests {
         let f = raw(1, "g-nocc", eml, /* is_sent */ false);
         let t = ingest(&f, &Stage1Config::default(), Utc::now(), |_| false);
         assert_eq!(t.message.to_addrs.as_deref(), Some("me@example.com"));
-        assert_eq!(t.message.cc_addrs, None);
+        // "" (read, named nobody), never None: None would leave this message in
+        // the recipients backfill queue (`cc_addrs IS NULL`) forever.
+        assert_eq!(t.message.cc_addrs.as_deref(), Some(""));
+        // Bcc is never read off received mail, so it stays unread.
         assert_eq!(t.message.bcc_addrs, None);
     }
 

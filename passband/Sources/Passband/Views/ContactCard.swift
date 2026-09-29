@@ -366,7 +366,7 @@ private struct ContactCard: View {
         let age = shortAge(iso)
         if age.isEmpty { return Fmt.shortDate(iso) }
         if age == "now" { return "just now" }
-        return age.first?.isNumber == true ? "\(age) ago" : "in \(age)"
+        return age.first?.isNumber == true ? "\(age) ago" : age
     }
 
     private func monthYear(_ iso: String) -> String {

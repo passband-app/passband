@@ -215,25 +215,17 @@ final class EventStream {
                 // poller are what tell the human their token is wrong.
                 return
             }
-            var parser = SSEParser()
-            // Split by hand rather than with `bytes.lines`: AsyncLineSequence
-            // silently DROPS empty lines, and the blank line between frames is
-            // SSE's only frame terminator, so every event would sit unread in the
-            // buffer. Splitting on LF is safe on UTF-8 — 0x0A cannot appear
-            // inside a multi-byte sequence.
-            var line: [UInt8] = []
-            for try await byte in bytes {
-                guard byte == UInt8(ascii: "\n") else {
-                    // A stream that never sends a newline would grow this buffer
-                    // for as long as we hold the connection — days. Past the cap,
-                    // drop it and let the backoff loop retry.
-                    guard line.count < SSEParser.maxFrameBytes else { return }
-                    line.append(byte)
-                    continue
-                }
+            // THE BYTE LOOP IS OFF THE MAIN ACTOR. This class is main-actor
+            // (it writes the store and posts notifications), and the loop
+            // used to run here too — which meant one main-actor hop PER BYTE
+            // of the feed, and a reconnect replaying a backlog of frames was
+            // the main thread doing nothing else for a while. The parsing and
+            // the decode run in a detached task; only decoded frames cross
+            // back, one hop each.
+            let frames = Self.frames(from: bytes)
+            for await (frame, event) in frames {
                 if Task.isCancelled { return }
-                consume(parser.feed(String(decoding: line, as: UTF8.self)))
-                line.removeAll(keepingCapacity: true)
+                consume(frame, event)
             }
         } catch {
             // Refused / DNS / inactivity timeout / cancellation. Silent and stored
@@ -242,13 +234,52 @@ final class EventStream {
         }
     }
 
-    private static let decoder = JSONDecoder()
+    /// Frames and their decoded events, produced off the main actor. The
+    /// stream ends when the connection does (or overflows — see the cap).
+    private nonisolated static func frames(from bytes: URLSession.AsyncBytes)
+        -> AsyncStream<(SSEFrame, Event?)>
+    {
+        AsyncStream { continuation in
+            let producer = Task.detached(priority: .utility) {
+                var parser = SSEParser()
+                let decoder = JSONDecoder()
+                // Split by hand rather than with `bytes.lines`: AsyncLineSequence
+                // silently DROPS empty lines, and the blank line between frames
+                // is SSE's only frame terminator, so every event would sit
+                // unread in the buffer. Splitting on LF is safe on UTF-8 — 0x0A
+                // cannot appear inside a multi-byte sequence.
+                var line: [UInt8] = []
+                do {
+                    for try await byte in bytes {
+                        if Task.isCancelled { break }
+                        guard byte == UInt8(ascii: "\n") else {
+                            // A stream that never sends a newline would grow this
+                            // buffer for as long as we hold the connection — days.
+                            // Past the cap, drop it and let the backoff loop retry.
+                            guard line.count < SSEParser.maxFrameBytes else { break }
+                            line.append(byte)
+                            continue
+                        }
+                        if let frame = parser.feed(String(decoding: line, as: UTF8.self)) {
+                            let event = frame.data.data(using: .utf8).flatMap {
+                                try? decoder.decode(Event.self, from: $0)
+                            }
+                            continuation.yield((frame, event))
+                        }
+                        line.removeAll(keepingCapacity: true)
+                    }
+                } catch {
+                    // Refused / inactivity timeout / cancellation: the stream
+                    // just ends, and the caller's backoff loop retries.
+                }
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in producer.cancel() }
+        }
+    }
 
-    private func consume(_ frame: SSEFrame?) {
-        guard let frame else { return }
-        if let data = frame.data.data(using: .utf8),
-            let event = try? Self.decoder.decode(Event.self, from: data)
-        {
+    private func consume(_ frame: SSEFrame, _ event: Event?) {
+        if let event {
             note(seen: event.id)
             // Legacy auth events refresh the explicit lookup. Current model
             // notifications use the ordinary event path below.

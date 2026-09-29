@@ -161,11 +161,15 @@ final class SitrepPoller {
             // One ordered list. The older bands remain empty until the shared
             // reader state no longer needs their compatibility fields.
             let next = SitrepData(
-                standing: page.items.map(\.row), new: [], open: [], stats: st, sealed: sl, totalCount: page.total_count)
+                standing: page.items.map(\.row), new: [], open: [], sealed: sl, totalCount: page.total_count)
             // ASSIGN ONLY ON CHANGE: @Observable notifies on assignment, not on
             // value difference, so writing an identical read model every 10s
-            // re-lays out the whole dashboard for nothing.
+            // re-lays out the whole dashboard for nothing. The stats are
+            // assigned apart from the bands for the same reason — they carry
+            // the sync clock and change on nearly every tick, and while they
+            // rode inside `SitrepData` this compare never once said "same".
             if next != store.sitrep { store.sitrep = next }
+            if st != store.stats { store.stats = st }
             // THE BADGE IS REFRESHED EVEN WHEN NOTHING CHANGED, and this is the
             // second write point rather than an accident. `AppStore.sitrep`'s
             // didSet catches every CHANGE; it cannot catch a confirmation, and

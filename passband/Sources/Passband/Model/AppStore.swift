@@ -181,8 +181,6 @@ struct SitrepZoneCache: Sendable {
     var banking: [BankingRecord] = []
     var receipts: [Receipt] = []
     var reading: [ReadingSender] = []
-    /// When the last full refresh COMPLETED. nil = never loaded.
-    var loadedAt: Date?
 }
 
 /// The search panel's state, held OUT of the panel: SwiftUI discards a view's
@@ -576,11 +574,16 @@ struct OpenThreadSummary: Sendable, Equatable {
 // MARK: - the store
 
 /// The read model the SitrepView renders: updates bucketed by band.
+/// The bands. The daemon's STATS used to ride in here too, and that defeated
+/// the poller's compare-before-assign: stats carry the sync clock, the queue
+/// depths and today's spend, which move on nearly every tick, so the whole
+/// read model was reassigned every ten seconds and every reader of the bands
+/// — the board, the rail, the inbox — re-rendered for a timestamp. Stats are
+/// their own property on the store now (`AppStore.stats`).
 struct SitrepData: Sendable, Equatable {
     var standing: [AttentionUpdate] = []
     var new: [AttentionUpdate] = []
     var open: [AttentionUpdate] = []
-    var stats: StoreStats?
     var sealed: [SealedMeta] = []
     /// Server aggregate, including attention beyond the displayed page.
     var totalCount: Int?
@@ -649,6 +652,10 @@ final class AppStore {
             Badge.refresh(sitrep.standing)
         }
     }
+    /// The daemon's stats, apart from the bands (see SitrepData): the sync
+    /// clock, the queues, the capabilities. Assigned by the poller only on
+    /// change, and it changes often — so only its readers pay for that.
+    var stats: StoreStats?
     var lastRefresh: Date?
     var refreshError: RefreshError?
 
@@ -668,6 +675,10 @@ final class AppStore {
 
     // MARK: sitrep zones — see SitrepZoneCache
     var zones = SitrepZoneCache()
+    /// When the last full zone refresh COMPLETED. nil = never loaded. OUT of
+    /// the observed struct: it is a TTL stamp, and stamping it invalidated
+    /// every zone view once per pass whether or not a row had changed.
+    @ObservationIgnored private var zonesLoadedAt: Date?
 
     // MARK: surfaces
     var sideView: SideView = .none
@@ -758,7 +769,17 @@ final class AppStore {
     /// the announcement have different rules, and ThreadArrivals is where the
     /// difference lives.
     private var arrivals = ThreadArrivals()
-    var compose: ComposeState?
+    var compose: ComposeState? {
+        didSet {
+            let open = compose != nil
+            if composeOpen != open { composeOpen = open }
+        }
+    }
+    /// WHETHER a composer is open, kept apart from WHICH: `compose` is
+    /// rewritten on every keystroke, and the window shell only needs to know
+    /// there is a pane to lay out beside. Reading this instead is what keeps
+    /// typing from re-evaluating the whole shell.
+    private(set) var composeOpen = false
     /// The pane composer opened out to a centred column over the whole page.
     /// Kept across composers on purpose: somebody who writes long mail
     /// full-size wants the next one full-size too.
@@ -950,7 +971,7 @@ final class AppStore {
         // live poller has never pulled (practice claims the connection before
         // it starts), so the stats are asked for once, here, while the client
         // still points at the real daemon. Read BEFORE the wipe either way.
-        var accountEmail = RehearsalMode.isEnabled ? nil : sitrep.stats?.account_email
+        var accountEmail = RehearsalMode.isEnabled ? nil : stats?.account_email
         if accountEmail == nil, !RehearsalMode.isEnabled, connStatus == .connected {
             accountEmail = (try? await APIClient.shared.getStats())?.account_email
         }
@@ -2002,7 +2023,7 @@ final class AppStore {
     /// makes a revisit instant instead of five round-trips. `force` is for callers
     /// that just changed the data (an explicit sync, a rule save).
     func refreshZones(force: Bool = false) async {
-        if !force, let loadedAt = zones.loadedAt,
+        if !force, let loadedAt = zonesLoadedAt,
             Date().timeIntervalSince(loadedAt) < Self.zoneTTL
         {
             return
@@ -2061,19 +2082,29 @@ final class AppStore {
                     group.cancelAll()
                     return
                 }
+                // ASSIGN ONLY ON CHANGE, every one: `zones` is one observed
+                // property, so any assignment re-renders every zone card and
+                // the board, and most passes find the same rows they found
+                // 45 seconds ago.
                 switch answer {
-                case .shipments(let rows?): zones.shipments = rows
-                case .reading(let rows?): zones.reading = rows
+                case .shipments(let rows?): if rows != zones.shipments { zones.shipments = rows }
+                case .reading(let rows?): if rows != zones.reading { zones.reading = rows }
                 case .records(let feed?):
-                    zones.receipts = feed.receipts
-                    zones.banking = feed.banking
-                    zones.calendar = feed.calendar
+                    // Derived off the feed ONCE, off the main actor would be
+                    // better still; the three walks are over up to a thousand
+                    // records.
+                    let receipts = feed.receipts
+                    let banking = feed.banking
+                    let calendar = feed.calendar
+                    if receipts != zones.receipts { zones.receipts = receipts }
+                    if banking != zones.banking { zones.banking = banking }
+                    if calendar != zones.calendar { zones.calendar = calendar }
                 case .shipments, .reading, .records: break
                 }
             }
         }
         guard e == epoch else { return }
-        zones.loadedAt = Date()
+        zonesLoadedAt = Date()
 
         HeroCache.shared.preload(zones.reading.map(\.latestThreadId))
         warmZoneThreads()
@@ -2325,7 +2356,10 @@ final class AppStore {
 
     private func performMailRefresh(_ mode: MailMode) async {
         let e = epoch
-        withMailPage(mode) { $0.isLoading = true }
+        // The spinner is for a page with nothing on it. A refresh under rows
+        // already showing has nothing to spin, and flipping the flag twice a
+        // tick re-rendered the list twice a tick.
+        withMailPage(mode) { if $0.value == nil { $0.isLoading = true } }
         do {
             let fetched = try await APIClient.shared.getUpdates(
                 UpdatesParams(
@@ -2336,14 +2370,15 @@ final class AppStore {
             guard e == epoch else { return }
             // Done/archived mail leaves the inbox (gmail semantics), which also
             // keeps auto-resolved receipts out — they're rail records, not rows.
+            // The sort key is a date parse, taken ONCE per row rather than
+            // twice per comparison: five hundred rows is nine thousand
+            // comparisons, each of which took the date cache's lock twice.
             let next =
                 fetched.items
                 .filter { $0.status != .done }
-                .sorted { a, b in
-                    let ta = Self.receivedTS(a)
-                    let tb = Self.receivedTS(b)
-                    return ta != tb ? ta > tb : a.id > b.id
-                }
+                .map { ($0, Self.receivedTS($0)) }
+                .sorted { a, b in a.1 != b.1 ? a.1 > b.1 : a.0.id > b.0.id }
+                .map(\.0)
             withMailPage(mode) { page in
                 // Only touch the value when the list actually CHANGED: the poll
                 // re-runs this, and an identical assignment re-renders 500 rows.
@@ -2368,9 +2403,13 @@ final class AppStore {
     private func withMailPage(
         _ mode: MailMode, _ mutate: (inout Loadable<[AttentionUpdate]>) -> Void
     ) {
-        var page = mailPages[mode] ?? .loading
+        let before = mailPages[mode] ?? .loading
+        var page = before
         mutate(&page)
-        mailPages[mode] = page
+        // Written back only when the mutation changed something: the poll
+        // comes through here three times a tick, and an identical write is a
+        // re-render of every row.
+        if page != before { mailPages[mode] = page }
     }
 
     /// Epoch for "order received": surfaced_at approximates arrival, and items
@@ -2417,7 +2456,7 @@ final class AppStore {
     }
 
     private func performSentRefresh() async {
-        sentRows.isLoading = true
+        if sentRows.value == nil { sentRows.isLoading = true }
         do {
             let page = try await APIClient.shared.listSent(limit: Self.mailLimit)
             // THE SERVER'S ORDER IS THE ORDER (received_at DESC, id DESC): no
@@ -2428,14 +2467,14 @@ final class AppStore {
             // Assigned only on a real change, like the mail pages: the poll
             // re-runs this, and an identical assignment re-renders every row.
             if page.items != sentRows.value { sentRows.value = page.items }
-            sentRows.error = nil
+            if sentRows.error != nil { sentRows.error = nil }
             sentLoadedAt = Date()
             ThreadPrefetch.shared.warm(
                 page.items.prefix(Self.mailWarmRows).map(\.thread_id), immediate: 5)
         } catch {
             sentRows.error = errText(error, "load failed")
         }
-        sentRows.isLoading = false
+        if sentRows.isLoading { sentRows.isLoading = false }
     }
 
     // MARK: - the pending-reminder filter
@@ -2481,10 +2520,10 @@ final class AppStore {
 
     /// Whether the folder has EVER been fetched. Nil stamp means the daemon has
     /// not looked, which is the normal state — it does not track that folder.
-    var spamEverSynced: Bool { sitrep.stats?.spam_synced_at != nil }
+    var spamEverSynced: Bool { stats?.spam_synced_at != nil }
 
     private func spamSyncLanded(since: Date) -> Bool {
-        guard let stamp = sitrep.stats?.spam_synced_at, let at = Fmt.date(stamp) else {
+        guard let stamp = stats?.spam_synced_at, let at = Fmt.date(stamp) else {
             return false
         }
         return at >= since
@@ -2503,7 +2542,7 @@ final class AppStore {
     /// condition left is that the daemon is new enough to have the field at
     /// all — `nil` means it cannot serve the page, and offering a door to a
     /// 400 would be worse than not offering one.
-    var spamDoorVisible: Bool { sitrep.stats?.spam != nil }
+    var spamDoorVisible: Bool { stats?.spam != nil }
 
     /// Ask the daemon to go and fetch the spam folder. Called when the page is
     /// OPENED, not on the recurring poll: the daemon does not track that folder,
@@ -2561,7 +2600,7 @@ final class AppStore {
     private func performRemindersRefresh() async {
         let e = epoch
         let mutations = remindersMutations
-        reminderRows.isLoading = true
+        if reminderRows.value == nil { reminderRows.isLoading = true }
         do {
             // `peek` because this page is a REVIEW of things already dealt
             // with: showing a parked row is not the app surfacing that mail,
@@ -2582,13 +2621,13 @@ final class AppStore {
                 return
             }
             if page.items != reminderRows.value { reminderRows.value = page.items }
-            reminderRows.error = nil
+            if reminderRows.error != nil { reminderRows.error = nil }
             remindersLoadedAt = Date()
         } catch {
             guard e == epoch else { return }
             reminderRows.error = errText(error, "load failed")
         }
-        reminderRows.isLoading = false
+        if reminderRows.isLoading { reminderRows.isLoading = false }
     }
 
     /// Land a reminder on the local rows without waiting for a round trip: the
@@ -3009,7 +3048,7 @@ final class AppStore {
             // over a half-second race would be the wrong sentence. Both still
             // REFUSE — hope is what mails the note alone.
             pushToast(
-                sitrep.stats == nil
+                stats == nil
                     ? "still connecting · try forward again in a moment"
                     : "this daemon cannot forward mail · update squelchd",
                 .error)
@@ -3484,7 +3523,7 @@ final class AppStore {
     /// probe and SitrepPoller keeps it fresh, so no extra fetch exists for
     /// this. A self-host daemon never says `assistant_relay`, and nil means
     /// the switch is simply not offered (same posture as `trackingAvailable`).
-    var relayAvailable: Bool { sitrep.stats?.assistant_relay == true }
+    var relayAvailable: Bool { stats?.assistant_relay == true }
 
     // MARK: - gmail connection
 
@@ -3495,7 +3534,7 @@ final class AppStore {
     /// without a metrics registry), and a daemon that cannot see the credential
     /// must not have its silence rendered as an alarm. A false alarm here sends
     /// somebody through a Google consent screen for nothing.
-    var gmailDisconnected: Bool { sitrep.stats?.gmail?.connected == false }
+    var gmailDisconnected: Bool { stats?.gmail?.connected == false }
 
     /// A mailbox catch-up in flight, as `(done, total)`.
     ///
@@ -3503,7 +3542,7 @@ final class AppStore {
     /// and anything waiting on a verdict is waiting on this — which is the one
     /// thing a stalled-looking progress bar needs to be able to say.
     var catchUp: (done: Int, total: Int)? {
-        guard let c = sitrep.stats?.catch_up, c.total > 0 else { return nil }
+        guard let c = stats?.catch_up, c.total > 0 else { return nil }
         return (c.done, c.total)
     }
 
@@ -3513,7 +3552,7 @@ final class AppStore {
     /// shell, so nil is the branch that shows the instruction instead of a
     /// button, never an error.
     var gmailReconnectURL: String? {
-        guard let raw = sitrep.stats?.gmail?.reconnect_url, Opener.isHTTP(raw) else { return nil }
+        guard let raw = stats?.gmail?.reconnect_url, Opener.isHTTP(raw) else { return nil }
         return raw
     }
 
@@ -3536,7 +3575,7 @@ final class AppStore {
     /// so it opens the link exactly as it did before.
     func askReconnect() {
         guard let url = gmailReconnectURL else { return }
-        let email = sitrep.stats?.account_email?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let email = stats?.account_email?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !email.isEmpty else { return Opener.open(url) }
         reconnectAsk = ReconnectAsk(url: url, email: email)
     }
@@ -3557,7 +3596,7 @@ final class AppStore {
     /// which here would quietly drop "expired 3 hours ago" and leave the vaguer
     /// sentence with nothing announcing the loss. `Fmt` tries both, memoizes,
     /// and holds the lock these formatters need; this is read every render.
-    var gmailDisconnectedSince: Date? { Fmt.date(sitrep.stats?.gmail?.disconnected_since) }
+    var gmailDisconnectedSince: Date? { Fmt.date(stats?.gmail?.disconnected_since) }
 
     // MARK: - sync status
 
@@ -3566,16 +3605,16 @@ final class AppStore {
     /// in that precedence. Every surface that talks about sync health reads
     /// this rather than re-deriving it. See Model/SyncStatus.swift.
     var syncStatus: SyncStatus {
-        SyncStatus.derive(daemonDown: daemonDown, stats: sitrep.stats, date: Fmt.date)
+        SyncStatus.derive(daemonDown: daemonDown, stats: stats, date: Fmt.date)
     }
 
     /// When the DAEMON last heard from Gmail. Nil on a daemon too old to say,
     /// and then callers fall back to the client's own poll time.
-    var daemonLastSync: Date? { Fmt.date(sitrep.stats?.sync?.last_success_at) }
+    var daemonLastSync: Date? { Fmt.date(stats?.sync?.last_success_at) }
 
     /// Jobs waiting for, or running through, triage right now. 0 when unknown.
     var triageWaiting: Int {
-        guard let t = sitrep.stats?.triage else { return 0 }
+        guard let t = stats?.triage else { return 0 }
         return max(t.queued, 0) + max(t.leased, 0)
     }
 
@@ -3594,7 +3633,7 @@ final class AppStore {
     /// hosted tenant nobody has turned sharing on for all read as false, and
     /// false means the button is never offered and the two-week nudge never
     /// fires.
-    var shareAvailable: Bool { sitrep.stats?.invite_sharing == true }
+    var shareAvailable: Bool { stats?.invite_sharing == true }
 
     // MARK: - forwarding
 
@@ -3610,14 +3649,14 @@ final class AppStore {
     /// so hoping would mean mailing a stranger an empty "look at this" and
     /// telling the sender it worked. A send has no undo, so the only safe read
     /// of "we do not know" is no.
-    var forwardingAvailable: Bool { sitrep.stats?.forwarding == true }
+    var forwardingAvailable: Bool { stats?.forwarding == true }
 
     /// Whether the composers may offer to attach files. Same shape and same
     /// reason as `forwardingAvailable`: a daemon that does not know
     /// `attachment_ids` ignores the key and mails the words without the
     /// files, answering 200 — so the affordance is withheld rather than
     /// offered as a lie. nil (no stats yet) counts as no.
-    var composeAttachmentsAvailable: Bool { sitrep.stats?.compose_attachments == true }
+    var composeAttachmentsAvailable: Bool { stats?.compose_attachments == true }
 
     // MARK: - read tracking
 

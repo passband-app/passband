@@ -24,7 +24,7 @@ struct LiveInboxSummary: View {
                     Text("See what needs your attention. Everything else has a place.")
                         .font(.system(size: 15))
                         .foregroundStyle(Palette.inkDim)
-                    if let stats = store.sitrep.stats {
+                    if let stats = store.stats {
                         HStack(spacing: 10) {
                             tile(stats.total, "emails triaged", "tray", Palette.accent)
                             tile(stats.tier_counts["noise"] ?? 0, "noise set aside", "moon", Palette.positive)
@@ -62,10 +62,10 @@ struct LiveInboxSummary: View {
 
     private var progress: String {
         if store.daemonDown { return "Connection interrupted. Your inbox will update when we reconnect." }
-        if store.sitrep.stats?.gmail?.connected == false {
+        if store.stats?.gmail?.connected == false {
             return "Your mail connection needs attention in Settings before new mail can arrive."
         }
-        if let catchUp = store.sitrep.stats?.catch_up {
+        if let catchUp = store.stats?.catch_up {
             return "Catching up · \(catchUp.done.formatted()) of \(catchUp.total.formatted()) emails fetched. Triage continues as your mailbox catches up."
         }
         return "These are your live mailbox counts. You can start now; new results appear as your inbox updates."

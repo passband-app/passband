@@ -296,8 +296,16 @@ enum SyncStatus: Equatable, Sendable {
 
     /// "4 minutes ago" style, for the hero's note.
     static func ago(_ date: Date, now: Date) -> String? {
+        agoLock.lock()
+        defer { agoLock.unlock() }
+        return agoFormatter.localizedString(for: date, relativeTo: now)
+    }
+    /// Built once: a RelativeDateTimeFormatter is ICU setup, and this is read
+    /// from the hero's body. Guarded, like every formatter that is shared.
+    nonisolated(unsafe) private static let agoFormatter: RelativeDateTimeFormatter = {
         let f = RelativeDateTimeFormatter()
         f.unitsStyle = .full
-        return f.localizedString(for: date, relativeTo: now)
-    }
+        return f
+    }()
+    private static let agoLock = NSLock()
 }

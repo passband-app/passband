@@ -43,3 +43,7 @@ extension Binding {
         wrappedValue.isLoading = false
     }
 }
+
+/// Comparable when the value is, so a refresh that changed nothing can say so
+/// instead of being written back (see AppStore.withMailPage).
+extension Loadable: Equatable where Value: Equatable {}

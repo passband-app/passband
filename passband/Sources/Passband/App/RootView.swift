@@ -277,7 +277,7 @@ struct MainShell: View {
             // How much of the page's width is spoken for by a surface beside
             // it, named only so its change can be told NOT to animate — see
             // the `.animation(nil, value:)` on the page and on the reader.
-            let pageInset: CGFloat = store.compose != nil && !store.composeExpanded ? composeWidth : 0
+            let pageInset: CGFloat = store.composeOpen && !store.composeExpanded ? composeWidth : 0
             let readerInset: CGFloat = (store.sideView.isOpen ? sidePanelWidth : 0) + pageInset
 
         ZStack(alignment: .topLeading) {
@@ -312,13 +312,23 @@ struct MainShell: View {
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // INVISIBLE UNDER A SETTLED READER, and still mounted. The
+                // reader is opaque and covers the page, but a covered page is
+                // still composited — six glass cards re-sampling whatever is
+                // under them, on every frame the reader is up and every
+                // frame of a done+next resolve re-rendering the board beneath
+                // it. Opacity keeps the page's state, layout and geometry
+                // reports (the tour measures it) and drops only the drawing.
+                // Visible again the moment the reader is in flight, so the
+                // board is there under a departing email.
+                .opacity(store.threadId != nil && store.threadFlight == .settled ? 0 : 1)
                 // The composer's STRIP: a working surface in the layout, NOT an
                 // overlay — no scrim, no blur, the page beside it shrinks and
                 // stays live. The pane itself is drawn in its own layer below,
                 // so that opening it out to full screen moves ONE view rather
                 // than swapping in a second one (which would drop the caret,
                 // the focus and the editor's undo stack on every toggle).
-                if store.compose != nil && !store.composeExpanded {
+                if store.composeOpen && !store.composeExpanded {
                     Color.clear
                         .frame(width: composeWidth)
                         .allowsHitTesting(false)
@@ -400,7 +410,7 @@ struct MainShell: View {
                     // Same reservation for the compose pane: `c` from the reader
                     // opens it in the layout BELOW this layer, and the reader
                     // insetting past it is what keeps it visible.
-                    if store.compose != nil && !store.composeExpanded {
+                    if store.composeOpen && !store.composeExpanded {
                         Color.clear
                             .frame(width: composeWidth)
                             .allowsHitTesting(false)
@@ -425,7 +435,7 @@ struct MainShell: View {
             // column (ComposePane holds the measure). The rail stays, as it
             // does for the reader. Same view in both: only its frame and its
             // layer change.
-            if store.compose != nil {
+            if store.composeOpen {
                 HStack(spacing: 0) {
                     if store.composeExpanded {
                         Color.clear
@@ -459,7 +469,7 @@ struct MainShell: View {
         .animation(.smooth(duration: 0.22), value: store.sideView)
         // The BOOL, never the ComposeState: the state changes on every
         // keystroke, and animating that would smear typing.
-        .animation(.smooth(duration: 0.22), value: store.compose != nil)
+        .animation(.smooth(duration: 0.22), value: store.composeOpen)
         .animation(.smooth(duration: 0.22), value: store.composeExpanded)
         // threadId is deliberately NOT animated HERE — opening a thread is a
         // jump. The one motion it has is the done+next flight, and that one is

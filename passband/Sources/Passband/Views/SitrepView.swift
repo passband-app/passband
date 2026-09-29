@@ -266,7 +266,7 @@ struct SitrepView: View {
     /// Nothing for your eyes, and truly so: the board has loaded, and it is not
     /// empty only because sync or triage is stuck.
     private var isClear: Bool {
-        store.sitrep.stats != nil && store.sitrep.standing.isEmpty && emptyHero == nil
+        store.stats != nil && store.sitrep.standing.isEmpty && emptyHero == nil
     }
 
     /// The reading cards as the zone draws them.

@@ -1,0 +1,12 @@
+# The Slack message shape. No `$` anywhere in it, so env-var interpolation
+# (which contact-points.yml relies on for the webhook URL) cannot touch it
+# whether or not it runs over this file.
+apiVersion: 1
+templates:
+  - orgId: 1
+    name: passband
+    template: |
+      {{ define "passband.title" }}{{ if eq .Status "firing" }}:rotating_light:{{ else }}:white_check_mark:{{ end }} {{ .CommonLabels.alertname }}{{ if gt (len .Alerts.Firing) 1 }} ({{ len .Alerts.Firing }}){{ end }}{{ end }}
+      {{ define "passband.text" }}{{ range .Alerts }}{{ if eq .Status "firing" }}*{{ .Annotations.summary }}*
+      {{ .Annotations.description }}{{ else }}resolved: {{ .Annotations.summary }}{{ end }}
+      {{ end }}{{ end }}

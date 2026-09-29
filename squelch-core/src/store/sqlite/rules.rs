@@ -53,58 +53,13 @@ fn map_pattern_conflict(e: rusqlite::Error) -> CoreError {
     }
 }
 
-/// How far back a sender-rule change re-triages that sender's mail. Beyond it
-/// only mail still holding the reader's attention (an unresolved thread, or
-/// one on FYE) is re-run; the rest keeps the placement it has.
-///
-/// Every re-triage is a full model investigation, and before this bound a
-/// rule change queued EVERY stored message from the matching senders: one
-/// click on a daily newsletter with a year of issues was hundreds of
-/// frontier-model calls to re-file mail nobody would scroll to. The same
-/// horizon the cutover uses for its backfill (`sync.backfill_days`' default).
-pub const PREFERENCE_RETRIAGE_DAYS: i64 = 30;
-
-/// A preference change requests fresh reasoning; it never rewrites placement.
-/// Queue messages already in the new pipeline, bounded by
-/// [`PREFERENCE_RETRIAGE_DAYS`] plus anything still holding attention.
-/// Historical cutover reads the current preferences when it eventually reaches
-/// untouched messages.
-fn queue_preference_change(conn: &Connection, account: AccountId, patterns: &[&str]) -> Result<()> {
-    let since =
-        (chrono::Utc::now() - chrono::Duration::days(PREFERENCE_RETRIAGE_DAYS)).to_rfc3339();
-    let ids = {
-        let mut statement = conn.prepare(
-            "SELECT m.id, m.from_addr FROM messages m
-             JOIN agent_message_state a ON a.account_id=m.account_id AND a.message_id=m.id
-             WHERE m.account_id=?1
-               AND (m.received_at>=?2
-                    OR EXISTS(SELECT 1 FROM agent_thread_attention t
-                              WHERE t.account_id=m.account_id AND t.thread_id=m.thread_id
-                                AND (t.show_in_fye=1 OR t.unresolved_since IS NOT NULL)))",
-        )?;
-        statement
-            .query_map(params![account, since], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?
-    };
-    let change_id: String = conn.query_row("SELECT lower(hex(randomblob(8)))", [], |r| r.get(0))?;
-    for (id, sender) in ids {
-        if patterns
-            .iter()
-            .any(|pattern| crate::triage::rules::glob_match(pattern, &sender))
-        {
-            super::agent_triage::enqueue_agent_triage_conn(
-                conn,
-                account,
-                id,
-                &format!("preference:{change_id}"),
-                false,
-            )?;
-        }
-    }
-    Ok(())
-}
+// A sender-rule change never re-triages stored mail. Rules apply to mail that
+// arrives after they are written: every re-triage is a full model
+// investigation, and a catch-all `*` rule (a content filter, which is a real
+// thing to want) used to queue the whole 30-day window, ~1,000 frontier calls
+// for one click. A decision in flight when the rule lands still goes stale on
+// its preference fingerprint and re-runs under the new rule; that is bounded
+// by the worker's concurrency, not by the mailbox.
 
 impl SqliteStore {
     pub(super) fn set_sender_rule(
@@ -136,7 +91,6 @@ impl SqliteStore {
             params![account_id, match_pattern],
             |r| r.get(0),
         )?;
-        queue_preference_change(&conn, account_id, &[match_pattern])?;
         conn.commit()?;
         Ok(id)
     }
@@ -186,7 +140,6 @@ impl SqliteStore {
                 audit.detail,
             ],
         )?;
-        queue_preference_change(&tx, account_id, &[match_pattern])?;
         tx.commit()?;
         Ok(id)
     }
@@ -202,13 +155,6 @@ impl SqliteStore {
         validate_sender_rule(want_text, disposition)?;
         let mut connection = self.lock()?;
         let conn = connection.transaction()?;
-        let old_pattern: Option<String> = conn
-            .query_row(
-                "SELECT match_pattern FROM sender_rules WHERE account_id=?1 AND id=?2",
-                params![account_id, id],
-                |r| r.get(0),
-            )
-            .optional()?;
         // Retargeting this rule onto a pattern another rule already owns trips
         // UNIQUE(account_id, match_pattern); map it to InvalidInput so the door
         // returns a 4xx the user can act on instead of a 500.
@@ -227,9 +173,6 @@ impl SqliteStore {
                 ],
             )
             .map_err(map_pattern_conflict)?;
-        if let Some(old_pattern) = old_pattern {
-            queue_preference_change(&conn, account_id, &[&old_pattern, match_pattern])?;
-        }
         conn.commit()?;
         Ok(n > 0)
     }
@@ -280,20 +223,10 @@ impl SqliteStore {
     pub(super) fn delete_sender_rule(&self, account_id: AccountId, id: i64) -> Result<bool> {
         let mut connection = self.lock()?;
         let conn = connection.transaction()?;
-        let pattern: Option<String> = conn
-            .query_row(
-                "SELECT match_pattern FROM sender_rules WHERE account_id=?1 AND id=?2",
-                params![account_id, id],
-                |r| r.get(0),
-            )
-            .optional()?;
         let n = conn.execute(
             "DELETE FROM sender_rules WHERE account_id=?1 AND id=?2",
             params![account_id, id],
         )?;
-        if let Some(pattern) = pattern {
-            queue_preference_change(&conn, account_id, &[&pattern])?;
-        }
         conn.commit()?;
         Ok(n > 0)
     }

@@ -50,6 +50,10 @@ final class SitrepCursor {
     /// Hovered reading-card address — `e` marks that sender's whole window done,
     /// deferring to the For-your-eyes handler when nothing hovers.
     var reading: String?
+    /// Hovered shipment card id — `e` clears that package off the rail until
+    /// the carrier or a new email reports something new. Checked before
+    /// `reading`; the two can't both be under one pointer.
+    var shipment: Int?
 
     /// Point the cursor at a row the POINTER is over. EVERY WRITE IS GUARDED:
     /// `@Observable` notifies on assignment, not on change, so an unguarded
@@ -296,7 +300,7 @@ struct SitrepView: View {
     @ViewBuilder
     private var railZones: some View {
         CalendarZone().tourTarget(.calendar)
-        ShipmentsZone().tourTarget(.shipments)
+        ShipmentsZone(cursor: cursor).tourTarget(.shipments)
         BankingZone().tourTarget(.banking)
         ReceiptsZone().tourTarget(.receipts)
     }
@@ -313,7 +317,7 @@ struct SitrepView: View {
             }
             .frame(maxWidth: .infinity)
             VStack(spacing: 16) {
-                ShipmentsZone().tourTarget(.shipments)
+                ShipmentsZone(cursor: cursor).tourTarget(.shipments)
                 ReceiptsZone().tourTarget(.receipts)
             }
             .frame(maxWidth: .infinity)
@@ -474,9 +478,19 @@ struct SitrepView: View {
                 guard eyesActionable, let u = reachable[safe: cursor.index] else { return }
                 Task { await Actions.done(u) }
             },
-            // `e` first tries the hovered reading card; with nothing hovered
-            // it DECLINES so the for-your-eyes done handler runs instead.
+            // `e` first tries the hovered shipment, then the hovered reading
+            // card; with nothing hovered it falls to the for-your-eyes row.
             KeyBinding(declining: "e", "mark done") {
+                // Checked against the rail as DRAWN: a card that left it (its
+                // own clear, or a refresh) never sends onHover(false), so a
+                // stale id must fall through rather than clear something unseen.
+                if let id = cursor.shipment,
+                    ShipmentsZone.rows(store).contains(where: { $0.id == id })
+                {
+                    cursor.shipment = nil
+                    Task { await store.clearShipment(id) }
+                    return true
+                }
                 if let addr = cursor.reading,
                     let rs = store.zones.reading.first(where: { $0.address == addr })
                 {

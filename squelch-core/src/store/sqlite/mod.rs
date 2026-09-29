@@ -24,6 +24,7 @@ mod migrate;
 mod notify;
 mod outbound;
 mod rules;
+mod scheduled;
 mod search;
 mod senders;
 mod specialists;

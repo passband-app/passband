@@ -659,6 +659,97 @@ pub struct OutboundAttachment {
     pub data: Vec<u8>,
 }
 
+/// The `CoreError::InvalidInput` message a scheduling answers when not every
+/// named file could move onto the row (unknown, swept, another account's, or
+/// held by another draft or scheduled send): the handler's
+/// `400 rejected:attachment_missing`.
+pub const ATTACHMENT_MISSING: &str = "attachment_missing";
+
+/// Where a [`ScheduledSend`] is in its life. Stored as the lowercase TEXT
+/// [`Self::as_str`] gives; see the `scheduled_sends` table comment in
+/// schema.sql for the transitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ScheduledSendState {
+    /// Waiting for `send_at`. The only state the worker claims from.
+    Scheduled,
+    /// Claimed by the worker under a lease: in Gmail's hands, NOT cancellable.
+    Sending,
+    Sent,
+    /// Out of retries; waits for the user ("send now" or cancel).
+    Failed,
+    Cancelled,
+}
+
+impl ScheduledSendState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Scheduled => "scheduled",
+            Self::Sending => "sending",
+            Self::Sent => "sent",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// `None` for text no build ever wrote.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "scheduled" => Self::Scheduled,
+            "sending" => Self::Sending,
+            "sent" => Self::Sent,
+            "failed" => Self::Failed,
+            "cancelled" => Self::Cancelled,
+            _ => return None,
+        })
+    }
+}
+
+/// One `scheduled_sends` row: a finished mail the daemon sends at `send_at`
+/// (docs/SCHEDULED-SEND.md).
+///
+/// HUMAN-DOOR ONLY, like [`Draft`]: produced for `/client/scheduled` and the
+/// scheduled-send worker, never synced, and no agent-door read reaches the
+/// table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduledSend {
+    pub id: i64,
+    pub account_id: AccountId,
+    /// The send route's JSON body, frozen at schedule time (`confirm` forced
+    /// true, `draft_id` stripped). CONTENT: never log or audit it.
+    pub request: String,
+    pub send_at: DateTime<Utc>,
+    pub state: ScheduledSendState,
+    /// Set while [`ScheduledSendState::Sending`], `None` otherwise.
+    pub lease_until: Option<DateTime<Utc>>,
+    /// Claims so far; the worker's claim increments it, a requeue does not.
+    pub attempts: u32,
+    /// Why the last attempt did not send: a REDACTED reason (a status, an
+    /// error class), NEVER mail content, since it is shown and kept.
+    pub last_error: Option<String>,
+    /// The `Message-ID` minted at schedule time, angle brackets included. The
+    /// crash-recovery key: searched for before any retry of a lapsed lease.
+    pub message_id_header: String,
+    /// Local `messages.id` of the sent copy's echo, once sent and echoed.
+    pub sent_message_id: Option<i64>,
+    pub sent_thread_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    /// The files this row has claimed, upload order. Metadata only.
+    pub attachments: Vec<OutboundAttachmentMeta>,
+}
+
+/// What [`SqliteStore::cancel_scheduled_send`](sqlite::SqliteStore::cancel_scheduled_send)
+/// found (the row is boxed only to keep the enum small). Three answers because the handler gives three: the cancelled row (its
+/// `request` reopens the composer), `409` for a row already in Gmail's hands,
+/// and `404` for an unknown id, another account's, or one that is already
+/// settled (`sent`/`cancelled`: there is nothing left to cancel).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CancelOutcome {
+    Cancelled(Box<ScheduledSend>),
+    Sending,
+    NotFound,
+}
+
 /// One non-confident triage row queued for the Stage-2 LLM pass, with message
 /// context and the matched Filtered-rule's `want_text`. Produced by
 /// [`Store::stage2_queue`], whose predicate (`model_used IS NULL AND

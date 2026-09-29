@@ -1097,6 +1097,11 @@ CREATE TABLE IF NOT EXISTS outbound_attachments (
     id          INTEGER PRIMARY KEY,
     account_id  INTEGER NOT NULL,
     draft_id    INTEGER,              -- NULL until a draft save claims it
+    -- The SECOND claim: set when scheduling moves the file from its draft to a
+    -- `scheduled_sends` row, cleared again by a cancel. At most one of the two
+    -- claim columns is set. Added to old DBs by migrate.rs; its index lives
+    -- there too, since this file runs before migrate.
+    scheduled_send_id INTEGER,
     filename    TEXT NOT NULL,
     mime        TEXT NOT NULL,
     size_bytes  INTEGER NOT NULL,
@@ -1107,6 +1112,55 @@ CREATE TABLE IF NOT EXISTS outbound_attachments (
 
 CREATE INDEX IF NOT EXISTS idx_outbound_attachments_draft
     ON outbound_attachments(account_id, draft_id);
+
+-- THE OUTBOX: mail the user has finished and told the daemon to send LATER
+-- (docs/SCHEDULED-SEND.md). HUMAN-DOOR DATA ONLY, like `drafts` and
+-- `outbound_attachments`: served on /client/scheduled, never synced, never
+-- visible on /mcp. The row lives in the daemon rather than the client so a
+-- closed laptop lid does not lose the mail.
+--
+-- NOT A DRAFT, on purpose. Drafts are edited by their KEYED UPSERT, and every
+-- autosave goes through it; a scheduled reply parked there would be rewritten
+-- the next time the user opened a reply to the same message. A frozen,
+-- guard-checked request needs to be unreachable by any autosave path.
+--
+-- `request` is the send route's own JSON body, frozen at schedule time
+-- (`confirm` forced true, `draft_id` stripped): every field the send body
+-- grows later is scheduled for free, and the worker deserializes and calls the
+-- same send the handler calls with no mapping code. CONTENT: never logged,
+-- never audited, never copied into `last_error`.
+--
+-- STATE MACHINE:
+--   scheduled --claim (lease)--> sending --settle--> sent
+--        ^                         |  |
+--        |---- retry / requeue ----'  '--settle (attempts spent)--> failed
+--   scheduled | failed --cancel--> cancelled      failed --send now--> scheduled
+-- A row is sent ONLY from `sending` under a lease, and a lease that lapsed
+-- (a crash mid-send) is answered by searching Gmail for `message_id_header`
+-- BEFORE the row is retried: that minted Message-ID is the whole double-send
+-- defense. `sending` is never cancellable: the mail is in Gmail's hands.
+-- `sent` and `cancelled` rows are swept a week after they settle.
+--
+-- Timestamps are RFC3339 text written by one formatter, so the `send_at <= ?`
+-- and `lease_until <= ?` comparisons are text comparisons that order right.
+CREATE TABLE IF NOT EXISTS scheduled_sends (
+    id                INTEGER PRIMARY KEY,
+    account_id        INTEGER NOT NULL,
+    request           TEXT NOT NULL,
+    send_at           TEXT NOT NULL,
+    state             TEXT NOT NULL DEFAULT 'scheduled',
+    lease_until       TEXT,              -- set while `sending`, NULL otherwise
+    attempts          INTEGER NOT NULL DEFAULT 0,
+    last_error        TEXT,              -- a REDACTED reason, never content
+    message_id_header TEXT NOT NULL,     -- `<uuid@passband>`, minted at schedule time
+    sent_message_id   INTEGER,           -- local echo id once sent
+    sent_thread_id    TEXT,
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_sends_due
+    ON scheduled_sends(account_id, state, send_at);
 
 -- OUTBOUND READ TRACKING. One `send_trackers` row per tracked send: the minted
 -- token IS the pixel URL's path segment, so it is the only thing a recipient's

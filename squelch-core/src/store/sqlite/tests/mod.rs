@@ -11,6 +11,7 @@ mod messages;
 mod migrate;
 mod notify;
 mod rules;
+mod scheduled;
 mod search;
 mod senders;
 mod spam;

@@ -458,9 +458,19 @@ extension ButtonStyle where Self == TextActionStyle {
         /// field editors — from the second click on: each left mouse-down
         /// turns background-moving off when it lands on text, and back on
         /// otherwise.
+        /// One monitor for the app's life: the configurator can be remade
+        /// when the root view is, and a second monitor would only repeat
+        /// the first. It reads the CURRENT shell window, so a remade window
+        /// is the one it serves.
+        private static var textMonitor: Any?
+        private static weak var shellWindow: NSWindow?
+
         private static func keepTextSelectable(in window: NSWindow) {
-            NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak window] event in
-                guard let window, event.window === window, let content = window.contentView
+            shellWindow = window
+            guard textMonitor == nil else { return }
+            textMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { event in
+                guard let window = shellWindow, event.window === window,
+                    let content = window.contentView
                 else { return event }
                 // `hitTest` takes a point in the receiver's superview, which
                 // for the content view is the frame view: window coordinates.

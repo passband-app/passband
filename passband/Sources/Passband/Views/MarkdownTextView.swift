@@ -139,8 +139,6 @@ struct MarkdownTextView: NSViewRepresentable {
     }
 }
 
-/// The NSTextView half: owns the re-style pass. Attribute changes never touch
-/// the characters, so the selection and undo stack survive every pass.
 /// THE EDITOR IS NOT A WINDOW HANDLE, and the only answer AppKit hears in
 /// time is the WINDOW's. The shell window moves by its background, and with
 /// `isMovableByWindowBackground` on at the moment of the mouse-down, a drag
@@ -181,6 +179,8 @@ final class EditorScrollView: NSScrollView {
     }
 }
 
+/// The NSTextView half: owns the re-style pass. Attribute changes never touch
+/// the characters, so the selection and undo stack survive every pass.
 final class HighlightingTextView: NSTextView {
     var onDropFiles: (([URL], Int?) -> Void)?
     var onPasteImage: ((Data, Int?) -> Void)?
@@ -234,6 +234,9 @@ final class HighlightingTextView: NSTextView {
             event.charactersIgnoringModifiers?.lowercased() == "z"
         else { return super.performKeyEquivalent(with: event) }
         let chord = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        // Read-only while a send is in flight: the chord is still ours (it
+        // must not fall through to the Inbox undo), but the body stays put.
+        if !isEditable, chord == .command || chord == [.command, .shift] { return true }
         switch chord {
         case .command:
             if undoManager?.canUndo == true { undoManager?.undo() }

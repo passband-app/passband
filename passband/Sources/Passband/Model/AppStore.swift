@@ -543,6 +543,38 @@ struct RuleEditorRequest: Identifiable, Sendable {
     var onResult: (@MainActor @Sendable (CreatedRule, CreateRuleBody) -> Void)?
     /// Called after a successful save so the opener re-fetches its list.
     var onSaved: (@MainActor @Sendable () -> Void)?
+
+    /// Which unsaved draft this card picks up, or nil when it must not pick one
+    /// up. One per thing the card is ABOUT: a sender, an existing rule, or the
+    /// blank create. A caller that hands over its own want text has already
+    /// written the sentence, so a stale draft does not get to overwrite it.
+    var draftKey: String? {
+        if let rule { return "rule:\(rule.id)" }
+        guard want == nil else { return nil }
+        if let sender { return "sender:\(SenderID.address(sender))|\(pattern ?? "")" }
+        return "new"
+    }
+}
+
+/// What a rule editor held when it was dismissed without saving (#306), so
+/// opening the same card again finds the half-written rule where it was left.
+/// In memory only: a draft is a sentence someone was halfway through, not a
+/// document, and it is gone at quit like the card's own state would be.
+struct RuleDraft {
+    var pattern: String
+    var want: String
+    var disposition: Disposition?
+    var advanced: Bool
+    /// What the card started from when this draft was written. A draft only
+    /// comes back over the SAME starting point: a rule edited somewhere else
+    /// since (the assistant, another device) opens on its new values, not
+    /// under a draft that would quietly revert them on save.
+    var origin: String = ""
+
+    /// The fields that decide whether two cards start from the same place.
+    var fingerprint: String {
+        [pattern, want, disposition?.rawValue ?? "auto"].joined(separator: "\u{0}")
+    }
 }
 
 /// What the group editor was opened with. `group` nil is a create; present is an
@@ -775,6 +807,9 @@ final class AppStore {
     var triageFix: TriageFixTarget?
     var remindTarget: RemindTarget?
     var ruleEditor: RuleEditorRequest?
+    /// Unsaved rule-editor cards by `RuleEditorRequest.draftKey`. Nothing
+    /// renders from this, so writing it on every dismiss invalidates nothing.
+    @ObservationIgnored var ruleDrafts: [String: RuleDraft] = [:]
     var groupEditor: GroupEditorRequest?
     var processModeOpen = false
     var askBarOpen = false {
@@ -1058,6 +1093,7 @@ final class AppStore {
         addAccountSheetOpen = false
         shareSheetOpen = false
         ruleEditor = nil
+        ruleDrafts = [:]
         remindTarget = nil
     }
 
@@ -1662,6 +1698,8 @@ final class AppStore {
         triageFix = nil
         remindTarget = nil
         ruleEditor = nil
+        // A draft's pattern names the old account's senders and rule ids.
+        ruleDrafts = [:]
         groupEditor = nil
         // Every revert closure targets the old account's daemon.
         undos = []

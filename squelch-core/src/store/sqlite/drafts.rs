@@ -199,16 +199,21 @@ impl SqliteStore {
     /// that claimed it (see `outbound_attachments` in schema.sql); a discarded
     /// draft's files would otherwise sit unreachable until the sweep, holding
     /// their bytes for nothing.
+    ///
+    /// ONE TRANSACTION, like `claim_outbound_attachments`: files gone with the
+    /// draft left standing (or the reverse) is a state neither door expects.
     pub fn delete_draft(&self, account_id: AccountId, id: i64) -> Result<bool> {
-        let conn = self.lock()?;
-        conn.execute(
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        tx.execute(
             "DELETE FROM outbound_attachments WHERE account_id = ?1 AND draft_id = ?2",
             params![account_id, id],
         )?;
-        let n = conn.execute(
+        let n = tx.execute(
             "DELETE FROM drafts WHERE account_id = ?1 AND id = ?2",
             params![account_id, id],
         )?;
+        tx.commit()?;
         Ok(n > 0)
     }
 }

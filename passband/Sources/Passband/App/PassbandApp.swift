@@ -94,14 +94,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // the test, so neither is skipped by a short-circuit.
             let pane = DraftSaver.shared.flush(.compose, store.compose)
             let inline = DraftSaver.shared.flush(.inlineReply, store.inlineReply)
-            guard store.hasHeldSends || pane || inline else { return .terminateNow }
-            if store.hasHeldSends { store.parkHeldSends(quitting: true) }
+            let held = store.hasHeldSends
+            guard held || pane || inline else { return .terminateNow }
+            if held { store.parkHeldSends(quitting: true) }
             // Before the first stats land, every save queued above first waits
             // up to `verdictWait` to learn which route to write by; a bound
             // shorter than that kills the process before the write it waited
-            // for. Once stats are in, the write goes out at once.
-            let limit: Duration = store.sitrep.stats == nil
-                ? DraftSaver.verdictWait + .seconds(2) : .seconds(3)
+            // for. Once stats are in, the write goes out at once, but a parked
+            // send and an edited pane composer share slot `.compose`, whose
+            // writes go one after the other: two round trips, and the parked
+            // one (never toasted, so nobody knows to look) is the one a short
+            // bound cuts on a slow daemon.
+            let limit: Duration =
+                store.sitrep.stats == nil
+                ? DraftSaver.verdictWait + .seconds(2) : held ? .seconds(8) : .seconds(3)
             Task { @MainActor in
                 // Whichever lands first answers; a reply of `true` ends the
                 // process, so the loser never gets to answer twice.

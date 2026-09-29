@@ -1700,7 +1700,11 @@ final class AppStore {
         draftsRows = []
         for pending in pendingDraftDeletes.values { pending.timer.cancel() }
         pendingDraftDeletes = [:]
-        deletedDraftIds = []
+        // The generation and the in-flight fetch list are NOT reset: an old
+        // account's fetch still in the air removes its own entry when it
+        // lands, and a rewound counter would let it prune the new account's
+        // tombstones early.
+        draftTombstones = [:]
         authRings = []
         authQueue = []
         tracking = nil
@@ -3163,7 +3167,7 @@ final class AppStore {
         // list taken before it lands restores the text as it was a keystroke
         // earlier (or finds no row at all).
         await DraftSaver.shared.settle()
-        guard e == epoch, let rows = try? await APIClient.shared.listDrafts() else { return }
+        guard e == epoch, let rows = await fetchDrafts() else { return }
         // Another account's drafts are not this composer's to restore, and
         // `forward_of_message_id` is a per-daemon id, so one WOULD match.
         guard e == epoch else { return }
@@ -3218,7 +3222,7 @@ final class AppStore {
         // flushed its last save fire-and-forget, and the newest row is exactly
         // the one that flush is writing.
         await DraftSaver.shared.settle()
-        guard e == epoch, let rows = try? await APIClient.shared.listDrafts() else { return }
+        guard e == epoch, let rows = await fetchDrafts() else { return }
         // Another account's drafts are not this composer's to restore.
         guard e == epoch else { return }
         // The fetch doubles as the drafts button's count; see `draftsRows`.
@@ -3252,7 +3256,11 @@ final class AppStore {
         else { return }
         // THE FETCH CORRECTS THE CACHE'S PAGE (see `openComposeNew`), but
         // only a page nobody has touched since: a reader who already went
-        // back to the composer, or to the list, keeps where they went.
+        // back to the composer, or to the list, keeps where they went. Both
+        // rules read this one test. A page toggle is a touch like a
+        // keystroke: rule 1 then restores nothing (filling a composer the
+        // reader has left for the list, or come back to on purpose blank,
+        // is second-guessing them), and rule 2 leaves the page alone.
         let corrected = next.page == opened
         guard let draft else {
             // Nothing recent to pick up. Older mail waiting lands on the
@@ -3268,8 +3276,9 @@ final class AppStore {
             }
             return
         }
+        guard corrected else { return }
         fill(&next, from: draft)
-        if corrected { next.page = .compose }
+        next.page = .compose
         compose = next
         await resolveDraftGroup()
     }
@@ -3314,29 +3323,90 @@ final class AppStore {
     func refreshDrafts() async {
         let e = epoch
         await DraftSaver.shared.settle()
-        guard e == epoch, let rows = try? await APIClient.shared.listDrafts(), e == epoch
-        else { return }
+        guard e == epoch, let rows = await fetchDrafts(), e == epoch else { return }
         adoptDraftsRows(rows)
     }
 
-    /// Store a fetched list, minus rows whose delete is still in its undo
-    /// window: the daemon has them until the hold ends, and a refetch inside
-    /// those five seconds must not bring a deleted draft back.
-    ///
-    /// AND minus rows whose delete already FIRED this session: a fetch that
-    /// left before the DELETE landed (a slow list, or one racing the DELETE
-    /// itself) carries the row, and adopting it would resurrect a draft the
-    /// reader deleted and watched the undo expire on.
+    /// Store a fetched list. `fetchDrafts` already took out rows that are
+    /// gone as far as the reader knows; this is only the cache write.
     private func adoptDraftsRows(_ rows: [DraftView]) {
-        draftsRows = rows.filter { !isDeleting($0.id) }
+        draftsRows = rows
     }
 
-    /// Whether this draft id is gone as far as the reader knows: its delete is
-    /// in the undo window, or already went out. Every read of a fetched list
-    /// (the cache, and all three restores) asks this, so no stale list can
-    /// bring a deleted draft back.
+    /// Bumped each time a draft row is known to have LEFT the daemon: a
+    /// DELETE that came back, or a send that took its row with it. A list
+    /// fetch records it when it leaves, which is how a landing fetch tells
+    /// "left before that row went" from "left after". See `draftTombstones`.
+    private var draftsGeneration = 0
+    /// Draft ids that left the daemon this account session, each with the
+    /// generation its removal completed at (`Int.max` while the DELETE is
+    /// still on the wire). A fetch that left BEFORE that generation may still
+    /// carry the row, and adopting it would resurrect a draft the reader
+    /// deleted (or sent) and watched go; a fetch that left AT or after it
+    /// cannot, so whatever it lists under that id is a NEW row.
+    ///
+    /// Which does happen: `drafts.id` is an `INTEGER PRIMARY KEY` without
+    /// AUTOINCREMENT, so deleting the highest-id draft and creating another
+    /// hands the same id straight back. A tombstone kept forever hid that
+    /// brand-new draft from the list and every restore until relaunch. So
+    /// each one is pruned as soon as no fetch that could carry the old row is
+    /// still in the air (`pruneDraftTombstones`).
+    private var draftTombstones: [Int: Int] = [:]
+    /// The start generations of list fetches still in the air, one entry per
+    /// fetch. A tombstone outlives the OLDEST of them, not merely the one that
+    /// just landed: fetches can land out of order, and a slow one that left
+    /// before the delete would otherwise land after a fast one pruned it.
+    private var draftFetchesInFlight: [Int] = []
+
+    /// The one way this store lists drafts: the daemon's rows minus every one
+    /// that is gone as far as the reader knows (see `isGone`), filtered HERE,
+    /// while this fetch's own entry still holds its tombstones in place. Nil
+    /// on failure, which every caller treats as "keep what you had".
+    private func fetchDrafts() async -> [DraftView]? {
+        let start = draftsGeneration
+        draftFetchesInFlight.append(start)
+        defer {
+            if let i = draftFetchesInFlight.firstIndex(of: start) {
+                draftFetchesInFlight.remove(at: i)
+            }
+            pruneDraftTombstones()
+        }
+        guard let rows = try? await APIClient.shared.listDrafts() else { return nil }
+        return rows.filter { !isGone($0.id, fetchedAt: start) }
+    }
+
+    /// Drop every tombstone no fetch still in the air could need: one whose
+    /// removal completed at or before the oldest in-flight fetch's start
+    /// (or at all, with none in flight). A DELETE still on the wire is
+    /// `Int.max` and stays.
+    private func pruneDraftTombstones() {
+        let floor = draftFetchesInFlight.min() ?? draftsGeneration
+        draftTombstones = draftTombstones.filter { $0.value > floor }
+    }
+
+    /// A draft row just left the daemon (its DELETE came back, or its send
+    /// did): stamp its tombstone with a fresh generation, so fetches already
+    /// in the air still drop it and later ones do not.
+    private func noteDraftGone(_ id: Int) {
+        draftsGeneration += 1
+        draftTombstones[id] = draftsGeneration
+        pruneDraftTombstones()
+    }
+
+    /// Whether a row a fetch that left at generation `start` listed is gone
+    /// as far as the reader knows: its delete is in the undo window, or it
+    /// left the daemon after that fetch did.
+    private func isGone(_ id: Int, fetchedAt start: Int) -> Bool {
+        if pendingDraftDeletes[id] != nil { return true }
+        guard let gone = draftTombstones[id] else { return false }
+        return gone > start
+    }
+
+    /// Whether this draft id's delete is in its undo window or on the wire.
+    /// Rows from `fetchDrafts` are already filtered; this is for the checks
+    /// made after, when a delete may have started since the list landed.
     private func isDeleting(_ id: Int) -> Bool {
-        pendingDraftDeletes[id] != nil || deletedDraftIds.contains(id)
+        pendingDraftDeletes[id] != nil || draftTombstones[id] == .max
     }
 
     /// What the drafts page lists: the cache minus rows a held or sending mail
@@ -3483,10 +3553,6 @@ final class AppStore {
     /// DELETE has to go out at exactly that moment, so the hold keeps its own
     /// timer (the `sendWithUndo` shape).
     private var pendingDraftDeletes: [Int: PendingDraftDelete] = [:]
-    /// Draft ids whose DELETE went out this account session; see
-    /// `adoptDraftsRows`. Tens at most, and ids are never reused by the
-    /// daemon, so it is never pruned, only cleared with the account.
-    private var deletedDraftIds: Set<Int> = []
 
     /// Delete a draft from the drafts page, with the app's five-second undo.
     ///
@@ -3497,9 +3563,11 @@ final class AppStore {
     /// files the delete had already released to the sweep.
     ///
     /// Refused for an inert row (the draft an open composer is editing), whose
-    /// close flush would bring it back; see `isInert`.
+    /// close flush would bring it back; see `isInert`. And for a held one,
+    /// whose send deletes it anyway and whose undo would reopen it.
     func deleteDraft(_ draft: DraftView) {
-        guard !isInert(draft), pendingDraftDeletes[draft.id] == nil else { return }
+        guard !isInert(draft), !isHeld(draft), pendingDraftDeletes[draft.id] == nil
+        else { return }
         let id = draft.id
         let e = epoch
         let index = draftsRows.firstIndex { $0.id == id } ?? draftsRows.count
@@ -3551,16 +3619,31 @@ final class AppStore {
         // An account switch inside the hold: the id belongs to the OLD
         // daemon's table and means a different row, or nothing, here.
         guard e == epoch else { return }
-        deletedDraftIds.insert(id)
+        // The row may have become LIVE during the hold: delete a reply draft,
+        // press `r` on its parent, type, and the debounce PUTs by key into
+        // this very row (it is still on the daemon). The DELETE would take
+        // that fresh text and its files with it. A held send owns its row the
+        // same way. Either one means the draft is kept after all: back in the
+        // list, and no error, because nothing failed.
+        if isInert(pending.draft) || isHeld(pending.draft) {
+            if !draftsRows.contains(where: { $0.id == id }) {
+                draftsRows.insert(pending.draft, at: min(pending.index, draftsRows.count))
+            }
+            return
+        }
+        // `Int.max` while on the wire: every fetch drops it until it lands.
+        draftTombstones[id] = .max
         do {
             try await APIClient.shared.deleteDraft(id)
+            if e == epoch { noteDraftGone(id) }
         } catch let error as APIError where error.kind == .notFound {
             // Already gone (sent, or deleted elsewhere). What was asked for.
+            if e == epoch { noteDraftGone(id) }
         } catch {
             guard e == epoch else { return }
             // The row is still on the daemon, so it goes back in the list
             // rather than hiding until the next fetch pretends it came back.
-            deletedDraftIds.remove(id)
+            draftTombstones[id] = nil
             if !draftsRows.contains(where: { $0.id == id }) {
                 draftsRows.insert(pending.draft, at: min(pending.index, draftsRows.count))
             }
@@ -3662,7 +3745,7 @@ final class AppStore {
         // A row whose delete is in its undo window (or went out) is gone as
         // far as the reader knows; restoring it would undo the delete.
         guard e == epoch,
-            let rows = try? await APIClient.shared.listDrafts(),
+            let rows = await fetchDrafts(),
             let draft = rows.first(where: { $0.reply_to_message_id == messageId }),
             !holdsDraft(replyTo: messageId), !isDeleting(draft.id)
         else { return }
@@ -3958,9 +4041,13 @@ final class AppStore {
             // sits in its band until the next poll, reading as a no-op.
             if let repliedTo = held.state.replyToMessageId { noteResolved(repliedTo) }
             // The send took its draft row with it; the cached list drops it now
-            // rather than offering sent mail until the next fetch.
+            // rather than offering sent mail until the next fetch. And a
+            // tombstone, as a DELETE gets: a list that left before the send
+            // returned still carries the row, and `isHeld` stopped covering it
+            // the moment the send came back.
             if let sentDraft = held.state.draftId {
                 draftsRows.removeAll { $0.id == sentDraft }
+                noteDraftGone(sentDraft)
             }
             pushToast("sent", .success)
             // Only an INLINE reply names its thread: the pane's mail (a new
@@ -4044,6 +4131,9 @@ final class AppStore {
             let savable = state.forwardOfMessageId == nil || draftsV2Available
             if savable && !sharesRow {
                 DraftSaver.shared.saveDetached(held.slot, state)
+                // The header's count says "it is in your drafts" too; it
+                // settles first, so it sees this save land.
+                Task { await refreshDrafts() }
                 pushToast("not sent: \(reason ?? "undone"). It is in your drafts", .error)
             } else {
                 pushToast(

@@ -29,10 +29,19 @@ const META_COLS: &str = "id, filename, mime, size_bytes, content_id";
 /// A claimed row belongs to something that will send it (today only a draft)
 /// and is never swept for age or re-claimed by another owner; `NOT ({CLAIMED})`
 /// is the unclaimed state an upload starts in. Changing this constant covers
-/// the claim path and the unclaimed arm of [`sweep`]; a second claim column
+/// the claim path, the send path ([`sendable`]) and the unclaimed arm of
+/// [`sweep`]; a second claim column
 /// (say a scheduled send's) ALSO needs its own orphan arm in `sweep` (rows
 /// whose referent is gone).
 pub(super) const CLAIMED: &str = "draft_id IS NOT NULL";
+
+/// A row a send may carry and consume: unclaimed, or claimed by the draft THIS
+/// send consumes (bound as `?3`, `NULL` for a draftless send, which then
+/// matches unclaimed rows only). The send-side twin of the claim path's
+/// `NOT ({CLAIMED})`: neither a claim nor a send may take another draft's file.
+fn sendable() -> String {
+    format!("(NOT ({CLAIMED}) OR draft_id = ?3)")
+}
 
 /// Drop this account's leftovers: unclaimed rows past the TTL, and rows
 /// claimed by a draft that no longer exists (every draft delete cascades, so
@@ -152,20 +161,27 @@ impl SqliteStore {
     /// account's) is simply absent from the result: the caller compares
     /// lengths and refuses the send, because a mail going out with fewer files
     /// than were reviewed is the one failure this table must never allow.
+    ///
+    /// SENDABLE BY THIS SEND ONLY: a row claimed by some OTHER draft is absent
+    /// too (see [`sendable`]), so a send cannot carry — and then consume —
+    /// a file another composition holds. `draft_id` is the draft this send
+    /// consumes, `None` for a send with no draft.
     pub fn outbound_attachments(
         &self,
         account_id: AccountId,
+        draft_id: Option<i64>,
         ids: &[i64],
     ) -> Result<Vec<OutboundAttachment>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(&format!(
             "SELECT {META_COLS}, data FROM outbound_attachments
-             WHERE account_id = ?1 AND id = ?2"
+             WHERE account_id = ?1 AND id = ?2 AND {}",
+            sendable()
         ))?;
         let mut out = Vec::with_capacity(ids.len());
         for id in ids {
             let row = stmt
-                .query_row(params![account_id, id], |r| {
+                .query_row(params![account_id, id, draft_id], |r| {
                     Ok(OutboundAttachment {
                         meta: map_meta(r)?,
                         data: r.get(5)?,
@@ -181,21 +197,24 @@ impl SqliteStore {
 
     /// The `(id, size_bytes, content_id)` of each staged file among `ids`, in
     /// the order asked, ids that name nothing absent — everything a send has
-    /// to refuse on, without a byte of the files themselves.
+    /// to refuse on, without a byte of the files themselves. The same
+    /// [`sendable`] filter as [`Self::outbound_attachments`].
     pub fn outbound_attachment_sizes(
         &self,
         account_id: AccountId,
+        draft_id: Option<i64>,
         ids: &[i64],
     ) -> Result<Vec<(i64, i64, String)>> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT id, size_bytes, content_id FROM outbound_attachments
-             WHERE account_id = ?1 AND id = ?2",
-        )?;
+             WHERE account_id = ?1 AND id = ?2 AND {}",
+            sendable()
+        ))?;
         let mut out = Vec::with_capacity(ids.len());
         for id in ids {
             let row = stmt
-                .query_row(params![account_id, id], |r| {
+                .query_row(params![account_id, id, draft_id], |r| {
                     Ok((
                         r.get::<_, i64>(0)?,
                         r.get::<_, i64>(1)?,
@@ -224,12 +243,22 @@ impl SqliteStore {
     /// Drop the files a send has CONSUMED. Called once the mail is away — the
     /// bytes are in the sent copy now, and a row that outlived its send would
     /// come back on the next draft restore as a file attached to nothing.
-    pub fn delete_outbound_attachments(&self, account_id: AccountId, ids: &[i64]) -> Result<()> {
+    /// Only rows this send could carry ([`sendable`]) go: a file another draft
+    /// claimed between the send's read and here stays with that draft.
+    pub fn delete_outbound_attachments(
+        &self,
+        account_id: AccountId,
+        draft_id: Option<i64>,
+        ids: &[i64],
+    ) -> Result<()> {
         let conn = self.lock()?;
-        let mut stmt =
-            conn.prepare("DELETE FROM outbound_attachments WHERE account_id = ?1 AND id = ?2")?;
+        let mut stmt = conn.prepare(&format!(
+            "DELETE FROM outbound_attachments
+             WHERE account_id = ?1 AND id = ?2 AND {}",
+            sendable()
+        ))?;
         for id in ids {
-            stmt.execute(params![account_id, id])?;
+            stmt.execute(params![account_id, id, draft_id])?;
         }
         Ok(())
     }
@@ -298,7 +327,9 @@ mod tests {
         assert_eq!(a.size_bytes, 3);
         assert_eq!(b.size_bytes, 2);
 
-        let got = store.outbound_attachments(acct, &[b.id, a.id]).unwrap();
+        let got = store
+            .outbound_attachments(acct, None, &[b.id, a.id])
+            .unwrap();
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].meta.id, b.id, "the caller's order, not the table's");
         assert_eq!(got[0].data, b"BB");
@@ -307,7 +338,9 @@ mod tests {
 
         // An id that names nothing is ABSENT, not an error: the length check
         // at the send is what refuses it.
-        let got = store.outbound_attachments(acct, &[a.id, 9999]).unwrap();
+        let got = store
+            .outbound_attachments(acct, None, &[a.id, 9999])
+            .unwrap();
         assert_eq!(got.len(), 1);
     }
 

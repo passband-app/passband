@@ -978,9 +978,16 @@ pub async fn delete_compose_attachment(
 /// whole send rather than going out without it, because the sender reviewed a
 /// tray and the mail must carry what the tray showed. Duplicated ids collapse
 /// to one file — one row is one part.
+///
+/// ANOTHER DRAFT'S FILE IS "GONE" TOO: a send may carry only files that are
+/// unclaimed or claimed by `draft_id`, the draft it consumes. The claim path
+/// already refuses to steal a claimed row; without the same rule here a send
+/// naming a foreign id would carry that file AND consume it on success,
+/// leaving the other draft pointing at nothing.
 async fn load_send_attachments(
     state: &ApiState,
     ids: &[i64],
+    draft_id: Option<i64>,
     target: Option<String>,
 ) -> Result<Vec<MailAttachment>, ApiError> {
     if ids.is_empty() {
@@ -999,7 +1006,7 @@ async fn load_send_attachments(
     let sizes = {
         let wanted = wanted.clone();
         store_call(state, move |store, account_id| {
-            store.outbound_attachment_sizes(account_id, &wanted)
+            store.outbound_attachment_sizes(account_id, draft_id, &wanted)
         })
         .await?
     };
@@ -1030,7 +1037,7 @@ async fn load_send_attachments(
         ));
     }
     let rows = store_call(state, move |store, account_id| {
-        store.outbound_attachments(account_id, &wanted)
+        store.outbound_attachments(account_id, draft_id, &wanted)
     })
     .await?;
     if rows.len() != count {
@@ -1081,12 +1088,12 @@ fn attachment_text_kinds(attachments: &[MailAttachment]) -> Vec<&'static str> {
 /// The staged files a send CONSUMED, dropped once the mail is away — the same
 /// contract as `discard_sent_draft`, and the same best-effort posture: the
 /// mail has left, so a failed cleanup is logged and never fails the request.
-async fn discard_sent_attachments(state: &ApiState, ids: Vec<i64>) {
+async fn discard_sent_attachments(state: &ApiState, draft_id: Option<i64>, ids: Vec<i64>) {
     if ids.is_empty() {
         return;
     }
     if store_call(state, move |store, account_id| {
-        store.delete_outbound_attachments(account_id, &ids)
+        store.delete_outbound_attachments(account_id, draft_id, &ids)
     })
     .await
     .is_err()
@@ -3464,7 +3471,9 @@ fn write_error(e: &WriteError) -> ApiError {
     }
 }
 
-/// Look up the (non-sealed) action target for a local message id.
+/// Look up the action target for a local message id. UNFILTERED: a sealed or
+/// restricted message resolves like any other (only another account's id or an
+/// unknown one fails), so any sealed gate belongs to the caller.
 async fn resolve_target(state: &ApiState, message_id: i64) -> Result<ActionMessageRef, ApiError> {
     store_call(state, move |store, account_id| {
         store.action_message_ref(account_id, message_id)
@@ -4062,7 +4071,7 @@ async fn finish_send(
             if let Some(draft_id) = draft_id {
                 discard_sent_draft(state, draft_id).await;
             }
-            discard_sent_attachments(state, attachment_ids.to_vec()).await;
+            discard_sent_attachments(state, draft_id, attachment_ids.to_vec()).await;
             audit_action(state, "send", target.clone(), &outcome).await;
             let echo_message_id = echo_sent(state, client, target, &sent).await;
             if let (Some((token, _)), Some(message_id)) = (&tracker, echo_message_id) {
@@ -4174,7 +4183,8 @@ pub async fn action_send(
     // THE FILES ARE READ FIRST, so a send naming a file that is gone is refused
     // before the guard spends anything — and so the guard can read them: a
     // text attachment is scanned exactly as a forward's would be.
-    let attachments = load_send_attachments(&state, &body.attachment_ids, target.clone()).await?;
+    let attachments =
+        load_send_attachments(&state, &body.attachment_ids, body.draft_id, target.clone()).await?;
     let mut matches = guard::scan_kinds(&body.body);
     for kind in attachment_text_kinds(&attachments) {
         if !matches.contains(&kind) {
@@ -4505,7 +4515,7 @@ async fn fan_out_send(
     if let Some(draft_id) = body.draft_id {
         discard_sent_draft(state, draft_id).await;
     }
-    discard_sent_attachments(state, body.attachment_ids.clone()).await;
+    discard_sent_attachments(state, body.draft_id, body.attachment_ids.clone()).await;
 
     Ok(Json(json!({
         "status": "sending",

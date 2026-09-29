@@ -7287,6 +7287,57 @@ async fn human_can_save_draft_for_restricted_parent_but_unknown_still_fails() {
     assert_eq!(list_drafts(&app).await.as_array().map(Vec::len), Some(1));
 }
 
+/// The forward key resolves its parent through the same unfiltered lookup as
+/// the reply key: a sealed parent is the human's to forward-draft, an unknown
+/// one is still a 404.
+#[tokio::test]
+async fn human_can_save_forward_draft_for_restricted_parent_but_unknown_still_fails() {
+    let Harness { app, store, acct } = harness(|store, acct| {
+        let s = store
+            .upsert_message(&msg(acct, "gmail-sealed", "t9", "code", "123456"))
+            .unwrap();
+        store
+            .set_triage(
+                s,
+                acct,
+                90,
+                Tier::Noise,
+                Sensitivity::Sealed,
+                Some(SealedKind::Otp),
+                "",
+                "",
+                None,
+            )
+            .unwrap();
+    });
+    let sealed_id = store.sealed_messages(acct).unwrap()[0].id;
+
+    for parent in [sealed_id, 999_999] {
+        let resp = app
+            .clone()
+            .oneshot(authed_json(
+                "PUT",
+                "/client/drafts",
+                serde_json::json!({ "forward_of_message_id": parent, "body": "fwd" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            if parent == sealed_id {
+                StatusCode::OK
+            } else {
+                StatusCode::NOT_FOUND
+            },
+            "human access and missing parent are distinct"
+        );
+    }
+    let drafts = store.list_drafts(acct).unwrap();
+    assert_eq!(drafts.len(), 1);
+    assert_eq!(drafts[0].forward_of_message_id, Some(sealed_id));
+    assert_eq!(list_drafts(&app).await.as_array().map(Vec::len), Some(1));
+}
+
 #[tokio::test]
 async fn drafts_list_carries_the_to_field_name_on_the_wire() {
     let Harness { app, .. } = harness(|_, _| {});
@@ -10489,6 +10540,149 @@ async fn a_send_naming_a_file_that_is_gone_is_refused_before_gmail() {
             .any(|a| a.action == "send"
                 && a.detail.as_deref() == Some("rejected:attachment_missing"))
     );
+}
+
+/// A send may carry only files that are unclaimed or claimed by the draft it
+/// consumes. Another draft's file is "no longer staged" as far as this send
+/// is concerned: refused before Gmail, and the file stays with its draft
+/// (a send that carried it would have consumed it on success).
+#[tokio::test]
+async fn a_send_naming_another_drafts_file_is_refused_and_the_file_survives() {
+    let (base, handle) = mock_gmail(0).await;
+    let Harness { app, store, acct } = app_with_writes(base, |_, _| {});
+    let theirs = stage(&app, "theirs.pdf", "application/pdf", "t1", b"T").await["id"]
+        .as_i64()
+        .unwrap();
+    let (status, holder) = draft_call(
+        &app,
+        "POST",
+        "/client/drafts",
+        serde_json::json!({ "body": "holder", "attachment_ids": [theirs] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(holder["attachments"].as_array().map(Vec::len), Some(1));
+    let (status, other) = draft_call(
+        &app,
+        "POST",
+        "/client/drafts",
+        serde_json::json!({ "body": "other" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // From another draft, and from no draft at all: both refused.
+    for draft_id in [other["id"].clone(), Value::Null] {
+        let resp = app
+            .clone()
+            .oneshot(authed_json(
+                "POST",
+                "/client/actions/send",
+                serde_json::json!({
+                    "to": "alice@example.com",
+                    "body": "see attached",
+                    "confirm": true,
+                    "draft_id": draft_id,
+                    "attachment_ids": [theirs]
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "draft_id {draft_id}"
+        );
+        let err = body_json(resp).await["error"].as_str().unwrap().to_string();
+        assert!(err.contains("no longer staged"), "{err}");
+    }
+    assert_eq!(handle.await.unwrap().len(), 0, "nothing reached Gmail");
+    let audit = store.list_audit(acct, 10).unwrap();
+    assert_eq!(
+        audit
+            .iter()
+            .filter(|a| a.action == "send"
+                && a.detail.as_deref() == Some("rejected:attachment_missing"))
+            .count(),
+        2
+    );
+    assert!(
+        store.outbound_attachment(acct, theirs).unwrap().is_some(),
+        "the file survives"
+    );
+    let holder_now = store
+        .draft_by_id(acct, holder["id"].as_i64().unwrap())
+        .unwrap()
+        .expect("the holder draft survives");
+    assert_eq!(
+        holder_now.attachments.len(),
+        1,
+        "still attached to its draft"
+    );
+    assert_eq!(list_drafts(&app).await.as_array().map(Vec::len), Some(2));
+}
+
+#[tokio::test]
+async fn a_send_carries_its_own_drafts_file_and_consumes_it() {
+    let (base, handle) = mock_gmail(1).await;
+    let Harness { app, store, acct } = app_with_writes(base, |_, _| {});
+    let mine = stage(&app, "mine.pdf", "application/pdf", "m1", b"MINE").await["id"]
+        .as_i64()
+        .unwrap();
+    let (_, draft) = draft_call(
+        &app,
+        "POST",
+        "/client/drafts",
+        serde_json::json!({ "body": "mine", "attachment_ids": [mine] }),
+    )
+    .await;
+    let resp = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            "/client/actions/send",
+            serde_json::json!({
+                "to": "alice@example.com",
+                "body": "see attached",
+                "confirm": true,
+                "draft_id": draft["id"],
+                "attachment_ids": [mine]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let reqs = handle.await.unwrap();
+    assert!(sent_mime(&reqs[0]).contains("filename=\"mine.pdf\""));
+    assert!(store.outbound_attachment(acct, mine).unwrap().is_none());
+    assert_eq!(list_drafts(&app).await.as_array().map(Vec::len), Some(0));
+}
+
+#[tokio::test]
+async fn a_draftless_send_carries_an_unclaimed_file_and_consumes_it() {
+    let (base, handle) = mock_gmail(1).await;
+    let Harness { app, store, acct } = app_with_writes(base, |_, _| {});
+    let loose = stage(&app, "loose.pdf", "application/pdf", "l1", b"LOOSE").await["id"]
+        .as_i64()
+        .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            "/client/actions/send",
+            serde_json::json!({
+                "to": "alice@example.com",
+                "body": "see attached",
+                "confirm": true,
+                "attachment_ids": [loose]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let reqs = handle.await.unwrap();
+    assert!(sent_mime(&reqs[0]).contains("filename=\"loose.pdf\""));
+    assert!(store.outbound_attachment(acct, loose).unwrap().is_none());
 }
 
 #[tokio::test]

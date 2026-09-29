@@ -481,11 +481,12 @@ enum AgentTools {
         return !domain.contains("*")
     }
 
-    /// New-message drafts the assistant has created this app session, and the
-    /// most it may; see `saveDraft`. Process-lifetime on purpose: a restart
-    /// is a person's act, and an account switch is not a reason to allow more.
-    @MainActor private static var newDraftsCreated = 0
-    private static let newDraftCap = 3
+    /// Drafts the assistant has created this app session (new mail AND
+    /// replies), and the most it may; see `saveDraft`. Process-lifetime on
+    /// purpose: a restart is a person's act, and an account switch is not a
+    /// reason to allow more.
+    @MainActor private static var draftsCreated = 0
+    private static let draftCap = 3
 
     @MainActor
     private static func saveDraft(_ input: [String: JSONValue]) async throws -> ToolOutcome {
@@ -497,6 +498,18 @@ enum AgentTools {
         let cc = string(input, "cc") ?? ""
         let bcc = string(input, "bcc") ?? ""
         let subject = string(input, "subject") ?? ""
+        // CAPPED, every kind, because nothing else bounds it: each call mints
+        // a row, a new message's always and a reply's for every parent that
+        // has none yet, so a prompt-injected loop ("draft a reply to each of
+        // these 40 threads") would bury the person's picker in mail nobody
+        // asked for. Three per app session is more than a real conversation
+        // needs; past it, the person decides.
+        guard draftsCreated < draftCap else {
+            return failure(
+                "\(draftCap) drafts already saved this session; ask the user to send "
+                    + "or discard one",
+                summary: "draft failed")
+        }
         if replyTo == nil {
             // NEW MAIL, under the same three-way gate as `DraftSaver.save`, and
             // for the same reason: with no stats verdict yet, the old nil-key
@@ -512,22 +525,10 @@ enum AgentTools {
                 // row of its OWN, so it cannot land on anything the person
                 // typed and there is no slot to check first. (The old check
                 // refused whenever ANY new-message draft existed, which is now
-                // the normal state.)
-                //
-                // CAPPED instead, because nothing else bounds it: every call
-                // mints a fresh row, so a prompt-injected loop ("save a draft
-                // for each of these...") would bury the person's picker in
-                // mail nobody asked for. Three per app session is more than a
-                // real conversation needs; past it, the person decides.
-                guard newDraftsCreated < newDraftCap else {
-                    return failure(
-                        "\(newDraftCap) drafts already saved this session; ask the user to send "
-                            + "or discard one",
-                        summary: "draft failed")
-                }
+                // the normal state.) The cap above is what bounds it instead.
                 let draft = try await APIClient.shared.createDraft(
                     to: to, cc: cc, bcc: bcc, subject: subject, body: body)
-                newDraftsCreated += 1
+                draftsCreated += 1
                 return ok(
                     row(["draft_id": draft.id, "reply_to_message_id": draft.reply_to_message_id]),
                     summary: "saved a draft")
@@ -559,6 +560,8 @@ enum AgentTools {
         }
         let draft = try await APIClient.shared.putDraft(
             replyToMessageId: replyTo, to: to, cc: cc, bcc: bcc, subject: subject, body: body)
+        // Only an empty slot reaches here, so this was a create: it counts.
+        draftsCreated += 1
         return ok(
             row(["draft_id": draft.id, "reply_to_message_id": draft.reply_to_message_id]),
             summary: "saved a draft")

@@ -45,9 +45,12 @@ struct DraftsList: View {
     /// Whether the composer behind this page holds anything to go back to:
     /// words, a saved row, or a parent (a reply or forward is somebody's
     /// mail even untouched). Decides the first row's words and what Esc does.
+    /// The row id through `DraftSaver.currentDraftId`, as `isInert` reads it:
+    /// a first save that came back after the slot last changed counts too.
     private var returning: Bool {
         guard let compose = store.compose else { return false }
-        return DraftSaver.hasContent(compose) || compose.draftId != nil
+        return DraftSaver.hasContent(compose)
+            || DraftSaver.shared.currentDraftId(of: compose) != nil
             || compose.replyToMessageId != nil || compose.forwardOfMessageId != nil
     }
 
@@ -201,7 +204,7 @@ struct DraftsList: View {
     private func bindings(_ rows: [DraftView]) -> [KeyBinding] {
         let current = cursor > 0 && rows.indices.contains(cursor - 1) ? rows[cursor - 1] : nil
         return [
-            KeyBinding("Escape", "back to the message") {
+            KeyBinding("Escape", returning ? "back to the message" : "close") {
                 if returning { back() } else { store.closeCompose() }
             },
             KeyBinding("ArrowDown", "next draft") {

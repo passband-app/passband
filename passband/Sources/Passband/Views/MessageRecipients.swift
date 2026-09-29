@@ -160,23 +160,31 @@ private struct RecipientLineView: View {
     let line: RecipientLine
     let size: CGFloat
 
-    /// ONE Text, not a stack of them: the names wrap mid-list the way a sentence
-    /// does, and a flow of chips here would take attention the message body has
-    /// more claim to. Concatenation is what lets one run carry three colours — a
-    /// `Text` + `Text` keeps each half's own styling.
+    /// ONE VIEW PER PERSON, flowed like a sentence, so each name is its own
+    /// door to that person's contact card (click) and copy menu (right-click),
+    /// exactly as the sender's name is. The line used to be one concatenated
+    /// `Text`, which wrapped mid-name but had nowhere to hang a gesture per
+    /// person; a flow of names wraps between people instead, which is where a
+    /// list of people should break anyway.
     ///
     /// SEPARATED BY A MIDDOT, not a comma, and that is not decoration: a display
     /// name is allowed to hold a comma ("Okafor, Daniel" is one person, which is
     /// the whole reason the split is quote-aware), and joining those names back
     /// together with commas hands the reader exactly the ambiguity the parser
-    /// just refused.
-    private var run: Text {
-        var out = Text("")
-        for (i, person) in line.people.enumerated() {
-            if i > 0 { out = out + Text(" · ").foregroundColor(Palette.inkFaintest) }
-            out = out + mark(person)
+    /// just refused. The dot rides on the END of the name before it, so a wrap
+    /// never starts a line with one.
+    private var run: some View {
+        FlowLayout(spacing: 0) {
+            ForEach(Array(line.people.enumerated()), id: \.element.id) { i, person in
+                HStack(spacing: 0) {
+                    mark(person)
+                        .contactCard(for: person.token)
+                    if i < line.people.count - 1 {
+                        Text(" · ").foregroundStyle(Palette.inkFaintest)
+                    }
+                }
+            }
         }
-        return out
     }
 
     private func mark(_ person: RecipientPerson) -> Text {
@@ -213,7 +221,6 @@ private struct RecipientLineView: View {
 
             run
                 .font(.system(size: size))
-                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }

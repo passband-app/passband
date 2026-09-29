@@ -183,6 +183,7 @@
 		765C0A73FABBBF4F7A041A83 /* HeroCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20CA62DECFED05021D0C9964 /* HeroCache.swift */; };
 		778A9FBEDBA350092B770844 /* Actions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10544C7DF8CDBA851AF0D9D8 /* Actions.swift */; };
 		7874B70E2E660A8F9446777F /* SpamNotice.swift in Sources */ = {isa = PBXBuildFile; fileRef = 848BEC54D1FCD1F0FC5BE1A5 /* SpamNotice.swift */; };
+		787AD75706177F4A8C038FC0 /* MessageRecipients.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FFFC29B07960820C815F66C /* MessageRecipients.swift */; };
 		78F890FF424189B1CDC6C501 /* newsreader-italic-var.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 83BF084E665545489EDF2D5E /* newsreader-italic-var.ttf */; };
 		7936BA935C085573F40A410E /* NotificationIcon.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88151BD4CF9D97EE43150B72 /* NotificationIcon.swift */; };
 		79648FA43CA52620F1B9832E /* Sessions.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA80DD18A355200FB6274585 /* Sessions.swift */; };
@@ -234,6 +235,7 @@
 		921ACE1D761AE0AD1F714980 /* MobileAuthView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E5E8356451742599F7D7A2A /* MobileAuthView.swift */; };
 		937272D25047533E99FAFE3A /* InlineReply.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5B001C6ABDDB051E2B57205 /* InlineReply.swift */; };
 		93FFF0E02F7D65ADCF4824D9 /* APIError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 37716282CFABFF5910677BBC /* APIError.swift */; };
+		964F8540CFA9F8C93CBB2C41 /* MessageRecipients.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FFFC29B07960820C815F66C /* MessageRecipients.swift */; };
 		96BF6FD479D7FDC147BC6C84 /* Passband.icon in Resources */ = {isa = PBXBuildFile; fileRef = C9CC93E238228B2BA4D4569A /* Passband.icon */; };
 		97EC2DEB9B2424CD580A8AD1 /* WebKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BBC8D81B089AFD24BD4AC367 /* WebKit.framework */; };
 		97F181221C34FBD4421A3349 /* GroupsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CC257E1C6D252919F11B337 /* GroupsView.swift */; };
@@ -452,6 +454,7 @@
 		1DD489E941E602E585098D3F /* EmailWebViewiOS.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmailWebViewiOS.swift; sourceTree = "<group>"; };
 		1EC7EBBF801C0364D402F94D /* Assistant.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Assistant.swift; sourceTree = "<group>"; };
 		1F0E547B2A7CA1DA951D255C /* Chrome.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Chrome.swift; sourceTree = "<group>"; };
+		1FFFC29B07960820C815F66C /* MessageRecipients.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageRecipients.swift; sourceTree = "<group>"; };
 		20CA62DECFED05021D0C9964 /* HeroCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeroCache.swift; sourceTree = "<group>"; };
 		22634771F8C0BE048B034866 /* WhatsNew.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhatsNew.swift; sourceTree = "<group>"; };
 		22B6CF4EF83BEF15EB372184 /* SitrepZones.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SitrepZones.swift; sourceTree = "<group>"; };
@@ -705,6 +708,7 @@
 				72CBF9D9D70A4E7B3BEC601D /* LiveInboxSummary.swift */,
 				A77BC580144CC1AF7B5B8AEF /* MarkdownStyle.swift */,
 				FF2D98A36AEF64366DD338AB /* MarkdownTextView.swift */,
+				1FFFC29B07960820C815F66C /* MessageRecipients.swift */,
 				5C787F920246CFD228F21747 /* OnboardingIntroView.swift */,
 				0AE10FD89ABF645A3F0617E5 /* PracticeProductTour.swift */,
 				3484EC544E0909F3D7A88E26 /* ProcessMode.swift */,
@@ -1253,6 +1257,7 @@
 				C14EABCB7D1F6C3C4B800311 /* Markdown.swift in Sources */,
 				F9571C6567D29994CCF6DBB2 /* MarkdownStyle.swift in Sources */,
 				7D46E9FB21A567E94CE3D748 /* MarkdownTextView.swift in Sources */,
+				964F8540CFA9F8C93CBB2C41 /* MessageRecipients.swift in Sources */,
 				F203E4786137371093270AB6 /* MinimapGeometry.swift in Sources */,
 				6FFB126258C28AC3F2E63D01 /* Motion.swift in Sources */,
 				371F0BF84F786E1C64657134 /* NeedToday.swift in Sources */,
@@ -1433,6 +1438,7 @@
 				063C1CF09D6E7CE57C547486 /* Markdown.swift in Sources */,
 				84F6860CDCC32C143703EF41 /* MarkdownStyle.swift in Sources */,
 				E4B1EE75A584D999AA58B0E2 /* MarkdownTextViewiOS.swift in Sources */,
+				787AD75706177F4A8C038FC0 /* MessageRecipients.swift in Sources */,
 				3036D5EBC31C8F05D10AAC8E /* MinimapGeometry.swift in Sources */,
 				BE9C340C64913DE9154BDCF0 /* MobileAgentView.swift in Sources */,
 				921ACE1D761AE0AD1F714980 /* MobileAuthView.swift in Sources */,

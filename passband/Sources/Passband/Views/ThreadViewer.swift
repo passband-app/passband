@@ -2091,7 +2091,10 @@ extension View {
                     if let message = preview?.messages.last {
                         MessageCard(
                             message: message, style: .classic, position: 0,
-                            selected: false, ruled: false, opens: [], onSelect: {})
+                            selected: false, ruled: false, opens: [],
+                            // A glimpse of the NEXT thread: no "you" rewrite and
+                            // no diff against a message it is not beside.
+                            me: nil, previousRecipients: nil, onSelect: {})
                     } else {
                         MessageSenderHeading(sender: row.senderString)
                             .padding(.leading, MessageCard.bodyInset)

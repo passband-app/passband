@@ -159,6 +159,7 @@ Everything is validated at startup and a bad value is a refusal to boot.
 | `SQUELCH_CONTROL_INVITE_FROM` | trio | The `From:` invites are sent as, e.g. `Passband <invites@passband.app>`. Must be an address on a domain **verified at Resend** or every send is refused. |
 | `SQUELCH_CONTROL_WAITLIST_ORIGIN` | no | The one browser origin allowed to post the public waitlist form, echoed as `Access-Control-Allow-Origin` on that route only, and the origin the signup page's "join the waitlist" link is built from (`<origin>/waitlist`). Default `https://passband.app`. Only meaningful with the trio above set; set alone it refuses to boot. |
 | `SQUELCH_CONTROL_TRUSTED_PROXY_HOPS` | no | How many proxies write `X-Forwarded-For` in front of this listener. `0` (default) meters the TCP peer, which behind a platform edge means one shared rate-limit bucket. Set `1` on Railway. |
+| `SQUELCH_CONTROL_ALERT_WEBHOOK_URL` | no | A Slack incoming webhook (https only). When set, control posts there when a signup ends half-finished, hits an already-set-up mailbox, or provisions a tenant it then cannot record, and on every finished signup. Label and VK ids only, never the mailbox. Fire and forget: Slack being down never slows or fails a signup. A SECRET: the URL is the whole credential. Unset = log lines only. |
 | `SQUELCH_CONTROL_LOG` | no | `tracing` filter. Default `info`. |
 
 There is deliberately **no age recipient variable**. It existed in v1, when one

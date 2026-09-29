@@ -144,9 +144,14 @@ pub async fn classify_llm(
 }
 
 /// The investigation schema exceeds Anthropic's strict grammar complexity
-/// limits. Use a forced native tool submission there; the agent still parses
-/// and validates every step before it can commit a decision. Other classifiers
-/// and the OpenAI transport retain their existing strict JSON schemas.
+/// limits, so the agent step is submitted through a native tool instead of
+/// `output_config.format`. The tool is NOT forced: Claude Opus 5.5 (and every
+/// model after it) answers `tool_choice: tool`/`any` with a 400, so the
+/// request sends `auto` and the system prompt tells the model to answer only
+/// by calling the tool. A turn that comes back without the call is
+/// `missing_agent_submission`, which the agent already spends a repair turn
+/// on; it still parses and validates every step before a decision can commit.
+/// Other classifiers and the OpenAI transport keep their strict JSON schemas.
 pub async fn classify_agent_step(
     http: &reqwest::Client,
     url: &str,
@@ -161,6 +166,14 @@ pub async fn classify_agent_step(
 }
 
 const AGENT_SUBMISSION_TOOL: &str = "submit_triage_step";
+
+/// A safety-classifier refusal of THIS content, from either lane. Retrying
+/// one re-buys the same refusal, thinking tokens included, so the worker
+/// fails the row once instead of walking `max_attempts`; the row stays
+/// inspectable and can be retried by hand.
+pub fn is_content_refusal(kind: &str) -> bool {
+    matches!(kind, "agent_refused" | "access_refused")
+}
 
 /// [`classify_llm`] plus the verdict parse: deserialize the raw text into `T`,
 /// then hand it to `finish` for the caller's own validation/repackaging (its
@@ -232,11 +245,23 @@ struct SystemBlock<'a> {
     cache_control: Option<CacheControl>,
 }
 
+/// The system block's cache marker. `ttl` is the ONE-HOUR duration, not the
+/// 5-minute default, and that is a measured choice: on the 5-minute TTL the
+/// prefix (system prompt plus the step schema, ~6.6k tokens) missed on 48% of
+/// steady-state triage calls, because a mailbox's arrivals are minutes to
+/// hours apart. A miss re-writes the whole prefix at 1.25x input price; the
+/// 1-hour write costs 2x but happens a few times a day instead of every other
+/// call, and it was 31% of the triage bill. Anthropic reports the split in
+/// `usage.cache_creation` so [`Usage::cache_creation`] can prove the field
+/// survived a fronting gateway (an integration that drops it silently falls
+/// back to 5 minutes, and `ephemeral_1h_input_tokens` stays at zero).
 #[derive(Debug, Serialize)]
 struct CacheControl {
     #[serde(rename = "type")]
     kind: &'static str,
+    ttl: &'static str,
 }
+const CACHE_TTL: &str = "1h";
 
 #[derive(Debug, Serialize)]
 struct RequestMessage<'a> {
@@ -330,6 +355,7 @@ impl OpenAiUsage {
             // OpenAI's wire has no prompt-cache split; the ledger records zero.
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            cache_creation: None,
         }
     }
 }
@@ -371,6 +397,20 @@ pub struct Usage {
     pub cache_creation_input_tokens: u64,
     #[serde(default)]
     pub cache_read_input_tokens: u64,
+    /// `cache_creation_input_tokens` split by TTL. Not a ledger column: it
+    /// rides along in each run's metadata so an operator can confirm from the
+    /// stored usage that the 1-hour TTL ([`CacheControl`]) reached the provider.
+    /// Absent when the provider (or a gateway in front of it) did not report it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation: Option<CacheCreationBreakdown>,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, Deserialize)]
+pub struct CacheCreationBreakdown {
+    #[serde(default)]
+    pub ephemeral_5m_input_tokens: u64,
+    #[serde(default)]
+    pub ephemeral_1h_input_tokens: u64,
 }
 
 /// The ledger records exactly the split the API reports, so a usage block maps
@@ -401,7 +441,10 @@ async fn classify_anthropic(
         system: vec![SystemBlock {
             kind: "text",
             text: req.system,
-            cache_control: Some(CacheControl { kind: "ephemeral" }),
+            cache_control: Some(CacheControl {
+                kind: "ephemeral",
+                ttl: CACHE_TTL,
+            }),
         }],
         messages: vec![RequestMessage {
             role: "user",
@@ -431,7 +474,7 @@ async fn classify_anthropic(
             "input_schema": req.schema,
         }]);
         body["tool_choice"] = serde_json::json!({
-            "type": "tool", "name": AGENT_SUBMISSION_TOOL, "disable_parallel_tool_use": true,
+            "type": "auto", "disable_parallel_tool_use": true,
         });
     }
 
@@ -798,7 +841,9 @@ mod tests {
                     assert_eq!(body["output_config"]["effort"], "low");
                     assert_eq!(body["tools"][0]["input_schema"], schema);
                     assert!(body["tools"][0].get("strict").is_none());
-                    assert_eq!(body["tool_choice"]["name"], AGENT_SUBMISSION_TOOL);
+                    // Never forced: a forced tool_choice is a 400 on Opus 5.5.
+                    assert_eq!(body["tool_choice"]["type"], "auto");
+                    assert!(body["tool_choice"].get("name").is_none());
                     assert_eq!(body["tool_choice"]["disable_parallel_tool_use"], true);
                     Json(json!({"content":content,"stop_reason":stop,"usage":{"input_tokens":11,"output_tokens":7}}))
                 }
@@ -862,6 +907,11 @@ mod tests {
         assert!(is_config_failure("http_402:payment_required"));
         assert!(is_config_failure("http_404:not_found_error"));
         assert!(!is_config_failure("max_tokens_truncation"));
+        // Refusals are row-level and terminal in both lanes, never config.
+        assert!(is_content_refusal("agent_refused"));
+        assert!(is_content_refusal("access_refused"));
+        assert!(!is_content_refusal("json_parse"));
+        assert!(!is_config_failure("agent_refused"));
         assert!(!is_config_failure("json_parse"));
         assert!(!is_config_failure("response_decode"));
         assert!(!is_config_failure("importance_out_of_range"));

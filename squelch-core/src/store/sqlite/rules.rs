@@ -53,18 +53,37 @@ fn map_pattern_conflict(e: rusqlite::Error) -> CoreError {
     }
 }
 
+/// How far back a sender-rule change re-triages that sender's mail. Beyond it
+/// only mail still holding the reader's attention (an unresolved thread, or
+/// one on FYE) is re-run; the rest keeps the placement it has.
+///
+/// Every re-triage is a full model investigation, and before this bound a
+/// rule change queued EVERY stored message from the matching senders: one
+/// click on a daily newsletter with a year of issues was hundreds of
+/// frontier-model calls to re-file mail nobody would scroll to. The same
+/// horizon the cutover uses for its backfill (`sync.backfill_days`' default).
+pub const PREFERENCE_RETRIAGE_DAYS: i64 = 30;
+
 /// A preference change requests fresh reasoning; it never rewrites placement.
-/// Queue messages already in the new pipeline. Historical cutover reads the
-/// current preferences when it eventually reaches untouched messages.
+/// Queue messages already in the new pipeline, bounded by
+/// [`PREFERENCE_RETRIAGE_DAYS`] plus anything still holding attention.
+/// Historical cutover reads the current preferences when it eventually reaches
+/// untouched messages.
 fn queue_preference_change(conn: &Connection, account: AccountId, patterns: &[&str]) -> Result<()> {
+    let since =
+        (chrono::Utc::now() - chrono::Duration::days(PREFERENCE_RETRIAGE_DAYS)).to_rfc3339();
     let ids = {
         let mut statement = conn.prepare(
             "SELECT m.id, m.from_addr FROM messages m
              JOIN agent_message_state a ON a.account_id=m.account_id AND a.message_id=m.id
-             WHERE m.account_id=?1",
+             WHERE m.account_id=?1
+               AND (m.received_at>=?2
+                    OR EXISTS(SELECT 1 FROM agent_thread_attention t
+                              WHERE t.account_id=m.account_id AND t.thread_id=m.thread_id
+                                AND (t.show_in_fye=1 OR t.unresolved_since IS NOT NULL)))",
         )?;
         statement
-            .query_map([account], |row| {
+            .query_map(params![account, since], |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?

@@ -110,10 +110,13 @@ private struct CalendarSeenMarker: ViewModifier {
 // MARK: - shipments
 
 /// Still-active shipments plus anything delivered TODAY; older deliveries drop
-/// out. No j/k, but each card opens its email and a context menu clears a
-/// package the user is done looking at.
+/// out. No j/k, but each card opens its email, and a context menu — or `e`
+/// while hovering, on the Mac — clears a package the user is done looking at.
 struct ShipmentsZone: View {
     @Environment(AppStore.self) private var store
+    /// The Mac board's hover cursor, for `e`. `nil` on the phone, which has no
+    /// hover and no keymap; the context menu is its only way to clear.
+    var cursor: SitrepCursor? = nil
     private var shipments: [Shipment] { store.zones.shipments }
 
     /// A delivered package survives the DAY IT LANDED, and that day is
@@ -140,7 +143,7 @@ struct ShipmentsZone: View {
                 EmptyNote("Nothing en route.")
             } else {
                 VStack(spacing: 8) {
-                    ForEach(rows) { ShipmentCard(shipment: $0) }
+                    ForEach(rows) { ShipmentCard(shipment: $0, cursor: cursor) }
                 }
             }
         }
@@ -151,6 +154,7 @@ struct ShipmentsZone: View {
 private struct ShipmentCard: View {
     @Environment(AppStore.self) private var store
     let shipment: Shipment
+    let cursor: SitrepCursor?
 
     @State private var hovering = false
 
@@ -330,7 +334,17 @@ private struct ShipmentCard: View {
         )
         .contentShape(Rectangle())
         .onTapGesture { if let target { store.openThread(target) } }
-        .onHover { hovering = $0 }
+        .onHover { over in
+            hovering = over
+            guard let cursor else { return }
+            // Only clear the slot if it is still OURS: sliding card to card can
+            // deliver the new card's enter before the old one's exit.
+            if over {
+                cursor.shipment = shipment.id
+            } else if cursor.shipment == shipment.id {
+                cursor.shipment = nil
+            }
+        }
         // A CONTEXT MENU rather than a chip or a swipe: the card's whole face is
         // already spoken for (the tap opens the email), and this rail is a VStack
         // of cards on both platforms, not a List — `swipeActions` would do

@@ -241,15 +241,32 @@ fn console(status: StatusCode, title: &str, body: &str) -> Response {
     render(status, title, body, r#" class="console""#)
 }
 
+/// The operator surface's own stylesheet, appended to the shell's only on the
+/// pages [`console`] renders. See the file itself for what it is doing; it is a
+/// file rather than more of the format string because it is long, and because
+/// it is plain CSS with single braces that can be edited as CSS.
+const CONSOLE_CSS: &str = include_str!("console.css");
+
+/// The backdrop behind every console page: a glow and the analyzer's
+/// graticule, fixed and still. `aria-hidden`, the same on every page, and NONE
+/// of it data: the sign in door renders it too, and that page names no
+/// waitlist, no counts, and no operator.
+const CONSOLE_CHROME: &str =
+    r#"<div class="fx" aria-hidden="true"><i class="glow"></i><i class="grat"></i></div>"#;
+
 fn render(status: StatusCode, title: &str, body: &str, body_class: &str) -> Response {
     let title = escape_html(title);
     let masthead =
         format!(r#"<header class="brand">{MARK}<span class="wordmark">Passband</span></header>"#);
+    let is_console = body_class == r#" class="console""#;
     let opening = if body_class == r#" class="auth""# {
         format!("{masthead}<main>")
+    } else if is_console {
+        format!("{CONSOLE_CHROME}<main>{masthead}")
     } else {
         format!("<main>{masthead}")
     };
+    let console_css = if is_console { CONSOLE_CSS } else { "" };
     let html = format!(
         r#"<!doctype html>
 <html lang="en">
@@ -276,10 +293,9 @@ main {{ max-width: 34rem; margin: 0 auto; }}
 .brand svg {{ height: 1.5rem; width: auto; flex: none; color: var(--brand); }}
 /* The brand's ONE serif moment, rationed the way the site and the Swift
    client's Typo ration it: Newsreader for the wordmark and nowhere else, since
-   a display serif spread further becomes wallpaper. Signup and sign-in pages load
-   the webfont from this origin (see `body.auth`); the operator console does not
-   declare it, so there it is named first for the reader who happens to have it
-   installed and the stack falls through to the platform's own serif. */
+   a display serif spread further becomes wallpaper. The webfont is served from
+   this origin and declared once in this sheet (see `body.auth`), so every page
+   that names it, the operator console's wordmark and heading included, gets it. */
 .wordmark {{ font-family: "Newsreader", ui-serif, Georgia, "Times New Roman", serif;
   font-size: 1.32rem; font-weight: 500; letter-spacing: -0.005em; }}
 /* The admin dashboard is the one page with a table, and the reading width the
@@ -375,83 +391,6 @@ a.button {{ display: inline-block; margin: 0.25rem 0 1.25rem; padding: 0.65rem 1
   .card {{ background: rgba(255, 255, 255, 0.055); border-color: rgba(255, 255, 255, 0.11); }}
   .alt, details {{ border-color: rgba(255, 255, 255, 0.11); }}
 }}
-/* THE OPERATOR'S SURFACE.
-   The landing page's ground, its mark and its type, and none of its selling: no
-   hero, no accent hardware, no motion. This is a page somebody reads in columns
-   and presses in a hurry, so it takes the dark field from that page and leaves
-   behind everything built to persuade.
-   ALWAYS DARK, in both palettes, exactly as the landing page is: nobody has a
-   light-mode Passband to match it to. That is why every colour the dark media
-   query above sets is RESTATED here instead of being inherited from it, which
-   would leave this page reading as warm paper for anybody whose OS is light. */
-/* THE ACCENT COMES WITH THE GROUND. `--brand` is the mark's ink ramp on light
-   and its lit ramp on dark, chosen by the media query above; this surface is
-   dark in BOTH, so it must state the dark one or a light-mode operator gets the
-   ink ramp on a near-black field. */
-body.console {{ --brand: #7cc8eb; background: #0f0f10; color: #f5f5f7; }}
-/* Wider ONLY when there is a board to lay out, the same way the base sheet
-   above widens for a table. The login door is one field, and a credential
-   stretched across fifty-four rems reads as a page that lost its layout. */
-body.console main:has(table) {{ max-width: 54rem; }}
-body.console .muted, body.console .hint, body.console th {{ color: #8a8a90; }}
-body.console code, body.console .code {{ background: rgba(255, 255, 255, 0.07); }}
-body.console :is(input[type=text], input[type=password], input[type=email]) {{
-  background: rgba(255, 255, 255, 0.04); border-color: rgba(255, 255, 255, 0.14); }}
-body.console button {{ background: #f5f5f7; color: #0f0f10; }}
-body.console button.quiet {{ background: none; color: #f5f5f7;
-  border-color: rgba(255, 255, 255, 0.2); }}
-body.console button.quiet:hover {{ border-color: rgba(255, 255, 255, 0.45); }}
-body.console :is(th, td) {{ border-bottom-color: rgba(255, 255, 255, 0.09); }}
-body.console .stop {{ border-left-color: #f2b8b5; }}
-/* The board says its own size, so the operator does not count rows to learn it. */
-body.console h1 {{ margin-bottom: 0; }}
-body.console .tally {{ color: #8a8a90; font-size: 0.9rem; margin: 0.3rem 0 2.5rem; }}
-/* Section headings as CONSOLE LABELS rather than document headings. This page
-   is three lists, not three chapters, and a heading that competes with the
-   addresses under it is a heading in the way. */
-body.console h2 {{ font-size: 0.72rem; font-weight: 600; text-transform: uppercase;
-  letter-spacing: 0.12em; color: #8a8a90; margin: 2.75rem 0 0.6rem; }}
-body.console h2 + .hint {{ margin: -0.2rem 0 1rem; }}
-/* THE COLUMNS ARE THE WHOLE POINT. The address is what gets read, so it takes
-   the width and the ink. The date and the button are looked at only after a row
-   has been picked, so they shrink to their contents and stay out of the scan:
-   `width: 1%` with nowrap is how a table is told to give a column exactly what
-   it needs and not one pixel more. It is also what stops a date breaking across
-   two lines in the middle of `2026-08-14`, which is what the narrow reading
-   column used to do to every row on the board. */
-body.console :is(td, th) {{ padding: 0.6rem 1.1rem 0.6rem 0; }}
-body.console td.who {{ color: #f5f5f7; }}
-body.console td.when {{ width: 1%; white-space: nowrap; color: #8a8a90;
-  font-size: 0.85rem; font-variant-numeric: tabular-nums; }}
-body.console :is(td.act, th:last-child) {{ width: 1%; white-space: nowrap;
-  text-align: right; padding-right: 0; }}
-/* THE ONE ROW THAT IS WRONG: approved, and nobody was told. Every other button
-   in a row is bordered rather than filled, so this is the only filled one among
-   them and the eye lands on it. (The direct-invite form at the foot of the page
-   is filled too, and should be: it is a form's submit, not one of forty
-   identical row actions, and it competes with nothing above it.) */
-body.console :is(.flag, .done) {{ display: inline-block; margin-right: 0.55rem;
-  padding: 0.12rem 0.55rem; border-radius: 999px; border: 1px solid;
-  font-size: 0.72rem; font-weight: 600; letter-spacing: 0.06em;
-  text-transform: uppercase; }}
-body.console .flag {{ color: #f2b8b5; border-color: rgba(242, 184, 181, 0.35); }}
-/* The other end of the funnel, and the reason this column exists: the invite
-   was spent, so there is a mailbox. Quieter than the red one, because a board
-   should draw the eye to what is broken before what worked. */
-body.console .done {{ color: var(--brand); border-color: rgba(124, 200, 235, 0.3); }}
-/* The direct invite: field and button on one row, at the foot of the board.
-   It used to sit BETWEEN the two lists, which split the one thing this page is
-   for (reading down a list of people) into two halves either side of a form. */
-body.console .invite {{ display: flex; gap: 0.5rem; max-width: 34rem; }}
-body.console .invite input {{ margin: 0; }}
-body.console .invite button {{ flex: none; }}
-/* The way out, at the foot of the board and quiet: it is the rarest press on
-   this page, and the session is long enough now that it needed to exist at all. */
-body.console .signout {{ margin: 2.75rem 0 0.6rem; }}
-/* A label the screen reader gets and the layout does not. The heading above the
-   row and the placeholder in it are enough on screen; neither is a label. */
-body.console .sr {{ position: absolute; width: 1px; height: 1px; overflow: hidden;
-  clip-path: inset(50%); white-space: nowrap; }}
 /* THE ACCOUNT PAGES WEAR THE LANDING PAGE (passband-site/App.tsx), token for
    token: its night ground, its analyzer graticule, Newsreader for the words
    that matter, and ONE material for controls, the dark machined "rig" edged in
@@ -584,7 +523,7 @@ body.auth::before {{ content: ""; position: fixed; inset: 0; z-index: -1; pointe
   .auth :is(a.button, button):is(:hover, :focus-visible) {{ transform: none; }}
   .auth :is(a.button, button):is(:hover, :focus-visible) .arrow {{ transform: none; }}
 }}
-</style>
+{console_css}</style>
 </head>
 <body{body_class} data-theme="{theme}">{opening}
 {body}</main></body>
@@ -1159,8 +1098,14 @@ pub fn admin_page(pending: &[UserRow], approved: &[UserRow], error: Option<&str>
                 .approved_at
                 .map(|at| format!("<br>approved {}", day(at)))
                 .unwrap_or_default();
+            // For the stylesheet only: an active row's pill is green.
+            let rung = if r.first_paired_at.is_some() {
+                r#" class="active""#
+            } else {
+                ""
+            };
             format!(
-                r#"<tr><td class="who">{who}</td><td class="when">joined {joined}{approved_on}</td><td class="act">{outcome}</td></tr>
+                r#"<tr{rung}><td class="who">{who}</td><td class="when">joined {joined}{approved_on}</td><td class="act">{outcome}</td></tr>
 "#,
                 who = who_cell(r),
                 joined = day(r.created_at),
@@ -1168,47 +1113,84 @@ pub fn admin_page(pending: &[UserRow], approved: &[UserRow], error: Option<&str>
         })
         .collect();
 
+    // "OF THOSE" NESTS, so an active person is counted in BOTH numbers:
+    // everybody active signed up. Partitioning them instead would make
+    // "3 signed up, 2 active" read as five people.
+    let accepted_count = approved.iter().filter(|r| r.signed_up_at.is_some()).count();
+    let active_count = approved
+        .iter()
+        .filter(|r| r.first_paired_at.is_some())
+        .count();
+    let rungs = [
+        Rung {
+            label: "waiting",
+            count: pending.len(),
+            colour: "var(--warn)",
+            of: None,
+        },
+        Rung {
+            label: "approved",
+            count: approved.len(),
+            colour: "var(--accent)",
+            of: None,
+        },
+        Rung {
+            label: "signed up",
+            count: accepted_count,
+            colour: "var(--accent-ink)",
+            of: Some((approved.len(), "approved")),
+        },
+        Rung {
+            label: "active",
+            count: active_count,
+            colour: "var(--positive)",
+            of: Some((accepted_count, "signed up")),
+        },
+    ];
+
     console(
         StatusCode::OK,
         "Waitlist",
         &format!(
-            r#"<h1>Waitlist</h1>
-<p class="tally">{waiting_count} waiting, {approved_count} approved recently,
+            r#"<section class="hero">
+<h1 data-text="Waitlist">Waitlist</h1>
+<p class="sr">{waiting_count} waiting, {approved_count} approved recently,
 {accepted_count} of those signed up, {active_count} of those active</p>
+</section>
+{scope}
 {error_html}
-<h2>Waiting</h2>
+<div class="racks">
+<section class="rack wait">
+<div class="rack-head"><span class="led"></span><h2>Waiting</h2><span class="count">{waiting_count}</span>
 <p class="hint">Approving mints one invite code and emails it. The code works
-once and expires in {ttl} days.</p>
+once and expires in {ttl} days.</p></div>
 {waiting_table}
-<h2>Approved recently</h2>
+</section>
+<section class="rack done-list">
+<div class="rack-head"><span class="led"></span><h2>Approved recently</h2><span class="count">{approved_count}</span></div>
 {history_table}
-<h2>Invite someone directly</h2>
+</section>
+<section class="rack send">
+<div class="rack-head"><span class="led"></span><h2>Invite someone directly</h2></div>
 <form class="invite" method="post" action="/admin/invite">
 <label class="sr" for="email">Email address</label>
 <input type="email" id="email" name="email" placeholder="them@example.com"
   autocomplete="off" autocapitalize="off" spellcheck="false" required>
 <button type="submit">Mint and email an invite</button>
 </form>
-<p class="hint">They do not have to be on the list. The address lands under
-Approved above and is tracked from there like everybody else. Nothing here can
-read a code back out, so a lost invite is replaced rather than resent, and a
-code that was already spent is not replaced at all.</p>
+<p class="hint">They do not have to be on the list first.</p>
+</section>
+</div>
+<div class="footer-row">
 <form class="signout" method="post" action="/admin/logout">
 <button type="submit" class="quiet">Sign out</button>
 </form>
-<p class="hint">This session lasts {session_days} days. Signing out ends it on
-this browser; rotating the admin token ends it everywhere.</p>"#,
+<p class="hint">This session lasts {session_days} days.</p>
+</div>"#,
+            scope = scope(&rungs),
             error_html = stop_note(error),
             waiting_count = pending.len(),
             approved_count = approved.len(),
-            // "OF THOSE" NESTS, so an active person is counted in BOTH numbers:
-            // everybody active signed up. Partitioning them instead would make
-            // "3 signed up, 2 active" read as five people.
-            accepted_count = approved.iter().filter(|r| r.signed_up_at.is_some()).count(),
-            active_count = approved
-                .iter()
-                .filter(|r| r.first_paired_at.is_some())
-                .count(),
             session_days = crate::cookie::ADMIN_COOKIE_TTL_SECS / (24 * 60 * 60),
             waiting_table = table(
                 r#"<th>Who</th><th>Joined</th><th></th>"#,
@@ -1222,6 +1204,127 @@ this browser; rotating the admin token ends it everywhere.</p>"#,
             ),
             ttl = crate::invites::DEFAULT_TTL_DAYS,
         ),
+    )
+}
+
+/// One rung of the funnel, as the scope draws it: a carrier with a marker.
+struct Rung {
+    label: &'static str,
+    count: usize,
+    /// A CSS colour, always one of the stylesheet's own variables. Never data.
+    colour: &'static str,
+    /// The rung this one is a fraction of, and its name, for the rate under it.
+    of: Option<(usize, &'static str)>,
+}
+
+/// The funnel as the landing page's analyzer would draw it: a noise floor with
+/// one carrier per rung standing out of it, and a marker on each peak.
+///
+/// THE PEAKS ARE THE DATA. Each carrier's height is its count on a log scale
+/// against the largest rung, so a board of 200 waiting and 3 active still
+/// shows three as a real signal rather than a flat line. A rung of zero is a
+/// carrier that is not there: just the floor, which is the honest picture.
+///
+/// THE NOISE IS NOT. It comes from a fixed seed, so the same counts draw the
+/// same trace on every refresh and the only thing that moves the picture is
+/// the funnel moving. Decoration that changed on every load would read as the
+/// data changing.
+///
+/// Everything here is numbers the server computed and labels it owns; no
+/// string from the store reaches the SVG, so there is nothing to escape.
+fn scope(rungs: &[Rung; 4]) -> String {
+    const W: f64 = 1000.0;
+    const H: f64 = 300.0;
+    const FLOOR: f64 = 262.0;
+    const RANGE: f64 = 200.0;
+    let centres = [125.0, 375.0, 625.0, 875.0];
+    let max = rungs.iter().map(|r| r.count).max().unwrap_or(0);
+    let heights: Vec<f64> = rungs
+        .iter()
+        .map(|r| {
+            if r.count == 0 || max == 0 {
+                0.0
+            } else {
+                // A single person still clears the floor by a visible margin.
+                36.0 + (RANGE - 36.0) * ((1 + r.count) as f64).ln() / ((1 + max) as f64).ln()
+            }
+        })
+        .collect();
+
+    // A tiny LCG: deterministic, dependency free, and plenty random for grass.
+    let noise = |seed: u64| {
+        let mut state = seed;
+        move || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 33) as f64) / ((1u64 << 31) as f64)
+        }
+    };
+    let signal = |x: f64| -> f64 {
+        centres
+            .iter()
+            .zip(&heights)
+            .map(|(c, h)| {
+                let d = x - c;
+                // A sharp Lorentzian carrier on a broad skirt, which is the
+                // shape a real carrier has through a resolution filter.
+                h * (0.8 / (1.0 + (d / 11.0).powi(2)) + 0.2 / (1.0 + (d / 55.0).powi(2)))
+            })
+            .sum()
+    };
+    let trace = |seed: u64, grass: f64| -> String {
+        let mut rnd = noise(seed);
+        let mut d = String::new();
+        let mut x = 0.0;
+        while x <= W {
+            let y = (FLOOR - grass * rnd() - signal(x)).max(8.0);
+            d.push_str(&format!(
+                "{}{x:.0} {y:.1}",
+                if x == 0.0 { "M" } else { "L" }
+            ));
+            x += 4.0;
+        }
+        d
+    };
+    let live = trace(7, 12.0);
+
+    let markers: String = rungs
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let top = (FLOOR - 12.0 - heights[i]).max(8.0);
+            format!(
+                r#"<i class="mkr" style="--c:{c};left:{l:.2}%;top:{t:.2}%"></i>"#,
+                c = r.colour,
+                l = centres[i] / W * 100.0,
+                t = top / H * 100.0,
+            )
+        })
+        .collect();
+    let readouts: String = rungs
+        .iter()
+        .map(|r| {
+            // A rate only where there is one to state. The top two rungs are
+            // just their counts.
+            let sub = match r.of {
+                Some((of, name)) if of > 0 => format!(
+                    r#"<div class="sub">{}% of {name}</div>"#,
+                    (r.count as f64 / of as f64 * 100.0).round()
+                ),
+                _ => String::new(),
+            };
+            format!(
+                r#"<div class="readout" style="--c:{c}"><div class="lbl">{label}</div><span class="num">{count}</span>{sub}</div>"#,
+                c = r.colour,
+                label = r.label,
+                count = r.count,
+            )
+        })
+        .collect();
+
+    format!(
+        r#"<figure class="scope" aria-hidden="true"><div class="scope-screen"><svg viewBox="0 0 {W} {H}" preserveAspectRatio="none"><path class="fill" d="{live} L{W} {H} L0 {H} Z"/><path class="trace" vector-effect="non-scaling-stroke" pathLength="4000" d="{live}"/></svg>{markers}</div><div class="readouts">{readouts}</div></figure>"#,
     )
 }
 

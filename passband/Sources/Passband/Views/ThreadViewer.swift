@@ -647,6 +647,22 @@ struct ThreadViewer: View {
             }
             .buttonStyle(.textAction)
             .help("unsubscribe from this sender")
+
+            // THE VERB YOU CAME HERE FOR, last, beside `back`: the far corner is
+            // where the way out lives, and `e` is the other way out. The same
+            // call as the key, so the reading stack advances here too instead
+            // of closing. Mac only — it is here to teach the key, and the phone
+            // resolves from the list's swipes.
+            #if os(macOS)
+                Button { Task { await doneAndClose() } } label: {
+                    HStack(spacing: 4) {
+                        Kbd("e")
+                        Text("done").font(Typo.micro)
+                    }
+                }
+                .buttonStyle(.textAction)
+                .help("mark done and close — d works too, and E moves to the next")
+            #endif
         }
     }
 

@@ -31,6 +31,7 @@ use crate::sync::ingest::{
 };
 use crate::triage::events;
 use crate::types::{AccountId, SenderRule};
+use futures::StreamExt;
 
 /// Gmail REST base for the authenticated user. Fixed; not user-tunable. `pub`
 /// so squelch-api's write path targets the same host from one definition.
@@ -353,11 +354,25 @@ fn subtract_ids(ids: Vec<String>, claimed: &[String]) -> Vec<String> {
 /// Gmail hiccup halfway through leaves by `?`. A pair left standing then would
 /// report a run that is not happening, which is a worse lie than the silence
 /// this replaced.
-struct CatchUpGuard<'a>(&'a crate::metrics::SyncMetrics);
+struct CatchUpGuard<'a> {
+    metrics: &'a crate::metrics::SyncMetrics,
+    window: &'a AtomicBool,
+}
+
+impl<'a> CatchUpGuard<'a> {
+    /// Also raises `window_in_flight` for the guard's lifetime, so the one
+    /// thing that says "a window is being fetched" is the same thing that says
+    /// how far along it is, and neither can be left standing without the other.
+    fn new(metrics: &'a crate::metrics::SyncMetrics, window: &'a AtomicBool) -> Self {
+        window.store(true, Ordering::Relaxed);
+        Self { metrics, window }
+    }
+}
 
 impl Drop for CatchUpGuard<'_> {
     fn drop(&mut self) {
-        self.0.catchup_end();
+        self.window.store(false, Ordering::Relaxed);
+        self.metrics.catchup_end();
     }
 }
 
@@ -695,11 +710,12 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// (revoked scope, Gmail outage) says so ONCE instead of once per poll. The
     /// next success re-arms it.
     unread_warned: AtomicBool,
-    /// HAS A POLL EVER SUCCEEDED IN THIS PROCESS, and has one succeeded since the
-    /// last one failed. Set by [`SyncEngine::poll_lane`] the moment `poll_once`
-    /// returns `Ok`; cleared by [`SyncEngine::run`] when a lifecycle bubbles an
-    /// `Err`. Read by [`SyncEngine::refine_lane`], which spends no model call
-    /// while it is false.
+    /// HAS GMAIL ANSWERED IN THIS PROCESS, and has it answered since the last
+    /// failure. Set by [`SyncEngine::poll_lane`] the moment `poll_once` returns
+    /// `Ok`, and by [`SyncEngine::backfill_inner`] the moment the first run's
+    /// INBOX listing does; cleared by [`SyncEngine::run`] when a lifecycle
+    /// bubbles an `Err`. Read by [`SyncEngine::refine_lane`], which spends no
+    /// model call while it is false.
     ///
     /// THIS EXISTS BECAUSE A CANCELLED MODEL CALL IS STILL BILLED. The lane split
     /// made the refine lane a sibling of the poll lane under one `select!`, so a
@@ -719,14 +735,32 @@ pub struct SyncEngine<S: Store, C: CredentialStore + ?Sized> {
     /// FALSE AT STARTUP, deliberately, so not even the first cycle can spend on a
     /// dead credential: the cost is that the refine lane waits out one poll
     /// interval on a healthy daemon before its first steady-state round, which
-    /// `run_once` has already covered on a first run (it runs the passes inline)
-    /// and which is `sync.poll_secs` — 5 seconds by default — on every other.
+    /// is `sync.poll_secs` — 5 seconds by default. A FIRST RUN has no poll to
+    /// wait for: the refine lane runs beside the backfill there (see
+    /// [`SyncEngine::run_once`]), and the backfill's own INBOX listing is the
+    /// proof that flips this, see [`SyncEngine::backfill_inner`].
     ///
     /// It restores exactly what the serial loop gave for free: `poll_once().await?`
     /// returned before any pass started, so a Gmail outage cost zero model calls.
     /// `Relaxed` throughout: this is a hint that costs at most one pass either way,
     /// never a lock.
     poll_healthy: AtomicBool,
+    /// DID THIS LIFECYCLE POLL, for [`SyncEngine::run`]'s backoff alone. It used
+    /// to read `poll_healthy` for that, which was fine while only a poll could
+    /// set it. Now a first run's listing sets `poll_healthy` too (so the refine
+    /// lane may spend beside the backfill), and a first run that lists fine and
+    /// then fails the same way every time (one body Gmail will not serve, a
+    /// scope that covers `list` but not `get`) must still back off to the cap
+    /// rather than re-list the whole window every two seconds. Set only by the
+    /// poll lane, swapped out by `run()`.
+    polled_ok: AtomicBool,
+    /// A WINDOW OF MAIL IS BEING FETCHED: the first backfill or a catch-up.
+    /// Held true by [`CatchUpGuard`] for exactly as long as the progress pair
+    /// stands, and read by [`SyncEngine::refine_lane`], which does not drain
+    /// vectors while it is. Its own flag rather than the progress gauge because
+    /// the gauge is for display, and control flow hung off a display value
+    /// comes back to bite when the display changes.
+    window_in_flight: AtomicBool,
     /// Shared cooldown after provider failure. Rejected configuration must not
     /// trigger one request per queued message or consume message retry attempts.
     agent_retry_after: AtomicI64,
@@ -798,6 +832,8 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             unread_warned: AtomicBool::new(false),
             // Nothing has polled yet, so nothing may spend yet.
             poll_healthy: AtomicBool::new(false),
+            polled_ok: AtomicBool::new(false),
+            window_in_flight: AtomicBool::new(false),
             agent_retry_after: AtomicI64::new(0),
             metrics: SyncMetrics::new(),
             api_base: GMAIL_API_BASE.to_string(),
@@ -1085,38 +1121,51 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             })
     }
 
-    /// One full lifecycle: backfill if needed (establishing the historyId), then
-    /// run the two steady-state lanes ([`Self::run_lanes`]) until an error
-    /// bubbles up (caller retries with backoff) or shutdown.
+    /// One full lifecycle: the first-run backfill if there is no cursor yet,
+    /// then the steady-state lanes ([`Self::run_lanes`]) until an error bubbles
+    /// up (caller retries with backoff) or shutdown.
     ///
-    /// The first-run sequence below is deliberately still SERIAL: on a brand-new
-    /// mailbox there is nothing to poll for concurrently, the backfill has to
-    /// finish before the history cursor exists at all, and running the passes
-    /// inline is what makes the first thing the user ever sees a triaged inbox
-    /// rather than an untriaged one.
+    /// THE FIRST RUN IS NOT SERIAL ANY MORE. It used to be backfill, then one
+    /// inline triage batch, then the lanes, on the theory that the first thing
+    /// the user saw should be a triaged inbox rather than an untriaged one. In
+    /// practice the inline batch was `concurrency` rows out of a month of mail
+    /// and the rest drained in the refine lane once the lanes started, so what
+    /// the user actually saw was "Catching up N of M" for the length of the
+    /// download and then a board that filled in a trickle. Now the refine lane
+    /// runs BESIDE the backfill: ingest queues a `backfill` job per row as it
+    /// lands, the lane claims in ingest order, which is the listing's order,
+    /// newest first, and the board fills while the download is still going.
+    ///
+    /// The known-contact signal is what this costs. Contacts are seeded from
+    /// the SENT leg, which runs after INBOX, so a first-run verdict on an INBOX
+    /// row sees its sender as a stranger. Accepted for the first pass: a fast
+    /// first board beats a marginally better one, and a re-triage repairs any
+    /// row it turns out to matter for.
+    ///
+    /// The backfill sits at the HEAD OF THE POLL LANE'S FUTURE rather than in
+    /// front of the lanes (see [`Self::run_lanes`]): there is no cursor to poll
+    /// from until it establishes one, so "backfill, then poll" is the poll
+    /// lane's own story, and telling it there is what makes the refine lane ONE
+    /// future across both phases. A select boundary between the two would be a
+    /// cancellation point on every healthy first run: the model calls in flight
+    /// when the last body landed would be dropped mid-call, paid for (the budget
+    /// charges before the call and never refunds) and their rows left leased
+    /// for the whole lease, untriaged on the board a new user is looking at.
     async fn run_once(&self, shutdown: &mut tokio::sync::watch::Receiver<bool>) -> Result<()> {
         eprintln!("squelch: gmail REST sync starting for <redacted account>");
 
         // First run (no history cursor) => full backfill + seed contacts.
-        let cursor = self.load_history_cursor()?;
-        if cursor.is_none() {
-            // BEFORE the backfill, and only before the FIRST one: every row it
-            // ingests gets its vector written at ingest, one message at a time,
-            // provided the embedder is there to write it. Start without one and
-            // the whole 30-day window lands unembedded, to be drained in batches
-            // afterwards instead. See [`SyncEngine::with_embedder_gate`].
-            if !self.wait_for_embedder(shutdown).await {
-                return Ok(());
-            }
-            self.backfill().await?;
-            // Stage-1, then Stage-2 over what Stage-1 escalated, then the
-            // specialist extractors over each row's FINAL category.
-            self.agent_triage_pass().await;
+        let first_run = self.load_history_cursor()?.is_none();
+        // BEFORE the backfill, and only before the FIRST one: every row it
+        // ingests gets its vector written at ingest, one message at a time,
+        // provided the embedder is there to write it. Start without one and
+        // the whole 30-day window lands unembedded, to be drained in batches
+        // afterwards instead. See [`SyncEngine::with_embedder_gate`].
+        if first_run && !self.wait_for_embedder(shutdown).await {
+            return Ok(());
         }
 
-        self.backfill_missing_vectors().await;
-
-        self.run_lanes(shutdown).await
+        self.run_lanes(shutdown, first_run).await
     }
 
     /// First-run backfill: INBOX bodies over the window, then SENT headers to
@@ -1141,11 +1190,17 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         let inbox_ids = self
             .list_message_ids_capped(LABEL_INBOX, Some(&q), None, GmailRetry::CatchUp)
             .await?;
+        // GMAIL ANSWERED, and a first run has no poll to say so. The refine
+        // lane runs beside this backfill (see [`Self::run_once`]) and spends
+        // nothing until this flag is true; the listing is the same proof a
+        // poll gives, that the credential works, so it is set here, before the
+        // first body is fetched, and the lane starts on rows as they land.
+        self.poll_healthy.store(true, Ordering::Relaxed);
         // THE FIRST RUN IS PROGRESS, not an outage. It runs for many minutes
         // before the first poll, and without a denominator the client could
         // only say "not synced yet" over it. Reported on the catch-up pair,
         // which is what it is from outside: a known amount of mail arriving.
-        let _guard = CatchUpGuard(&self.metrics);
+        let _guard = CatchUpGuard::new(&self.metrics, &self.window_in_flight);
         self.metrics.catchup_begin(inbox_ids.len() as u64);
         // Backfill NEVER notifies (see `IngestOrigin`).
         let n = self
@@ -1229,11 +1284,25 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     ///   because `changed()` needs `&mut`, and a clone starts out having seen
     ///   the current value, which is why each lane still checks `borrow()` at
     ///   the top of its own loop rather than trusting the wakeup.
-    async fn run_lanes(&self, shutdown: &mut tokio::sync::watch::Receiver<bool>) -> Result<()> {
+    ///
+    /// `backfill_first` is the first run: the poll lane's future then begins
+    /// with the backfill and continues into polling, and the other two lanes
+    /// run across both unbroken. See [`Self::run_once`] for why that shape and
+    /// not a select in front of this one.
+    async fn run_lanes(
+        &self,
+        shutdown: &mut tokio::sync::watch::Receiver<bool>,
+        backfill_first: bool,
+    ) -> Result<()> {
         let mut refine_shutdown = shutdown.clone();
         let mut notify_shutdown = shutdown.clone();
         tokio::select! {
-            polled = self.poll_lane(shutdown) => polled,
+            polled = async {
+                if backfill_first {
+                    self.backfill().await?;
+                }
+                self.poll_lane(shutdown).await
+            } => polled,
             () = self.agent_notification_lane(&mut notify_shutdown) => Ok(()),
             // Only ever completes on shutdown; it has no error to report.
             () = self.refine_lane(&mut refine_shutdown) => Ok(()),
@@ -1271,6 +1340,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             // poke and reads a flag that is true by the time it does. See the
             // field's own doc for what this is protecting.
             self.poll_healthy.store(true, Ordering::Relaxed);
+            self.polled_ok.store(true, Ordering::Relaxed);
             // THE freshness stamp for a healthy daemon: `run()` only records one
             // on its way out, and a mailbox that polls happily for a month never
             // goes there — staleness alerts would fire on the boot timestamp.
@@ -1354,7 +1424,22 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 // and the next healthy round picks up whatever is missing. One
                 // shape for the whole round is easier to reason about than a
                 // half-round.
-                self.backfill_missing_vectors().await;
+                //
+                // NOT WHILE A WINDOW IS BEING FETCHED. This lane runs beside the
+                // first backfill now (see `run_once`), and a drain in the middle
+                // of one is wrong both ways: with an embedder, every row is
+                // embedded at ingest a moment AFTER its commit, so the drain's
+                // query keeps finding the row that is mid-embed and embeds it a
+                // second time, one ONNX pass per message thrown away on the CPU
+                // the backfill needs; without one (the gate released at its
+                // ceiling), the batch drain's own peak (`EmbedConfig::
+                // backfill_batch`) would land on top of the backfill's instead
+                // of after it, which is the exact watermark `crate::mem` is
+                // built to avoid. The first round after the guard drops drains
+                // whatever the window left behind, beside the first poll.
+                if !self.window_in_flight.load(Ordering::Relaxed) {
+                    self.backfill_missing_vectors().await;
+                }
             }
 
             // A poke that arrives mid-round is not lost, for the same reason a
@@ -1614,7 +1699,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         // It is held ACROSS the trim on purpose: handing the heap back is part
         // of the catch-up as seen from outside, so progress clears when the
         // whole thing is done rather than when the last fetch returns.
-        let _guard = CatchUpGuard(&self.metrics);
+        let _guard = CatchUpGuard::new(&self.metrics, &self.window_in_flight);
         let out = self.catch_up_inner().await;
         crate::mem::trim_off_runtime().await;
         out
@@ -2235,9 +2320,37 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         let rules = self.store.list_sender_rules(self.account_id)?;
         let mut count = 0usize;
 
-        for id in ids {
-            let url = format!("{}/messages/{id}?format=raw", self.api_base);
-            let msg: GmailMessage = self.get_json_with_retry(&url, retry).await?;
+        // FETCHES OVERLAP, INGEST DOES NOT. Up to `sync.fetch_concurrency`
+        // GETs are in flight at once, each paced by the shared Gmail budget on
+        // its way out, so the budget is the only limiter rather than the sum
+        // of one round trip plus one ingest plus one embedding per message.
+        // `FuturesOrdered`, not unordered: rows are ingested in listing order,
+        // newest first, because that is the order the refine lane claims them
+        // in and the order the board should fill in. The window is topped up
+        // BEFORE the row just fetched is ingested, so the wire stays full while
+        // the store and the embedder do their part.
+        //
+        // A hand-rolled window rather than `StreamExt::buffered` because a
+        // closure returning a future that borrows `self` makes the whole
+        // lifecycle future non-`Send` under rustc's current rules, and `run()`
+        // is spawned.
+        //
+        // An `Err` from any fetch drops the window, which cancels the GETs
+        // still in flight. The retry re-lists, and ingest is idempotent.
+        let width = self.config.sync.fetch_concurrency.max(1);
+        let mut queue = ids.iter().map(String::as_str);
+        let mut window = futures::stream::FuturesOrdered::new();
+        for id in queue.by_ref().take(width) {
+            window.push_back(self.fetch_raw_message(id, retry));
+        }
+
+        while let Some(next) = window.next().await {
+            // AFTER the `?`, so a failed fetch does not push one more GET
+            // through the budget only to drop it with the window.
+            let (id, msg, now) = next?;
+            if let Some(id) = queue.next() {
+                window.push_back(self.fetch_raw_message(id, retry));
+            }
             // Only a catch-up has a denominator, so this is a no-op on the
             // ordinary incremental path — `catchup_step` moves a gauge that is
             // zero unless `catch_up` set one up. A line every 50 messages
@@ -2265,7 +2378,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             let fetched = RawFetched {
                 account_id: self.account_id,
                 gmail_msg_id: if msg.id.is_empty() {
-                    id.clone()
+                    id.to_string()
                 } else {
                     msg.id.clone()
                 },
@@ -2277,11 +2390,14 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 account_addr: self.account_email.clone(),
             };
             // THE CLOCK IS READ PER MESSAGE AND AFTER ITS FETCH, not once for the
-            // batch, and that is load bearing rather than tidy. This value is what
+            // batch, and that is load bearing rather than tidy. `now` came back
+            // with the message from [`Self::fetch_raw_message`], taken the
+            // instant its GET returned and before it waited its turn behind the
+            // rows ahead of it in the window. This value is what
             // `notify_eligible_stamp` records as "the moment we first saw the
             // message" (docs/NOTIFY.md §11.3) and what the rescue ceiling is
-            // measured from, and this loop is SEQUENTIAL over one `format=raw` GET
-            // per id: `catch_up` runs it over the whole backfill window, which
+            // measured from, and this loop walks the whole window a few GETs at
+            // a time: `catch_up` runs it over the whole backfill window, which
             // [`Self::catch_up_inner`]'s own comment records taking half an hour
             // for a real tenant. Frozen at the top of the function, both
             // directions are wrong:
@@ -2299,11 +2415,12 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             //   post-outage path where notifications matter most.
             //
             // AFTER the GET rather than before it, so a slow fetch is charged to
-            // the fetch and not to the message's rescue window. It costs one
-            // `clock_gettime` per network round trip. `ingest_with_rules` reads
-            // the same value; it is a pure function of the message and the clock,
-            // so per-message is simply the more truthful "now" for it too.
-            let now = Utc::now();
+            // the fetch and not to the message's rescue window; and at the GET
+            // rather than here, so the ingest and embedding of the rows ahead
+            // are not charged to it either. It costs one `clock_gettime` per
+            // network round trip. `ingest_with_rules` reads the same value; it
+            // is a pure function of the message and the clock, so per-message is
+            // simply the more truthful "now" for it too.
             let Some(ingested) = self.ingest_one(&fetched, &rules, now, origin)? else {
                 count += 1;
                 continue;
@@ -2326,22 +2443,42 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 self.embed_and_store(ingested.id, text).await;
             }
             count += 1;
-        }
-        // POLL LANE -> REFINE LANE. Poked from here rather than from the poll
-        // loop because this is the one place that knows BOTH facts the poke
-        // needs: how many rows actually landed, and which sync path they landed
-        // on. `Notify` stores a permit when nobody is waiting, so a poke that
-        // arrives while the refine lane is mid-round wakes it as soon as it
-        // finishes, and several pokes in one round collapse into one.
-        //
-        // BACKFILL DOES NOT POKE. The first backfill's refinement is run inline
-        // by `run_once` before either lane starts, so a poke would only queue a
-        // redundant round; and the poke means "mail that may be genuinely new is
-        // waiting", which a backfill's month of already-read mail is not.
-        if count > 0 && origin == IngestOrigin::Incremental {
-            self.refine_wake.notify_one();
+            // POLL LANE -> REFINE LANE, PER ROW. Poked from here rather than
+            // from the poll loop because this is the one place that knows a row
+            // actually landed. `Notify` stores a permit when nobody is waiting,
+            // so a poke that arrives while the refine lane is mid-round wakes
+            // it as soon as it finishes, and a window of pokes in one round
+            // collapses into one extra round, not one per message.
+            //
+            // Per row rather than once per batch, and on a backfill as much as
+            // on a walk: the refine lane runs beside the first backfill now
+            // (see [`Self::run_once`]), and "start on the first row the moment
+            // it lands" is the whole point of that. On a walk it is the
+            // contract's "start on new mail immediately" (docs/NOTIFY.md
+            // §11.2), applied to the first row of a batch rather than the last.
+            //
+            // Not for spam: those rows queue no agent work, so a poke per spam
+            // row is a round that claims nothing, two hundred times over when
+            // somebody opens the Spam page.
+            if !mailbox.is_spam() {
+                self.refine_wake.notify_one();
+            }
         }
         Ok(count)
+    }
+
+    /// One `messages.get?format=raw`, as its own future so the fetch window
+    /// above can hold several of them. The timestamp is "the moment we first
+    /// saw the message", read the instant the GET returns (see the clock note
+    /// in [`Self::fetch_raw_and_ingest`]).
+    async fn fetch_raw_message<'a>(
+        &self,
+        id: &'a str,
+        retry: GmailRetry,
+    ) -> Result<(&'a str, GmailMessage, DateTime<Utc>)> {
+        let url = format!("{}/messages/{id}?format=raw", self.api_base);
+        let msg: GmailMessage = self.get_json_with_retry(&url, retry).await?;
+        Ok((id, msg, Utc::now()))
     }
 
     /// Parse and atomically persist one message plus its durable model jobs.
@@ -2655,7 +2792,8 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                     // A lifecycle that polled successfully before failing starts
                     // the backoff over: without this, one bad hour a week ago
                     // left every later hiccup waiting the full five minutes.
-                    let polled_ok = self.poll_healthy.swap(false, Ordering::Relaxed);
+                    self.poll_healthy.store(false, Ordering::Relaxed);
+                    let polled_ok = self.polled_ok.swap(false, Ordering::Relaxed);
                     backoff = lifecycle_backoff(backoff, polled_ok);
                     if *shutdown.borrow() {
                         return Ok(());
@@ -5577,17 +5715,23 @@ mod tests {
         );
 
         // Same engine, same mailbox, one bit different: an OPEN gate is not
-        // waited on at all and the backfill goes straight out.
+        // waited on at all and the backfill goes straight out. Driven through
+        // `run()` and stopped once the cursor exists: the lanes run beside the
+        // backfill now, and a shutdown they can see ends the lifecycle at once,
+        // backfill included, as it should.
         let (_open_tx, open_rx) = tokio::sync::watch::channel(true);
-        let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
-        // This one lands after the (skipped) wait, on the poll loop's own
-        // shutdown check, so the backfill runs to completion first.
-        shutdown_tx.send(true).unwrap();
-
-        engine(store.clone(), acct, &base)
-            .with_embedder_gate(open_rx)
-            .run_once(&mut shutdown_rx)
+        let (stop, rx) = tokio::sync::watch::channel(false);
+        let e = engine(store.clone(), acct, &base).with_embedder_gate(open_rx);
+        let task = tokio::spawn(async move { e.run(rx).await });
+        wait_for(5, "the first backfill to establish a cursor", || {
+            cursor_of(&store, acct).is_some()
+        })
+        .await;
+        stop.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
             .await
+            .unwrap()
+            .unwrap()
             .unwrap();
 
         assert!(g.at("list:INBOX") < g.at("list:SENT"), "{:?}", g.seen());
@@ -5611,18 +5755,24 @@ mod tests {
         g.profile(900);
         let base = serve_mock(g.clone()).await;
 
-        let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
-        shutdown_tx.send(true).unwrap();
-
-        engine(store.clone(), acct, &base)
-            .run_once(&mut shutdown_rx)
+        let (stop, rx) = tokio::sync::watch::channel(false);
+        let e = engine(store.clone(), acct, &base);
+        let task = tokio::spawn(async move { e.run(rx).await });
+        wait_for(5, "the first backfill to establish a cursor", || {
+            cursor_of(&store, acct).is_some()
+        })
+        .await;
+        stop.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
             .await
+            .unwrap()
+            .unwrap()
             .unwrap();
 
         assert_eq!(
             cursor_of(&store, acct),
             Some(900),
-            "no gate, no wait: the first backfill ran on this call"
+            "no gate, no wait: the first backfill ran on this lifecycle"
         );
     }
 
@@ -6025,7 +6175,7 @@ mod tests {
     /// `notified()` is immediately ready exactly when a permit is stored. So a
     /// ZERO budget is a synchronous "is there a permit", not a wait.
     #[tokio::test]
-    async fn ingesting_new_mail_pokes_the_refine_lane_and_a_backfill_does_not() {
+    async fn ingesting_mail_pokes_the_refine_lane_on_a_backfill_and_a_walk_alike() {
         let (store, acct) = store_at_cursor(Some(100));
         let now = Utc::now();
         let g = MockGmail::default();
@@ -6043,10 +6193,12 @@ mod tests {
 
         let poked = || tokio::time::timeout(Duration::ZERO, eng.refine_wake.notified());
 
-        // A BACKFILL DOES NOT POKE, even though it ingests: `run_once` refines
-        // the first backfill inline before either lane exists, and the poke means
-        // "mail that may be genuinely new is waiting", which a month of already
-        // read mail is not.
+        // Nothing has been ingested, so nothing has poked.
+        assert!(poked().await.is_err(), "a fresh engine holds no permit");
+
+        // A BACKFILL POKES: the refine lane runs beside the first backfill
+        // (`run_once`), and a row it can start on is a row it should be woken
+        // for, whether or not the row is genuinely new.
         let n = eng
             .fetch_raw_and_ingest(
                 &["g-old".to_string()],
@@ -6058,8 +6210,8 @@ mod tests {
             .unwrap();
         assert_eq!(n, 1, "the backfill really did ingest a row");
         assert!(
-            poked().await.is_err(),
-            "a backfill must leave the refine lane parked"
+            poked().await.is_ok(),
+            "a backfilled row must wake the refine lane"
         );
 
         // An incremental tick that ingests DOES poke, and the permit is stored
@@ -6078,6 +6230,74 @@ mod tests {
             poked().await.is_err(),
             "the permit was consumed by the wait above; Notify holds exactly one"
         );
+    }
+
+    /// THE BOARD FILLS WHILE THE DOWNLOAD IS STILL GOING. A first run used to
+    /// hold every model call until the last message of the window had landed;
+    /// now the refine lane runs beside the backfill and claims rows as ingest
+    /// queues them. Asserted on the wire: the model is asked about the first
+    /// message while the second is still in flight and no cursor exists yet.
+    #[tokio::test]
+    async fn a_first_run_triages_while_the_backfill_is_still_downloading() {
+        let g = MockGmail::default();
+        g.listing(LABEL_INBOX, &["a", "b"]);
+        g.listing(LABEL_SENT, &[]);
+        g.body("a", alert_eml(Utc::now()));
+        g.body("b", alert_eml(Utc::now()));
+        g.slow_body("b", Duration::from_secs(20));
+        g.history(LABEL_INBOX, LabelHistory::quiet(1));
+        g.history(LABEL_SENT, LabelHistory::quiet(1));
+        g.profile(1);
+        let base = serve_mock(g.clone()).await;
+        let (store, acct) = store_at_cursor(None);
+
+        // Any answer proves the ask; a 503 keeps the test from needing a
+        // decision fixture and trips the circuit so there is exactly one call.
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = calls.clone();
+        let app = Router::new().route(
+            "/",
+            axum::routing::post(move || {
+                count.fetch_add(1, Ordering::Relaxed);
+                async { StatusCode::SERVICE_UNAVAILABLE }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let llm = ResolvedLlm {
+            url: format!("http://{}/", listener.local_addr().unwrap()),
+            api_key: "test".into(),
+            provider: Stage2Provider::OpenAI,
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let metrics = SyncMetrics::new();
+        let mut e = engine(store.clone(), acct, &base).with_metrics(metrics.clone());
+        e.stage2_llm = Some(llm);
+        let (stop, rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(async move { e.run(rx).await });
+
+        wait_for(10, "a model call during the backfill", || {
+            calls.load(Ordering::Relaxed) >= 1
+        })
+        .await;
+        assert_eq!(
+            metrics.catchup_progress(),
+            Some((1, 2)),
+            "the second message was still in flight when the model was asked"
+        );
+        assert_eq!(cursor_of(&store, acct), None, "and no cursor existed yet");
+        assert!(
+            !metrics.poll_ok(),
+            "no poll has run; the listing was the proof"
+        );
+
+        stop.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        server.abort();
     }
 
     /// Exercise parsing, the durable claim, real model transport, validation,

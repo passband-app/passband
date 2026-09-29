@@ -198,10 +198,16 @@ mod tests {
                 "delete_draft",
                 "DraftKey",
                 "outbound_attachment",
+                // The outbox (docs/SCHEDULED-SEND.md) is drafts' sibling: the
+                // user's own finished mail, human door only.
+                "scheduled_send",
+                "ScheduledSend",
+                "list_scheduled_sends",
+                "claim_attachments_for_scheduled",
             ] {
                 assert!(
                     !code.contains(needle),
-                    "{} references `{needle}`: the agent door must not reach drafts",
+                    "{} references `{needle}`: the agent door must not reach drafts or the outbox",
                     path.display()
                 );
             }

@@ -119,6 +119,17 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
+    // The outbox's recovery columns (docs/SCHEDULED-SEND.md §4), for a DB
+    // whose `scheduled_sends` predates them. 0 and NULL are the honest
+    // readings: no earlier attempt is known to have reached Gmail, and no
+    // recovery search is being waited out.
+    add_column_if_missing(
+        conn,
+        "scheduled_sends",
+        "maybe_sent",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(conn, "scheduled_sends", "recover_at", "TEXT")?;
     // MANY NEW-MESSAGE DRAFTS. The old single-slot index made a second
     // new-message draft a constraint violation; new mail is keyed by row id now.
     // No dedupe is owed: that index guaranteed at most one nil-keyed row.
@@ -546,24 +557,6 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // Blind recipients on a local draft. Pre-existing rows had none, and '' is
     // the honest reading, which is also the column default: no backfill.
     add_column_if_missing(conn, "drafts", "bcc_addr", "TEXT NOT NULL DEFAULT ''")?;
-
-    // A staged file's SECOND claim, beside `draft_id`: the scheduled send that
-    // holds it (docs/SCHEDULED-SEND.md). Every pre-existing row is unclaimed by
-    // a schedule, which NULL says: no backfill. The index names the new column,
-    // so it lives here, behind the column check, and never in schema.sql.
-    add_column_if_missing(conn, "outbound_attachments", "scheduled_send_id", "INTEGER")?;
-    if has_columns(
-        conn,
-        "outbound_attachments",
-        &["account_id", "scheduled_send_id"],
-    )? {
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_outbound_attachments_scheduled
-                 ON outbound_attachments(account_id, scheduled_send_id)
-                 WHERE scheduled_send_id IS NOT NULL",
-            [],
-        )?;
-    }
 
     // STRANDED FAN-OUTS. A group send settles its recipients from a background
     // task, and no task survives the process. So any recipient still 'pending'

@@ -666,6 +666,22 @@ pub struct OutboundAttachment {
 /// `400 rejected:attachment_missing`.
 pub const ATTACHMENT_MISSING: &str = "attachment_missing";
 
+/// The `CoreError::InvalidInput` message a scheduling answers when the account
+/// already holds [`MAX_SCHEDULED_PER_ACCOUNT`] live rows: the handler's
+/// `400 rejected:too_many_scheduled`.
+pub const TOO_MANY_SCHEDULED: &str = "too_many_scheduled";
+
+/// Live (`scheduled`, `sending`, `failed`) outbox rows one account may hold.
+/// Each row pins its files' bytes for up to a year, and nobody schedules a
+/// hundred mails by hand: past this it is a client loop, not a person.
+pub const MAX_SCHEDULED_PER_ACCOUNT: usize = 100;
+
+/// Claims a scheduled send gets before it is `failed` and waits for the user.
+/// The claim counts, so a row fails on its third unsuccessful attempt. The
+/// worker's claim refuses a row already at the limit (a belt: every path that
+/// reaches it settles `failed` first).
+pub const SCHEDULED_MAX_ATTEMPTS: u32 = 3;
+
 /// Where a [`ScheduledSend`] is in its life. Stored as the lowercase TEXT
 /// [`Self::as_str`] gives; see the `scheduled_sends` table comment in
 /// schema.sql for the transitions.
@@ -733,6 +749,10 @@ pub struct ScheduledSend {
     /// Local `messages.id` of the sent copy's echo, once sent and echoed.
     pub sent_message_id: Option<i64>,
     pub sent_thread_id: Option<String>,
+    /// STICKY: some earlier attempt may have reached Gmail (a transport error
+    /// or a 5xx AFTER the send was posted, or a lapsed lease). Every later
+    /// fire asks Gmail for `message_id_header` before sending again.
+    pub maybe_sent: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     /// The files this row has claimed, upload order. Metadata only.

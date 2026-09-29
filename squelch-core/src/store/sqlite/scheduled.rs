@@ -12,16 +12,23 @@ use super::drafts::{PARENT_COLS, parent_join};
 use super::outbound::{move_claims_to_scheduled, release_scheduled_claims, scheduled_attachments};
 use super::*;
 use crate::store::{
-    ATTACHMENT_MISSING, CancelOutcome, ParentContext, ScheduledSend, ScheduledSendState,
+    ATTACHMENT_MISSING, CancelOutcome, MAX_SCHEDULED_PER_ACCOUNT, ParentContext,
+    SCHEDULED_MAX_ATTEMPTS, ScheduledSend, ScheduledSendState, TOO_MANY_SCHEDULED,
 };
 
 /// The row shape, in [`map_scheduled`]'s order. Shared by the SELECTs and the
 /// claim's `RETURNING`, so the two cannot drift.
 const SCHEDULED_COLS: &str = "id, account_id, request, send_at, state, lease_until, attempts,
-        last_error, message_id_header, sent_message_id, sent_thread_id, created_at, updated_at";
+        last_error, message_id_header, sent_message_id, sent_thread_id, created_at, updated_at,
+        maybe_sent";
 
 /// How long a settled (`sent`/`cancelled`) row is kept before the sweep.
 pub const SCHEDULED_SETTLED_TTL: chrono::Duration = chrono::Duration::days(7);
+
+/// How long a `failed` row waits for the user before the sweep takes it and
+/// its files. Longer than a settled row's week: it is still owed a decision,
+/// and the listing shows it as "didn't send" the whole time.
+pub const SCHEDULED_FAILED_TTL: chrono::Duration = chrono::Duration::days(30);
 
 /// One [`SCHEDULED_COLS`] row into a [`ScheduledSend`], attachments empty (the
 /// caller fills them: a row map cannot run a second query).
@@ -48,6 +55,7 @@ fn map_scheduled(r: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduledSend> {
         sent_thread_id: r.get(10)?,
         created_at: dt(r, 11)?,
         updated_at: dt(r, 12)?,
+        maybe_sent: r.get::<_, i64>(13)? != 0,
         attachments: Vec::new(),
     })
 }
@@ -164,8 +172,19 @@ impl SqliteStore {
         now: DateTime<Utc>,
     ) -> Result<ScheduledSend> {
         let mut conn = self.lock()?;
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         super::outbound::sweep(&tx, account_id, now)?;
+        // THE CAP, counted inside the transaction that inserts, so two
+        // schedules racing at 99 cannot both land.
+        let live: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM scheduled_sends
+             WHERE account_id = ?1 AND state IN ('scheduled', 'sending', 'failed')",
+            params![account_id],
+            |r| r.get(0),
+        )?;
+        if live as usize >= MAX_SCHEDULED_PER_ACCOUNT {
+            return Err(CoreError::InvalidInput(TOO_MANY_SCHEDULED.into()));
+        }
         let id = insert_row(&tx, account_id, request, send_at, message_id_header, now)?;
         if !move_claims_to_scheduled(&tx, account_id, id, attachment_ids, from_draft)? {
             // Dropping `tx` rolls the insert and any partial move back.
@@ -265,11 +284,9 @@ impl SqliteStore {
         Ok(out)
     }
 
-    /// THE WORKER'S CLAIM (contract §4 step 2): the oldest due `scheduled` row
-    /// moves to `sending` under a lease of `lease` from `now`, `attempts` + 1,
-    /// in ONE statement. The pick and the move cannot be split by another
-    /// claimer, so two ticks (or two processes on one file) never both hold a
-    /// row. `None` when nothing is due. Call in a loop until `None`.
+    /// THE WORKER'S CLAIM (contract §4 step 2) with a flat lease: see
+    /// [`Self::claim_due_scheduled_send_with`], which the worker calls to size
+    /// the lease per row.
     pub fn claim_due_scheduled_send(
         &self,
         account_id: AccountId,
@@ -279,55 +296,115 @@ impl SqliteStore {
         if lease <= chrono::Duration::zero() {
             return Err(CoreError::InvalidInput("lease must be positive".into()));
         }
-        let conn = self.lock()?;
-        let row = conn
+        self.claim_due_scheduled_send_with(account_id, now, |_| lease)
+    }
+
+    /// THE WORKER'S CLAIM (contract §4 step 2): the oldest due `scheduled` row
+    /// with attempts left moves to `sending` under a lease of `lease_for(row)`
+    /// from `now`, `attempts` + 1, in ONE IMMEDIATE TRANSACTION. The pick and
+    /// the move cannot be split by another claimer (the write lock is taken
+    /// before the pick), so two ticks, or two processes on one file, never
+    /// both hold a row. `None` when nothing is due. Call in a loop until
+    /// `None`.
+    ///
+    /// The lease is sized FROM THE ROW, files included, because a send's own
+    /// Gmail budget grows with its bytes: a flat lease shorter than a 25 MB
+    /// upload would hand a mail still on the wire to recovery. The returned
+    /// row's `attempts` NAMES THIS CLAIM: every settle takes it back, so a
+    /// settle from an older claim is a no-op.
+    pub fn claim_due_scheduled_send_with(
+        &self,
+        account_id: AccountId,
+        now: DateTime<Utc>,
+        lease_for: impl Fn(&ScheduledSend) -> chrono::Duration,
+    ) -> Result<Option<ScheduledSend>> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let id: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM scheduled_sends
+                 WHERE account_id = ?1 AND state = 'scheduled' AND send_at <= ?2
+                   AND attempts < ?3
+                 ORDER BY send_at, id LIMIT 1",
+                params![account_id, now.to_rfc3339(), SCHEDULED_MAX_ATTEMPTS],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(id) = id else {
+            return Ok(None);
+        };
+        let Some(picked) = read_scheduled(&tx, account_id, id)? else {
+            return Ok(None);
+        };
+        let lease = lease_for(&picked);
+        if lease <= chrono::Duration::zero() {
+            return Err(CoreError::InvalidInput("lease must be positive".into()));
+        }
+        let row = tx
             .query_row(
                 &format!(
                     "UPDATE scheduled_sends
-                     SET state = 'sending', lease_until = ?3, attempts = attempts + 1,
-                         updated_at = ?2
-                     WHERE id = (SELECT id FROM scheduled_sends
-                                 WHERE account_id = ?1 AND state = 'scheduled'
-                                   AND send_at <= ?2
-                                 ORDER BY send_at, id LIMIT 1)
+                     SET state = 'sending', lease_until = ?4, attempts = attempts + 1,
+                         recover_at = NULL, updated_at = ?3
+                     WHERE account_id = ?1 AND id = ?2 AND state = 'scheduled'
                      RETURNING {SCHEDULED_COLS}"
                 ),
-                params![account_id, now.to_rfc3339(), (now + lease).to_rfc3339()],
+                params![account_id, id, now.to_rfc3339(), (now + lease).to_rfc3339()],
                 map_scheduled,
             )
             .optional()?;
         let Some(mut row) = row else {
             return Ok(None);
         };
-        row.attachments = scheduled_attachments(&conn, account_id, row.id)?;
+        row.attachments = picked.attachments;
+        tx.commit()?;
         Ok(Some(row))
     }
 
-    /// Recovery input (contract §4 step 1): `sending` rows whose lease has
-    /// lapsed, i.e. a worker that died mid-send. Each must be answered by a
-    /// Message-ID search BEFORE it can be retried: found → [`Self::settle_scheduled_sent`],
-    /// not found → [`Self::requeue_scheduled_send`].
+    /// Recovery input (contract §4 step 1): `sending` rows whose lease lapsed
+    /// at or before `lapsed_before`, i.e. a worker that died mid-send, and
+    /// whose last recovery search (if one failed) asked to wait until past
+    /// `now`. The worker passes `now - RECOVERY_GRACE` as `lapsed_before`, so
+    /// a send that finished just as its lease ran out has time to be indexed
+    /// before Gmail is asked about it. Each must be answered by a Message-ID
+    /// search BEFORE it can be retried: found → [`Self::settle_scheduled_sent`],
+    /// not found → [`Self::requeue_scheduled_send`], could not ask →
+    /// [`Self::defer_scheduled_recovery`].
     pub fn expired_sending_scheduled_sends(
         &self,
         account_id: AccountId,
+        lapsed_before: DateTime<Utc>,
         now: DateTime<Utc>,
     ) -> Result<Vec<ScheduledSend>> {
         let conn = self.lock()?;
-        read_many(
-            &conn,
-            account_id,
-            "state = 'sending' AND lease_until IS NOT NULL AND lease_until <= ?2",
-            Some(now),
-        )
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {SCHEDULED_COLS} FROM scheduled_sends
+             WHERE account_id = ?1 AND state = 'sending'
+               AND lease_until IS NOT NULL AND lease_until <= ?2
+               AND (recover_at IS NULL OR recover_at <= ?3)
+             ORDER BY send_at ASC, id ASC"
+        ))?;
+        let rows = stmt.query_map(
+            params![account_id, lapsed_before.to_rfc3339(), now.to_rfc3339()],
+            map_scheduled,
+        )?;
+        let mut out = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        for row in &mut out {
+            row.attachments = scheduled_attachments(&conn, account_id, row.id)?;
+        }
+        Ok(out)
     }
 
-    /// `sending` → `sent`, with the echo's local ids when the echo landed.
-    /// `false` when the row is not `sending` (already settled, cancelled out
-    /// from under a stale worker, unknown, another account's).
+    /// `sending` → `sent` under claim `attempts`, with the echo's local ids
+    /// when the echo landed. `false` when the row is not `sending` under that
+    /// claim (already settled, cancelled out from under a stale worker,
+    /// recovered and re-claimed, unknown, another account's).
+    #[allow(clippy::too_many_arguments)]
     pub fn settle_scheduled_sent(
         &self,
         account_id: AccountId,
         id: i64,
+        attempts: u32,
         sent_message_id: Option<i64>,
         sent_thread_id: Option<&str>,
         now: DateTime<Utc>,
@@ -335,12 +412,13 @@ impl SqliteStore {
         let conn = self.lock()?;
         let n = conn.execute(
             "UPDATE scheduled_sends
-             SET state = 'sent', lease_until = NULL, sent_message_id = ?3,
-                 sent_thread_id = ?4, updated_at = ?5
-             WHERE account_id = ?1 AND id = ?2 AND state = 'sending'",
+             SET state = 'sent', lease_until = NULL, recover_at = NULL,
+                 sent_message_id = ?4, sent_thread_id = ?5, updated_at = ?6
+             WHERE account_id = ?1 AND id = ?2 AND state = 'sending' AND attempts = ?3",
             params![
                 account_id,
                 id,
+                attempts,
                 sent_message_id,
                 sent_thread_id,
                 now.to_rfc3339()
@@ -350,13 +428,52 @@ impl SqliteStore {
     }
 
     /// A failed attempt with retries left: `sending` → `scheduled` at
-    /// `next_send_at`, lease cleared, `last_error` kept for the listing.
-    /// `last_error` is a REDACTED reason, never content. `false` when the row
-    /// is not `sending`.
+    /// `next_send_at` under claim `attempts`, lease cleared, `last_error` kept
+    /// for the listing. `maybe_sent` says the attempt failed AFTER the mail was
+    /// posted to Gmail; it is OR-ed into the row's sticky flag, so every later
+    /// fire asks Gmail first. `last_error` is a REDACTED reason, never content.
+    /// `false` when the row is not `sending` under that claim.
+    #[allow(clippy::too_many_arguments)]
     pub fn settle_scheduled_retry(
         &self,
         account_id: AccountId,
         id: i64,
+        attempts: u32,
+        next_send_at: DateTime<Utc>,
+        last_error: &str,
+        maybe_sent: bool,
+        now: DateTime<Utc>,
+    ) -> Result<bool> {
+        let conn = self.lock()?;
+        let n = conn.execute(
+            "UPDATE scheduled_sends
+             SET state = 'scheduled', lease_until = NULL, recover_at = NULL, send_at = ?4,
+                 last_error = ?5, maybe_sent = MAX(maybe_sent, ?6), updated_at = ?7
+             WHERE account_id = ?1 AND id = ?2 AND state = 'sending' AND attempts = ?3",
+            params![
+                account_id,
+                id,
+                attempts,
+                next_send_at.to_rfc3339(),
+                last_error,
+                maybe_sent as i64,
+                now.to_rfc3339()
+            ],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// An attempt that NEVER STARTED, so it must not count: `sending` →
+    /// `scheduled` at `next_send_at` under claim `attempts`, with the claim's
+    /// increment taken back. For the two answers that say "not now" rather
+    /// than "this mail failed": Gmail's budget pacing the mailbox, and a
+    /// pre-fire search that could not be made. `false` when the row is not
+    /// `sending` under that claim.
+    pub fn unclaim_scheduled_send(
+        &self,
+        account_id: AccountId,
+        id: i64,
+        attempts: u32,
         next_send_at: DateTime<Utc>,
         last_error: &str,
         now: DateTime<Utc>,
@@ -364,12 +481,13 @@ impl SqliteStore {
         let conn = self.lock()?;
         let n = conn.execute(
             "UPDATE scheduled_sends
-             SET state = 'scheduled', lease_until = NULL, send_at = ?3,
-                 last_error = ?4, updated_at = ?5
-             WHERE account_id = ?1 AND id = ?2 AND state = 'sending'",
+             SET state = 'scheduled', lease_until = NULL, recover_at = NULL, send_at = ?4,
+                 last_error = ?5, attempts = MAX(attempts - 1, 0), updated_at = ?6
+             WHERE account_id = ?1 AND id = ?2 AND state = 'sending' AND attempts = ?3",
             params![
                 account_id,
                 id,
+                attempts,
                 next_send_at.to_rfc3339(),
                 last_error,
                 now.to_rfc3339()
@@ -378,42 +496,86 @@ impl SqliteStore {
         Ok(n > 0)
     }
 
-    /// Out of retries: `sending` → `failed`, lease cleared. The row waits for
-    /// the user (send now, or cancel). `last_error` is a REDACTED reason.
-    /// `false` when the row is not `sending`.
+    /// Out of retries: `sending` → `failed` under claim `attempts`, lease
+    /// cleared. The row waits for the user (send now, or cancel). `last_error`
+    /// is a REDACTED reason. `false` when the row is not `sending` under that
+    /// claim.
     pub fn settle_scheduled_failed(
         &self,
         account_id: AccountId,
         id: i64,
+        attempts: u32,
         last_error: &str,
         now: DateTime<Utc>,
     ) -> Result<bool> {
         let conn = self.lock()?;
         let n = conn.execute(
             "UPDATE scheduled_sends
-             SET state = 'failed', lease_until = NULL, last_error = ?3, updated_at = ?4
-             WHERE account_id = ?1 AND id = ?2 AND state = 'sending'",
-            params![account_id, id, last_error, now.to_rfc3339()],
+             SET state = 'failed', lease_until = NULL, recover_at = NULL, last_error = ?4,
+                 updated_at = ?5
+             WHERE account_id = ?1 AND id = ?2 AND state = 'sending' AND attempts = ?3",
+            params![account_id, id, attempts, last_error, now.to_rfc3339()],
         )?;
         Ok(n > 0)
     }
 
-    /// Recovery's "not found in Gmail" branch: `sending` → `scheduled`, lease
-    /// cleared, `send_at` and `attempts` UNCHANGED (the lapsed attempt already
-    /// counted; its `send_at` is past, so the next claim takes it at once).
-    /// `false` when the row is not `sending`.
+    /// Recovery's "not found in Gmail" branch: `sending` → `scheduled` at
+    /// `send_at` under claim `attempts`, lease cleared, `attempts` UNCHANGED
+    /// (the lapsed attempt already counted), and `maybe_sent` set: the lapsed
+    /// attempt may still surface in Gmail's index, so the re-fire asks again
+    /// before it sends. `false` when the row is not `sending` under that claim.
     pub fn requeue_scheduled_send(
         &self,
         account_id: AccountId,
         id: i64,
+        attempts: u32,
+        send_at: DateTime<Utc>,
         now: DateTime<Utc>,
     ) -> Result<bool> {
         let conn = self.lock()?;
         let n = conn.execute(
             "UPDATE scheduled_sends
-             SET state = 'scheduled', lease_until = NULL, updated_at = ?3
-             WHERE account_id = ?1 AND id = ?2 AND state = 'sending'",
-            params![account_id, id, now.to_rfc3339()],
+             SET state = 'scheduled', lease_until = NULL, recover_at = NULL, send_at = ?4,
+                 maybe_sent = 1, updated_at = ?5
+             WHERE account_id = ?1 AND id = ?2 AND state = 'sending' AND attempts = ?3",
+            params![
+                account_id,
+                id,
+                attempts,
+                send_at.to_rfc3339(),
+                now.to_rfc3339()
+            ],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Recovery COULD NOT ASK (no write credential, or the search failed): the
+    /// row stays `sending`, its lease untouched (the give-up clock runs from
+    /// it), `last_error` says why for the listing, and recovery does not ask
+    /// again before `recover_at`. One Gmail call per row per minute, not per
+    /// tick. `false` when the row is not `sending` under claim `attempts`.
+    pub fn defer_scheduled_recovery(
+        &self,
+        account_id: AccountId,
+        id: i64,
+        attempts: u32,
+        recover_at: DateTime<Utc>,
+        last_error: &str,
+        now: DateTime<Utc>,
+    ) -> Result<bool> {
+        let conn = self.lock()?;
+        let n = conn.execute(
+            "UPDATE scheduled_sends
+             SET recover_at = ?4, last_error = ?5, updated_at = ?6
+             WHERE account_id = ?1 AND id = ?2 AND state = 'sending' AND attempts = ?3",
+            params![
+                account_id,
+                id,
+                attempts,
+                recover_at.to_rfc3339(),
+                last_error,
+                now.to_rfc3339()
+            ],
         )?;
         Ok(n > 0)
     }
@@ -434,7 +596,10 @@ impl SqliteStore {
         now: DateTime<Utc>,
     ) -> Result<CancelOutcome> {
         let mut conn = self.lock()?;
-        let tx = conn.transaction()?;
+        // IMMEDIATE: the write lock is taken before the read, so the state
+        // read below is the state the UPDATE moves (another process's claim
+        // cannot land in between).
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let Some(mut row) = read_scheduled(&tx, account_id, id)? else {
             return Ok(CancelOutcome::NotFound);
         };
@@ -446,12 +611,21 @@ impl SqliteStore {
             }
             ScheduledSendState::Scheduled | ScheduledSendState::Failed => {}
         }
-        tx.execute(
+        let n = tx.execute(
             "UPDATE scheduled_sends
              SET state = 'cancelled', lease_until = NULL, updated_at = ?3
              WHERE account_id = ?1 AND id = ?2 AND state IN ('scheduled', 'failed')",
             params![account_id, id, now.to_rfc3339()],
         )?;
+        // The read above said the row was cancellable and the lock has been
+        // held since, so anything but one row is a store that moved under us:
+        // never answer `Cancelled` (and release the files) for a row that was
+        // not. Dropping `tx` rolls back.
+        if n != 1 {
+            return Err(CoreError::Other(anyhow::anyhow!(
+                "scheduled send {id} moved during cancel"
+            )));
+        }
         release_scheduled_claims(&tx, account_id, id, now)?;
         tx.commit()?;
         row.state = ScheduledSendState::Cancelled;
@@ -488,31 +662,38 @@ impl SqliteStore {
     }
 
     /// Drop settled (`sent`, `cancelled`) rows whose last move is older than
-    /// [`SCHEDULED_SETTLED_TTL`], with any files still claimed by them (a
-    /// cancel released its files and a send consumed its own, so this is a
-    /// belt). ONE TRANSACTION. Returns how many rows went.
+    /// [`SCHEDULED_SETTLED_TTL`], and `failed` rows older than
+    /// [`SCHEDULED_FAILED_TTL`], with any files still claimed by them (a
+    /// cancel released its files and a send consumed its own, so for settled
+    /// rows this is a belt; a failed row still holds its files). Then the
+    /// staged-file sweep ([`super::outbound::sweep`]), so files a cancel
+    /// released and nobody re-claimed go at their TTL even when no composer
+    /// runs. ONE TRANSACTION. Returns how many outbox rows went.
     pub fn sweep_scheduled_sends(
         &self,
         account_id: AccountId,
         now: DateTime<Utc>,
     ) -> Result<usize> {
-        let cutoff = (now - SCHEDULED_SETTLED_TTL).to_rfc3339();
+        let settled_cutoff = (now - SCHEDULED_SETTLED_TTL).to_rfc3339();
+        let failed_cutoff = (now - SCHEDULED_FAILED_TTL).to_rfc3339();
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
         const STALE: &str = "SELECT id FROM scheduled_sends
-             WHERE account_id = ?1 AND state IN ('sent', 'cancelled') AND updated_at < ?2";
+             WHERE account_id = ?1
+               AND ((state IN ('sent', 'cancelled') AND updated_at < ?2)
+                    OR (state = 'failed' AND updated_at < ?3))";
         tx.execute(
             &format!(
                 "DELETE FROM outbound_attachments
                  WHERE account_id = ?1 AND scheduled_send_id IN ({STALE})"
             ),
-            params![account_id, cutoff],
+            params![account_id, settled_cutoff, failed_cutoff],
         )?;
         let n = tx.execute(
-            "DELETE FROM scheduled_sends
-             WHERE account_id = ?1 AND state IN ('sent', 'cancelled') AND updated_at < ?2",
-            params![account_id, cutoff],
+            &format!("DELETE FROM scheduled_sends WHERE account_id = ?1 AND id IN ({STALE})"),
+            params![account_id, settled_cutoff, failed_cutoff],
         )?;
+        super::outbound::sweep(&tx, account_id, now)?;
         tx.commit()?;
         Ok(n)
     }

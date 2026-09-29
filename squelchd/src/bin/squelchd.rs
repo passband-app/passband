@@ -1485,6 +1485,38 @@ fn cmd_pair(config: &Config, args: &PairArgs) -> Result<(), squelch_core::CoreEr
     Ok(())
 }
 
+/// Ctrl-C, or the SIGTERM a container runtime stops us with.
+///
+/// SIGTERM is not optional in the image: squelchd is PID 1 there
+/// (deploy/DOCKER.md), and PID 1 has no default disposition for a signal it
+/// does not handle, so without this every hosted roll would wait out the
+/// grace period for a SIGKILL and skip the graceful path entirely (sync's
+/// flush, the scheduled-send pass settling its row).
+async fn stop_requested() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+            }
+            // Losing the handler costs a harder stop, never a mail: a send
+            // cut off mid-flight is answered by lease recovery.
+            Err(_) => {
+                eprintln!("squelchd: no SIGTERM handler; stopping on Ctrl-C only");
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
 /// Sync-only loop with graceful Ctrl-C shutdown.
 fn run_daemon(config: Config) -> Result<(), squelch_core::CoreError> {
     // Fail fast on config problems before spinning up the runtime.
@@ -2298,8 +2330,10 @@ fn cmd_serve(
         // here: it sends on the WRITE credential (docs/SCHEDULED-SEND.md §4).
         // The tick is the clock — no timer per row — so a restart costs
         // punctuality and never a mail. Unlike the shredder it HONOURS THE
-        // SHUTDOWN WATCH, and is awaited on the way out, so a pass in flight
-        // settles its row instead of leaving it to lease recovery.
+        // SHUTDOWN WATCH: between ticks here, and between rows inside a pass
+        // (the pass reads the watch `api_state` carries), so a pass in flight
+        // settles the row in hand and claims no more instead of leaving work
+        // to lease recovery.
         let scheduled_handle = {
             let state = api_state.clone();
             let mut shutdown_rx = shutdown_tx.subscribe();
@@ -2455,11 +2489,14 @@ fn cmd_serve(
         }
 
         // Graceful shutdown: stop accepting, cancel MCP sessions, signal sync.
+        // On Ctrl-C, or the SIGTERM a container stop sends (see
+        // `stop_requested`): either way sync flushes and the scheduled-send
+        // pass settles the row in hand.
         let shutdown_signal = {
             let mcp_cancel = mcp_cancel.clone();
             let shutdown_tx = shutdown_tx.clone();
             async move {
-                let _ = tokio::signal::ctrl_c().await;
+                stop_requested().await;
                 eprintln!("squelchd: shutdown requested; stopping doors and flushing sync...");
                 mcp_cancel.cancel();
                 let _ = shutdown_tx.send(true);

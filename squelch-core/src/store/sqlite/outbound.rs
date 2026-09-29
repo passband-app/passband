@@ -37,15 +37,24 @@ const META_COLS: &str = "id, filename, mime, size_bytes, content_id";
 /// `NOT {CLAIMED}` would bind to the first arm only.
 pub(super) const CLAIMED: &str = "draft_id IS NOT NULL OR scheduled_send_id IS NOT NULL";
 
-/// A row a send may carry and consume: unclaimed, or claimed by the draft THIS
-/// send consumes (bound as `?3`), or by the scheduled send THIS send fires
-/// (bound as `?4`). Either is `NULL` when the send has no such owner, and
-/// `col = NULL` matches nothing, so a plain send matches unclaimed rows only.
-/// The send-side twin of the claim path's `NOT ({CLAIMED})`: neither a claim
-/// nor a send may take a file another composition holds, and a plain send may
-/// not take a file a scheduled mail is waiting to carry.
+/// A row a send may carry and consume. For a send made while the user waits
+/// (`?4` bound `NULL`): unclaimed, or claimed by the draft THIS send consumes
+/// (bound as `?3`, `NULL` for none; `col = NULL` matches nothing). The
+/// send-side twin of the claim path's `NOT ({CLAIMED})`: neither a claim nor
+/// a send may take a file another composition holds, and a plain send may not
+/// take a file a scheduled mail is waiting to carry.
+///
+/// A FIRED SCHEDULED SEND (`?4` bound to its row) takes ONLY the files that
+/// row holds, never an unclaimed one. Row ids are reused rowids: if a file the
+/// row named were deleted and its id handed to somebody's fresh upload, the
+/// unclaimed arm would send that new, never-scanned file in its place, and
+/// then delete it out from under the composer that owns it. The row's files
+/// are claimed by it from schedule time on, so this arm loses nothing real.
 fn sendable() -> String {
-    format!("(NOT ({CLAIMED}) OR draft_id = ?3 OR scheduled_send_id = ?4)")
+    format!(
+        "(CASE WHEN ?4 IS NULL THEN (NOT ({CLAIMED}) OR draft_id = ?3)
+               ELSE scheduled_send_id = ?4 END)"
+    )
 }
 
 /// Drop this account's leftovers: unclaimed rows past the TTL, and rows
@@ -253,8 +262,9 @@ impl SqliteStore {
     }
 
     /// [`Self::outbound_attachments`] for the scheduled-send WORKER: the files
-    /// scheduled send `scheduled_send_id` holds (plus unclaimed ones), in the
-    /// order asked. The frozen request carries no `draft_id` (scheduling
+    /// scheduled send `scheduled_send_id` holds and NOTHING ELSE (see
+    /// [`sendable`] for why an unclaimed row is never taken), in the order
+    /// asked. The frozen request carries no `draft_id` (scheduling
     /// consumed the draft), so a fire that read through the draft door would
     /// find its own files claimed and absent.
     pub fn scheduled_outbound_attachments(
@@ -353,10 +363,16 @@ impl SqliteStore {
 
     /// Drop one staged file. `false` when nothing matched, so another account's
     /// id is indistinguishable from an unknown one.
+    ///
+    /// A FILE A SCHEDULED SEND HOLDS IS NOT DELETABLE HERE: it answers `false`
+    /// like an unknown id (the route's 404). Cancel is the only door that
+    /// releases it. A stale composer tray deleting it would leave the row
+    /// naming an id the next upload may be handed.
     pub fn delete_outbound_attachment(&self, account_id: AccountId, id: i64) -> Result<bool> {
         let conn = self.lock()?;
         let n = conn.execute(
-            "DELETE FROM outbound_attachments WHERE account_id = ?1 AND id = ?2",
+            "DELETE FROM outbound_attachments
+             WHERE account_id = ?1 AND id = ?2 AND scheduled_send_id IS NULL",
             params![account_id, id],
         )?;
         Ok(n > 0)

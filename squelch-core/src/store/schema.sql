@@ -1151,9 +1151,12 @@ CREATE INDEX IF NOT EXISTS idx_outbound_attachments_draft
 --   scheduled | failed --cancel--> cancelled      failed --send now--> scheduled
 -- A row is sent ONLY from `sending` under a lease, and a lease that lapsed
 -- (a crash mid-send) is answered by searching Gmail for `message_id_header`
--- BEFORE the row is retried: that minted Message-ID is the whole double-send
--- defense. `sending` is never cancellable: the mail is in Gmail's hands.
--- `sent` and `cancelled` rows are swept a week after they settle.
+-- BEFORE the row is retried, as is every re-fire of a row whose earlier
+-- attempt may have gone (`maybe_sent`): that minted Message-ID is the whole
+-- double-send defense. Every settle names the claim it settles (`attempts`),
+-- so a stale worker's settle is a no-op. `sending` is never cancellable: the
+-- mail is in Gmail's hands. `sent` and `cancelled` rows are swept a week
+-- after they settle, `failed` rows after thirty days.
 --
 -- Timestamps are RFC3339 text written by one formatter, so the `send_at <= ?`
 -- and `lease_until <= ?` comparisons are text comparisons that order right.
@@ -1166,9 +1169,16 @@ CREATE TABLE IF NOT EXISTS scheduled_sends (
     lease_until       TEXT,              -- set while `sending`, NULL otherwise
     attempts          INTEGER NOT NULL DEFAULT 0,
     last_error        TEXT,              -- a REDACTED reason, never content
-    message_id_header TEXT NOT NULL,     -- `<uuid@passband>`, minted at schedule time
+    message_id_header TEXT NOT NULL,     -- `<48 hex@passband>`, minted at schedule time
     sent_message_id   INTEGER,           -- local echo id once sent
     sent_thread_id    TEXT,
+    -- STICKY 1 once any attempt MAY have reached Gmail (a failure after the
+    -- send was posted, or a lapsed lease): every later fire searches Gmail for
+    -- `message_id_header` first. Added to older DBs by migrate.rs.
+    maybe_sent        INTEGER NOT NULL DEFAULT 0,
+    -- Not before this may recovery ask Gmail about a lapsed `sending` row
+    -- again (set when a search could not be made). Added by migrate.rs too.
+    recover_at        TEXT,
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL
 );

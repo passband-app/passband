@@ -957,7 +957,9 @@ pub async fn get_compose_attachment(
 }
 
 /// `DELETE /client/compose/attachments/{id}` — a file removed from the tray.
-/// Another account's id and an unknown id are the same 404.
+/// Another account's id and an unknown id are the same 404, and so is a file a
+/// scheduled send holds: only cancelling it releases that file (see
+/// `delete_outbound_attachment`).
 pub async fn delete_compose_attachment(
     State(state): State<ApiState>,
     Path(id): Path<i64>,
@@ -4214,6 +4216,8 @@ pub(crate) async fn guard_verdict(
 ///   is remembered.
 /// - `outcome`: the audit detail (`ok`, `ok:reply_all:N`, `ok:forward`).
 /// - `tracker` / `draft_id`: this send's minted pixel and the draft it consumes.
+/// - `fire`: the scheduled send being fired, which marks the failure's ledger
+///   row the way [`fired_outcome`] already marked `outcome`.
 ///
 /// THE ORDER IS THE CONTRACT: resolve, discard the draft, audit the outcome,
 /// echo, link the tracker, answer. Everything after the audit line is
@@ -4232,6 +4236,7 @@ async fn finish_send(
     draft_id: Option<i64>,
     attachment_ids: &[i64],
     target: Option<String>,
+    fire: Option<Fire<'_>>,
 ) -> Result<SendOutcome, SendFailure> {
     match client.send(raw, thread_id.as_deref()).await {
         Ok(sent) => {
@@ -4259,8 +4264,8 @@ async fn finish_send(
             if let Some((token, _)) = &tracker {
                 discard_tracker(state, token, target.clone()).await;
             }
-            audit_action(state, "send", target, "failed:gmail").await;
-            Err(SendFailure::new("failed:gmail", write_error(&e)))
+            audit_action(state, "send", target, &fired(fire, "failed:gmail")).await;
+            Err(SendFailure::after_post("failed:gmail", &e))
         }
     }
 }
@@ -4323,11 +4328,46 @@ impl SendOutcome {
 pub(crate) struct SendFailure {
     pub(crate) reason: &'static str,
     pub(crate) error: ApiError,
+    /// The mail MAY BE IN GMAIL: the failure came back after `messages.send`
+    /// was posted (a transport error, or a 5xx), so Gmail may hold the
+    /// message and only the answer was lost. `false` for everything refused
+    /// before the post (validation, no credential, the parent read, pacing)
+    /// and for a 4xx, which Gmail answers without sending. The scheduled-send
+    /// worker asks Gmail by Message-ID before it re-fires a row whose failure
+    /// said `true` (docs/SCHEDULED-SEND.md §4).
+    pub(crate) maybe_sent: bool,
+    /// Gmail's budget was pacing the mailbox and nothing was posted: "not
+    /// now", not "this mail failed". The worker retries without spending an
+    /// attempt.
+    pub(crate) paced: bool,
 }
 
 impl SendFailure {
     fn new(reason: &'static str, error: ApiError) -> Self {
-        Self { reason, error }
+        Self {
+            reason,
+            error,
+            maybe_sent: false,
+            paced: false,
+        }
+    }
+
+    /// A failure answered by `messages.send` itself, classified by whether
+    /// the post may have landed.
+    fn after_post(reason: &'static str, e: &WriteError) -> Self {
+        let mut f = Self::new(reason, write_error(e));
+        match e {
+            // A transport error can come after Gmail took the whole body (a
+            // timeout on the answer, a reset, an undecodable 2xx), and a 5xx
+            // is Google saying it does not know how it went.
+            WriteError::Transport(_) => f.maybe_sent = true,
+            WriteError::Api { status, .. } if *status >= 500 => f.maybe_sent = true,
+            WriteError::Paced { .. } => f.paced = true,
+            // A 4xx is refused before anything is sent; no credential and bad
+            // input never reached the post at all.
+            WriteError::Api { .. } | WriteError::MissingCredential(_) | WriteError::Invalid(_) => {}
+        }
+        f
     }
 }
 
@@ -4378,6 +4418,13 @@ fn fired_outcome(fire: Option<Fire<'_>>, outcome: String) -> String {
         Some(f) => format!("scheduled:{}:{outcome}", f.id),
         None => outcome,
     }
+}
+
+/// A send's REFUSAL detail, marked the same way when it was a fired scheduled
+/// send (`scheduled:7:failed:gmail`), so the ledger says which outbox row a
+/// failure belongs to and a plain send's failure reads exactly as before.
+fn fired(fire: Option<Fire<'_>>, reason: &str) -> String {
+    fired_outcome(fire, reason.to_string())
 }
 
 /// AUDIT TARGET for a send: the stored message it is ABOUT — the original for
@@ -4545,9 +4592,10 @@ pub async fn action_send(
 ///
 /// Dispatch: a FORWARD goes to [`forward_send`] (unthreaded, reads the
 /// original). An `individual` GROUP goes to [`fan_out_send`], which answers
-/// [`SendOutcome::Sending`] and IGNORES `message_id` (one id cannot name N
-/// messages; scheduling refuses a fan-out for v1). Everything else, a reply or
-/// a cold send, possibly attributed to a `to`/`bcc` group, is composed here.
+/// [`SendOutcome::Sending`], but NEVER WHEN FIRED: a fired send's group is
+/// attribution only (one id cannot name N messages; scheduling refuses a
+/// fan-out for v1, and the group may have changed since). Everything else, a
+/// reply or a cold send, possibly attributed to a group, is composed here.
 ///
 /// Audit rows, the attachment-scaled Gmail timeout and the echo budget are
 /// exactly what `action_send` had before this was pulled out of it.
@@ -4564,7 +4612,13 @@ pub(crate) async fn perform_send(
     let client = match write_client(state) {
         Ok(c) => c,
         Err(e) => {
-            audit_action(state, "send", target, "rejected:no_write_credential").await;
+            audit_action(
+                state,
+                "send",
+                target,
+                &fired(fire, "rejected:no_write_credential"),
+            )
+            .await;
             return Err(SendFailure::new("rejected:no_write_credential", e));
         }
     };
@@ -4586,15 +4640,35 @@ pub(crate) async fn perform_send(
     // A GROUP SEND resolves its audience here, once, after the guard has cleared
     // and the write credential is known good — so a fan-out that is going to be
     // refused is refused before any of it has gone.
-    let audience = match body.group_id {
-        Some(group_id) => Some(
+    //
+    // A FIRED SCHEDULED SEND IS DIFFERENT: its `group_id` is ATTRIBUTION ONLY.
+    // The composer addressed its `to`/`bcc` when it was scheduled and those
+    // lists are frozen in the request, so the group's CURRENT state decides
+    // nothing about the send. A group flipped to `individual` since is still
+    // attributed, not fanned out (scheduling refused a fan-out, and one minted
+    // Message-ID cannot name N messages); a group deleted since costs only the
+    // history entry, never the mail.
+    let audience = match (body.group_id, fire) {
+        (Some(group_id), None) => Some(
             group_send::resolve(state, group_id)
                 .await
                 .map_err(|e| SendFailure::new("failed:group", e))?,
         ),
-        None => None,
+        (Some(group_id), Some(f)) => match group_send::resolve(state, group_id).await {
+            Ok(audience) => Some(audience),
+            Err(_) => {
+                eprintln!(
+                    "squelch-api: scheduled send {} names group {group_id}, which no longer \
+                     resolves; sending unattributed",
+                    f.id
+                );
+                None
+            }
+        },
+        (None, _) => None,
     };
-    if let Some(audience) = &audience
+    if fire.is_none()
+        && let Some(audience) = &audience
         && audience.mode == GroupMode::Individual
     {
         return fan_out_send(state, body, audience, attachments).await;
@@ -4607,7 +4681,7 @@ pub(crate) async fn perform_send(
                 (Some(m), Some(tid))
             }
             Err(e) => {
-                audit_action(state, "send", target, "failed:target").await;
+                audit_action(state, "send", target, &fired(fire, "failed:target")).await;
                 return Err(SendFailure::new("failed:target", e));
             }
         },
@@ -4625,7 +4699,7 @@ pub(crate) async fn perform_send(
             // quietly falling back to reply-to-sender would send to fewer people
             // than the user reviewed. Fail loudly instead.
             Err(_) if body.reply_all => {
-                audit_action(state, "send", target, "failed:gmail").await;
+                audit_action(state, "send", target, &fired(fire, "failed:gmail")).await;
                 return Err(SendFailure::new(
                     "failed:gmail",
                     ApiError::new(
@@ -4691,7 +4765,8 @@ pub(crate) async fn perform_send(
                     // still fails the send rather than composing something
                     // half-addressed.
                     _ => {
-                        audit_action(state, "send", target, "rejected:no_recipient").await;
+                        audit_action(state, "send", target, &fired(fire, "rejected:no_recipient"))
+                            .await;
                         return Err(SendFailure::new(
                             "rejected:no_recipient",
                             ApiError::bad_request(
@@ -4703,7 +4778,7 @@ pub(crate) async fn perform_send(
                 }
             }
             (_, None) => {
-                audit_action(state, "send", target, "rejected:no_recipient").await;
+                audit_action(state, "send", target, &fired(fire, "rejected:no_recipient")).await;
                 return Err(SendFailure::new(
                     "rejected:no_recipient",
                     ApiError::bad_request(
@@ -4776,7 +4851,7 @@ pub(crate) async fn perform_send(
             if let Some((token, _)) = &tracker {
                 discard_tracker(state, token, target.clone()).await;
             }
-            audit_action(state, "send", target, "rejected:compose").await;
+            audit_action(state, "send", target, &fired(fire, "rejected:compose")).await;
             return Err(SendFailure::new("rejected:compose", write_error(&e)));
         }
     };
@@ -4808,6 +4883,7 @@ pub(crate) async fn perform_send(
         body.draft_id,
         &body.attachment_ids,
         target,
+        fire,
     )
     .await;
 
@@ -4822,7 +4898,28 @@ pub(crate) async fn perform_send(
         }),
     ) = (&audience, &result)
     {
-        group_send::record_single(state, audience, subject_for_record, *echo_message_id).await;
+        // A fired send whose group has since become `individual` still went
+        // as ONE message: record it the way it went (bcc when the frozen
+        // request carried blind copies, else to), not the way the group reads
+        // now.
+        let recorded = if fire.is_some() && audience.mode == GroupMode::Individual {
+            group_send::GroupAudience {
+                group_id: audience.group_id,
+                mode: if bcc_requested.trim().is_empty() {
+                    GroupMode::To
+                } else {
+                    GroupMode::Bcc
+                },
+                addrs: audience.addrs.clone(),
+            }
+        } else {
+            group_send::GroupAudience {
+                group_id: audience.group_id,
+                mode: audience.mode,
+                addrs: audience.addrs.clone(),
+            }
+        };
+        group_send::record_single(state, &recorded, subject_for_record, *echo_message_id).await;
     }
     result
 }
@@ -4907,7 +5004,7 @@ async fn fan_out_send(
 /// 100 MB of daemon memory and then fails somewhere deep in that pipeline as an
 /// opaque 502 pointing at Gmail. Refuse it up front, with a status that says
 /// which side the problem is on.
-const MAX_FORWARD_RAW_BYTES: usize = 20 * 1024 * 1024;
+pub(crate) const MAX_FORWARD_RAW_BYTES: usize = 20 * 1024 * 1024;
 
 /// Whether a fetched original is past the forward ceiling. Its own function so
 /// the boundary is testable without moving twenty megabytes through a socket.
@@ -4923,7 +5020,8 @@ fn forward_raw_too_large(len: usize) -> bool {
 /// Shared by the forward send and by scheduling a forward, which reads the
 /// original NOW so the guard can judge it while the user is there
 /// (docs/SCHEDULED-SEND.md §3 step 4). `action` is the audit action every
-/// refusal is written under (`send` / `schedule`).
+/// refusal is written under (`send` / `schedule`), and `fire` marks it when a
+/// scheduled send is being fired (see [`fired`]).
 pub(crate) async fn read_forward_original(
     state: &ApiState,
     client: &GmailWriteClient,
@@ -4931,12 +5029,13 @@ pub(crate) async fn read_forward_original(
     target: Option<String>,
     original_id: i64,
     staged: usize,
+    fire: Option<Fire<'_>>,
 ) -> Result<(ActionMessageRef, ForwardedOriginal), SendFailure> {
     // Sealed and unknown ids are the same 404 every message-target route returns.
     let original_ref = match resolve_target(state, original_id).await {
         Ok(m) => m,
         Err(e) => {
-            audit_action(state, action, target, "failed:target").await;
+            audit_action(state, action, target, &fired(fire, "failed:target")).await;
             return Err(SendFailure::new("failed:target", e));
         }
     };
@@ -4950,7 +5049,13 @@ pub(crate) async fn read_forward_original(
         // 403 every other write path answers it with, so the client's existing
         // "no write credential" handling fires.
         Err(e @ WriteError::MissingCredential(_)) => {
-            audit_action(state, action, target, "rejected:no_write_credential").await;
+            audit_action(
+                state,
+                action,
+                target,
+                &fired(fire, "rejected:no_write_credential"),
+            )
+            .await;
             return Err(SendFailure::new(
                 "rejected:no_write_credential",
                 write_error(&e),
@@ -4964,7 +5069,7 @@ pub(crate) async fn read_forward_original(
     // own staged files, which ride in the same message and were each under
     // the cap on their own.
     if forward_raw_too_large(raw.len() + staged) {
-        audit_action(state, action, target, "rejected:too_large").await;
+        audit_action(state, action, target, &fired(fire, "rejected:too_large")).await;
         return Err(SendFailure::new(
             "rejected:too_large",
             ApiError::new(
@@ -4979,7 +5084,7 @@ pub(crate) async fn read_forward_original(
         .then(|| parse_forwarded_original(&raw))
         .flatten()
     else {
-        audit_action(state, action, target, "failed:fetch_original").await;
+        audit_action(state, action, target, &fired(fire, "failed:fetch_original")).await;
         return Err(SendFailure::new(
             "failed:fetch_original",
             ApiError::new(
@@ -5072,8 +5177,16 @@ async fn forward_send(
     // The staged files ride in the same message and were each under the cap
     // on their own, so they count against the original's ceiling.
     let staged: usize = attachments.iter().map(|a| a.data.len()).sum();
-    let (original_ref, original) =
-        read_forward_original(state, client, "send", target.clone(), original_id, staged).await?;
+    let (original_ref, original) = read_forward_original(
+        state,
+        client,
+        "send",
+        target.clone(),
+        original_id,
+        staged,
+        fire,
+    )
+    .await?;
 
     // A forward judged before it was queued is not judged again; nothing
     // below is read for any other reason, so it is skipped whole.
@@ -5137,7 +5250,7 @@ async fn forward_send(
             if let Some((token, _)) = &tracker {
                 discard_tracker(state, token, target.clone()).await;
             }
-            audit_action(state, "send", target, "rejected:compose").await;
+            audit_action(state, "send", target, &fired(fire, "rejected:compose")).await;
             return Err(SendFailure::new("rejected:compose", write_error(&e)));
         }
     };
@@ -5169,6 +5282,7 @@ async fn forward_send(
         body.draft_id,
         &body.attachment_ids,
         target,
+        fire,
     )
     .await
 }

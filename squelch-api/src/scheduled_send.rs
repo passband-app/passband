@@ -4,8 +4,10 @@
 //!
 //! HUMAN DOOR ONLY, like drafts: the outbox is the user's own finished mail
 //! waiting to go, and no `/mcp` surface reads `scheduled_sends` or the files
-//! it claims. Every response here is `no-store`, errors included (a listing
-//! and a cancel both carry the user's own words).
+//! it claims. Every response on these routes is `no-store`, errors included
+//! (a listing and a cancel both carry the user's own words): [`routes`] sets
+//! it on the way out, so an extractor's own rejection (a malformed body, a
+//! non-numeric id) carries it too.
 //!
 //! THE SCHEDULE HANDLER DOES EVERYTHING A SEND DOES BEFORE THE GMAIL CALL,
 //! because the user is present to answer: validation, the files, the outbound
@@ -17,27 +19,31 @@
 //! `request` is mail content and is never logged or audited.
 
 use axum::{
-    Json,
+    Json, Router,
     extract::{Path, State},
-    http::StatusCode,
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
+    routing::{delete, get, post},
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use squelch_core::store::{ATTACHMENT_MISSING, CancelOutcome, ParentContext, ScheduledSend};
+use squelch_core::store::{
+    ATTACHMENT_MISSING, CancelOutcome, ParentContext, SCHEDULED_MAX_ATTEMPTS, ScheduledSend,
+    ScheduledSendState, TOO_MANY_SCHEDULED,
+};
 use squelch_core::types::GroupMode;
 
 use crate::error::ApiError;
-use crate::gmail_write::{GmailWriteClient, SentRef};
+use crate::gmail_write::{GmailWriteClient, SentRef, send_budget};
 use crate::group_send;
 use crate::handlers::{
-    Fire, OutboundAttachmentView, SendBody, SendGuard, SendOutcome, audit_action,
-    composition_kinds, dedup_ids, echo_sent, forward_original_kinds, guard_verdict,
-    load_send_attachments, mail_attachment, no_store, perform_send, read_forward_original,
-    resolve_target, send_target, store_call, validate_send, write_client,
+    Fire, MAX_FORWARD_RAW_BYTES, OutboundAttachmentView, SendBody, SendGuard, SendOutcome,
+    audit_action, composition_kinds, dedup_ids, echo_sent, forward_original_kinds, guard_verdict,
+    load_send_attachments, mail_attachment, perform_send, read_forward_original, resolve_target,
+    send_target, store_call, validate_send, write_client,
 };
 use crate::state::ApiState;
 
@@ -46,19 +52,47 @@ const AUDIT_SCHEDULE: &str = "schedule";
 const AUDIT_CANCEL: &str = "schedule.cancel";
 const AUDIT_NOW: &str = "schedule.now";
 
-/// How far ahead a mail may be scheduled. Past a year it is far more likely a
-/// typo in the palette (2027 for 2026) than an intent, and a row that sits for
-/// longer than the write credential's life is a failure waiting to happen.
-const MAX_SCHEDULE_AHEAD: chrono::Duration = chrono::Duration::days(365);
+/// How far ahead a mail may be scheduled: a year, counted as 366 days so
+/// "the same date next year" is accepted across a leap day. Past that it is
+/// far more likely a typo in the palette (2027 for 2026) than an intent, and a
+/// row that sits for longer than the write credential's life is a failure
+/// waiting to happen.
+const MAX_SCHEDULE_AHEAD: chrono::Duration = chrono::Duration::days(366);
 
-/// The worker's claim lease. A send that has not settled inside it is
-/// presumed to have died mid-send, and the next pass asks Gmail by Message-ID
-/// before anything is retried.
-pub(crate) const SCHEDULED_LEASE: chrono::Duration = chrono::Duration::seconds(120);
+/// The fixed part of the worker's claim lease, before the send's own budget
+/// ([`send_budget`], which grows with the message) is added per row. It covers
+/// everything a fire spends on Gmail besides the upload itself, each bounded
+/// by the write client's 60 s timeout: the pre-fire Message-ID search, the
+/// parent's headers (or a forward's original), the 5 s echo, and the store.
+/// A send that has not settled inside its lease is presumed to have died
+/// mid-send, and recovery asks Gmail by Message-ID before anything is retried.
+pub(crate) const SCHEDULED_LEASE_BASE: chrono::Duration = chrono::Duration::seconds(180);
 
-/// Claims a row gets before it is `failed` and waits for the user. The claim
-/// counts, so a row fails on its third unsuccessful attempt.
-pub(crate) const SCHEDULED_MAX_ATTEMPTS: u32 = 3;
+/// How long after a lease lapses recovery waits before asking Gmail, and how
+/// far a "not found" pushes the re-fire. Gmail's search index trails a send by
+/// seconds to minutes; asking the instant a lease lapsed could read a mail
+/// that went out a moment ago as "never sent" and send it twice. The re-fire
+/// asks again first (its row is `maybe_sent`), so a slow index gets two looks.
+pub(crate) const RECOVERY_GRACE: chrono::Duration = chrono::Duration::minutes(5);
+
+/// When recovery could not ask Gmail (no credential, the search failed), how
+/// long before it asks about that row again: one call per row per minute,
+/// not one per tick.
+const RECOVERY_RETRY: chrono::Duration = chrono::Duration::seconds(60);
+
+/// How long past its lease a `sending` row may wait on a recovery that cannot
+/// be asked before it is settled `failed:recovery` for the user. Such a row
+/// MAY have been sent; "send now" on it searches before it sends.
+pub(crate) const RECOVERY_GIVE_UP: chrono::Duration = chrono::Duration::minutes(30);
+
+/// "Not now" answers that must not spend an attempt (Gmail's budget pacing the
+/// mailbox, a pre-fire search that could not be made) come back this far out.
+const NOT_NOW_RETRY: chrono::Duration = chrono::Duration::minutes(2);
+
+/// Claims one pass makes before it yields to the next tick, so a backlog (a
+/// laptop that slept through a morning of scheduled mail) drains in steps a
+/// shutdown can interrupt, not one unbounded burst.
+pub(crate) const MAX_PER_PASS: usize = 20;
 
 /// `2^attempts` minutes after a failed attempt: 2, then 4 (the third failure
 /// is terminal, so 8 is never waited out).
@@ -66,16 +100,25 @@ fn retry_backoff(attempts: u32) -> chrono::Duration {
     chrono::Duration::minutes(1i64 << attempts.min(16))
 }
 
-/// Every response on this door carries `Cache-Control: no-store`, the error
-/// bodies too: one spelling, applied once per handler, so no arm can forget.
-fn no_store_response(result: Result<Response, ApiError>) -> Response {
-    let mut resp = match result {
-        Ok(r) => r,
-        Err(e) => e.into_response(),
-    };
-    for (name, value) in no_store().iter() {
-        resp.headers_mut().insert(name.clone(), value.clone());
-    }
+/// The outbox's routes, each response `no-store` whatever produced it: the
+/// handler, an extractor's rejection, or an error. One layer rather than one
+/// call per handler, so no arm and no rejection can forget it.
+pub(crate) fn routes() -> Router<ApiState> {
+    Router::new()
+        .route(
+            "/client/scheduled",
+            get(list_scheduled_sends).post(schedule_send),
+        )
+        .route("/client/scheduled/{id}", delete(cancel_scheduled_send))
+        .route("/client/scheduled/{id}/now", post(send_scheduled_now))
+        .layer(axum::middleware::map_response(no_store_layer))
+}
+
+async fn no_store_layer(mut resp: Response) -> Response {
+    resp.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store"),
+    );
     resp
 }
 
@@ -107,13 +150,14 @@ pub struct ScheduleBody {
 }
 
 /// `POST /client/scheduled` — queue a finished mail for `send_at`.
-/// `201 {"id", "send_at"}`. Refusals are the send route's own, audited under
+/// `201 {"id", "send_at"}`. Refusals are the send route's own, in the send
+/// route's order (400, then 422, then 403, then 404), audited under
 /// `schedule` with the same details.
 pub async fn schedule_send(
     State(state): State<ApiState>,
     Json(req): Json<ScheduleBody>,
-) -> Response {
-    no_store_response(schedule(&state, req).await)
+) -> Result<Response, ApiError> {
+    schedule(&state, req).await
 }
 
 async fn schedule(state: &ApiState, req: ScheduleBody) -> Result<Response, ApiError> {
@@ -146,7 +190,8 @@ async fn schedule(state: &ApiState, req: ScheduleBody) -> Result<Response, ApiEr
     // minted Message-ID cannot name N messages, so the crash recovery that
     // makes a scheduled send exactly-once has nothing to search for. Refused
     // for v1. `to`/`bcc` groups are one message the composer already
-    // addressed; `group_id` stays in the request for attribution at fire time.
+    // addressed; `group_id` stays in the request for attribution at fire time
+    // (and only for that: the fire never re-reads the group's mode).
     if let Some(group_id) = body.group_id {
         match group_send::resolve(state, group_id).await {
             Ok(audience) if audience.mode == GroupMode::Individual => {
@@ -163,18 +208,10 @@ async fn schedule(state: &ApiState, req: ScheduleBody) -> Result<Response, ApiEr
         }
     }
 
-    // A reply to a message that is not there (another account's, sealed away,
-    // never stored) would fail at fire time three times over and land as
-    // "didn't send" hours later. Asked now, it is the same 404 a send gets.
-    if let Some(parent) = body.reply_to_message_id
-        && let Err(e) = resolve_target(state, parent).await
-    {
-        audit_action(state, AUDIT_SCHEDULE, target, "failed:target").await;
-        return Err(e);
-    }
-
     // 4. The files, exactly as a send reads them: every id resolves (from the
-    // draft being consumed, or unclaimed), 25 MB in total.
+    // draft being consumed, or unclaimed), 25 MB in total. THIS is the check
+    // a request naming a missing file meets; the store's all-or-nothing move
+    // in step 8 is the belt for a file that vanishes in between.
     let attachments = load_send_attachments(
         state,
         AUDIT_SCHEDULE,
@@ -201,6 +238,7 @@ async fn schedule(state: &ApiState, req: ScheduleBody) -> Result<Response, ApiEr
             target.clone(),
             original_id,
             staged,
+            None,
         )
         .await?;
         for kind in forward_original_kinds(&original) {
@@ -228,7 +266,21 @@ async fn schedule(state: &ApiState, req: ScheduleBody) -> Result<Response, ApiEr
         require_write_client(state, target.clone()).await?;
     }
 
-    // 7-8. Mint the Message-ID and freeze the request: `confirm` forced true
+    // 7. A reply's parent, where a send meets it: after the files, the guard
+    // and the credential, so a body with two problems gets the send route's
+    // answer. A parent that is not stored at all (another account's, never
+    // synced, deleted since) would fail at fire time three times over and
+    // land as "didn't send" hours later; asked now, it is the same 404 a send
+    // gets. UNFILTERED like the send's own lookup: a sealed parent resolves,
+    // exactly as it does for a reply sent now.
+    if let Some(parent) = body.reply_to_message_id
+        && let Err(e) = resolve_target(state, parent).await
+    {
+        audit_action(state, AUDIT_SCHEDULE, target, "failed:target").await;
+        return Err(e);
+    }
+
+    // 8. Mint the Message-ID and freeze the request: `confirm` forced true
     // (the user confirmed by scheduling) and `draft_id` stripped (the draft is
     // consumed HERE, and a fired send must not delete whatever draft reuses
     // that id later). `override_guard` persists: the fire path honours it by
@@ -240,7 +292,8 @@ async fn schedule(state: &ApiState, req: ScheduleBody) -> Result<Response, ApiEr
         .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?;
     let ids = dedup_ids(&body.attachment_ids);
 
-    // 9. ONE transaction: the row, the files moved onto it, the draft gone.
+    // 9. ONE transaction: the cap, the row, the files moved onto it, the
+    // draft gone.
     let stored = store_call(state, move |store, account_id| {
         store.schedule_send(
             account_id,
@@ -263,17 +316,23 @@ async fn schedule(state: &ApiState, req: ScheduleBody) -> Result<Response, ApiEr
                 "an attached file is no longer staged; remove it and attach it again",
             ));
         }
+        Err(e) if e.status == StatusCode::BAD_REQUEST && e.message == TOO_MANY_SCHEDULED => {
+            audit_action(state, AUDIT_SCHEDULE, target, "rejected:too_many_scheduled").await;
+            return Err(ApiError::bad_request(
+                "too many mails are already scheduled; send or cancel some first",
+            ));
+        }
         Err(e) => {
             audit_action(state, AUDIT_SCHEDULE, target, "failed:store").await;
             return Err(e);
         }
     };
 
-    // 10. Ids only.
+    // 10. Ids only. `send_at` through serde, as the listing spells it (`Z`).
     audit_action(state, AUDIT_SCHEDULE, target, &format!("ok:{}", row.id)).await;
     Ok((
         StatusCode::CREATED,
-        Json(json!({ "id": row.id, "send_at": row.send_at.to_rfc3339() })),
+        Json(json!({ "id": row.id, "send_at": row.send_at })),
     )
         .into_response())
 }
@@ -400,21 +459,16 @@ impl ScheduledSendView {
 /// `GET /client/scheduled` — the outbox: rows still owed an outcome or the
 /// user's attention (`scheduled`, `sending`, `failed`), oldest `send_at`
 /// first. No audit rows: a listing reveals nothing the user did not write.
-pub async fn list_scheduled_sends(State(state): State<ApiState>) -> Response {
-    no_store_response(
-        async {
-            let rows = store_call(&state, |store, account_id| {
-                store.list_scheduled_sends_with_parent(account_id)
-            })
-            .await?;
-            let items: Vec<ScheduledSendView> = rows
-                .into_iter()
-                .map(|(row, parent)| ScheduledSendView::new(row, parent))
-                .collect();
-            Ok(Json(items).into_response())
-        }
-        .await,
-    )
+pub async fn list_scheduled_sends(State(state): State<ApiState>) -> Result<Response, ApiError> {
+    let rows = store_call(&state, |store, account_id| {
+        store.list_scheduled_sends_with_parent(account_id)
+    })
+    .await?;
+    let items: Vec<ScheduledSendView> = rows
+        .into_iter()
+        .map(|(row, parent)| ScheduledSendView::new(row, parent))
+        .collect();
+    Ok(Json(items).into_response())
 }
 
 // --- DELETE /client/scheduled/{id} -------------------------------------------
@@ -426,48 +480,60 @@ pub async fn list_scheduled_sends(State(state): State<ApiState>) -> Response {
 /// `attachments` the files it held, now unclaimed, so the tray can be redrawn
 /// and the composer's next autosave re-claims them. No draft is created here.
 ///
+/// `request` comes back WITHOUT `override_guard` and `confirm`: both were
+/// answers the user gave for the mail as it stood, and a reopened composer is
+/// a new question. The client sets `confirm` itself, and a reschedule is
+/// judged by the guard again.
+///
 /// `409` for a row already in Gmail's hands; `404` for an unknown id, another
 /// account's, or one already sent or cancelled. Audited, ids only.
-pub async fn cancel_scheduled_send(State(state): State<ApiState>, Path(id): Path<i64>) -> Response {
-    no_store_response(
-        async {
-            let outcome = store_call(&state, move |store, account_id| {
-                store.cancel_scheduled_send(account_id, id, Utc::now())
-            })
-            .await?;
-            let target = Some(id.to_string());
-            match outcome {
-                CancelOutcome::Cancelled(row) => {
-                    audit_action(&state, AUDIT_CANCEL, target, "ok").await;
-                    let request = serde_json::from_str::<serde_json::Value>(&row.request)
-                        .unwrap_or(serde_json::Value::Null);
-                    let attachments: Vec<OutboundAttachmentView> = row
-                        .attachments
-                        .into_iter()
-                        .map(OutboundAttachmentView::from)
-                        .collect();
-                    Ok(Json(json!({
-                        "status": "cancelled",
-                        "id": id,
-                        "request": request,
-                        "attachments": attachments,
-                    }))
-                    .into_response())
-                }
-                CancelOutcome::Sending => {
-                    audit_action(&state, AUDIT_CANCEL, target, "rejected:sending").await;
-                    Err(ApiError::new(
-                        StatusCode::CONFLICT,
-                        "this mail is already being sent and can no longer be cancelled",
-                    ))
-                }
-                CancelOutcome::NotFound => {
-                    audit_action(&state, AUDIT_CANCEL, target, "failed:not_found").await;
-                    Err(ApiError::not_found())
-                }
+pub async fn cancel_scheduled_send(
+    State(state): State<ApiState>,
+    Path(id): Path<i64>,
+) -> Result<Response, ApiError> {
+    let outcome = store_call(&state, move |store, account_id| {
+        store.cancel_scheduled_send(account_id, id, Utc::now())
+    })
+    .await?;
+    let target = Some(id.to_string());
+    match outcome {
+        CancelOutcome::Cancelled(row) => {
+            audit_action(&state, AUDIT_CANCEL, target, "ok").await;
+            let mut request = serde_json::from_str::<serde_json::Value>(&row.request)
+                .unwrap_or(serde_json::Value::Null);
+            if let Some(obj) = request.as_object_mut() {
+                obj.remove("override_guard");
+                obj.remove("confirm");
             }
+            let attachments: Vec<OutboundAttachmentView> = row
+                .attachments
+                .into_iter()
+                .map(OutboundAttachmentView::from)
+                .collect();
+            Ok(Json(json!({
+                "status": "cancelled",
+                "id": id,
+                "request": request,
+                "attachments": attachments,
+            }))
+            .into_response())
         }
-        .await,
+        CancelOutcome::Sending => {
+            audit_action(&state, AUDIT_CANCEL, target, "rejected:sending").await;
+            Err(in_gmails_hands())
+        }
+        CancelOutcome::NotFound => {
+            audit_action(&state, AUDIT_CANCEL, target, "failed:not_found").await;
+            Err(ApiError::not_found())
+        }
+    }
+}
+
+/// The `409` for a row the worker holds: cancel and send-now both answer it.
+fn in_gmails_hands() -> ApiError {
+    ApiError::new(
+        StatusCode::CONFLICT,
+        "this mail is already being sent and can no longer be cancelled",
     )
 }
 
@@ -476,28 +542,38 @@ pub async fn cancel_scheduled_send(State(state): State<ApiState>, Path(id): Path
 /// `POST /client/scheduled/{id}/now` — send a `scheduled` or `failed` row on
 /// the next tick. `202 {"status": "queued", "id"}`: queued, not sent; the
 /// listing shows it go. A `failed` row gets a fresh retry budget (the store's
-/// rule). `404` for anything else. Audited, ids only.
-pub async fn send_scheduled_now(State(state): State<ApiState>, Path(id): Path<i64>) -> Response {
-    no_store_response(
-        async {
-            let queued = store_call(&state, move |store, account_id| {
-                store.send_scheduled_now(account_id, id, Utc::now())
-            })
-            .await?;
-            let target = Some(id.to_string());
-            if !queued {
-                audit_action(&state, AUDIT_NOW, target, "failed:not_found").await;
-                return Err(ApiError::not_found());
-            }
-            audit_action(&state, AUDIT_NOW, target, "ok").await;
-            Ok((
-                StatusCode::ACCEPTED,
-                Json(json!({ "status": "queued", "id": id })),
-            )
-                .into_response())
+/// rule). `409` for a `sending` row (the same answer a cancel gets: it is
+/// already going), `404` for anything else. Audited, ids only.
+pub async fn send_scheduled_now(
+    State(state): State<ApiState>,
+    Path(id): Path<i64>,
+) -> Result<Response, ApiError> {
+    let queued = store_call(&state, move |store, account_id| {
+        store.send_scheduled_now(account_id, id, Utc::now())
+    })
+    .await?;
+    let target = Some(id.to_string());
+    if !queued {
+        // Why not: read the state, as a cancel does. A row that moved to
+        // `sending` in between answers 409 either way, which is the truth.
+        let state_now = store_call(&state, move |store, account_id| {
+            store.scheduled_send_by_id(account_id, id)
+        })
+        .await?
+        .map(|r| r.state);
+        if state_now == Some(ScheduledSendState::Sending) {
+            audit_action(&state, AUDIT_NOW, target, "rejected:sending").await;
+            return Err(in_gmails_hands());
         }
-        .await,
+        audit_action(&state, AUDIT_NOW, target, "failed:not_found").await;
+        return Err(ApiError::not_found());
+    }
+    audit_action(&state, AUDIT_NOW, target, "ok").await;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({ "status": "queued", "id": id })),
     )
+        .into_response())
 }
 
 // --- the worker ---------------------------------------------------------------
@@ -505,16 +581,21 @@ pub async fn send_scheduled_now(State(state): State<ApiState>, Path(id): Path<i6
 /// What one [`run_scheduled_send_pass`] did, as counts (ids go to the log).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ScheduledPassReport {
-    /// Lapsed `sending` rows Gmail already had: settled `sent`, not re-sent.
+    /// Rows Gmail already had (a lapsed lease, or a re-fire of a row whose
+    /// earlier attempt may have gone): settled `sent`, not sent again.
     pub recovered_sent: usize,
-    /// Lapsed `sending` rows Gmail did not have: back to `scheduled`.
+    /// Lapsed `sending` rows Gmail did not have: back to `scheduled`, to be
+    /// asked about once more before they fire.
     pub requeued: usize,
     pub sent: usize,
     /// Failed attempts put back with a backoff.
     pub retried: usize,
+    /// "Not now" answers that spent no attempt: Gmail pacing the mailbox, or a
+    /// search that could not be made (before a re-fire, or in recovery).
+    pub deferred: usize,
     /// Rows that went terminal (`failed`) this pass.
     pub failed: usize,
-    /// Settled rows past their 7 days, dropped.
+    /// Rows past their keep (settled a week, failed a month), dropped.
     pub swept: usize,
 }
 
@@ -525,31 +606,44 @@ impl ScheduledPassReport {
     }
 }
 
+/// Whether the daemon has asked to stop: the pass finishes the send in hand
+/// and claims nothing more.
+fn stopping(state: &ApiState) -> bool {
+    state.shutdown.as_ref().is_some_and(|rx| *rx.borrow())
+}
+
 /// One pass of the outbox (docs/SCHEDULED-SEND.md §4): RECOVER lapsed leases,
-/// CLAIM and send every due row, SWEEP settled ones. The daemon's timer calls
-/// it every tick; the tick is the clock, so a restart costs punctuality and
-/// never a mail.
+/// CLAIM and send due rows (at most [`MAX_PER_PASS`]), SWEEP old ones. The
+/// daemon's timer calls it every tick; the tick is the clock, so a restart
+/// costs punctuality and never a mail.
 ///
 /// Exported for the daemon because it needs the WRITE credential, which the
 /// readonly-bound sync loop must never touch. Never fails: every error is
 /// logged (ids only) and left for the next pass, which is what makes firing
-/// it unconditionally safe.
+/// it unconditionally safe. HONOURS THE SHUTDOWN WATCH the state carries
+/// ([`ApiState::with_shutdown`]) between rows: a send in hand settles, and
+/// nothing new is claimed.
 ///
-/// EXACTLY ONCE: a row is sent only from `sending` under a lease, and a row
-/// whose lease lapsed is answered by a Message-ID search BEFORE it can be
-/// claimed again. A search that fails leaves it `sending`: "could not ask" is
-/// never "did not go out".
+/// EXACTLY ONCE: a row is sent only from `sending` under a lease sized to the
+/// send, a row whose lease lapsed is answered by a Message-ID search BEFORE it
+/// can be claimed again, and a row whose earlier attempt MAY have reached
+/// Gmail is searched for again before it is re-sent. A search that fails
+/// sends nothing: "could not ask" is never "did not go out".
 pub async fn run_scheduled_send_pass(state: &ApiState) -> ScheduledPassReport {
     let mut report = ScheduledPassReport::default();
     recover(state, &mut report).await;
 
-    loop {
+    let mut claims = 0;
+    while claims < MAX_PER_PASS && !stopping(state) {
         let claimed = store_call(state, |store, account_id| {
-            store.claim_due_scheduled_send(account_id, Utc::now(), SCHEDULED_LEASE)
+            store.claim_due_scheduled_send_with(account_id, Utc::now(), lease_for)
         })
         .await;
         match claimed {
-            Ok(Some(row)) => fire(state, row, &mut report).await,
+            Ok(Some(row)) => {
+                claims += 1;
+                fire(state, row, &mut report).await;
+            }
             Ok(None) => break,
             Err(_) => {
                 eprintln!("squelch-api: scheduled send claim failed; retrying next pass");
@@ -569,11 +663,38 @@ pub async fn run_scheduled_send_pass(state: &ApiState) -> ScheduledPassReport {
     report
 }
 
-/// Step 1: every `sending` row whose lease lapsed (a worker that died
-/// mid-send) is asked of Gmail by its minted Message-ID.
+/// The claim lease for one row: [`SCHEDULED_LEASE_BASE`] plus the send's own
+/// Gmail budget for the bytes it will post. The estimate is the files as
+/// base64 (4/3 of their size), the frozen request (the typed words, and then
+/// some), and 4 KB of headers; a FORWARD adds the largest original it may
+/// carry, since the original's size is not known until it is fetched. Too
+/// long only delays a crash's recovery; too short hands a mail still on the
+/// wire to it.
+pub(crate) fn lease_for(row: &ScheduledSend) -> chrono::Duration {
+    let files: u64 = row
+        .attachments
+        .iter()
+        .map(|a| a.size_bytes.max(0) as u64)
+        .sum();
+    let mut estimate = files * 4 / 3 + row.request.len() as u64 + 4096;
+    let is_forward = serde_json::from_str::<SendBody>(&row.request)
+        .map(|b| b.forward_of_message_id.is_some())
+        .unwrap_or(false);
+    if is_forward {
+        estimate += MAX_FORWARD_RAW_BYTES as u64 * 4 / 3;
+    }
+    let budget = chrono::Duration::from_std(send_budget(estimate as usize))
+        .unwrap_or(chrono::Duration::hours(1));
+    SCHEDULED_LEASE_BASE + budget
+}
+
+/// Step 1: every `sending` row whose lease lapsed at least [`RECOVERY_GRACE`]
+/// ago (a worker that died mid-send) is asked of Gmail by its minted
+/// Message-ID.
 async fn recover(state: &ApiState, report: &mut ScheduledPassReport) {
-    let expired = match store_call(state, |store, account_id| {
-        store.expired_sending_scheduled_sends(account_id, Utc::now())
+    let now = Utc::now();
+    let expired = match store_call(state, move |store, account_id| {
+        store.expired_sending_scheduled_sends(account_id, now - RECOVERY_GRACE, now)
     })
     .await
     {
@@ -588,46 +709,103 @@ async fn recover(state: &ApiState, report: &mut ScheduledPassReport) {
     }
     let Ok(client) = write_client(state) else {
         // Nothing can be asked, so nothing is decided: the rows stay
-        // `sending` until a credential exists to search with.
+        // `sending`, and the listing says why.
         eprintln!(
             "squelch-api: {} scheduled send(s) await recovery; no write credential",
             expired.len()
         );
+        for row in &expired {
+            cannot_recover(state, row, "rejected:no_write_credential", report).await;
+        }
         return;
     };
     for row in expired {
+        if stopping(state) {
+            return;
+        }
         match client.find_by_rfc822_msgid(&row.message_id_header).await {
             Ok(Some(gmail_id)) => {
                 if settle_recovered(state, &client, &row, gmail_id).await {
                     report.recovered_sent += 1;
                 }
             }
+            // The lapsed attempt was the last one it had: a row that keeps
+            // dying mid-send (a crash the send itself triggers) stops here
+            // rather than looping forever.
+            Ok(None) if row.attempts >= SCHEDULED_MAX_ATTEMPTS => {
+                eprintln!(
+                    "squelch-api: scheduled send {} died mid-send {} times; failed",
+                    row.id, row.attempts
+                );
+                settle_failed(state, &row, "failed:crash_loop", report).await;
+            }
             Ok(None) => {
-                let id = row.id;
+                // NOT SENT AGAIN IN THIS PASS: the requeue lands a grace out,
+                // and the re-fire searches once more before it sends (the
+                // row is now `maybe_sent`). A mail the index had not caught
+                // up with gets a second look.
+                let (id, attempts) = (row.id, row.attempts);
+                let at = Utc::now() + RECOVERY_GRACE;
                 match store_call(state, move |store, account_id| {
-                    store.requeue_scheduled_send(account_id, id, Utc::now())
+                    store.requeue_scheduled_send(account_id, id, attempts, at, Utc::now())
                 })
                 .await
                 {
                     Ok(true) => {
-                        eprintln!("squelch-api: scheduled send {id} never reached Gmail; requeued");
+                        eprintln!("squelch-api: scheduled send {id} not found in Gmail; requeued");
                         report.requeued += 1;
                     }
                     Ok(false) => {}
                     Err(_) => eprintln!("squelch-api: scheduled send {id} requeue failed"),
                 }
             }
-            Err(_) => eprintln!(
-                "squelch-api: scheduled send {} recovery search failed; still sending",
-                row.id
-            ),
+            Err(_) => {
+                eprintln!(
+                    "squelch-api: scheduled send {} recovery search failed; still sending",
+                    row.id
+                );
+                cannot_recover(state, &row, "recovery:unreachable", report).await;
+            }
         }
     }
 }
 
-/// A lapsed row Gmail already has: echo it (best effort, so the Sent list and
-/// the row both point at the local copy), drop its files, settle it `sent`.
-/// NO SECOND SEND. `true` when the row moved.
+/// Recovery could not ask Gmail about a lapsed row. Within
+/// [`RECOVERY_GIVE_UP`] of its lease the row stays `sending` with the reason
+/// shown and is asked about again in a minute; past it, it goes `failed` with
+/// `failed:recovery` so the user can cancel it or send it now (which asks
+/// Gmail first: the row MAY have been sent).
+async fn cannot_recover(
+    state: &ApiState,
+    row: &ScheduledSend,
+    reason: &'static str,
+    report: &mut ScheduledPassReport,
+) {
+    let now = Utc::now();
+    let lapsed_for = row.lease_until.map(|l| now - l).unwrap_or_default();
+    if lapsed_for >= RECOVERY_GIVE_UP {
+        eprintln!(
+            "squelch-api: scheduled send {} could not be recovered ({reason}); failed",
+            row.id
+        );
+        settle_failed(state, row, "failed:recovery", report).await;
+        return;
+    }
+    let (id, attempts) = (row.id, row.attempts);
+    match store_call(state, move |store, account_id| {
+        store.defer_scheduled_recovery(account_id, id, attempts, now + RECOVERY_RETRY, reason, now)
+    })
+    .await
+    {
+        Ok(true) => report.deferred += 1,
+        Ok(false) => {}
+        Err(_) => eprintln!("squelch-api: scheduled send {id} recovery deferral not recorded"),
+    }
+}
+
+/// A row Gmail already has: echo it (best effort, so the Sent list and the row
+/// both point at the local copy), drop its files, settle it `sent` under the
+/// row's claim. NO SECOND SEND. `true` when the row moved.
 async fn settle_recovered(
     state: &ApiState,
     client: &GmailWriteClient,
@@ -646,13 +824,14 @@ async fn settle_recovered(
         Some(local) => resolve_target(state, local).await.ok().map(|m| m.thread_id),
         None => None,
     };
-    let id = row.id;
+    let (id, attempts) = (row.id, row.attempts);
     let ids: Vec<i64> = row.attachments.iter().map(|a| a.id).collect();
     discard_scheduled_files(state, id, ids).await;
     let settled = store_call(state, move |store, account_id| {
         store.settle_scheduled_sent(
             account_id,
             id,
+            attempts,
             echo_message_id,
             thread_id.as_deref(),
             Utc::now(),
@@ -673,15 +852,46 @@ async fn settle_recovered(
     }
 }
 
-/// Steps 3-4 for one claimed row: send it, then settle.
+/// Steps 3-4 for one claimed row: ask Gmail first if an earlier attempt may
+/// have gone, send it, then settle.
 async fn fire(state: &ApiState, row: ScheduledSend, report: &mut ScheduledPassReport) {
     let id = row.id;
     let Ok(body) = serde_json::from_str::<SendBody>(&row.request) else {
         // Nothing to retry: the same bytes parse the same way next time.
         eprintln!("squelch-api: scheduled send {id} has an unreadable request; failed");
-        settle_failed(state, id, "failed:request", report).await;
+        settle_failed(state, &row, "failed:request", report).await;
         return;
     };
+
+    // THE PRE-FIRE SEARCH. An earlier attempt of this row may be in Gmail (it
+    // failed after the post, or its lease lapsed and recovery did not find it
+    // YET): ask by Message-ID before sending again. Found: settled, no send.
+    // Could not ask: nothing is sent, and the attempt is handed back.
+    if row.maybe_sent {
+        let client = match write_client(state) {
+            Ok(c) => c,
+            Err(_) => {
+                // Nothing could be sent without it either: the ordinary
+                // retryable failure a fire without a credential is.
+                settle_retry(state, &row, "rejected:no_write_credential", false, report).await;
+                return;
+            }
+        };
+        match client.find_by_rfc822_msgid(&row.message_id_header).await {
+            Ok(Some(gmail_id)) => {
+                if settle_recovered(state, &client, &row, gmail_id).await {
+                    report.recovered_sent += 1;
+                }
+                return;
+            }
+            Ok(None) => {}
+            Err(_) => {
+                eprintln!("squelch-api: scheduled send {id} could not be searched for; deferred");
+                not_now(state, &row, "recovery:unreachable", report).await;
+                return;
+            }
+        }
+    }
 
     let ids = dedup_ids(&body.attachment_ids);
     let attachments = if ids.is_empty() {
@@ -694,16 +904,16 @@ async fn fire(state: &ApiState, row: ScheduledSend, report: &mut ScheduledPassRe
         .await
         {
             Ok(rows) if rows.len() == ids.len() => rows.into_iter().map(mail_attachment).collect(),
-            // The row's own files are claimed by it and never swept while it
-            // lives, so a missing one is not going to come back: terminal,
-            // rather than three sends refused the same way.
+            // The row's own files are claimed by it and never swept or
+            // deleted while it lives, so a missing one is not going to come
+            // back: terminal, rather than three sends refused the same way.
             Ok(_) => {
                 eprintln!("squelch-api: scheduled send {id} lost an attached file; failed");
-                settle_failed(state, id, "failed:attachment_missing", report).await;
+                settle_failed(state, &row, "failed:attachment_missing", report).await;
                 return;
             }
             Err(_) => {
-                settle_retry(state, &row, "failed:store", report).await;
+                settle_retry(state, &row, "failed:store", false, report).await;
                 return;
             }
         }
@@ -714,26 +924,19 @@ async fn fire(state: &ApiState, row: ScheduledSend, report: &mut ScheduledPassRe
         message_id: &row.message_id_header,
     };
     match perform_send(state, &body, attachments, SendGuard::Settled, Some(fired)).await {
-        Ok(outcome) => {
-            let (echo_message_id, thread_id) = match outcome {
-                SendOutcome::Sent {
-                    echo_message_id,
-                    thread_id,
-                } => (echo_message_id, thread_id),
-                // Scheduling refuses a fan-out, so a row answering this was
-                // stored by something else. It went, so it is settled sent.
-                SendOutcome::Sending { .. } => {
-                    eprintln!("squelch-api: scheduled send {id} fanned out; settled sent");
-                    (None, None)
-                }
-            };
+        Ok(SendOutcome::Sent {
+            echo_message_id,
+            thread_id,
+        }) => {
             // `finish_send` consumed only unclaimed files (it knows no
             // scheduled id); this row's own go here.
             discard_scheduled_files(state, id, ids).await;
+            let attempts = row.attempts;
             match store_call(state, move |store, account_id| {
                 store.settle_scheduled_sent(
                     account_id,
                     id,
+                    attempts,
                     echo_message_id,
                     thread_id.as_deref(),
                     Utc::now(),
@@ -746,17 +949,30 @@ async fn fire(state: &ApiState, row: ScheduledSend, report: &mut ScheduledPassRe
                 Err(_) => eprintln!("squelch-api: scheduled send {id} sent but not settled"),
             }
         }
+        // UNREACHABLE: a fired send's group is attribution only, so
+        // `perform_send` never fans it out. Should that ever change, the row
+        // must not read as one mail sent: terminal, for a human to look at.
+        Ok(SendOutcome::Sending { .. }) => {
+            eprintln!("squelch-api: scheduled send {id} fanned out; failed");
+            settle_failed(state, &row, "failed:group_fanout", report).await;
+        }
+        // Gmail's budget held the call and nothing was posted: not this
+        // mail's failure, so no attempt is spent.
+        Err(failure) if failure.paced => not_now(state, &row, "paced", report).await,
         // `perform_send` already wrote the refusal to the ledger.
-        Err(failure) => settle_retry(state, &row, failure.reason, report).await,
+        Err(failure) => settle_retry(state, &row, failure.reason, failure.maybe_sent, report).await,
     }
 }
 
 /// A failed attempt: back to `scheduled` after the backoff while attempts
-/// remain, else `failed` for the user.
+/// remain, else `failed` for the user. A failure that MAY HAVE SENT the mail
+/// marks the row so the re-fire searches first, and waits at least
+/// [`RECOVERY_GRACE`] so the search can see it.
 async fn settle_retry(
     state: &ApiState,
     row: &ScheduledSend,
     reason: &'static str,
+    maybe_sent: bool,
     report: &mut ScheduledPassReport,
 ) {
     if row.attempts >= SCHEDULED_MAX_ATTEMPTS {
@@ -764,13 +980,25 @@ async fn settle_retry(
             "squelch-api: scheduled send {} failed ({reason}) on attempt {}; giving up",
             row.id, row.attempts
         );
-        settle_failed(state, row.id, reason, report).await;
+        settle_failed(state, row, reason, report).await;
         return;
     }
-    let id = row.id;
-    let next = Utc::now() + retry_backoff(row.attempts);
+    let (id, attempts) = (row.id, row.attempts);
+    let mut wait = retry_backoff(attempts);
+    if maybe_sent {
+        wait = wait.max(RECOVERY_GRACE);
+    }
+    let next = Utc::now() + wait;
     match store_call(state, move |store, account_id| {
-        store.settle_scheduled_retry(account_id, id, next, reason, Utc::now())
+        store.settle_scheduled_retry(
+            account_id,
+            id,
+            attempts,
+            next,
+            reason,
+            maybe_sent,
+            Utc::now(),
+        )
     })
     .await
     {
@@ -783,14 +1011,36 @@ async fn settle_retry(
     }
 }
 
-async fn settle_failed(
+/// "Not now": the claim is handed back without spending an attempt, and the
+/// row comes round again in [`NOT_NOW_RETRY`].
+async fn not_now(
     state: &ApiState,
-    id: i64,
+    row: &ScheduledSend,
     reason: &'static str,
     report: &mut ScheduledPassReport,
 ) {
+    let (id, attempts) = (row.id, row.attempts);
+    let next = Utc::now() + NOT_NOW_RETRY;
     match store_call(state, move |store, account_id| {
-        store.settle_scheduled_failed(account_id, id, reason, Utc::now())
+        store.unclaim_scheduled_send(account_id, id, attempts, next, reason, Utc::now())
+    })
+    .await
+    {
+        Ok(true) => report.deferred += 1,
+        Ok(false) => {}
+        Err(_) => eprintln!("squelch-api: scheduled send {id} deferral not recorded"),
+    }
+}
+
+async fn settle_failed(
+    state: &ApiState,
+    row: &ScheduledSend,
+    reason: &'static str,
+    report: &mut ScheduledPassReport,
+) {
+    let (id, attempts) = (row.id, row.attempts);
+    match store_call(state, move |store, account_id| {
+        store.settle_scheduled_failed(account_id, id, attempts, reason, Utc::now())
     })
     .await
     {
@@ -839,7 +1089,19 @@ mod tests {
             "now is not later"
         );
         assert!(parse_send_at(Some(&fmt(now - chrono::Duration::minutes(1))), now).is_err());
-        assert!(parse_send_at(Some(&fmt(now + chrono::Duration::days(366))), now).is_err());
+        // A YEAR IS 366 DAYS, so "the same date next year" across a leap day
+        // is accepted; the exact boundary is in, a second past it is out.
+        let edge = now + chrono::Duration::days(366);
+        assert_eq!(parse_send_at(Some(&fmt(edge)), now).unwrap(), edge);
+        assert!(parse_send_at(Some(&fmt(edge + chrono::Duration::seconds(1))), now).is_err());
+        // A literal `Z` is RFC3339 too.
+        let z = DateTime::parse_from_rfc3339("2029-12-31T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            parse_send_at(Some("2030-01-01T09:00:00Z"), z).unwrap(),
+            z + chrono::Duration::hours(33)
+        );
         let at = now + chrono::Duration::hours(3);
         assert_eq!(parse_send_at(Some(&fmt(at)), now).unwrap(), at);
         // Any offset, normalized to UTC.
@@ -908,6 +1170,7 @@ mod tests {
             message_id_header: "<x@passband>".into(),
             sent_message_id: None,
             sent_thread_id: None,
+            maybe_sent: false,
             created_at: now,
             updated_at: now,
             attachments: Vec::new(),
@@ -915,5 +1178,62 @@ mod tests {
         let v = ScheduledSendView::new(row, ParentContext::default());
         assert_eq!((v.to.as_str(), v.subject.as_str()), ("", ""));
         assert_eq!(v.state, "failed");
+    }
+
+    fn row_with(request: &str, files: &[i64]) -> ScheduledSend {
+        let now = Utc::now();
+        ScheduledSend {
+            id: 1,
+            account_id: 1,
+            request: request.into(),
+            send_at: now,
+            state: ScheduledSendState::Scheduled,
+            lease_until: None,
+            attempts: 0,
+            last_error: None,
+            message_id_header: "<x@passband>".into(),
+            sent_message_id: None,
+            sent_thread_id: None,
+            maybe_sent: false,
+            created_at: now,
+            updated_at: now,
+            attachments: files
+                .iter()
+                .enumerate()
+                .map(|(i, size)| squelch_core::store::OutboundAttachmentMeta {
+                    id: i as i64 + 1,
+                    filename: "f".into(),
+                    mime: "application/octet-stream".into(),
+                    size_bytes: *size,
+                    content_id: format!("c{i}"),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn the_lease_covers_the_send_budget_of_the_bytes_it_will_post() {
+        let secs = |d: chrono::Duration| d.num_seconds();
+        let bare = lease_for(&row_with(r#"{"to":"a@x","body":"hi"}"#, &[]));
+        // Base plus the send's flat minute; a few bytes add nothing.
+        assert_eq!(secs(bare), secs(SCHEDULED_LEASE_BASE) + 60);
+        // 25 MB of files is ~33 MB of base64 on the wire: 666 s more at the
+        // send budget's 50 KB/s, the case a flat two minutes got wrong.
+        let big = lease_for(&row_with(
+            r#"{"to":"a@x","body":"hi"}"#,
+            &[15 * 1024 * 1024, 10 * 1024 * 1024],
+        ));
+        let est = 25 * 1024 * 1024 * 4 / 3 + r#"{"to":"a@x","body":"hi"}"#.len() + 4096;
+        assert_eq!(
+            secs(big),
+            secs(SCHEDULED_LEASE_BASE) + send_budget(est).as_secs() as i64
+        );
+        assert!(secs(big) > 180 + 60 + 600, "{big}");
+        // A forward budgets for the largest original it may carry.
+        let fwd = lease_for(&row_with(
+            r#"{"forward_of_message_id":7,"to":"a@x","body":""}"#,
+            &[],
+        ));
+        assert!(fwd > bare + chrono::Duration::seconds(500), "{fwd}");
     }
 }

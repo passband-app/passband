@@ -197,19 +197,10 @@ fn client_router(state: ApiState) -> Router {
         // learns the table exists. POST schedules (running every check a send
         // runs, guard included, while the user is there to answer), GET lists
         // what is still owed an outcome, DELETE pulls one back into the
-        // composer, and /now sends one on the next tick.
-        .route(
-            "/client/scheduled",
-            get(scheduled_send::list_scheduled_sends).post(scheduled_send::schedule_send),
-        )
-        .route(
-            "/client/scheduled/{id}",
-            delete(scheduled_send::cancel_scheduled_send),
-        )
-        .route(
-            "/client/scheduled/{id}/now",
-            post(scheduled_send::send_scheduled_now),
-        )
+        // composer, and /now sends one on the next tick. Its own router so
+        // one `no-store` layer covers every response on it, an extractor's
+        // rejection included.
+        .merge(scheduled_send::routes())
         // The composer/signature preview: the send path's own markdown render,
         // exposed so the client never grows a second, drifting renderer.
         .route("/client/markdown/preview", post(handlers::markdown_preview))

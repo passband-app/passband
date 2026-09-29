@@ -5,7 +5,8 @@ use super::super::migrate::migrate;
 use super::super::*;
 use super::support::*;
 use crate::store::{
-    ATTACHMENT_MISSING, CancelOutcome, ParentContext, ScheduledSend, ScheduledSendState,
+    ATTACHMENT_MISSING, CancelOutcome, MAX_SCHEDULED_PER_ACCOUNT, ParentContext,
+    SCHEDULED_MAX_ATTEMPTS, ScheduledSend, ScheduledSendState, TOO_MANY_SCHEDULED,
 };
 
 /// A fixed base instant, so every clock move is asserted, not raced.
@@ -154,7 +155,7 @@ fn only_a_lapsed_lease_is_offered_for_recovery() {
 
     let at = |now| -> Vec<i64> {
         store
-            .expired_sending_scheduled_sends(acct, now)
+            .expired_sending_scheduled_sends(acct, now, now)
             .unwrap()
             .into_iter()
             .map(|r| r.id)
@@ -171,7 +172,7 @@ fn retry_failed_requeue_and_sent_each_move_only_a_sending_row() {
     let r = schedule(&store, acct, "r", t(0));
     assert!(
         !store
-            .settle_scheduled_retry(acct, r.id, t(5), "http 500", t(1))
+            .settle_scheduled_retry(acct, r.id, 0, t(5), "http 500", false, t(1))
             .unwrap(),
         "a row nobody claimed cannot be settled"
     );
@@ -183,7 +184,7 @@ fn retry_failed_requeue_and_sent_each_move_only_a_sending_row() {
         .unwrap();
     assert!(
         store
-            .settle_scheduled_retry(acct, r.id, t(2), "http 500", t(0))
+            .settle_scheduled_retry(acct, r.id, 1, t(2), "http 500", false, t(0))
             .unwrap()
     );
     let row = store.scheduled_send_by_id(acct, r.id).unwrap().unwrap();
@@ -192,28 +193,44 @@ fn retry_failed_requeue_and_sent_each_move_only_a_sending_row() {
     assert_eq!(row.lease_until, None);
     assert_eq!(row.last_error.as_deref(), Some("http 500"));
     assert_eq!(row.attempts, 1);
+    assert!(
+        !row.maybe_sent,
+        "a definitely-not-sent failure leaves the flag"
+    );
 
-    // Requeue: sending -> scheduled, attempts and send_at untouched.
+    // Requeue: sending -> scheduled at the time given, attempts untouched, and
+    // the row marked MAYBE SENT so its re-fire asks Gmail first.
     store
         .claim_due_scheduled_send(acct, t(2), LEASE)
         .unwrap()
         .unwrap();
-    assert!(store.requeue_scheduled_send(acct, r.id, t(9)).unwrap());
+    assert!(
+        !store
+            .requeue_scheduled_send(acct, r.id, 1, t(14), t(9))
+            .unwrap(),
+        "a settle naming an older claim is a no-op"
+    );
+    assert!(
+        store
+            .requeue_scheduled_send(acct, r.id, 2, t(14), t(9))
+            .unwrap()
+    );
     let row = store.scheduled_send_by_id(acct, r.id).unwrap().unwrap();
     assert_eq!(row.state, ScheduledSendState::Scheduled);
     assert_eq!(
-        (row.attempts, row.send_at, row.lease_until),
-        (2, t(2), None)
+        (row.attempts, row.send_at, row.lease_until, row.maybe_sent),
+        (2, t(14), None, true)
     );
 
     // Failed.
-    store
-        .claim_due_scheduled_send(acct, t(9), LEASE)
+    let claimed = store
+        .claim_due_scheduled_send(acct, t(14), LEASE)
         .unwrap()
         .unwrap();
+    assert!(claimed.maybe_sent, "the flag is sticky across claims");
     assert!(
         store
-            .settle_scheduled_failed(acct, r.id, "no write credential", t(9))
+            .settle_scheduled_failed(acct, r.id, 3, "no write credential", t(14))
             .unwrap()
     );
     let row = store.scheduled_send_by_id(acct, r.id).unwrap().unwrap();
@@ -221,7 +238,9 @@ fn retry_failed_requeue_and_sent_each_move_only_a_sending_row() {
     assert_eq!(row.attempts, 3);
     assert_eq!(row.last_error.as_deref(), Some("no write credential"));
     assert!(
-        !store.requeue_scheduled_send(acct, r.id, t(9)).unwrap(),
+        !store
+            .requeue_scheduled_send(acct, r.id, 3, t(9), t(9))
+            .unwrap(),
         "a failed row is not the worker's any more"
     );
 
@@ -244,7 +263,7 @@ fn retry_failed_requeue_and_sent_each_move_only_a_sending_row() {
     );
     assert!(
         store
-            .settle_scheduled_sent(acct, r.id, Some(42), Some("thr"), t(21))
+            .settle_scheduled_sent(acct, r.id, 1, Some(42), Some("thr"), t(21))
             .unwrap()
     );
     let row = store.scheduled_send_by_id(acct, r.id).unwrap().unwrap();
@@ -254,7 +273,7 @@ fn retry_failed_requeue_and_sent_each_move_only_a_sending_row() {
     assert_eq!(row.lease_until, None);
     assert!(
         !store
-            .settle_scheduled_sent(acct, r.id, None, None, t(22))
+            .settle_scheduled_sent(acct, r.id, 1, None, None, t(22))
             .unwrap(),
         "settling twice is a no-op"
     );
@@ -457,7 +476,7 @@ fn cancel_releases_files_and_a_sending_row_refuses() {
 
     // A failed row cancels too.
     store
-        .settle_scheduled_failed(acct, s.id, "http 500", t(62))
+        .settle_scheduled_failed(acct, s.id, 1, "http 500", t(62))
         .unwrap();
     assert!(matches!(
         store.cancel_scheduled_send(acct, s.id, t(63)).unwrap(),
@@ -478,7 +497,7 @@ fn sweep_takes_only_week_old_settled_rows_and_their_files() {
         .unwrap()
         .unwrap();
     store
-        .settle_scheduled_sent(acct, old_sent.id, None, None, t(1))
+        .settle_scheduled_sent(acct, old_sent.id, 1, None, None, t(1))
         .unwrap();
     let old_cancel = schedule(&store, acct, "old-cancel", t(500));
     store
@@ -604,28 +623,42 @@ fn every_outbox_query_is_account_scoped() {
         .unwrap();
     assert!(
         store
-            .expired_sending_scheduled_sends(other, t(99))
+            .expired_sending_scheduled_sends(other, t(99), t(99))
             .unwrap()
             .is_empty()
     );
-    assert!(!store.requeue_scheduled_send(other, row.id, t(99)).unwrap());
     assert!(
         !store
-            .settle_scheduled_retry(other, row.id, t(99), "x", t(99))
+            .requeue_scheduled_send(other, row.id, 1, t(99), t(99))
             .unwrap()
     );
     assert!(
         !store
-            .settle_scheduled_failed(other, row.id, "x", t(99))
+            .settle_scheduled_retry(other, row.id, 1, t(99), "x", false, t(99))
             .unwrap()
     );
     assert!(
         !store
-            .settle_scheduled_sent(other, row.id, None, None, t(99))
+            .unclaim_scheduled_send(other, row.id, 1, t(99), "x", t(99))
+            .unwrap()
+    );
+    assert!(
+        !store
+            .defer_scheduled_recovery(other, row.id, 1, t(99), "x", t(99))
+            .unwrap()
+    );
+    assert!(
+        !store
+            .settle_scheduled_failed(other, row.id, 1, "x", t(99))
+            .unwrap()
+    );
+    assert!(
+        !store
+            .settle_scheduled_sent(other, row.id, 1, None, None, t(99))
             .unwrap()
     );
     store
-        .settle_scheduled_sent(acct, row.id, None, None, t(99))
+        .settle_scheduled_sent(acct, row.id, 1, None, None, t(99))
         .unwrap();
     assert_eq!(
         store
@@ -712,7 +745,7 @@ fn send_now_on_a_pending_retry_keeps_its_budget() {
         .unwrap();
     assert!(
         store
-            .settle_scheduled_retry(acct, r.id, t(3), "failed:gmail", t(1))
+            .settle_scheduled_retry(acct, r.id, 1, t(3), "failed:gmail", false, t(1))
             .unwrap()
     );
     // Pulling a pending retry forward is not a new request: attempts and the
@@ -804,4 +837,403 @@ fn the_outbox_listing_carries_the_parent_context_drafts_carry() {
     assert_eq!(listed[2].1, parent_ctx, "a reply's parent");
     assert_eq!(listed[3].1, ParentContext::default());
     assert_eq!(listed[4].1, ParentContext::default());
+}
+
+#[test]
+fn a_settle_from_an_older_claim_is_a_no_op() {
+    let (store, acct) = store();
+    let r = schedule(&store, acct, "stale", t(0));
+    let first = store
+        .claim_due_scheduled_send(acct, t(0), LEASE)
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.attempts, 1);
+    // The first worker's lease lapsed; recovery requeued and a second claim
+    // took the row.
+    assert!(
+        store
+            .requeue_scheduled_send(acct, r.id, 1, t(5), t(5))
+            .unwrap()
+    );
+    let second = store
+        .claim_due_scheduled_send(acct, t(5), LEASE)
+        .unwrap()
+        .unwrap();
+    assert_eq!(second.attempts, 2);
+    // The first worker wakes up and settles: every settle names ITS claim.
+    for stale in [
+        store
+            .settle_scheduled_sent(acct, r.id, 1, Some(1), None, t(6))
+            .unwrap(),
+        store
+            .settle_scheduled_retry(acct, r.id, 1, t(9), "failed:gmail", false, t(6))
+            .unwrap(),
+        store
+            .settle_scheduled_failed(acct, r.id, 1, "failed:gmail", t(6))
+            .unwrap(),
+        store
+            .unclaim_scheduled_send(acct, r.id, 1, t(9), "paced", t(6))
+            .unwrap(),
+        store
+            .defer_scheduled_recovery(acct, r.id, 1, t(9), "x", t(6))
+            .unwrap(),
+    ] {
+        assert!(!stale, "a stale settle moved the row");
+    }
+    assert_eq!(
+        store.scheduled_send_by_id(acct, r.id).unwrap().unwrap(),
+        second,
+        "untouched"
+    );
+    assert!(
+        store
+            .settle_scheduled_sent(acct, r.id, 2, None, None, t(6))
+            .unwrap()
+    );
+}
+
+#[test]
+fn the_claim_never_takes_a_row_out_of_attempts() {
+    let (store, acct) = store();
+    let r = schedule(&store, acct, "spent", t(0));
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE scheduled_sends SET attempts = ?1 WHERE id = ?2",
+            params![SCHEDULED_MAX_ATTEMPTS, r.id],
+        )
+        .unwrap();
+    assert!(
+        store
+            .claim_due_scheduled_send(acct, t(10), LEASE)
+            .unwrap()
+            .is_none()
+    );
+    let ok = schedule(&store, acct, "fresh", t(1));
+    assert_eq!(
+        store
+            .claim_due_scheduled_send(acct, t(10), LEASE)
+            .unwrap()
+            .unwrap()
+            .id,
+        ok.id,
+        "the spent row does not block the next one"
+    );
+}
+
+#[test]
+fn the_lease_is_sized_from_the_claimed_row_and_its_files() {
+    let (store, acct) = store();
+    let big = store
+        .stage_outbound_attachment(acct, "big", "text/plain", "cid-big", &[b'x'; 3000], t(0))
+        .unwrap()
+        .id;
+    let row = store
+        .schedule_send(acct, "{}", t(0), "<l@passband>", &[big], None, t(0))
+        .unwrap();
+    let got = store
+        .claim_due_scheduled_send_with(acct, t(1), |r| {
+            let bytes: i64 = r.attachments.iter().map(|a| a.size_bytes).sum();
+            chrono::Duration::seconds(bytes)
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(got.id, row.id);
+    assert_eq!(got.attachments.len(), 1, "the files ride on the claim");
+    assert_eq!(
+        got.lease_until,
+        Some(t(1) + chrono::Duration::seconds(3000))
+    );
+    // A non-positive lease is refused and claims nothing.
+    let other = schedule(&store, acct, "zero", t(0));
+    assert!(
+        store
+            .claim_due_scheduled_send_with(acct, t(1), |_| chrono::Duration::zero())
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .scheduled_send_by_id(acct, other.id)
+            .unwrap()
+            .unwrap()
+            .state,
+        ScheduledSendState::Scheduled
+    );
+}
+
+#[test]
+fn recovery_waits_out_a_grace_and_a_deferral() {
+    let (store, acct) = store();
+    let r = schedule(&store, acct, "grace", t(0));
+    store
+        .claim_due_scheduled_send(acct, t(0), LEASE)
+        .unwrap()
+        .unwrap();
+    let lapse = t(0) + LEASE;
+    let ids = |lapsed_before, now| -> Vec<i64> {
+        store
+            .expired_sending_scheduled_sends(acct, lapsed_before, now)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect()
+    };
+    // The caller's grace: a lease that lapsed after `lapsed_before` waits.
+    assert!(ids(lapse - chrono::Duration::seconds(1), lapse).is_empty());
+    assert_eq!(ids(lapse, lapse), vec![r.id]);
+
+    // A search that could not be made defers the next one; the lease stays.
+    assert!(
+        store
+            .defer_scheduled_recovery(acct, r.id, 1, t(10), "recovery:unreachable", t(5))
+            .unwrap()
+    );
+    let row = store.scheduled_send_by_id(acct, r.id).unwrap().unwrap();
+    assert_eq!(row.state, ScheduledSendState::Sending);
+    assert_eq!(
+        row.lease_until,
+        Some(lapse),
+        "the give-up clock runs from it"
+    );
+    assert_eq!(row.last_error.as_deref(), Some("recovery:unreachable"));
+    assert!(ids(t(9), t(9)).is_empty(), "deferred");
+    assert_eq!(ids(t(10), t(10)), vec![r.id]);
+}
+
+#[test]
+fn an_attempt_that_never_started_does_not_count() {
+    let (store, acct) = store();
+    let r = schedule(&store, acct, "paced", t(0));
+    store
+        .claim_due_scheduled_send(acct, t(0), LEASE)
+        .unwrap()
+        .unwrap();
+    assert!(
+        store
+            .unclaim_scheduled_send(acct, r.id, 1, t(2), "paced", t(0))
+            .unwrap()
+    );
+    let row = store.scheduled_send_by_id(acct, r.id).unwrap().unwrap();
+    assert_eq!(
+        (
+            row.state,
+            row.attempts,
+            row.send_at,
+            row.last_error.as_deref()
+        ),
+        (ScheduledSendState::Scheduled, 0, t(2), Some("paced"))
+    );
+}
+
+#[test]
+fn the_sweep_takes_month_old_failed_rows_and_released_leftovers() {
+    let (store, acct) = store();
+    let f = stage(&store, acct, "cid-failed");
+    let failed = store
+        .schedule_send(acct, "{}", t(0), "<f@passband>", &[f], None, t(0))
+        .unwrap();
+    store
+        .claim_due_scheduled_send(acct, t(0), LEASE)
+        .unwrap()
+        .unwrap();
+    store
+        .settle_scheduled_failed(acct, failed.id, 1, "failed:gmail", t(1))
+        .unwrap();
+    // A file a cancel released and nobody re-claimed.
+    let g = stage(&store, acct, "cid-released");
+    let cancelled = store
+        .schedule_send(acct, "{}", t(600), "<c@passband>", &[g], None, t(0))
+        .unwrap();
+    store
+        .cancel_scheduled_send(acct, cancelled.id, t(1))
+        .unwrap();
+
+    // A week on: the failed row waits for the user, the leftover is past its
+    // day and goes even though no composer ran.
+    let week = t(2) + chrono::Duration::days(7);
+    store.sweep_scheduled_sends(acct, week).unwrap();
+    assert!(
+        store
+            .scheduled_send_by_id(acct, failed.id)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(claims(&store, "cid-failed"), Some((None, Some(failed.id))));
+    assert_eq!(claims(&store, "cid-released"), None);
+
+    let month = t(2) + chrono::Duration::days(30);
+    assert_eq!(store.sweep_scheduled_sends(acct, month).unwrap(), 1);
+    assert!(
+        store
+            .scheduled_send_by_id(acct, failed.id)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(claims(&store, "cid-failed"), None, "its files went with it");
+}
+
+#[test]
+fn an_account_holds_at_most_the_cap_of_live_rows() {
+    let (store, acct) = store();
+    for i in 0..MAX_SCHEDULED_PER_ACCOUNT {
+        store
+            .schedule_send(
+                acct,
+                "{}",
+                t(60),
+                &format!("<{i}@passband>"),
+                &[],
+                None,
+                t(0),
+            )
+            .unwrap();
+    }
+    let err = store
+        .schedule_send(acct, "{}", t(60), "<over@passband>", &[], None, t(0))
+        .unwrap_err();
+    assert!(
+        matches!(&err, CoreError::InvalidInput(m) if m == TOO_MANY_SCHEDULED),
+        "{err:?}"
+    );
+    // A cancelled row frees its slot; another account has its own.
+    let first = store.list_scheduled_sends(acct).unwrap()[0].id;
+    store.cancel_scheduled_send(acct, first, t(1)).unwrap();
+    store
+        .schedule_send(acct, "{}", t(60), "<again@passband>", &[], None, t(1))
+        .unwrap();
+    let other = store.ensure_account("other@example.com").unwrap();
+    store
+        .schedule_send(other, "{}", t(60), "<o@passband>", &[], None, t(1))
+        .unwrap();
+}
+
+#[test]
+fn a_scheduled_file_is_never_swapped_or_deleted_behind_the_row() {
+    let (store, acct) = store();
+    let f = stage(&store, acct, "cid-held");
+    let row = store
+        .schedule_send(acct, "{}", t(60), "<h@passband>", &[f], None, t(0))
+        .unwrap();
+    // The compose door cannot delete a file the outbox holds: the same
+    // answer as an unknown id. Cancel is the only release.
+    assert!(!store.delete_outbound_attachment(acct, f).unwrap());
+    assert_eq!(claims(&store, "cid-held"), Some((None, Some(row.id))));
+
+    // Suppose the row's file DID vanish and its id was handed to a fresh,
+    // unclaimed upload: the worker's door must not read, size or consume it.
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE outbound_attachments SET scheduled_send_id = NULL, content_id = 'cid-swapped'
+             WHERE id = ?1",
+            params![f],
+        )
+        .unwrap();
+    assert!(
+        store
+            .scheduled_outbound_attachments(acct, row.id, &[f])
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .scheduled_outbound_attachment_sizes(acct, row.id, &[f])
+            .unwrap()
+            .is_empty()
+    );
+    store
+        .delete_scheduled_outbound_attachments(acct, row.id, &[f])
+        .unwrap();
+    assert_eq!(
+        claims(&store, "cid-swapped"),
+        Some((None, None)),
+        "somebody else's upload survives the fired row's discard"
+    );
+}
+
+/// TWO DOORS, core side: no store method the agent door or the triage agent
+/// reads through (`external_*`, `agent_*`, `thread_view*`,
+/// `load_agent_context`) may name the outbox. A structural check over the
+/// source text of those functions' bodies, proven non-vacuous by the same
+/// extractor finding the outbox in the human door's listing.
+#[test]
+fn no_agent_door_store_read_names_the_outbox() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/store");
+    let mut sources = Vec::new();
+    for sub in [dir.clone(), dir.join("sqlite")] {
+        for entry in std::fs::read_dir(&sub).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                sources.push(std::fs::read_to_string(&path).unwrap());
+            }
+        }
+    }
+    let prefixes = [
+        "fn external_",
+        "fn agent_",
+        "fn thread_view",
+        "fn load_agent_context",
+    ];
+    let mut checked = 0;
+    for src in &sources {
+        for prefix in prefixes {
+            for body in fn_bodies(src, prefix) {
+                assert!(
+                    !body.contains("scheduled_send"),
+                    "an agent-door read names the outbox:\n{body}"
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked >= 15, "only {checked} agent-door bodies found");
+    // The extractor sees what it is looking for.
+    let listing: Vec<String> = sources
+        .iter()
+        .flat_map(|s| fn_bodies(s, "fn list_scheduled_sends"))
+        .collect();
+    assert!(
+        listing.iter().any(|b| b.contains("scheduled_sends")),
+        "the extractor cannot see the outbox where it is"
+    );
+}
+
+/// Every function body (brace-matched from the first `{` after the name) in
+/// `src` whose definition starts with `prefix`. Trait declarations ending in
+/// `;` before any `{` are skipped.
+fn fn_bodies(src: &str, prefix: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(at) = src[from..].find(prefix) {
+        let start = from + at;
+        from = start + prefix.len();
+        let rest = &src[start..];
+        let (Some(open), semi) = (rest.find('{'), rest.find(';')) else {
+            continue;
+        };
+        if semi.is_some_and(|s| s < open) {
+            continue;
+        }
+        let mut depth = 0usize;
+        let mut end = None;
+        for (i, c) in rest[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(open + i + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(end) = end {
+            out.push(rest[..end].to_string());
+        }
+    }
+    out
 }

@@ -324,8 +324,15 @@ impl SqliteStore {
     /// HUMAN-DOOR ACTION SUPPORT (squelch-api only): resolve a local message id
     /// to the Gmail ids + headers an action needs (archive/label/send).
     ///
-    /// SECURITY: excludes `sensitivity = 'sealed'` in SQL, so an action can never
-    /// target sealed mail — missing and sealed both return NotFound.
+    /// UNFILTERED by sensitivity: a sealed or access-restricted message resolves
+    /// like any other; only an unknown id or another account's id is NotFound.
+    /// This is deliberate, not a hole. Human-door actions do not treat a legacy
+    /// `sensitivity = 'sealed'` as a denial (docs/SECURITY.md §4); what gates
+    /// them is the confirm flag and audit ladder in squelch-api's
+    /// `guarded_action`. The access authority for the agent door is
+    /// `messages.rs:external_message_allowed_conn` (via `thread_guard_and_subject`
+    /// / [`Self::external_thread_allowed`]), which this lookup does NOT apply, so
+    /// never hand its result to an agent-facing path.
     pub fn action_message_ref(
         &self,
         account_id: AccountId,

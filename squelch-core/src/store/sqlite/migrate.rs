@@ -119,6 +119,12 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     if unique_new_index {
         conn.execute("DROP INDEX idx_drafts_new", [])?;
     }
+    // NOT the same kind of guard as the forward index's below. On every real
+    // open schema.sql has already created `drafts` with both of these columns,
+    // so in production this is always true. It exists for the migrate unit
+    // tests, which run `migrate` over partial schemas with no `drafts` table at
+    // all; without it ~15 of them fail on a missing table. Nothing here adds
+    // either column.
     if has_columns(conn, "drafts", &["account_id", "reply_to_message_id"])? {
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_drafts_new

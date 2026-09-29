@@ -3491,7 +3491,8 @@ enum OnSuccess {
 }
 
 /// The ladder every message-scoped action walks: confirm gate -> the caller's own
-/// rejection -> write client -> non-sealed target -> the Gmail call.
+/// rejection -> write client -> target lookup (unfiltered, see `resolve_target`)
+/// -> the Gmail call.
 ///
 /// AUDIT STRINGS ARE A CONTRACT. Every exit appends a row under `action` with the
 /// detail clients assert on — "rejected:confirm", the caller's `reject` detail,

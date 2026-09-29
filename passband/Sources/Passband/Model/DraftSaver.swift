@@ -261,7 +261,20 @@ final class DraftSaver {
         // and stores its task below with no suspension in between (this is
         // MainActor, so nothing else runs there), and the second then finds
         // THAT task and waits again.
-        while let running = inflight[slot] { await running.value }
+        //
+        // AND THE LOOP CLEARS A FINISHED MARKER ITSELF. Only the writer that
+        // stored a task clears it, in its own continuation, and a queued
+        // writer can be resumed AHEAD of that owner. It would then find the
+        // same, already-completed task still in the slot, and awaiting a
+        // finished Task returns without suspending, so without this clear it
+        // would spin the main actor forever and the owner (who needs the main
+        // actor to run its clear) would never get to. Clearing is safe: the
+        // task is done, and the owner's own clear only nils its OWN marker,
+        // so it tolerates finding the slot already free or replaced.
+        while let running = inflight[slot] {
+            await running.value
+            if inflight[slot] == running { inflight[slot] = nil }
+        }
         let task = Task { await save(slot, state) }
         inflight[slot] = task
         await task.value
@@ -320,7 +333,19 @@ final class DraftSaver {
             // rather than saved as a blank row that would restore as one. With no
             // id yet there was never a row, so there is nothing to discard either.
             guard let id = draftId else { return }
-            try? await APIClient.shared.deleteDraft(id)
+            // FORGET THE ID ONLY ONCE THE ROW IS GONE: deleted now, or a 404
+            // (already gone). Any other failure leaves the row alive, and
+            // dropping the id anyway would make the next content save on a
+            // `drafts_v2` daemon mint a SECOND row beside it. Keeping the id,
+            // the next blank save retries the delete and the next content
+            // save edits the row it still has.
+            do {
+                try await APIClient.shared.deleteDraft(id)
+            } catch let error as APIError where error.kind == .notFound {
+                // Already gone: nothing left to delete, so forgetting is right.
+            } catch {
+                return
+            }
             adopt(nil, slot: slot, key: state.id)
             return
         }

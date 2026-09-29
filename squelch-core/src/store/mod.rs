@@ -264,7 +264,8 @@ pub struct SealedBody {
 /// The Gmail ids + header fields an action endpoint needs to act on a message,
 /// and no body. HUMAN-DOOR-ONLY: produced solely by
 /// [`SqliteStore::action_message_ref`](sqlite::SqliteStore::action_message_ref),
-/// which excludes sealed rows in SQL so an action can never target sealed mail.
+/// which does NOT filter sealed or restricted rows (see its doc for where the
+/// human-door and agent-door gates actually live).
 #[derive(Debug, Clone)]
 pub struct ActionMessageRef {
     /// Local message id.

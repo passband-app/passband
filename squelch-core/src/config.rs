@@ -221,6 +221,21 @@ pub struct SyncConfig {
     /// How often (seconds) the incremental poll loop calls `history.list`; one
     /// poll batch is the coalesced batch.
     pub poll_secs: u64,
+    /// HOW MANY `messages.get` CALLS ARE IN FLIGHT AT ONCE while a window of
+    /// mail is fetched (the first backfill, a catch-up, a history walk).
+    ///
+    /// The fetch used to be one GET at a time, each awaited to completion and
+    /// then its embedding awaited too, before the next was even started. That
+    /// serialised network latency behind CPU work and left the Gmail budget
+    /// half idle. Overlapping the GETs lets the budget be the only limiter,
+    /// which is what it is for.
+    ///
+    /// 4, not more, because every in-flight message is a raw RFC 822 body held
+    /// in memory until it is ingested, and a message can be tens of megabytes.
+    /// The first backfill is already the peak of a hosted pod's life (see
+    /// `crate::mem`), so the width is a memory knob as much as a speed one.
+    /// Env: SQUELCH_FETCH_CONCURRENCY. 0 is read as 1.
+    pub fetch_concurrency: usize,
     /// HOW MANY SPAM MESSAGES one on-demand spam sync will fetch, newest first.
     ///
     /// The spam folder is not walked by the poll loop at all (see
@@ -242,6 +257,7 @@ impl Default for SyncConfig {
             gmail_quota_profile: GmailQuotaProfile::Standard,
             backfill_days: 30,
             poll_secs: 5,
+            fetch_concurrency: 4,
             spam_max: 200,
         }
     }
@@ -1841,6 +1857,10 @@ impl Config {
         env_override("SQUELCH_BACKFILL_DAYS", &mut self.sync.backfill_days);
         env_override("SQUELCH_POLL_SECS", &mut self.sync.poll_secs);
         env_override(
+            "SQUELCH_FETCH_CONCURRENCY",
+            &mut self.sync.fetch_concurrency,
+        );
+        env_override(
             "SQUELCH_GMAIL_QUOTA_PROFILE",
             &mut self.sync.gmail_quota_profile,
         );
@@ -2395,6 +2415,7 @@ mod tests {
         let c = Config::default();
         assert_eq!(c.sync.backfill_days, 30);
         assert_eq!(c.sync.poll_secs, 5);
+        assert_eq!(c.sync.fetch_concurrency, 4);
         assert!(c.client_id.is_none());
     }
 

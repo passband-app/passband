@@ -3118,32 +3118,21 @@ final class AppStore {
     /// live on the pane's drafts page. An older daemon keeps its one slot and
     /// today's rule.
     ///
-    /// THE LANDING RULE, on a `drafts_v2` daemon:
+    /// THE LANDING RULE, on a `drafts_v2` daemon: ⌘N ALWAYS OPENS THE
+    /// COMPOSER. A plain new draft edited in the last five minutes is
+    /// restored into it a round-trip later (see `restoreNewMessage`); older
+    /// drafts are only NOTED, by the header's "N drafts" control, never
+    /// opened onto. An earlier cut landed a ⌘N with older drafts waiting on
+    /// the drafts page instead; the user asked for the composer every time
+    /// (2026-09-29): a key that sometimes opens a list is a key you cannot
+    /// type into blind.
     ///
-    /// 1. A plain new draft edited in the last five minutes: restored, and the
-    ///    pane shows the composer.
-    /// 2. None that recent, but at least one OTHER draft exists (any kind, not
-    ///    held, not the one open): the pane lands on its DRAFTS PAGE, with
-    ///    "start a new message" selected, so ⌘N then Enter is still a blank
-    ///    composer and the older mail is one glance away instead of hidden.
-    /// 3. No drafts at all: the blank composer.
-    ///
-    /// Rules 1 and 2 only ever touch the untouched blank composer this call
-    /// opened: typing into it before the list lands wins.
+    /// The restore only ever fills the untouched blank composer this call
+    /// opened, and only while it is still on the composer page: typing into
+    /// it, or toggling to the list, before the fetch lands wins.
     ///
     /// A SECOND ⌘N while the pane is on its drafts page flips it back to the
     /// composer, as it is. On the composer page a repeat does nothing.
-    ///
-    /// THE CACHE DECIDES THE FIRST FRAME, THE FETCH CORRECTS IT. The pane
-    /// opens BLANK and immediately, because the keypress has to feel instant,
-    /// and it opens on the page the same rule picks from `draftsRows` as it
-    /// stands (`newMessagePage`), so a ⌘N with older drafts waiting does not
-    /// flash the composer first. The saved draft lands a round-trip later
-    /// (see `restoreNewMessage`), and that fetch re-runs the rule: it may
-    /// flip the list to the composer (a fresh candidate turned up, restored
-    /// into the untouched composer as ever) or the composer to the list (the
-    /// cache was empty or stale). Only while the page is still the one the
-    /// cache picked: a page the reader changed in the meantime is theirs.
     func openComposeNew() {
         // A composer already up is not something a repeated `c` — or the menu
         // item behind ⌘N — gets to blank out. Same rule as the inline reply.
@@ -3156,8 +3145,7 @@ final class AppStore {
             }
             return
         }
-        var state = ComposeState()
-        state.page = newMessagePage(in: draftsRows)
+        let state = ComposeState()
         openCompose(state)
         let opened = state.page
         Task { await restoreNewMessage(openedOn: opened) }
@@ -3183,16 +3171,6 @@ final class AppStore {
             Date().timeIntervalSince(edited) <= Self.restoreWindow
         else { return nil }
         return newest
-    }
-
-    /// Which page a fresh ⌘N belongs on, by the landing rule at
-    /// `openComposeNew`, judged against `rows` (the cache, or a fetch just
-    /// adopted into it). A pane with no composer open has no inert rows, so
-    /// `otherDrafts` is every listed draft.
-    private func newMessagePage(in rows: [DraftView]) -> ComposePage {
-        guard draftsV2Available else { return .compose }
-        if recentNewDraft(in: rows) != nil { return .compose }
-        return otherDrafts.isEmpty ? .compose : .drafts
     }
 
     /// `f` in the reader — pass THIS message on to someone else, in the pane
@@ -3378,29 +3356,14 @@ final class AppStore {
             // orphan its upload and cut its marker.
             next.attachments.isEmpty
         else { return }
-        // THE FETCH CORRECTS THE CACHE'S PAGE (see `openComposeNew`), but
-        // only a page nobody has touched since: a reader who already went
-        // back to the composer, or to the list, keeps where they went. Both
-        // rules read this one test. A page toggle is a touch like a
-        // keystroke: rule 1 then restores nothing (filling a composer the
-        // reader has left for the list, or come back to on purpose blank,
-        // is second-guessing them), and rule 2 leaves the page alone.
+        // THE RESTORE FILLS ONLY A PAGE NOBODY HAS TOUCHED SINCE (see
+        // `openComposeNew`): a reader who toggled to the drafts list in the
+        // meantime keeps it. A page toggle is a touch like a keystroke, and
+        // filling a composer the reader has left is second-guessing them.
+        // Nothing recent: the blank composer stays exactly as opened, whatever
+        // older drafts the fetch listed; the header's count notes them.
         let corrected = next.page == opened
-        guard let draft else {
-            // Nothing recent to pick up. Older mail waiting lands on the
-            // drafts page (rule 2); none at all is the blank composer, which
-            // also takes back a list the stale cache opened onto nothing.
-            // `otherDrafts` is this fetch, minus held rows and the one open
-            // (none: this composer has no row yet).
-            let page: ComposePage =
-                draftsV2Available && !otherDrafts.isEmpty ? .drafts : .compose
-            if corrected, next.page != page {
-                next.page = page
-                compose = next
-            }
-            return
-        }
-        guard corrected else { return }
+        guard let draft, corrected else { return }
         fill(&next, from: draft)
         next.page = .compose
         compose = next
@@ -3436,7 +3399,7 @@ final class AppStore {
     /// and keeps ⌘N on the one-slot rule, because the by-id routes would 404
     /// on an old daemon. Note `DraftSaver.save` tells the two nil cases apart;
     /// this flag does not need to.
-    var draftsV2Available: Bool { sitrep.stats?.drafts_v2 == true }
+    var draftsV2Available: Bool { stats?.drafts_v2 == true }
 
     /// Fetch the drafts list into `draftsRows`. The drafts page calls it on open.
     ///

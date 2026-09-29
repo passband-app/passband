@@ -209,7 +209,7 @@ final class DraftSaver {
     /// keep: stats in, and no `drafts_v2`. Nil stats is not a refusal (see
     /// `noteChange`); `save` itself waits for the verdict before writing.
     private func forwardRefused(_ state: ComposeState) -> Bool {
-        guard state.forwardOfMessageId != nil, let stats = store.sitrep.stats else { return false }
+        guard state.forwardOfMessageId != nil, let stats = store.stats else { return false }
         return stats.drafts_v2 != true
     }
 
@@ -303,10 +303,10 @@ final class DraftSaver {
         //
         // ONLY a forward or plain new mail asks the question: a reply's
         // route is the same on every daemon, so it never waits.
-        if payloadNeedsVerdict(state), store.sitrep.stats == nil {
+        if payloadNeedsVerdict(state), store.stats == nil {
             guard await awaitVerdict() else { return }
         }
-        if state.forwardOfMessageId != nil, store.sitrep.stats?.drafts_v2 != true { return }
+        if state.forwardOfMessageId != nil, store.stats?.drafts_v2 != true { return }
         // A body that is only the seeded signature counts as blank: saving it
         // would mint a draft of nothing, and every later `c` would restore it.
         //
@@ -368,7 +368,7 @@ final class DraftSaver {
                     replyToMessageId: nil, forwardOfMessageId: original, to: payload.to,
                     cc: payload.cc, bcc: payload.bcc, subject: payload.subject,
                     body: payload.body, attachmentIds: payload.attachmentIds)
-            } else if let stats = store.sitrep.stats {
+            } else if let stats = store.stats {
                 if stats.drafts_v2 == true {
                     // Many new-message drafts, told apart by id. The first save
                     // mints the row; every later one edits it.
@@ -430,7 +430,7 @@ final class DraftSaver {
     func awaitVerdict() async -> Bool {
         let epoch = store.epoch
         let deadline = ContinuousClock.now + Self.verdictWait
-        while store.sitrep.stats == nil {
+        while store.stats == nil {
             guard ContinuousClock.now < deadline else { return false }
             try? await Task.sleep(for: .milliseconds(100))
             guard store.epoch == epoch else { return false }

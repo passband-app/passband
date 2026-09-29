@@ -40,7 +40,7 @@ final class SitrepPoller {
     private init() {}
 
     /// Whether the loop is up. False between an account switch's `stop()`
-    /// and the next `start()`: nothing can land in `sitrep.stats` meanwhile,
+    /// and the next `start()`: nothing can land in `stats` meanwhile,
     /// which is what a writer waiting on that verdict needs to know.
     var isPolling: Bool { resident.isRunning }
 

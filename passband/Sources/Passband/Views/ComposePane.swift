@@ -35,9 +35,9 @@
 // `ComposeState.page`: on `.drafts` the header stays and the body (fields,
 // editor, footer) swaps for `DraftsList`, full width, with the composer kept
 // exactly as it was underneath, one Enter or one click on the control away.
-// A ⌘N with no recent draft to restore but older ones waiting LANDS on that
-// page (see `AppStore.openComposeNew`). The header says which page is up: the
-// title reads "drafts" and the control turns into the way back.
+// ⌘N always opens the composer page; the control's count is how older drafts
+// make themselves known (see `AppStore.openComposeNew`). The header says which
+// page is up: the title reads "drafts" and the control turns into the way back.
 
 import SwiftUI
 

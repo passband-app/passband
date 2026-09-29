@@ -106,7 +106,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // one (never toasted, so nobody knows to look) is the one a short
             // bound cuts on a slow daemon.
             let limit: Duration =
-                store.sitrep.stats == nil
+                store.stats == nil
                 ? DraftSaver.verdictWait + .seconds(2) : held ? .seconds(8) : .seconds(3)
             Task { @MainActor in
                 // Whichever lands first answers; a reply of `true` ends the

@@ -19,6 +19,7 @@
 import AppKit
 import Combine
 import Sparkle
+import UserNotifications
 
 /// Where the update flow has got to, as the card needs to see it. `available`
 /// is the ONLY phase that waits on a human; everything past it is progress the
@@ -65,7 +66,17 @@ final class Updater: NSObject, ObservableObject, SPUUserDriver {
     @Published private(set) var canCheck = false
 
     /// What the card draws.
-    @Published private(set) var phase: UpdatePhase = .idle
+    @Published private(set) var phase: UpdatePhase = .idle {
+        // The banner announces the card, so it goes when the card does (Later,
+        // an install, a failed download). Left behind, it is a click that
+        // opens a window with nothing in it.
+        didSet {
+            if phase == .idle, oldValue != .idle {
+                UNUserNotificationCenter.current()
+                    .removeDeliveredNotifications(withIdentifiers: ["passband.update"])
+            }
+        }
+    }
 
     /// Sparkle's question, parked until the human answers it. `install` is the
     /// card's one button; `dismiss` is Later, which brings the update back on

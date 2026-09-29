@@ -427,6 +427,12 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
         await MainActor.run {
             if route == EventBanner.updateRoute {
                 Notifier.shared.front()
+                // A banner from before a quit: this launch has no card yet, and
+                // Sparkle's next scheduled check could be hours off. The tap is
+                // a request, so it gets the check a request gets.
+                #if os(macOS)
+                    if Updater.shared.phase == .idle { Updater.shared.check() }
+                #endif
                 return
             }
             if let messageId, route != EventBanner.testRoute {

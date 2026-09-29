@@ -13,7 +13,9 @@
 // domain each — the shape has to be assertable without a window.
 //
 // Keys: j/k select · n new · Enter/e edit · x delete, undo-first — the 5s toast
-// recreates the deleted rule. j/k walk DRAWN order, not fetch order.
+// recreates the deleted rule. j/k walk DRAWN order, not fetch order. A click
+// opens the rule: selecting a row has nothing to do on its own that the editor
+// does not, so the pointer goes straight there (#308).
 
 import SwiftUI
 
@@ -96,8 +98,10 @@ struct RulesView: View {
                                         RuleRow(
                                             row: row, group: group, selected: i == index,
                                             matchCount: matchCounts[row.rule.id] ?? 0,
-                                            onSelect: { index = i },
-                                            onEdit: { edit(row.rule) })
+                                            onOpen: {
+                                                index = i
+                                                edit(row.rule)
+                                            })
                                         .id(row.rule.id)
                                     }
                                 }
@@ -294,14 +298,14 @@ private struct RuleRow: View {
     let group: RuleGrouping.DomainGroup
     let selected: Bool
     let matchCount: Int
-    let onSelect: () -> Void
-    let onEdit: () -> Void
+    /// Selects the row and opens it in the editor, on one click.
+    let onOpen: () -> Void
 
     private var rule: SenderRule { row.rule }
 
     var body: some View {
         ListRow(
-            selected: selected, cornerRadius: 8, hPadding: 11, vPadding: 7, action: onSelect
+            selected: selected, cornerRadius: 8, hPadding: 11, vPadding: 7, action: onOpen
         ) { selected, _ in
             HStack(spacing: 9) {
                 if row.nested {
@@ -347,7 +351,6 @@ private struct RuleRow: View {
                     .frame(width: 34, alignment: .trailing)
             }
         }
-        .simultaneousGesture(TapGesture(count: 2).onEnded { onEdit() })
     }
 }
 
@@ -393,34 +396,45 @@ struct RuleEditor: View {
     /// field was still empty. One that lands behind typing was never offered.
     @State private var suggestionShown = false
     @FocusState private var focusedField: FocusTarget?
+    /// What the card opened on BEFORE any draft was laid over it. Leaving the
+    /// card back on these values is not a draft, it is nothing written.
+    private let pristine: RuleDraft
 
     private enum FocusTarget { case pattern, want }
 
     enum Mode { case tune, create, edit }
 
-    init(request: RuleEditorRequest, onClose: @escaping () -> Void) {
+    /// `draft` is what this same card held when it was last dismissed unsaved
+    /// (#306); the opener looks it up by `request.draftKey`.
+    init(request: RuleEditorRequest, draft: RuleDraft? = nil, onClose: @escaping () -> Void) {
         self.request = request
         self.onClose = onClose
+        let start: RuleDraft
         if let rule = request.rule {
-            _pattern = State(initialValue: rule.match_pattern)
-            _want = State(initialValue: rule.want_text)
-            _disposition = State(initialValue: rule.disposition)
             // Editing IS pattern work: hiding the glob would hide the thing
             // being edited.
-            _advanced = State(initialValue: true)
+            start = RuleDraft(
+                pattern: rule.match_pattern, want: rule.want_text,
+                disposition: rule.disposition, advanced: true)
         } else {
-            _pattern = State(
-                initialValue: request.pattern
-                    ?? request.sender.map(SenderID.patternFromSender) ?? "")
-            _want = State(initialValue: request.want ?? "")
-            // nil = auto, which is what every ordinary create/tune sends. A
-            // caller that names one is deliberately overriding on the user's
-            // behalf, so its choice travels as an explicit value.
-            _disposition = State(initialValue: request.disposition)
-            // With no sender there is nothing to derive a glob from, so the
-            // glob field is the only way to say who the rule is about.
-            _advanced = State(initialValue: request.sender == nil)
+            start = RuleDraft(
+                pattern: request.pattern
+                    ?? request.sender.map(SenderID.patternFromSender) ?? "",
+                want: request.want ?? "",
+                // nil = auto, which is what every ordinary create/tune sends. A
+                // caller that names one is deliberately overriding on the user's
+                // behalf, so its choice travels as an explicit value.
+                disposition: request.disposition,
+                // With no sender there is nothing to derive a glob from, so the
+                // glob field is the only way to say who the rule is about.
+                advanced: request.sender == nil)
         }
+        pristine = start
+        let shown = draft ?? start
+        _pattern = State(initialValue: shown.pattern)
+        _want = State(initialValue: shown.want)
+        _disposition = State(initialValue: shown.disposition)
+        _advanced = State(initialValue: shown.advanced)
     }
 
     private var mode: Mode {
@@ -438,7 +452,7 @@ struct RuleEditor: View {
     }
 
     var body: some View {
-        OverlayScrim(onDismiss: onClose) {
+        OverlayScrim(onDismiss: dismiss) {
             ModalCard(width: 470) {
                 header
                 alreadyInEffect
@@ -454,7 +468,7 @@ struct RuleEditor: View {
         }
         .keyContext(.modal)
         .keyBindings(.modal, [
-            KeyBinding("Escape", "cancel", allowInInput: true) { onClose() },
+            KeyBinding("Escape", "cancel", allowInInput: true) { dismiss() },
             // Tab takes a suggestion while one is on offer in the empty field.
             // Otherwise it only means something while the override is on
             // screen; with advanced closed it DECLINES, so the key falls
@@ -704,7 +718,7 @@ struct RuleEditor: View {
                 #endif
             }
             Spacer(minLength: 8)
-            Button("cancel", action: onClose).buttonStyle(.glass)
+            Button("cancel", action: dismiss).buttonStyle(.glass)
             Button(saving ? "saving…" : (mode == .edit ? "update rule" : "save rule")) {
                 Task { await save() }
             }
@@ -748,6 +762,39 @@ struct RuleEditor: View {
         focusedField = advanced ? .pattern : .want
     }
 
+    /// Every way out that is not a save: Escape, the scrim, cancel, and opening
+    /// one of the in-effect rules instead. The card goes, what was typed on it
+    /// stays for the next time the same card opens (#306).
+    private func dismiss() {
+        stashDraft()
+        onClose()
+    }
+
+    /// Keeps the card's values under its draft key, or drops the key when the
+    /// card is back where it started (typed, then erased, is not a draft).
+    private func stashDraft() {
+        guard let key = request.draftKey else { return }
+        let unchanged =
+            pattern == pristine.pattern && want == pristine.want
+            && disposition == pristine.disposition
+        store.ruleDrafts[key] =
+            unchanged
+            ? nil
+            : RuleDraft(
+                pattern: pattern, want: want, disposition: disposition, advanced: advanced)
+    }
+
+    /// A rule in the in-effect strip, clicked: this card gives way to that
+    /// rule's own editor (#308). Whatever was typed here is kept as this card's
+    /// draft, so `t` on the sender again finds it.
+    private func openExisting(_ rule: SenderRule) {
+        stashDraft()
+        store.openRuleEditor(
+            RuleEditorRequest(
+                rule: rule,
+                onSaved: request.onSaved ?? { Task { await RulesReload.shared.reload() } }))
+    }
+
     /// What already governs this sender, above the field that would add another,
     /// scoped by the same glob the triage pipeline matches with. Tune mode only:
     /// create has no address to scope by, edit already shows the rule it edits.
@@ -778,27 +825,30 @@ struct RuleEditor: View {
         VStack(alignment: .leading, spacing: 0) {
             ForEach(Array(rules.enumerated()), id: \.element.id) { i, rule in
                 if i > 0 { Hairline() }
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Chip(text: rule.disposition.label, tone: rule.disposition.tone, filled: true)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(rule.want_text.isEmpty ? "no description" : rule.want_text)
-                            .font(Typo.rowSub)
-                            .foregroundStyle(
-                                rule.want_text.isEmpty ? Palette.inkFaintest : Palette.ink
-                            )
-                            .lineLimit(2)
-                            .help(rule.want_text)
-                        if rule.match_pattern != pattern {
-                            Text(rule.match_pattern)
-                                .font(Typo.mono(10))
-                                .foregroundStyle(Palette.inkFaint)
-                                .lineLimit(1)
+                ListRow(
+                    selected: false, cornerRadius: 8, hPadding: 10, vPadding: 7,
+                    action: { openExisting(rule) }
+                ) { _, _ in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Chip(text: rule.disposition.label, tone: rule.disposition.tone, filled: true)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(rule.want_text.isEmpty ? "no description" : rule.want_text)
+                                .font(Typo.rowSub)
+                                .foregroundStyle(
+                                    rule.want_text.isEmpty ? Palette.inkFaintest : Palette.ink
+                                )
+                                .lineLimit(2)
+                                .help(rule.want_text)
+                            if rule.match_pattern != pattern {
+                                Text(rule.match_pattern)
+                                    .font(Typo.mono(10))
+                                    .foregroundStyle(Palette.inkFaint)
+                                    .lineLimit(1)
+                            }
                         }
+                        Spacer(minLength: 0)
                     }
-                    Spacer(minLength: 0)
                 }
-                .padding(.vertical, 7)
-                .padding(.horizontal, 10)
             }
         }
         .background(
@@ -889,6 +939,7 @@ struct RuleEditor: View {
                 .success)
             request.onResult?(saved, body)
             request.onSaved?()
+            if let key = request.draftKey { store.ruleDrafts[key] = nil }
             onClose()
         } catch let apiError as APIError where apiError.kind == .forbidden {
             error = "no write credential · run squelchd auth --write"

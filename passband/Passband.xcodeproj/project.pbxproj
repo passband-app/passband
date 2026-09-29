@@ -170,6 +170,7 @@
 		6F3982A3598CCC296C35C2E6 /* WireTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C9F46E8DA615783DD2BEAF6 /* WireTypes.swift */; };
 		6FFB126258C28AC3F2E63D01 /* Motion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30406C6A67318CD0CE71C1FF /* Motion.swift */; };
 		7212E886802DBD6F6E869BD0 /* MainWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00D13052ED3A4D60224B1B18 /* MainWindow.swift */; };
+		72B7AEAB358D6173A2E762D5 /* DraftsList.swift in Sources */ = {isa = PBXBuildFile; fileRef = 449EBE20D26F590B99D2AA0A /* DraftsList.swift */; };
 		72CE3BD39D4FA8820AFBE15C /* MobileSearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F82499FD36351898E386644C /* MobileSearchView.swift */; };
 		73406C552849D8EC2F46D149 /* SenderSuggestions.swift in Sources */ = {isa = PBXBuildFile; fileRef = DBC81A5D09703AAB2D2F092C /* SenderSuggestions.swift */; };
 		7362D6064FE828BD80A2AEDA /* ProcessView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 639F5C0DB9AE5A1AE8DF69A1 /* ProcessView.swift */; };
@@ -293,6 +294,7 @@
 		C1D1665A922C1E5430CAFF76 /* SharePanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8F60C8D4A9145D5DD96DC2A /* SharePanel.swift */; };
 		C208912136BEEE63FE2DBF28 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3BE1E84810E523707C4E2CC5 /* SettingsView.swift */; };
 		C2102B9052FF6E97DAAA2AB4 /* ImageProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39D5C019641DC37B55D7D922 /* ImageProxy.swift */; };
+		C222BEDB1AA4B6CE4B34D240 /* DraftsList.swift in Sources */ = {isa = PBXBuildFile; fileRef = 449EBE20D26F590B99D2AA0A /* DraftsList.swift */; };
 		C2C0DFC734A69CCFE13ECEFA /* SettingsSearch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 673B876D08EF2BB9C1FA0E19 /* SettingsSearch.swift */; };
 		C3BC6287782BE4B513C8F6F9 /* RuleGrouping.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C13060FB00E773CC4E33680 /* RuleGrouping.swift */; };
 		C3DD204EC3377648F4153546 /* Analytics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A46105028AEB554882E2D72 /* Analytics.swift */; };
@@ -480,6 +482,7 @@
 		3E1FEEC087CEB684B1D4F861 /* ClearBand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClearBand.swift; sourceTree = "<group>"; };
 		40EDDA2423A09A989C77CAED /* AuthLabels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthLabels.swift; sourceTree = "<group>"; };
 		41BFA30FC9B1A10CD0FB94E3 /* ComposeAttach.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposeAttach.swift; sourceTree = "<group>"; };
+		449EBE20D26F590B99D2AA0A /* DraftsList.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DraftsList.swift; sourceTree = "<group>"; };
 		47122181AE7D49894917581E /* Passband.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Passband.entitlements; sourceTree = "<group>"; };
 		48410833F8D7B524FBDD2FB2 /* QuickLookUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuickLookUI.framework; path = System/Library/Frameworks/QuickLookUI.framework; sourceTree = SDKROOT; };
 		49697D28E02B833310EE2C12 /* EmailWebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmailWebView.swift; sourceTree = "<group>"; };
@@ -689,6 +692,7 @@
 				4D6D7D083F3A7242DB7EB186 /* ConnectView.swift */,
 				EE90BEFCBE860D7F852028C5 /* DeeperSearchBand.swift */,
 				D2D68A34D5DC11532BE8E359 /* DemoAppearancePicker.swift */,
+				449EBE20D26F590B99D2AA0A /* DraftsList.swift */,
 				6D358053F47CDAD2D0B7EAB5 /* EmailsView.swift */,
 				3BFBFFBE499370A5F88E2540 /* EmailWebCore.swift */,
 				49697D28E02B833310EE2C12 /* EmailWebView.swift */,
@@ -1214,6 +1218,7 @@
 				3FBFC0C93CC79B3FD2624085 /* DeeperSearchBand.swift in Sources */,
 				6483175C82FC7A1C7672AB69 /* DemoAppearancePicker.swift in Sources */,
 				2530ADC217749D5FEEFFA4D9 /* DraftSaver.swift in Sources */,
+				C222BEDB1AA4B6CE4B34D240 /* DraftsList.swift in Sources */,
 				918EB3663E912FF4F36229C2 /* EmailWebCore.swift in Sources */,
 				D5D9F05E11B3B8383ED792EB /* EmailWebView.swift in Sources */,
 				D559CB25DC210A5DDEAA0D51 /* EmailsView.swift in Sources */,
@@ -1392,6 +1397,7 @@
 				3D45D6FA3BBF96A82531286A /* DeeperSearchBand.swift in Sources */,
 				1A920B5E9FD361E56B345AC3 /* DemoAppearancePicker.swift in Sources */,
 				2305ADF476A30E034D2EC27C /* DraftSaver.swift in Sources */,
+				72B7AEAB358D6173A2E762D5 /* DraftsList.swift in Sources */,
 				903D181BC549637A0AEEB564 /* EmailWebCore.swift in Sources */,
 				4D885CFF844970680B6C93DA /* EmailWebViewiOS.swift in Sources */,
 				4E260638B2736F4A91E83841 /* EmailsView.swift in Sources */,

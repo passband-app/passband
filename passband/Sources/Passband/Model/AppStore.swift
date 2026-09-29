@@ -280,7 +280,12 @@ struct RefreshError: Equatable, Sendable {
 /// `send` is the odd one out: nothing has gone out yet. The mail is HELD for
 /// the undo window and only leaves when it closes, so its "inverse" is simply
 /// not sending (see `AppStore.sendWithUndo`).
-enum UndoKind: Sendable { case archive, done, label, ruleDelete, groupDelete, remind, send }
+///
+/// `draftDelete` is held the same way: the DELETE only goes out when the
+/// window closes, so its inverse is not deleting (see `AppStore.deleteDraft`).
+enum UndoKind: Sendable {
+    case archive, done, label, ruleDelete, groupDelete, remind, send, draftDelete
+}
 
 /// A queued undo. `revert` is the exact inverse call to fire on `u`/toast-click;
 /// the forward action has already gone out.
@@ -459,6 +464,12 @@ struct ComposeState: Sendable, Equatable {
     /// INLINE is not recorded here — the body says, by carrying the file's
     /// `cid:` marker or not (see `ComposeMarkers`).
     var attachments: [ComposeAttachment] = []
+    /// WHICH PAGE OF THE PANE IS SHOWING: the composer, or the drafts list
+    /// that swaps in for its body (`DraftsList`). The pane's own navigation,
+    /// nothing about the mail: it never reaches the wire and is never
+    /// autosaved (`DraftSaver`'s payload is a closed list of mail fields).
+    /// The inline reply has no drafts page and leaves it at `.compose`.
+    var page: ComposePage = .compose
 
     /// The daemon ids of every file that has finished staging: what a draft
     /// save and a send name.
@@ -498,6 +509,12 @@ struct ComposeState: Sendable, Equatable {
         if forwardOfMessageId != nil { return "forward" }
         return replyToMessageId == nil ? "new" : "reply"
     }
+}
+
+/// The compose pane's two pages; see `ComposeState.page`.
+enum ComposePage: Sendable, Equatable {
+    case compose
+    case drafts
 }
 
 /// The email currently being reclassified by the `v` palette.
@@ -855,6 +872,17 @@ final class AppStore {
     /// beside it on purpose: the two are mutually exclusive by construction
     /// (see WhatsNew), and keeping them adjacent is what keeps that readable.
     let whatsNew = WhatsNew()
+
+    // MARK: drafts
+
+    /// The account's saved drafts as last fetched, newest edits first as the
+    /// daemon lists them, MINUS any whose delete is waiting out its undo. A
+    /// cache for the composer's drafts control and drafts page, filled by
+    /// `refreshDrafts` and by the ⌘N restore's own fetch, so the count is there
+    /// without a second round trip. Held sends are NOT filtered out here,
+    /// because which rows are held changes by the second; `listedDrafts` and
+    /// `otherDrafts` apply that at read time.
+    var draftsRows: [DraftView] = []
 
     // MARK: undo / toasts
     var undos: [PendingUndo] = []
@@ -1703,6 +1731,18 @@ final class AppStore {
         groupEditor = nil
         // Every revert closure targets the old account's daemon.
         undos = []
+        // The drafts cache is the old account's rows, and a delete still in
+        // its hold is aimed at the old account's daemon: cancelled, not fired.
+        // (The timer checks the epoch too; this is what keeps it from even
+        // waking up to.)
+        draftsRows = []
+        for pending in pendingDraftDeletes.values { pending.timer.cancel() }
+        pendingDraftDeletes = [:]
+        // The generation and the in-flight fetch list are NOT reset: an old
+        // account's fetch still in the air removes its own entry when it
+        // lands, and a rewound counter would let it prune the new account's
+        // tombstones early.
+        draftTombstones = [:]
         authRings = []
         authQueue = []
         tracking = nil
@@ -2984,19 +3024,89 @@ final class AppStore {
         Analytics.capture("compose_opened", ["kind": next.analyticsKind])
     }
 
-    /// `c` / ⌘N — the new-message composer, RESTORED. The account holds at most
-    /// one new-message draft by construction, so there is one row to look for and
-    /// no picker to show.
+    /// `c` / ⌘N — the new-message composer, RESTORED, but only from the recent
+    /// past. A `drafts_v2` daemon holds any number of new-message drafts, so
+    /// "the" draft to restore is the most recently edited one, and only when
+    /// that edit was within `restoreWindow`: a ⌘N minutes after an Esc is
+    /// picking up where you left off, a ⌘N tomorrow is a new mail. Older drafts
+    /// live on the pane's drafts page. An older daemon keeps its one slot and
+    /// today's rule.
     ///
-    /// The pane opens BLANK and immediately, because the keypress has to feel
-    /// instant; the saved draft lands into it a round-trip later, and only if
-    /// nothing has been typed in the meantime (see `restoreNewMessage`).
+    /// THE LANDING RULE, on a `drafts_v2` daemon:
+    ///
+    /// 1. A plain new draft edited in the last five minutes: restored, and the
+    ///    pane shows the composer.
+    /// 2. None that recent, but at least one OTHER draft exists (any kind, not
+    ///    held, not the one open): the pane lands on its DRAFTS PAGE, with
+    ///    "start a new message" selected, so ⌘N then Enter is still a blank
+    ///    composer and the older mail is one glance away instead of hidden.
+    /// 3. No drafts at all: the blank composer.
+    ///
+    /// Rules 1 and 2 only ever touch the untouched blank composer this call
+    /// opened: typing into it before the list lands wins.
+    ///
+    /// A SECOND ⌘N while the pane is on its drafts page flips it back to the
+    /// composer, as it is. On the composer page a repeat does nothing.
+    ///
+    /// THE CACHE DECIDES THE FIRST FRAME, THE FETCH CORRECTS IT. The pane
+    /// opens BLANK and immediately, because the keypress has to feel instant,
+    /// and it opens on the page the same rule picks from `draftsRows` as it
+    /// stands (`newMessagePage`), so a ⌘N with older drafts waiting does not
+    /// flash the composer first. The saved draft lands a round-trip later
+    /// (see `restoreNewMessage`), and that fetch re-runs the rule: it may
+    /// flip the list to the composer (a fresh candidate turned up, restored
+    /// into the untouched composer as ever) or the composer to the list (the
+    /// cache was empty or stale). Only while the page is still the one the
+    /// cache picked: a page the reader changed in the meantime is theirs.
     func openComposeNew() {
         // A composer already up is not something a repeated `c` — or the menu
         // item behind ⌘N — gets to blank out. Same rule as the inline reply.
-        guard compose == nil else { return }
-        openCompose(ComposeState())
-        Task { await restoreNewMessage() }
+        // Except for the page it is on: ⌘N from the drafts list means the
+        // composer, and the list's own first row says so with a ⌘N chip.
+        if var open = compose {
+            if open.page == .drafts {
+                open.page = .compose
+                compose = open
+            }
+            return
+        }
+        var state = ComposeState()
+        state.page = newMessagePage(in: draftsRows)
+        openCompose(state)
+        let opened = state.page
+        Task { await restoreNewMessage(openedOn: opened) }
+    }
+
+    /// The newest plain new-message draft edited within `restoreWindow`, not
+    /// owned by a held send and not waiting out a delete: rule 1's candidate.
+    /// `drafts_v2` only; the one-slot rule lives in `restoreNewMessage`.
+    private func recentNewDraft(in rows: [DraftView]) -> DraftView? {
+        // Plain new mail only (a reply or forward row belongs to its parent),
+        // never one a held send owns or one whose delete is in its undo
+        // window, and the NEWEST edit of what is left.
+        let candidates = rows.filter {
+            $0.reply_to_message_id == nil && $0.forward_of_message_id == nil
+                && !isHeld($0) && !isDeleting($0.id)
+        }
+        guard
+            let newest = candidates.max(by: {
+                (Fmt.date($0.updated_at) ?? .distantPast)
+                    < (Fmt.date($1.updated_at) ?? .distantPast)
+            }),
+            let edited = Fmt.date(newest.updated_at),
+            Date().timeIntervalSince(edited) <= Self.restoreWindow
+        else { return nil }
+        return newest
+    }
+
+    /// Which page a fresh ⌘N belongs on, by the landing rule at
+    /// `openComposeNew`, judged against `rows` (the cache, or a fetch just
+    /// adopted into it). A pane with no composer open has no inert rows, so
+    /// `otherDrafts` is every listed draft.
+    private func newMessagePage(in rows: [DraftView]) -> ComposePage {
+        guard draftsV2Available else { return .compose }
+        if recentNewDraft(in: rows) != nil { return .compose }
+        return otherDrafts.isEmpty ? .compose : .drafts
     }
 
     /// `f` in the reader — pass THIS message on to someone else, in the pane
@@ -3018,15 +3128,18 @@ final class AppStore {
     /// list that stamps its own prefix). Resolved HERE rather than at the call
     /// site so the outgoing subject and the shown one cannot drift.
     ///
-    /// Two deliberate absences:
+    /// Its drafts:
     ///
-    /// - No `restoreNewMessage`. That draft is the account's ONE plain new
-    ///   message, keyed `reply_to_message_id == nil` server-side, and adopting
-    ///   it here would drop a stranger's half-written mail into a forward of
+    /// - No `restoreNewMessage`. Those rows are plain new mail, and adopting
+    ///   one here would drop a stranger's half-written mail into a forward of
     ///   something else — and take its subject line with it.
-    /// - No autosave at all, for the mirror of the same reason: the drafts wire
-    ///   cannot record what is being forwarded, so a saved forward would come
-    ///   back as an ordinary new message with the original silently gone. See
+    /// - `restoreForward` instead, on a `drafts_v2` daemon: the row keyed by
+    ///   THIS message's id. KEYED PER TARGET, like a reply's, so `f` twice on
+    ///   the same message reopens the same draft rather than starting a second
+    ///   one, and the drafts page's forward row lands here too (`openDraft`).
+    /// - On an older daemon no autosave at all: its drafts wire cannot record
+    ///   what is being forwarded, so a saved forward would come back as an
+    ///   ordinary new message with the original silently gone. See
     ///   `DraftSaver.save`.
     func openComposeForward(message: ClientMessage, fallbackSubject: String) {
         // A composer already up is not something a repeated `f` gets to blank
@@ -3070,24 +3183,97 @@ final class AppStore {
         // Through `openCompose` so the tracker default and the signature are
         // seeded by the one place that seeds them, and the open is counted.
         openCompose(state)
+        Task { await restoreForward(message.id) }
     }
+
+    /// Fill the just-opened forward composer from the draft keyed to the
+    /// message it forwards. The sibling of `restoreReply`, and silent on
+    /// failure like it: a restore that cannot happen leaves the fresh forward
+    /// the reader asked for.
+    ///
+    /// Everything the row holds comes back (to, cc, bcc, subject, body,
+    /// files): unlike a reply, a forward derives no audience from anything,
+    /// so the draft's addressees are the whole of it.
+    private func restoreForward(_ messageId: Int) async {
+        let e = epoch
+        // Only a `drafts_v2` daemon keeps forward rows at all; asking an older
+        // one would list drafts for nothing. Nil stats is "not asked yet", not
+        // "no", so an `f` pressed right after launch waits for the answer.
+        guard await DraftSaver.shared.awaitVerdict(), draftsV2Available else { return }
+        // SETTLE FIRST, as `refreshDrafts` does: a forward of this message
+        // closed a moment ago flushed its last save fire-and-forget, and a
+        // list taken before it lands restores the text as it was a keystroke
+        // earlier (or finds no row at all).
+        await DraftSaver.shared.settle()
+        guard e == epoch, let rows = await fetchDrafts() else { return }
+        // Another account's drafts are not this composer's to restore, and
+        // `forward_of_message_id` is a per-daemon id, so one WOULD match.
+        guard e == epoch else { return }
+        // The fetch doubles as the drafts button's count; see `draftsRows`.
+        adoptDraftsRows(rows)
+        // A forward of this message in the hold owns this row until its send
+        // deletes it, and one whose delete is in its undo window is gone as
+        // far as the reader knows.
+        guard let draft = rows.first(where: { $0.forward_of_message_id == messageId }),
+            !isHeld(draft), !isDeleting(draft.id)
+        else { return }
+        // Must still be THE forward we opened, untouched: closed, replaced, or
+        // typed into in the meantime all mean the draft has missed its window.
+        // Untouched is measured against what `openComposeForward` SEEDED (its
+        // `Fwd:` subject and the signature), not against empty, which a
+        // forward never is: `hasContent` already reads it that way. A file
+        // still uploading is not staged yet, so the tray is checked too.
+        guard var next = compose, next.forwardOfMessageId == messageId, next.draftId == nil,
+            !DraftSaver.hasContent(next), next.attachments.isEmpty
+        else { return }
+        // `fill` after `openCompose`, as for new mail: the draft's addressees
+        // are what somebody typed, not the seed.
+        fill(&next, from: draft)
+        compose = next
+    }
+
+    /// How recent a new-message draft's last edit must be for ⌘N to restore it
+    /// (the user's call). Past this the composer opens blank and the draft
+    /// waits on the drafts page.
+    static let restoreWindow: TimeInterval = 5 * 60
 
     /// Fill the just-opened new-message composer from its saved draft. Silent on
     /// failure: a restore that cannot happen leaves a blank composer, which is
     /// what the reader asked for anyway.
-    private func restoreNewMessage() async {
+    private func restoreNewMessage(openedOn opened: ComposePage) async {
         let e = epoch
-        // Not while a new message is in the send HOLD: its draft row is still
-        // there (the send deletes it), and restoring it here would put mail
-        // that is about to go out into a fresh composer, one ⌘Enter from going
-        // out twice.
-        guard !holdsDraft(replyTo: nil),
-            let rows = try? await APIClient.shared.listDrafts(),
-            let draft = rows.first(where: { $0.reply_to_message_id == nil }),
-            !holdsDraft(replyTo: nil)
-        else { return }
+        // No verdict on the daemon yet, no rule to apply: which rows count as
+        // candidates depends on whether it keeps one slot or many. WAIT for it
+        // (bounded, like a save does) rather than open blank: a `c` in the
+        // first half second after launch restored its draft before there was
+        // a verdict to ask about, and must still. Every "still the blank
+        // composer" guard below runs after the wait, so typing meanwhile wins.
+        guard await DraftSaver.shared.awaitVerdict(), e == epoch else { return }
+        // OLD DAEMON: not while a new message is in the send HOLD. Its draft row
+        // is the one slot, still there until the send deletes it, and restoring
+        // it here would put mail that is about to go out into a fresh composer,
+        // one ⌘Enter from going out twice. (On a `drafts_v2` daemon the held
+        // row is excluded by `isHeld` below instead, which leaves every OTHER
+        // draft restorable.)
+        if !draftsV2Available, holdsDraft(replyTo: nil) { return }
+        // SETTLE FIRST, as `refreshDrafts` does: the composer ⌘N replaced
+        // flushed its last save fire-and-forget, and the newest row is exactly
+        // the one that flush is writing.
+        await DraftSaver.shared.settle()
+        guard e == epoch, let rows = await fetchDrafts() else { return }
         // Another account's drafts are not this composer's to restore.
         guard e == epoch else { return }
+        // The fetch doubles as the drafts button's count; see `draftsRows`.
+        adoptDraftsRows(rows)
+        let draft: DraftView?
+        if draftsV2Available {
+            draft = recentNewDraft(in: rows)
+        } else {
+            guard !holdsDraft(replyTo: nil),
+                let only = rows.first(where: { $0.reply_to_message_id == nil })
+            else { return }
+            draft = only
+        }
         // Must still be THE blank composer we opened: closed, replaced by a
         // reply, or typed into in the meantime all mean the draft has missed its
         // window, and overwriting live keystrokes is worse than not restoring.
@@ -3100,13 +3286,48 @@ final class AppStore {
         // restore in it and quietly re-address someone else's mail. The subject
         // this seeds would survive as the only visible trace.
         guard var next = compose, next.replyToMessageId == nil, next.forwardOfMessageId == nil,
-            next.draftId == nil,
-            next.to.isEmpty, next.cc.isEmpty, next.bcc.isEmpty, next.subject.isEmpty,
-            Prefs.shared.isBodyUntouched(next.body),
-            // A file dropped in the meantime is composing too: overwriting the
-            // tray with the draft's would orphan its upload and cut its marker.
+            next.draftId == nil, !DraftSaver.hasContent(next),
+            // A file dropped in the meantime is composing too, even before it
+            // finishes staging: overwriting the tray with the draft's would
+            // orphan its upload and cut its marker.
             next.attachments.isEmpty
         else { return }
+        // THE FETCH CORRECTS THE CACHE'S PAGE (see `openComposeNew`), but
+        // only a page nobody has touched since: a reader who already went
+        // back to the composer, or to the list, keeps where they went. Both
+        // rules read this one test. A page toggle is a touch like a
+        // keystroke: rule 1 then restores nothing (filling a composer the
+        // reader has left for the list, or come back to on purpose blank,
+        // is second-guessing them), and rule 2 leaves the page alone.
+        let corrected = next.page == opened
+        guard let draft else {
+            // Nothing recent to pick up. Older mail waiting lands on the
+            // drafts page (rule 2); none at all is the blank composer, which
+            // also takes back a list the stale cache opened onto nothing.
+            // `otherDrafts` is this fetch, minus held rows and the one open
+            // (none: this composer has no row yet).
+            let page: ComposePage =
+                draftsV2Available && !otherDrafts.isEmpty ? .drafts : .compose
+            if corrected, next.page != page {
+                next.page = page
+                compose = next
+            }
+            return
+        }
+        guard corrected else { return }
+        fill(&next, from: draft)
+        next.page = .compose
+        compose = next
+        await resolveDraftGroup()
+    }
+
+    /// Copy a saved new-message draft into a composer. AFTER `openCompose`, on
+    /// purpose, at both call sites: `openCompose` records what the composer
+    /// opened with as its `seededRecipients`, and a draft's own addressees
+    /// must not become that seed. They are what somebody TYPED, so emptying the
+    /// body of a draft that still names a recipient has to read as a draft, not
+    /// as a blank composer the autosave may discard.
+    private func fill(_ next: inout ComposeState, from draft: DraftView) {
         next.to = draft.to
         // Nil is a daemon too old to carry them, not an emptied field — leave
         // the composer's own (empty) values rather than writing "" over them,
@@ -3119,8 +3340,353 @@ final class AppStore {
         // The files the draft claimed, already staged — no upload to wait on.
         next.attachments = (draft.attachments ?? []).map(ComposeAttachment.init)
         next.draftId = draft.id
+    }
+
+    // MARK: - drafts list
+
+    /// Whether this daemon keeps many new-message drafts by id. Same shape as
+    /// `forwardingAvailable`: read off the sitrep stats, STRICTLY `== true`.
+    /// nil (no stats yet, or a daemon too old to say) hides the drafts button
+    /// and keeps ⌘N on the one-slot rule, because the by-id routes would 404
+    /// on an old daemon. Note `DraftSaver.save` tells the two nil cases apart;
+    /// this flag does not need to.
+    var draftsV2Available: Bool { sitrep.stats?.drafts_v2 == true }
+
+    /// Fetch the drafts list into `draftsRows`. The drafts page calls it on open.
+    ///
+    /// SETTLES FIRST: a composer closed a moment ago flushed its last save as a
+    /// fire-and-forget task, and listing before it lands would show the draft
+    /// as it was a keystroke ago, or not at all. Silent on failure: the cache
+    /// keeps what it had.
+    func refreshDrafts() async {
+        let e = epoch
+        await DraftSaver.shared.settle()
+        guard e == epoch, let rows = await fetchDrafts(), e == epoch else { return }
+        adoptDraftsRows(rows)
+    }
+
+    /// Store a fetched list. `fetchDrafts` already took out rows that are
+    /// gone as far as the reader knows; this is only the cache write.
+    private func adoptDraftsRows(_ rows: [DraftView]) {
+        draftsRows = rows
+    }
+
+    /// Bumped each time a draft row is known to have LEFT the daemon: a
+    /// DELETE that came back, or a send that took its row with it. A list
+    /// fetch records it when it leaves, which is how a landing fetch tells
+    /// "left before that row went" from "left after". See `draftTombstones`.
+    private var draftsGeneration = 0
+    /// Draft ids that left the daemon this account session, each with the
+    /// generation its removal completed at (`Int.max` while the DELETE is
+    /// still on the wire). A fetch that left BEFORE that generation may still
+    /// carry the row, and adopting it would resurrect a draft the reader
+    /// deleted (or sent) and watched go; a fetch that left AT or after it
+    /// cannot, so whatever it lists under that id is a NEW row.
+    ///
+    /// Which does happen: `drafts.id` is an `INTEGER PRIMARY KEY` without
+    /// AUTOINCREMENT, so deleting the highest-id draft and creating another
+    /// hands the same id straight back. A tombstone kept forever hid that
+    /// brand-new draft from the list and every restore until relaunch. So
+    /// each one is pruned as soon as no fetch that could carry the old row is
+    /// still in the air (`pruneDraftTombstones`).
+    private var draftTombstones: [Int: Int] = [:]
+    /// The start generations of list fetches still in the air, one entry per
+    /// fetch. A tombstone outlives the OLDEST of them, not merely the one that
+    /// just landed: fetches can land out of order, and a slow one that left
+    /// before the delete would otherwise land after a fast one pruned it.
+    private var draftFetchesInFlight: [Int] = []
+
+    /// The one way this store lists drafts: the daemon's rows minus every one
+    /// that is gone as far as the reader knows (see `isGone`), filtered HERE,
+    /// while this fetch's own entry still holds its tombstones in place. Nil
+    /// on failure, which every caller treats as "keep what you had".
+    private func fetchDrafts() async -> [DraftView]? {
+        let start = draftsGeneration
+        draftFetchesInFlight.append(start)
+        defer {
+            if let i = draftFetchesInFlight.firstIndex(of: start) {
+                draftFetchesInFlight.remove(at: i)
+            }
+            pruneDraftTombstones()
+        }
+        guard let rows = try? await APIClient.shared.listDrafts() else { return nil }
+        return rows.filter { !isGone($0.id, fetchedAt: start) }
+    }
+
+    /// Drop every tombstone no fetch still in the air could need: one whose
+    /// removal completed at or before the oldest in-flight fetch's start
+    /// (or at all, with none in flight). A DELETE still on the wire is
+    /// `Int.max` and stays.
+    private func pruneDraftTombstones() {
+        let floor = draftFetchesInFlight.min() ?? draftsGeneration
+        draftTombstones = draftTombstones.filter { $0.value > floor }
+    }
+
+    /// A draft row just left the daemon (its DELETE came back, or its send
+    /// did): stamp its tombstone with a fresh generation, so fetches already
+    /// in the air still drop it and later ones do not.
+    private func noteDraftGone(_ id: Int) {
+        draftsGeneration += 1
+        draftTombstones[id] = draftsGeneration
+        pruneDraftTombstones()
+    }
+
+    /// Whether a row a fetch that left at generation `start` listed is gone
+    /// as far as the reader knows: its delete is in the undo window, or it
+    /// left the daemon after that fetch did.
+    private func isGone(_ id: Int, fetchedAt start: Int) -> Bool {
+        if pendingDraftDeletes[id] != nil { return true }
+        guard let gone = draftTombstones[id] else { return false }
+        return gone > start
+    }
+
+    /// Whether this draft id's delete is in its undo window or on the wire.
+    /// Rows from `fetchDrafts` are already filtered; this is for the checks
+    /// made after, when a delete may have started since the list landed.
+    private func isDeleting(_ id: Int) -> Bool {
+        pendingDraftDeletes[id] != nil || draftTombstones[id] == .max
+    }
+
+    /// What the drafts page lists: the cache minus rows a held or sending mail
+    /// owns. Those are mail on its way out, and opening one would put it in a
+    /// composer one ⌘Enter from going out twice. Inert rows STAY (the drafts page
+    /// marks them "editing"); see `isInert`.
+    var listedDrafts: [DraftView] { draftsRows.filter { !isHeld($0) } }
+
+    /// The drafts the page can actually open: `listedDrafts` minus the ones
+    /// already open in a composer. Its count is the header control's number.
+    var otherDrafts: [DraftView] { listedDrafts.filter { !isInert($0) } }
+
+    /// Whether this row is the draft an open composer (the pane OR the
+    /// reader's inline reply) is editing, by id or by its reply/forward key.
+    /// The drafts page shows it marked "editing" and will neither open nor delete
+    /// it.
+    ///
+    /// Delete is the one that matters: the composer's close flush would
+    /// faithfully re-create the row it just lost (or edit the dead id and
+    /// fall back to a create), so "deleted" would last until the next Esc.
+    /// The id is read through `DraftSaver.currentDraftId`, which also knows a
+    /// first save that came back after the slot last changed.
+    func isInert(_ draft: DraftView) -> Bool {
+        [compose, inlineReply].compactMap { $0 }.contains { open in
+            if DraftSaver.shared.currentDraftId(of: open) == draft.id { return true }
+            if let parent = draft.reply_to_message_id, open.forwardOfMessageId == nil,
+                open.replyToMessageId == parent
+            {
+                return true
+            }
+            if let original = draft.forward_of_message_id,
+                open.forwardOfMessageId == original
+            {
+                return true
+            }
+            return false
+        }
+    }
+
+    /// Whether a held or sending mail owns this row. Its send deletes it; until
+    /// then neither the drafts page nor the ⌘N restore may offer it.
+    ///
+    /// By id first, from every place a held mail's id can be: its own state
+    /// (held, releasing, or on the wire), and `detachedDrafts`, where the id
+    /// lands when the save that minted it was still in flight at send time
+    /// (so the state's own `draftId` is nil). Then by reply or forward key,
+    /// which is how a keyed row was always matched and still covers one whose
+    /// id never reached the client.
+    func isHeld(_ draft: DraftView) -> Bool {
+        let states = Array(heldSends.values.map(\.state)) + Array(releasing.values.map(\.state))
+        if states.contains(where: { $0.draftId == draft.id }) { return true }
+        if firingDraftIds.contains(draft.id) { return true }
+        if detachedDrafts.values.contains(where: { $0 == draft.id }) { return true }
+        if let parent = draft.reply_to_message_id, holdsDraft(replyTo: parent) { return true }
+        if let original = draft.forward_of_message_id, holdsDraft(forwardOf: original) {
+            return true
+        }
+        return false
+    }
+
+    /// Open a saved draft from the drafts page.
+    ///
+    /// A REPLY opens where it belongs: the thread, with the inline reply
+    /// restored through the ordinary `r` chain (`pendingReplyMessageId` →
+    /// the viewer → `openInlineReply` → `restoreReply`). Nothing new, so a
+    /// reply opened from the drafts page and one opened by `r` cannot differ.
+    ///
+    /// PLAIN NEW MAIL loads into THIS pane, on its composer page. The one
+    /// being replaced is FLUSHED, not closed: it autosaves like any Esc
+    /// would, and it will be on the drafts page next time. (The open
+    /// composer's own draft is inert, so "open the draft I am already in"
+    /// cannot reach here.)
+    ///
+    /// A FORWARD needs the original it forwards, which the row names only by
+    /// id: the composer shows the message underneath the note, and titles
+    /// itself from it. So the pane is closed (flushed, like any Esc), the
+    /// message fetched, and the forward opened through `openComposeForward`,
+    /// whose `restoreForward` fills it from this row exactly as a second `f`
+    /// on that message would.
+    func openDraft(_ draft: DraftView) {
+        guard !isInert(draft), !isHeld(draft), pendingDraftDeletes[draft.id] == nil else { return }
+        if let original = draft.forward_of_message_id {
+            // Closed FIRST: the forward opener refuses over an open composer.
+            closeCompose()
+            let e = epoch
+            Task {
+                let envelope = try? await APIClient.shared.getMessage(original)
+                // Another account's message ids mean nothing here.
+                guard e == epoch else { return }
+                guard let envelope,
+                    let message = envelope.thread.messages.first(where: {
+                        $0.id == envelope.message_id
+                    })
+                else {
+                    pushToast("that message is no longer here", .error)
+                    return
+                }
+                openComposeForward(message: message, fallbackSubject: envelope.thread.subject)
+            }
+            return
+        }
+        if let parent = draft.reply_to_message_id {
+            // No thread = a parent this daemon no longer describes (or one too
+            // old to say). There is nowhere to open the reply under.
+            guard let thread = draft.thread_id else {
+                pushToast("could not find the email that draft replies to", .error)
+                return
+            }
+            closeCompose()
+            openThread(thread, replyTo: parent)
+            return
+        }
+        // Through `closeCompose`, so the one being replaced says "kept in
+        // drafts" exactly when an Esc on it would have.
+        closeCompose()
+        // Opened BLANK, then filled, the order `restoreNewMessage` keeps: see
+        // `fill` for why the draft's recipients must not be the seed.
+        // `openCompose` also marks the slot opened, so a glance that types
+        // nothing writes nothing and does not bump the draft's `updated_at`.
+        // A fresh state, so the pane leaves the drafts page for the composer.
+        openCompose(ComposeState())
+        guard var next = compose else { return }
+        fill(&next, from: draft)
+        next.page = .compose
+        // A saved draft states its own audience: it was a new message when it
+        // was typed, and new messages are addressed by hand.
+        next.recipientsStated = true
         compose = next
-        await resolveDraftGroup()
+        Task { await resolveDraftGroup() }
+    }
+
+    /// A draft delete waiting out its undo window. See `deleteDraft`.
+    private struct PendingDraftDelete {
+        var draft: DraftView
+        /// Where the row sat in `draftsRows`, so an undo puts it back in place
+        /// rather than at the end of the list.
+        var index: Int
+        var undoId: UUID
+        var timer: Task<Void, Never>
+    }
+
+    /// Keyed by draft id. Separate from `undos` because `PendingUndo` has no
+    /// expiry hook: its entry is simply dropped after five seconds, and the
+    /// DELETE has to go out at exactly that moment, so the hold keeps its own
+    /// timer (the `sendWithUndo` shape).
+    private var pendingDraftDeletes: [Int: PendingDraftDelete] = [:]
+
+    /// Delete a draft from the drafts page, with the app's five-second undo.
+    ///
+    /// HELD, not deleted-then-recreated: the row leaves the list now and the
+    /// DELETE goes out when the window closes, so an undo is only ever "do not
+    /// delete" and the draft comes back with its own id, attachments and
+    /// `updated_at` intact. Recreating it would mint a new row and re-stage
+    /// files the delete had already released to the sweep.
+    ///
+    /// Refused for an inert row (the draft an open composer is editing), whose
+    /// close flush would bring it back; see `isInert`. And for a held one,
+    /// whose send deletes it anyway and whose undo would reopen it.
+    func deleteDraft(_ draft: DraftView) {
+        guard !isInert(draft), !isHeld(draft), pendingDraftDeletes[draft.id] == nil
+        else { return }
+        let id = draft.id
+        let e = epoch
+        let index = draftsRows.firstIndex { $0.id == id } ?? draftsRows.count
+        draftsRows.removeAll { $0.id == id }
+        let timer = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.draftDeleteHold))
+            guard !Task.isCancelled else { return }
+            await self?.fireDraftDelete(id, epoch: e)
+        }
+        // `messageId: -1`, NOT the draft id: `fireUndo` un-resolves the entry's
+        // id on success, and draft ids share the Int space with message ids, so
+        // a draft id there would un-hide an unrelated message.
+        let undoId = pushUndo(kind: .draftDelete, messageId: -1, label: Self.draftLabel(draft)) {
+            [weak self] in
+            guard let self, await self.keepDraft(id) else { throw HoldError.alreadySent }
+        }
+        pendingDraftDeletes[id] = PendingDraftDelete(
+            draft: draft, index: index, undoId: undoId, timer: timer)
+    }
+
+    /// "deleted draft: Lunch plans". Names the draft, because the undo toast
+    /// is read by somebody wondering whether they deleted the right one.
+    private static func draftLabel(_ draft: DraftView) -> String {
+        let subject = draft.subject.trimmed
+        if !subject.isEmpty { return "deleted draft: \(Fmt.truncate(subject, 40))" }
+        if let parent = draft.parent_subject?.trimmed, !parent.isEmpty {
+            return "deleted draft: re \(Fmt.truncate(parent, 40))"
+        }
+        return "deleted draft"
+    }
+
+    /// Undo: the DELETE never goes out and the row goes back where it was.
+    /// False when the window already closed, so the toast says the undo failed
+    /// rather than claiming a deleted draft was kept.
+    private func keepDraft(_ id: Int) -> Bool {
+        guard let pending = pendingDraftDeletes.removeValue(forKey: id) else { return false }
+        pending.timer.cancel()
+        if !draftsRows.contains(where: { $0.id == id }) {
+            draftsRows.insert(pending.draft, at: min(pending.index, draftsRows.count))
+        }
+        return true
+    }
+
+    /// The window closed: delete it for real. Removed from the table FIRST,
+    /// on the main actor, so an undo landing now finds nothing and says so.
+    private func fireDraftDelete(_ id: Int, epoch e: Int) async {
+        guard let pending = pendingDraftDeletes.removeValue(forKey: id) else { return }
+        undos.removeAll { $0.id == pending.undoId }
+        // An account switch inside the hold: the id belongs to the OLD
+        // daemon's table and means a different row, or nothing, here.
+        guard e == epoch else { return }
+        // The row may have become LIVE during the hold: delete a reply draft,
+        // press `r` on its parent, type, and the debounce PUTs by key into
+        // this very row (it is still on the daemon). The DELETE would take
+        // that fresh text and its files with it. A held send owns its row the
+        // same way. Either one means the draft is kept after all: back in the
+        // list, and no error, because nothing failed.
+        if isInert(pending.draft) || isHeld(pending.draft) {
+            if !draftsRows.contains(where: { $0.id == id }) {
+                draftsRows.insert(pending.draft, at: min(pending.index, draftsRows.count))
+            }
+            return
+        }
+        // `Int.max` while on the wire: every fetch drops it until it lands.
+        draftTombstones[id] = .max
+        do {
+            try await APIClient.shared.deleteDraft(id)
+            if e == epoch { noteDraftGone(id) }
+        } catch let error as APIError where error.kind == .notFound {
+            // Already gone (sent, or deleted elsewhere). What was asked for.
+            if e == epoch { noteDraftGone(id) }
+        } catch {
+            guard e == epoch else { return }
+            // The row is still on the daemon, so it goes back in the list
+            // rather than hiding until the next fetch pretends it came back.
+            draftTombstones[id] = nil
+            if !draftsRows.contains(where: { $0.id == id }) {
+                draftsRows.insert(pending.draft, at: min(pending.index, draftsRows.count))
+            }
+            pushToast(errText(error, "could not delete that draft"), .error)
+        }
     }
 
     /// Turn a restored draft's `#slug` token back into a group.
@@ -3151,8 +3717,30 @@ final class AppStore {
     func closeCompose() {
         // An unsent draft outlives its composer: the closing values go out as one
         // fire-and-forget save. Before the slot is cleared — `flush` reads it.
-        DraftSaver.shared.flush(.compose, compose)
+        let closing = compose
+        let queued = DraftSaver.shared.flush(.compose, closing)
+        // SAY SO, now that drafts are many and older ones live behind a
+        // button: an Esc that quietly kept the mail reads exactly like one
+        // that threw it away. Only when a row actually holds it: this close
+        // QUEUED a save (the composer was typed into; an agent hand-off
+        // counts, see `AskBar`), or an earlier save already made the row and
+        // it is still there, still holding content. Never for a composer
+        // nothing was saved from, whose toast would promise a row that does
+        // not exist. A forward only on a `drafts_v2` daemon, which is the
+        // only one that keeps it. The pane only; the inline reply comes back
+        // by itself the next time `r` is pressed on the same message.
+        if let closing, DraftSaver.hasContent(closing),
+            queued || DraftSaver.shared.currentDraftId(of: closing) != nil,
+            closing.forwardOfMessageId == nil || draftsV2Available
+        {
+            pushToast("kept in drafts")
+        }
         compose = nil
+        // Refresh the cache behind the close (it settles first, so it sees
+        // this flush land), so the drafts button's count is right the next
+        // time a composer opens rather than one close behind. Epoch-guarded
+        // inside. Only when something may have changed.
+        if closing != nil { Task { await refreshDrafts() } }
     }
 
     /// Open the reader's inline reply on a specific message. Never resets a
@@ -3187,17 +3775,25 @@ final class AppStore {
         let e = epoch
         // Same rule as the new message: a reply to this message in the hold
         // owns this draft row until its send deletes it.
-        guard !holdsDraft(replyTo: messageId),
-            let rows = try? await APIClient.shared.listDrafts(),
+        guard !holdsDraft(replyTo: messageId) else { return }
+        // SETTLE FIRST, as `refreshDrafts` does: an inline reply to this
+        // message closed a moment ago flushed fire-and-forget, and the list
+        // must see that save, not the one before it.
+        await DraftSaver.shared.settle()
+        // A row whose delete is in its undo window (or went out) is gone as
+        // far as the reader knows; restoring it would undo the delete.
+        guard e == epoch,
+            let rows = await fetchDrafts(),
             let draft = rows.first(where: { $0.reply_to_message_id == messageId }),
-            !holdsDraft(replyTo: messageId)
+            !holdsDraft(replyTo: messageId), !isDeleting(draft.id)
         else { return }
         // Another account's drafts are not this composer's to restore — and
         // `reply_to_message_id` is a per-daemon id, so one WOULD match.
         guard e == epoch else { return }
-        // Untouched, not empty — the seeded signature must not block the restore.
+        // Untouched, not empty: the seeded signature and the derived audience
+        // must not block the restore, but an edited recipient must.
         guard var next = inlineReply, next.replyToMessageId == messageId, next.draftId == nil,
-            Prefs.shared.isBodyUntouched(next.body), next.attachments.isEmpty
+            !DraftSaver.hasContent(next), next.attachments.isEmpty
         else { return }
         next.body = draft.body
         // Only a draft that actually recorded a copy list gets to state one:
@@ -3259,15 +3855,39 @@ final class AppStore {
     /// request is built, the account can change under them.
     private var releasing: [UUID: HeldSend] = [:]
     /// The reply keys of mails ON THE WIRE, whose draft rows exist until the
-    /// send returns. Forwards are -1, which matches no row.
+    /// send returns. Forwards are not in it (their key is a different column,
+    /// and nil here means the old daemon's new-message slot); see
+    /// `firingForwardKeys`.
     private var firingReplyKeys: [Int?] = []
+    /// The forward keys of mails ON THE WIRE, for the same reason: a forward
+    /// row on a `drafts_v2` daemon lives until its send returns and deletes it.
+    private var firingForwardKeys: [Int] = []
+    /// The draft ids of mails ON THE WIRE, for the same reason: a `drafts_v2`
+    /// new-message row is matched by id, not by a key, and between leaving
+    /// `releasing` and the send returning its state is in neither table
+    /// `isHeld` reads.
+    private var firingDraftIds: [Int] = []
+
+    /// Whether any mail is waiting out its hold or waiting to fire. What quit
+    /// asks before it lets the app go (see `AppDelegate`).
+    var hasHeldSends: Bool { !heldSends.isEmpty || !releasing.isEmpty }
 
     /// Whether a held or sending mail owns the draft row for this reply key
-    /// (nil = the new-message row). Forwards never have one.
+    /// (nil = the ONE new-message row of an older daemon; on a `drafts_v2`
+    /// daemon new mail is matched by id instead, see `isHeld`). A forward's
+    /// row is a different key; see `holdsDraft(forwardOf:)`.
     private func holdsDraft(replyTo: Int?) -> Bool {
         (Array(heldSends.values) + Array(releasing.values)).contains {
             $0.state.replyToMessageId == replyTo && $0.state.forwardOfMessageId == nil
         } || firingReplyKeys.contains(replyTo)
+    }
+
+    /// Whether a held or sending forward owns the draft row keyed to this
+    /// forwarded message (`drafts_v2` daemons; older ones never have one).
+    private func holdsDraft(forwardOf original: Int) -> Bool {
+        (Array(heldSends.values) + Array(releasing.values)).contains {
+            $0.state.forwardOfMessageId == original
+        } || firingForwardKeys.contains(original)
     }
 
     /// The state as the send must see it: with any draft id a late save
@@ -3288,7 +3908,11 @@ final class AppStore {
     ///
     /// Each one SAYS so. The sender pressed send and saw "sending to…"; a mail
     /// that then quietly became a draft would be believed sent.
-    func parkHeldSends(save: Bool = true) {
+    ///
+    /// `quitting: true` is ⌘Q inside the hold (see `AppDelegate`): the same
+    /// park, but no toast, because the window it would appear in is going
+    /// away. The mail is on the drafts page on the next launch.
+    func parkHeldSends(save: Bool = true, quitting: Bool = false) {
         let parked = Array(heldSends.values) + Array(releasing.values)
         heldSends = [:]
         releasing = [:]
@@ -3298,12 +3922,18 @@ final class AppStore {
             holding.remove(state.id)
             if !save {
                 pushToast("not sent: its account was removed", .error)
-            } else if state.forwardOfMessageId != nil {
-                // Never saved (see `DraftSaver.save`), so no promise of one.
-                pushToast("not sent: you switched accounts while it was waiting", .error)
+            } else if state.forwardOfMessageId != nil && !draftsV2Available {
+                // Not saved on this daemon (see `DraftSaver.save`), so no
+                // promise of one.
+                if !quitting {
+                    pushToast("not sent: you switched accounts while it was waiting", .error)
+                }
             } else {
                 DraftSaver.shared.saveDetached(held.slot, state)
-                pushToast("not sent: you switched accounts. It is in that account's drafts", .error)
+                if !quitting {
+                    pushToast(
+                        "not sent: you switched accounts. It is in that account's drafts", .error)
+                }
             }
         }
     }
@@ -3405,12 +4035,29 @@ final class AppStore {
             pushToast("not sent: the account changed while it was waiting", .error)
             return
         }
-        // Until the send returns, this reply key still owns its draft row
-        // (see `holdsDraft`).
-        let replyKey = held.state.forwardOfMessageId == nil ? held.state.replyToMessageId : -1
-        firingReplyKeys.append(replyKey)
+        // Until the send returns, this reply or forward key still owns its
+        // draft row (see `holdsDraft`). Exactly one of the two tables.
+        let forwardKey = held.state.forwardOfMessageId
+        let replyKey = forwardKey == nil ? held.state.replyToMessageId : nil
+        if let forwardKey {
+            firingForwardKeys.append(forwardKey)
+        } else {
+            firingReplyKeys.append(replyKey)
+        }
+        // And by id, which is how a new-message row is known (see `isHeld`).
+        let firingId = held.state.draftId
+        if let firingId { firingDraftIds.append(firingId) }
         defer {
-            if let i = firingReplyKeys.firstIndex(of: replyKey) { firingReplyKeys.remove(at: i) }
+            if let forwardKey {
+                if let i = firingForwardKeys.firstIndex(of: forwardKey) {
+                    firingForwardKeys.remove(at: i)
+                }
+            } else if let i = firingReplyKeys.firstIndex(of: replyKey) {
+                firingReplyKeys.remove(at: i)
+            }
+            if let firingId, let i = firingDraftIds.firstIndex(of: firingId) {
+                firingDraftIds.remove(at: i)
+            }
         }
         let outcome = await ComposeSubmit.fire(held.state, override: held.override)
         // The account changed while it was on the wire: whatever came back
@@ -3431,6 +4078,15 @@ final class AppStore {
             // The daemon resolved the replied-to update; without this the row
             // sits in its band until the next poll, reading as a no-op.
             if let repliedTo = held.state.replyToMessageId { noteResolved(repliedTo) }
+            // The send took its draft row with it; the cached list drops it now
+            // rather than offering sent mail until the next fetch. And a
+            // tombstone, as a DELETE gets: a list that left before the send
+            // returned still carries the row, and `isHeld` stopped covering it
+            // the moment the send came back.
+            if let sentDraft = held.state.draftId {
+                draftsRows.removeAll { $0.id == sentDraft }
+                noteDraftGone(sentDraft)
+            }
             pushToast("sent", .success)
             // Only an INLINE reply names its thread: the pane's mail (a new
             // message, a forward) starts a thread of its own, and refetching
@@ -3474,11 +4130,16 @@ final class AppStore {
     ///
     /// With both slots holding real work nothing is overwritten, and it goes
     /// to the daemon as a draft instead, UNLESS an open composer shares its
-    /// draft row. Drafts are one row per reply key (nil for new mail), so
-    /// saving there would be overwritten by that composer's next keystroke,
-    /// and "it is in your drafts" would be a lie told about mail about to be
-    /// lost. Then the toast says it could not be kept. A forward is never
-    /// saved at all (see `DraftSaver.save`).
+    /// draft row. A reply's row is one per parent, so saving there would be
+    /// overwritten by that composer's next keystroke, and "it is in your
+    /// drafts" would be a lie told about mail about to be lost. Then the toast
+    /// says it could not be kept. A forward's row is one per forwarded
+    /// message, so the same holds for a forward of the same message open in
+    /// the pane. New mail shares a row only on an older daemon's one nil-key
+    /// slot; on a `drafts_v2` daemon it parks as a row of its own (by its id,
+    /// or a fresh one), so it is always kept. A forward is saved only on a
+    /// `drafts_v2` daemon (see `DraftSaver.save`), so elsewhere it cannot be
+    /// kept either.
     private func putBack(_ held: HeldSend, error: String?, blocked: Bool = false) {
         guard held.epoch == epoch else { return }
         var state = held.state
@@ -3497,11 +4158,20 @@ final class AppStore {
             compose = state
             DraftSaver.shared.noteChange(.compose)
         } else {
-            let sharesRow = [compose, inlineReply].compactMap { $0 }.contains {
-                $0.forwardOfMessageId == nil && $0.replyToMessageId == state.replyToMessageId
+            let sharesRow = [compose, inlineReply].compactMap { $0 }.contains { open in
+                if let original = state.forwardOfMessageId {
+                    return open.forwardOfMessageId == original
+                }
+                return (state.replyToMessageId != nil || !draftsV2Available)
+                    && open.forwardOfMessageId == nil
+                    && open.replyToMessageId == state.replyToMessageId
             }
-            if state.forwardOfMessageId == nil && !sharesRow {
+            let savable = state.forwardOfMessageId == nil || draftsV2Available
+            if savable && !sharesRow {
                 DraftSaver.shared.saveDetached(held.slot, state)
+                // The header's count says "it is in your drafts" too; it
+                // settles first, so it sees this save land.
+                Task { await refreshDrafts() }
                 pushToast("not sent: \(reason ?? "undone"). It is in your drafts", .error)
             } else {
                 pushToast(
@@ -3730,6 +4400,11 @@ final class AppStore {
     // MARK: - undo
 
     private static let undoTTL: TimeInterval = 5
+
+    /// How long a draft DELETE waits before going out: exactly as long as its
+    /// undo toast lives, so the toast can never outlast the row (an undo that
+    /// fails) or vanish while the delete is still revocable.
+    static let draftDeleteHold: TimeInterval = undoTTL
 
     @discardableResult
     func pushUndo(

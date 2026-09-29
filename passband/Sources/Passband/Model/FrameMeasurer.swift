@@ -69,9 +69,22 @@ final class FrameMeasurer {
     /// mail is not worth that; a guess is fine for one message.
     private static let loadDeadline: Duration = .seconds(2)
 
+    /// THE ONE FRAME, KEPT ACROSS PASSES. It used to be let go at the end of
+    /// every pass and built again at the start of the next, which put a
+    /// content-process launch (~70ms) at the front of every thread's measuring
+    /// — the pass runs 120ms after the reader opens, so the newest message
+    /// sat at a guessed height for the first two hundred milliseconds of
+    /// every open. An idle frame costs a parked process and nothing else, and
+    /// a document through a warm one is two milliseconds.
     private var frame: WKWebView?
     private var relay: MeasureRelay?
     private var pass: Task<Void, Never>?
+    /// The width the documents are rendered at: the reader's BODY width for
+    /// the style being measured. Not `FrameHeights.width` — that is the
+    /// column, style-independent, the number the heights are filed under.
+    /// Declaring the body width there would wipe the column's file every
+    /// time a pass began.
+    private var width: CGFloat = 0
     /// Whose pass this is — the thread id. See `cancel(token:)`.
     private var token: String?
     /// WHICH ARRANGEMENT is being measured. It decides the key each height is
@@ -92,7 +105,7 @@ final class FrameMeasurer {
     ) {
         reset()
         guard width > 0 else { return }
-        FrameHeights.shared.using(width: width)
+        self.width = width
         // A window too short to be a reading surface is a window mid-animation;
         // a screenful is the better guess than a sliver.
         self.viewportHeight = max(400, viewport)
@@ -134,8 +147,7 @@ final class FrameMeasurer {
                 }
             }
             guard let self, !Task.isCancelled else { return }
-            // The frame is a content process and the queue is empty: nothing
-            // needs one until the next thread opens.
+            // The frame stays warm for the next thread; only the pass ends.
             self.reset()
             onFinished()
         }
@@ -150,20 +162,20 @@ final class FrameMeasurer {
         reset()
     }
 
-    /// Stop, and let the frame go. Heights already taken stay taken — they are
-    /// true regardless of what is on screen.
+    /// Stop. Heights already taken stay taken — they are true regardless of
+    /// what is on screen — and the frame stays too (see `frame`).
     private func reset() {
         pass?.cancel()
         pass = nil
         token = nil
         // Anything awaiting a navigation that will now never finish has to be
-        // let go, or the task parks on a continuation forever.
+        // let go, or the task parks on a continuation forever. A claim that
+        // load was holding at the policy gate goes with it: the frame is
+        // told to stop, and a claim left standing would be spent on the next
+        // document's own navigation attempt.
         relay?.abort()
+        relay?.resetClaims()
         frame?.stopLoading()
-        frame?.navigationDelegate = nil
-        frame?.configuration.userContentController.removeAllUserScripts()
-        frame = nil
-        relay = nil
     }
 
     // MARK: - one message
@@ -179,8 +191,7 @@ final class FrameMeasurer {
 
         let view = liveFrame()
         guard let relay else { return 0 }
-        view.frame = CGRect(
-            x: 0, y: 0, width: FrameHeights.shared.width, height: viewportHeight)
+        view.frame = CGRect(x: 0, y: 0, width: max(1, width), height: viewportHeight)
         // Claimed BEFORE the load, because the policy gate can be asked before
         // `loadHTMLString` has returned.
         relay.expectOwnLoad()
@@ -296,7 +307,7 @@ final class FrameMeasurer {
         let relay = MeasureRelay()
         let view = WKWebView(
             frame: CGRect(
-                x: 0, y: 0, width: max(1, FrameHeights.shared.width),
+                x: 0, y: 0, width: max(1, width),
                 height: viewportHeight),
             configuration: config)
         view.navigationDelegate = relay
@@ -383,6 +394,9 @@ private final class MeasureRelay: NSObject, WKNavigationDelegate {
     }
 
     func expectOwnLoad() { pendingOwnLoads += 1 }
+    /// Every claim, dropped: the pass that made them is over and the frame has
+    /// been told to stop.
+    func resetClaims() { pendingOwnLoads = 0 }
     /// A load that was claimed and then never started. Left standing, the claim
     /// would be spent on somebody else's navigation.
     func forgetOwnLoad() { pendingOwnLoads = max(0, pendingOwnLoads - 1) }

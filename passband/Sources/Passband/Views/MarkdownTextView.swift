@@ -141,23 +141,48 @@ struct MarkdownTextView: NSViewRepresentable {
 
 /// The NSTextView half: owns the re-style pass. Attribute changes never touch
 /// the characters, so the selection and undo stack survive every pass.
-/// The editor's scroller, which is a window handle unless it says otherwise:
-/// see `HighlightingTextView.mouseDownCanMoveWindow`. Under short text the
-/// scroller is what a click lands on, and it has to select, not move.
+/// THE EDITOR IS NOT A WINDOW HANDLE, and the only answer AppKit hears in
+/// time is the WINDOW's. The shell window moves by its background, and with
+/// `isMovableByWindowBackground` on at the moment of the mouse-down, a drag
+/// into the editor moved the window — even with the text view, its clip view
+/// and this scroller all answering no to `mouseDownCanMoveWindow` (logged on
+/// a real mouse: every view under the pointer said no, and the window moved).
+/// The decision is made before the event reaches any view or monitor, so it
+/// has to be settled BEFORE the click: the flag goes off while the pointer is
+/// over the editor, and back on when it leaves.
 final class EditorScrollView: NSScrollView {
-    override var mouseDownCanMoveWindow: Bool { false }
+    private var hover: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hover { removeTrackingArea(hover) }
+        let area = NSTrackingArea(
+            rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self)
+        addTrackingArea(area)
+        hover = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        super.mouseEntered(with: event)
+        window?.isMovableByWindowBackground = false
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        window?.isMovableByWindowBackground = true
+    }
+
+    /// Leaving the window mid-hover (the composer closing under the pointer)
+    /// sends no exit; the window is a handle again without us.
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil { window?.isMovableByWindowBackground = true }
+        super.viewWillMove(toWindow: newWindow)
+    }
 }
 
 final class HighlightingTextView: NSTextView {
     var onDropFiles: (([URL], Int?) -> Void)?
-
-    /// NOT A WINDOW HANDLE. The shell window moves by its background, and a
-    /// text view that draws none is non-opaque, which AppKit reads as "a
-    /// mouse-down here may move the window". It asks that ahead of the click
-    /// — the draggable region is settled before the event reaches any
-    /// monitor — so the first drag into an unfocused editor moved the window
-    /// instead of selecting. The answer has to come from the view itself.
-    override var mouseDownCanMoveWindow: Bool { false }
     var onPasteImage: ((Data, Int?) -> Void)?
     var onDropHover: ((Bool) -> Void)?
 

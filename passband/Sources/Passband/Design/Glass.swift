@@ -450,14 +450,14 @@ extension ButtonStyle where Self == TextActionStyle {
         /// window movable by its background a drag across text can pick the
         /// window up instead of the words.
         ///
-        /// THIS IS THE SECOND LINE, NOT THE FIRST. AppKit settles the window's
-        /// draggable region AHEAD of the click, so a view we own answers no
-        /// itself (`HighlightingTextView`, `PillHandleView`); a monitor only
-        /// sees the event after that call is made. What this catches is the
-        /// text we do not subclass — SwiftUI's fields and their field editors
-        /// — for every mouse-down after the one that lands the caret: each
-        /// left mouse-down turns background-moving off when it lands on text,
-        /// and back on otherwise.
+        /// THIS IS THE SECOND LINE, NOT THE FIRST. AppKit reads the window's
+        /// flag before the mouse-down reaches any view or monitor, so what
+        /// this sets only governs the NEXT click; the editor turns the flag
+        /// off on hover, ahead of its click (`EditorScrollView`). What this
+        /// catches is the text we do not own — SwiftUI's fields and their
+        /// field editors — from the second click on: each left mouse-down
+        /// turns background-moving off when it lands on text, and back on
+        /// otherwise.
         private static func keepTextSelectable(in window: NSWindow) {
             NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak window] event in
                 guard let window, event.window === window, let content = window.contentView

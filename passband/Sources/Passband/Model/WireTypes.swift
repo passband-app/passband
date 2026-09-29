@@ -1718,6 +1718,9 @@ struct ScheduledSendView: Codable, Sendable, Identifiable, Hashable {
     /// A redacted reason (`failed:gmail`, `rejected:no_write_credential`, ...).
     /// Never content.
     var last_error: String?
+    /// STICKY: an earlier attempt may have reached Gmail, whatever
+    /// `last_error` says. Absent from a daemon older than the flag (nil).
+    var maybe_sent: Bool? = nil
     /// `""` when the request had none (a reply's audience derives at fire
     /// time); never absent, like a draft's.
     var to: String

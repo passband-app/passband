@@ -26,8 +26,11 @@ it a draft again.
 ### `scheduled_sends`
 
 HUMAN-DOOR ONLY, like `drafts` and `outbound_attachments`: served on
-`/client/scheduled`, never synced, never visible on `/mcp`. A new table, so a
-plain `CREATE TABLE IF NOT EXISTS` in `schema.sql` (no migrate.rs column).
+`/client/scheduled`, never synced, never visible on `/mcp`. A new table, a
+plain `CREATE TABLE IF NOT EXISTS` in `schema.sql`; the four columns added
+after the table first landed (`maybe_sent`, `recover_at`, `last_attempt_at`,
+`search_deferred_since`) are also in migrate.rs (`add_column_if_missing`),
+so a database created by an earlier build of this branch gains them.
 
 | column | notes |
 |---|---|
@@ -44,7 +47,7 @@ plain `CREATE TABLE IF NOT EXISTS` in `schema.sql` (no migrate.rs column).
 | `sent_thread_id` | TEXT |
 | `maybe_sent` | INTEGER 0/1, STICKY: an earlier attempt may have reached Gmail (§4) |
 | `recover_at` | TEXT, recovery does not ask Gmail about this `sending` row before it (§4) |
-| `last_attempt_at` | TEXT, when the last attempt ENDED (its retry or failed settle; a requeue stamps the lapsed lease's end). A `maybe_sent` row is not fired before this + `RECOVERY_GRACE` (§4) |
+| `last_attempt_at` | TEXT, when the last attempt ENDED (its retry or failed settle; a requeue, a `failed:crash_loop` and recovery's `failed:recovery` stamp the lapsed lease's end; a pre-fire search's `failed:recovery` keeps it, since that claim sent nothing). A `maybe_sent` row is not fired before this + `RECOVERY_GRACE` (§4) |
 | `search_deferred_since` | TEXT, the first "could not ask" of a pre-fire search still unanswered; the give-up clock (§4) |
 | `created_at`, `updated_at` | TEXT |
 
@@ -180,13 +183,17 @@ Per tick:
    (`recovery:grace`). Then the search. Found: settled as in step 1, no send.
    Not found: sent. Could not ask, two kinds:
    - REFUSED (no credential, which is where a revoked write grant first
-     surfaces; a 4xx other than 429): an attempt like any other, spent and
-     backed off (`rejected:no_write_credential` / `failed:search`), `failed`
-     after the third, still `maybe_sent`.
-   - UNREACHABLE (transport, 5xx, 429, pacing): nothing sent, the claim handed
+     surfaces; a 4xx other than 403 and 429): an attempt like any other,
+     spent and backed off (`rejected:no_write_credential` / `failed:search`),
+     `failed` after the third, still `maybe_sent`.
+   - UNREACHABLE (transport, 5xx, 429, 403, pacing): nothing sent, the claim handed
      back WITHOUT spending the attempt, `last_error = recovery:unreachable`,
      next try in 2 min; `RECOVERY_GIVE_UP` after the first such answer it goes
-     `failed:recovery`, still `maybe_sent`.
+     `failed:recovery`, still `maybe_sent`. A 403 is here, not under
+     REFUSED: Gmail answers a per-user rate limit (`userRateLimitExceeded`)
+     with a 403 as often as a permission refusal, and the write client drops
+     the body that tells them apart once the budget has read it. A genuine
+     permission 403 costs the give-up's 30 minutes before the user sees it.
    A row never marked goes straight to the send.
 4. **Send** through `perform_send(state, body, files, SendGuard::Settled,
    Some(Fire))`. Recipients, subject and threading derive from the parent at
@@ -219,8 +226,13 @@ Per tick:
    request, a lost file, a crash loop, a recovery or search that gave up, the
    pre-fire search's refusals) are written to the ledger by the worker, same
    `scheduled:<id>:<reason>` shape; the "not now" deferrals are not.
-   Attribution: a fired `group_id` records the frozen `to`/`bcc` as its
-   recipients (who the mail went to), not the group's members at fire time.
+   Attribution: a fired `group_id` records the direct recipients of the ONE
+   field the group's mode expanded into (`to` for a To group, `bcc` for a
+   Bcc group; an `individual` group flipped since reads as Bcc when the
+   request carried blind copies, else To), as frozen in the request: who the
+   mail went to, not the group's members at fire time. That list may include
+   non-members the user typed into the same field; addresses in the other
+   field are never recorded.
 6. **Sweep**: `sent`/`cancelled` rows after 7 days, `failed` rows (and their
    files) after 30, then the staged-file sweep, so files a cancel released
    and nobody re-claimed go at their one-day TTL even if no composer runs.
@@ -338,6 +350,27 @@ request.
 - Sealed/read-only tenants: scheduling needs the write credential at
   schedule time (403), and the worker treats a missing credential as a
   retryable failure, never a silent drop.
+
+### Live-route changes this branch makes
+
+`POST /client/actions/send` is shared with the worker (`perform_send`), and
+a few of its answers changed with the split. For the PR description:
+
+- **Paced parent read on a plain reply**: a Gmail-budget hold on the
+  parent-headers read now answers 503 ("Gmail is pacing this mailbox") and
+  audits `send` `paced`. Before, a plain reply degraded to an unthreaded
+  reply with no derived audience and was sent.
+- **Paced parent read on reply-all**: 503 + audit `paced`, where it was a
+  502 audited `failed:gmail`.
+- **Paced forward original read**: 503 + audit `paced`, where the empty
+  original became a 502 audited `failed:fetch_original`.
+- **`finish_send` audits `paced`** when the budget held `messages.send`
+  itself (nothing posted); the response was already 503, but the ledger
+  said `failed:gmail`.
+
+Each is pinned by a `client_api` test on the live route
+(`a_live_reply_whose_parent_read_is_paced_is_503_and_audited_paced`,
+`a_live_forward_whose_original_read_is_paced_is_503_and_audited_paced`).
 
 ## 9. Phasing
 

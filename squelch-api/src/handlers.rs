@@ -4941,18 +4941,22 @@ pub(crate) async fn perform_send(
         // request carried blind copies, else to), not the way the group reads
         // now.
         //
-        // And WHO it went to is the frozen request's `to`/`bcc`, the lists the
-        // mail was actually addressed with, not the group's membership now: a
-        // member added since never got this mail, and one removed since did.
+        // And WHO it went to is the frozen request's field the group's mode
+        // expanded into (`to` for a To group, `bcc` for a Bcc group), the list
+        // the mail was actually addressed with, not the group's membership
+        // now: a member added since never got this mail, and one removed
+        // since did. Only that field: a Bcc group mail with the user's boss
+        // typed in `to` does not record the boss as a group recipient.
         let recorded = if fire.is_some() {
+            let mode = match audience.mode {
+                GroupMode::Individual if bcc_requested.trim().is_empty() => GroupMode::To,
+                GroupMode::Individual => GroupMode::Bcc,
+                mode => mode,
+            };
             group_send::GroupAudience {
                 group_id: audience.group_id,
-                mode: match audience.mode {
-                    GroupMode::Individual if bcc_requested.trim().is_empty() => GroupMode::To,
-                    GroupMode::Individual => GroupMode::Bcc,
-                    mode => mode,
-                },
-                addrs: frozen_addrs(body),
+                mode,
+                addrs: frozen_addrs(body, mode),
             }
         } else {
             group_send::GroupAudience {
@@ -4966,18 +4970,20 @@ pub(crate) async fn perform_send(
     result
 }
 
-/// The addresses a frozen request named in `to` and `bcc`, bare, in order,
-/// each once (case-insensitively): who a fired group send actually reached.
-fn frozen_addrs(body: &SendBody) -> Vec<String> {
+/// The addresses a frozen request named in the field `mode` expands a group
+/// into (`bcc` for [`GroupMode::Bcc`], else `to`), bare, in order, each once
+/// (case-insensitively): the direct recipients a fired group send reached in
+/// that field. Non-members the user typed there are included; the other
+/// field is not read.
+fn frozen_addrs(body: &SendBody, mode: GroupMode) -> Vec<String> {
+    let list = match mode {
+        GroupMode::Bcc => body.bcc.as_deref(),
+        GroupMode::To | GroupMode::Individual => body.to.as_deref(),
+    };
     let mut out: Vec<String> = Vec::new();
-    for list in [body.to.as_deref(), body.bcc.as_deref()]
-        .into_iter()
-        .flatten()
-    {
-        for addr in parse_addr_list(list) {
-            if !out.iter().any(|a| a.eq_ignore_ascii_case(&addr)) {
-                out.push(addr);
-            }
+    for addr in list.map(parse_addr_list).unwrap_or_default() {
+        if !out.iter().any(|a| a.eq_ignore_ascii_case(&addr)) {
+            out.push(addr);
         }
     }
     out
@@ -6065,15 +6071,23 @@ mod send_split_tests {
 
     #[test]
     fn a_fired_group_is_attributed_to_the_addresses_the_request_named() {
-        // `to` and `bcc` as they were frozen, bare, each once: who the mail
-        // actually went to, whatever the group says now.
+        // The field the mode expanded into, as it was frozen, bare, each
+        // once: who the mail actually went to there, whatever the group says
+        // now. The other field is never read.
         let b = body(json!({
-            "to": "\"Ann, A.\" <ann@fund.com>",
-            "bcc": "bo@fund.com, ANN@fund.com",
+            "to": "\"Ann, A.\" <ann@fund.com>, boss@work.com",
+            "bcc": "bo@fund.com, cy@fund.com, BO@fund.com",
             "body": "hi"
         }));
-        assert_eq!(frozen_addrs(&b), vec!["ann@fund.com", "bo@fund.com"]);
-        assert!(frozen_addrs(&body(json!({ "body": "hi" }))).is_empty());
+        assert_eq!(
+            frozen_addrs(&b, GroupMode::To),
+            vec!["ann@fund.com", "boss@work.com"]
+        );
+        assert_eq!(
+            frozen_addrs(&b, GroupMode::Bcc),
+            vec!["bo@fund.com", "cy@fund.com"]
+        );
+        assert!(frozen_addrs(&body(json!({ "body": "hi" })), GroupMode::Bcc).is_empty());
     }
 
     #[test]

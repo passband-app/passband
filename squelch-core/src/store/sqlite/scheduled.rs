@@ -155,8 +155,8 @@ impl SqliteStore {
 
     /// HUMAN-DOOR ONLY (`POST /client/scheduled`, contract §3 step 7) as ONE
     /// TRANSACTION: insert the row, move `attachment_ids` onto it (from
-    /// `from_draft` or unclaimed, see
-    /// [`Self::claim_attachments_for_scheduled_send`]), and delete `from_draft`
+    /// `from_draft` or unclaimed, as the test-only
+    /// `claim_attachments_for_scheduled_send` does), and delete `from_draft`
     /// with whatever files it still held that the request does not name (files
     /// removed from the tray). From here the row IS the composition.
     ///
@@ -524,7 +524,13 @@ impl SqliteStore {
     /// row that failed on an attempt that MAY have reached Gmail (an ambiguous
     /// last post, a crash loop, a recovery that never got to ask) must be
     /// searched for before "send now" sends it, or the fresh budget send-now
-    /// grants would post it blind. `now` is stamped as `last_attempt_at`.
+    /// grants would post it blind.
+    ///
+    /// `last_attempt_at` is when the last attempt ENDED, `None` = `now` (an
+    /// attempt that just failed). A give-up that decides long after the
+    /// attempt (a lapsed lease recovery never asked about, a crash loop)
+    /// passes that attempt's end instead, so a send-now straight after the
+    /// failure does not sit out a grace that ran out long ago.
     /// `false` when the row is not `sending` under that claim.
     #[allow(clippy::too_many_arguments)]
     pub fn settle_scheduled_failed(
@@ -534,6 +540,7 @@ impl SqliteStore {
         attempts: u32,
         last_error: &str,
         maybe_sent: bool,
+        last_attempt_at: Option<DateTime<Utc>>,
         now: DateTime<Utc>,
     ) -> Result<bool> {
         let conn = self.lock()?;
@@ -541,7 +548,7 @@ impl SqliteStore {
             "UPDATE scheduled_sends
              SET state = 'failed', lease_until = NULL, recover_at = NULL, last_error = ?4,
                  maybe_sent = MAX(maybe_sent, ?5), last_attempt_at = ?6,
-                 search_deferred_since = NULL, updated_at = ?6
+                 search_deferred_since = NULL, updated_at = ?7
              WHERE account_id = ?1 AND id = ?2 AND state = 'sending' AND attempts = ?3",
             params![
                 account_id,
@@ -549,6 +556,7 @@ impl SqliteStore {
                 attempts,
                 last_error,
                 maybe_sent as i64,
+                last_attempt_at.unwrap_or(now).to_rfc3339(),
                 now.to_rfc3339()
             ],
         )?;

@@ -226,7 +226,7 @@ struct ScheduledSendTests {
     static func theListingDecodes() {
         let raw = """
             [{"id":3,"send_at":"2027-01-15T08:00:00Z","state":"failed","attempts":3,
-              "last_error":"failed:gmail","to":"","subject":"","body":"hi",
+              "last_error":"failed:gmail","maybe_sent":true,"to":"","subject":"","body":"hi",
               "reply_to_message_id":5,"forward_of_message_id":null,"attachments":[],
               "thread_id":"t1","parent_subject":"lunch","parent_from":"Ana",
               "parent_from_addr":"ana@x.test","created_at":"2027-01-14T08:00:00Z",
@@ -235,6 +235,11 @@ struct ScheduledSendTests {
         let rows = decode([ScheduledSendView].self, raw)
         equal(rows?.first?.state, "failed", "state")
         equal(rows?.first?.last_error, "failed:gmail", "reason")
+        equal(rows?.first?.maybe_sent, true, "the sticky flag")
+        let old = decode(
+            [ScheduledSendView].self,
+            raw.replacingOccurrences(of: #""maybe_sent":true,"#, with: ""))
+        equal(old?.first?.maybe_sent, nil, "an older daemon without the flag still decodes")
         equal(rows?.first?.parent_subject, "lunch", "parent context")
         equal(
             decode(ScheduledCreated.self, #"{"id":9,"send_at":"2027-01-15T08:00:00Z"}"#)?.id, 9,
@@ -247,11 +252,12 @@ struct ScheduledSendTests {
 
     static func row(
         id: Int = 3, sendAt: String = "2026-10-04T13:00:00Z", state: String = "scheduled",
-        attempts: Int = 0, lastError: String? = nil, created: String = "2026-10-01T08:00:00Z"
+        attempts: Int = 0, lastError: String? = nil, maybeSent: Bool? = nil,
+        created: String = "2026-10-01T08:00:00Z"
     ) -> ScheduledSendView {
         ScheduledSendView(
             id: id, send_at: sendAt, state: state, attempts: attempts, last_error: lastError,
-            to: "ana@x.test", subject: "lunch", body: "see you", reply_to_message_id: nil,
+            maybe_sent: maybeSent, to: "ana@x.test", subject: "lunch", body: "see you", reply_to_message_id: nil,
             forward_of_message_id: nil, attachments: [], thread_id: nil, parent_subject: nil,
             parent_from: nil, parent_from_addr: nil, created_at: created, updated_at: created)
     }
@@ -293,6 +299,17 @@ struct ScheduledSendTests {
                 calendar: cal),
             T(text: "may have sent", tone: .danger),
             "failed:recovery never says didn't send: it may have")
+        equal(
+            ScheduledRowCopy.trailing(
+                row(state: "failed", attempts: 3, lastError: "failed:gmail", maybeSent: true),
+                now: now, calendar: cal),
+            T(text: "may have sent", tone: .danger),
+            "the daemon's flag, whatever the reason code: an ambiguous last post")
+        equal(
+            ScheduledRowCopy.trailing(
+                row(state: "failed", attempts: 3, lastError: "failed:gmail", maybeSent: false),
+                now: now, calendar: cal),
+            T(text: "didn't send", tone: .danger), "flag down: didn't send")
     }
 
     static func aFailedRowSaysWhy() {
@@ -319,6 +336,24 @@ struct ScheduledSendTests {
         equal(
             ScheduledRowCopy.failedToast(row(state: "failed", lastError: "failed:recovery")),
             "may have been sent, check Sent", "the recovery toast does not say didn't send")
+        equal(
+            ScheduledRowCopy.failedToast(
+                row(state: "failed", lastError: "failed:crash_loop", maybeSent: true)),
+            "may have been sent, check Sent", "keyed on maybe_sent, not the reason code")
+        equal(
+            ScheduledRowCopy.reasonLine(
+                row(state: "failed", lastError: "failed:gmail", maybeSent: true)),
+            "may have been sent, check Sent", "line two never says Gmail refused a maybe")
+        check(
+            !ScheduledRowCopy.mayHaveSent(
+                row(state: "scheduled", attempts: 1, lastError: "failed:gmail", maybeSent: true)),
+            "a row still owed its re-fire is not failed: no maybe copy")
+        equal(
+            ScheduledRowCopy.reasonLine(row(attempts: 1, lastError: "recovery:grace")),
+            "waiting to confirm the last try", "the fire-time grace")
+        equal(
+            ScheduledRowCopy.reasonLine(row(state: "failed", lastError: "failed:search")),
+            "could not check with Gmail", "a refused pre-fire search")
         for text in [
             ScheduledRowCopy.failedToast(row(state: "failed", lastError: "failed:gmail")),
             ScheduledRowCopy.alreadySending, ScheduledRowCopy.sendingNow,

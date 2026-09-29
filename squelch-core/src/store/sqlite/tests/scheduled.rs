@@ -230,7 +230,7 @@ fn retry_failed_requeue_and_sent_each_move_only_a_sending_row() {
     assert!(claimed.maybe_sent, "the flag is sticky across claims");
     assert!(
         store
-            .settle_scheduled_failed(acct, r.id, 3, "no write credential", false, t(14))
+            .settle_scheduled_failed(acct, r.id, 3, "no write credential", false, None, t(14))
             .unwrap()
     );
     let row = store.scheduled_send_by_id(acct, r.id).unwrap().unwrap();
@@ -476,7 +476,7 @@ fn cancel_releases_files_and_a_sending_row_refuses() {
 
     // A failed row cancels too.
     store
-        .settle_scheduled_failed(acct, s.id, 1, "http 500", false, t(62))
+        .settle_scheduled_failed(acct, s.id, 1, "http 500", false, None, t(62))
         .unwrap();
     assert!(matches!(
         store.cancel_scheduled_send(acct, s.id, t(63)).unwrap(),
@@ -649,7 +649,7 @@ fn every_outbox_query_is_account_scoped() {
     );
     assert!(
         !store
-            .settle_scheduled_failed(other, row.id, 1, "x", false, t(99))
+            .settle_scheduled_failed(other, row.id, 1, "x", false, None, t(99))
             .unwrap()
     );
     assert!(
@@ -869,7 +869,7 @@ fn a_settle_from_an_older_claim_is_a_no_op() {
             .settle_scheduled_retry(acct, r.id, 1, t(9), "failed:gmail", false, t(6))
             .unwrap(),
         store
-            .settle_scheduled_failed(acct, r.id, 1, "failed:gmail", false, t(6))
+            .settle_scheduled_failed(acct, r.id, 1, "failed:gmail", false, None, t(6))
             .unwrap(),
         store
             .unclaim_scheduled_send(acct, r.id, 1, t(9), "paced", SearchClock::Reset, t(6))
@@ -1038,7 +1038,7 @@ fn the_sweep_takes_month_old_failed_rows_and_released_leftovers() {
         .unwrap()
         .unwrap();
     store
-        .settle_scheduled_failed(acct, failed.id, 1, "failed:gmail", false, t(1))
+        .settle_scheduled_failed(acct, failed.id, 1, "failed:gmail", false, None, t(1))
         .unwrap();
     // A file a cancel released and nobody re-claimed.
     let g = stage(&store, acct, "cid-released");
@@ -1257,7 +1257,7 @@ fn a_failed_row_remembers_it_may_have_gone_and_when_its_attempt_ended() {
     );
     assert!(
         store
-            .settle_scheduled_failed(acct, r.id, 1, "failed:gmail", true, t(3))
+            .settle_scheduled_failed(acct, r.id, 1, "failed:gmail", true, None, t(3))
             .unwrap()
     );
     let row = store.scheduled_send_by_id(acct, r.id).unwrap().unwrap();
@@ -1279,11 +1279,26 @@ fn a_failed_row_remembers_it_may_have_gone_and_when_its_attempt_ended() {
         .unwrap()
         .unwrap();
     store
-        .settle_scheduled_failed(acct, r.id, 1, "failed:request", false, t(5))
+        .settle_scheduled_failed(acct, r.id, 1, "failed:request", false, None, t(5))
         .unwrap();
     let row = store.scheduled_send_by_id(acct, r.id).unwrap().unwrap();
     assert!(row.maybe_sent, "sticky");
     assert_eq!(row.last_attempt_at, Some(t(5)));
+
+    // A give-up decided long after its attempt (a lapsed lease) stamps that
+    // attempt's end, not the moment it gave up.
+    assert!(store.send_scheduled_now(acct, r.id, t(6)).unwrap());
+    store
+        .claim_due_scheduled_send(acct, t(6), LEASE)
+        .unwrap()
+        .unwrap();
+    assert!(
+        store
+            .settle_scheduled_failed(acct, r.id, 1, "failed:recovery", true, Some(t(7)), t(40))
+            .unwrap()
+    );
+    let row = store.scheduled_send_by_id(acct, r.id).unwrap().unwrap();
+    assert_eq!((row.last_attempt_at, row.updated_at), (Some(t(7)), t(40)));
 }
 
 #[test]

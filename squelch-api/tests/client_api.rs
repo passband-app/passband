@@ -11956,7 +11956,8 @@ async fn the_outbox_lists_what_is_owed_an_outcome_with_its_parent() {
         .unwrap()
         .unwrap();
     store
-        .settle_scheduled_failed(acct, failed, 2, "failed:gmail", false, now)
+        // Its last post was ambiguous: the listing says it may have gone.
+        .settle_scheduled_failed(acct, failed, 2, "failed:gmail", true, None, now)
         .unwrap();
     // Sent and cancelled rows do not.
     let sent = row_at(-5, "sent");
@@ -11995,6 +11996,7 @@ async fn the_outbox_lists_what_is_owed_an_outcome_with_its_parent() {
             "state",
             "attempts",
             "last_error",
+            "maybe_sent",
             "to",
             "subject",
             "body",
@@ -12014,11 +12016,16 @@ async fn the_outbox_lists_what_is_owed_an_outcome_with_its_parent() {
     assert_eq!(items[0]["state"], "failed");
     assert_eq!(items[0]["attempts"], 2);
     assert_eq!(items[0]["last_error"], "failed:gmail");
+    assert_eq!(
+        items[0]["maybe_sent"], true,
+        "keyed on the flag, not the reason"
+    );
     assert_eq!(items[0]["to"], "failed@example.com");
     assert_eq!(items[0]["subject"], "failed");
     assert_eq!(items[1]["state"], "sending");
     assert_eq!(items[1]["attempts"], 1);
     assert_eq!(items[1]["to"], "sending@example.com");
+    assert_eq!(items[1]["maybe_sent"], false);
 
     let r = &items[2];
     assert_eq!(r["state"], "scheduled");
@@ -12164,7 +12171,7 @@ async fn send_now_queues_the_row_and_gives_a_failed_one_a_fresh_budget() {
         .settle_scheduled_retry(acct, id, 1, now, "failed:gmail", false, now)
         .unwrap();
     store
-        .settle_scheduled_failed(acct, failed, 1, "failed:gmail", false, now)
+        .settle_scheduled_failed(acct, failed, 1, "failed:gmail", false, None, now)
         .unwrap();
     let row = store.scheduled_send_by_id(acct, failed).unwrap().unwrap();
     assert_eq!(row.state, ScheduledSendState::Failed);
@@ -12726,6 +12733,10 @@ async fn a_row_that_keeps_dying_mid_send_stops_at_its_last_attempt() {
     assert_eq!(row.state, ScheduledSendState::Failed);
     assert_eq!(row.last_error.as_deref(), Some("failed:crash_loop"));
     assert!(row.maybe_sent, "one miss in a trailing index is not proof");
+    assert!(
+        row.last_attempt_at.expect("stamped") <= now - chrono::Duration::minutes(5),
+        "the attempt ended when its lease lapsed, not at the give-up"
+    );
     // The worker decided this one without `perform_send`: it audits it.
     assert_eq!(
         audited(&store, acct, "send"),
@@ -13783,6 +13794,9 @@ async fn a_fired_group_send_records_who_it_went_to_not_who_is_in_the_group_now()
         "/client/scheduled",
         Some(serde_json::json!({
             "group_id": group,
+            // A non-member typed in `to`: a direct recipient, but not in the
+            // field the Bcc group expanded into, so not recorded as reached.
+            "to": "boss@work.com",
             "bcc": "ann@fund.com, bo@fund.com",
             "subject": "Update",
             "body": "hi all",
@@ -13824,6 +13838,178 @@ async fn a_fired_group_send_records_who_it_went_to_not_who_is_in_the_group_now()
     assert_eq!(
         (recorded[0].reached, recorded[0].group_size),
         (2, 2),
-        "ann and bo got it; carol and dan never did"
+        "ann and bo got it in bcc; carol and dan never did; the boss in to is not the group's"
+    );
+}
+
+#[tokio::test]
+async fn a_search_gmail_answers_403_is_not_now_not_an_attempt() {
+    // Gmail answers a per-user rate limit with a 403 as often as a permission
+    // refusal: "not now", bounded by the give-up, never an attempt spent.
+    let (base, gmail) = mock_gmail_seq(vec![(
+        403,
+        r#"{"error":{"errors":[{"reason":"userRateLimitExceeded"}],"code":403}}"#.to_string(),
+    )])
+    .await;
+    let (Harness { store, acct, .. }, state) = scheduled_rig(Some(base), |_, _| {});
+    let id = maybe_sent_row(&store, acct, "<limited@passband>");
+
+    let report = squelch_api::run_scheduled_send_pass(&state).await;
+    assert_eq!(
+        (report.deferred, report.retried, report.failed),
+        (1, 0, 0),
+        "{report:?}"
+    );
+    let reqs = gmail.await.unwrap();
+    assert_eq!(reqs.len(), 1);
+    assert!(reqs[0].contains("rfc822msgid"), "the search, and no send");
+    let row = store.scheduled_send_by_id(acct, id).unwrap().unwrap();
+    assert_eq!(
+        (row.state, row.attempts, row.last_error.as_deref()),
+        (
+            ScheduledSendState::Scheduled,
+            1,
+            Some("recovery:unreachable")
+        ),
+        "the lapsed attempt counted; the search spent none"
+    );
+    assert!(
+        row.search_deferred_since.is_some(),
+        "the give-up clock runs"
+    );
+    assert!(row.maybe_sent);
+    assert!(
+        audited(&store, acct, "send").is_empty(),
+        "a deferral is not in the ledger"
+    );
+}
+
+#[tokio::test]
+async fn a_send_now_right_after_a_recovery_give_up_owes_no_fresh_grace() {
+    // Recovery never got to ask (no credential), and gave up half an hour
+    // past the lease. The attempt ENDED then, not at the give-up: a send-now
+    // straight after the toast searches and sends on the next pass.
+    let (Harness { store, acct, .. }, state) = scheduled_rig(None, |_, _| {});
+    let id = lapsed_row(&store, acct, "<prompt@passband>", 31);
+    let report = squelch_api::run_scheduled_send_pass(&state).await;
+    assert_eq!(report.failed, 1, "{report:?}");
+    let row = store.scheduled_send_by_id(acct, id).unwrap().unwrap();
+    assert_eq!(row.last_error.as_deref(), Some("failed:recovery"));
+    assert!(
+        row.last_attempt_at.expect("stamped") <= chrono::Utc::now() - chrono::Duration::minutes(30),
+        "stamped at the lapsed lease, not the give-up"
+    );
+
+    let (base, gmail) = mock_gmail_seq(vec![
+        (200, "{\"resultSizeEstimate\":0}".to_string()),
+        (
+            200,
+            "{\"id\":\"sent-p\",\"threadId\":\"thread-new\"}".to_string(),
+        ),
+        (200, echo_response("sent-p")),
+    ])
+    .await;
+    // NO clock skew: the very next pass.
+    let state = state.with_write_test_harness(Arc::new(StubCreds), base);
+    assert!(
+        store
+            .send_scheduled_now(acct, id, chrono::Utc::now())
+            .unwrap()
+    );
+    let report = squelch_api::run_scheduled_send_pass(&state).await;
+    assert_eq!(
+        (report.sent, report.deferred),
+        (1, 0),
+        "no grace hold: {report:?}"
+    );
+    let reqs = gmail.await.unwrap();
+    assert!(reqs[0].contains("rfc822msgid"), "searched first");
+    assert!(reqs[1].contains("/messages/send"));
+    assert_eq!(
+        store.scheduled_send_by_id(acct, id).unwrap().unwrap().state,
+        ScheduledSendState::Sent
+    );
+}
+
+/// A write-enabled app whose mailbox budget is in a ten-minute quota hold,
+/// with one stored signal message to reply to or forward.
+fn paced_send_app() -> (axum::Router, Arc<SqliteStore>, i64, i64) {
+    use squelch_core::config::GmailQuotaProfile;
+    use squelch_core::gmail_budget::GmailBudget;
+    let budget = Arc::new(
+        GmailBudget::with_unit(GmailQuotaProfile::Standard, std::time::Duration::ZERO)
+            .with_adaptation(
+                std::time::Duration::from_secs(600),
+                std::time::Duration::from_secs(600),
+            ),
+    );
+    budget.note_quota_refusal(None);
+    let mut parent = 0;
+    let (state, store, acct) = state_with(|store, acct| {
+        parent = seed_one_signal(store, acct, "gmail-parent", "thread-77", "Quarterly");
+    });
+    // Nothing listens: a request that got past the budget would fail loudly
+    // as a transport error, never as the 503 asserted.
+    let app = router(
+        state
+            .with_write_test_harness(Arc::new(StubCreds), "http://127.0.0.1:1".into())
+            .with_gmail_budget(budget),
+    );
+    (app, store, acct, parent)
+}
+
+#[tokio::test]
+async fn a_live_reply_whose_parent_read_is_paced_is_503_and_audited_paced() {
+    // Plain reply and reply-all alike: a paced parent read is "not now", not
+    // an unthreaded reply with no derived audience, and not a Gmail failure.
+    for reply_all in [false, true] {
+        let (app, store, acct, parent) = paced_send_app();
+        let resp = app
+            .oneshot(authed_json(
+                "POST",
+                "/client/actions/send",
+                serde_json::json!({
+                    "reply_to_message_id": parent,
+                    "reply_all": reply_all,
+                    "body": "sounds good",
+                    "confirm": true,
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "reply_all={reply_all}"
+        );
+        assert_eq!(
+            audited(&store, acct, "send"),
+            vec!["paced".to_string()],
+            "reply_all={reply_all}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_live_forward_whose_original_read_is_paced_is_503_and_audited_paced() {
+    let (app, store, acct, original) = paced_send_app();
+    let resp = app
+        .oneshot(authed_json(
+            "POST",
+            "/client/actions/send",
+            serde_json::json!({
+                "forward_of_message_id": original,
+                "to": "c@example.com",
+                "body": "fyi",
+                "confirm": true,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        audited(&store, acct, "send"),
+        vec!["paced".to_string()],
+        "not `failed:fetch_original`"
     );
 }

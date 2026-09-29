@@ -405,6 +405,10 @@ struct ScheduledSendView {
     /// A redacted reason (`failed:gmail`, `rejected:no_write_credential`, ...)
     /// or `null`. Never content.
     last_error: Option<String>,
+    /// STICKY: an earlier attempt may have reached Gmail. On a `failed` row
+    /// the client says "may have sent, check Sent" whatever `last_error`
+    /// reads, and a send-now searches before it sends.
+    maybe_sent: bool,
     /// `""` when the request had none (a reply's audience derives at fire
     /// time), so a client need not branch on absence, as with drafts.
     to: String,
@@ -446,6 +450,7 @@ impl ScheduledSendView {
             state: row.state.as_str(),
             attempts: row.attempts,
             last_error: row.last_error,
+            maybe_sent: row.maybe_sent,
             to: req.as_ref().and_then(|r| r.to.clone()).unwrap_or_default(),
             subject: req
                 .as_ref()
@@ -759,7 +764,16 @@ async fn recover(state: &ApiState, report: &mut ScheduledPassReport) {
                 );
                 // "Not found" is one look at an index that may trail: the
                 // row stays `maybe_sent`, so send-now searches first.
-                fail_unsent(state, &row, "failed:crash_loop", true, report).await;
+                // Its attempt ended when its lease lapsed, not now.
+                fail_unsent(
+                    state,
+                    &row,
+                    "failed:crash_loop",
+                    true,
+                    row.lease_until,
+                    report,
+                )
+                .await;
             }
             Ok(None) => {
                 // NOT SENT AGAIN IN THIS PASS: the requeue lands a grace out,
@@ -811,7 +825,9 @@ async fn cannot_recover(
             "squelch-api: scheduled send {} could not be recovered ({reason}); failed",
             row.id
         );
-        fail_unsent(state, row, "failed:recovery", true, report).await;
+        // Its attempt ended when its lease lapsed, half an hour ago: a
+        // send-now straight after this owes no fresh grace.
+        fail_unsent(state, row, "failed:recovery", true, row.lease_until, report).await;
         return;
     }
     let (id, attempts) = (row.id, row.attempts);
@@ -887,7 +903,7 @@ async fn fire(state: &ApiState, row: ScheduledSend, report: &mut ScheduledPassRe
     let Ok(body) = serde_json::from_str::<SendBody>(&row.request) else {
         // Nothing to retry: the same bytes parse the same way next time.
         eprintln!("squelch-api: scheduled send {id} has an unreadable request; failed");
-        fail_unsent(state, &row, "failed:request", false, report).await;
+        fail_unsent(state, &row, "failed:request", false, None, report).await;
         return;
     };
 
@@ -956,7 +972,15 @@ async fn fire(state: &ApiState, row: ScheduledSend, report: &mut ScheduledPassRe
             // back: terminal, rather than three sends refused the same way.
             Ok(_) => {
                 eprintln!("squelch-api: scheduled send {id} lost an attached file; failed");
-                fail_unsent(state, &row, "failed:attachment_missing", false, report).await;
+                fail_unsent(
+                    state,
+                    &row,
+                    "failed:attachment_missing",
+                    false,
+                    None,
+                    report,
+                )
+                .await;
                 return;
             }
             Err(_) => {
@@ -1004,7 +1028,7 @@ async fn fire(state: &ApiState, row: ScheduledSend, report: &mut ScheduledPassRe
         Ok(SendOutcome::Sending { .. }) => {
             eprintln!("squelch-api: scheduled send {id} fanned out; failed");
             // Mail DID go (one per member): never re-sent blind.
-            fail_unsent(state, &row, "failed:group_fanout", true, report).await;
+            fail_unsent(state, &row, "failed:group_fanout", true, None, report).await;
         }
         // Gmail's budget held a call on the way (the send, a forward's
         // original, a reply's parent) and nothing was posted: not this mail's
@@ -1029,13 +1053,22 @@ async fn fire(state: &ApiState, row: ScheduledSend, report: &mut ScheduledPassRe
 /// A pre-fire search that could not be made. Two kinds of "could not":
 ///
 /// - REFUSED (no credential, which is where a revoked write grant first
-///   surfaces since the client fetches no token until it calls; or a 4xx):
-///   asking again in two minutes gets the same answer, so it is a failed
-///   attempt like any other: spent, backed off, `failed` after the third.
-/// - UNREACHABLE (transport, a 5xx, a 429, the budget pacing): "not now",
+///   surfaces since the client fetches no token until it calls; or a 4xx
+///   other than 403 and 429): asking again in two minutes gets the same
+///   answer, so it is a failed attempt like any other: spent, backed off,
+///   `failed` after the third.
+/// - UNREACHABLE (transport, a 5xx, a 429, a 403, the budget pacing): "not
+///   now",
 ///   no attempt spent, but BOUNDED: [`RECOVERY_GIVE_UP`] after the first
 ///   such answer the row goes `failed:recovery` for the user instead of
 ///   deferring (and refreshing a token) forever.
+///
+/// A 403 is UNREACHABLE because Gmail answers a per-user rate limit
+/// (`userRateLimitExceeded`, `rateLimitExceeded`) with a 403 as often as a
+/// permission refusal, and the write client does not surface the body that
+/// tells them apart (`is_quota_refusal` reads it for the budget, then it is
+/// dropped). A genuine permission 403 costs at most the give-up's wait
+/// before the user sees it, and a quota 403 never spends an attempt.
 ///
 /// Either way nothing was sent, and the row stays `maybe_sent`.
 async fn search_failed(
@@ -1047,7 +1080,9 @@ async fn search_failed(
     let id = row.id;
     let refused = match e {
         WriteError::MissingCredential(_) => Some("rejected:no_write_credential"),
-        WriteError::Api { status, .. } if (400..500).contains(status) && *status != 429 => {
+        WriteError::Api { status, .. }
+            if (400..500).contains(status) && !matches!(*status, 403 | 429) =>
+        {
             Some("failed:search")
         }
         WriteError::Invalid(_) => Some("failed:search"),
@@ -1065,7 +1100,16 @@ async fn search_failed(
         .is_some_and(|since| now - since >= RECOVERY_GIVE_UP)
     {
         eprintln!("squelch-api: scheduled send {id} could never be searched for; failed");
-        fail_unsent(state, row, "failed:recovery", true, report).await;
+        // This claim sent nothing: the last attempt's end stays what it was.
+        fail_unsent(
+            state,
+            row,
+            "failed:recovery",
+            true,
+            row.last_attempt_at,
+            report,
+        )
+        .await;
         return;
     }
     eprintln!("squelch-api: scheduled send {id} could not be searched for; deferred");
@@ -1097,16 +1141,21 @@ async fn audit_fire(state: &ApiState, row: &ScheduledSend, reason: &str) {
 }
 
 /// A terminal outcome only the worker knows of (an unreadable request, a lost
-/// file, a crash loop, a recovery never asked): audited, then `failed`.
+/// file, a crash loop, a recovery never asked): `failed`, then audited, and
+/// only when the settle moved the row (a worker that outlived its claim
+/// decided nothing, so the ledger must not say it did). `ended` is the last
+/// attempt's end for `last_attempt_at`, `None` = now.
 async fn fail_unsent(
     state: &ApiState,
     row: &ScheduledSend,
     reason: &'static str,
     maybe_sent: bool,
+    ended: Option<DateTime<Utc>>,
     report: &mut ScheduledPassReport,
 ) {
-    audit_fire(state, row, reason).await;
-    settle_failed(state, row, reason, maybe_sent, report).await;
+    if settle_failed(state, row, reason, maybe_sent, ended, report).await {
+        audit_fire(state, row, reason).await;
+    }
 }
 
 /// A failed attempt: back to `scheduled` after the backoff while attempts
@@ -1127,7 +1176,7 @@ async fn settle_retry(
             "squelch-api: scheduled send {} failed ({reason}) on attempt {}; giving up",
             row.id, row.attempts
         );
-        settle_failed(state, row, reason, maybe_sent, report).await;
+        settle_failed(state, row, reason, maybe_sent, None, report).await;
         return;
     }
     let (id, attempts) = (row.id, row.attempts);
@@ -1176,23 +1225,31 @@ async fn not_now(
 }
 
 /// `failed` under the row's claim, OR-ing `maybe_sent` into its sticky flag.
+/// `ended` stamps `last_attempt_at` (`None` = now). `true` when the row moved.
 async fn settle_failed(
     state: &ApiState,
     row: &ScheduledSend,
     reason: &'static str,
     maybe_sent: bool,
+    ended: Option<DateTime<Utc>>,
     report: &mut ScheduledPassReport,
-) {
+) -> bool {
     let (id, attempts) = (row.id, row.attempts);
     let now = clock(state);
     match store_call(state, move |store, account_id| {
-        store.settle_scheduled_failed(account_id, id, attempts, reason, maybe_sent, now)
+        store.settle_scheduled_failed(account_id, id, attempts, reason, maybe_sent, ended, now)
     })
     .await
     {
-        Ok(true) => report.failed += 1,
-        Ok(false) => {}
-        Err(_) => eprintln!("squelch-api: scheduled send {id} failure not recorded"),
+        Ok(true) => {
+            report.failed += 1;
+            true
+        }
+        Ok(false) => false,
+        Err(_) => {
+            eprintln!("squelch-api: scheduled send {id} failure not recorded");
+            false
+        }
     }
 }
 

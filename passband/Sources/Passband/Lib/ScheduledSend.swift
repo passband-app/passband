@@ -97,9 +97,9 @@ enum ScheduledRowCopy {
     ///   time is the backoff's, not the one the person picked, so showing it
     ///   as theirs would be wrong.
     /// - `sending`: "sending". In Gmail's hands; nothing here can stop it.
-    /// - `failed`: "didn't send", EXCEPT `failed:recovery`, which is the one
-    ///   failure that MAY have gone out: that row says "may have sent", and
-    ///   saying "didn't send" over it would invite a second copy.
+    /// - `failed`: "didn't send", EXCEPT a row that MAY have gone out
+    ///   (`mayHaveSent`): that row says "may have sent", and saying "didn't
+    ///   send" over it would invite a second copy.
     static func trailing(
         _ row: ScheduledSendView, now: Date = Date(), calendar: Calendar = .current
     ) -> Trailing {
@@ -125,7 +125,7 @@ enum ScheduledRowCopy {
     static func reasonLine(_ row: ScheduledSendView) -> String? {
         switch row.state {
         case "failed":
-            return reason(row.last_error)
+            return mayHaveSent(row) ? mayHaveSentLine : reason(row.last_error)
         case "scheduled" where row.attempts > 0 || row.last_error != nil:
             return row.last_error.map(reason)
         default:
@@ -133,11 +133,20 @@ enum ScheduledRowCopy {
         }
     }
 
-    /// `failed:recovery`: the worker lost track of a send mid-flight and could
-    /// never ask Gmail whether it went (docs/SCHEDULED-SEND.md §4).
+    /// A failed row an earlier attempt MAY have put in Gmail: the daemon's
+    /// sticky `maybe_sent` (an ambiguous post, a crash loop, a recovery that
+    /// never got to ask), whatever the reason code says; `failed:recovery`
+    /// also counts for a daemon older than the flag (docs/SCHEDULED-SEND.md
+    /// §4). A send-now on it searches Gmail before it sends.
     static func mayHaveSent(_ row: ScheduledSendView) -> Bool {
-        row.last_error == "failed:recovery"
+        row.state == "failed"
+            && (row.maybe_sent == true || row.last_error == "failed:recovery")
     }
+
+    /// What a `mayHaveSent` row says on line two and in its toast, in place
+    /// of the reason: the reason ("Gmail refused it") would read as "it did
+    /// not go", which is the one thing nobody knows.
+    static let mayHaveSentLine = "may have been sent, check Sent"
 
     /// The daemon's redacted reason (`failed:gmail`, `rejected:too_large`, ...)
     /// as a person would say it. A CLOSED MAP of the codes the send path and
@@ -145,10 +154,12 @@ enum ScheduledRowCopy {
     /// raw code, which reads as a crash.
     static func reason(_ code: String?) -> String {
         switch code {
-        case "failed:recovery": "may have been sent, check Sent"
+        case "failed:recovery": mayHaveSentLine
         case "failed:gmail": "Gmail refused it"
         case "rejected:no_write_credential": "sending is not connected, reconnect your account"
         case "recovery:unreachable": "could not reach Gmail"
+        case "recovery:grace": "waiting to confirm the last try"
+        case "failed:search": "could not check with Gmail"
         case "paced": "Gmail is pacing sends, waiting a moment"
         case "failed:crash_loop": "sending it kept failing"
         case "failed:request": "the saved mail could not be read"
@@ -166,10 +177,10 @@ enum ScheduledRowCopy {
     }
 
     /// The toast a newly failed row raises, once per app run
-    /// (`ScheduledFailures`). `failed:recovery` is not "didn't send": it
+    /// (`ScheduledFailures`). A `mayHaveSent` row is not "didn't send": it
     /// might have, and the toast says to look before sending again.
     static func failedToast(_ row: ScheduledSendView) -> String {
-        mayHaveSent(row) ? reason(row.last_error) : "didn't send: \(reason(row.last_error))"
+        mayHaveSent(row) ? mayHaveSentLine : "didn't send: \(reason(row.last_error))"
     }
 
     /// The Sent page's order: the next to go on top, oldest `send_at` first,

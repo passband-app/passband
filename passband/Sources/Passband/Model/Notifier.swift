@@ -220,6 +220,28 @@ final class Notifier {
         return true
     }
 
+    /// A new version of Passband is ready to install. Posted by the updater
+    /// when a SCHEDULED check finds one; the tap brings the window forward,
+    /// and the update card inside it is the install button.
+    ///
+    /// Presented by the ordinary foreground rule on purpose: with the app
+    /// frontmost and its window up, the card is already on screen and a banner
+    /// saying the same thing would be the second copy.
+    ///
+    /// No sender tile and no chime. It is the app talking about itself, and a
+    /// release is not urgent enough to make a sound.
+    func postUpdate(version: String) async {
+        await requestAuthorizationIfNeeded()
+        let content = UNMutableNotificationContent()
+        content.title = "Passband \(version) is ready"
+        content.body = "Click to open Passband and install it. It takes a few seconds."
+        content.threadIdentifier = "passband.update"
+        content.userInfo = [EventBanner.routeKey: EventBanner.updateRoute]
+        // One identifier for every version, so a newer release replaces an
+        // unread banner for an older one instead of stacking beside it.
+        send(content, identifier: "passband.update", sender: "")
+    }
+
     // MARK: - delegate behaviour
 
     /// What to do with a notification that arrives while the app is running.
@@ -403,6 +425,16 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
         let route = userInfo[EventBanner.routeKey] as? String
         let unresolved = EventBanner.unresolvedPush(userInfo["event_id"] as? String)
         await MainActor.run {
+            if route == EventBanner.updateRoute {
+                Notifier.shared.front()
+                // A banner from before a quit: this launch has no card yet, and
+                // Sparkle's next scheduled check could be hours off. The tap is
+                // a request, so it gets the check a request gets.
+                #if os(macOS)
+                    if Updater.shared.phase == .idle { Updater.shared.check() }
+                #endif
+                return
+            }
             if let messageId, route != EventBanner.testRoute {
                 Notifier.shared.handleMessageTap(messageId: messageId, accountId: accountId)
                 return

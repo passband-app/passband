@@ -41,6 +41,9 @@ enum EventBanner {
     /// a tap on it is not a human opening their mail and must not be counted
     /// as one.
     static let testRoute = "test"
+    /// A new Passband version is ready. The tap fronts the window, where the
+    /// update card is already waiting, and is not a mail open either.
+    static let updateRoute = "update"
 
     /// The relay's original push survives when device enrichment times out.
     /// Keep its account-qualified event handle so a tap can resolve the email.

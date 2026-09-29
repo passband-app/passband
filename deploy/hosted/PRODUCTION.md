@@ -1,6 +1,6 @@
 # Hosted Passband: what is actually deployed
 
-The record of THIS install, as of 2026-08-12. `SETUP.md` is the generic runbook
+The record of THIS install, as of 2026-08-12 (box and capacity: 2026-09-28). `SETUP.md` is the generic runbook
 and explains why each piece exists; this file is the answers — which box, which
 domain at which provider, which secret in which namespace — so nobody has to
 reverse-engineer them at 3am.
@@ -12,14 +12,14 @@ Values are never in here. Names, namespaces and key names only.
 | | |
 |---|---|
 | Name | `carrier` |
-| Provider | Hetzner Cloud, CPX21 (**shared** vCPU: 3 vCPU / 4 GB / 80 GB root) |
+| Provider | Hetzner Cloud, **shared** vCPU: 4 vCPU / 16 GB / 80 GB root. Resized from a CPX21 (3 vCPU / 4 GB) on 2026-09-28, CPU and RAM only, when the sixth signup hit the quota |
 | Region | US |
 | OS | Ubuntu 26.04 |
 | Public IP | `5.78.205.240` |
 | Firewall | inbound 22, 80, 443 only |
 | Backups | ON — 7 daily snapshots, **root disk only** (see "Backups" below) |
 | SSH | `ssh carrier` (host alias in `~/.ssh/config`) |
-| Node memory | 3814 MiB total, and **all of it is offered to pods today**: nothing is reserved, so `kubepods.slice` `memory.max` is the whole 3.72 GiB, while the host's own processes (k3s, its containerd, journald, litestream, sshd) hold ~1.2 GB that is outside every pod's budget. `SETUP.md` §2b reserves 1200Mi and evicts at 200Mi, which leaves ~2414Mi allocatable and room for five tenants. **Not applied here yet** |
+| Node memory | 15985 MiB total (`kube_node_status_capacity`), and **all of it is offered to pods today**: nothing is reserved, while the host's own processes (k3s, its containerd, journald, litestream, sshd) hold ~1.2 GB that is outside every pod's budget. `SETUP.md` §2b's `systemReserved` is **not applied here yet**, so the tenants quota below is still the only refusal |
 | Swap | none. §2b's 2 GB zram device is written (`deploy/hosted/node/`) and **not installed here yet**. With it, `LimitedSwap` rations about 206 MB per tenant at a 384Mi request |
 
 Shared vCPU on purpose: tenant daemons are idle between syncs, and dedicated
@@ -87,39 +87,60 @@ Security Admission at `restricted`), `cert-manager`. Manifests applied from
 
 ## How many tenants fit
 
-**Five, and memory is what decides it.** Not CPU, not the `pods: "25"` line in
-`70-tenant-limits.yaml`, and there is no swap under any of it.
+**Thirty, and this box's quota is NOT the file in the repo.** Since the
+2026-09-28 resize the `tenants` ResourceQuota on `carrier` is a live patch over
+`70-tenant-limits.yaml`, which stays sized to the 4 GB floor because it is also
+the self-host template. So:
 
-A tenant daemon that has embedded anything keeps its ONNX session resident. The
-four tenant pods here read 91, 317, 376 and 509 MiB on 2026-08-26, and 123, 293,
-349 and 545 MB on another pass the same day: roughly 300-500 MB at rest, moving
-while you watch. The warden requests **384Mi** per tenant
-(`15-warden-config.yaml`), which is about the p50 of that rather than a
-comfortable number, and `70-tenant-limits.yaml` holds the namespace to
-`requests.memory: 1920Mi`, which is five of them. The subtraction is written out
-in that file and in `SETUP.md` §7: 3814 MiB of machine, less about 1200 for k3s,
-containerd, journald and litestream, less about 372 for the pods that are not
-tenants, leaving about 2.2 GiB.
+> **Re-applying `70-tenant-limits.yaml` here puts the cap back at FIVE.** Eight
+> tenants were already running when it was raised, so the next signup would be
+> refused exactly the way `ethan`'s was. Re-run the patch below after any apply
+> of that file. The "tenants quota near full" alert fires within 15 minutes if
+> you forget (see `deploy/monitoring/README.md`).
 
-**The quota is the only refusal on this box.** Nothing is reserved outside the
-pod budget today: k3s takes nothing for itself by default, so the scheduler
-still sees all 3814 MiB as allocatable and would admit a sixth tenant and a
-seventh onto a machine that cannot run them. A kubelet `systemReserved` is what
-would make the scheduler a second gate; it is written up as `SETUP.md` §2b (PR
-#151) and **not applied here**.
+What is live, every dimension sized to thirty tenants at the warden's
+100m / 384Mi / 256Mi-ephemeral request (`15-warden-config.yaml`):
 
-What that combination costs when the numbers are wrong is 2026-08-19: the
-request was 256Mi and the quota was 5Gi on a 4 GB box, four tenants ran it out
-of memory globally, and the kernel OOM-killed two squelchd processes. It takes a
-running mailbox, because a tenant pod is burstable, while the signup that
-overcommitted the box succeeded days earlier and is nobody's suspect. With both
-numbers telling the truth the sixth signup is refused instead, as the documented
-`500 not_ready`, reason in `kubectl -n tenants describe replicaset`.
+```sh
+kubectl -n tenants patch resourcequota tenants --type merge -p '{"spec":{"hard":{
+  "requests.memory":"11520Mi","limits.memory":"46080Mi",
+  "requests.cpu":"3","limits.cpu":"12",
+  "requests.ephemeral-storage":"8Gi","limits.ephemeral-storage":"32Gi",
+  "pods":"40","persistentvolumeclaims":"40","count/secrets":"100"}}}'
+```
 
-A sixth tenant is a RAM resize (CPU and RAM only, see "The box") or the
-daemon-side embedder unload landing and being measured for a week, whichever
-comes sooner. Raise it off `container_memory_working_set_bytes`, not off wanting
-a sixth tenant. Existing tenants take a changed bound the way they take any
+ALL of them, not just memory. At 16 GB the template's other lines bind first:
+`requests.cpu: "2"` is twenty tenants at 100m, `requests.ephemeral-storage: 5Gi`
+is twenty at 256Mi, and `pods`/`persistentvolumeclaims: 25` are twenty-five.
+Raising memory alone moves the wall from five to twenty and nothing else.
+
+**Memory arithmetic.** 15985 MiB of machine, less about 1200 for k3s,
+containerd, journald and litestream, less about 400 for the pods that are not
+tenants, leaves about 14 GiB. Thirty tenants at 384Mi is 11520Mi, which leaves
+real room for the fact that 384Mi is the p50 of a tenant at rest, not its peak:
+tenant pods read 300-500 MB with the ONNX session resident (2026-08-26
+measurements). It is deliberately not the ~36 the division allows.
+
+**The quota is the only refusal on this box.** k3s reserves nothing for itself
+by default, so the scheduler sees all 15985 MiB as allocatable and would admit
+tenants past what the machine can run. A kubelet `systemReserved` (`SETUP.md`
+§2b) would make the scheduler a second gate; it is **not applied here**. What
+the wrong numbers cost is 2026-08-19: a 5Gi quota on a 4 GB box, a global OOM,
+and two running mailboxes killed.
+
+**What a full quota looks like** is 2026-09-28: the warden applies the
+Deployment, the ReplicaSet is refused (`FailedCreate ... exceeded quota:
+tenants`, only in `kubectl -n tenants get events`), control's call times out,
+and the signup page tells a new user to try again, which cannot work because
+the label is now taken. Recovering that user is on our side only: once the pod
+is Ready, insert their `tenants` row in control's Postgres, then
+`squelch-control llm mint <label>` and `share mint <label>`, and revoke the two
+orphaned VKs control logged. They then sign in to Passband with Google as normal.
+
+The next raise is RAM again (CPU and RAM only, see "The box") or the
+daemon-side embedder unload, measured for a week. Raise it off
+`container_memory_working_set_bytes` and the quota alert, not off wanting one
+more tenant. Existing tenants take a changed bound the way they take any
 pod-shape change: see "Shipping a tenant-shape change".
 
 ## Railway

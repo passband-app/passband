@@ -1,0 +1,14 @@
+# Everything to Slack. One receiver, so the tree is one node.
+#
+# Grouped by alert name so a box-wide failure (every tenant's sync going stale
+# at once) arrives as ONE message listing them, not eight. Re-sent every 4h while
+# it stays firing, which is loud enough to not be forgotten overnight and quiet
+# enough to not be muted.
+apiVersion: 1
+policies:
+  - orgId: 1
+    receiver: slack
+    group_by: ['alertname']
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h

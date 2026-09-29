@@ -98,6 +98,9 @@ struct EmailWebView: View {
     /// back in `init` — the Coordinator refuses to load a placeholder, so an
     /// unprepared body is a blank frame. The `.task` below is the cold path.
     @State private var prepared: Prepared
+    /// The width the frame was last laid out at — see the geometry hook in
+    /// `body`. 0 until it has been laid out once.
+    @State private var frameWidth: CGFloat = 0
 
     /// `prepared` is seeded from the warm cache HERE: `@State` cannot be assigned
     /// from `body`, and every later hook is a frame too late.
@@ -115,7 +118,9 @@ struct EmailWebView: View {
         self.mine = mine
         _prepared = State(
             initialValue: PreparedBodies.shared.get(
-                Prepared.cacheKey(html, allowTrackers, attachments)) ?? .empty)
+                PreparedKeyMemo.shared.key(
+                    message: cacheKey, html: html, allowTrackers: allowTrackers,
+                    attachments: attachments)) ?? .empty)
     }
 
     struct Prepared: Equatable, Sendable {
@@ -263,6 +268,7 @@ struct EmailWebView: View {
 
             EmailWebViewRepresentable(
                 html: prepared.html,
+                source: prepared.sourceHash,
                 allowRemote: allowRemote,
                 collapseQuotes: quotedHidden,
                 bubble: bubble,
@@ -287,6 +293,22 @@ struct EmailWebView: View {
             // past the edge while the heights are being retaken.
             .frame(maxWidth: displayWidth)
             .frame(height: empty ? 0 : displayHeight)
+            // A NARROWER OR WIDER FRAME IS A NEW DOCUMENT TO SIZE. The column
+            // changes width when a pane opens beside the reader or the window
+            // is resized; the document reflows and reports its new height —
+            // and a machine already in `.done` ignored it, so the frame kept
+            // the old width's height (clipped, or trailing white space) until
+            // the offscreen pass got round to it. Re-opening the sizing takes
+            // the reflowed height at once. A card only: a bubble's frame
+            // narrows to what its own document reported, which is not news.
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
+                let previous = frameWidth
+                frameWidth = width
+                guard !bubble, previous > 0, abs(width - previous) > 0.5, measured,
+                    sizing != .opening
+                else { return }
+                restartSizing(userDriven: false)
+            }
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             // The speech tail, on the DOCUMENT's outer bottom corner, in the
             // document's own page colour. BEHIND the frame, not over it: the
@@ -486,7 +508,12 @@ struct EmailWebView: View {
         print("[passband.height] msg \(cacheKey) \(what)")
     }
 
-    private var preparedKey: Int { Prepared.cacheKey(html, allowTrackers, attachments) }
+    /// Memoized per message: the raw key is a hash of the whole html, and this
+    /// is read from `body` (as a task id) on every evaluation.
+    private var preparedKey: Int {
+        PreparedKeyMemo.shared.key(
+            message: cacheKey, html: html, allowTrackers: allowTrackers, attachments: attachments)
+    }
     private var rememberedHeight: CGFloat? { cacheKey.flatMap { FrameHeights.shared.get($0) } }
     /// What the caller's line count says this document will come to, or nil
     /// when it offered none. Never remembered as a height: it is a guess, and
@@ -655,13 +682,13 @@ enum EmailFrame {
     /// What a LIVE frame would have to be holding to be reusable for this render,
     /// or nil if this render cannot use one (nothing to render yet, or no message
     /// id).
-    static func renderKey(poolKey: String?, html: String, allowRemote: Bool, bubble: Bool)
-        -> WebFramePool.Key?
-    {
+    static func renderKey(
+        poolKey: String?, html: String, source: Int, allowRemote: Bool, bubble: Bool
+    ) -> WebFramePool.Key? {
         guard let poolKey, !html.isEmpty else { return nil }
         return WebFramePool.Key(
             message: poolKey, allowRemote: allowRemote,
-            document: EmailFrameCoordinator.documentHash(html: html, bubble: bubble))
+            document: EmailFrameCoordinator.documentHash(source: source, bubble: bubble))
     }
 
     /// Injected AFTER document end (the message cannot run script to interfere):
@@ -1007,21 +1034,28 @@ final class EmailFrameCoordinator: NSObject {
     /// documents when one hugs as a bubble and the other fills as a card, and
     /// a frame holding the one must not pass for the other — neither at the
     /// load guard nor in the pool.
-    nonisolated static func documentHash(html: String, bubble: Bool) -> Int {
+    ///
+    /// FROM THE PREPARED BODY'S SOURCE HASH, not from the html again: the
+    /// prepared html is a pure function of what that hash covers (the raw
+    /// body, the tracker policy, the parts), so it identifies the document
+    /// exactly as well — and this used to re-hash the whole prepared html on
+    /// every `updateNSView`, which is every re-render of the card.
+    nonisolated static func documentHash(source: Int, bubble: Bool) -> Int {
         var hasher = Hasher()
-        hasher.combine(html)
+        hasher.combine(source)
         hasher.combine(bubble)
         return hasher.finalize()
     }
 
     func load(
-        _ webView: WKWebView, html: String, allowRemote: Bool, bubble: Bool, poolKey: String?
+        _ webView: WKWebView, html: String, source: Int, allowRemote: Bool, bubble: Bool,
+        poolKey: String?
     ) {
         // NEVER LOAD THE PLACEHOLDER: `prepared` can start empty, and loading
         // a blank document lands the real one as a SECOND navigation — which
         // is what makes the load race reachable at all.
         guard !html.isEmpty else { return }
-        let document = Self.documentHash(html: html, bubble: bubble)
+        let document = Self.documentHash(source: source, bubble: bubble)
         let signature = Self.signature(allowRemote: allowRemote, document: document)
         guard signature != loadedSignature else { return }
         loadedSignature = signature
@@ -1090,7 +1124,7 @@ final class EmailFrameCoordinator: NSObject {
 
     /// Give the frame up: to the pool if it is worth keeping, otherwise to
     /// the teardown path.
-    func release(_ webView: WKWebView) {
+    func release(_ webView: WKWebView, prerendered: Bool = false) {
         guard let relay else { return }
         relay.owner = nil
         let entry = WebFramePool.Entry(webView: webView, relay: relay)
@@ -1104,7 +1138,7 @@ final class EmailFrameCoordinator: NSObject {
             WebFramePool.discard(entry)
             return
         }
-        WebFramePool.shared.checkIn(entry, key: key)
+        WebFramePool.shared.checkIn(entry, key: key, prerendered: prerendered)
     }
 
     func setQuotesCollapsed(_ webView: WKWebView, collapsed: Bool) {
@@ -1563,8 +1597,19 @@ final class WebFramePool {
     private var frames: [Key: Entry] = [:]
     /// Least-recently-used first.
     private var order: [Key] = []
+    /// THE SECOND TIER: frames rendered AHEAD of a click (FramePrewarmer),
+    /// for mail nobody has opened yet. Kept apart from the read frames so
+    /// that pre-rendering the board's top rows can never evict the message
+    /// somebody just walked away from, and capped on its own — each is a
+    /// live content process, and the board only ever shows a few rows a
+    /// click away.
+    private static let prerenderedCapacity = 4
+    private var prerendered: Set<Key> = []
 
     private init() {}
+
+    /// Whether a frame for this document is parked, in either tier.
+    func holds(_ key: Key) -> Bool { frames[key] != nil }
 
     /// A parked frame holding exactly this document, or nil. Checkout REMOVES it,
     /// which is the whole answer to a frame being in use: two views of one message
@@ -1573,10 +1618,11 @@ final class WebFramePool {
     func checkout(_ key: Key) -> Entry? {
         guard let entry = frames.removeValue(forKey: key) else { return nil }
         order.removeAll { $0 == key }
+        prerendered.remove(key)
         return entry
     }
 
-    func checkIn(_ entry: Entry, key: Key) {
+    func checkIn(_ entry: Entry, key: Key, prerendered: Bool = false) {
         entry.relay.owner = nil
         entry.webView.removeFromSuperview()
         // Settle back to the state a fresh open expects: a frame parked with its
@@ -1589,13 +1635,22 @@ final class WebFramePool {
         // Two frames of one document: keep the one just used.
         if let incumbent = frames.removeValue(forKey: key) {
             order.removeAll { $0 == key }
+            self.prerendered.remove(key)
             Self.discard(incumbent)
         }
         frames[key] = entry
         order.append(key)
+        if prerendered { self.prerendered.insert(key) }
 
-        while order.count > Self.capacity {
-            let oldest = order.removeFirst()
+        // Each tier evicts its own oldest, and neither counts the other.
+        evict(tier: prerendered, capacity: prerendered ? Self.prerenderedCapacity : Self.capacity)
+    }
+
+    private func evict(tier: Bool, capacity: Int) {
+        while order.filter({ prerendered.contains($0) == tier }).count > capacity {
+            guard let oldest = order.first(where: { prerendered.contains($0) == tier }) else { return }
+            order.removeAll { $0 == oldest }
+            prerendered.remove(oldest)
             if let evicted = frames.removeValue(forKey: oldest) { Self.discard(evicted) }
         }
     }
@@ -1608,6 +1663,7 @@ final class WebFramePool {
         for (_, entry) in frames { Self.discard(entry) }
         frames.removeAll()
         order.removeAll()
+        prerendered.removeAll()
         for spare in spares { Self.discard(spare) }
         spares.removeAll()
     }
@@ -1681,5 +1737,217 @@ final class WebFramePool {
         controller.removeScriptMessageHandler(forName: FrameRelay.name)
         controller.removeAllUserScripts()
         entry.webView.removeFromSuperview()
+    }
+}
+
+
+/// THE PREPARED-BODY KEY, REMEMBERED PER MESSAGE. `Prepared.cacheKey` hashes
+/// the whole html, and it was being asked in `EmailWebView.init` and again
+/// from `body` on every evaluation of every card. Keyed on the message id
+/// and the body's length: a healed body (the blank-body heal replaces the html
+/// under the same id) is a different length and misses, and nothing else ever
+/// changes a message's html under its id. A body with no id is hashed
+/// outright — those are sealed reveals and the forward composer's preview,
+/// one at a time.
+///
+/// Lock-based for the same reason PreparedBodies is: `EmailWebView.init`
+/// runs nonisolated.
+final class PreparedKeyMemo: @unchecked Sendable {
+    static let shared = PreparedKeyMemo()
+    private struct Identity: Hashable {
+        let message: String
+        let length: Int
+        let allowTrackers: Bool
+        let parts: Int
+    }
+    private let lock = NSLock()
+    private var entries = LRUMap<Identity, Int>(limit: 600)
+    private init() {}
+
+    func key(message: String?, html: String, allowTrackers: Bool, attachments: [Attachment]) -> Int {
+        guard let message else {
+            return EmailWebView.Prepared.cacheKey(html, allowTrackers, attachments)
+        }
+        var parts = Hasher()
+        for att in attachments { parts.combine(att.id) }
+        let identity = Identity(
+            message: message, length: html.utf8.count, allowTrackers: allowTrackers,
+            parts: parts.finalize())
+        lock.lock()
+        defer { lock.unlock() }
+        if let known = entries.get(identity) { return known }
+        let made = EmailWebView.Prepared.cacheKey(html, allowTrackers, attachments)
+        entries.set(identity, made)
+        return made
+    }
+}
+
+// MARK: - rendering ahead of the click
+
+/// FRAMES RENDERED BEFORE ANYBODY CLICKS. The thread prefetch makes an open
+/// network-free and the body warmer makes it scan-free; what was left was the
+/// web frame itself — a spare's content process is warm, but the document
+/// still has to be parsed, laid out, measured and its images fetched after
+/// the click, which is a blank box for the first hundred-odd milliseconds of
+/// every unread email. A pool hit skips all of it, and until now only a
+/// message somebody had ALREADY read could be one.
+///
+/// This renders the NEWEST message of each wanted thread — the one the reader
+/// opens on — into a frame parked in the pool's prerendered tier, under the
+/// exact key the reader's mount will ask for: same style resolution, same
+/// tracker policy, same image policy (the CSP), same bubble-or-card document.
+/// Any of those differing is a miss, never a wrong frame.
+///
+/// ONE AT A TIME, off the interaction path: each render is a content-process
+/// load, and two starting at once during a scroll is the thing spares exist
+/// to avoid. The queue is replaced wholesale by `want` — the board's top rows
+/// are the only ones worth a frame, and they change.
+@MainActor
+final class FramePrewarmer {
+    static let shared = FramePrewarmer()
+
+    private var queue: [String] = []
+    private var running = false
+    private var inflight: Set<WebFramePool.Key> = []
+    /// Bumped by `wipe`: an account switch must abandon the queue AND refuse
+    /// to park anything a render started under the old account.
+    private var generation = 0
+    /// The viewport a pre-rendered document is laid out in. Only `vh` units
+    /// care, and an adopted frame re-reports at its real size anyway.
+    private static let viewport: CGFloat = 800
+    /// Longer than the measurer's load deadline: images are part of what is
+    /// being rendered ahead, and a frame that is not finished is not parked.
+    private static let loadDeadline: Duration = .seconds(4)
+
+    private init() {}
+
+    /// The threads worth a frame, in priority order. Replaces the queue.
+    func want(_ threadIds: [String]) {
+        var seen = Set<String>()
+        queue = threadIds.filter { !$0.isEmpty && seen.insert($0).inserted }
+        kick()
+    }
+
+    /// Account switch: nothing queued belongs to the new daemon.
+    func wipe() {
+        generation &+= 1
+        queue.removeAll()
+        nudged?.cancel()
+        nudged = nil
+    }
+
+    /// The row under the pointer: rendered ahead of the others, but only once
+    /// the pointer has RESTED there — crossing ten rows on the way to one
+    /// must not queue ten documents.
+    private var nudged: Task<Void, Never>?
+    func nudge(_ threadId: String) {
+        nudged?.cancel()
+        nudged = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(150))
+            guard let self, !Task.isCancelled else { return }
+            self.queue.removeAll { $0 == threadId }
+            self.queue.insert(threadId, at: 0)
+            self.kick()
+        }
+    }
+
+    private func kick() {
+        guard !running else { return }
+        running = true
+        let gen = generation
+        Task { @MainActor [weak self] in
+            defer { self?.running = false }
+            while let self, gen == self.generation, !self.queue.isEmpty {
+                let next = self.queue.removeFirst()
+                await self.render(next, gen: gen)
+                // A beat between renders, so a click landing mid-queue is
+                // served before the next document starts.
+                await Task.yield()
+            }
+        }
+    }
+
+    private func render(_ threadId: String, gen: Int) async {
+        guard let view = try? await ThreadPrefetch.shared.fetch(threadId),
+            gen == generation, view.cache_allowed == true,
+            let message = view.messages.last, let html = message.html, !html.isEmpty
+        else { return }
+        let store = AppStore.shared
+        let style = ThreadViewer.resolveStyle(
+            threadId: threadId, messages: view.messages,
+            readingMail: ThreadViewer.isReadingMail(threadId, store))
+        let bubble = style == .bubbles
+        let allowRemote = Prefs.shared.loadRemoteImages
+        let width = ThreadViewer.expectedBodyWidth(style: style)
+        guard width > 0 else { return }
+
+        // The prepared body, from the warmer if it has been here, made here
+        // (off the main actor) if not.
+        let allow = message.allowsTrackers
+        let parts = message.attachmentList
+        let key = EmailWebView.Prepared.cacheKey(html, allow, parts)
+        let prepared: EmailWebView.Prepared
+        if let warm = PreparedBodies.shared.get(key) {
+            prepared = warm
+        } else {
+            prepared = await Task.detached(priority: .utility) {
+                EmailWebView.Prepared.make(from: html, allowTrackers: allow, attachments: parts)
+            }.value
+            PreparedBodies.shared.set(key, prepared)
+        }
+        guard gen == generation, !prepared.html.isEmpty else { return }
+
+        let poolKey = style.frameKey(message.id)
+        guard
+            let renderKey = EmailFrame.renderKey(
+                poolKey: poolKey, html: prepared.html, source: prepared.sourceHash,
+                allowRemote: allowRemote, bubble: bubble)
+        else { return }
+        guard !WebFramePool.shared.holds(renderKey), !inflight.contains(renderKey) else { return }
+        inflight.insert(renderKey)
+        defer { inflight.remove(renderKey) }
+
+        let entry = WebFramePool.shared.takeSpare() ?? EmailWebViewRepresentable.buildFrame()
+        WebFramePool.shared.replenishSpares(EmailWebViewRepresentable.buildSpare)
+        let webView = entry.webView
+        webView.navigationDelegate = entry.relay
+        webView.uiDelegate = entry.relay
+        // NO WINDOW AND NO SUPERVIEW, like the measurer's frame: a web view
+        // held in a variable parses, lays out and runs the injected script
+        // exactly as one in a window does.
+        webView.frame = CGRect(x: 0, y: 0, width: width, height: Self.viewport)
+
+        let coordinator = EmailFrameCoordinator(
+            onHeight: { _ in }, onLoaded: {}, onQuotedFound: { _ in }, onLink: { _ in })
+        let landed = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            let once = Once()
+            coordinator.onLoaded = { once.run { continuation.resume(returning: true) } }
+            coordinator.attach(entry.relay)
+            coordinator.load(
+                webView, html: prepared.html, source: prepared.sourceHash,
+                allowRemote: allowRemote, bubble: bubble, poolKey: poolKey)
+            Task { @MainActor in
+                try? await Task.sleep(for: Self.loadDeadline)
+                once.run { continuation.resume(returning: false) }
+            }
+        }
+        // `onLoaded` also fires for a FAILED navigation (documentDidFail);
+        // `release` checks the relay's own `loaded` and discards the rest.
+        guard landed, gen == generation else {
+            coordinator.release(webView)  // discards: not loaded, or parks a finished one
+            if !landed { WebFramePool.discard(entry) }
+            return
+        }
+        coordinator.release(webView, prerendered: true)
+    }
+
+    /// A continuation may be resumed exactly once, and two things race to.
+    private final class Once {
+        private var done = false
+        func run(_ body: () -> Void) {
+            guard !done else { return }
+            done = true
+            body()
+        }
     }
 }

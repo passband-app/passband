@@ -66,6 +66,23 @@ struct SitrepView: View {
     @Environment(AppStore.self) private var store
     @Environment(Prefs.self) private var prefs
 
+    /// How long a board row's thread stays good in the prefetch cache. Longer
+    /// than the default: a board row is the likeliest click in the app, and a
+    /// reader opened from a stale copy heals itself — the poll refetches in
+    /// place the moment it sees a newer message (AppStore.noteThreadArrival).
+    static let boardFresh: TimeInterval = 5 * 60
+    /// How many of the top rows are worth a pre-rendered frame. Bounded by
+    /// WebFramePool's prerendered tier; each is a live content process.
+    private static let prerenderRows = 4
+
+    /// The whole warm for a list of board rows: threads first, then frames
+    /// for the top few.
+    fileprivate static func warmBoard(_ ids: [String]) {
+        ThreadPrefetch.shared.warm(
+            ids, immediate: eyesVisible, spacing: .milliseconds(150), fresh: boardFresh)
+        FramePrewarmer.shared.want(Array(ids.prefix(prerenderRows)))
+    }
+
     /// Hover + keyboard cursor. A reference, deliberately — see `SitrepCursor`.
     @State private var cursor = SitrepCursor()
 
@@ -209,14 +226,17 @@ struct SitrepView: View {
         .task { await store.refreshZones() }
         // Warm the visible top-10 immediately and trickle the collapsed
         // remainder, so a long list never stampedes the daemon. Prefetch dedupes
-        // in-flight and fresh entries, so re-runs are near-free.
-        .onChange(of: threadIds) { _, ids in
-            ThreadPrefetch.shared.warm(ids, immediate: eyesVisible, spacing: .milliseconds(150))
-        }
-        .onAppear {
-            ThreadPrefetch.shared.warm(
-                threadIds, immediate: eyesVisible, spacing: .milliseconds(150))
-        }
+        // in-flight and fresh entries, so re-runs are near-free. The top rows
+        // go one step further and get their newest message RENDERED into a
+        // parked frame (FramePrewarmer), so the click is a pool hit.
+        .onChange(of: threadIds) { _, ids in Self.warmBoard(ids) }
+        .onAppear { Self.warmBoard(threadIds) }
+        // AND KEPT WARM. The warm above ran once per list change, and a
+        // cached thread goes stale after its TTL — so a board left open for a
+        // few minutes and then clicked paid the round trip the prefetch
+        // exists to remove. A zero-size leaf watches the poll heartbeat so
+        // this body does not have to.
+        .background { BoardWarmKeeper(threadIds: threadIds) }
         .onChange(of: visible.count) { _, count in
             cursor.index = max(0, min(cursor.index, max(0, count - 1)))
         }
@@ -893,6 +913,20 @@ private struct DashHero: View {
     }
 #endif
 
+/// Re-warms the board's threads on every poll heartbeat. A LEAF of its own
+/// so that reading `lastRefresh` — which changes every ten seconds — costs a
+/// zero-size view's body and not the board's.
+private struct BoardWarmKeeper: View {
+    @Environment(AppStore.self) private var store
+    let threadIds: [String]
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .onChange(of: store.lastRefresh) { _, _ in SitrepView.warmBoard(threadIds) }
+    }
+}
+
 // MARK: - obligation row
 
 private struct ObligationRow: View {
@@ -995,7 +1029,14 @@ private struct ObligationRow: View {
         }
         .onHover { over in
             hover.on = over
-            if over { cursor.hover(index) }
+            if over {
+                cursor.hover(index)
+                // The pointer resting on a row is the best predictor of the
+                // next click: make sure its thread is cached (a no-op when it
+                // already is) and, a beat later, rendered.
+                ThreadPrefetch.shared.prefetch(update.thread_id, fresh: SitrepView.boardFresh)
+                FramePrewarmer.shared.nudge(update.thread_id)
+            }
         }
     }
 }

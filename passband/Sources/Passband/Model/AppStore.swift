@@ -1684,6 +1684,8 @@ final class AppStore {
     /// mis-prioritises eviction and nothing else — accepted.
     private func wipeAccountCaches() {
         ThreadPrefetch.shared.wipe()
+        // The queue of frames being rendered ahead: thread ids, one daemon's.
+        FramePrewarmer.shared.wipe()
         HeroCache.shared.wipe()
         AttachmentThumbs.shared.wipe()
         ComposeAttach.wipe()

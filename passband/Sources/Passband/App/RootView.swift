@@ -274,6 +274,11 @@ struct MainShell: View {
         // window itself is narrow.
         GeometryReader { geo in
             let composeWidth = max(420, geo.size.width / 2)
+            // How much of the page's width is spoken for by a surface beside
+            // it, named only so its change can be told NOT to animate — see
+            // the `.animation(nil, value:)` on the page and on the reader.
+            let pageInset: CGFloat = store.compose != nil && !store.composeExpanded ? composeWidth : 0
+            let readerInset: CGFloat = (store.sideView.isOpen ? sidePanelWidth : 0) + pageInset
 
         ZStack(alignment: .topLeading) {
             // THE QUIET BOARD: the sitrep with nothing on it sits on the live
@@ -319,6 +324,15 @@ struct MainShell: View {
                         .allowsHitTesting(false)
                 }
             }
+            // THE STRIP IS RESERVED IN ONE STEP, NOT SLID INTO. The pane slides
+            // (its own transition below); the page beside it must not shrink
+            // along with it, because the page is a live layout — the board
+            // re-judges its rail breakpoint at every width it passes through
+            // and rebuilds every zone when it crosses, and a reader's web
+            // frames reflow their documents on every one of the thirteen
+            // frames. One reflow at the start, then the pane arrives over the
+            // space it left. Innermost animation wins for the values it names.
+            .animation(nil, value: pageInset)
 
             // Side panel surfaces (browse / search).
             if store.sideView.isOpen {
@@ -363,10 +377,14 @@ struct MainShell: View {
                         // (see ThreadViewer.deck), so the window holds still.
                         let flight: AppStore.ThreadFlight =
                             store.readingStack ? .settled : store.threadFlight
+                        // OFFSET AND OPACITY ONLY — no scale. The reader is a
+                        // column of live WKWebViews, and a transform on a
+                        // platform view is re-rasterised every frame it
+                        // changes; the departure ran on the same main thread
+                        // it was starving.
                         ThreadViewer(threadId: threadId)
                             .id(threadId)
                             .offset(flight.offset(in: geo.size))
-                            .scaleEffect(flight.scale)
                             .opacity(flight.opacity)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -388,6 +406,11 @@ struct MainShell: View {
                             .allowsHitTesting(false)
                     }
                 }
+                // Same as the page above: the reader steps aside once, and the
+                // pane slides in over the space. Animating the inset made every
+                // web frame in the thread reflow per frame, which is the
+                // flicker `f` used to show.
+                .animation(nil, value: readerInset)
                 // NO TRANSITION. Opening an email is a jump, not a dissolve: a
                 // crossfade shows two surfaces at once on a surface the reader
                 // enters and leaves constantly, which reads as lag.
@@ -644,11 +667,11 @@ extension AppStore.ThreadFlight {
         }
     }
 
-    /// Only the departure fades and shrinks, and both are slight: enough for the
-    /// email to read as leaving the reader's plane rather than merely sliding,
-    /// not so much that it becomes a card trick. What arrives arrives whole.
+    /// Only the departure fades, and slightly: enough for the email to read as
+    /// leaving the reader's plane rather than merely sliding. What arrives
+    /// arrives whole. (It used to shrink to 0.96 as well; a scale on a column
+    /// of web frames re-rasterises every one of them per frame, so it went.)
     var opacity: Double { isDeparting ? 0 : 1 }
-    var scale: CGFloat { isDeparting ? 0.96 : 1 }
 
     /// Both exits, whichever way they leave. The next variant added is a
     /// departure or an arrival, and it says so here once.

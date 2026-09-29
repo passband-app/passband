@@ -12,8 +12,11 @@ final class ThreadPrefetch {
     static let shared = ThreadPrefetch()
 
     /// Sized to hold the whole For-your-eyes list (the sitrep preloads every
-    /// standing item) plus inbox hover-warms, without LRU churn.
-    private static let cacheMax = 60
+    /// standing item, up to its band limit of 200) plus the inbox's head rows,
+    /// without LRU churn: at 60 the trickle of a long list evicted the ten
+    /// rows on screen, which are the ones that get clicked. A cached view is
+    /// a thread's bodies, a few hundred kilobytes at most.
+    private static let cacheMax = 260
     /// A cached view older than this refetches on real open — mail can change.
     private static let freshDefault: TimeInterval = 60
 
@@ -165,8 +168,11 @@ final class ThreadPrefetch {
 
     /// Warm a staggered batch so a fresh list never stampedes the daemon.
     /// `immediate` rows go now; the rest trickle at `spacing`.
-    func warm(_ threadIds: [String], immediate: Int = 5, spacing: Duration = .milliseconds(120)) {
-        for id in threadIds.prefix(immediate) { prefetch(id) }
+    func warm(
+        _ threadIds: [String], immediate: Int = 5, spacing: Duration = .milliseconds(120),
+        fresh: TimeInterval? = nil
+    ) {
+        for id in threadIds.prefix(immediate) { prefetch(id, fresh: fresh) }
         let rest = Array(threadIds.dropFirst(immediate))
         guard !rest.isEmpty else { return }
         let gen = generation
@@ -178,7 +184,7 @@ final class ThreadPrefetch {
                 // abandon the rest of it rather than ask the new daemon for
                 // thread ids it has never heard of.
                 guard let self, gen == self.generation else { return }
-                self.prefetch(id)
+                self.prefetch(id, fresh: fresh)
             }
         }
     }
@@ -244,21 +250,45 @@ final class FrameHeights {
     /// `vh` units there is no viewport-independent answer at all — the height
     /// is whatever viewport you ask at — and then only the fixed-viewport
     /// number means anything.
-    private struct Known {
+    struct Known {
         var height: CGFloat
         var authoritative: Bool
     }
 
-    private var heights: [String: Known] = [:]
-    private var guesses: [String: CGFloat] = [:]
-    /// How wide a HUGGING bubble document came to (EmailWebView `bubble`), so
-    /// a message scrolled back into view opens at its width rather than the
-    /// whole measure and then narrowing. Keyed like the heights, and it only
-    /// ever holds bubble keys — a card is always the measure. Live frames are
-    /// the only source: width has none of the viewport feedback that makes
-    /// the offscreen pass necessary for heights.
-    private var hugWidths: [String: CGFloat] = [:]
+    /// ONE OBSERVABLE CELL PER KEY, and that is the whole point of the shape.
+    /// This used to be two dictionaries on the observable object, and a
+    /// dictionary is ONE tracked property: a height landing for message A
+    /// invalidated every mounted frame in the thread, each of which then ran
+    /// its update and hashed its body again. Twenty messages measured newest
+    /// first was twenty re-renders of twenty frames. A cell is a tracked
+    /// property of its own, so a view reading message A's height is invalidated
+    /// by message A's height and by nothing else.
+    ///
+    /// Created ON READ, not only on write: a frame that asked before its
+    /// message was measured has to be invalidated when the answer lands, which
+    /// means the cell it observed must be the cell the pass writes to.
+    @Observable
+    final class Cell {
+        var known: Known?
+        /// How wide a HUGGING bubble document came to (EmailWebView `bubble`),
+        /// so a message scrolled back into view opens at its width rather than
+        /// the whole measure and then narrowing. Only ever set on bubble keys.
+        var hugWidth: CGFloat?
+    }
+
+    @ObservationIgnored private var cells: [String: Cell] = [:]
+    /// A MEMO, NOT NEWS: written from inside a view body (see `guess`), and
+    /// nothing needs re-rendering because a guess was made. Untracked, so the
+    /// first render of card N no longer invalidates cards 0..N-1.
+    @ObservationIgnored private var guesses: [String: CGFloat] = [:]
     private init() {}
+
+    private func cell(_ key: String) -> Cell {
+        if let cell = cells[key] { return cell }
+        let cell = Cell()
+        cells[key] = cell
+        return cell
+    }
 
     /// THE WIDTH EVERY HEIGHT IN HERE WAS MEASURED AT. A height is only an
     /// answer to a question that included the width — mail reflows, and a body
@@ -269,7 +299,10 @@ final class FrameHeights {
     /// the same message has one height per style). What is left for this is the
     /// column itself, which is the same for both styles and changes only when
     /// the window does — so it is one number rather than part of every key.
-    private(set) var width: CGFloat = 0
+    ///
+    /// Untracked: the measurer and the pre-renderer read it to size a frame,
+    /// and neither is a view.
+    @ObservationIgnored private(set) var width: CGFloat = 0
 
     /// The reader declaring the width it is laying out at. A different one
     /// discards the measurements, which is not a loss: the frames on screen
@@ -279,31 +312,40 @@ final class FrameHeights {
     func using(width: CGFloat) {
         guard width > 0, abs(width - self.width) > 0.5 else { return }
         self.width = width
-        heights.removeAll()
-        hugWidths.removeAll()
+        for cell in cells.values {
+            if cell.known != nil { cell.known = nil }
+            if cell.hugWidth != nil { cell.hugWidth = nil }
+        }
     }
 
     /// The width a hugging bubble document last came to, if this message has
     /// been open as one at this column width.
-    func hugWidth(_ key: String) -> CGFloat? { hugWidths[key] }
-    func setHugWidth(_ key: String, _ width: CGFloat) { hugWidths[key] = width }
+    func hugWidth(_ key: String) -> CGFloat? { cell(key).hugWidth }
+    func setHugWidth(_ key: String, _ width: CGFloat) {
+        let cell = cell(key)
+        if cell.hugWidth != width { cell.hugWidth = width }
+    }
 
     /// The best height on file, whoever took it — what a frame is drawn at.
-    func get(_ key: String) -> CGFloat? { heights[key]?.height }
+    func get(_ key: String) -> CGFloat? { cell(key).known?.height }
 
     /// Only a height taken at a FIXED viewport. This is the one a live frame
     /// must defer to rather than re-deriving, and the one that says a message
     /// no longer needs measuring.
     func authoritative(_ key: String) -> CGFloat? {
-        heights[key].flatMap { $0.authoritative ? $0.height : nil }
+        cell(key).known.flatMap { $0.authoritative ? $0.height : nil }
     }
 
     /// A provisional height never displaces a measured one: a live frame's
     /// answer is a stopgap until the pass reaches that message, and letting it
     /// overwrite would make the stopgap permanent.
     func set(_ key: String, _ height: CGFloat, authoritative: Bool = false) {
-        if let known = heights[key], known.authoritative, !authoritative { return }
-        heights[key] = Known(height: height, authoritative: authoritative)
+        let cell = cell(key)
+        if let known = cell.known, known.authoritative, !authoritative { return }
+        // Assignment is notification: an identical height written again is a
+        // frame re-rendered for nothing.
+        if cell.known?.height == height, cell.known?.authoritative == authoritative { return }
+        cell.known = Known(height: height, authoritative: authoritative)
     }
 
     /// Forget a message, in EVERY SPELLING OF ITS KEY, and its guess with it.
@@ -315,9 +357,11 @@ final class FrameHeights {
     func clear(messageId: Int) {
         for style in ThreadStyle.allCases {
             let key = style.frameKey(messageId)
-            heights.removeValue(forKey: key)
+            if let cell = cells[key] {
+                if cell.known != nil { cell.known = nil }
+                if cell.hugWidth != nil { cell.hugWidth = nil }
+            }
             guesses.removeValue(forKey: key)
-            hugWidths.removeValue(forKey: key)
         }
     }
 
@@ -340,8 +384,11 @@ final class FrameHeights {
     /// daemon's, so a surviving entry paints the new account's mail at the old
     /// account's size and then snaps — which reads as a rendering glitch.
     func wipeAll() {
-        heights.removeAll()
+        for cell in cells.values {
+            if cell.known != nil { cell.known = nil }
+            if cell.hugWidth != nil { cell.hugWidth = nil }
+        }
+        cells.removeAll()
         guesses.removeAll()
-        hugWidths.removeAll()
     }
 }

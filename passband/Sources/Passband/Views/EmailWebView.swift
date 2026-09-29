@@ -23,6 +23,9 @@ final class PassthroughWebView: WKWebView {
 
 struct EmailWebViewRepresentable: NSViewRepresentable {
     let html: String
+    /// The prepared body's source hash — the document's identity, for the
+    /// load guard and the pool key (EmailFrameCoordinator.documentHash).
+    let source: Int
     let allowRemote: Bool
     let collapseQuotes: Bool
     /// A hugging bubble document rather than a filling card one — part of the
@@ -49,7 +52,8 @@ struct EmailWebViewRepresentable: NSViewRepresentable {
         // `adopt` seeds the load guard so the updateNSView that follows is a no-op
         // instead of a reload that would throw the rendered frame away.
         if let key = EmailFrame.renderKey(
-            poolKey: poolKey, html: html, allowRemote: allowRemote, bubble: bubble),
+            poolKey: poolKey, html: html, source: source, allowRemote: allowRemote,
+            bubble: bubble),
             let entry = WebFramePool.shared.checkout(key)
         {
             context.coordinator.adopt(entry, key: key)
@@ -77,7 +81,8 @@ struct EmailWebViewRepresentable: NSViewRepresentable {
 
         context.coordinator.attach(entry.relay)
         context.coordinator.load(
-            webView, html: html, allowRemote: allowRemote, bubble: bubble, poolKey: poolKey)
+            webView, html: html, source: source, allowRemote: allowRemote, bubble: bubble,
+            poolKey: poolKey)
         return webView
     }
 
@@ -119,7 +124,8 @@ struct EmailWebViewRepresentable: NSViewRepresentable {
         // A content/policy change is a genuine reload; a quote toggle is not
         // (reloading for it would flash an empty frame).
         context.coordinator.load(
-            webView, html: html, allowRemote: allowRemote, bubble: bubble, poolKey: poolKey)
+            webView, html: html, source: source, allowRemote: allowRemote, bubble: bubble,
+            poolKey: poolKey)
         context.coordinator.setQuotesCollapsed(webView, collapsed: collapseQuotes)
     }
 

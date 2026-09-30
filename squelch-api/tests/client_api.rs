@@ -11668,7 +11668,7 @@ async fn scheduling_freezes_the_request_and_consumes_the_draft() {
         vec![file]
     );
     assert!(row.message_id_header.starts_with('<'));
-    assert!(row.message_id_header.ends_with("@passband>"));
+    assert!(row.message_id_header.ends_with("@passband.app>"));
     // Another draft cannot take the file off the row.
     let (_, other) = draft_call(
         &app,
@@ -12701,18 +12701,33 @@ async fn recovery_finds_a_mail_whose_message_id_gmail_rewrote_by_its_outbox_head
     assert!(reqs[0].contains("rfc822msgid%3Acrashed%40passband"));
     assert!(reqs[1].contains("q=in%3Asent%20after%3A"));
     assert!(reqs[1].contains("includeSpamTrash=true"));
-    // The floor reaches back past the lapsed attempt, with the slack.
-    let floor: i64 = reqs[1]
-        .split("after%3A")
-        .nth(1)
-        .unwrap()
-        .split('&')
-        .next()
-        .unwrap()
-        .parse()
-        .unwrap();
-    assert!(floor <= (before - chrono::Duration::minutes(70)).timestamp());
-    assert!(floor >= (before - chrono::Duration::days(1)).timestamp());
+    // The window: from `send_at` (40 min ago) less one whole lease (at least
+    // the 3 min base) and the hour of slack, to where the lapsed lease ended
+    // (10 min ago) plus the slack. Tight enough that dropping the lease from
+    // the floor, or the ceiling altogether, fails here.
+    let bound = |op: &str, end: char| -> i64 {
+        reqs[1]
+            .split(op)
+            .nth(1)
+            .unwrap()
+            .split(end)
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    let (floor, ceiling) = (bound("after%3A", '%'), bound("before%3A", '&'));
+    let ago = |m: i64| (before - chrono::Duration::minutes(m)).timestamp();
+    assert!(
+        (ago(40 + 60 + 10)..=ago(40 + 60 + 3)).contains(&floor),
+        "floor {floor} vs now {}",
+        before.timestamp()
+    );
+    assert!(
+        (ago(10 - 60 + 1)..=ago(10 - 60 - 1)).contains(&ceiling),
+        "ceiling {ceiling} vs now {}",
+        before.timestamp()
+    );
     assert!(reqs[2].contains("/messages/gm-other?format=metadata"));
     assert!(reqs[3].contains("/messages/gm-9?format=metadata&metadataHeaders=X-Passband-Outbox"));
     assert!(reqs[4].contains("/messages/gm-9?format=raw"), "the echo");

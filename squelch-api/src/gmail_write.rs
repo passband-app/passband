@@ -116,7 +116,7 @@ pub struct ReplyParts {
     /// against `body_html` — see [`mark_inline`].
     pub attachments: Vec<MailAttachment>,
     /// This message's own `Message-ID`, angle brackets included
-    /// (`<uuid@passband>`). `None` writes no header and Gmail mints one, which
+    /// (`<48hex@passband.app>`). `None` writes no header and Gmail mints one, which
     /// is every send made while the user waits: the bytes are exactly what
     /// they were before this field existed.
     ///
@@ -144,8 +144,10 @@ pub struct ReplyParts {
 pub const OUTBOX_HEADER: &str = "X-Passband-Outbox";
 
 /// The outbox token of a minted `Message-ID`: its local part, brackets and
-/// host off (`<48hex@passband>` -> `48hex`). Derived rather than stored, so a
-/// row scheduled before the header existed still has one.
+/// host off (`<48hex@passband.app>` -> `48hex`). WHATEVER THE HOST: rows
+/// minted before the id moved to a dotted host carry `<48hex@passband>`, and
+/// their token is the same local part. Derived rather than stored, so a row
+/// scheduled before the header existed still has one.
 pub fn outbox_token(message_id: &str) -> String {
     let bare = message_id
         .trim()
@@ -1123,10 +1125,14 @@ impl GmailWriteClient {
     /// Two looks, cheapest first:
     ///
     /// 1. `rfc822msgid:` for the minted id. A hit returns at once.
-    /// 2. The Sent mail since `sent_after` less [`SCAN_SLACK`], newest first,
+    /// 2. The Sent mail inside `window` (`after`, `before`), newest first,
     ///    [`SCAN_PAGE`] a page for at most [`SCAN_MAX_PAGES`] pages, each
     ///    candidate's [`OUTBOX_HEADER`] and `Message-ID` read by a metadata
-    ///    get. The header is what the live finding demands: on 2026-09-29 a
+    ///    get. The caller sizes the window to the attempt being asked about
+    ///    (slack included, see `scan_window` in scheduled_send.rs): BOTH ends
+    ///    matter, since a window open at the top covers every mail sent since,
+    ///    and a busy mailbox would hit the page cap on every ask of an old row
+    ///    and never let it send. The header is what the live finding demands: on 2026-09-29 a
     ///    minted id the daemon had just sent (and echoed) was NOT found by
     ///    step 1 at 9 and 28 minutes, so Gmail may rewrite a client-supplied
     ///    Message-ID; a custom header it has no reason to touch.
@@ -1135,11 +1141,15 @@ impl GmailWriteClient {
     /// this client. Any error is `Err` ("could not ask"), never `None`. A scan
     /// that runs out of pages with more still listed is ALSO `Err`: it could
     /// not rule the mail out, and reading that as "not sent" is the double
-    /// send this exists to prevent.
+    /// send this exists to prevent. So is a scan cut short by `stopping`
+    /// (the daemon's shutdown), which is checked before every request after
+    /// the first: a scan is up to 1 + 4 + 100 of them, too many for a
+    /// shutdown to wait out.
     pub async fn find_scheduled_send(
         &self,
         message_id: &str,
-        sent_after: chrono::DateTime<chrono::Utc>,
+        window: (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>),
+        stopping: &(dyn Fn() -> bool + Send + Sync),
     ) -> Result<Option<String>, WriteError> {
         let token = outbox_token(message_id);
         if token.is_empty() {
@@ -1149,12 +1159,21 @@ impl GmailWriteClient {
             return Ok(Some(id));
         }
         let bare_mid = bare_message_id(message_id);
-        let floor = (sent_after - SCAN_SLACK).timestamp().max(0);
+        let (after, before) = window;
+        let floor = after.timestamp().max(0);
+        let ceiling = before.timestamp().max(floor + 1);
+        let cut_short = || WriteError::Transport("sent scan cut short by shutdown".into());
         let mut page_token: Option<String> = None;
         for _ in 0..SCAN_MAX_PAGES {
-            let url = sent_scan_url(&self.base, floor, page_token.as_deref());
+            if stopping() {
+                return Err(cut_short());
+            }
+            let url = sent_scan_url(&self.base, floor, ceiling, page_token.as_deref());
             let list: MessageIdList = self.get_json(&url).await?;
             for candidate in list.messages {
+                if stopping() {
+                    return Err(cut_short());
+                }
                 if self.carries_outbox(&candidate.id, &token, bare_mid).await? {
                     return Ok(Some(candidate.id));
                 }
@@ -1195,8 +1214,8 @@ impl GmailWriteClient {
     }
 }
 
-/// How far before the attempt the Sent scan reaches: clock skew between this
-/// host and Gmail's `internalDate`, with room to spare.
+/// How far past the attempt, either side, the Sent scan reaches: clock skew
+/// between this host and Gmail's `internalDate`, with room to spare.
 pub const SCAN_SLACK: chrono::Duration = chrono::Duration::hours(1);
 /// Candidates per page of the Sent scan.
 pub const SCAN_PAGE: u32 = 25;
@@ -1209,11 +1228,12 @@ fn bare_message_id(msgid: &str) -> &str {
     msgid.trim().trim_start_matches('<').trim_end_matches('>')
 }
 
-/// `messages.list` over the Sent mail after `floor` (epoch seconds, which
-/// Gmail's `after:` takes as an instant rather than a local date), Spam and
-/// Trash included for the same reason as [`rfc822msgid_search_url`].
-fn sent_scan_url(base: &str, floor: i64, page_token: Option<&str>) -> String {
-    let q = percent_encode(&format!("in:sent after:{floor}"));
+/// `messages.list` over the Sent mail after `floor` and before `ceiling`
+/// (epoch seconds, which Gmail's `after:` and `before:` take as instants
+/// rather than local dates), Spam and Trash included for the same reason as
+/// [`rfc822msgid_search_url`].
+fn sent_scan_url(base: &str, floor: i64, ceiling: i64, page_token: Option<&str>) -> String {
+    let q = percent_encode(&format!("in:sent after:{floor} before:{ceiling}"));
     let mut url = format!("{base}/messages?q={q}&maxResults={SCAN_PAGE}&includeSpamTrash=true");
     if let Some(t) = page_token {
         url.push_str("&pageToken=");
@@ -1223,8 +1243,8 @@ fn sent_scan_url(base: &str, floor: i64, page_token: Option<&str>) -> String {
 }
 
 /// `messages.list` narrowed to one `Message-ID`. THE BRACKETS COME OFF: the
-/// header value is `<id@passband>`, but Gmail's `rfc822msgid:` operator takes
-/// the bare `id@passband`, and searching with the brackets in finds NOTHING.
+/// header value is `<id@passband.app>`, but Gmail's `rfc822msgid:` operator
+/// takes the bare `id@passband.app`, and searching with the brackets in finds NOTHING.
 /// Proven live on 2026-09-29: a mail the daemon had just sent came back
 /// "not found" with them and was requeued as maybe-sent. What is left still
 /// carries `@` and the colon of the operator, so the whole term is
@@ -4323,8 +4343,15 @@ mod tests {
 
     #[test]
     fn the_outbox_token_is_the_minted_ids_local_part() {
+        assert_eq!(outbox_token("<0badc0de@passband.app>"), "0badc0de");
+        assert_eq!(outbox_token(" 0badc0de@passband.app "), "0badc0de");
+        // Rows minted before the dotted host: the same token.
         assert_eq!(outbox_token("<0badc0de@passband>"), "0badc0de");
-        assert_eq!(outbox_token(" 0badc0de@passband "), "0badc0de");
+        assert_eq!(
+            bare_message_id(" <0badc0de@passband.app> "),
+            "0badc0de@passband.app"
+        );
+        assert_eq!(bare_message_id("<0badc0de@passband>"), "0badc0de@passband");
         assert_eq!(outbox_token("0badc0de"), "0badc0de");
         assert_eq!(outbox_token("<>"), "");
     }
@@ -4393,15 +4420,15 @@ mod tests {
     }
 
     #[test]
-    fn the_sent_scan_lists_sent_mail_after_an_instant() {
+    fn the_sent_scan_lists_sent_mail_between_two_instants() {
         assert_eq!(
-            sent_scan_url("https://g.test/me", 1_790_000_000, None),
+            sent_scan_url("https://g.test/me", 1_790_000_000, 1_790_007_200, None),
             "https://g.test/me/messages?q=in%3Asent%20after%3A1790000000\
-             &maxResults=25&includeSpamTrash=true"
+             %20before%3A1790007200&maxResults=25&includeSpamTrash=true"
         );
         assert_eq!(
-            sent_scan_url("https://g.test/me", 5, Some("t/1&x")),
-            "https://g.test/me/messages?q=in%3Asent%20after%3A5\
+            sent_scan_url("https://g.test/me", 5, 9, Some("t/1&x")),
+            "https://g.test/me/messages?q=in%3Asent%20after%3A5%20before%3A9\
              &maxResults=25&includeSpamTrash=true&pageToken=t%2F1%26x"
         );
     }
@@ -4450,8 +4477,15 @@ mod tests {
         )
     }
 
-    fn after() -> chrono::DateTime<chrono::Utc> {
-        chrono::DateTime::from_timestamp(1_790_003_600, 0).unwrap()
+    fn window() -> (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) {
+        (
+            chrono::DateTime::from_timestamp(1_790_000_000, 0).unwrap(),
+            chrono::DateTime::from_timestamp(1_790_007_200, 0).unwrap(),
+        )
+    }
+
+    fn running() -> bool {
+        false
     }
 
     #[tokio::test]
@@ -4462,7 +4496,7 @@ mod tests {
         ])
         .await;
         let got = client(base)
-            .find_scheduled_send("<abc@passband>", after())
+            .find_scheduled_send("<abc@passband>", window(), &running)
             .await
             .unwrap();
         assert_eq!(got.as_deref(), Some("gm-1"));
@@ -4485,14 +4519,16 @@ mod tests {
         ])
         .await;
         let got = client(base)
-            .find_scheduled_send("<abc@passband>", after())
+            .find_scheduled_send("<abc@passband>", window(), &running)
             .await
             .unwrap();
         assert_eq!(got.as_deref(), Some("gm-b"));
         let reqs = handle.await.unwrap();
         assert_eq!(reqs.len(), 4);
-        // The floor is `sent_after` less an hour, in epoch seconds.
-        assert!(reqs[1].contains("GET /messages?q=in%3Asent%20after%3A1790000000&maxResults=25"));
+        // Both ends of the window, in epoch seconds, as given.
+        assert!(reqs[1].contains(
+            "GET /messages?q=in%3Asent%20after%3A1790000000%20before%3A1790007200&maxResults=25"
+        ));
         assert!(reqs[1].contains("includeSpamTrash=true"));
         for (req, id) in [(&reqs[2], "gm-a"), (&reqs[3], "gm-b")] {
             assert!(req.contains(&format!(
@@ -4516,7 +4552,7 @@ mod tests {
         ])
         .await;
         let got = client(base)
-            .find_scheduled_send("<abc@passband>", after())
+            .find_scheduled_send("<abc@passband>", window(), &running)
             .await
             .unwrap();
         handle.await.unwrap();
@@ -4537,7 +4573,7 @@ mod tests {
         ])
         .await;
         let got = client(base)
-            .find_scheduled_send("<abc@passband>", after())
+            .find_scheduled_send("<abc@passband>", window(), &running)
             .await
             .unwrap();
         let reqs = handle.await.unwrap();
@@ -4560,7 +4596,7 @@ mod tests {
         }
         let (base, handle) = mock_seq(script).await;
         let got = client(base)
-            .find_scheduled_send("<abc@passband>", after())
+            .find_scheduled_send("<abc@passband>", window(), &running)
             .await;
         let reqs = handle.await.unwrap();
         assert!(matches!(got, Err(WriteError::Transport(_))), "{got:?}");
@@ -4580,11 +4616,36 @@ mod tests {
         ])
         .await;
         let got = client(base)
-            .find_scheduled_send("<abc@passband>", after())
+            .find_scheduled_send("<abc@passband>", window(), &running)
             .await;
         let reqs = handle.await.unwrap();
         assert!(matches!(got, Err(WriteError::Api { status: 503, .. })));
         assert_eq!(reqs.len(), 3, "nothing asked after the failure");
+    }
+
+    #[tokio::test]
+    async fn a_shutdown_mid_scan_is_an_error_never_a_none() {
+        let (base, handle) = mock_seq(vec![
+            (200, NO_MATCH.into()),
+            (
+                200,
+                "{\"messages\":[{\"id\":\"gm-a\"},{\"id\":\"gm-b\"}]}".into(),
+            ),
+            (200, meta("gm-a", "other", "<x@mail.gmail.com>")),
+            (200, meta("gm-b", "abc", "<abc@passband.app>")),
+        ])
+        .await;
+        // Asked before the page and the first candidate; stopping by the
+        // second.
+        let asks = std::sync::atomic::AtomicUsize::new(0);
+        let stopping = || asks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 2;
+        let got = client(base)
+            .find_scheduled_send("<abc@passband.app>", window(), &stopping)
+            .await;
+        let reqs = handle.await.unwrap();
+        assert!(matches!(got, Err(WriteError::Transport(_))), "{got:?}");
+        assert_eq!(reqs.len(), 3, "nothing asked after the shutdown");
+        assert!(reqs[0].contains("rfc822msgid%3Aabc%40passband.app"));
     }
 
     // ---- attachments on a COMPOSED message ---------------------------------

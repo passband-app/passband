@@ -406,6 +406,14 @@ re-fetched from Gmail at fire (Gmail's raw bytes are immutable, so what is sent
 is what was judged). A cancel hands the request back WITHOUT `override_guard`,
 so a reschedule is judged again.
 
+**Scheduled sends carry a visible fingerprint (privacy).** Every mail the outbox
+fires goes out with `X-Passband-Outbox: <token>` and a `Message-ID` of
+`<token@passband.app>`, where the token is 48 hex chars of fresh randomness minted
+per row (docs/SCHEDULED-SEND.md §4). Recipients can see both: they reveal that the
+mail was sent by Passband's scheduler, and carry nothing else, no account, mailbox,
+user or row id, so two scheduled mails from one user are not linkable by them.
+Interactive sends carry neither.
+
 **Do not break.** `GuardMatch::kind()` is the only thing that may leave the process —
 never return, log, or audit the matched substring. Keep the override audited; an
 un-audited bypass is not a bypass we can reason about.

@@ -42,7 +42,7 @@ so a database created by an earlier build of this branch gains them.
 | `lease_until` | TEXT, set while `sending` |
 | `attempts` | INTEGER, default 0 |
 | `last_error` | TEXT, redacted reason (never content) |
-| `message_id_header` | TEXT, the `Message-ID` minted at schedule time: `<` + 48 hex chars + `@passband>`. The 48 hex are also the row's OUTBOX TOKEN (`X-Passband-Outbox`, §4), derived, not stored |
+| `message_id_header` | TEXT, the `Message-ID` minted at schedule time: `<` + 48 hex chars + `@passband.app>` (rows minted before 2026-09-29 end `@passband>`; the dotless host is a plausible reason Gmail rewrote the id, §4). The 48 hex are also the row's OUTBOX TOKEN (`X-Passband-Outbox`, §4), derived as the local part before `@` WHATEVER the host, not stored |
 | `sent_message_id` | INTEGER, local echo id once sent |
 | `sent_thread_id` | TEXT |
 | `maybe_sent` | INTEGER 0/1, STICKY: an earlier attempt may have reached Gmail (§4) |
@@ -175,23 +175,36 @@ Per tick:
    is the whole double-send defense.
 
    **THE LOOKUP** (`GmailWriteClient::find_scheduled_send(message_id,
-   sent_after)`). Every fired send carries two fingerprints: the minted
-   `Message-ID: <48hex@passband>` and a custom header
+   (after, before), stopping)`). Every fired send carries two fingerprints:
+   the minted `Message-ID: <48hex@passband.app>` and a custom header
    `X-Passband-Outbox: 48hex`. The lookup asks for them in two steps:
 
-   a. `messages.list?q=rfc822msgid:<48hex@passband, brackets off,
+   a. `messages.list?q=rfc822msgid:<48hex@passband.app, brackets off,
       percent-encoded>&maxResults=1&includeSpamTrash=true`. A hit returns at
       once. A miss proves NOTHING (below).
    b. The Sent scan: `messages.list?q=in:sent after:<epoch seconds>
-      &maxResults=25&includeSpamTrash=true`, newest first, following
+      before:<epoch seconds>&maxResults=25&includeSpamTrash=true`, newest first, following
       `pageToken` for at most 4 pages (100 candidates), and for each
       candidate `messages.get?format=metadata&metadataHeaders=X-Passband-Outbox
       &metadataHeaders=Message-ID`. A candidate whose `X-Passband-Outbox`
       equals the token (exact, trimmed), or whose `Message-ID` is the minted
-      one, is the mail. The floor is the earliest of the row's `send_at`,
-      `last_attempt_at` and `lease_until`, less one lease (a retry or requeue
-      moves `send_at` PAST the attempt being asked about), less one hour of
-      clock slack.
+      one, is the mail. The window is `scan_window(row)`, one hour of clock
+      slack (`SCAN_SLACK`) on each side:
+      - FLOOR: the earliest of the row's `send_at`, `last_attempt_at` and
+        `lease_until`, less one lease (a retry or requeue moves `send_at` PAST
+        the attempt being asked about), less the slack.
+      - CEILING: the END of the attempt being asked about, plus the slack. An
+        attempt cannot have posted after its own end. The pre-fire search
+        (step 3) asks about the last attempt, which ended at
+        `last_attempt_at` (the row's `lease_until` there is the claim just
+        taken); recovery asks about the lapsed attempt, which ended at
+        `lease_until` (a `last_attempt_at` there is an EARLIER attempt). With
+        neither, `send_at` plus one lease.
+      The ceiling is what keeps an old row sendable: without it, a send-now of
+      a row that failed a day ago scans a day of Sent mail, hits the page cap
+      on any busy mailbox, and is deferred into `failed:recovery` on every
+      try, burning ~2,000 quota units a cycle. Bounded both ways the window is
+      about two hours plus one lease however old the row is.
 
    WHY TWO STEPS (live finding, 2026-09-29, real Gmail): the daemon sent a
    scheduled mail with its minted Message-ID, the mail went out and was
@@ -211,8 +224,24 @@ Per tick:
    pages still listed is ALSO "could not ask" (a transport-class error, so
    UNREACHABLE in step 3): it could not rule the mail out, and reading that
    as "not sent" is the double send this exists to prevent. A row in that
-   state (over 100 Sent mails since its attempt) ends `failed:recovery` for
-   the user after `RECOVERY_GIVE_UP`.
+   state (over 100 Sent mails inside its window) ends `failed:recovery` for
+   the user after `RECOVERY_GIVE_UP`. A scan cut short by shutdown (checked
+   before every request after the first) is "could not ask" too.
+
+   The scan can outrun the claim's lease (worst case 1 + 4 + 100 requests).
+   That is safe: the pass loop is sequential, so recovery never touches a row
+   its own worker is firing, and the lookup posts nothing
+   (`SCHEDULED_LEASE_BASE`'s doc). What it must not do is push the POST past
+   the lease's end, the window's ceiling on recovery: a pre-fire lookup that
+   leaves less than the parent-headers call (60 s) plus the upload's budget
+   is "could not ask" (`recovery:unreachable`), and nothing is sent
+   (`lease_too_short_to_post`).
+
+   WHY A DOTTED HOST: the id was minted as `<48hex@passband>` until
+   2026-09-29. A dotless right-hand side is a plausible reason Gmail rewrote
+   it in the live finding; under `passband.app` an id that survives is found
+   by step (a) and skips the scan. The token contract is unchanged (the local
+   part), so rows minted under either host are found the same way.
 
    `X-Passband-Outbox` IS A STABLE CONTRACT: every mail a daemon has fired is
    recognised by that exact header name and by the token being the minted

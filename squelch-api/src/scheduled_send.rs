@@ -37,7 +37,7 @@ use squelch_core::store::{
 use squelch_core::types::GroupMode;
 
 use crate::error::ApiError;
-use crate::gmail_write::{GmailWriteClient, SentRef, WriteError, send_budget};
+use crate::gmail_write::{GmailWriteClient, SCAN_SLACK, SentRef, WriteError, send_budget};
 use crate::group_send;
 use crate::handlers::{
     Fire, MAX_FORWARD_RAW_BYTES, OutboundAttachmentView, SendBody, SendGuard, SendOutcome,
@@ -62,10 +62,21 @@ const MAX_SCHEDULE_AHEAD: chrono::Duration = chrono::Duration::days(366);
 /// The fixed part of the worker's claim lease, before the send's own budget
 /// ([`send_budget`], which grows with the message) is added per row. It covers
 /// everything a fire spends on Gmail besides the upload itself, each bounded
-/// by the write client's 60 s timeout: the pre-fire Message-ID search, the
-/// parent's headers (or a forward's original), the 5 s echo, and the store.
-/// A send that has not settled inside its lease is presumed to have died
-/// mid-send, and recovery asks Gmail by Message-ID before anything is retried.
+/// by the write client's 60 s timeout: the pre-fire lookup, the parent's
+/// headers (or a forward's original), the 5 s echo, and the store. A send that
+/// has not settled inside its lease is presumed to have died mid-send, and
+/// recovery asks Gmail by Message-ID before anything is retried.
+///
+/// THE PRE-FIRE LOOKUP CAN OUTRUN THIS: after a `rfc822msgid:` miss it is a
+/// paged Sent scan ([`GmailWriteClient::find_scheduled_send`]), at worst
+/// 1 + 4 + 100 requests, which a lease sized for three calls does not cover.
+/// That is still safe, because a lapse during the lookup can hand nobody the
+/// row mid-send: the pass loop is sequential (recovery runs before the claims,
+/// never beside them, and a pass does not start until the last one returned),
+/// so recovery never touches a row its own worker is firing, and the lookup
+/// posts nothing. What it must not do is leave the upload too little lease: a
+/// post after the lease's end is outside the window a later lookup scans, so
+/// a lookup that ate the lease is could-not-ask and sends nothing ([`fire`]).
 pub(crate) const SCHEDULED_LEASE_BASE: chrono::Duration = chrono::Duration::seconds(180);
 
 /// How long after a lease lapses recovery waits before asking Gmail, and how
@@ -140,7 +151,11 @@ async fn no_store_layer(mut resp: Response) -> Response {
 /// [`crate::gmail_write::outbox_token`]): together they are what answers "did
 /// it go out?" after a crash mid-send (the worker's recovery asks Gmail before
 /// any retry). 24 bytes of OS entropy as hex, so the id is plain `atext` and
-/// neither search needs quoting.
+/// neither search needs quoting. The host is DOTTED (`passband.app`): a
+/// dotless right-hand side is a plausible reason Gmail rewrote the id in the
+/// live finding, and an id that survives is found by the cheap search and
+/// skips the scan. Rows minted as `@passband` keep working: the token is the
+/// local part whatever the host.
 fn mint_message_id() -> Result<String, ApiError> {
     let token = squelch_core::tracking::mint_token()
         .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?;
@@ -148,7 +163,7 @@ fn mint_message_id() -> Result<String, ApiError> {
         .decode(token)
         .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?;
     let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    Ok(format!("<{hex}@passband>"))
+    Ok(format!("<{hex}@passband.app>"))
 }
 
 // --- POST /client/scheduled --------------------------------------------------
@@ -722,20 +737,56 @@ pub(crate) fn lease_for(row: &ScheduledSend) -> chrono::Duration {
     SCHEDULED_LEASE_BASE + budget
 }
 
-/// The earliest instant an earlier attempt of `row` can have posted its mail:
-/// the scan's floor for [`GmailWriteClient::find_scheduled_send`] (which
-/// subtracts its own slack on top). The earliest of `send_at`, the last
-/// attempt's end and the live lease's end, less one whole lease: `send_at`
-/// alone will not do, because a retry or a requeue moves it PAST the attempt
-/// being asked about. The scan reads newest first, so the floor only bounds
-/// how far back it pages, never what it finds first.
-fn scan_floor(row: &ScheduledSend) -> DateTime<Utc> {
+/// Whether the claim on `row` has too little lease left at `now` to post
+/// inside it: less than the parent's headers (one 60 s call) plus the upload's
+/// own budget. A lease-less row has nothing to outrun.
+fn lease_too_short_to_post(row: &ScheduledSend, now: DateTime<Utc>) -> bool {
+    let needed = lease_for(row) - SCHEDULED_LEASE_BASE + chrono::Duration::seconds(60);
+    row.lease_until.is_some_and(|end| end - now < needed)
+}
+
+/// Who is asking Gmail about a row, which decides where the attempt being
+/// asked about ENDED ([`scan_window`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Asking {
+    /// The pre-fire lookup of a claimed `maybe_sent` row: the attempt asked
+    /// about is the LAST one, which ended at `last_attempt_at`. The row's
+    /// `lease_until` is the claim just taken, not that attempt.
+    PreFire,
+    /// Recovery of a lapsed `sending` row: the attempt asked about is the one
+    /// whose lease lapsed, so it ended at `lease_until`. `last_attempt_at`,
+    /// when set, is an EARLIER attempt.
+    Recovery,
+}
+
+/// The `(after, before)` instants the Sent scan of
+/// [`GmailWriteClient::find_scheduled_send`] searches between, [`SCAN_SLACK`]
+/// included on both sides.
+///
+/// FLOOR: the earliest of `send_at`, the last attempt's end and the lease's
+/// end, less one whole lease. `send_at` alone will not do, because a retry or
+/// a requeue moves it PAST the attempt being asked about.
+///
+/// CEILING: the attempt's END (see [`Asking`]; with neither on the row,
+/// `send_at` plus one lease). An attempt cannot have posted after its own
+/// end, and without a ceiling a send-now of a row that failed a day ago would
+/// scan a day of Sent mail, hit the page cap on any busy mailbox, and be
+/// deferred into `failed:recovery` on every try: the row could never go out.
+/// Bounded both ways, the window is about two hours plus one lease however old
+/// the row is.
+fn scan_window(row: &ScheduledSend, asking: Asking) -> (DateTime<Utc>, DateTime<Utc>) {
+    let lease = lease_for(row);
     let earliest = [Some(row.send_at), row.last_attempt_at, row.lease_until]
         .into_iter()
         .flatten()
         .min()
         .unwrap_or(row.send_at);
-    earliest - lease_for(row)
+    let ended = match asking {
+        Asking::PreFire => row.last_attempt_at.or(row.lease_until),
+        Asking::Recovery => row.lease_until.or(row.last_attempt_at),
+    }
+    .unwrap_or(row.send_at + lease);
+    (earliest - lease - SCAN_SLACK, ended + SCAN_SLACK)
 }
 
 /// Step 1: every `sending` row whose lease lapsed at least [`RECOVERY_GRACE`]
@@ -779,7 +830,11 @@ async fn recover(state: &ApiState, report: &mut ScheduledPassReport) {
             return;
         }
         match client
-            .find_scheduled_send(&row.message_id_header, scan_floor(&row))
+            .find_scheduled_send(
+                &row.message_id_header,
+                scan_window(&row, Asking::Recovery),
+                &|| stopping(state),
+            )
             .await
         {
             Ok(Some(gmail_id)) => {
@@ -977,13 +1032,28 @@ async fn fire(state: &ApiState, row: ScheduledSend, report: &mut ScheduledPassRe
             }
         };
         match client
-            .find_scheduled_send(&row.message_id_header, scan_floor(&row))
+            .find_scheduled_send(
+                &row.message_id_header,
+                scan_window(&row, Asking::PreFire),
+                &|| stopping(state),
+            )
             .await
         {
             Ok(Some(gmail_id)) => {
                 if settle_recovered(state, &client, &row, gmail_id).await {
                     report.recovered_sent += 1;
                 }
+                return;
+            }
+            // A LOOKUP THAT ATE THE LEASE posts nothing: the scan can outrun
+            // a lease sized for three calls (see [`SCHEDULED_LEASE_BASE`]),
+            // and a post after the lease's end is one a later lookup's
+            // window ([`scan_window`], which ends at the lease) cannot see.
+            // Left: the parent's headers (one call) and the upload's own
+            // budget. Short of that, it is could-not-ask, and nothing is sent.
+            Ok(None) if lease_too_short_to_post(&row, clock(state)) => {
+                let overran = WriteError::Transport("the lookup outran the lease".into());
+                search_failed(state, &row, &overran, report).await;
                 return;
             }
             Ok(None) => {}
@@ -1376,10 +1446,12 @@ mod tests {
         let a = mint_message_id().unwrap();
         let b = mint_message_id().unwrap();
         assert_ne!(a, b);
-        assert!(a.starts_with('<') && a.ends_with("@passband>"));
-        let local = &a[1..a.len() - "@passband>".len()];
+        // A DOTTED host, and the token is the whole local part.
+        assert!(a.starts_with('<') && a.ends_with("@passband.app>"));
+        let local = &a[1..a.len() - "@passband.app>".len()];
         assert_eq!(local.len(), 48);
         assert!(local.bytes().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(crate::gmail_write::outbox_token(&a), local);
     }
 
     #[test]
@@ -1504,5 +1576,77 @@ mod tests {
             &[],
         ));
         assert!(fwd > bare + chrono::Duration::seconds(500), "{fwd}");
+    }
+
+    fn at(secs: i64) -> DateTime<Utc> {
+        DateTime::from_timestamp(1_790_000_000 + secs, 0).unwrap()
+    }
+
+    #[test]
+    fn a_requeued_rows_window_is_its_last_attempt_not_its_new_send_at() {
+        // Failed a day ago, then sent now: `send_at` is today, the attempt
+        // asked about ended a day earlier. The claim's lease is today too.
+        let mut row = row_with(r#"{"to":"a@x","body":"hi"}"#, &[]);
+        row.maybe_sent = true;
+        row.last_attempt_at = Some(at(0));
+        row.send_at = at(86_400);
+        let lease = lease_for(&row);
+        for claimed in [None, Some(at(86_400) + lease)] {
+            row.lease_until = claimed;
+            let (after, before) = scan_window(&row, Asking::PreFire);
+            assert_eq!(after, at(0) - lease - SCAN_SLACK);
+            // The ceiling is that attempt's end, NOT today: a day of Sent
+            // mail is what made the old unbounded scan hit its cap.
+            assert_eq!(before, at(0) + SCAN_SLACK);
+        }
+    }
+
+    #[test]
+    fn a_recovered_rows_window_ends_where_its_lease_lapsed() {
+        let mut row = row_with(r#"{"to":"a@x","body":"hi"}"#, &[]);
+        row.state = ScheduledSendState::Sending;
+        row.send_at = at(0);
+        let lease = lease_for(&row);
+        row.lease_until = Some(at(0) + lease);
+        row.last_attempt_at = None;
+        let (after, before) = scan_window(&row, Asking::Recovery);
+        assert_eq!(after, at(0) - lease - SCAN_SLACK);
+        assert_eq!(before, at(0) + lease + SCAN_SLACK);
+        // An EARLIER attempt's end on the row does not pull the ceiling back
+        // before the lapsed attempt; it only widens the floor.
+        row.last_attempt_at = Some(at(-600));
+        let (after, before) = scan_window(&row, Asking::Recovery);
+        assert_eq!(after, at(-600) - lease - SCAN_SLACK);
+        assert_eq!(before, at(0) + lease + SCAN_SLACK);
+    }
+
+    #[test]
+    fn a_lookup_that_ate_the_lease_leaves_nothing_to_post_in() {
+        let mut row = row_with(r#"{"to":"a@x","body":"hi"}"#, &[]);
+        let lease = lease_for(&row);
+        let upload = lease - SCHEDULED_LEASE_BASE + chrono::Duration::seconds(60);
+        row.lease_until = Some(at(0) + lease);
+        // A lookup of a few seconds leaves plenty.
+        assert!(!lease_too_short_to_post(&row, at(5)));
+        // The last instant that still fits the parent's headers and the upload.
+        assert!(!lease_too_short_to_post(&row, at(0) + lease - upload));
+        assert!(lease_too_short_to_post(&row, at(1) + lease - upload));
+        // A lapsed lease.
+        assert!(lease_too_short_to_post(&row, at(0) + lease + lease));
+        row.lease_until = None;
+        assert!(!lease_too_short_to_post(&row, at(86_400)));
+    }
+
+    #[test]
+    fn a_row_with_only_a_send_at_scans_one_lease_either_side_of_it() {
+        let mut row = row_with(r#"{"to":"a@x","body":"hi"}"#, &[]);
+        row.send_at = at(0);
+        let lease = lease_for(&row);
+        for asking in [Asking::PreFire, Asking::Recovery] {
+            assert_eq!(
+                scan_window(&row, asking),
+                (at(0) - lease - SCAN_SLACK, at(0) + lease + SCAN_SLACK)
+            );
+        }
     }
 }

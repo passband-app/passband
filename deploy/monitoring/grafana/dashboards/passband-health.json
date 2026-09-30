@@ -574,7 +574,7 @@
     "h": 8,
     "w": 8,
     "x": 0,
-    "y": 6
+    "y": 15
    },
    "targets": [
     {
@@ -656,7 +656,7 @@
     "h": 8,
     "w": 8,
     "x": 8,
-    "y": 6
+    "y": 15
    },
    "targets": [
     {
@@ -736,11 +736,11 @@
     "type": "prometheus",
     "uid": "prometheus"
    },
-   "description": "4 GB total; every tenant daemon eats into this",
+   "description": "The whole box in bytes, against the RAM it has. MemAvailable counts page cache the kernel can drop, so \"used\" is memory someone actually holds. Past the RAM line is a global OOM: the kernel kills the biggest process, which is a tenant daemon unrelated to whatever grew (PRODUCTION.md, \"If a tenant is OOM-killed\"). Nothing is reserved for k3s on carrier and there is no swap, so the RAM line is the only wall. The tenants quota is a different limit, on requests rather than use; the \"Tenants quota near full\" alert watches that one.",
    "gridPos": {
-    "h": 8,
-    "w": 8,
-    "x": 16,
+    "h": 9,
+    "w": 24,
+    "x": 0,
     "y": 6
    },
    "targets": [
@@ -749,11 +749,44 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)",
+     "expr": "node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes",
      "refId": "A",
      "range": true,
      "instant": false,
-     "legendFormat": "used %"
+     "legendFormat": "used"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(container_memory_working_set_bytes{namespace=\"tenants\", container!=\"\"})",
+     "refId": "B",
+     "range": true,
+     "instant": false,
+     "legendFormat": "of which tenant daemons"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "0.85 * node_memory_MemTotal_bytes",
+     "refId": "C",
+     "range": true,
+     "instant": false,
+     "legendFormat": "alert (85%)"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "node_memory_MemTotal_bytes",
+     "refId": "D",
+     "range": true,
+     "instant": false,
+     "legendFormat": "RAM"
     }
    ],
    "fieldConfig": {
@@ -761,12 +794,12 @@
      "color": {
       "mode": "palette-classic"
      },
-     "unit": "percent",
+     "unit": "bytes",
      "min": 0,
      "custom": {
       "drawStyle": "line",
       "lineWidth": 2,
-      "fillOpacity": 8,
+      "fillOpacity": 0,
       "showPoints": "never",
       "pointSize": 5,
       "spanNulls": true,
@@ -776,37 +809,128 @@
        "mode": "none"
       },
       "thresholdsStyle": {
-       "mode": "line"
+       "mode": "off"
       }
      },
      "mappings": [],
-     "max": 100,
      "thresholds": {
       "mode": "absolute",
       "steps": [
        {
         "color": "green",
         "value": null
-       },
-       {
-        "color": "yellow",
-        "value": 75
-       },
-       {
-        "color": "red",
-        "value": 90
        }
       ]
      }
     },
-    "overrides": []
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "used"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "blue"
+        }
+       },
+       {
+        "id": "custom.fillOpacity",
+        "value": 15
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "of which tenant daemons"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "purple"
+        }
+       },
+       {
+        "id": "custom.lineWidth",
+        "value": 1
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "alert (85%)"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "yellow"
+        }
+       },
+       {
+        "id": "custom.lineWidth",
+        "value": 1
+       },
+       {
+        "id": "custom.lineStyle",
+        "value": {
+         "fill": "dash",
+         "dash": [
+          6,
+          6
+         ]
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "RAM"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "red"
+        }
+       },
+       {
+        "id": "custom.lineWidth",
+        "value": 1
+       },
+       {
+        "id": "custom.lineStyle",
+        "value": {
+         "fill": "dash",
+         "dash": [
+          10,
+          6
+         ]
+        }
+       }
+      ]
+     }
+    ]
    },
    "options": {
     "legend": {
-     "showLegend": false,
-     "displayMode": "list",
-     "placement": "bottom",
-     "calcs": []
+     "showLegend": true,
+     "displayMode": "table",
+     "placement": "right",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
     },
     "tooltip": {
      "mode": "multi",
@@ -826,8 +950,8 @@
    "gridPos": {
     "h": 8,
     "w": 8,
-    "x": 0,
-    "y": 14
+    "x": 16,
+    "y": 15
    },
    "targets": [
     {
@@ -923,8 +1047,8 @@
    "gridPos": {
     "h": 8,
     "w": 8,
-    "x": 8,
-    "y": 14
+    "x": 0,
+    "y": 23
    },
    "targets": [
     {
@@ -1026,8 +1150,8 @@
    "gridPos": {
     "h": 8,
     "w": 8,
-    "x": 16,
-    "y": 14
+    "x": 8,
+    "y": 23
    },
    "targets": [
     {
@@ -1100,6 +1224,75 @@
    }
   },
   {
+   "type": "stat",
+   "title": "Memory left",
+   "id": 53,
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "description": "MemAvailable: what the box can still hand out before a global OOM, reclaimable page cache included. A tenant daemon peaks around 500 MB with the embedder loaded, so under ~1.5 GiB is a couple of busy tenants from the edge.",
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 16,
+    "y": 23
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "node_memory_MemAvailable_bytes",
+     "refId": "A",
+     "range": true,
+     "instant": false,
+     "legendFormat": "available"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "color": {
+      "mode": "thresholds"
+     },
+     "unit": "bytes",
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "red",
+        "value": null
+       },
+       {
+        "color": "yellow",
+        "value": 1610612736
+       },
+       {
+        "color": "green",
+        "value": 3221225472
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "textMode": "auto"
+   }
+  },
+  {
    "type": "row",
    "title": "Kubernetes",
    "collapsed": false,
@@ -1108,7 +1301,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 22
+    "y": 31
    },
    "panels": []
   },
@@ -1125,7 +1318,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 23
+    "y": 32
    },
    "targets": [
     {
@@ -1199,7 +1392,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 23
+    "y": 32
    },
    "targets": [
     {
@@ -1273,7 +1466,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 31
+    "y": 40
    },
    "targets": [
     {
@@ -1347,7 +1540,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 31
+    "y": 40
    },
    "targets": [
     {
@@ -1446,7 +1639,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 39
+    "y": 48
    },
    "panels": []
   },
@@ -1463,7 +1656,7 @@
     "h": 8,
     "w": 8,
     "x": 0,
-    "y": 40
+    "y": 49
    },
    "targets": [
     {
@@ -1548,7 +1741,7 @@
     "h": 8,
     "w": 8,
     "x": 8,
-    "y": 40
+    "y": 49
    },
    "targets": [
     {
@@ -1633,7 +1826,7 @@
     "h": 8,
     "w": 8,
     "x": 16,
-    "y": 40
+    "y": 49
    },
    "targets": [
     {
@@ -1705,7 +1898,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 48
+    "y": 57
    },
    "panels": []
   },
@@ -1722,7 +1915,7 @@
     "h": 8,
     "w": 4,
     "x": 0,
-    "y": 49
+    "y": 58
    },
    "targets": [
     {
@@ -1781,7 +1974,7 @@
     "h": 8,
     "w": 10,
     "x": 4,
-    "y": 49
+    "y": 58
    },
    "targets": [
     {
@@ -1855,7 +2048,7 @@
     "h": 8,
     "w": 10,
     "x": 14,
-    "y": 49
+    "y": 58
    },
    "targets": [
     {
@@ -1929,7 +2122,7 @@
     "h": 8,
     "w": 8,
     "x": 0,
-    "y": 57
+    "y": 66
    },
    "targets": [
     {
@@ -2024,7 +2217,7 @@
     "h": 8,
     "w": 8,
     "x": 8,
-    "y": 57
+    "y": 66
    },
    "targets": [
     {
@@ -2093,7 +2286,7 @@
     "h": 8,
     "w": 8,
     "x": 16,
-    "y": 57
+    "y": 66
    },
    "targets": [
     {
@@ -2163,7 +2356,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 65
+    "y": 74
    },
    "panels": []
   },
@@ -2180,7 +2373,7 @@
     "h": 5,
     "w": 4,
     "x": 0,
-    "y": 66
+    "y": 75
    },
    "targets": [
     {
@@ -2247,7 +2440,7 @@
     "h": 5,
     "w": 4,
     "x": 4,
-    "y": 66
+    "y": 75
    },
    "targets": [
     {
@@ -2310,7 +2503,7 @@
     "h": 5,
     "w": 4,
     "x": 8,
-    "y": 66
+    "y": 75
    },
    "targets": [
     {
@@ -2373,7 +2566,7 @@
     "h": 5,
     "w": 4,
     "x": 12,
-    "y": 66
+    "y": 75
    },
    "targets": [
     {
@@ -2436,7 +2629,7 @@
     "h": 5,
     "w": 8,
     "x": 16,
-    "y": 66
+    "y": 75
    },
    "targets": [
     {
@@ -2512,7 +2705,7 @@
     "h": 5,
     "w": 6,
     "x": 0,
-    "y": 71
+    "y": 80
    },
    "targets": [
     {
@@ -2575,7 +2768,7 @@
     "h": 5,
     "w": 6,
     "x": 6,
-    "y": 71
+    "y": 80
    },
    "targets": [
     {
@@ -2642,7 +2835,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 76
+    "y": 85
    },
    "targets": [
     {
@@ -2719,7 +2912,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 76
+    "y": 85
    },
    "targets": [
     {
@@ -2796,7 +2989,7 @@
     "h": 10,
     "w": 24,
     "x": 0,
-    "y": 84
+    "y": 93
    },
    "targets": [
     {
@@ -2874,7 +3067,7 @@
     "h": 8,
     "w": 24,
     "x": 0,
-    "y": 94
+    "y": 103
    },
    "targets": [
     {
@@ -3084,7 +3277,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 102
+    "y": 111
    },
    "panels": []
   },
@@ -3101,7 +3294,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 103
+    "y": 112
    },
    "targets": [
     {
@@ -3186,7 +3379,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 103
+    "y": 112
    },
    "targets": [
     {
@@ -3267,7 +3460,7 @@
     "h": 8,
     "w": 8,
     "x": 0,
-    "y": 111
+    "y": 120
    },
    "targets": [
     {
@@ -3336,7 +3529,7 @@
     "h": 8,
     "w": 8,
     "x": 8,
-    "y": 111
+    "y": 120
    },
    "targets": [
     {
@@ -3410,7 +3603,7 @@
     "h": 8,
     "w": 8,
     "x": 16,
-    "y": 111
+    "y": 120
    },
    "targets": [
     {
@@ -3484,7 +3677,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 119
+    "y": 128
    },
    "targets": [
     {
@@ -3569,7 +3762,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 119
+    "y": 128
    },
    "targets": [
     {
@@ -3650,7 +3843,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 127
+    "y": 136
    },
    "targets": [
     {
@@ -3726,7 +3919,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 127
+    "y": 136
    },
    "targets": [
     {

@@ -1025,17 +1025,22 @@ final class AppStore {
     /// - No identity yet: the Connect gate is on screen and reads it there.
     /// - Already connected: the gate is not mounted, and the link is a SECOND
     ///   daemon asking to be added, so the Add Account sheet is opened for it.
+    ///   On the phone, only into a sheet that is already open — see
+    ///   `PairLink.admits` for why.
     ///   Re-pairing over the identity this install holds is still impossible —
     ///   the sheet adds an account beside it, it does not replace it.
     func receivePairLink(_ url: URL) {
         guard let link = PairLink(url) else { return }
         #if os(iOS)
-            // Nothing on the phone presents the Add Account sheet, so a link
-            // arriving while connected would park here forever — and then be
-            // applied, arbitrarily stale, by whatever Connect gate mounts
-            // next. Dropped instead; a link at the gate still fills the form.
-            guard connStatus != .connected else { return }
+            let phone = true
+        #else
+            let phone = false
         #endif
+        guard PairLink.admits(
+            connected: connStatus == .connected,
+            addAccountOpen: addAccountSheetOpen,
+            phone: phone)
+        else { return }
         // DROPPED, not parked, while the practice inbox is up: a link held
         // through a lesson would be applied the moment the live account came
         // back — the Add Account sheet over the summary card — and by then
@@ -1066,6 +1071,9 @@ final class AppStore {
                     #if os(iOS)
                         await PushRegistration.shared.registerAndSync()
                         guard !Task.isCancelled, isCurrent(recoveryEpoch) else { return }
+                        // Parked while loading, so nobody raised the sheet for
+                        // it, and the phone only takes a link into a sheet the
+                        // person opened themselves (`PairLink.admits`).
                         pairLink = nil
                     #else
                         if pairLink != nil { addAccountSheetOpen = true }

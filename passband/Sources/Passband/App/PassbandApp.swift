@@ -95,7 +95,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let pane = DraftSaver.shared.flush(.compose, store.compose)
             let inline = DraftSaver.shared.flush(.inlineReply, store.inlineReply)
             let held = store.hasHeldSends
-            guard held || pane || inline else { return .terminateNow }
+            // A schedule POST, pull-back DELETE or undo re-POST on the wire:
+            // its answer can reopen the mail in a composer, which is then the
+            // only copy. Quit waits for it, then flushes that composer.
+            let onWire = store.outboxOnWire > 0
+            guard held || pane || inline || onWire else { return .terminateNow }
             if held { store.parkHeldSends(quitting: true) }
             // Before the first stats land, every save queued above first waits
             // up to `verdictWait` to learn which route to write by; a bound
@@ -106,8 +110,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // one (never toasted, so nobody knows to look) is the one a short
             // bound cuts on a slow daemon.
             let limit: Duration =
-                store.sitrep.stats == nil
-                ? DraftSaver.verdictWait + .seconds(2) : held ? .seconds(8) : .seconds(3)
+                store.stats == nil
+                ? DraftSaver.verdictWait + .seconds(2) : held || onWire ? .seconds(8) : .seconds(3)
             Task { @MainActor in
                 // Whichever lands first answers; a reply of `true` ends the
                 // process, so the loser never gets to answer twice.
@@ -116,6 +120,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     if !Task.isCancelled { NSApp.reply(toApplicationShouldTerminate: true) }
                 }
                 await DraftSaver.shared.settle()
+                if onWire {
+                    await store.awaitOutboxOnWire()
+                    // No-ops unless the answer put the mail in a composer
+                    // (`putBack` and `openPulledBack` arm its save).
+                    DraftSaver.shared.flush(.compose, store.compose)
+                    DraftSaver.shared.flush(.inlineReply, store.inlineReply)
+                    await DraftSaver.shared.settle()
+                }
                 bound.cancel()
                 NSApp.reply(toApplicationShouldTerminate: true)
             }

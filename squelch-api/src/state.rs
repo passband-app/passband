@@ -94,6 +94,10 @@ pub struct ApiState {
     /// graceful shutdown waits for open connections, so without this one
     /// resident client would hold squelchd open forever.
     pub(crate) shutdown: Option<tokio::sync::watch::Receiver<bool>>,
+    /// TEST HOOK: added to the wall clock the scheduled-send worker reads, so
+    /// a test can step past a grace or a give-up without sleeping through it.
+    /// Zero in production; nothing but the worker reads it.
+    pub(crate) worker_clock_skew: chrono::Duration,
     /// PUBLIC base URL that reaches this daemon's `/t/:token` pixel route, from
     /// `[tracking] base_url` / `SQUELCH_TRACK_URL`. THE FEATURE FLAG for
     /// minting: `None` means no send is ever tracked, whatever the client asks
@@ -377,6 +381,7 @@ impl ApiState {
             spam_refresh: None,
             event_notifier: None,
             shutdown: None,
+            worker_clock_skew: chrono::Duration::zero(),
             tracking_base_url: None,
             pixel_slots: Arc::new(tokio::sync::Semaphore::new(
                 crate::tracking::PIXEL_CONCURRENCY,
@@ -728,6 +733,14 @@ impl ApiState {
         self.notify_model = Arc::from(model.into().as_str());
         self.notify_price_in_per_mtok = price_in_per_mtok;
         self.notify_price_out_per_mtok = price_out_per_mtok;
+        self
+    }
+
+    /// TEST HOOK: run the scheduled-send worker's clock `skew` ahead of the
+    /// wall clock (see `worker_clock_skew`). Never used in production.
+    #[doc(hidden)]
+    pub fn with_worker_clock_skew(mut self, skew: chrono::Duration) -> Self {
+        self.worker_clock_skew = skew;
         self
     }
 

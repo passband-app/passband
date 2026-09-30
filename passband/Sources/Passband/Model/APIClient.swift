@@ -767,9 +767,8 @@ actor APIClient {
         replyAll: Bool = false, forwardOfMessageId: Int? = nil, attachmentIds: [Int] = [],
         attachmentBytes: Int = 0
     ) async throws -> SendResult {
-        try await post(
-            "/client/actions/send",
-            body: SendBody(
+        try await send(
+            SendBody(
                 reply_to_message_id: replyToMessageId,
                 // Omitted when absent, like every other optional here — and
                 // never set beside `reply_to_message_id`: the daemon refuses a
@@ -800,15 +799,70 @@ actor APIClient {
                 reply_all: replyAll ? true : nil,
                 // Omitted when empty, like everything else here.
                 attachment_ids: attachmentIds.isEmpty ? nil : attachmentIds),
-            // A send that re-reads and base64s megabytes of files, then
-            // hands them to Gmail, gets a budget sized to what it carries —
-            // the forward's floor plus a second per 50 KB. A 20 MB send on
-            // a slow uplink that timed out CLIENT-side while the daemon
-            // finished would be retried, and the recipient would get it
-            // twice.
-            timeout: forwardOfMessageId == nil && attachmentIds.isEmpty
-                ? Self.requestTimeout
-                : Self.forwardTimeout + TimeInterval(attachmentBytes / 50_000))
+            attachmentBytes: attachmentBytes)
+    }
+
+    /// The send route with its body already built: `SendBody(compose:)` for
+    /// the composers, the parameter list above for the agent's tool.
+    @discardableResult
+    func send(_ body: SendBody, attachmentBytes: Int = 0) async throws -> SendResult {
+        try await post(
+            "/client/actions/send", body: body, timeout: Self.sendTimeout(body, attachmentBytes))
+    }
+
+    /// A send that re-reads and base64s megabytes of files, then hands them to
+    /// Gmail, gets a budget sized to what it carries: the forward's floor plus
+    /// a second per 50 KB. A 20 MB send on a slow uplink that timed out
+    /// CLIENT-side while the daemon finished would be retried, and the
+    /// recipient would get it twice.
+    ///
+    /// A schedule gets the same budget. It sends nothing, but a forward is
+    /// guard-scanned by fetching the original from Gmail, and a tray full of
+    /// files is read back and scanned too, all before the 201.
+    private static func sendTimeout(_ body: SendBody, _ attachmentBytes: Int) -> TimeInterval {
+        body.forward_of_message_id == nil && (body.attachment_ids ?? []).isEmpty
+            ? Self.requestTimeout
+            : Self.forwardTimeout + TimeInterval(attachmentBytes / 50_000)
+    }
+
+    // MARK: - scheduled send
+
+    /// Put a mail in the daemon's outbox: the send body a send would carry,
+    /// plus when. Everything a send checks before Gmail (validation, the
+    /// files, the outbound guard, the write credential) is checked NOW, while
+    /// the sender is here to answer: a 422 carries `.guardKinds` exactly as a
+    /// send's does, and a resend with `override_guard` goes through. The
+    /// draft named by `draft_id` is consumed by this call.
+    func scheduleSend(_ body: SendBody, at sendAt: Date, attachmentBytes: Int = 0) async throws
+        -> ScheduledCreated
+    {
+        try await post(
+            "/client/scheduled", body: ScheduleBody(send: body, send_at: Self.rfc3339(sendAt)),
+            timeout: Self.sendTimeout(body, attachmentBytes))
+    }
+
+    /// The outbox: rows `scheduled`, `sending` or `failed`, oldest first.
+    func listScheduled() async throws -> [ScheduledSendView] {
+        try await get("/client/scheduled")
+    }
+
+    /// Pull a mail back out of the outbox. Answers the frozen request and its
+    /// (now released) files so a composer can reopen it. A row already in
+    /// Gmail's hands is a 409 (`status == 409`, kind `.unknown`); an unknown,
+    /// sent or cancelled one a 404.
+    func cancelScheduled(_ id: Int) async throws -> ScheduledCancel {
+        let req = try buildRequest(
+            path: "/client/scheduled/\(id)", method: .DELETE, query: [:], body: nil,
+            timeout: Self.requestTimeout)
+        let (data, _) = try await perform(req)
+        return try decode(ScheduledCancel.self, from: data)
+    }
+
+    /// Send a `scheduled` or `failed` row on the worker's next tick. Queued,
+    /// not sent: the listing is where it is seen to go.
+    @discardableResult
+    func sendScheduledNow(_ id: Int) async throws -> ScheduledNow {
+        try await post("/client/scheduled/\(id)/now", body: EmptyBody())
     }
 
     // MARK: - compose attachments

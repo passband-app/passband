@@ -515,7 +515,7 @@ enum AgentTools {
             // for the same reason: with no stats verdict yet, the old nil-key
             // PUT against a `drafts_v2` daemon would overwrite the person's
             // newest draft, and the new route against an old daemon 404s.
-            guard let stats = AppStore.shared.sitrep.stats else {
+            guard let stats = AppStore.shared.stats else {
                 return failure(
                     "still connecting to the mail daemon; try again in a moment",
                     summary: "draft failed")

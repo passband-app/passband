@@ -58,6 +58,13 @@ struct ActionLayer: View {
             if let target = store.remindTarget {
                 RemindPalette(target: target) { store.closeRemind() }
             }
+            // The composers' send-later clock. Here rather than on the
+            // composer for the reason the remind palette is: a window-level
+            // overlay takes the keys through the modal context above the
+            // composer's own, and the pane is too narrow to hold it.
+            if let slot = store.schedulePicker {
+                SchedulePalette(slot: slot) { store.schedulePicker = nil }
+            }
             if store.askBarOpen { AskBar { store.askBarOpen = false } }
             if store.shortcutsOpen { ShortcutsOverlay { store.shortcutsOpen = false } }
             // Above everything else in this layer, because it is shown at most

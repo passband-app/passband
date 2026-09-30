@@ -129,6 +129,47 @@ groups:
               conditions:
                 - evaluator: { type: gt, params: [900] }
 
+      # 2026-09-29: memory is what carrier runs out of first, and the only
+      # wall it has is the RAM itself. Nothing is reserved for k3s and there
+      # is no swap (PRODUCTION.md, "The box"), so past 100% is a global OOM
+      # that kills whichever tenant daemon is biggest. MemAvailable counts
+      # reclaimable page cache as free, so this is memory actually held. 85%
+      # of 16 GB leaves ~2.4 GB, a handful of tenants loading the embedder at
+      # once. Asked for as "ever goes over", so 2m: two evaluations in a row,
+      # enough to drop a single odd scrape and nothing more. If the embedder
+      # sawtooth makes it chatty, raise this rather than the threshold.
+      - uid: carrier-memory-high
+        title: carrier memory high
+        condition: C
+        for: 2m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: 'carrier memory at {{ humanizePercentage $values.A.Value }}'
+          description: >-
+            The box is close to a global OOM, which kills the largest tenant daemon.
+            "Memory used" on the dashboard shows who grew ("of which tenant daemons");
+            "Memory by pod" names them. Resize RAM (CPU and RAM only) before adding
+            tenants (PRODUCTION.md, "How many tenants fit").
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 600, to: 0 }
+            model:
+              refId: A
+              instant: true
+              expr: 1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gte, params: [0.85] }
+
       # The alert that makes the others worth trusting. Everything above reads
       # series the Prometheus agent on carrier remote-writes; when the box, the
       # agent or kube-state-metrics goes away they all fall silent together.

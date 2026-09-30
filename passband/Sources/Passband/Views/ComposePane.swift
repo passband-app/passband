@@ -35,9 +35,9 @@
 // `ComposeState.page`: on `.drafts` the header stays and the body (fields,
 // editor, footer) swaps for `DraftsList`, full width, with the composer kept
 // exactly as it was underneath, one Enter or one click on the control away.
-// A ⌘N with no recent draft to restore but older ones waiting LANDS on that
-// page (see `AppStore.openComposeNew`). The header says which page is up: the
-// title reads "drafts" and the control turns into the way back.
+// ⌘N always opens the composer page; the control's count is how older drafts
+// make themselves known (see `AppStore.openComposeNew`). The header says which
+// page is up: the title reads "drafts" and the control turns into the way back.
 
 import SwiftUI
 
@@ -57,6 +57,12 @@ struct ComposePane: View {
 
     private var compose: ComposeState? { store.compose }
     private var guarded: Bool { !(compose?.guardKinds.isEmpty ?? true) }
+    /// A send time is set: the verbs say "schedule", and ⌘↵ files the mail in
+    /// the daemon's outbox instead of holding it for five seconds. Only while
+    /// the daemon keeps an outbox: a gate that went off under a set time (an
+    /// older daemon after a reconnect) makes the mail an ordinary send, and
+    /// the verb says so rather than promising a schedule ⌘↵ would 404.
+    private var scheduled: Bool { compose?.sendAt != nil && store.scheduledSendAvailable }
     /// Opened out to a centred column over the page. The Mac's alone: a phone
     /// sheet is already the whole screen.
     private var expanded: Bool {
@@ -108,6 +114,16 @@ struct ComposePane: View {
             }
             .onChange(of: compose.id) { _, _ in
                 if store.compose?.page == .compose { refocus() }
+            }
+            // Back from the time palette: its field had the caret, and a
+            // composer left with nothing focused hands the next letter typed
+            // to whatever binds it.
+            .onChange(of: store.schedulePicker) { old, new in
+                if EditorRefocus.returns(from: old, to: new, slot: .compose),
+                    store.compose?.page == .compose
+                {
+                    refocus()
+                }
             }
             // ANYWHERE ON THE PANE: a file let go over the subject line or
             // the tray still lands.
@@ -215,9 +231,14 @@ struct ComposePane: View {
                 // a new message that could not take a file was the odd one out.
                 //
                 // NEITHER ON THE DRAFTS PAGE: a list has nothing to send.
+                //
+                // THE CLOCK SITS JUST LEFT OF SEND, as on the Mac: it is the
+                // verb's modifier, and "send" flips to "schedule" once a time
+                // is set.
                 if !onList {
                     AttachButton(slot: .compose)
-                    Button("send") { send(override: false) }
+                    ScheduleClock(slot: .compose)
+                    Button(ScheduleCopy.sendVerb(scheduled: scheduled)) { send(override: false) }
                         .buttonStyle(.glassProminent)
                         .tint(Palette.accent)
                 }
@@ -253,8 +274,9 @@ struct ComposePane: View {
 
     /// THE DRAFTS CONTROL, beside the title: the kind label says what this
     /// mail is, and this answers which one. It sits in the header rather than
-    /// the footer because the footer's left cluster is how a mail goes out
-    /// (attach, track), and this is not that.
+    /// the footer because the footer's left cluster holds the mail's options
+    /// (attach, track) and its right the verbs (the send clock, send), and
+    /// this is neither.
     ///
     /// A TOGGLE between the pane's two pages, in one spot, so a second click
     /// undoes the first. On the composer it counts the drafts you could open
@@ -412,16 +434,30 @@ struct ComposePane: View {
                 TrackerToggle(on: bindFlag(\.includeTracker))
             #endif
             Spacer()
+            // WHEN IT GOES sits with the verbs, not the options: it changes
+            // what the verb beside it does. An icon until a time is picked,
+            // then the chip. Draws nothing on a daemon without an outbox.
+            #if os(macOS)
+                ScheduleClock(slot: .compose)
+            #endif
             // Past a blocked verdict the plain send stays (the match may have
             // been edited out) and the override stands beside it in danger red:
             // two acts, never one button that quietly means both.
+            //
+            // A SET TIME FLIPS BOTH VERBS, "schedule" and "schedule anyway":
+            // same keys, and the button says what it does. One computed string
+            // each (`ScheduleCopy`), so the label and the act cannot disagree.
             if guarded {
-                Button { send(override: true) } label: { keyed("send anyway", "⌘⇧↵") }
+                Button { send(override: true) } label: {
+                    keyed(ScheduleCopy.overrideVerb(scheduled: scheduled), "⌘⇧↵")
+                }
                     .buttonStyle(.glassProminent)
                     .tint(Palette.danger)
             }
             #if os(macOS)
-                Button { send(override: false) } label: { keyed("send", "⌘↵") }
+                Button { send(override: false) } label: {
+                    keyed(ScheduleCopy.sendVerb(scheduled: scheduled), "⌘↵")
+                }
                     .buttonStyle(.glassProminent)
                     .tint(Palette.accent)
             #endif
@@ -682,6 +718,20 @@ struct ComposePane: View {
                 send(override: true)
                 return true
             },
+            // THE CLOCK'S CHORD (`ScheduleClock.chord`, ⌘⇧L). Declines where
+            // the clock is not drawn: on a daemon without an outbox, and on
+            // the drafts page, where no mail is on screen to schedule.
+            // EXACT CASE: ⌘⇧L, never a bare ⌘L through the fold.
+            KeyBinding(
+                declining: ScheduleClock.chordKey, "send later", meta: true, allowInInput: true,
+                exactCase: true
+            ) {
+                guard !store.askBarOpen, store.scheduledSendAvailable,
+                    store.compose?.page != .drafts
+                else { return false }
+                store.schedulePicker = .compose
+                return true
+            },
         ]
     }
 
@@ -737,9 +787,11 @@ struct ComposePane: View {
         store.compose = next
     }
 
-    /// Hand the mail to the hold (`AppStore.sendWithUndo`), after the two
-    /// checks that have to happen while the composer is still on screen to
-    /// show their answer.
+    /// Hand the mail to the hold (`AppStore.sendWithUndo`), or with a time set
+    /// to the outbox (`AppStore.scheduleCompose`), after the two checks that
+    /// have to happen while the composer is still on screen to show their
+    /// answer. The checks are the same for both: a scheduled mail is still a
+    /// mail, and its tray is still the promise.
     private func send(override: Bool) {
         guard let compose = store.compose else { return }
         // Untouched covers the seeded signature: a signature under nothing is
@@ -763,7 +815,11 @@ struct ComposePane: View {
             patch { $0.error = problem }
             return
         }
-        store.sendWithUndo(.compose, override: override)
+        if scheduled {
+            store.scheduleCompose(.compose, override: override)
+        } else {
+            store.sendWithUndo(.compose, override: override)
+        }
     }
 }
 

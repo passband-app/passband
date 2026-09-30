@@ -115,6 +115,45 @@ pub struct ReplyParts {
     /// [`build_reply_rfc822`] describes. `is_inline` is decided by the caller
     /// against `body_html` — see [`mark_inline`].
     pub attachments: Vec<MailAttachment>,
+    /// This message's own `Message-ID`, angle brackets included
+    /// (`<48hex@passband.app>`). `None` writes no header and Gmail mints one, which
+    /// is every send made while the user waits: the bytes are exactly what
+    /// they were before this field existed.
+    ///
+    /// `Some` is the SCHEDULED send (docs/SCHEDULED-SEND.md §4). It is the
+    /// first, cheap thing recovery searches for (`rfc822msgid:`), but it is
+    /// NOT the fingerprint recovery rests on: proven live on 2026-09-29, a
+    /// minted id the daemon had just sent was not findable by it, so Gmail
+    /// may rewrite it. [`Self::outbox_token`] is the one it cannot. The id is
+    /// minted by the caller at schedule time, never here.
+    pub message_id: Option<String>,
+    /// The scheduled send's outbox token, written as [`OUTBOX_HEADER`]. `None`
+    /// (or empty) writes nothing, which is every send made while the user
+    /// waits: the bytes are exactly what they were before this field existed.
+    ///
+    /// `Some` is a FIRED scheduled send: the 48-hex of its minted Message-ID
+    /// ([`outbox_token`]). A header Gmail has no reason to touch, read back by
+    /// [`GmailWriteClient::find_scheduled_send`] from the Sent copy.
+    pub outbox_token: Option<String>,
+}
+
+/// The header a fired scheduled send carries its outbox token in
+/// (docs/SCHEDULED-SEND.md §4). A STABLE CONTRACT: every mail a daemon has
+/// ever fired is recognised by this exact name, so renaming it strands the
+/// recovery of any row in flight across the upgrade.
+pub const OUTBOX_HEADER: &str = "X-Passband-Outbox";
+
+/// The outbox token of a minted `Message-ID`: its local part, brackets and
+/// host off (`<48hex@passband.app>` -> `48hex`). WHATEVER THE HOST: rows
+/// minted before the id moved to a dotted host carry `<48hex@passband>`, and
+/// their token is the same local part. Derived rather than stored, so a row
+/// scheduled before the header existed still has one.
+pub fn outbox_token(message_id: &str) -> String {
+    let bare = message_id
+        .trim()
+        .trim_start_matches('<')
+        .trim_end_matches('>');
+    bare.split('@').next().unwrap_or("").trim().to_string()
 }
 
 /// Escape text for interpolation into HTML markup or a double-quoted attribute
@@ -272,6 +311,8 @@ pub fn build_reply_rfc822(parts: &ReplyParts) -> Result<Vec<u8>, WriteError> {
         ("Subject", parts.subject.as_str()),
         ("In-Reply-To", parts.in_reply_to.as_deref().unwrap_or("")),
         ("References", parts.references.as_deref().unwrap_or("")),
+        ("Message-ID", parts.message_id.as_deref().unwrap_or("")),
+        (OUTBOX_HEADER, parts.outbox_token.as_deref().unwrap_or("")),
     ] {
         if val.contains('\r') || val.contains('\n') {
             return Err(WriteError::Invalid(format!(
@@ -302,6 +343,14 @@ pub fn build_reply_rfc822(parts: &ReplyParts) -> Result<Vec<u8>, WriteError> {
     }
     if let Some(refs) = parts.references.as_deref().filter(|s| !s.is_empty()) {
         out.push_str(&format!("References: {refs}\r\n"));
+    }
+    // Absent or empty writes nothing, so an unscheduled send's bytes are
+    // untouched (see `ReplyParts::message_id`).
+    if let Some(mid) = parts.message_id.as_deref().filter(|s| !s.is_empty()) {
+        out.push_str(&format!("Message-ID: {mid}\r\n"));
+    }
+    if let Some(token) = parts.outbox_token.as_deref().filter(|s| !s.is_empty()) {
+        out.push_str(&format!("{OUTBOX_HEADER}: {token}\r\n"));
     }
     // Bodies: normalize bare LFs to CRLF for RFC822 line endings.
     let text = parts.body.replace("\r\n", "\n").replace('\n', "\r\n");
@@ -560,7 +609,7 @@ fn addr_is_emittable(addr: &str) -> bool {
 /// mean here, survives unchanged. Anything that comes back still carrying a
 /// character it must not is DROPPED rather than repaired — a mangled recipient
 /// is worse than a missing one.
-fn parse_addr_list(value: &str) -> Vec<String> {
+pub(crate) fn parse_addr_list(value: &str) -> Vec<String> {
     if value.trim().is_empty() {
         return Vec::new();
     }
@@ -1050,6 +1099,191 @@ impl GmailWriteClient {
             internal_date: msg.internal_date,
         })
     }
+
+    /// The Gmail id of the message whose `Message-ID` header is `msgid`, or
+    /// `None` when Gmail's search finds none. On the WRITE token, like every
+    /// other call here (gmail.modify grants read).
+    ///
+    /// A HIT IS PROOF, A MISS IS NOT: a daemon-minted id was not findable this
+    /// way minutes after its mail went out (2026-09-29, see
+    /// [`Self::find_scheduled_send`], the question recovery actually asks).
+    /// The search includes Spam and Trash; an error is an error, never "not
+    /// found".
+    pub async fn find_by_rfc822_msgid(&self, msgid: &str) -> Result<Option<String>, WriteError> {
+        let url = rfc822msgid_search_url(&self.base, msgid);
+        let list: MessageIdList = self.get_json(&url).await?;
+        Ok(list.messages.into_iter().next().map(|m| m.id))
+    }
+
+    /// The Gmail id of the fired scheduled send whose `Message-ID` was minted
+    /// as `message_id`, or `None` when the mailbox holds no such mail.
+    ///
+    /// THIS IS THE SCHEDULED SEND'S RECOVERY QUESTION (docs/SCHEDULED-SEND.md
+    /// §4): a row left `sending` by a crash, or `maybe_sent` by an ambiguous
+    /// failure, either went out or did not. A wrong `None` is a double send.
+    ///
+    /// Two looks, cheapest first:
+    ///
+    /// 1. `rfc822msgid:` for the minted id. A hit returns at once.
+    /// 2. The Sent mail inside `window` (`after`, `before`), newest first,
+    ///    [`SCAN_PAGE`] a page for at most [`SCAN_MAX_PAGES`] pages, each
+    ///    candidate's [`OUTBOX_HEADER`] and `Message-ID` read by a metadata
+    ///    get. The caller sizes the window to the attempt being asked about
+    ///    (slack included, see `scan_window` in scheduled_send.rs): BOTH ends
+    ///    matter, since a window open at the top covers every mail sent since,
+    ///    and a busy mailbox would hit the page cap on every ask of an old row
+    ///    and never let it send. The header is what the live finding demands: on 2026-09-29 a
+    ///    minted id the daemon had just sent (and echoed) was NOT found by
+    ///    step 1 at 9 and 28 minutes, so Gmail may rewrite a client-supplied
+    ///    Message-ID; a custom header it has no reason to touch.
+    ///
+    /// Every request goes through the same budget and timeout as the rest of
+    /// this client. Any error is `Err` ("could not ask"), never `None`. A scan
+    /// that runs out of pages with more still listed is ALSO `Err`: it could
+    /// not rule the mail out, and reading that as "not sent" is the double
+    /// send this exists to prevent. So is a scan cut short by `stopping`
+    /// (the daemon's shutdown), which is checked before every request after
+    /// the first: a scan is up to 1 + 4 + 100 of them, too many for a
+    /// shutdown to wait out.
+    pub async fn find_scheduled_send(
+        &self,
+        message_id: &str,
+        window: (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>),
+        stopping: &(dyn Fn() -> bool + Send + Sync),
+    ) -> Result<Option<String>, WriteError> {
+        let token = outbox_token(message_id);
+        if token.is_empty() {
+            return Err(WriteError::Invalid("no outbox token to search for".into()));
+        }
+        if let Some(id) = self.find_by_rfc822_msgid(message_id).await? {
+            return Ok(Some(id));
+        }
+        let bare_mid = bare_message_id(message_id);
+        let (after, before) = window;
+        let floor = after.timestamp().max(0);
+        let ceiling = before.timestamp().max(floor + 1);
+        let cut_short = || WriteError::Transport("sent scan cut short by shutdown".into());
+        let mut page_token: Option<String> = None;
+        for _ in 0..SCAN_MAX_PAGES {
+            if stopping() {
+                return Err(cut_short());
+            }
+            let url = sent_scan_url(&self.base, floor, ceiling, page_token.as_deref());
+            let list: MessageIdList = self.get_json(&url).await?;
+            for candidate in list.messages {
+                if stopping() {
+                    return Err(cut_short());
+                }
+                if self.carries_outbox(&candidate.id, &token, bare_mid).await? {
+                    return Ok(Some(candidate.id));
+                }
+            }
+            match list.next_page_token.filter(|t| !t.is_empty()) {
+                Some(next) => page_token = Some(next),
+                None => return Ok(None),
+            }
+        }
+        Err(WriteError::Transport(
+            "sent scan reached its page cap without ruling the mail out".into(),
+        ))
+    }
+
+    /// Whether Gmail message `gmail_id` is the fired send: its
+    /// [`OUTBOX_HEADER`] is `token`, or its `Message-ID` is the minted one
+    /// (free, it rides the same metadata get). Exact after trimming.
+    async fn carries_outbox(
+        &self,
+        gmail_id: &str,
+        token: &str,
+        bare_mid: &str,
+    ) -> Result<bool, WriteError> {
+        let url = format!(
+            "{}/messages/{}?format=metadata&metadataHeaders={OUTBOX_HEADER}\
+             &metadataHeaders=Message-ID",
+            self.base,
+            percent_encode(gmail_id)
+        );
+        let meta: GmailMessage = self.get_json(&url).await?;
+        Ok(meta.payload.is_some_and(|p| {
+            p.headers.iter().any(|h| {
+                (h.name.eq_ignore_ascii_case(OUTBOX_HEADER) && h.value.trim() == token)
+                    || (h.name.eq_ignore_ascii_case("message-id")
+                        && bare_message_id(&h.value) == bare_mid)
+            })
+        }))
+    }
+}
+
+/// How far past the attempt, either side, the Sent scan reaches: clock skew
+/// between this host and Gmail's `internalDate`, with room to spare.
+pub const SCAN_SLACK: chrono::Duration = chrono::Duration::hours(1);
+/// Candidates per page of the Sent scan.
+pub const SCAN_PAGE: u32 = 25;
+/// Pages the Sent scan reads before it gives up on ruling a mail out: at most
+/// `SCAN_PAGE * SCAN_MAX_PAGES` metadata gets per question.
+pub const SCAN_MAX_PAGES: usize = 4;
+
+/// A `Message-ID` without its brackets or surrounding whitespace.
+fn bare_message_id(msgid: &str) -> &str {
+    msgid.trim().trim_start_matches('<').trim_end_matches('>')
+}
+
+/// `messages.list` over the Sent mail after `floor` and before `ceiling`
+/// (epoch seconds, which Gmail's `after:` and `before:` take as instants
+/// rather than local dates), Spam and Trash included for the same reason as
+/// [`rfc822msgid_search_url`].
+fn sent_scan_url(base: &str, floor: i64, ceiling: i64, page_token: Option<&str>) -> String {
+    let q = percent_encode(&format!("in:sent after:{floor} before:{ceiling}"));
+    let mut url = format!("{base}/messages?q={q}&maxResults={SCAN_PAGE}&includeSpamTrash=true");
+    if let Some(t) = page_token {
+        url.push_str("&pageToken=");
+        url.push_str(&percent_encode(t));
+    }
+    url
+}
+
+/// `messages.list` narrowed to one `Message-ID`. THE BRACKETS COME OFF: the
+/// header value is `<id@passband.app>`, but Gmail's `rfc822msgid:` operator
+/// takes the bare `id@passband.app`, and searching with the brackets in finds NOTHING.
+/// Proven live on 2026-09-29: a mail the daemon had just sent came back
+/// "not found" with them and was requeued as maybe-sent. What is left still
+/// carries `@` and the colon of the operator, so the whole term is
+/// percent-encoded and nothing can end the value or open a parameter.
+fn rfc822msgid_search_url(base: &str, msgid: &str) -> String {
+    let bare = bare_message_id(msgid);
+    let q = percent_encode(&format!("rfc822msgid:{bare}"));
+    format!("{base}/messages?q={q}&maxResults=1&includeSpamTrash=true")
+}
+
+/// RFC 3986 percent-encoding for a query value: unreserved characters pass,
+/// every other byte becomes `%XX`. Hand-rolled because it is eight lines and
+/// the one query it serves is fully covered by tests.
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// `messages.list`'s answer, reduced to the ids. Gmail OMITS `messages`
+/// entirely on no match (it does not send an empty list), hence the default.
+#[derive(Debug, serde::Deserialize)]
+struct MessageIdList {
+    #[serde(default)]
+    messages: Vec<MessageIdEntry>,
+    /// Present while more pages follow.
+    #[serde(default, rename = "nextPageToken")]
+    next_page_token: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct MessageIdEntry {
+    id: String,
 }
 
 /// The default reply recipient: the original sender's address.
@@ -1323,6 +1557,11 @@ pub struct ForwardParts {
     /// as it does on a reply.
     pub pixel_url: Option<String>,
     pub original: ForwardedOriginal,
+    /// The forward's own `Message-ID`, same rules as [`ReplyParts::message_id`]:
+    /// `None` writes no header (today's bytes), `Some` is a scheduled send.
+    pub message_id: Option<String>,
+    /// Same rules as [`ReplyParts::outbox_token`].
+    pub outbox_token: Option<String>,
 }
 
 /// The `---------- Forwarded message ---------` header line every mail client
@@ -1927,6 +2166,8 @@ pub fn build_forward_rfc822(parts: &ForwardParts) -> Result<Vec<u8>, WriteError>
         ("Cc", parts.cc.as_deref().unwrap_or("")),
         ("Bcc", parts.bcc.as_deref().unwrap_or("")),
         ("Subject", parts.subject.as_str()),
+        ("Message-ID", parts.message_id.as_deref().unwrap_or("")),
+        (OUTBOX_HEADER, parts.outbox_token.as_deref().unwrap_or("")),
     ] {
         if val.contains('\r') || val.contains('\n') {
             return Err(WriteError::Invalid(format!(
@@ -1980,6 +2221,12 @@ pub fn build_forward_rfc822(parts: &ForwardParts) -> Result<Vec<u8>, WriteError>
         out.push_str(&format!("Bcc: {bcc}\r\n"));
     }
     out.push_str(&format!("Subject: {}\r\n", parts.subject));
+    if let Some(mid) = parts.message_id.as_deref().filter(|s| !s.is_empty()) {
+        out.push_str(&format!("Message-ID: {mid}\r\n"));
+    }
+    if let Some(token) = parts.outbox_token.as_deref().filter(|s| !s.is_empty()) {
+        out.push_str(&format!("{OUTBOX_HEADER}: {token}\r\n"));
+    }
     if parts.original.attachments.is_empty() {
         out.push_str(&format!(
             "Content-Type: multipart/alternative; boundary=\"{alt}\"\r\n"
@@ -2504,6 +2751,8 @@ mod tests {
             body_html: None,
             pixel_url: None,
             attachments: Vec::new(),
+            message_id: None,
+            outbox_token: None,
         };
         let raw = build_reply_rfc822(&parts).unwrap();
         let s = String::from_utf8(raw).unwrap();
@@ -2528,6 +2777,8 @@ mod tests {
             body_html: None,
             pixel_url: None,
             attachments: Vec::new(),
+            message_id: None,
+            outbox_token: None,
         };
         assert!(matches!(
             build_reply_rfc822(&parts),
@@ -2548,6 +2799,8 @@ mod tests {
             body_html: Some("<div><strong>bold</strong> text</div>".into()),
             pixel_url: None,
             attachments: Vec::new(),
+            message_id: None,
+            outbox_token: None,
         };
         let s = String::from_utf8(build_reply_rfc822(&parts).unwrap()).unwrap();
         assert!(
@@ -2575,6 +2828,8 @@ mod tests {
             body_html: None,
             pixel_url: None,
             attachments: Vec::new(),
+            message_id: None,
+            outbox_token: None,
         }
     }
 
@@ -2719,6 +2974,8 @@ mod tests {
             body_html: Some("<p>x</p>".into()),
             pixel_url: None,
             attachments: Vec::new(),
+            message_id: None,
+            outbox_token: None,
         };
         assert!(matches!(
             build_reply_rfc822(&parts),
@@ -2739,6 +2996,8 @@ mod tests {
             body_html: None,
             pixel_url: None,
             attachments: Vec::new(),
+            message_id: None,
+            outbox_token: None,
         };
         assert!(matches!(
             build_reply_rfc822(&parts),
@@ -2831,6 +3090,8 @@ mod tests {
             note_html: None,
             pixel_url: None,
             original: parse_forwarded_original(&fixture_original_raw()).unwrap(),
+            message_id: None,
+            outbox_token: None,
         }
     }
 
@@ -3929,6 +4190,462 @@ mod tests {
             }
             other => panic!("expected Api error, got {other:?}"),
         }
+    }
+
+    // ---- scheduled send: the minted Message-ID and its recovery search ------
+
+    #[test]
+    fn rfc822msgid_search_drops_the_brackets_and_encodes_the_at() {
+        let url = rfc822msgid_search_url("https://g.test/me", "<a.b-c_1~@passband>");
+        assert_eq!(
+            url,
+            "https://g.test/me/messages?q=rfc822msgid%3Aa.b-c_1~%40passband\
+             &maxResults=1&includeSpamTrash=true"
+        );
+        // A bare id, or one with stray whitespace, searches the same.
+        assert_eq!(
+            rfc822msgid_search_url("https://g.test/me", " a.b-c_1~@passband "),
+            url
+        );
+        // Nothing that could end the value or open another parameter survives.
+        let q = url.split("?q=").nth(1).unwrap().split('&').next().unwrap();
+        for raw in ['<', '>', '@', ':', ' ', '&', '='] {
+            assert!(!q.contains(raw), "{raw:?} must be encoded");
+        }
+        assert_eq!(percent_encode("a b&c=d"), "a%20b%26c%3Dd");
+    }
+
+    #[tokio::test]
+    async fn find_by_rfc822_msgid_returns_the_hit() {
+        let (base, handle) = mock_once(
+            200,
+            "{\"messages\":[{\"id\":\"gm-77\",\"threadId\":\"t-1\"}],\"resultSizeEstimate\":1}",
+        )
+        .await;
+        let got = client(base)
+            .find_by_rfc822_msgid("<x@passband>")
+            .await
+            .unwrap();
+        let req = handle.await.unwrap();
+        assert_eq!(got.as_deref(), Some("gm-77"));
+        assert!(req.starts_with("GET "), "a search is a GET");
+        assert!(req.contains("/messages?q=rfc822msgid%3Ax%40passband&maxResults=1"));
+        assert!(
+            req.contains("authorization: Bearer WRITE-TOKEN")
+                || req.contains("Authorization: Bearer WRITE-TOKEN")
+        );
+    }
+
+    #[tokio::test]
+    async fn find_by_rfc822_msgid_reads_an_absent_messages_key_as_none() {
+        // Gmail's real no-match answer: no `messages` key at all.
+        let (base, handle) = mock_once(200, "{\"resultSizeEstimate\":0}").await;
+        let got = client(base)
+            .find_by_rfc822_msgid("<x@passband>")
+            .await
+            .unwrap();
+        handle.await.unwrap();
+        assert_eq!(got, None);
+    }
+
+    #[tokio::test]
+    async fn find_by_rfc822_msgid_reads_an_empty_list_as_none() {
+        let (base, handle) = mock_once(200, "{\"messages\":[]}").await;
+        let got = client(base)
+            .find_by_rfc822_msgid("<x@passband>")
+            .await
+            .unwrap();
+        handle.await.unwrap();
+        assert_eq!(got, None);
+    }
+
+    #[tokio::test]
+    async fn find_by_rfc822_msgid_surfaces_an_error_never_a_none() {
+        // "Could not ask" must not read as "did not go out": that is a resend.
+        let (base, handle) = mock_once(500, "{}").await;
+        let got = client(base).find_by_rfc822_msgid("<x@passband>").await;
+        handle.await.unwrap();
+        assert!(matches!(got, Err(WriteError::Api { status: 500, .. })));
+    }
+
+    #[test]
+    fn a_minted_message_id_adds_exactly_one_header_and_nothing_else() {
+        let id = "<0b7e-4f@passband>";
+        let header = format!("Message-ID: {id}\r\n");
+        // Plain, threaded (the parent's id rides In-Reply-To: it must not be
+        // confused with ours), and multipart with a pixel.
+        let mut threaded = bare_parts("hi");
+        threaded.in_reply_to = Some("<parent@x>".into());
+        threaded.references = Some("<root@x> <parent@x>".into());
+        let mut html = bare_parts("hi");
+        html.body_html = Some("<p>hi</p>".into());
+        html.pixel_url = Some("https://t.test/t/tok".into());
+        for base in [bare_parts("hi"), threaded, html] {
+            let without = String::from_utf8(build_reply_rfc822(&base).unwrap()).unwrap();
+            let mut with_id = base.clone();
+            with_id.message_id = Some(id.into());
+            let with = String::from_utf8(build_reply_rfc822(&with_id).unwrap()).unwrap();
+            let head = with.split("\r\n\r\n").next().unwrap();
+            assert_eq!(
+                head.lines()
+                    .filter(|l| l.starts_with("Message-ID:"))
+                    .count(),
+                1
+            );
+            assert!(head.contains(&header));
+            assert_eq!(with.replacen(&header, "", 1), without);
+            assert!(!without.contains("Message-ID:"), "None writes no header");
+        }
+        // Empty is None, same as every other optional header.
+        let mut empty = bare_parts("hi");
+        empty.message_id = Some(String::new());
+        assert_eq!(
+            build_reply_rfc822(&empty).unwrap(),
+            build_reply_rfc822(&bare_parts("hi")).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_minted_message_id_rides_a_forward_the_same_way() {
+        let id = "<fwd-1@passband>";
+        let header = format!("Message-ID: {id}\r\n");
+        let without = String::from_utf8(build_forward_rfc822(&fwd_parts("see")).unwrap()).unwrap();
+        let mut parts = fwd_parts("see");
+        parts.message_id = Some(id.into());
+        let with = String::from_utf8(build_forward_rfc822(&parts).unwrap()).unwrap();
+        let head = with.split("\r\n\r\n").next().unwrap();
+        assert_eq!(
+            head.lines()
+                .filter(|l| l.starts_with("Message-ID:"))
+                .count(),
+            1
+        );
+        assert_eq!(with.replacen(&header, "", 1), without);
+    }
+
+    #[test]
+    fn a_message_id_carrying_crlf_is_refused_not_repaired() {
+        let mut reply = bare_parts("hi");
+        reply.message_id = Some("<a@passband>\r\nBcc: evil@x".into());
+        assert!(matches!(
+            build_reply_rfc822(&reply),
+            Err(WriteError::Invalid(_))
+        ));
+        let mut fwd = fwd_parts("see");
+        fwd.message_id = Some("<a@passband>\nBcc: evil@x".into());
+        assert!(matches!(
+            build_forward_rfc822(&fwd),
+            Err(WriteError::Invalid(_))
+        ));
+    }
+
+    // ---- scheduled send: the outbox header and the Sent scan ---------------
+
+    #[test]
+    fn the_outbox_token_is_the_minted_ids_local_part() {
+        assert_eq!(outbox_token("<0badc0de@passband.app>"), "0badc0de");
+        assert_eq!(outbox_token(" 0badc0de@passband.app "), "0badc0de");
+        // Rows minted before the dotted host: the same token.
+        assert_eq!(outbox_token("<0badc0de@passband>"), "0badc0de");
+        assert_eq!(
+            bare_message_id(" <0badc0de@passband.app> "),
+            "0badc0de@passband.app"
+        );
+        assert_eq!(bare_message_id("<0badc0de@passband>"), "0badc0de@passband");
+        assert_eq!(outbox_token("0badc0de"), "0badc0de");
+        assert_eq!(outbox_token("<>"), "");
+    }
+
+    #[test]
+    fn an_outbox_token_adds_exactly_one_header_and_nothing_else() {
+        let header = "X-Passband-Outbox: 0badc0de\r\n";
+        let mut threaded = bare_parts("hi");
+        threaded.in_reply_to = Some("<parent@x>".into());
+        let mut html = bare_parts("hi");
+        html.body_html = Some("<p>hi</p>".into());
+        html.pixel_url = Some("https://t.test/t/tok".into());
+        for mut base in [bare_parts("hi"), threaded, html] {
+            // As the worker fires it: the minted id AND its token.
+            base.message_id = Some("<0badc0de@passband>".into());
+            let without = String::from_utf8(build_reply_rfc822(&base).unwrap()).unwrap();
+            let mut with_token = base.clone();
+            with_token.outbox_token = Some("0badc0de".into());
+            let with = String::from_utf8(build_reply_rfc822(&with_token).unwrap()).unwrap();
+            let head = with.split("\r\n\r\n").next().unwrap();
+            assert_eq!(
+                head.lines()
+                    .filter(|l| l.starts_with("X-Passband-Outbox:"))
+                    .count(),
+                1
+            );
+            assert!(head.contains(header));
+            assert!(head.contains("Message-ID: <0badc0de@passband>\r\n"), "kept");
+            assert_eq!(with.replacen(header, "", 1), without);
+            assert!(
+                !without.contains("X-Passband-Outbox"),
+                "None writes no header"
+            );
+        }
+        // Empty is None.
+        let mut empty = bare_parts("hi");
+        empty.outbox_token = Some(String::new());
+        assert_eq!(
+            build_reply_rfc822(&empty).unwrap(),
+            build_reply_rfc822(&bare_parts("hi")).unwrap()
+        );
+        // And a forward the same way.
+        let fwd_without =
+            String::from_utf8(build_forward_rfc822(&fwd_parts("see")).unwrap()).unwrap();
+        let mut fwd = fwd_parts("see");
+        fwd.outbox_token = Some("0badc0de".into());
+        let fwd_with = String::from_utf8(build_forward_rfc822(&fwd).unwrap()).unwrap();
+        assert!(fwd_with.split("\r\n\r\n").next().unwrap().contains(header));
+        assert_eq!(fwd_with.replacen(header, "", 1), fwd_without);
+    }
+
+    #[test]
+    fn an_outbox_token_carrying_crlf_is_refused_not_repaired() {
+        let mut reply = bare_parts("hi");
+        reply.outbox_token = Some("abc\r\nBcc: evil@x".into());
+        assert!(matches!(
+            build_reply_rfc822(&reply),
+            Err(WriteError::Invalid(_))
+        ));
+        let mut fwd = fwd_parts("see");
+        fwd.outbox_token = Some("abc\nBcc: evil@x".into());
+        assert!(matches!(
+            build_forward_rfc822(&fwd),
+            Err(WriteError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn the_sent_scan_lists_sent_mail_between_two_instants() {
+        assert_eq!(
+            sent_scan_url("https://g.test/me", 1_790_000_000, 1_790_007_200, None),
+            "https://g.test/me/messages?q=in%3Asent%20after%3A1790000000\
+             %20before%3A1790007200&maxResults=25&includeSpamTrash=true"
+        );
+        assert_eq!(
+            sent_scan_url("https://g.test/me", 5, 9, Some("t/1&x")),
+            "https://g.test/me/messages?q=in%3Asent%20after%3A5%20before%3A9\
+             &maxResults=25&includeSpamTrash=true&pageToken=t%2F1%26x"
+        );
+    }
+
+    /// Serve one scripted `(status, body)` per connection, in order, and
+    /// return the requests. Stops at the first connection that does not come
+    /// within half a second, so a test can script MORE than it expects and
+    /// prove the client stopped short.
+    async fn mock_seq(
+        responses: Vec<(u16, String)>,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let mut reqs = Vec::new();
+            for (status, body) in responses {
+                let accepted =
+                    tokio::time::timeout(std::time::Duration::from_millis(500), listener.accept())
+                        .await;
+                let Ok(Ok((mut sock, _))) = accepted else {
+                    break;
+                };
+                let mut buf = vec![0u8; 8192];
+                let n = sock.read(&mut buf).await.unwrap();
+                reqs.push(String::from_utf8_lossy(&buf[..n]).to_string());
+                let resp = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                sock.write_all(resp.as_bytes()).await.unwrap();
+                sock.flush().await.unwrap();
+            }
+            reqs
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    const NO_MATCH: &str = "{\"resultSizeEstimate\":0}";
+
+    fn meta(id: &str, outbox: &str, mid: &str) -> String {
+        format!(
+            "{{\"id\":\"{id}\",\"payload\":{{\"headers\":[\
+               {{\"name\":\"Message-ID\",\"value\":\"{mid}\"}},\
+               {{\"name\":\"X-Passband-Outbox\",\"value\":\"{outbox}\"}}]}}}}"
+        )
+    }
+
+    fn window() -> (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) {
+        (
+            chrono::DateTime::from_timestamp(1_790_000_000, 0).unwrap(),
+            chrono::DateTime::from_timestamp(1_790_007_200, 0).unwrap(),
+        )
+    }
+
+    fn running() -> bool {
+        false
+    }
+
+    #[tokio::test]
+    async fn a_msgid_hit_short_circuits_the_scan() {
+        let (base, handle) = mock_seq(vec![
+            (200, "{\"messages\":[{\"id\":\"gm-1\"}]}".into()),
+            (200, NO_MATCH.into()),
+        ])
+        .await;
+        let got = client(base)
+            .find_scheduled_send("<abc@passband>", window(), &running)
+            .await
+            .unwrap();
+        assert_eq!(got.as_deref(), Some("gm-1"));
+        let reqs = handle.await.unwrap();
+        assert_eq!(reqs.len(), 1, "no scan after a hit");
+        assert!(reqs[0].contains("rfc822msgid%3Aabc%40passband"));
+    }
+
+    #[tokio::test]
+    async fn the_scan_finds_the_mail_by_its_outbox_header() {
+        let (base, handle) = mock_seq(vec![
+            (200, NO_MATCH.into()),
+            (
+                200,
+                "{\"messages\":[{\"id\":\"gm-a\"},{\"id\":\"gm-b\"}]}".into(),
+            ),
+            (200, meta("gm-a", "other", "<x@mail.gmail.com>")),
+            // Gmail's own Message-ID: the minted one did not survive.
+            (200, meta("gm-b", " abc ", "<rewritten@mail.gmail.com>")),
+        ])
+        .await;
+        let got = client(base)
+            .find_scheduled_send("<abc@passband>", window(), &running)
+            .await
+            .unwrap();
+        assert_eq!(got.as_deref(), Some("gm-b"));
+        let reqs = handle.await.unwrap();
+        assert_eq!(reqs.len(), 4);
+        // Both ends of the window, in epoch seconds, as given.
+        assert!(reqs[1].contains(
+            "GET /messages?q=in%3Asent%20after%3A1790000000%20before%3A1790007200&maxResults=25"
+        ));
+        assert!(reqs[1].contains("includeSpamTrash=true"));
+        for (req, id) in [(&reqs[2], "gm-a"), (&reqs[3], "gm-b")] {
+            assert!(req.contains(&format!(
+                "GET /messages/{id}?format=metadata&metadataHeaders=X-Passband-Outbox\
+                 &metadataHeaders=Message-ID"
+            )));
+        }
+    }
+
+    #[tokio::test]
+    async fn the_scan_also_matches_the_minted_message_id() {
+        let (base, handle) = mock_seq(vec![
+            (200, NO_MATCH.into()),
+            (200, "{\"messages\":[{\"id\":\"gm-a\"}]}".into()),
+            (
+                200,
+                "{\"id\":\"gm-a\",\"payload\":{\"headers\":[\
+                  {\"name\":\"Message-Id\",\"value\":\"<abc@passband>\"}]}}"
+                    .into(),
+            ),
+        ])
+        .await;
+        let got = client(base)
+            .find_scheduled_send("<abc@passband>", window(), &running)
+            .await
+            .unwrap();
+        handle.await.unwrap();
+        assert_eq!(got.as_deref(), Some("gm-a"));
+    }
+
+    #[tokio::test]
+    async fn a_clean_scan_pages_to_the_end_and_answers_none() {
+        let (base, handle) = mock_seq(vec![
+            (200, NO_MATCH.into()),
+            (
+                200,
+                "{\"messages\":[{\"id\":\"p1\"}],\"nextPageToken\":\"tok1\"}".into(),
+            ),
+            (200, meta("p1", "nope", "<p1@x>")),
+            (200, "{\"messages\":[{\"id\":\"p2\"}]}".into()),
+            (200, meta("p2", "abcd", "<abc@passband.evil>")),
+        ])
+        .await;
+        let got = client(base)
+            .find_scheduled_send("<abc@passband>", window(), &running)
+            .await
+            .unwrap();
+        let reqs = handle.await.unwrap();
+        assert_eq!(got, None, "a prefix or a lookalike is not a match");
+        assert_eq!(reqs.len(), 5);
+        assert!(reqs[3].contains("&pageToken=tok1"));
+    }
+
+    #[tokio::test]
+    async fn a_scan_that_reaches_its_page_cap_stops_and_cannot_rule_out() {
+        let mut script = vec![(200, NO_MATCH.to_string())];
+        for page in 0..=SCAN_MAX_PAGES {
+            script.push((
+                200,
+                format!(
+                    "{{\"messages\":[{{\"id\":\"p{page}\"}}],\"nextPageToken\":\"tok{page}\"}}"
+                ),
+            ));
+            script.push((200, meta(&format!("p{page}"), "nope", "<n@x>")));
+        }
+        let (base, handle) = mock_seq(script).await;
+        let got = client(base)
+            .find_scheduled_send("<abc@passband>", window(), &running)
+            .await;
+        let reqs = handle.await.unwrap();
+        assert!(matches!(got, Err(WriteError::Transport(_))), "{got:?}");
+        assert_eq!(reqs.len(), 1 + SCAN_MAX_PAGES * 2, "stopped at the cap");
+    }
+
+    #[tokio::test]
+    async fn a_5xx_mid_scan_is_an_error_never_a_none() {
+        let (base, handle) = mock_seq(vec![
+            (200, NO_MATCH.into()),
+            (
+                200,
+                "{\"messages\":[{\"id\":\"gm-a\"},{\"id\":\"gm-b\"}]}".into(),
+            ),
+            (503, "{}".into()),
+            (200, meta("gm-b", "abc", "<abc@passband>")),
+        ])
+        .await;
+        let got = client(base)
+            .find_scheduled_send("<abc@passband>", window(), &running)
+            .await;
+        let reqs = handle.await.unwrap();
+        assert!(matches!(got, Err(WriteError::Api { status: 503, .. })));
+        assert_eq!(reqs.len(), 3, "nothing asked after the failure");
+    }
+
+    #[tokio::test]
+    async fn a_shutdown_mid_scan_is_an_error_never_a_none() {
+        let (base, handle) = mock_seq(vec![
+            (200, NO_MATCH.into()),
+            (
+                200,
+                "{\"messages\":[{\"id\":\"gm-a\"},{\"id\":\"gm-b\"}]}".into(),
+            ),
+            (200, meta("gm-a", "other", "<x@mail.gmail.com>")),
+            (200, meta("gm-b", "abc", "<abc@passband.app>")),
+        ])
+        .await;
+        // Asked before the page and the first candidate; stopping by the
+        // second.
+        let asks = std::sync::atomic::AtomicUsize::new(0);
+        let stopping = || asks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 2;
+        let got = client(base)
+            .find_scheduled_send("<abc@passband.app>", window(), &stopping)
+            .await;
+        let reqs = handle.await.unwrap();
+        assert!(matches!(got, Err(WriteError::Transport(_))), "{got:?}");
+        assert_eq!(reqs.len(), 3, "nothing asked after the shutdown");
+        assert!(reqs[0].contains("rfc822msgid%3Aabc%40passband.app"));
     }
 
     // ---- attachments on a COMPOSED message ---------------------------------

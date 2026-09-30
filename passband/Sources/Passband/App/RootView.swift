@@ -321,7 +321,9 @@ struct MainShell: View {
                 // reports (the tour measures it) and drops only the drawing.
                 // Visible again the moment the reader is in flight, so the
                 // board is there under a departing email.
-                .opacity(store.threadId != nil && store.threadFlight == .settled ? 0 : 1)
+                .opacity(
+                    (store.threadId != nil && store.threadFlight == .settled)
+                        || store.scheduledPreviewRow != nil ? 0 : 1)
                 // The composer's STRIP: a working surface in the layout, NOT an
                 // overlay — no scrim, no blur, the page beside it shrinks and
                 // stays live. The pane itself is drawn in its own layer below,
@@ -356,7 +358,14 @@ struct MainShell: View {
             // open side panel's strip: opening a hit from search must leave the
             // results visible beside the email. Esc sheds the panel first (the
             // email stays), a second Esc closes the reader.
-            if let threadId = store.threadId {
+            //
+            // THE SAME SLOT holds a scheduled mail's read-only preview
+            // (ScheduledPreview): opened from Sent where a sent row's thread
+            // would open, with the same rail, insets and layer. The two never
+            // share it (`openThread` and `openScheduledPreview` each clear
+            // the other).
+            let preview = store.threadId == nil ? store.scheduledPreviewRow : nil
+            if store.threadId != nil || preview != nil {
                 HStack(spacing: 0) {
                     // THE RAIL STAYS: the reader insets past it instead of
                     // covering it, so 1..5 stay clickable while you read. The
@@ -392,10 +401,17 @@ struct MainShell: View {
                         // platform view is re-rasterised every frame it
                         // changes; the departure ran on the same main thread
                         // it was starving.
-                        ThreadViewer(threadId: threadId)
-                            .id(threadId)
-                            .offset(flight.offset(in: geo.size))
-                            .opacity(flight.opacity)
+                        if let threadId = store.threadId {
+                            ThreadViewer(threadId: threadId)
+                                .id(threadId)
+                                .offset(flight.offset(in: geo.size))
+                                .opacity(flight.opacity)
+                        } else if let preview {
+                            // No flight: a preview is opened and closed, never
+                            // walked through.
+                            ScheduledPreview(row: preview)
+                                .id(preview.id)
+                        }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipped()

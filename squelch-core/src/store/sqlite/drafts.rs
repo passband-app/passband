@@ -2,22 +2,45 @@
 
 use super::*;
 
+/// The picker's PARENT CONTEXT (thread, subject, sender address, sender
+/// name), in that order, read off the `m` that [`parent_join`] brings in.
+/// Shared by drafts and the outbox (`scheduled.rs`), which show the same
+/// "who / what" line for a composition that replies to or forwards a stored
+/// message.
+pub(super) const PARENT_COLS: &str = "m.thread_id, m.subject, m.from_addr, m.from_name";
+
+/// `LEFT JOIN messages m` onto the row aliased `owner`, matching the message
+/// whose id is the SQL expression `parent_id`. PINNED TO THE SAME ACCOUNT, so
+/// a composition can never borrow another account's message by id; plain new
+/// mail, and a composition whose parent is gone, join nothing and read `NULL`s.
+pub(super) fn parent_join(owner: &str, parent_id: &str) -> String {
+    format!(
+        "LEFT JOIN messages m
+      ON m.account_id = {owner}.account_id
+     AND m.id = {parent_id}"
+    )
+}
+
 /// Every draft read goes through this one SELECT, so the row shape and the
 /// parent join cannot drift between the listing and the single-row reads.
 ///
-/// The LEFT JOIN fills the picker's context (thread, subject, sender) from the
-/// replied-to or forwarded message. It is pinned to the SAME account, so a
-/// draft can never borrow another account's message by id; plain new mail, and
-/// a draft whose parent is gone, join nothing and read `NULL`s.
-const DRAFT_SELECT: &str = "SELECT d.id, d.account_id, d.reply_to_message_id,
+/// The LEFT JOIN fills the picker's context from the replied-to or forwarded
+/// message (see [`parent_join`]).
+fn draft_select() -> String {
+    format!(
+        "SELECT d.id, d.account_id, d.reply_to_message_id,
         d.forward_of_message_id, d.to_addr, d.cc_addr, d.bcc_addr, d.subject, d.body,
-        d.created_at, d.updated_at, m.thread_id, m.subject, m.from_addr, m.from_name
+        d.created_at, d.updated_at, {PARENT_COLS}
     FROM drafts d
-    LEFT JOIN messages m
-      ON m.account_id = d.account_id
-     AND m.id = COALESCE(d.reply_to_message_id, d.forward_of_message_id)";
+    {}",
+        parent_join(
+            "d",
+            "COALESCE(d.reply_to_message_id, d.forward_of_message_id)"
+        )
+    )
+}
 
-/// One [`DRAFT_SELECT`] row into a [`Draft`].
+/// One [`draft_select`] row into a [`Draft`].
 fn map_draft(r: &rusqlite::Row<'_>) -> rusqlite::Result<Draft> {
     Ok(Draft {
         id: r.get(0)?,
@@ -45,7 +68,7 @@ fn map_draft(r: &rusqlite::Row<'_>) -> rusqlite::Result<Draft> {
 fn read_draft(conn: &Connection, account_id: AccountId, id: i64) -> Result<Option<Draft>> {
     let row = conn
         .query_row(
-            &format!("{DRAFT_SELECT} WHERE d.account_id = ?1 AND d.id = ?2"),
+            &format!("{} WHERE d.account_id = ?1 AND d.id = ?2", draft_select()),
             params![account_id, id],
             map_draft,
         )
@@ -180,7 +203,8 @@ impl SqliteStore {
         let conn = self.lock()?;
         // Drafts are human-only; external access restrictions do not hide them.
         let mut stmt = conn.prepare(&format!(
-            "{DRAFT_SELECT} WHERE d.account_id = ?1 ORDER BY d.updated_at DESC, d.id DESC"
+            "{} WHERE d.account_id = ?1 ORDER BY d.updated_at DESC, d.id DESC",
+            draft_select()
         ))?;
         let mut out = stmt
             .query_map(params![account_id], map_draft)?

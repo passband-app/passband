@@ -451,9 +451,31 @@ private struct ThreadDestination: ViewModifier {
     /// while the tab is frontmost, so a store-level thread never leaks onto a
     /// stack that didn't open it.
     @State private var mine: String?
+    /// The SCHEDULED MAIL this tab's stack shows read-only (ScheduledPreview),
+    /// pushed the way a thread is and owned by the same rule: captured from
+    /// `store.scheduledPreviewId` only while this tab is frontmost.
+    @State private var minePreview: Int?
 
     func body(content: Content) -> some View {
         content
+            .navigationDestination(item: openPreview) { id in
+                // By id, resolved against the live listing, so a retry or a
+                // failure shows up while it is open. A row that left the
+                // listing pops (the store's refresh closes the preview).
+                if let row = store.scheduledRows.first(where: { $0.id == id }) {
+                    ScheduledPreview(row: row)
+                        .id(id)
+                        .navigationTitle("")
+                        .navigationBarTitleDisplayMode(.inline)
+                }
+            }
+            .onChange(of: store.scheduledPreviewId) { _, newValue in
+                if active {
+                    minePreview = newValue
+                } else if newValue != minePreview {
+                    minePreview = nil
+                }
+            }
             .navigationDestination(item: openThread) { threadId in
                 ThreadViewer(threadId: threadId)
                     .id(threadId)
@@ -475,6 +497,17 @@ private struct ThreadDestination: ViewModifier {
                     mine = nil
                 }
             }
+    }
+
+    /// A pop (the chevron, the edge swipe) is Esc: the mail stays scheduled.
+    private var openPreview: Binding<Int?> {
+        Binding(
+            get: { minePreview },
+            set: { newValue in
+                guard newValue == nil, let owned = minePreview else { return }
+                minePreview = nil
+                if active, store.scheduledPreviewId == owned { store.closeScheduledPreview() }
+            })
     }
 
     private var openThread: Binding<String?> {

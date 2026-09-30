@@ -21,6 +21,7 @@ mod http_metrics;
 mod invite_mail;
 mod markdown;
 mod pair;
+mod scheduled_send;
 mod sharing;
 mod state;
 pub mod tracking;
@@ -34,6 +35,9 @@ pub use error::ApiError;
 /// WRITE credential, which the readonly-bound sync loop must never touch.
 pub use handlers::run_shred_pass;
 pub use http_metrics::record_http_metrics;
+/// The scheduled-send worker's pass. Exported for the daemon's timer for the
+/// same reason as the shredder: it sends on the WRITE credential.
+pub use scheduled_send::{ScheduledPassReport, run_scheduled_send_pass};
 /// The invite minter. Exported for the daemon binaries that build state by
 /// hand and for the integration suite, which points it at a mock control plane.
 pub use sharing::Sharing;
@@ -188,6 +192,15 @@ fn client_router(state: ApiState) -> Router {
             "/client/drafts/{id}",
             put(handlers::update_draft).delete(handlers::delete_draft),
         )
+        // The outbox: finished mail the daemon sends later. Served EXCLUSIVELY
+        // here, like drafts — the agent door has no route to it and never
+        // learns the table exists. POST schedules (running every check a send
+        // runs, guard included, while the user is there to answer), GET lists
+        // what is still owed an outcome, DELETE pulls one back into the
+        // composer, and /now sends one on the next tick. Its own router so
+        // one `no-store` layer covers every response on it, an extractor's
+        // rejection included.
+        .merge(scheduled_send::routes())
         // The composer/signature preview: the send path's own markdown render,
         // exposed so the client never grows a second, drifting renderer.
         .route("/client/markdown/preview", post(handlers::markdown_preview))

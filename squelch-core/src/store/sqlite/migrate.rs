@@ -68,6 +68,7 @@ fn tables_exist(conn: &Connection, tables: &[&str]) -> Result<bool> {
 /// and the rare index that has to be dropped.
 pub(super) fn migrate(conn: &Connection) -> Result<()> {
     retire_records_destination(conn)?;
+    retire_preference_retriage(conn)?;
     add_column_if_missing(conn, "messages", "list_unsubscribe", "TEXT")?;
     add_column_if_missing(
         conn,
@@ -101,6 +102,40 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // the composer can show, or closing one silently drops recipients.
     add_column_if_missing(conn, "drafts", "cc_addr", "TEXT NOT NULL DEFAULT ''")?;
     add_column_if_missing(conn, "drafts", "bcc_addr", "TEXT NOT NULL DEFAULT ''")?;
+
+    // A staged file's SECOND claim, beside `draft_id`: the scheduled send that
+    // holds it (docs/SCHEDULED-SEND.md). Every pre-existing row is unclaimed by
+    // a schedule, which NULL says: no backfill. The index names the new column,
+    // so it lives here, behind the column check, and never in schema.sql.
+    add_column_if_missing(conn, "outbound_attachments", "scheduled_send_id", "INTEGER")?;
+    if has_columns(
+        conn,
+        "outbound_attachments",
+        &["account_id", "scheduled_send_id"],
+    )? {
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_outbound_attachments_scheduled
+                 ON outbound_attachments(account_id, scheduled_send_id)
+                 WHERE scheduled_send_id IS NOT NULL",
+            [],
+        )?;
+    }
+    // The outbox's recovery columns (docs/SCHEDULED-SEND.md §4), for a DB
+    // whose `scheduled_sends` predates them. 0 and NULL are the honest
+    // readings: no earlier attempt is known to have reached Gmail, and no
+    // recovery search is being waited out.
+    add_column_if_missing(
+        conn,
+        "scheduled_sends",
+        "maybe_sent",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(conn, "scheduled_sends", "recover_at", "TEXT")?;
+    // The fire-time grace and the pre-fire search's give-up clock. NULL is the
+    // honest reading for both: no attempt's end is known (the grace does not
+    // hold a row back), and no search is being waited out.
+    add_column_if_missing(conn, "scheduled_sends", "last_attempt_at", "TEXT")?;
+    add_column_if_missing(conn, "scheduled_sends", "search_deferred_since", "TEXT")?;
     // MANY NEW-MESSAGE DRAFTS. The old single-slot index made a second
     // new-message draft a constraint violation; new mail is keyed by row id now.
     // No dedupe is owed: that index guaranteed at most one nil-keyed row.
@@ -127,6 +162,12 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     if unique_new_index {
         conn.execute("DROP INDEX idx_drafts_new", [])?;
     }
+    // NOT the same kind of guard as the forward index's below. On every real
+    // open schema.sql has already created `drafts` with both of these columns,
+    // so in production this is always true. It exists for the migrate unit
+    // tests, which run `migrate` over partial schemas with no `drafts` table at
+    // all; without it ~15 of them fail on a missing table. Nothing here adds
+    // either column.
     if has_columns(conn, "drafts", &["account_id", "reply_to_message_id"])? {
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_drafts_new
@@ -1305,6 +1346,25 @@ fn clear_recoverable_no_body_markers(conn: &Connection) -> Result<usize> {
     }
     tx.commit()?;
     Ok(cleared)
+}
+
+/// Drop re-triage work queued by sender-rule changes. Rules now apply only to
+/// mail that arrives after them (see `rules.rs`), and a backlog left by the old
+/// fan-out would otherwise keep draining the background budget for days: one
+/// `*` rule queued ~1,000 investigations. Every such job targets a message that
+/// already has a decision, so closing it leaves that placement as it was.
+/// Marked `completed` like a superseded revision, so lane and follow-up rows
+/// keep a valid job. Idempotent: nothing enqueues this trigger any more.
+pub(super) fn retire_preference_retriage(conn: &Connection) -> Result<()> {
+    if !tables_exist(conn, &["agent_triage_jobs"])? {
+        return Ok(());
+    }
+    conn.execute(
+        "UPDATE agent_triage_jobs SET state='completed',lease_token=NULL,lease_until=NULL
+         WHERE state='queued' AND trigger LIKE 'preference:%'",
+        [],
+    )?;
+    Ok(())
 }
 
 /// Retire the old independent placement without dropping typed record facts.

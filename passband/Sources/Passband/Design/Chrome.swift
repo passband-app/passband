@@ -217,9 +217,15 @@ struct KeyHint: View {
 /// hints under a top hairline.
 struct KeyHintBar: View {
     let hints: [KeyHint]
+    /// A control ahead of the first hint (the inline reply's send clock, just
+    /// left of the send verb it changes). nil = the bar as it always was.
+    var leading: AnyView? = nil
 
     var body: some View {
         HStack(spacing: 4) {
+            if let leading {
+                leading.padding(.trailing, 4)
+            }
             ForEach(Array(hints.enumerated()), id: \.offset) { i, hint in
                 if i > 0 { Text("·").foregroundStyle(Palette.inkFaintest) }
                 hint

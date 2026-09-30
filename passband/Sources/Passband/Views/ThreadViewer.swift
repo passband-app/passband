@@ -725,7 +725,7 @@ struct ThreadViewer: View {
                                     message: m, style: style, position: i,
                                     selected: i == index, ruled: i > 0,
                                     opens: opens[m.id] ?? [],
-                                    me: store.sitrep.stats?.account_email,
+                                    me: store.stats?.account_email,
                                     // The message before this one IN THE THREAD,
                                     // which is the order this stack is already in
                                     // (oldest first). The first message has none,

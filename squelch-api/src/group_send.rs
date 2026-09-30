@@ -288,13 +288,17 @@ async fn send_one(
         body_html: plan.body_html.clone(),
         pixel_url: plan.pixel_url.clone(),
         attachments: plan.attachments.clone(),
+        // Gmail mints each member's. One minted id cannot serve N messages, and a
+        // scheduled fan-out is refused for v1 (docs/SCHEDULED-SEND.md §3).
+        message_id: None,
+        outbox_token: None,
     };
     let raw = build_reply_rfc822(&parts).map_err(|_| "could not compose".to_string())?;
     let sent = client
         .send(&raw, None)
         .await
         .map_err(|_| "gmail refused the message".to_string())?;
-    Ok(crate::handlers::echo_sent(state, client, None, &sent).await)
+    Ok(crate::handlers::echo_sent(state, client, None, &sent, None).await)
 }
 
 /// Write one recipient's outcome. Best-effort in the sense that a failed write

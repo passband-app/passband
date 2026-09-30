@@ -40,7 +40,7 @@ final class SitrepPoller {
     private init() {}
 
     /// Whether the loop is up. False between an account switch's `stop()`
-    /// and the next `start()`: nothing can land in `sitrep.stats` meanwhile,
+    /// and the next `start()`: nothing can land in `stats` meanwhile,
     /// which is what a writer waiting on that verdict needs to know.
     var isPolling: Bool { resident.isRunning }
 
@@ -248,6 +248,10 @@ final class SitrepPoller {
             // first visit of a session still pays five round-trips. Its own TTL
             // makes this a date compare on most polls.
             await store.refreshZones()
+            // The outbox, so a scheduled mail that FAILS toasts wherever the
+            // person is, not only on the Sent page. Its own TTL and an
+            // empty-outbox skip make this free on most ticks.
+            await store.pollScheduled()
             return true
         } catch {
             guard !Task.isCancelled, store.isCurrent(e) else { return true }

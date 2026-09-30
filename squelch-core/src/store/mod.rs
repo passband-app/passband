@@ -264,7 +264,8 @@ pub struct SealedBody {
 /// The Gmail ids + header fields an action endpoint needs to act on a message,
 /// and no body. HUMAN-DOOR-ONLY: produced solely by
 /// [`SqliteStore::action_message_ref`](sqlite::SqliteStore::action_message_ref),
-/// which excludes sealed rows in SQL so an action can never target sealed mail.
+/// which does NOT filter sealed or restricted rows (see its doc for where the
+/// human-door and agent-door gates actually live).
 #[derive(Debug, Clone)]
 pub struct ActionMessageRef {
     /// Local message id.
@@ -657,6 +658,150 @@ pub struct OutboundAttachmentMeta {
 pub struct OutboundAttachment {
     pub meta: OutboundAttachmentMeta,
     pub data: Vec<u8>,
+}
+
+/// The `CoreError::InvalidInput` message a scheduling answers when not every
+/// named file could move onto the row (unknown, swept, another account's, or
+/// held by another draft or scheduled send): the handler's
+/// `400 rejected:attachment_missing`.
+pub const ATTACHMENT_MISSING: &str = "attachment_missing";
+
+/// The `CoreError::InvalidInput` message a scheduling answers when the account
+/// already holds [`MAX_SCHEDULED_PER_ACCOUNT`] live rows: the handler's
+/// `400 rejected:too_many_scheduled`.
+pub const TOO_MANY_SCHEDULED: &str = "too_many_scheduled";
+
+/// Live (`scheduled`, `sending`, `failed`) outbox rows one account may hold.
+/// Each row pins its files' bytes for up to a year, and nobody schedules a
+/// hundred mails by hand: past this it is a client loop, not a person.
+pub const MAX_SCHEDULED_PER_ACCOUNT: usize = 100;
+
+/// Claims a scheduled send gets before it is `failed` and waits for the user.
+/// The claim counts, so a row fails on its third unsuccessful attempt. The
+/// worker's claim refuses a row already at the limit (a belt: every path that
+/// reaches it settles `failed` first).
+pub const SCHEDULED_MAX_ATTEMPTS: u32 = 3;
+
+/// Where a [`ScheduledSend`] is in its life. Stored as the lowercase TEXT
+/// [`Self::as_str`] gives; see the `scheduled_sends` table comment in
+/// schema.sql for the transitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ScheduledSendState {
+    /// Waiting for `send_at`. The only state the worker claims from.
+    Scheduled,
+    /// Claimed by the worker under a lease: in Gmail's hands, NOT cancellable.
+    Sending,
+    Sent,
+    /// Out of retries; waits for the user ("send now" or cancel).
+    Failed,
+    Cancelled,
+}
+
+impl ScheduledSendState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Scheduled => "scheduled",
+            Self::Sending => "sending",
+            Self::Sent => "sent",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// `None` for text no build ever wrote.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "scheduled" => Self::Scheduled,
+            "sending" => Self::Sending,
+            "sent" => Self::Sent,
+            "failed" => Self::Failed,
+            "cancelled" => Self::Cancelled,
+            _ => return None,
+        })
+    }
+}
+
+/// One `scheduled_sends` row: a finished mail the daemon sends at `send_at`
+/// (docs/SCHEDULED-SEND.md).
+///
+/// HUMAN-DOOR ONLY, like [`Draft`]: produced for `/client/scheduled` and the
+/// scheduled-send worker, never synced, and no agent-door read reaches the
+/// table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduledSend {
+    pub id: i64,
+    pub account_id: AccountId,
+    /// The send route's JSON body, frozen at schedule time (`confirm` forced
+    /// true, `draft_id` stripped). CONTENT: never log or audit it.
+    pub request: String,
+    pub send_at: DateTime<Utc>,
+    pub state: ScheduledSendState,
+    /// Set while [`ScheduledSendState::Sending`], `None` otherwise.
+    pub lease_until: Option<DateTime<Utc>>,
+    /// Claims so far; the worker's claim increments it, a requeue does not.
+    pub attempts: u32,
+    /// Why the last attempt did not send: a REDACTED reason (a status, an
+    /// error class), NEVER mail content, since it is shown and kept.
+    pub last_error: Option<String>,
+    /// The `Message-ID` minted at schedule time, angle brackets included. The
+    /// crash-recovery key: searched for before any retry of a lapsed lease.
+    pub message_id_header: String,
+    /// Local `messages.id` of the sent copy's echo, once sent and echoed.
+    pub sent_message_id: Option<i64>,
+    pub sent_thread_id: Option<String>,
+    /// STICKY: some earlier attempt may have reached Gmail (a transport error
+    /// or a 5xx AFTER the send was posted, or a lapsed lease). Every later
+    /// fire asks Gmail for `message_id_header` before sending again.
+    pub maybe_sent: bool,
+    /// When the last attempt ENDED: stamped by its retry or failed settle (a
+    /// requeue stamps the lapsed lease's end). Not by the claim, which would
+    /// overwrite the very value the fire needs and which, for a large upload,
+    /// can precede the post by a whole lease. A `maybe_sent` row is not fired
+    /// before this plus the recovery grace, so its search can see the mail.
+    pub last_attempt_at: Option<DateTime<Utc>>,
+    /// The first "could not search" deferral of a pre-fire search still
+    /// unanswered, or `None`. The give-up clock for that search.
+    pub search_deferred_since: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    /// The files this row has claimed, upload order. Metadata only.
+    pub attachments: Vec<OutboundAttachmentMeta>,
+}
+
+/// What an unclaim does to a row's pre-fire search clock
+/// ([`ScheduledSend::search_deferred_since`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchClock {
+    /// The search answered (or none was owed): the clock stops.
+    Reset,
+    /// The search could not be made: the clock starts, unless it is running.
+    Start,
+    /// The search was not tried (the fire-time grace): left as it is.
+    Keep,
+}
+
+/// What [`SqliteStore::cancel_scheduled_send`](sqlite::SqliteStore::cancel_scheduled_send)
+/// found (the row is boxed only to keep the enum small). Three answers because the handler gives three: the cancelled row (its
+/// `request` reopens the composer), `409` for a row already in Gmail's hands,
+/// and `404` for an unknown id, another account's, or one that is already
+/// settled (`sent`/`cancelled`: there is nothing left to cancel).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CancelOutcome {
+    Cancelled(Box<ScheduledSend>),
+    Sending,
+    NotFound,
+}
+
+/// The picker context of the stored message a composition replies to or
+/// forwards: the same four columns a [`Draft`] carries flat, read by the same
+/// account-pinned join. Every field is `None` for new mail and for a parent
+/// that is no longer stored.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ParentContext {
+    pub thread_id: Option<String>,
+    pub subject: Option<String>,
+    pub from_addr: Option<String>,
+    pub from_name: Option<String>,
 }
 
 /// One non-confident triage row queued for the Stage-2 LLM pass, with message

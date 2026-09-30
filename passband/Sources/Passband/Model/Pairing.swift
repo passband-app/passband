@@ -77,6 +77,24 @@ struct PairLink: Equatable, Sendable {
         analyticsId = Pairing.analyticsId(from: value("aid"))
     }
 
+    /// Whether a link that just arrived is taken at all. A link any web page
+    /// can open must not be able to raise a pre-filled form over a working
+    /// app on its own, so what "taken" means depends on who is asking:
+    ///
+    /// - Not connected: always. The Connect gate is the whole screen, and a
+    ///   link filling it is how a first pairing works.
+    /// - Connected, on the Mac: yes, and the store raises Add Account for it.
+    ///   That has always been the Mac's contract with `squelchd pair` links
+    ///   clicked from a terminal.
+    /// - Connected, on the PHONE: only while the Add Account sheet is already
+    ///   up, which is the one moment a person is actually expecting one — they
+    ///   pressed "sign in with Gmail" in it and went to the browser. Anything
+    ///   else (a page redirecting mid-inbox, a link left over from a sheet they
+    ///   dismissed, one arriving under the composer) is dropped.
+    static func admits(connected: Bool, addAccountOpen: Bool, phone: Bool) -> Bool {
+        guard connected else { return true }
+        return !phone || addAccountOpen
+    }
 }
 
 enum PairError: Error, Equatable {

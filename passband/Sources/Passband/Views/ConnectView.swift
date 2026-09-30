@@ -319,13 +319,19 @@ struct ConnectView: View {
         }
     }
 
+    /// Open the hosted sign in. Every door to it goes through here, so the
+    /// "finish in your browser" copy can never disagree with what happened.
+    private func openHostedSignIn() {
+        signInOpened = true
+        Opener.open(Hosted.signIn(theme: colorScheme))
+    }
+
     private func signIn() {
         url = ""
         mode = .pair
         arrivedViaPairLink = false
-        signInOpened = true
         gateStep = .credentials(.hosted)
-        Opener.open(Hosted.signIn(theme: colorScheme))
+        openHostedSignIn()
     }
 
     private func selfHost() {
@@ -515,15 +521,13 @@ struct ConnectView: View {
     /// The sheet's hosted door, and the same one the gate opens: Google's
     /// account chooser names the mailbox, the control plane finds the daemon
     /// that mailbox owns, and the browser comes back with a `passband://pair`
-    /// link. The store raises THIS sheet for a link while connected, so the
-    /// link lands in the form below exactly as a hand-typed code would —
-    /// filled and ringed, and a press away from adding, never added on its own.
+    /// link. That link lands in THIS sheet, which has to still be open for
+    /// it (the phone drops a link that arrives while connected with no sheet
+    /// up, see `PairLink.admits`), and fills the form below the way a typed
+    /// code would: ringed, a press away from adding, never added on its own.
     private var sheetSignIn: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Button {
-                signInOpened = true
-                Opener.open(Hosted.signIn(theme: colorScheme))
-            } label: {
+            Button { openHostedSignIn() } label: {
                 HStack(spacing: 9) {
                     Image(systemName: "envelope.fill")
                     Text(signInOpened ? "open sign in again" : "sign in with Gmail")
@@ -540,19 +544,19 @@ struct ConnectView: View {
             .disabled(busy)
 
             Text(signInOpened
-                ? "finish in the browser tab that opened. this sheet fills in when passband comes back."
+                ? "finish signing in in your browser. keep this sheet open: it fills in when passband comes back."
                 : "pick the Google account whose mail you want to add.")
                 .font(.system(size: 12))
                 .foregroundStyle(Palette.inkFaint)
                 .fixedSize(horizontal: false, vertical: true)
 
             HStack(spacing: 10) {
-                Rectangle().fill(Palette.hairlineStrong).frame(height: 0.75)
-                Text("or pair a server")
+                Hairline()
+                Text("or connect a server by hand")
                     .font(.system(size: 11))
                     .foregroundStyle(Palette.inkFaint)
                     .fixedSize()
-                Rectangle().fill(Palette.hairlineStrong).frame(height: 0.75)
+                Hairline()
             }
             .padding(.vertical, 10)
         }
@@ -708,8 +712,7 @@ struct ConnectView: View {
     @ViewBuilder private var gateSecondaryAction: some View {
         if hostingChoice == .hosted {
             Button(signInOpened ? "Open sign in again" : "Sign in with Gmail") {
-                signInOpened = true
-                Opener.open(Hosted.signIn(theme: colorScheme))
+                openHostedSignIn()
             }
                 .buttonStyle(.plain)
                 .font(.system(size: 12))

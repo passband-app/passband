@@ -1224,8 +1224,7 @@ struct AccountSection: View {
             }
             // SHARING, and it renders only when this daemon can actually do it.
             // A self-hosted daemon has no control plane to mint a code at, so
-            // the button would be a control whose only outcome is a refusal —
-            // the same reasoning that keeps Add Account off the phone.
+            // the button would be a control whose only outcome is a refusal.
             //
             // THE PERMANENT DOOR. The two-week nudge asks once and never again;
             // anybody who changes their mind comes here.

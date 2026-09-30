@@ -26,9 +26,9 @@ struct PassbandiOSApp: App {
                 .preferredColorScheme(prefs.theme.colorScheme)
                 // passband://pair links, through the SAME store entry point the
                 // Mac uses: parked for a ConnectView rather than acted on — the
-                // gate when this install has no identity, the Add Account sheet
-                // (raised for it) when it does, which is how "sign in with
-                // Gmail" from that sheet comes back to it.
+                // gate when this install has no identity, or an Add Account
+                // sheet the person already has open, which is how "sign in
+                // with Gmail" from that sheet comes back to it.
                 .onOpenURL { store.receivePairLink($0) }
         }
     }

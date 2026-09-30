@@ -1938,3 +1938,40 @@ fn an_older_binarys_unique_drafts_index_create_is_a_no_op_after_many_drafts() {
     .expect("the old binary's create is a no-op, not a UNIQUE violation");
     assert_eq!(idx_drafts_new_unique(&conn), Some(false));
 }
+
+/// Re-triage queued by the retired rule-change fan-out is closed on open, so a
+/// backlog cannot keep draining the budget. In-flight and other work is kept.
+#[test]
+fn migrate_retires_queued_rule_change_retriage() {
+    let (store, acct) = store();
+    let conn = store.lock().unwrap();
+    for (message, trigger, state) in [
+        (1, "preference:abc", "queued"),
+        (2, "preference:abc", "leased"),
+        (3, "ingest", "queued"),
+    ] {
+        conn.execute(
+            "INSERT INTO agent_triage_jobs(account_id,message_id,kind,trigger,input_revision,state,available_at)
+             VALUES(?1,?2,'triage',?3,1,?4,'2026-09-29T00:00:00Z')",
+            params![acct, message, trigger, state],
+        )
+        .unwrap();
+    }
+    migrate(&conn).unwrap();
+    migrate(&conn).unwrap(); // idempotent
+    let states: Vec<(i64, String)> = conn
+        .prepare("SELECT message_id,state FROM agent_triage_jobs ORDER BY message_id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        states,
+        vec![
+            (1, "completed".into()),
+            (2, "leased".into()),
+            (3, "queued".into())
+        ]
+    );
+}

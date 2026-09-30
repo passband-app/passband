@@ -68,6 +68,7 @@ fn tables_exist(conn: &Connection, tables: &[&str]) -> Result<bool> {
 /// and the rare index that has to be dropped.
 pub(super) fn migrate(conn: &Connection) -> Result<()> {
     retire_records_destination(conn)?;
+    retire_preference_retriage(conn)?;
     add_column_if_missing(conn, "messages", "list_unsubscribe", "TEXT")?;
     add_column_if_missing(
         conn,
@@ -1305,6 +1306,25 @@ fn clear_recoverable_no_body_markers(conn: &Connection) -> Result<usize> {
     }
     tx.commit()?;
     Ok(cleared)
+}
+
+/// Drop re-triage work queued by sender-rule changes. Rules now apply only to
+/// mail that arrives after them (see `rules.rs`), and a backlog left by the old
+/// fan-out would otherwise keep draining the background budget for days: one
+/// `*` rule queued ~1,000 investigations. Every such job targets a message that
+/// already has a decision, so closing it leaves that placement as it was.
+/// Marked `completed` like a superseded revision, so lane and follow-up rows
+/// keep a valid job. Idempotent: nothing enqueues this trigger any more.
+pub(super) fn retire_preference_retriage(conn: &Connection) -> Result<()> {
+    if !tables_exist(conn, &["agent_triage_jobs"])? {
+        return Ok(());
+    }
+    conn.execute(
+        "UPDATE agent_triage_jobs SET state='completed',lease_token=NULL,lease_until=NULL
+         WHERE state='queued' AND trigger LIKE 'preference:%'",
+        [],
+    )?;
+    Ok(())
 }
 
 /// Retire the old independent placement without dropping typed record facts.

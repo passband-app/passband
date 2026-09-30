@@ -676,35 +676,3 @@ extension RoutedHeader where Trailing == EmptyView {
         self.init(title: title, subtitle: subtitle) { EmptyView() }
     }
 }
-
-// MARK: - how the reader changes threads
-
-extension AppStore.ThreadFlight {
-    /// WHERE THE READER SITS for each beat of the flight, a full window away in
-    /// whichever direction it is travelling — far enough that the email is
-    /// genuinely off the screen rather than peeking in at an edge.
-    func offset(in window: CGSize) -> CGSize {
-        switch self {
-        case .settled: .zero
-        case .departing: CGSize(width: 0, height: -window.height)
-        case .departingDown: CGSize(width: 0, height: window.height)
-        case .entering(.bottom): CGSize(width: 0, height: window.height)
-        case .entering(.trailing): CGSize(width: window.width, height: 0)
-        }
-    }
-
-    /// Only the departure fades, and slightly: enough for the email to read as
-    /// leaving the reader's plane rather than merely sliding. What arrives
-    /// arrives whole. (It used to shrink to 0.96 as well; a scale on a column
-    /// of web frames re-rasterises every one of them per frame, so it went.)
-    var opacity: Double { isDeparting ? 0 : 1 }
-
-    /// Both exits, whichever way they leave. The next variant added is a
-    /// departure or an arrival, and it says so here once.
-    var isDeparting: Bool {
-        switch self {
-        case .departing, .departingDown: true
-        case .settled, .entering: false
-        }
-    }
-}

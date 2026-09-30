@@ -355,8 +355,14 @@ struct ThreadViewer: View {
         // Warm the NEXT queued thread while this one is being read, so e/d's
         // done+advance opens it instantly.
         .onAppear {
-            // Reading's passive preview fetches and warms the next thread itself.
-            if !store.readingStack, let next = store.nextQueuedThread {
+            // Reading's passive preview fetches and warms the next thread itself
+            // — on the Mac. The phone's stack has no peek, so it warms here.
+            #if os(macOS)
+                let peekWarms = store.readingStack
+            #else
+                let peekWarms = false
+            #endif
+            if !peekWarms, let next = store.nextQueuedThread {
                 ThreadPrefetch.shared.prefetch(next.thread_id)
             }
         }
@@ -386,11 +392,38 @@ struct ThreadViewer: View {
         #else
             VStack(spacing: 0) {
                 header
-                content
+                stackFlight
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { composer }
         #endif
     }
+
+    #if !os(macOS)
+        /// THE PHONE'S READING STACK: the same done+next walk as the Mac's deck
+        /// — the finished email drops out, the sender's next one slides in from
+        /// the right — and NOTHING PEEKING. A phone has no width to spare for the
+        /// next card's edge, and a 56pt strip of it would take that much off
+        /// every line of the email you are actually reading. The slide alone
+        /// says "more from this sender".
+        ///
+        /// Only the mail flies; the header stays, as it does on the Mac. Outside
+        /// a stack the reader is a NavigationStack push and never flies, so the
+        /// flight is pinned to settled there.
+        ///
+        /// NOT CLIPPED. The settled reader scrolls under the composer and the
+        /// home indicator, and a clip at this frame would cut it off at the
+        /// safe area; the card in flight is fading out or off the side of the
+        /// screen anyway, so there is nothing for a clip to hide.
+        private var stackFlight: some View {
+            GeometryReader { reader in
+                let flight: AppStore.ThreadFlight = store.readingStack ? store.threadFlight : .settled
+                content
+                    .frame(width: reader.size.width, height: reader.size.height)
+                    .offset(flight.offset(in: reader.size))
+                    .opacity(flight.opacity)
+            }
+        }
+    #endif
 
     #if os(macOS)
         /// The header belongs to the window; only the mail participates in the deck.
@@ -1753,8 +1786,16 @@ struct ThreadViewer: View {
         ///
         /// The haptic stands in for it. It is the same confirmation a committed
         /// swipe gets on a list row, which is the other way this app says done.
+        ///
+        /// A READING STACK IS THE EXCEPTION: there the reader stays and walks to
+        /// the sender's next email, which is a motion the phone DOES draw
+        /// (`stackFlight`), so it takes the Mac's done+next whole.
         private func doneFromBar() async {
             Haptics.commit()
+            if store.readingStack {
+                await doneAndNext()
+                return
+            }
             await resolveOpenThread()
             // Same outlived-its-reader guard the other two verbs take: a resolve
             // that finished after the reader moved on must not close the thread
@@ -2990,5 +3031,39 @@ private final class WheelYield {
             if let monitor { NSEvent.removeMonitor(monitor) }
         #endif
         monitor = nil
+    }
+}
+
+// MARK: - how the reader changes threads
+
+/// Shared by both hosts: the Mac's RootView flies the whole reader (or the deck
+/// its card), and the phone's reader flies its own mail under the nav bar.
+extension AppStore.ThreadFlight {
+    /// WHERE THE READER SITS for each beat of the flight, a full window away in
+    /// whichever direction it is travelling — far enough that the email is
+    /// genuinely off the screen rather than peeking in at an edge.
+    func offset(in window: CGSize) -> CGSize {
+        switch self {
+        case .settled: .zero
+        case .departing: CGSize(width: 0, height: -window.height)
+        case .departingDown: CGSize(width: 0, height: window.height)
+        case .entering(.bottom): CGSize(width: 0, height: window.height)
+        case .entering(.trailing): CGSize(width: window.width, height: 0)
+        }
+    }
+
+    /// Only the departure fades, and slightly: enough for the email to read as
+    /// leaving the reader's plane rather than merely sliding. What arrives
+    /// arrives whole. (It used to shrink to 0.96 as well; a scale on a column
+    /// of web frames re-rasterises every one of them per frame, so it went.)
+    var opacity: Double { isDeparting ? 0 : 1 }
+
+    /// Both exits, whichever way they leave. The next variant added is a
+    /// departure or an arrival, and it says so here once.
+    var isDeparting: Bool {
+        switch self {
+        case .departing, .departingDown: true
+        case .settled, .entering: false
+        }
     }
 }

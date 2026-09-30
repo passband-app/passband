@@ -356,7 +356,7 @@ ClusterIssuer in `40-wildcard-certificate.yaml`.
 
 Every `daemon-X.Y.Z` tag builds all three from
 `.github/workflows/release-daemon.yml` and pushes them to GHCR. The image tag is
-the git tag verbatim — `ghcr.io/braelyn-ai/squelchd:daemon-0.0.1`, plus a moving
+the git tag verbatim — `ghcr.io/passband-app/squelchd:daemon-0.0.1`, plus a moving
 `latest`. There are no bare numeric tags any more, deliberately: GHCR tags are
 mutable and this node pulls `IfNotPresent`, so a recycled number would pin a
 stale image with nothing to show for it. The old numeric tags (`0.2.x`,
@@ -365,9 +365,9 @@ it is repointed.
 
 | Image | Arch | Built by |
 |---|---|---|
-| `ghcr.io/braelyn-ai/squelchd:<tag>` | amd64 + arm64 | `squelchd-image`; the Dockerfile cross-compiles, so no emulation |
-| `ghcr.io/braelyn-ai/squelch-warden:<tag>` | **amd64 only** | `warden-image`; builds natively, and emulating the ONNX build risks the six-hour job ceiling |
-| `ghcr.io/braelyn-ai/squelch-control:<tag>` | **amd64 only** | `control-image`; same reason. Railway still builds its own copy from source, so this tag is for reproducibility and for running the plane elsewhere |
+| `ghcr.io/passband-app/squelchd:<tag>` | amd64 + arm64 | `squelchd-image`; the Dockerfile cross-compiles, so no emulation |
+| `ghcr.io/passband-app/squelch-warden:<tag>` | **amd64 only** | `warden-image`; builds natively, and emulating the ONNX build risks the six-hour job ceiling |
+| `ghcr.io/passband-app/squelch-control:<tag>` | **amd64 only** | `control-image`; same reason. Railway still builds its own copy from source, so this tag is for reproducibility and for running the plane elsewhere |
 
 `carrier` is amd64, so the two amd64-only images cover everything hosted
 actually runs. Moving the hosted planes to an arm box means giving those
@@ -379,8 +379,8 @@ turning binfmt back on.
 > straight into containerd:
 >
 > ```sh
-> docker build -f Dockerfile.warden -t ghcr.io/braelyn-ai/squelch-warden:v0.2.0 .
-> docker save ghcr.io/braelyn-ai/squelch-warden:v0.2.0 | k3s ctr images import -
+> docker build -f Dockerfile.warden -t ghcr.io/passband-app/squelch-warden:v0.2.0 .
+> docker save ghcr.io/passband-app/squelch-warden:v0.2.0 | k3s ctr images import -
 > ```
 >
 > That tag carries a GHCR name nothing has ever pushed, and adding the CI job
@@ -681,7 +681,7 @@ is idempotent) before the roller gets to it.
 Three steps, and only the middle one is a decision.
 
 1. **CI publishes.** A `daemon-X.Y.Z` tag builds
-   `ghcr.io/braelyn-ai/squelchd:daemon-X.Y.Z` and pushes it to GHCR
+   `ghcr.io/passband-app/squelchd:daemon-X.Y.Z` and pushes it to GHCR
    (`docs/RELEASING.md`, surface 1). Nothing on this box moves, and no tenant is
    affected: the registry holding an image is not a deploy.
 2. **A human bumps the pin and applies.** `SQUELCH_WARDEN_IMAGE` in

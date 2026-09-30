@@ -288,7 +288,7 @@ sync loop finish in-flight work and flush before exit.
 > requires ([docs/BROKER.md](../docs/BROKER.md) has the full status). Headless
 > consent is `squelchd auth --export` / `--import`; the encrypted-courier
 > successor is tracked in
-> [issue #15](https://github.com/braelyn-ai/squelch/issues/15). This section
+> [issue #15](https://github.com/passband-app/passband/issues/15). This section
 > stays as the operational reference for the hosted-tier callback, which is
 > where the crate lands next.
 

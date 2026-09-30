@@ -1,8 +1,8 @@
 // Where the Mac archives are downloaded from. TEMPORARY: the source repo is
 // private for now and its release assets 404 for the public, so the release
 // workflow also publishes each zip to this public, releases-only mirror. To
-// undo, set it back to "braelyn-ai/squelch" and drop the workflow's mirror step.
-const RELEASES_REPO = "braelyn-ai/passband-releases";
+// undo, set it back to "passband-app/passband" and drop the workflow's mirror step.
+const RELEASES_REPO = "passband-app/passband-releases";
 
 // Static pages are plain HTML files, not React routes: legal pages must be
 // readable by crawlers and reviewers without executing the bundle.

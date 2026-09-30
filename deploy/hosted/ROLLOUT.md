@@ -95,10 +95,10 @@ fails, and you pin a tag that only two of the three have.
 
 ```sh
 for img in squelchd squelch-warden squelch-control; do
-  TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:braelyn-ai/$img:pull" \
+  TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:passband-app/$img:pull" \
     | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
   echo "== $img"
-  curl -s -H "Authorization: Bearer $TOKEN" "https://ghcr.io/v2/braelyn-ai/$img/tags/list"
+  curl -s -H "Authorization: Bearer $TOKEN" "https://ghcr.io/v2/passband-app/$img/tags/list"
 done
 ```
 
@@ -110,10 +110,10 @@ control are amd64 only, which is fine because the carrier is amd64.
 Four lines, in the repo, committed:
 
 ```
-deploy/hosted/15-warden-config.yaml   SQUELCH_WARDEN_IMAGE: ghcr.io/braelyn-ai/squelchd:daemon-X.Y.Z
-deploy/hosted/20-warden.yaml          image: ghcr.io/braelyn-ai/squelch-warden:daemon-X.Y.Z
-deploy/hosted/90-warden-roller.yaml   image: ghcr.io/braelyn-ai/squelch-warden:daemon-X.Y.Z
-deploy/hosted/60-models.yaml          image: ghcr.io/braelyn-ai/squelchd:daemon-X.Y.Z   (only if re-seeding)
+deploy/hosted/15-warden-config.yaml   SQUELCH_WARDEN_IMAGE: ghcr.io/passband-app/squelchd:daemon-X.Y.Z
+deploy/hosted/20-warden.yaml          image: ghcr.io/passband-app/squelch-warden:daemon-X.Y.Z
+deploy/hosted/90-warden-roller.yaml   image: ghcr.io/passband-app/squelch-warden:daemon-X.Y.Z
+deploy/hosted/60-models.yaml          image: ghcr.io/passband-app/squelchd:daemon-X.Y.Z   (only if re-seeding)
 ```
 
 **Never set these as a container `env:` in a pod spec.** A container `env:` name

@@ -4984,7 +4984,7 @@ mod tests {
 
     /// The image a tenant was provisioned on before somebody bumped
     /// `SQUELCH_WARDEN_IMAGE`. Any value the test config does not name.
-    const PREVIOUS_IMAGE: &str = "ghcr.io/braelyn-ai/squelchd:daemon-0.3.0";
+    const PREVIOUS_IMAGE: &str = "ghcr.io/passband-app/squelchd:daemon-0.3.0";
 
     /// Put a tenant's live Deployment a render behind: the daemon image the
     /// warden's config no longer names, with the warden still the only owner of

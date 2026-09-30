@@ -6,7 +6,7 @@
 
 squelch reads your Gmail (read-only), decides what actually deserves attention, catches bills and deadlines, and serves that intelligence over MCP to an agent you already run. Your agent never holds your Gmail credential and never gets raw access to your mailbox.
 
-[![release](https://github.com/braelyn-ai/squelch/actions/workflows/release-daemon.yml/badge.svg)](https://github.com/braelyn-ai/squelch/actions/workflows/release-daemon.yml)
+[![release](https://github.com/passband-app/passband/actions/workflows/release-daemon.yml/badge.svg)](https://github.com/passband-app/passband/actions/workflows/release-daemon.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](Cargo.toml)
 [![container](https://img.shields.io/badge/ghcr.io-braelyn--ai%2Fsquelchd-2496ED.svg)](deploy/DOCKER.md)
@@ -65,7 +65,7 @@ Let us run it for you: [passband.app](https://passband.app)
 Our hosted version is currently in alpha. Please join the waitlist.
 
 The Mac client is the download on that page, or `brew install --cask
-braelyn-ai/tap/passband`. It is signed, notarized, and updates itself, so the download
+passband-app/tap/passband`. It is signed, notarized, and updates itself, so the download
 is the last one you have to think about; the iOS client ships through TestFlight. The
 same client talks to a hosted daemon and a self-hosted one — it only ever knows a URL
 and a token.
@@ -74,7 +74,7 @@ and a token.
 
 Email is sensitive. Don't want to give it to us? Self-hosting has first-class support. Everything available in the hosted version is available to self-host.
 
-> 🐳 **Prefer Docker?** Prebuilt images live at `ghcr.io/braelyn-ai/squelchd` (amd64 + arm64). [`deploy/DOCKER.md`](deploy/DOCKER.md) is the compose-file-and-env-vars path, no toolchain needed. And [`docs/GETTING-STARTED.md`](docs/GETTING-STARTED.md) walks a full setup end to end: daemon in Docker on a NAS, Passband on a Mac.
+> 🐳 **Prefer Docker?** Prebuilt images live at `ghcr.io/passband-app/squelchd` (amd64 + arm64). [`deploy/DOCKER.md`](deploy/DOCKER.md) is the compose-file-and-env-vars path, no toolchain needed. And [`docs/GETTING-STARTED.md`](docs/GETTING-STARTED.md) walks a full setup end to end: daemon in Docker on a NAS, Passband on a Mac.
 
 ### 1. Create a Google Cloud OAuth client
 

@@ -6,7 +6,7 @@ all of them; know which one you are doing before you start.
 
 | Surface | Trigger | What ships | Who is affected |
 |---|---|---|---|
-| Server images | push tag `daemon-X.Y.Z` | `ghcr.io/braelyn-ai/{squelchd,squelch-warden,squelch-control}` | nobody, until a deploy points at the tag |
+| Server images | push tag `daemon-X.Y.Z` | `ghcr.io/passband-app/{squelchd,squelch-warden,squelch-control}` | nobody, until a deploy points at the tag |
 | Hosted carrier | manual ops on `carrier` | warden + tenant pods | every hosted tenant |
 | Passband for Mac | push tag `passband-mac-X.Y.Z` | GitHub Release + appcast + Homebrew cask | every Mac user, via Sparkle |
 | Passband for iOS | push tag `passband-ios-X.Y.Z` | a TestFlight build | every TestFlight tester |
@@ -35,7 +35,7 @@ wrong number somewhere:
   now enforces it: a `verify` job fails the release, before any registry write,
   unless the tag is exactly `daemon-<workspace version>`.
 - **Image tags** — the git tag, verbatim. `daemon-0.0.1` publishes
-  `ghcr.io/braelyn-ai/squelchd:daemon-0.0.1` (same for warden and control) and
+  `ghcr.io/passband-app/squelchd:daemon-0.0.1` (same for warden and control) and
   moves `latest`. There are no bare numeric image tags any more — no `0.0.1`,
   no `0.0`, no `v0.0.1` — on purpose: GHCR tags are mutable and the carrier
   node pulls `IfNotPresent`, so a recycled number would silently pin a stale
@@ -117,8 +117,8 @@ Verify (the failure mode is a half-published release):
 ```sh
 gh run watch
 for img in squelchd squelch-warden squelch-control; do
-  TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:braelyn-ai/$img:pull" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
-  curl -s -H "Authorization: Bearer $TOKEN" "https://ghcr.io/v2/braelyn-ai/$img/tags/list"
+  TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:passband-app/$img:pull" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+  curl -s -H "Authorization: Bearer $TOKEN" "https://ghcr.io/v2/passband-app/$img/tags/list"
 done
 ```
 

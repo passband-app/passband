@@ -38,10 +38,10 @@ See [TRIAGE-OPERATIONS.md](TRIAGE-OPERATIONS.md) for the effective configuration
 Each issue begins with a short technical description, then includes motivating
 failures, relevant code, proposed scope, acceptance criteria, and non-goals.
 
-1. [#216: Per-call accounting and cost budgets](https://github.com/braelyn-ai/passband/issues/216)
-2. [#217: Dedicated coalesced thread-refresh executor](https://github.com/braelyn-ai/passband/issues/217)
-3. [#218: Fair scheduling and provider recovery](https://github.com/braelyn-ai/passband/issues/218)
-4. [#219: Context allocation, prefix reuse, and retired-code cleanup](https://github.com/braelyn-ai/passband/issues/219)
+1. [#216: Per-call accounting and cost budgets](https://github.com/passband-app/passband/issues/216)
+2. [#217: Dedicated coalesced thread-refresh executor](https://github.com/passband-app/passband/issues/217)
+3. [#218: Fair scheduling and provider recovery](https://github.com/passband-app/passband/issues/218)
+4. [#219: Context allocation, prefix reuse, and retired-code cleanup](https://github.com/passband-app/passband/issues/219)
 
 Run/turn caps are not dollar caps. Provider failures such as truncation/refusal
 still need the shared transport usage-shape work in #216. Dedicated thread-refresh

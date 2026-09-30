@@ -162,6 +162,7 @@ impl Harness {
             auth_url: "http://127.0.0.1:1/authorize".into(),
             profile_url: "http://127.0.0.1:1/profile".into(),
             userinfo_url: "http://127.0.0.1:1/userinfo".into(),
+            alert_webhook_url: None,
             bifrost: None,
             waitlist: waitlist.then(|| WaitlistConfig {
                 admin_token: ADMIN_TOKEN.into(),

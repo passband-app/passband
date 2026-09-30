@@ -246,7 +246,10 @@ struct RemindPalette: View {
     }
 }
 
-private struct RemindRow: View {
+/// One pick: the words on the left, the instant they resolve to on the right.
+/// Shared with `SchedulePalette`, which asks the same engine a different
+/// question ("send when") and must answer it in the same shape.
+struct RemindRow: View {
     let hit: RemindHit
     let selected: Bool
     let onHover: () -> Void

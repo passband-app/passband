@@ -485,6 +485,12 @@ fn build_embedder(config: &Config, metrics: Option<Arc<SyncMetrics>>) -> Option<
 /// leaving an operator who set 5 wondering why it took 65.
 const EMBEDDER_REAP_INTERVAL_SECS: u64 = 60;
 
+/// How often the scheduled-send worker looks for due mail. A scheduled mail
+/// goes out at most this late (plus the pass itself).
+const SCHEDULED_SEND_TICK_SECS: u64 = 10;
+/// The worker's first look, after startup.
+const SCHEDULED_SEND_FIRST_TICK_SECS: u64 = 5;
+
 /// How many consecutive contended ticks before the reaper says so. An embed
 /// holding the lock is normal and happens all day; a whole hour of them is a
 /// session no reaper can ever reach, which is the memory this feature exists to
@@ -1479,6 +1485,38 @@ fn cmd_pair(config: &Config, args: &PairArgs) -> Result<(), squelch_core::CoreEr
     Ok(())
 }
 
+/// Ctrl-C, or the SIGTERM a container runtime stops us with.
+///
+/// SIGTERM is not optional in the image: squelchd is PID 1 there
+/// (deploy/DOCKER.md), and PID 1 has no default disposition for a signal it
+/// does not handle, so without this every hosted roll would wait out the
+/// grace period for a SIGKILL and skip the graceful path entirely (sync's
+/// flush, the scheduled-send pass settling its row).
+async fn stop_requested() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+            }
+            // Losing the handler costs a harder stop, never a mail: a send
+            // cut off mid-flight is answered by lease recovery.
+            Err(_) => {
+                eprintln!("squelchd: no SIGTERM handler; stopping on Ctrl-C only");
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
 /// Sync-only loop with graceful Ctrl-C shutdown.
 fn run_daemon(config: Config) -> Result<(), squelch_core::CoreError> {
     // Fail fast on config problems before spinning up the runtime.
@@ -2177,22 +2215,24 @@ fn cmd_serve(
 
         // One-time history sweeps on the read credential: the contacts harvest
         // seeding recipient autocomplete and the recipients backfill filling
-        // `to_addrs` on sent mail that predates the column (both headers-only),
-        // then the blank-body heal re-fetching mail stored with an empty text
-        // body beside a full HTML one (one raw GET per such message, and it
-        // hands each row back to triage). Staggered past the startup sync burst
-        // and run one after the other so they never contend for the same Gmail
-        // quota. Any of them failing just retries on the next daemon start —
-        // each done flag is only set on completion — and none can block the
-        // sync loop, which runs in its own task.
+        // To/Cc (and Bcc on the user's own sends) for every message that
+        // predates the per-header columns (both headers-only), then the
+        // blank-body heal re-fetching mail stored with an empty text body beside
+        // a full HTML one (one raw GET per such message, and it hands each row
+        // back to triage). Staggered past the startup sync burst and run one
+        // after the other so they never contend for the same Gmail quota. Any
+        // of them failing just retries on the next daemon start — each done
+        // flag is only set on completion — and none can block the sync loop,
+        // which runs in its own task.
         //
         // The stagger is measured from when that burst can actually START, which
         // is why this waits on the SAME embedder gate the first backfill does: on
         // a cold model cache the backfill now begins minutes into the run, and a
-        // sweep that is one metadata GET per Sent message (the heaviest Gmail
-        // consumer here) landing on top of a 30-day raw backfill on one
-        // credential is how a tenant earns a 429 — which bubbles out of
-        // `run_once` and bounces the whole sync lifecycle through backoff.
+        // sweep that is one metadata GET per STORED MESSAGE (the heaviest Gmail
+        // consumer here, and heavier since it stopped being Sent-only) landing on
+        // top of a 30-day raw backfill on one credential is how a tenant earns a
+        // 429 — which bubbles out of `run_once` and bounces the whole sync
+        // lifecycle through backoff. The sweep paces itself on top of that.
         {
             let store = store.clone();
             let email = email.clone();
@@ -2214,9 +2254,9 @@ fn cmd_serve(
                         "squelchd: sent-contacts harvest incomplete (retries next start): {e}"
                     );
                 }
-                if let Err(e) = engine.backfill_sent_recipients().await {
+                if let Err(e) = engine.backfill_recipients().await {
                     eprintln!(
-                        "squelchd: sent-recipients backfill incomplete (retries next start): {e}"
+                        "squelchd: recipients backfill incomplete (retries next start): {e}"
                     );
                 }
                 if let Err(e) = engine.heal_blank_bodies().await {
@@ -2285,6 +2325,53 @@ fn cmd_serve(
                 }
             });
         }
+
+        // SCHEDULED SEND fires here for the same reason the shredder runs
+        // here: it sends on the WRITE credential (docs/SCHEDULED-SEND.md §4).
+        // The tick is the clock — no timer per row — so a restart costs
+        // punctuality and never a mail. Unlike the shredder it HONOURS THE
+        // SHUTDOWN WATCH: between ticks here, and between rows inside a pass
+        // (the pass reads the watch `api_state` carries), so a pass in flight
+        // settles the row in hand and claims no more instead of leaving work
+        // to lease recovery.
+        let scheduled_handle = {
+            let state = api_state.clone();
+            let mut shutdown_rx = shutdown_tx.subscribe();
+            eprintln!(
+                "squelchd: scheduled-send worker enabled ({SCHEDULED_SEND_TICK_SECS}s tick)"
+            );
+            tokio::spawn(async move {
+                // First tick a few seconds in, past the bind and the first
+                // sync burst; then every tick.
+                let mut tick = tokio::time::interval_at(
+                    tokio::time::Instant::now()
+                        + std::time::Duration::from_secs(SCHEDULED_SEND_FIRST_TICK_SECS),
+                    std::time::Duration::from_secs(SCHEDULED_SEND_TICK_SECS),
+                );
+                // A pass that overran (a slow Gmail) is not followed by a burst
+                // of catch-up passes.
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    tokio::select! {
+                        _ = tick.tick() => {}
+                        // An Err is the sender dropped: the daemon is leaving.
+                        res = shutdown_rx.changed() => {
+                            if res.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                    if *shutdown_rx.borrow() {
+                        return;
+                    }
+                    let report = squelch_api::run_scheduled_send_pass(&state).await;
+                    if !report.is_idle() {
+                        // Counts only; the pass logged its own ids.
+                        eprintln!("squelchd: scheduled-send pass {report:?}");
+                    }
+                }
+            })
+        };
 
         // Bind BEFORE building the embedder: its first-run model download must
         // not leave the doors unreachable.
@@ -2402,11 +2489,14 @@ fn cmd_serve(
         }
 
         // Graceful shutdown: stop accepting, cancel MCP sessions, signal sync.
+        // On Ctrl-C, or the SIGTERM a container stop sends (see
+        // `stop_requested`): either way sync flushes and the scheduled-send
+        // pass settles the row in hand.
         let shutdown_signal = {
             let mcp_cancel = mcp_cancel.clone();
             let shutdown_tx = shutdown_tx.clone();
             async move {
-                let _ = tokio::signal::ctrl_c().await;
+                stop_requested().await;
                 eprintln!("squelchd: shutdown requested; stopping doors and flushing sync...");
                 mcp_cancel.cancel();
                 let _ = shutdown_tx.send(true);
@@ -2446,6 +2536,9 @@ fn cmd_serve(
                 Err(e) => eprintln!("squelchd: shipment poller task join error: {e}"),
             }
         }
+        if scheduled_handle.await.is_err() {
+            eprintln!("squelchd: scheduled-send worker task join error");
+        }
         if let Some(handle) = metrics_handle {
             match handle.await {
                 Ok(Ok(())) => {}
@@ -2467,6 +2560,27 @@ mod tests {
     use squelch_core::credentials::{CredentialKind, StoredToken};
 
     const BROKER: &str = "https://auth.passband.email";
+
+    /// PID 1 in the image stops on SIGTERM or not at all: the stop future must
+    /// resolve on it, not only on Ctrl-C.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_stop_future_resolves_on_sigterm() {
+        use tokio::signal::unix::{SignalKind, signal};
+        // Held for the whole test, so the process has a SIGTERM handler before
+        // the signal is raised whatever the timing below: the default
+        // disposition would kill the test binary.
+        let _keep = signal(SignalKind::terminate()).expect("a SIGTERM handler");
+        let stop = tokio::spawn(stop_requested());
+        // Let the spawned future register its own handler before the signal.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // SAFETY: signalling our own pid; the handler above is installed.
+        assert_eq!(unsafe { libc::kill(libc::getpid(), libc::SIGTERM) }, 0);
+        tokio::time::timeout(std::time::Duration::from_secs(5), stop)
+            .await
+            .expect("stop_requested resolved on SIGTERM")
+            .unwrap();
+    }
 
     /// Every flag off, for tests that vary one at a time.
     fn bare_auth_args() -> AuthArgs {

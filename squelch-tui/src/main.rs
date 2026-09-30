@@ -240,6 +240,8 @@ fn seed_fake_data(store: &SqliteStore, account: AccountId) -> Result<()> {
             is_sent: false,
             is_spam: false,
             to_addrs: None,
+            cc_addrs: None,
+            bcc_addrs: None,
             list_unsubscribe: None,
             list_unsub_one_click: false,
             auth_pass: None,

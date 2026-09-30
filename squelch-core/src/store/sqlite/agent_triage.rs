@@ -4610,7 +4610,7 @@ mod tests {
         );
     }
     #[test]
-    fn preference_edit_queues_reasoning_without_rewriting_placement() {
+    fn preference_edit_keeps_placement_and_queues_nothing() {
         let store = fixture();
         let (job, context) = claim(&store, 1);
         store
@@ -4637,12 +4637,17 @@ mod tests {
             1
         );
         let context = store.agent_thread_context(1, "one").unwrap();
-        assert_eq!(context.rules.len(), 1);
+        assert_eq!(
+            context.rules.len(),
+            1,
+            "the next investigation reads the rule"
+        );
         assert!(
             store
                 .claim_agent_job(1, "triage", Utc::now(), 60)
                 .unwrap()
-                .is_some()
+                .is_none(),
+            "a rule applies to later mail; stored mail is not re-run"
         );
     }
 }

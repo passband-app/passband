@@ -1,0 +1,26 @@
+# Where alerts go: one Slack channel, through an incoming webhook.
+#
+# A webhook, not a Slack app. An alert channel only ever RECEIVES; a bot token,
+# scopes and an interactive endpoint buy acknowledge buttons that a team of one
+# does not need, and they are one more credential to rotate.
+#
+# SLACK_ALERTS_WEBHOOK_URL is a Grafana service variable on Railway, never a
+# value in this repo: whoever holds the URL can post into the channel.
+#
+# SET IT BEFORE THIS FILE REACHES `main`. The service deploys itself on merge,
+# and Grafana refuses to start with a Slack receiver that has no URL, so the
+# deploy fails its healthcheck and the previous image keeps serving: nothing
+# breaks, but nothing alerts either, and the deploy list is the only place that
+# says so.
+apiVersion: 1
+contactPoints:
+  - orgId: 1
+    name: slack
+    receivers:
+      - uid: passband-slack
+        type: slack
+        disableResolveMessage: false
+        settings:
+          url: $SLACK_ALERTS_WEBHOOK_URL
+          title: '{{ template "passband.title" . }}'
+          text: '{{ template "passband.text" . }}'

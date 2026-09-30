@@ -256,3 +256,40 @@ its three-minute ceiling) is `increase(squelchd_embedder_gate_timeouts_total[1h]
 vector backfill pass then drains that mailbox in batches instead of ingest
 embedding it one message at a time. One is worth a look; a train of them is a
 wedged init retrying.
+
+## Alerts
+
+Grafana alerting, provisioned from `grafana/provisioning/alerting/` and baked
+into the image like the dashboard, so an alert is changed by merging to `main`
+and not in the UI. Everything goes to one Slack channel (`#passband-alerts`)
+through an incoming webhook.
+
+| Rule | Fires when | For |
+|---|---|---|
+| Tenants quota near full | any `tenants` ResourceQuota dimension is at 80% or more | 15m |
+| Tenant has no running pod | a tenant Deployment wants a pod and has none available | 10m |
+| Tenant mail sync stale | `time() - squelchd_sync_last_success_timestamp_seconds > 900` | 15m |
+| carrier memory high | the box is 85% or more used (`1 - MemAvailable / MemTotal`) | 2m |
+| carrier metrics missing | no kube-state-metrics series from carrier for 10 minutes | 5m |
+
+The first two are 2026-09-28: the quota was full at five tenants and the first
+anyone heard of it was a new user stuck on a signup that timed out. The third is
+the sync alert this README recommended above, which until now nothing fired. The
+fourth is 2026-09-29: memory is the box's bottleneck, and with nothing reserved
+for k3s and no swap the RAM is the only wall, so this fires before a global OOM
+rather than after one. The last is what makes the others trustworthy: every rule
+reads series the carrier agent remote-writes, so they go quiet together when it
+stops, and the others treat NoData as OK so that only this one says so.
+
+**`SLACK_ALERTS_WEBHOOK_URL` must be set on the Grafana service before any
+change to these files deploys.** Grafana exits at startup when the Slack
+receiver has no URL (checked against 12.2.0), the deploy fails its healthcheck,
+and the previous image keeps serving without the change. Nothing breaks, and
+nothing alerts either.
+
+Two escapes that were tested rather than assumed, both against 12.2.0:
+env-var interpolation DOES run over `contact-points.yml` (that is how the URL
+arrives) and does NOT run over `rules.yml`, so `$labels` in an annotation is
+written bare. A `$$labels` there reaches Slack as a literal `$$labels`.
+
+To check the pipe end to end: Alerting, Contact points, `slack`, Test.

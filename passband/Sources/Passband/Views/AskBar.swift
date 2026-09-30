@@ -27,8 +27,9 @@ struct AskBar: View {
     /// Rendered markdown, kept across body evaluations — see MarkdownCache.
     @State private var rendered = MarkdownCache()
 
-    /// The conversation outlives this view — see AppStore.assistant.
-    private var session: AssistantSession { store.assistant }
+    /// The conversation outlives this view — see AppStore.assistant. While the
+    /// bar is watching a deeper search finish, it is that lane instead.
+    private var session: AssistantSession { store.askBarSession }
 
     /// The email behind the bar, as the agent should hear about it — nil when
     /// the bar was opened from a list. The summary lands a beat after the
@@ -83,7 +84,13 @@ struct AskBar: View {
         .keyBindings(.modal, [
             KeyBinding("Escape", "close", allowInInput: true) { onClose() }
         ])
-        .onAppear { focused = true }
+        .onAppear {
+            focused = true
+            store.finishLaneHandoff()
+        }
+        // A watched deeper search that finishes becomes the chat, so the
+        // follow-up field under it starts working.
+        .onChange(of: store.searchLane.running) { store.finishLaneHandoff() }
         // STRUCTURE ONLY. Animating anything that changes per token would smear
         // the streaming text; the count changes once per row.
         .animation(.smooth(duration: 0.25), value: session.transcript.count)
@@ -122,7 +129,7 @@ struct AskBar: View {
             Spacer()
             if !session.transcript.isEmpty {
                 Button {
-                    session.clear()
+                    store.newAskChat()
                     focused = true
                 } label: {
                     HStack(spacing: 4) {
@@ -168,6 +175,9 @@ struct AskBar: View {
     }
 
     private func submit() {
+        // A watched lane that ended a beat ago may not have been handed over
+        // yet; do it now so the question lands in the chat, not the search.
+        store.finishLaneHandoff()
         guard canSubmit else { return }
         let text = question.trimmed
         question = ""
@@ -460,6 +470,22 @@ struct AskBar: View {
                 bcc: action.bcc ?? "",
                 subject: action.subject ?? "",
                 body: action.body ?? ""))
+        // A HAND-OFF IS COMPOSED CONTENT: the words are on screen because the
+        // reader asked the agent for them and chose to edit them. `openCompose`
+        // marks the slot opened (untouched), which would make an Esc before
+        // the first keystroke drop the mail and nothing say so. Marking it
+        // changed arms the autosave and makes the close flush keep it.
+        //
+        // BUT ONLY FOR PLAIN NEW MAIL. A reply saves under its parent's key,
+        // one row per parent, and the pane composer never restores a reply
+        // draft, so arming a reply hand-off would autosave one debounce later
+        // and silently OVERWRITE a reply the person already had saved for that
+        // parent (the reason `AgentTools.saveDraft` refuses an occupied slot).
+        // Unarmed, the reply's first keystroke arms it, and by then the person
+        // is editing on purpose.
+        if action.replyToMessageId == nil {
+            DraftSaver.shared.noteChange(.compose)
+        }
         session.resolve(action.id, .editedInComposer)
         onClose()
     }

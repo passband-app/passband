@@ -12,6 +12,29 @@ updates itself, the phone comes through TestFlight, and the daemon is
 rolled onto hosted accounts or pulled as an image on a self-host box,
 so every note says which one it landed in.
 
+## 0.0.10 (2026-09-27)
+
+The iPhone catches up.
+
+### Mac
+
+- Visual Improvements
+- Email subheaders are displayed better
+- Search experience tuning
+- Bug Fixes
+
+### iPhone
+
+- New intro
+- Attach files to emails
+- Undo send for 5s
+- Search remembers recent searches and finds partial matches
+- "Newsletters" is now named "Reading"
+- Chat-style emails are bubbles
+- Notifications show a readable name and your login code
+- Tapping a login-code notification opens your codes
+- Settings overhaul
+
 ## 0.0.8 (2026-09-25)
 
 Biggest update by far. Now we're a real product?

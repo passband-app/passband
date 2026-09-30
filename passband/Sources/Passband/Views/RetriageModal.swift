@@ -163,7 +163,7 @@ struct RetriageModal: View {
     /// on them. A blocked step is the one line in the modal worth reading.
     private var steps: some View {
         let list = run.steps(
-            sync: store.syncStatus, triage: store.sitrep.stats?.triage, date: Fmt.date)
+            sync: store.syncStatus, triage: store.stats?.triage, date: Fmt.date)
         return VStack(alignment: .leading, spacing: 7) {
             ForEach(Array(list.enumerated()), id: \.offset) { _, step in
                 HStack(alignment: .firstTextBaseline, spacing: 8) {

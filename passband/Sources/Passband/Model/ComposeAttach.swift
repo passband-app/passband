@@ -152,6 +152,10 @@ enum ComposeAttach {
         write(slot, state)
         DraftSaver.shared.noteChange(slot)
         thumbs[attachment.contentId] = nil
+        // The tray has ALREADY dropped it, before the DELETE leaves, and the
+        // answer is ignored. That is also right for the 404 the daemon now
+        // gives a file an outbox row holds: it is that row's, not this
+        // composer's, so gone from here is exactly the truth.
         if let id = attachment.id {
             Task { try? await APIClient.shared.deleteComposeAttachment(id) }
         }

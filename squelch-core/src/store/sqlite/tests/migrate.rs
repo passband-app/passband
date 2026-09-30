@@ -1806,3 +1806,172 @@ fn migrate_adds_a_background_foreground_flag_to_preexisting_followups() {
         .unwrap();
     assert_eq!(lane, 0);
 }
+
+#[test]
+fn init_upgrades_a_single_slot_drafts_table_to_many_drafts_and_forwards() {
+    // An install from before many drafts: no `forward_of_message_id`, and the
+    // single-slot `idx_drafts_new`, with its one new-message draft saved. Going
+    // through `init` (schema.sql THEN migrate) is the point: an index on the
+    // new column in schema.sql would fail right here, before migrate ran.
+    //
+    // A FILE, not memory: the second `init` below has to reopen the same DB.
+    register_vec_extension();
+    let dir = std::env::temp_dir().join(format!("squelch-drafts-many-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("drafts.db");
+    let _ = std::fs::remove_file(&path);
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE drafts(
+             id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL,
+             reply_to_message_id INTEGER,
+             to_addr TEXT NOT NULL DEFAULT '', cc_addr TEXT NOT NULL DEFAULT '',
+             bcc_addr TEXT NOT NULL DEFAULT '', subject TEXT NOT NULL DEFAULT '',
+             body TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+             updated_at TEXT NOT NULL);
+         CREATE UNIQUE INDEX idx_drafts_reply
+             ON drafts(account_id, reply_to_message_id) WHERE reply_to_message_id IS NOT NULL;
+         CREATE UNIQUE INDEX idx_drafts_new
+             ON drafts(account_id) WHERE reply_to_message_id IS NULL;
+         INSERT INTO drafts(account_id, subject, body, created_at, updated_at)
+             VALUES (1, 'old', 'kept', '2026-07-01T00:00:00+00:00', '2026-07-01T00:00:00+00:00');",
+    )
+    .unwrap();
+    let store = SqliteStore::init(conn).unwrap();
+    let acct = store.ensure_account("me@example.com").unwrap();
+    assert_eq!(acct, 1, "the fixture's row belongs to the first account");
+    {
+        let conn = store.lock().unwrap();
+        assert_eq!(
+            idx_drafts_new_unique(&conn),
+            Some(false),
+            "the single-slot index is replaced by a NON-unique one of the same name"
+        );
+        // Two MORE nil-keyed rows now insert beside the pre-existing one.
+        for _ in 0..2 {
+            conn.execute(
+                "INSERT INTO drafts(account_id, created_at, updated_at)
+                 VALUES (1, '2026-07-02T00:00:00+00:00', '2026-07-02T00:00:00+00:00')",
+                [],
+            )
+            .expect("many new-message drafts");
+        }
+        // The forward key exists and is unique per target.
+        conn.execute(
+            "INSERT INTO drafts(account_id, forward_of_message_id, created_at, updated_at)
+             VALUES (1, 5, '2026-07-03T00:00:00+00:00', '2026-07-03T00:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+        let dup = conn
+            .execute(
+                "INSERT INTO drafts(account_id, forward_of_message_id, created_at, updated_at)
+                 VALUES (1, 5, '2026-07-03T00:00:00+00:00', '2026-07-03T00:00:00+00:00')",
+                [],
+            )
+            .expect_err("a second forward draft of one message is refused")
+            .to_string();
+        assert!(dup.contains("UNIQUE"), "{dup}");
+    }
+    // The pre-existing draft reads back through the store, key columns NULL.
+    let all = store.list_drafts(acct).unwrap();
+    let old = all.iter().find(|d| d.subject == "old").unwrap();
+    assert_eq!(old.body, "kept");
+    assert!(old.reply_to_message_id.is_none() && old.forward_of_message_id.is_none());
+    // Migrating again is a no-op.
+    migrate(&store.lock().unwrap()).unwrap();
+    // And so is a whole second open of the same file, with three keyless rows.
+    drop(store);
+    let store = SqliteStore::init(Connection::open(&path).unwrap()).unwrap();
+    assert_eq!(
+        idx_drafts_new_unique(&store.lock().unwrap()),
+        Some(false),
+        "a re-open leaves the guard index non-unique"
+    );
+    assert_eq!(store.list_drafts(acct).unwrap().len(), 4);
+    drop(store);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `Some(unique)` for `idx_drafts_new`, `None` when there is no such index.
+fn idx_drafts_new_unique(conn: &Connection) -> Option<bool> {
+    conn.query_row(
+        "SELECT \"unique\" FROM pragma_index_list('drafts') WHERE name = 'idx_drafts_new'",
+        [],
+        |r| r.get::<_, i64>(0),
+    )
+    .optional()
+    .unwrap()
+    .map(|u| u == 1)
+}
+
+#[test]
+fn an_older_binarys_unique_drafts_index_create_is_a_no_op_after_many_drafts() {
+    // ROLLBACK: an older daemon's schema.sql runs this exact statement on every
+    // open. Once a user holds two keyless drafts it must not fail, or the old
+    // binary cannot open the DB at all. It is a no-op only because the new
+    // schema keeps an index of the same NAME (IF NOT EXISTS checks nothing else).
+    let store = SqliteStore::open_in_memory().unwrap();
+    let acct = store.ensure_account("me@example.com").unwrap();
+    store
+        .upsert_draft(
+            acct,
+            DraftKey::NewCreate,
+            DraftFields::default(),
+            Utc::now(),
+        )
+        .unwrap();
+    store
+        .upsert_draft(
+            acct,
+            DraftKey::NewCreate,
+            DraftFields::default(),
+            Utc::now(),
+        )
+        .unwrap();
+    let conn = store.lock().unwrap();
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_drafts_new
+             ON drafts(account_id) WHERE reply_to_message_id IS NULL",
+        [],
+    )
+    .expect("the old binary's create is a no-op, not a UNIQUE violation");
+    assert_eq!(idx_drafts_new_unique(&conn), Some(false));
+}
+
+/// Re-triage queued by the retired rule-change fan-out is closed on open, so a
+/// backlog cannot keep draining the budget. In-flight and other work is kept.
+#[test]
+fn migrate_retires_queued_rule_change_retriage() {
+    let (store, acct) = store();
+    let conn = store.lock().unwrap();
+    for (message, trigger, state) in [
+        (1, "preference:abc", "queued"),
+        (2, "preference:abc", "leased"),
+        (3, "ingest", "queued"),
+    ] {
+        conn.execute(
+            "INSERT INTO agent_triage_jobs(account_id,message_id,kind,trigger,input_revision,state,available_at)
+             VALUES(?1,?2,'triage',?3,1,?4,'2026-09-29T00:00:00Z')",
+            params![acct, message, trigger, state],
+        )
+        .unwrap();
+    }
+    migrate(&conn).unwrap();
+    migrate(&conn).unwrap(); // idempotent
+    let states: Vec<(i64, String)> = conn
+        .prepare("SELECT message_id,state FROM agent_triage_jobs ORDER BY message_id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        states,
+        vec![
+            (1, "completed".into()),
+            (2, "leased".into()),
+            (3, "queued".into())
+        ]
+    );
+}

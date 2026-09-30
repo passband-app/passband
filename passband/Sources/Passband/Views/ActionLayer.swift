@@ -38,7 +38,14 @@ struct ActionLayer: View {
             .padding(.bottom, 18)
 
             if let request = store.ruleEditor {
-                RuleEditor(request: request) { store.closeRuleEditor() }
+                // Keyed by the request: a click on an in-effect rule swaps the
+                // request under an open card, and without a fresh identity the
+                // edit card would inherit the tune card's @State.
+                RuleEditor(
+                    request: request,
+                    draft: request.draftKey.flatMap { store.ruleDrafts[$0] }
+                ) { store.closeRuleEditor() }
+                .id(request.id)
             }
             if let request = store.groupEditor {
                 GroupEditor(request: request) { store.closeGroupEditor() }
@@ -50,6 +57,13 @@ struct ActionLayer: View {
             }
             if let target = store.remindTarget {
                 RemindPalette(target: target) { store.closeRemind() }
+            }
+            // The composers' send-later clock. Here rather than on the
+            // composer for the reason the remind palette is: a window-level
+            // overlay takes the keys through the modal context above the
+            // composer's own, and the pane is too narrow to hold it.
+            if let slot = store.schedulePicker {
+                SchedulePalette(slot: slot) { store.schedulePicker = nil }
             }
             if store.askBarOpen { AskBar { store.askBarOpen = false } }
             if store.shortcutsOpen { ShortcutsOverlay { store.shortcutsOpen = false } }
@@ -84,7 +98,10 @@ struct ActionLayer: View {
             // being typed.
             KeyBinding("c", "new message") { store.openComposeNew() },
         ])
-        .task(id: store.lastRefresh) { await scanViolations() }
+        // The scan rides the poll tick from a leaf of its own: this layer is
+        // every toast, undo chip and modal in the app, and reading the tick
+        // here re-evaluated all of it every ten seconds.
+        .background { ViolationScanKeeper(scan: scanViolations) }
     }
 
     // MARK: - toasts
@@ -202,9 +219,11 @@ struct ActionLayer: View {
     private func scanViolations() async {
         guard let rows = try? await APIClient.shared.getUnsubscribes() else { return }
         // Surface one at a time: a stack of these is a nag, not a prompt.
-        blockPrompt = rows.first {
+        let next = rows.first {
             $0.violation_count > 0 && $0.resolution == nil && !acted.contains($0.sender)
         }
+        // Assignment is invalidation, and the answer is nil nearly always.
+        if next != blockPrompt { blockPrompt = next }
     }
 
     private func block(_ record: UnsubscribeRecord) async {
@@ -360,5 +379,27 @@ struct ShortcutsOverlay: View {
             KeyBinding("Escape", "close help") { onClose() },
             KeyBinding("?", "close help") { onClose() },
         ])
+    }
+}
+
+
+/// Asks for the unsubscribe ledger on the poll tick, from a zero-size leaf
+/// (see the call site), and NOT ON EVERY TICK: a violation is something a
+/// sender did days ago, and a request every ten seconds for it was the
+/// busiest thing this client asked the daemon for. Once a minute.
+private struct ViolationScanKeeper: View {
+    @Environment(AppStore.self) private var store
+    let scan: () async -> Void
+    @State private var lastScan: Date?
+    private static let interval: TimeInterval = 60
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .task(id: store.lastRefresh) {
+                if let lastScan, Date().timeIntervalSince(lastScan) < Self.interval { return }
+                lastScan = Date()
+                await scan()
+            }
     }
 }

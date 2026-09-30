@@ -16,11 +16,17 @@ import WebKit
 
 struct EmailWebViewRepresentable: UIViewRepresentable {
     let html: String
+    /// The prepared body's source hash — the document's identity, for the
+    /// load guard and the pool key (EmailFrameCoordinator.documentHash).
+    let source: Int
     let allowRemote: Bool
     let collapseQuotes: Bool
+    /// A hugging bubble document rather than a filling card one — part of the
+    /// document's identity, see EmailFrameCoordinator.documentHash.
+    let bubble: Bool
     /// Message id, or nil for a body that must never be pooled.
     let poolKey: String?
-    let onHeight: (CGFloat) -> Void
+    let onHeight: (FrameMeasurement) -> Void
     let onLoaded: () -> Void
     let onQuotedFound: (Bool) -> Void
     let onLink: (String) -> Void
@@ -35,7 +41,9 @@ struct EmailWebViewRepresentable: UIViewRepresentable {
         // still parsed and laid out in a live frame. Adopt it and DO NOT LOAD —
         // `adopt` seeds the load guard so the updateUIView that follows is a
         // no-op instead of a reload that would throw the rendered frame away.
-        if let key = EmailFrame.renderKey(poolKey: poolKey, html: html, allowRemote: allowRemote),
+        if let key = EmailFrame.renderKey(
+            poolKey: poolKey, html: html, source: source, allowRemote: allowRemote,
+            bubble: bubble),
             let entry = WebFramePool.shared.checkout(key)
         {
             context.coordinator.adopt(entry, key: key)
@@ -86,7 +94,9 @@ struct EmailWebViewRepresentable: UIViewRepresentable {
         webView.scrollView.contentInsetAdjustmentBehavior = .never
 
         context.coordinator.attach(relay)
-        context.coordinator.load(webView, html: html, allowRemote: allowRemote, poolKey: poolKey)
+        context.coordinator.load(
+            webView, html: html, source: source, allowRemote: allowRemote, bubble: bubble,
+            poolKey: poolKey)
         return webView
     }
 
@@ -97,7 +107,9 @@ struct EmailWebViewRepresentable: UIViewRepresentable {
         context.coordinator.onLink = onLink
         // A content/policy change is a genuine reload; a quote toggle is not
         // (reloading for it would flash an empty frame).
-        context.coordinator.load(webView, html: html, allowRemote: allowRemote, poolKey: poolKey)
+        context.coordinator.load(
+            webView, html: html, source: source, allowRemote: allowRemote, bubble: bubble,
+            poolKey: poolKey)
         context.coordinator.setQuotesCollapsed(webView, collapsed: collapseQuotes)
     }
 

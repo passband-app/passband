@@ -28,6 +28,16 @@ struct RecipientsTests {
         removingIsIdempotent()
         countsAndSlots()
         aMovedAddressIsAFinishedRecipient()
+        readingSkipsHeadersThatNamedNobody()
+        readingNamesTheReaderYou()
+        readingKeepsNamesLinedUpWithAddresses()
+        readingMarksWhoJoinedAndWhoWasDropped()
+        aMoveBetweenHeadersIsNotAChange()
+        anUnreadPredecessorMarksNobody()
+        aPredecessorThatNamedNobodyMarksNobody()
+        aReplyDoesNotDropItsOwnAuthorOrAddTheLastOne()
+        aBlindCopyNeverGhosts()
+        aDroppedPayloadYieldsOnlyAddresses()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -113,6 +123,20 @@ struct RecipientsTests {
         equal(r.bcc, "bob@x.test", "one person, one field")
     }
 
+    static func aDroppedPayloadYieldsOnlyAddresses() {
+        // A pill from the next field over: its own token, whole.
+        equal(Recipients.dropped("Bob Smith <bob@x.test>"), ["Bob Smith <bob@x.test>"], "one pill, name and all")
+        // A list, with the same person spelled twice: once, first spelling.
+        equal(
+            Recipients.dropped("Bob <bob@x.test>, alice@x.test, BOB@X.TEST"),
+            ["Bob <bob@x.test>", "alice@x.test"], "each person once")
+        // A column pasted out of a spreadsheet has newlines where commas go.
+        equal(Recipients.dropped("a@x.test\nb@x.test"), ["a@x.test", "b@x.test"], "lines are separators too")
+        // Prose is nobody, even prose that mentions somebody.
+        equal(Recipients.dropped("call me maybe"), [], "no @, no address")
+        equal(Recipients.dropped("Contact alice@x.test for details"), [], "a sentence is not an address")
+    }
+
     static func movingSomebodyAlreadyThereIsANoOp() {
         var r = Recipients(to: "alice@x.test", bcc: "bob@x.test")
         r.move("bob@x.test", to: .bcc)
@@ -184,6 +208,165 @@ struct RecipientsTests {
         // what keeps it editable instead of being pilled out from under the
         // caret.
         equal(Recipients.key("bo").isEmpty, true, "a fragment is not finished")
+    }
+
+    // MARK: - the reading side
+
+    /// A header nobody was on draws no line, and the two ways of being on no
+    /// header — never read, and read and empty — draw the same nothing. (They
+    /// are NOT the same statement upstream: one is the daemon's backfill queue.)
+    static func readingSkipsHeadersThatNamedNobody() {
+        equal(
+            Recipients.reading(audience(), me: nil).lines.count, 0,
+            "read-and-named-nobody draws nothing")
+        equal(
+            Recipients.reading(audience(cc: "  ,  "), me: nil).lines.count, 0,
+            "separators alone name nobody")
+        let d = Recipients.reading(audience(to: "a@x.test", bcc: "b@x.test"), me: nil)
+        equal(d.lines.count, 2, "only the headers with somebody on them")
+        equal(d.lines.map(\.slot), [RecipientSlot.to, .bcc], "in header order")
+        equal(d.count, 2, "two people addressed")
+        equal(d.changed, false, "with nothing before it, nothing has changed")
+    }
+
+    /// The reader knows they were on the mail. Their own address spelled out
+    /// among four others is the one name on the line carrying no information —
+    /// and it has to be matched on the bare mailbox, because the same person is
+    /// written three ways across the headers of one message.
+    static func readingNamesTheReaderYou() {
+        let d = Recipients.reading(
+            audience(to: "You <ME@x.test>, Bob Smith <bob@y.test>", cc: "me@x.test"),
+            me: "me@x.test")
+        equal(names(d.lines[0]), ["you", "Bob Smith"], "shouted and named, still you")
+        equal(names(d.lines[1]), ["you"], "and again on the Cc")
+
+        // No account address yet (the first /client/stats has not landed): every
+        // address renders as itself. A missing greeting, not a wrong one.
+        let anon = Recipients.reading(audience(to: "You <me@x.test>"), me: nil)
+        equal(names(anon.lines[0]), ["You"], "without an account address, nobody is you")
+    }
+
+    /// THE TOOLTIP AND THE LINE MUST NOT DISAGREE. The names are the readable
+    /// half and the tokens are the half that says which bob@ it was, so they are
+    /// built index-for-index off one split — and that split is quote-aware, or a
+    /// lastname-first address book entry becomes two people who do not exist.
+    static func readingKeepsNamesLinedUpWithAddresses() {
+        let d = Recipients.reading(
+            audience(to: "\"Doe, John\" <j@x.test>, plain@y.test"), me: nil)
+        equal(d.lines.count, 1, "one header")
+        equal(names(d.lines[0]), ["Doe, John", "plain@y.test"], "a name, then a bare address")
+        equal(
+            d.lines[0].full, "to: \"Doe, John\" <j@x.test>, plain@y.test",
+            "the pointer gets the addresses, spelled as the header spelled them")
+    }
+
+    /// THE SIGNAL THIS EXISTS FOR. A thread that quietly loses a recipient looks
+    /// exactly like one that did not, in every mail client there is: the message
+    /// simply stops naming them, and nothing draws what is absent. The ghost is
+    /// the only thing that can say it happened.
+    static func readingMarksWhoJoinedAndWhoWasDropped() {
+        let before = audience(to: "ann@x.test, bob@x.test", cc: "carol@x.test")
+        let now = audience(to: "ann@x.test, dave@x.test", cc: "carol@x.test")
+        let d = Recipients.reading(now, me: nil, previous: before)
+
+        equal(d.added, 1, "dave joined")
+        equal(d.removed, 1, "bob was dropped")
+        equal(d.changed, true, "so the block opens itself")
+        equal(d.count, 3, "a ghost is not a recipient of this message")
+
+        let to = d.lines[0]
+        equal(to.people.map(\.mark), [.present, .added, .removed], "in that order")
+        equal(to.people.map(\.name), ["ann@x.test", "dave@x.test", "bob@x.test"], "who")
+        equal(
+            to.full,
+            "to: ann@x.test, dave@x.test (added), bob@x.test (removed)",
+            "and the pointer says which is which in words")
+        equal(d.lines[1].people.map(\.mark), [.present], "carol never moved")
+
+        // A ghost is drawn ON THE HEADER THEY LEFT, even when this message has no
+        // such header of its own — otherwise dropping the whole Cc list would
+        // erase the evidence along with the people.
+        let cut = Recipients.reading(audience(to: "ann@x.test"), me: nil, previous: before)
+        equal(cut.lines.count, 2, "the Cc line survives its own emptying")
+        equal(cut.lines[1].people.map(\.mark), [.removed], "as a ghost")
+        equal(cut.removed, 2, "bob and carol both went")
+    }
+
+    /// Somebody moved from To to Cc is still in the conversation. Marking that as
+    /// an addition and a removal at once would cry wolf on the one signal here.
+    static func aMoveBetweenHeadersIsNotAChange() {
+        let before = audience(to: "ann@x.test, bob@x.test")
+        let now = audience(to: "ann@x.test", cc: "Bob <BOB@X.TEST>")
+        let d = Recipients.reading(now, me: nil, previous: before)
+        equal(d.added, 0, "nobody joined")
+        equal(d.removed, 0, "and nobody left")
+        equal(d.changed, false, "so the block stays shut")
+    }
+
+    /// An unread predecessor is not evidence that everyone here is new. The
+    /// daemon's recipients sweep walks a mailbox back over minutes, so mid-sweep
+    /// a thread holds messages that have been read and messages that have not.
+    static func anUnreadPredecessorMarksNobody() {
+        let d = Recipients.reading(
+            audience(to: "ann@x.test, bob@x.test"), me: nil, previous: nil)
+        equal(d.added, 0, "no marks without something to compare against")
+        equal(d.changed, false, "and no self-opening block")
+        equal(d.lines[0].people.map(\.mark), [.present, .present], "everyone plain")
+    }
+
+    /// A newsletter that reached you as a Bcc names nobody. The reply after it
+    /// is not "everyone joined".
+    static func aPredecessorThatNamedNobodyMarksNobody() {
+        let d = Recipients.reading(
+            audience(to: "you@x.test", cc: "ann@x.test, bob@x.test"), me: nil,
+            previous: audience(from: "news@x.test"))
+        equal(d.added, 0, "nobody is new against a message that named nobody")
+        equal(d.changed, false, "and the block stays shut")
+    }
+
+    static func names(_ line: RecipientLine) -> [String] { line.people.map(\.name) }
+
+    /// One message's audience. `from` defaults to somebody outside every fixture
+    /// list, so a test that is not about the sender is not quietly about it.
+    static func audience(
+        from: String = "outsider@x.test", to: String = "", cc: String = "", bcc: String = ""
+    ) -> MessageAudience {
+        MessageAudience(sender: from, recipients: Recipients(to: to, cc: cc, bcc: bcc))
+    }
+
+    /// THE TWO MOST ORDINARY EVENTS IN MAIL, and the two this mark would have
+    /// cried wolf on. A reply does not name its own author in its To, and the
+    /// message it answers did not name its author either — so a diff over
+    /// recipients alone reports "Daniel left" and "Maya joined" for a plain
+    /// back-and-forth, on every thread, forever.
+    static func aReplyDoesNotDropItsOwnAuthorOrAddTheLastOne() {
+        let first = audience(from: "maya@x.test", to: "you@x.test, daniel@x.test")
+        let reply = audience(from: "daniel@x.test", to: "you@x.test, maya@x.test")
+        let d = Recipients.reading(reply, me: "you@x.test", previous: first)
+        equal(d.added, 0, "the author of the last message is not a new face")
+        equal(d.removed, 0, "and the author of this one has not left it")
+        equal(d.changed, false, "so an ordinary exchange opens nothing")
+    }
+
+    /// A blind copy is invisible to every other recipient, so the next message in
+    /// the thread cannot name them and never does. Ghosting them would report a
+    /// removal on every thread the user ever blind-copied anyone on — and report
+    /// it to the one person who knows it did not happen.
+    static func aBlindCopyNeverGhosts() {
+        let mine = audience(
+            from: "you@x.test", to: "maya@x.test", bcc: "Ana Beck <ana@x.test>")
+        let theirs = audience(from: "maya@x.test", to: "you@x.test")
+        let d = Recipients.reading(theirs, me: "you@x.test", previous: mine)
+        equal(d.removed, 0, "Ana was never visible to Maya to drop")
+        equal(d.changed, false, "and nothing opens")
+
+        // The other direction still marks: blind-copying somebody IS a change to
+        // who is reading, and it is the user's own doing, so they can see it.
+        let opening = Recipients.reading(mine, me: "you@x.test", previous: theirs)
+        equal(opening.added, 1, "Ana joined, blind or not")
+        equal(
+            opening.lines.last?.people.map(\.mark), [.added],
+            "and the mark lands on the Bcc line")
     }
 
     // MARK: - assert

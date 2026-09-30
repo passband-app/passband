@@ -8,6 +8,7 @@ pub mod access;
 pub mod agent;
 pub mod agent_config;
 pub mod calendar;
+pub mod condense;
 pub mod context;
 pub mod deadline;
 pub mod decision;

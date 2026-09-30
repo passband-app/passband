@@ -274,7 +274,7 @@ struct MobileSitrepView: View {
         } else {
             // The same stamp and tint as the Mac's status strip.
             let stamp = SyncStatus.syncedStamp(
-                stats: store.sitrep.stats, clientRefresh: store.lastRefresh, date: Fmt.date)
+                stats: store.stats, clientRefresh: store.lastRefresh, date: Fmt.date)
             Text(stamp.text)
                 .font(Typo.micro)
                 .foregroundStyle(stamp.warn ? Palette.warn : Palette.inkFaintest)

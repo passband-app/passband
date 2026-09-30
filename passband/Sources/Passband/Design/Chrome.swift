@@ -217,9 +217,15 @@ struct KeyHint: View {
 /// hints under a top hairline.
 struct KeyHintBar: View {
     let hints: [KeyHint]
+    /// A control ahead of the first hint (the inline reply's send clock, just
+    /// left of the send verb it changes). nil = the bar as it always was.
+    var leading: AnyView? = nil
 
     var body: some View {
         HStack(spacing: 4) {
+            if let leading {
+                leading.padding(.trailing, 4)
+            }
             ForEach(Array(hints.enumerated()), id: \.offset) { i, hint in
                 if i > 0 { Text("·").foregroundStyle(Palette.inkFaintest) }
                 hint
@@ -365,8 +371,8 @@ extension View {
     ///
     /// Both halves are guarded and the disappear case is real, not defensive:
     /// these sit on controls that VANISH under the cursor by design — the
-    /// cc/bcc toggles fold a field open and the layout moves, the pill move bar
-    /// closes the moment its pill is gone — and a view removed while hovered
+    /// cc/bcc toggles fold a field open and the layout moves, a recipient pill
+    /// vanishes when it is dragged to another field — and a view removed while hovered
     /// never gets its exit callback. An unbalanced push leaves the pointing
     /// hand stuck over the whole window.
     private struct PointingHandCursor: ViewModifier {

@@ -50,6 +50,10 @@ final class SitrepCursor {
     /// Hovered reading-card address — `e` marks that sender's whole window done,
     /// deferring to the For-your-eyes handler when nothing hovers.
     var reading: String?
+    /// Hovered shipment card id — `e` clears that package off the rail until
+    /// the carrier or a new email reports something new. Checked before
+    /// `reading`; the two can't both be under one pointer.
+    var shipment: Int?
 
     /// Point the cursor at a row the POINTER is over. EVERY WRITE IS GUARDED:
     /// `@Observable` notifies on assignment, not on change, so an unguarded
@@ -65,6 +69,23 @@ final class SitrepCursor {
 struct SitrepView: View {
     @Environment(AppStore.self) private var store
     @Environment(Prefs.self) private var prefs
+
+    /// How long a board row's thread stays good in the prefetch cache. Longer
+    /// than the default: a board row is the likeliest click in the app, and a
+    /// reader opened from a stale copy heals itself — the poll refetches in
+    /// place the moment it sees a newer message (AppStore.noteThreadArrival).
+    static let boardFresh: TimeInterval = 5 * 60
+    /// How many of the top rows are worth a pre-rendered frame. Bounded by
+    /// WebFramePool's prerendered tier; each is a live content process.
+    private static let prerenderRows = 4
+
+    /// The whole warm for a list of board rows: threads first, then frames
+    /// for the top few.
+    fileprivate static func warmBoard(_ ids: [String]) {
+        ThreadPrefetch.shared.warm(
+            ids, immediate: eyesVisible, spacing: .milliseconds(150), fresh: boardFresh)
+        FramePrewarmer.shared.want(Array(ids.prefix(prerenderRows)))
+    }
 
     /// Hover + keyboard cursor. A reference, deliberately — see `SitrepCursor`.
     @State private var cursor = SitrepCursor()
@@ -129,8 +150,7 @@ struct SitrepView: View {
             // padding inside each scroll view's content.
             DashHero(
                 standing: store.sitrep.standing,
-                empty: store.syncStatus.emptyHero(
-                    queued: store.triageWaiting, lastSync: store.daemonLastSync))
+                empty: emptyHero)
                 .padding(.horizontal, 28)
                 .padding(.bottom, 18)
 
@@ -144,8 +164,9 @@ struct SitrepView: View {
                         leftZones(visible: visible, overflow: overflow)
                         // Same key as the pinned rail below: whichever layout is
                         // on screen is the one the tour's ring finds.
-                        railCards.tourTarget(.records)
-                        StatusStrip()
+                        if !recordsEmpty {
+                            railCards.tourTarget(.records)
+                        }
                     }
                     .padding(.top, 14)
                     .padding(.bottom, 28)
@@ -159,7 +180,6 @@ struct SitrepView: View {
                     ScrollView(.vertical) {
                         VStack(spacing: 16) {
                             leftZones(visible: visible, overflow: overflow)
-                            StatusStrip()
                         }
                         .padding(.top, 14)
                         .padding(.bottom, 28)
@@ -177,6 +197,7 @@ struct SitrepView: View {
                     // taller than the window is still reachable —
                     // `.basedOnSize` is what keeps it completely inert until then,
                     // instead of rubber-banding against nothing.
+                    if !recordsEmpty {
                     ScrollView(.vertical) {
                         VStack(spacing: 14) {
                             railZones
@@ -191,10 +212,16 @@ struct SitrepView: View {
                     // The COLUMN, not its content: a rail taller than the window
                     // would put the ring's bottom edge off screen.
                     .tourTarget(.records)
+                    }
                 }
                 .padding(.horizontal, 24)
             }
         }
+        // The window shell draws the scene (it runs under the rail and the
+        // traffic lights), so the sitrep only says whether it should.
+        .onChange(of: quiet, initial: true) { _, q in QuietBoard.shared.isQuiet = q }
+        .onDisappear { QuietBoard.shared.isQuiet = false }
+        .animation(.easeInOut(duration: 0.3), value: recordsEmpty)
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { pageWidth = $0 }
         .keyContext(.sitrep)
         .keyBindings(.sitrep, bindings)
@@ -203,17 +230,66 @@ struct SitrepView: View {
         .task { await store.refreshZones() }
         // Warm the visible top-10 immediately and trickle the collapsed
         // remainder, so a long list never stampedes the daemon. Prefetch dedupes
-        // in-flight and fresh entries, so re-runs are near-free.
-        .onChange(of: threadIds) { _, ids in
-            ThreadPrefetch.shared.warm(ids, immediate: eyesVisible, spacing: .milliseconds(150))
-        }
-        .onAppear {
-            ThreadPrefetch.shared.warm(
-                threadIds, immediate: eyesVisible, spacing: .milliseconds(150))
-        }
+        // in-flight and fresh entries, so re-runs are near-free. The top rows
+        // go one step further and get their newest message RENDERED into a
+        // parked frame (FramePrewarmer), so the click is a pool hit.
+        .onChange(of: threadIds) { _, ids in Self.warmBoard(ids) }
+        .onAppear { Self.warmBoard(threadIds) }
+        // AND KEPT WARM. The warm above ran once per list change, and a
+        // cached thread goes stale after its TTL — so a board left open for a
+        // few minutes and then clicked paid the round trip the prefetch
+        // exists to remove. A zero-size leaf watches the poll heartbeat so
+        // this body does not have to.
+        .background { BoardWarmKeeper(threadIds: threadIds) }
         .onChange(of: visible.count) { _, count in
             cursor.index = max(0, min(cursor.index, max(0, count - 1)))
         }
+        // Arms the clear moment while there is something on the board, and
+        // spends it the first time the board is seen clear afterwards. With
+        // `initial`, coming back from the reader after finishing the last
+        // email counts: that is where most boards actually get cleared.
+        // Keyed on BOTH facts: a board that loads straight into items never
+        // changes `isClear` (false before the load, false after), so watching
+        // that alone would never arm.
+        .onChange(of: [ranked.isEmpty && readingSenders.isEmpty, quiet], initial: true) { _, now in
+            if !now[0] {
+                QuietBoard.shared.armed = true
+            } else if now[1], QuietBoard.shared.armed {
+                QuietBoard.shared.armed = false
+                ClearChime.play()
+            }
+        }
+    }
+
+    /// What the hero says over an empty board that is empty for a reason other
+    /// than the reader having handled everything. Nil when the board is clear.
+    private var emptyHero: (title: String, note: String)? {
+        store.syncStatus.emptyHero(queued: store.triageWaiting, lastSync: store.daemonLastSync)
+    }
+
+    /// Nothing for your eyes, and truly so: the board has loaded, and it is not
+    /// empty only because sync or triage is stuck.
+    private var isClear: Bool {
+        store.stats != nil && store.sitrep.standing.isEmpty && emptyHero == nil
+    }
+
+    /// The reading cards as the zone draws them.
+    private var readingSenders: [ReadingSender] {
+        Reading.prune(store.zones.reading, resolved: store.resolvedIds)
+    }
+
+    /// Clear AND nothing to read: the board with nothing on it at all, which
+    /// is what the quiet board's scene plays behind. Mail in either zone
+    /// fades it away.
+    private var quiet: Bool { isClear && readingSenders.isEmpty }
+
+    /// Every records card would only say it has nothing. Four cards of "No
+    /// receipts today." is a dashboard of absences, so the rail steps aside.
+    private var recordsEmpty: Bool {
+        CalendarZone.rows(store, now: Date()).isEmpty
+            && ShipmentsZone.rows(store).isEmpty
+            && BankingZone.rows(store).isEmpty
+            && ReceiptsZone.rows(store).isEmpty
     }
 
     // MARK: - columns
@@ -225,20 +301,26 @@ struct SitrepView: View {
         if !store.sitrep.standing.isEmpty {
             forYourEyes(visible: visible, overflow: overflow)
                 .tourTarget(.eyes)
+        } else if isClear {
+            ClearNote()
+                .padding(.horizontal, 4)
+                .transition(.opacity)
         }
-        ReadingZone(
-            senders: Reading.prune(
-                store.zones.reading, resolved: store.resolvedIds),
-            cursor: cursor
-        )
-        .tourTarget(.reading)
+        // Empty reading still stands beside a live For-your-eyes (a zone that
+        // vanishes mid-work reads as a missing feature), but on a board with
+        // nothing else it is one more absence to look at.
+        let senders = readingSenders
+        if !(senders.isEmpty && store.sitrep.standing.isEmpty) {
+            ReadingZone(senders: senders, cursor: cursor)
+                .tourTarget(.reading)
+        }
     }
 
     /// The records zones as the pinned rail shows them: full-width rows.
     @ViewBuilder
     private var railZones: some View {
         CalendarZone().tourTarget(.calendar)
-        ShipmentsZone().tourTarget(.shipments)
+        ShipmentsZone(cursor: cursor).tourTarget(.shipments)
         BankingZone().tourTarget(.banking)
         ReceiptsZone().tourTarget(.receipts)
     }
@@ -255,7 +337,7 @@ struct SitrepView: View {
             }
             .frame(maxWidth: .infinity)
             VStack(spacing: 16) {
-                ShipmentsZone().tourTarget(.shipments)
+                ShipmentsZone(cursor: cursor).tourTarget(.shipments)
                 ReceiptsZone().tourTarget(.receipts)
             }
             .frame(maxWidth: .infinity)
@@ -416,9 +498,19 @@ struct SitrepView: View {
                 guard eyesActionable, let u = reachable[safe: cursor.index] else { return }
                 Task { await Actions.done(u, via: .key, on: .sitrep) }
             },
-            // `e` first tries the hovered reading card; with nothing hovered
-            // it DECLINES so the for-your-eyes done handler runs instead.
+            // `e` first tries the hovered shipment, then the hovered reading
+            // card; with nothing hovered it falls to the for-your-eyes row.
             KeyBinding(declining: "e", "mark done") {
+                // Checked against the rail as DRAWN: a card that left it (its
+                // own clear, or a refresh) never sends onHover(false), so a
+                // stale id must fall through rather than clear something unseen.
+                if let id = cursor.shipment,
+                    ShipmentsZone.rows(store).contains(where: { $0.id == id })
+                {
+                    cursor.shipment = nil
+                    Task { await store.clearShipment(id) }
+                    return true
+                }
                 if let addr = cursor.reading,
                     let rs = store.zones.reading.first(where: { $0.address == addr })
                 {
@@ -432,6 +524,17 @@ struct SitrepView: View {
             KeyBinding("Enter", "open email") {
                 guard eyesActionable, let u = reachable[safe: cursor.index] else { return }
                 store.openThread(u.thread_id, queue: eyesWalk(store), from: .sitrep)
+            },
+            // Space STARTS the walk: no highlight needed, so it is the one key
+            // that works the moment the page opens. A row the cursor is on still
+            // wins, so it never jumps back past where you arrowed to. Declines on
+            // an empty board so Space keeps scrolling the page.
+            KeyBinding(declining: "Space", "start with the first item") {
+                let walk = eyesWalk(store)
+                let u = eyesActionable ? reachable[safe: cursor.index] : walk.first
+                guard let u else { return false }
+                store.openThread(u.thread_id, queue: walk, from: .sitrep)
+                return true
             },
             // Same guard as every other verb here — inert unless a row is
             // actually highlighted. Reply opens the email and composes inside it,
@@ -835,6 +938,26 @@ private struct DashHero: View {
     }
 #endif
 
+/// Re-warms the board's threads on every poll heartbeat. A LEAF of its own
+/// so that reading `lastRefresh` — which changes every ten seconds — costs a
+/// zero-size view's body and not the board's.
+private struct BoardWarmKeeper: View {
+    @Environment(AppStore.self) private var store
+    let threadIds: [String]
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            // THE VISIBLE ROWS ONLY. The whole band is warmed when the list
+            // changes; re-warming all two hundred every tick would start a
+            // thirty-second trickle every ten seconds and, when the TTL
+            // lapsed, refetch every collapsed row nobody can click.
+            .onChange(of: store.lastRefresh) { _, _ in
+                SitrepView.warmBoard(Array(threadIds.prefix(eyesVisible)))
+            }
+    }
+}
+
 // MARK: - obligation row
 
 private struct ObligationRow: View {
@@ -937,7 +1060,14 @@ private struct ObligationRow: View {
         }
         .onHover { over in
             hover.on = over
-            if over { cursor.hover(index) }
+            if over {
+                cursor.hover(index)
+                // The pointer resting on a row is the best predictor of the
+                // next click: make sure its thread is cached (a no-op when it
+                // already is) and, a beat later, rendered.
+                ThreadPrefetch.shared.prefetch(update.thread_id, fresh: SitrepView.boardFresh)
+                FramePrewarmer.shared.nudge(update.thread_id)
+            }
         }
     }
 }
@@ -989,56 +1119,6 @@ private struct ObligationWash: View {
                     .strokeBorder(
                         focused ? tint.opacity(SelectionTone.border) : .clear, lineWidth: 1)
             )
-    }
-}
-
-// MARK: - status strip
-
-private struct StatusStrip: View {
-    @Environment(AppStore.self) private var store
-    @State private var refreshing = false
-
-    var body: some View {
-        HStack(spacing: 9) {
-            if !RehearsalMode.isEnabled {
-            ChromeChip(
-                tone: stamp.warn ? Palette.warn : Palette.inkDim,
-                help: "check for new mail now"
-            ) {
-                guard !refreshing else { return }
-                refreshing = true
-                Task {
-                    await SitrepPoller.shared.triggerMailRefresh()
-                    refreshing = false
-                }
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 10, weight: .semibold))
-                        .symbolEffect(.rotate, isActive: refreshing)
-                    Text(stamp.text)
-                }
-                .font(Typo.micro)
-            }
-            .disabled(refreshing)
-            }
-
-            if let cost = store.sitrep.stats?.stage2?.est_cost_usd_today {
-                Text("triage: \(String(format: "$%.2f", cost)) today")
-                    .font(Typo.num(11))
-                    .foregroundStyle(Palette.inkFaintest)
-                    .help("today's stage-2 triage cost estimate")
-            }
-
-            Spacer(minLength: 0)
-        }
-        .padding(.top, 2)
-    }
-
-    /// Shared with the phone's footnote: see `SyncStatus.syncedStamp`.
-    private var stamp: (text: String, warn: Bool) {
-        SyncStatus.syncedStamp(
-            stats: store.sitrep.stats, clientRefresh: store.lastRefresh, date: Fmt.date)
     }
 }
 

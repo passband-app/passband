@@ -25,6 +25,26 @@ enum Quotes {
         var quoted: String?
     }
 
+    /// `splitText`, remembered. For a caller that asks from a view body — the
+    /// split is a regex over every line, and a body is evaluated far more
+    /// often than a message changes. Keyed on the whole text: hashing a string
+    /// is a fraction of walking its lines through a regex, and a plain body is
+    /// small beside the html one.
+    static func splitTextMemoized(_ content: String) -> TextSplit {
+        memoLock.lock()
+        defer { memoLock.unlock() }
+        if let known = memo[content] { return known }
+        // Bounded by wholesale reset rather than an LRU: this file compiles
+        // into suites that carry no LRU, and a few hundred plain bodies is
+        // more than any reader has on screen.
+        if memo.count >= 400 { memo.removeAll(keepingCapacity: true) }
+        let made = splitText(content)
+        memo[content] = made
+        return made
+    }
+    nonisolated(unsafe) private static var memo: [String: TextSplit] = [:]
+    private static let memoLock = NSLock()
+
     /// Split a plain-text body into the visible reply and its trailing quoted
     /// history. `quoted: nil` unless the tail is genuinely history: ≥ 2 quoted
     /// lines and almost no stray non-quote text. A message that STARTS quoted is

@@ -74,7 +74,26 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+    # Two things keep the workspace inside the runner's disk. The hosted
+    # ubuntu image ships ~14 GB free on / and something like 25 GB of
+    # toolchains this job never touches (.NET, Android, Haskell, CodeQL);
+    # dropping those first is the cheap half. The other half is debuginfo:
+    # `cargo test --workspace` links one binary per test target with the whole
+    # dependency tree inside it, and at the default `debug = 2` those binaries
+    # are several hundred MB each. Line tables keep panic backtraces readable
+    # and cut the target dir by roughly two thirds. The env var is part of the
+    # rust-cache key, so flipping it starts a fresh cache rather than mixing
+    # artifacts of two debuginfo levels.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
+      - name: free disk
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h / | tail -1
+
       - uses: actions/checkout@v4
 
       # No-arg install reads rust-toolchain.toml — the pinned channel and its

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const PROMPT_VERSION: &str = "agent-triage-v3";
+pub const PROMPT_VERSION: &str = "agent-triage-v4";
 const SYSTEM: &str = include_str!("prompts/agent-v1.txt");
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "step", rename_all = "snake_case")]
@@ -63,6 +63,7 @@ pub async fn run_agent(
         usage: Vec::new(),
         model_calls: 0,
     })?;
+    condense_initial_context(&mut context.initial, &config.context);
     // Reserve half the context window for investigation results. Truncation is
     // visible in the payload and never silently drops a message's identity.
     bound_evidence_text(&mut context.initial, config.context.max_context_bytes / 2);
@@ -193,6 +194,7 @@ async fn run_bounded(
                     tool_calls += 1;
                     match reader.read(&request) {
                         Ok(mut result) => {
+                            condense_evidence(&mut result.data);
                             bound_evidence_text(
                                 &mut result.data,
                                 config.context.max_tool_result_bytes,
@@ -238,6 +240,61 @@ async fn run_bounded(
         }
     }
     Err("agent_turn_budget_exhausted".into())
+}
+
+/// Condense the bodies of the initial snapshot: the target and the newest
+/// `full_sibling_bodies` siblings lose quoted tails and long URLs
+/// ([`super::condense::condense_body`]); older siblings shrink to an excerpt
+/// and say so. Runs BEFORE [`bound_evidence_text`], so the byte budget is
+/// spent on text that can still decide something.
+fn condense_initial_context(initial: &mut Value, config: &super::agent_config::ContextConfig) {
+    if let Some(Value::String(body)) = initial.pointer_mut("/message/body") {
+        *body = super::condense::condense_body(body);
+    }
+    let Some(Value::Array(siblings)) = initial.get_mut("thread") else {
+        return;
+    };
+    for (index, sibling) in siblings.iter_mut().enumerate() {
+        let Some(fields) = sibling.as_object_mut() else {
+            continue;
+        };
+        let Some(Value::String(body)) = fields.get_mut("body") else {
+            continue;
+        };
+        if index < config.full_sibling_bodies {
+            *body = super::condense::condense_body(body);
+            continue;
+        }
+        let (excerpt, cut) = super::condense::excerpt(body, config.sibling_excerpt_chars);
+        *body = excerpt;
+        if cut {
+            fields.insert("body_excerpted".into(), Value::Bool(true));
+        }
+    }
+}
+
+/// Condense the bodies in a tool result: every `messages[]` entry and a
+/// top-level `message`. A `read_message` page (it carries `body_offset`) is
+/// left raw, because its offsets index the stored text and the prompt promises
+/// the model that pages are unmodified.
+fn condense_evidence(data: &mut Value) {
+    fn condense_message(value: &mut Value) {
+        let Some(fields) = value.as_object_mut() else {
+            return;
+        };
+        if fields.contains_key("body_offset") {
+            return;
+        }
+        if let Some(Value::String(body)) = fields.get_mut("body") {
+            *body = super::condense::condense_body(body);
+        }
+    }
+    if let Some(message) = data.get_mut("message") {
+        condense_message(message);
+    }
+    if let Some(Value::Array(messages)) = data.get_mut("messages") {
+        messages.iter_mut().for_each(condense_message);
+    }
 }
 
 /// Bound large textual evidence without truncating JSON, identifiers, user
@@ -607,6 +664,24 @@ fn number() -> Value {
 fn boolean() -> Value {
     json!({"type":"boolean"})
 }
+/// A `$ref` into [`schema_defs`]. The step schema used to inline every
+/// repeated sub-schema — `attention` twice, `evidence` a dozen times, `time`
+/// six — and the whole thing rode in the cached prefix of every call. Refs
+/// keep the JSON the model sees a fraction of that size; both transports'
+/// structured-output modes resolve local `$ref`s.
+fn reference(name: &str) -> Value {
+    json!({"$ref": format!("#/$defs/{name}")})
+}
+/// The shared definitions. Attached at the ROOT of whichever schema is sent
+/// ([`step_schema`], or [`decision_schema`] on its own), because a `$ref` is
+/// resolved against the document root, not the object that contains it.
+fn schema_defs() -> Value {
+    json!({
+        "evidence": evidence_schema(),
+        "time": time_schema(),
+        "attention": attention_schema(),
+    })
+}
 fn evidence_schema() -> Value {
     array(object(vec![
         ("message_id", integer()),
@@ -643,8 +718,8 @@ fn attention_schema() -> Value {
                 ),
                 ("description", text()),
                 ("resolved", boolean()),
-                ("due", nullable(time_schema())),
-                ("evidence", evidence_schema()),
+                ("due", nullable(reference("time"))),
+                ("evidence", reference("evidence")),
             ])),
         ),
         ("summary", text()),
@@ -655,30 +730,39 @@ fn attention_schema() -> Value {
                 ("action_need", number()),
                 ("personal_relevance", number()),
                 ("importance", number()),
-                ("attention_at", nullable(time_schema())),
+                ("attention_at", nullable(reference("time"))),
             ]),
         ),
         ("relevant_message_ids", array(integer())),
-        ("evidence", evidence_schema()),
+        ("evidence", reference("evidence")),
     ])
 }
+/// The decision schema as a self-contained document (with its `$defs`), for
+/// callers that send or inspect it on its own.
 pub fn decision_schema() -> Value {
+    let mut schema = decision_schema_body();
+    schema["$defs"] = schema_defs();
+    schema
+}
+/// [`decision_schema`] minus the `$defs`, for embedding under a root that
+/// carries them ([`step_schema`]).
+fn decision_schema_body() -> Value {
     let records = vec![
         object(vec![
             ("kind", enumeration(&["bill"])),
             ("merchant", text()),
             ("amount", nullable(number())),
             ("currency", nullable(text())),
-            ("due", nullable(time_schema())),
+            ("due", nullable(reference("time"))),
             ("autopay", nullable(boolean())),
-            ("evidence", evidence_schema()),
+            ("evidence", reference("evidence")),
         ]),
         object(vec![
             ("kind", enumeration(&["receipt"])),
             ("merchant", text()),
             ("amount", nullable(number())),
             ("currency", nullable(text())),
-            ("evidence", evidence_schema()),
+            ("evidence", reference("evidence")),
         ]),
         object(vec![
             ("kind", enumeration(&["delivery"])),
@@ -703,20 +787,20 @@ pub fn decision_schema() -> Value {
             ("item_name", nullable(text())),
             ("merchant", nullable(text())),
             ("order_refs", array(text())),
-            ("evidence", evidence_schema()),
+            ("evidence", reference("evidence")),
         ]),
         object(vec![
             ("kind", enumeration(&["event"])),
             ("title", text()),
-            ("start", nullable(time_schema())),
+            ("start", nullable(reference("time"))),
             ("location", nullable(text())),
-            ("evidence", evidence_schema()),
+            ("evidence", reference("evidence")),
         ]),
         object(vec![
             ("kind", enumeration(&["financial_update"])),
             ("institution", text()),
             ("description", text()),
-            ("evidence", evidence_schema()),
+            ("evidence", reference("evidence")),
         ]),
     ];
     object(vec![
@@ -753,7 +837,7 @@ pub fn decision_schema() -> Value {
                         "security_alert",
                     ])),
                 ),
-                ("evidence", evidence_schema()),
+                ("evidence", reference("evidence")),
             ]),
         ),
         (
@@ -761,18 +845,18 @@ pub fn decision_schema() -> Value {
             object(vec![
                 ("restricted", boolean()),
                 ("reason", text()),
-                ("evidence", evidence_schema()),
+                ("evidence", reference("evidence")),
             ]),
         ),
-        ("attention", attention_schema()),
+        ("attention", reference("attention")),
         ("records", array(json!({"anyOf":records}))),
         (
             "related_updates",
             array(object(vec![
                 ("thread_id", text()),
                 ("expected_revision", integer()),
-                ("attention", attention_schema()),
-                ("evidence", evidence_schema()),
+                ("attention", reference("attention")),
+                ("evidence", reference("evidence")),
             ])),
         ),
         (
@@ -780,7 +864,7 @@ pub fn decision_schema() -> Value {
             array(object(vec![
                 ("rule_id", integer()),
                 ("reason", text()),
-                ("evidence", evidence_schema()),
+                ("evidence", reference("evidence")),
             ])),
         ),
         (
@@ -839,12 +923,14 @@ fn step_schema() -> Value {
         ]),
         object(vec![
             ("step", enumeration(&["finish"])),
-            ("decision", decision_schema()),
+            ("decision", decision_schema_body()),
         ]),
     ];
     // Provider structured outputs require an object at the root; a nested
     // union is supported by both transports. WireStep unwraps that envelope.
-    object(vec![("result", json!({"anyOf": steps}))])
+    let mut schema = object(vec![("result", json!({"anyOf": steps}))]);
+    schema["$defs"] = schema_defs();
+    schema
 }
 #[derive(Deserialize)]
 struct WireStep {
@@ -854,6 +940,52 @@ struct WireStep {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The step schema is part of the cached prefix of EVERY triage call, so
+    /// its encoded size is a cost line item. The bound is the `$defs` version's
+    /// size with headroom; inlining the shared sub-schemas again roughly
+    /// doubles it, and this is what notices.
+    #[test]
+    fn step_schema_stays_compact_and_its_refs_resolve() {
+        let schema = step_schema();
+        let encoded = serde_json::to_string(&schema).unwrap();
+        eprintln!("step schema: {} bytes", encoded.len());
+        assert!(
+            encoded.len() < 9_000,
+            "step schema grew to {} bytes",
+            encoded.len()
+        );
+        let defs = schema["$defs"].as_object().unwrap();
+        fn refs(value: &Value, out: &mut Vec<String>) {
+            match value {
+                Value::Object(fields) => {
+                    if let Some(Value::String(target)) = fields.get("$ref") {
+                        out.push(target.clone());
+                    }
+                    fields.values().for_each(|v| refs(v, out));
+                }
+                Value::Array(values) => values.iter().for_each(|v| refs(v, out)),
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        refs(&schema, &mut found);
+        assert!(
+            found.len() >= 10,
+            "expected the shared schemas to be referenced"
+        );
+        for target in found {
+            let name = target.strip_prefix("#/$defs/").expect("local ref");
+            assert!(defs.contains_key(name), "dangling $ref {target}");
+        }
+        // The standalone decision schema resolves on its own too.
+        let alone = decision_schema();
+        let mut found = Vec::new();
+        refs(&alone, &mut found);
+        for target in found {
+            let name = target.strip_prefix("#/$defs/").unwrap();
+            assert!(alone["$defs"].get(name).is_some(), "dangling {target}");
+        }
+    }
     fn valid() -> MessageDecision {
         let evidence = vec![EvidenceRef {
             message_id: 7,
@@ -876,6 +1008,59 @@ mod tests {
             ..Default::default()
         }
     }
+    /// The target and the two newest siblings keep their (condensed) bodies;
+    /// older siblings become a flagged excerpt; quoted tails go everywhere.
+    #[test]
+    fn initial_context_condenses_bodies_and_excerpts_older_siblings() {
+        let quote = "\n\nOn Mon, Sep 28, 2026 Alice <a@example.com> wrote:\n> earlier";
+        let long = "x".repeat(600);
+        let mut initial = json!({
+            "message": {"id": 4, "body": format!("Reply four.{quote}")},
+            "thread": [
+                {"id": 3, "body": format!("Reply three.{quote}")},
+                {"id": 2, "body": format!("Reply two.{quote}")},
+                {"id": 1, "body": format!("{long}{quote}")},
+                {"id": 0, "body": "short"},
+            ],
+        });
+        let config = super::super::agent_config::ContextConfig::default();
+        condense_initial_context(&mut initial, &config);
+        let marker = super::super::condense::QUOTE_MARKER;
+        assert_eq!(initial["message"]["body"], format!("Reply four.\n{marker}"));
+        assert_eq!(
+            initial["thread"][0]["body"],
+            format!("Reply three.\n{marker}")
+        );
+        assert_eq!(
+            initial["thread"][1]["body"],
+            format!("Reply two.\n{marker}")
+        );
+        assert!(initial["thread"][0].get("body_excerpted").is_none());
+        let third = initial["thread"][2]["body"].as_str().unwrap();
+        assert_eq!(third.chars().count(), config.sibling_excerpt_chars);
+        assert!(third.ends_with('…'));
+        assert_eq!(initial["thread"][2]["body_excerpted"], true);
+        // Already under the excerpt budget: unchanged and unflagged.
+        assert_eq!(initial["thread"][3]["body"], "short");
+        assert!(initial["thread"][3].get("body_excerpted").is_none());
+    }
+
+    /// Tool results condense too, except a raw page from read_message.
+    #[test]
+    fn tool_results_condense_except_raw_pages() {
+        let quote = "\n\nOn Mon, Sep 28, 2026 Alice <a@example.com> wrote:\n> earlier";
+        let mut thread = json!({"messages": [{"id": 1, "body": format!("Hi.{quote}")}]});
+        condense_evidence(&mut thread);
+        assert_eq!(
+            thread["messages"][0]["body"],
+            format!("Hi.\n{}", super::super::condense::QUOTE_MARKER)
+        );
+        let raw = format!("Hi.{quote}");
+        let mut page = json!({"message": {"id": 1, "body": raw, "body_offset": 0}});
+        condense_evidence(&mut page);
+        assert_eq!(page["message"]["body"], raw);
+    }
+
     #[test]
     fn long_thread_retains_decisive_subject_content_within_encoded_limit() {
         let body = format!("{}Payment is due tomorrow.", "x".repeat(23_900));
@@ -893,6 +1078,19 @@ mod tests {
         assert!(after < before / 3);
     }
 
+    #[test]
+    fn invitations_are_carved_out_of_auth_in_the_prompt() {
+        // A Slack workspace invite ("X has invited you to work with them in Y",
+        // one-click join link) was classified sign_in_link and sealed. The prompt
+        // must say what an invitation is, not only list the auth kinds.
+        assert!(SYSTEM.contains("An invitation is not authentication"));
+        assert!(SYSTEM.contains("one-click join or accept link"));
+        // A Passband invite (one-time signup code, 30-day expiry) was sealed as
+        // verification: the code box looked like an OTP.
+        assert!(SYSTEM.contains("invite, referral, promo, or waitlist code"));
+        assert!(SYSTEM.contains("invite or referral or promo codes"));
+        assert!(!SYSTEM.contains('\u{2014}'), "em dash in the agent prompt");
+    }
     #[test]
     fn credentials_are_not_inferred_from_auth_category() {
         let mut decision = valid();

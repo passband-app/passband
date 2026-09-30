@@ -68,6 +68,13 @@ struct InlineReply: View {
 
     private var compose: ComposeState? { store.inlineReply }
     private var guarded: Bool { !(compose?.guardKinds.isEmpty ?? true) }
+    /// A send time is set: the verbs say "schedule" (see `ScheduleCopy`).
+    /// Only while the daemon keeps an outbox, as in the pane.
+    private var scheduled: Bool { compose?.sendAt != nil && store.scheduledSendAvailable }
+    /// Bumped when the time palette closes over this composer, so the editor
+    /// takes the caret back (`EditorRefocus`): its autofocus fires on mount
+    /// alone, and the palette's field had the caret.
+    @State private var refocusEditor = 0
     /// The message being answered. nil = nothing to answer, which renders as no
     /// composer at all.
     private var parent: ClientMessage? {
@@ -126,7 +133,9 @@ struct InlineReply: View {
                 .composeDropTarget(.inlineReply, targeted: $dropTargeted)
 
                 #if os(macOS)
-                    KeyHintBar(hints: hints)
+                    // When it goes, just left of the send verb it changes
+                    // (`ScheduleClock`), as in the pane.
+                    KeyHintBar(hints: hints, leading: AnyView(ScheduleClock(slot: .inlineReply)))
                 #else
                     actionBar(compose)
                 #endif
@@ -161,6 +170,14 @@ struct InlineReply: View {
             // different audience: the fields close so nobody edits one reply's
             // recipients believing they are another's.
             .onChange(of: recipientsKey) { _, _ in editingRecipients = false }
+            // Back from the time palette. Nothing is focused once its field
+            // goes, and with nothing focused every letter typed is a reader
+            // verb: `e` would finish the thread under a half-written reply.
+            .onChange(of: store.schedulePicker) { old, new in
+                if EditorRefocus.returns(from: old, to: new, slot: .inlineReply) {
+                    refocusEditor &+= 1
+                }
+            }
         }
     }
 
@@ -324,7 +341,8 @@ struct InlineReply: View {
         // bar never left), so Esc out of review would otherwise drop the cursor
         // and hand every letter you typed next to the reader's verbs.
         MarkdownTextView(
-            text: bind(\.body), autofocus: true, disabled: compose.sending,
+            text: bind(\.body), autofocus: true, refocus: refocusEditor,
+            disabled: compose.sending,
             // Same two doors the pane's editor has, gated the same way.
             onDropFiles: store.composeAttachmentsAvailable
                 ? { urls, at in ComposeAttach.add(urls: urls, to: .inlineReply, at: at) }
@@ -366,8 +384,10 @@ struct InlineReply: View {
 
     #if os(macOS)
         private var hints: [KeyHint] {
-            var hints = [KeyHint("⌘enter", "send")]
-            if guarded { hints.append(KeyHint("⌘⇧enter", "send anyway")) }
+            var hints = [KeyHint("⌘enter", ScheduleCopy.sendVerb(scheduled: scheduled))]
+            if guarded {
+                hints.append(KeyHint("⌘⇧enter", ScheduleCopy.overrideVerb(scheduled: scheduled)))
+            }
             hints.append(KeyHint("esc", "dismiss"))
             return hints
         }
@@ -385,12 +405,15 @@ struct InlineReply: View {
                 Spacer()
                 Button(ComposeLabels.dismiss) { store.closeInlineReply() }
                     .buttonStyle(.glass)
+                // When it goes, just left of the verbs, as in the pane: "send
+                // this tomorrow morning" is what a reply typed at midnight wants.
+                ScheduleClock(slot: .inlineReply)
                 if guarded {
-                    Button("send anyway") { send(override: true) }
+                    Button(ScheduleCopy.overrideVerb(scheduled: scheduled)) { send(override: true) }
                         .buttonStyle(.glassProminent)
                         .tint(Palette.danger)
                 }
-                Button("send") { send(override: false) }
+                Button(ScheduleCopy.sendVerb(scheduled: scheduled)) { send(override: false) }
                     .buttonStyle(.glassProminent)
                     .tint(Palette.accent)
             }
@@ -417,6 +440,15 @@ struct InlineReply: View {
             KeyBinding(declining: "shift+Enter", "send anyway", meta: true, allowInInput: true) {
                 guard !store.askBarOpen, guarded else { return false }
                 send(override: true)
+                return true
+            },
+            // The clock's chord, as in the pane (`ScheduleClock.chord`).
+            KeyBinding(
+                declining: ScheduleClock.chordKey, "send later", meta: true, allowInInput: true,
+                exactCase: true
+            ) {
+                guard !store.askBarOpen, store.scheduledSendAvailable else { return false }
+                store.schedulePicker = .inlineReply
                 return true
             },
         ]
@@ -472,7 +504,8 @@ struct InlineReply: View {
         store.inlineReply = next
     }
 
-    /// Same two checks as the pane composer, then the same hold.
+    /// Same two checks as the pane composer, then the same hold, or with a
+    /// time set the same outbox.
     private func send(override: Bool) {
         guard let compose = store.inlineReply else { return }
         // Same seed rule as the pane: an untouched signature is an empty body.
@@ -486,6 +519,10 @@ struct InlineReply: View {
             patch { $0.error = problem }
             return
         }
-        store.sendWithUndo(.inlineReply, override: override)
+        if scheduled {
+            store.scheduleCompose(.inlineReply, override: override)
+        } else {
+            store.sendWithUndo(.inlineReply, override: override)
+        }
     }
 }

@@ -23,6 +23,12 @@ enum Fmt {
     /// A failed parse is cached too — the same bad stamp must not re-parse.
     nonisolated(unsafe) private static var dateCache = LRUMap<String, Date?>(limit: dateCacheCap)
     private static let dateCacheLock = NSLock()
+    /// The deadline chip's "MMM d". Guarded by `dateCacheLock`.
+    private static let monthDay: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MMM d"
+        return f
+    }()
     private static let dateCacheCap = 4000
 
     static func date(_ iso: String?) -> Date? {
@@ -74,6 +80,16 @@ enum Fmt {
         if w < 8 { return "\(Int(w.rounded()))w" }
         let mo = d / 30
         return "\(Int(mo.rounded()))mo"
+    }
+
+    /// The other direction: how long UNTIL `then`, for a time still to come.
+    /// "in 5m", "in 3h", "in 2d". The same units and rounding as `relAge`, so
+    /// a row that reads "3h" ago and one that reads "in 3h" mean the same span.
+    /// A time already here (or gone by) is "now": the worker is about to pick
+    /// it up, and "in 0m" would be a countdown to nothing.
+    static func relUntil(_ then: Date, now: Date = Date()) -> String {
+        let span = relAge(now, now: then)
+        return span == "now" ? "now" : "in \(span)"
     }
 
     /// Human byte size for attachment cards, e.g. "812 B", "34 KB", "2.4 MB".
@@ -147,10 +163,15 @@ enum Fmt {
             let days = calendar.dateComponents([.day], from: day, to: today).day ?? 0
             if days > 0 { return DeadlineChip(text: "\(days)d PAST DUE", overdue: true) }
             if days == 0 { return DeadlineChip(text: "due today", overdue: false) }
-            let formatter = DateFormatter()
+            // ONE formatter, under the date cache's lock (a DateFormatter is
+            // not safe to share without one). Building one per call cost a
+            // fraction of a millisecond of ICU setup, and this is called for
+            // every dated row on the board and in the inbox, on every render.
+            dateCacheLock.lock()
+            defer { dateCacheLock.unlock() }
+            let formatter = monthDay
             formatter.calendar = calendar
             formatter.timeZone = calendar.timeZone
-            formatter.dateFormat = "MMM d"
             let label = formatter.string(from: day)
             return DeadlineChip(text: "due \(label)", overdue: false)
         }
@@ -190,6 +211,36 @@ enum Fmt {
         if Calendar.current.isDateInTomorrow(then) { return "tomorrow \(clock(then))" }
         if secs < 7 * 86400 { return "\(weekday(iso)) \(clock(then))" }
         return shortDate(iso).lowercased()
+    }
+
+    /// When a scheduled mail goes, at chip size: "today 6pm", "tomorrow 9am",
+    /// "Tue 9am" inside the week, "Oct 12 9am" past it. The same voice as
+    /// `remindChip`, minus its countdown: a send time is read as a WALL CLOCK
+    /// ("it goes out Tuesday morning"), and "in 17h" would make the reader do
+    /// the arithmetic the chip exists to save. Uncached, like `dateTime(_:)`:
+    /// a Date is not a stable cache key.
+    static func sendAtChip(
+        _ then: Date, now: Date = Date(), calendar: Calendar = .current
+    ) -> String {
+        let time = clock(then, calendar: calendar)
+        if calendar.isDate(then, inSameDayAs: now) { return "today \(time)" }
+        if let tomorrow = calendar.date(byAdding: .day, value: 1, to: now),
+            calendar.isDate(then, inSameDayAs: tomorrow)
+        {
+            return "tomorrow \(time)"
+        }
+        let days =
+            calendar.dateComponents(
+                [.day], from: calendar.startOfDay(for: now), to: calendar.startOfDay(for: then)
+            ).day ?? 0
+        var style = Date.FormatStyle.dateTime
+        style.calendar = calendar
+        style.timeZone = calendar.timeZone
+        style.locale = calendar.locale ?? .current
+        if days > 0, days < 7 {
+            return "\(then.formatted(style.weekday(.abbreviated))) \(time)"
+        }
+        return "\(then.formatted(style.month(.abbreviated).day())) \(time)"
     }
 
     /// Compact wall clock: "9am", "6:30pm". Hand-built rather than run through a

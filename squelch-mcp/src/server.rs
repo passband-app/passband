@@ -373,6 +373,16 @@ impl SquelchServer {
         self.tool_router.list_all().len()
     }
 
+    /// Names of the registered MCP tools (for tests pinning the surface).
+    #[allow(dead_code)]
+    pub fn tool_names(&self) -> Vec<String> {
+        self.tool_router
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect()
+    }
+
     /// The account's sender rules, read in the order `squelch-core` itself reads
     /// them (`list_sender_rules`, newest-updated first). Same list, same order,
     /// so the rule this door names for an address is the rule Stage-1 would pick
@@ -827,7 +837,8 @@ impl SquelchServer {
     #[tool(
         name = "set_sender_rule",
         description = "Create/update a LOCAL sender rule (surface|squelch|filtered). \
-                       Writes only squelch's local store, never the mailbox."
+                       Writes only squelch's local store, never the mailbox. \
+                       Applies to mail that arrives after it; stored mail is not re-triaged."
     )]
     async fn set_sender_rule(
         &self,

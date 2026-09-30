@@ -26,14 +26,28 @@ CREATE TABLE IF NOT EXISTS messages (
     -- storage is fine, serving is guarded.
     body_html   TEXT,
     is_sent     INTEGER NOT NULL DEFAULT 0,
-    -- DISPLAY RECIPIENTS of mail the user SENT: the To + Cc + Bcc mailboxes as
-    -- the headers spelled them, comma-joined `Name <addr>` (bare addr with no
-    -- display name). NULL on received mail — a message the user did not send
-    -- has no "to" worth showing — and NULL on sent rows ingested before this
-    -- column existed, which the one-shot recipients backfill fills in. Empty
-    -- string means "looked, and the headers named nobody". Consumed ONLY by the
-    -- human door's sent listing; the agent door has no sent surface at all.
+    -- DISPLAY RECIPIENTS, one column per header: the mailboxes as the headers
+    -- spelled them, comma-joined `Name <addr>` (bare addr with no display
+    -- name). Empty string means "looked, and the headers named nobody"; NULL
+    -- means NOBODY HAS LOOKED YET, which is what the one-shot recipients
+    -- backfill queue reads (`cc_addrs IS NULL`, the column every filled row
+    -- gains together with the other two).
+    --
+    -- ON EVERY MESSAGE, not just sent mail: a reader that shows who a message
+    -- was from and not who else it went to cannot tell a note from a broadcast,
+    -- and "was I the only one asked?" is the question a thread is opened with.
+    -- Both are served through the human door only — the agent door's
+    -- `SanitizedMessage` carries no recipients at all (docs/SECURITY.md), so a
+    -- display name written by a stranger never reaches /mcp.
     to_addrs    TEXT,
+    cc_addrs    TEXT,
+    -- BCC IS SENT MAIL'S ALONE, and structurally so: `set_message_recipients`
+    -- writes NULL here for anything with `is_sent = 0`, whatever a caller
+    -- passes. Gmail strips the header on delivery and keeps it on the sender's
+    -- own copy, so on the user's own mail this is the blind list they chose; on
+    -- received mail a `Bcc:` header is at best the sender's leak and at worst
+    -- forged, and in neither case is it "who this went to".
+    bcc_addrs   TEXT,
     -- Raw `List-Unsubscribe` header value, NULL when absent. Consumed ONLY by
     -- the human door's unsubscribe endpoint.
     list_unsubscribe TEXT,
@@ -1034,20 +1048,29 @@ CREATE TABLE IF NOT EXISTS devices (
 -- The pusher's read is exactly "every token for my account".
 CREATE INDEX IF NOT EXISTS idx_devices_account ON devices(account_id);
 
--- LOCAL DRAFTS. One unsent composition per reply target, plus ONE new-message
--- draft per account (`reply_to_message_id IS NULL`).
+-- LOCAL DRAFTS. One unsent composition per reply target, one per forwarded
+-- message, and ANY NUMBER of new-message drafts per account (both keys NULL),
+-- each addressed by its own `id`. A row carries at most one of the two keys.
 --
 -- HUMAN-DOOR DATA ONLY: served exclusively by /client/drafts, never synced to
 -- Gmail Drafts, and never visible on /mcp — an unsent draft is the user's own
 -- thinking, not mail the agent door was handed (two-door invariant).
 --
--- Uniqueness is two PARTIAL indexes rather than UNIQUE(account_id,
--- reply_to_message_id), because SQLite treats NULLs as distinct in a UNIQUE:
--- the new-message draft would otherwise be insertable without bound.
+-- Uniqueness is PARTIAL indexes rather than UNIQUE(account_id,
+-- reply_to_message_id), so the key only binds rows that carry it. The NULL key
+-- is NOT unique any more: new-message drafts are many by design. Its index
+-- (`idx_drafts_new`) keeps the old name on purpose, as a ROLLBACK GUARD: an
+-- older binary's `CREATE UNIQUE INDEX IF NOT EXISTS idx_drafts_new` checks
+-- only the name, so it is a no-op instead of a UNIQUE violation on every open
+-- (see migrate.rs).
+-- The forward key's index (`idx_drafts_forward`) is created in migrate.rs, NOT
+-- here: this file runs before `migrate`, and on an existing DB the index would
+-- name a column that does not exist yet.
 CREATE TABLE IF NOT EXISTS drafts (
     id                  INTEGER PRIMARY KEY,
     account_id          INTEGER NOT NULL,
-    reply_to_message_id INTEGER,          -- NULL = the new-message draft
+    reply_to_message_id INTEGER,          -- NULL = not a reply
+    forward_of_message_id INTEGER,        -- NULL = not a forward
     to_addr             TEXT NOT NULL DEFAULT '',
     -- The composer's other two recipient lists, comma-joined exactly as
     -- to_addr holds the visible ones. A draft that could not hold these would
@@ -1064,7 +1087,7 @@ CREATE TABLE IF NOT EXISTS drafts (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_drafts_reply
     ON drafts(account_id, reply_to_message_id) WHERE reply_to_message_id IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_drafts_new
+CREATE INDEX IF NOT EXISTS idx_drafts_new
     ON drafts(account_id) WHERE reply_to_message_id IS NULL;
 
 -- FILES STAGED FOR A SEND. The composer uploads each file the moment it is
@@ -1088,6 +1111,11 @@ CREATE TABLE IF NOT EXISTS outbound_attachments (
     id          INTEGER PRIMARY KEY,
     account_id  INTEGER NOT NULL,
     draft_id    INTEGER,              -- NULL until a draft save claims it
+    -- The SECOND claim: set when scheduling moves the file from its draft to a
+    -- `scheduled_sends` row, cleared again by a cancel. At most one of the two
+    -- claim columns is set. Added to old DBs by migrate.rs; its index lives
+    -- there too, since this file runs before migrate.
+    scheduled_send_id INTEGER,
     filename    TEXT NOT NULL,
     mime        TEXT NOT NULL,
     size_bytes  INTEGER NOT NULL,
@@ -1098,6 +1126,74 @@ CREATE TABLE IF NOT EXISTS outbound_attachments (
 
 CREATE INDEX IF NOT EXISTS idx_outbound_attachments_draft
     ON outbound_attachments(account_id, draft_id);
+
+-- THE OUTBOX: mail the user has finished and told the daemon to send LATER
+-- (docs/SCHEDULED-SEND.md). HUMAN-DOOR DATA ONLY, like `drafts` and
+-- `outbound_attachments`: served on /client/scheduled, never synced, never
+-- visible on /mcp. The row lives in the daemon rather than the client so a
+-- closed laptop lid does not lose the mail.
+--
+-- NOT A DRAFT, on purpose. Drafts are edited by their KEYED UPSERT, and every
+-- autosave goes through it; a scheduled reply parked there would be rewritten
+-- the next time the user opened a reply to the same message. A frozen,
+-- guard-checked request needs to be unreachable by any autosave path.
+--
+-- `request` is the send route's own JSON body, frozen at schedule time
+-- (`confirm` forced true, `draft_id` stripped): every field the send body
+-- grows later is scheduled for free, and the worker deserializes and calls the
+-- same send the handler calls with no mapping code. CONTENT: never logged,
+-- never audited, never copied into `last_error`.
+--
+-- STATE MACHINE:
+--   scheduled --claim (lease)--> sending --settle--> sent
+--        ^                         |  |
+--        |---- retry / requeue ----'  '--settle (attempts spent)--> failed
+--   scheduled | failed --cancel--> cancelled      failed --send now--> scheduled
+-- A row is sent ONLY from `sending` under a lease, and a lease that lapsed
+-- (a crash mid-send) is answered by searching Gmail for `message_id_header`
+-- BEFORE the row is retried, as is every re-fire of a row whose earlier
+-- attempt may have gone (`maybe_sent`): that minted Message-ID is the whole
+-- double-send defense. Every settle names the claim it settles (`attempts`),
+-- so a stale worker's settle is a no-op. `sending` is never cancellable: the
+-- mail is in Gmail's hands. `sent` and `cancelled` rows are swept a week
+-- after they settle, `failed` rows after thirty days.
+--
+-- Timestamps are RFC3339 text written by one formatter, so the `send_at <= ?`
+-- and `lease_until <= ?` comparisons are text comparisons that order right.
+CREATE TABLE IF NOT EXISTS scheduled_sends (
+    id                INTEGER PRIMARY KEY,
+    account_id        INTEGER NOT NULL,
+    request           TEXT NOT NULL,
+    send_at           TEXT NOT NULL,
+    state             TEXT NOT NULL DEFAULT 'scheduled',
+    lease_until       TEXT,              -- set while `sending`, NULL otherwise
+    attempts          INTEGER NOT NULL DEFAULT 0,
+    last_error        TEXT,              -- a REDACTED reason, never content
+    message_id_header TEXT NOT NULL,     -- `<48 hex@passband>`, minted at schedule time
+    sent_message_id   INTEGER,           -- local echo id once sent
+    sent_thread_id    TEXT,
+    -- STICKY 1 once any attempt MAY have reached Gmail (a failure after the
+    -- send was posted, or a lapsed lease): every later fire searches Gmail for
+    -- `message_id_header` first. Added to older DBs by migrate.rs.
+    maybe_sent        INTEGER NOT NULL DEFAULT 0,
+    -- Not before this may recovery ask Gmail about a lapsed `sending` row
+    -- again (set when a search could not be made). Added by migrate.rs too.
+    recover_at        TEXT,
+    -- When the row's last attempt ENDED (its retry or failed settle; a lapsed
+    -- lease's end on a requeue). A `maybe_sent` row is not fired again before
+    -- this plus the recovery grace, whoever pulled it forward. Added by
+    -- migrate.rs.
+    last_attempt_at   TEXT,
+    -- The first time a pre-fire search could not be made, kept across the
+    -- "not now" deferrals that follow it, so an unreachable search gives up
+    -- instead of deferring forever. NULL once a search answers. Migrate.rs.
+    search_deferred_since TEXT,
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_sends_due
+    ON scheduled_sends(account_id, state, send_at);
 
 -- OUTBOUND READ TRACKING. One `send_trackers` row per tracked send: the minted
 -- token IS the pixel URL's path segment, so it is the only thing a recipient's

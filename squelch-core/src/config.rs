@@ -221,6 +221,28 @@ pub struct SyncConfig {
     /// How often (seconds) the incremental poll loop calls `history.list`; one
     /// poll batch is the coalesced batch.
     pub poll_secs: u64,
+    /// HOW MANY `messages.get` CALLS ARE IN FLIGHT AT ONCE while a window of
+    /// mail is fetched (the first backfill, a catch-up, a history walk).
+    ///
+    /// The fetch used to be one GET at a time, each awaited to completion and
+    /// then its embedding awaited too, before the next was even started. That
+    /// serialised network latency behind CPU work and left the Gmail budget
+    /// half idle. Overlapping the GETs lets the budget be the only limiter,
+    /// which is what it is for.
+    ///
+    /// 2, MEASURED. On a real mailbox (805 INBOX + 9 SENT over 30 days, release
+    /// build, 2026-09-28) the window took 333 s at width 1, 226 s at width 2 and
+    /// 228 s at width 4: from two onward the shared Gmail budget (about four
+    /// `messages.get` a second under the Standard profile) is the only limiter,
+    /// so a wider window buys nothing. What it costs is memory: every in-flight
+    /// message is a raw RFC 822 body held until it is ingested, plus its base64
+    /// carrier, and a message can be tens of megabytes. The first backfill is
+    /// already the peak of a hosted pod's life (see `crate::mem`), and an
+    /// OOM-kill there is a crash LOOP, not a crash: the restart re-lists the
+    /// same window in the same order and dies at the same message. Two is the
+    /// whole speed gain at half the exposure of four.
+    /// Env: SQUELCH_FETCH_CONCURRENCY. 0 is read as 1.
+    pub fetch_concurrency: usize,
     /// HOW MANY SPAM MESSAGES one on-demand spam sync will fetch, newest first.
     ///
     /// The spam folder is not walked by the poll loop at all (see
@@ -242,6 +264,7 @@ impl Default for SyncConfig {
             gmail_quota_profile: GmailQuotaProfile::Standard,
             backfill_days: 30,
             poll_secs: 5,
+            fetch_concurrency: 2,
             spam_max: 200,
         }
     }
@@ -1112,7 +1135,7 @@ pub struct Stage1Config {
     // an alternative verdict: see [`crate::triage::router`]. Key, provider, and
     // endpoint come from [`Stage2Config::resolve_llm`]; only the fields below
     // are Stage-1's own.
-    /// The Stage-1 model id string. Default `claude-opus-5`: triage is the
+    /// The Stage-1 model id string. Default `claude-opus-5-5`: triage is the
     /// product, so the pass that sees every email runs the best model there is,
     /// and the two stages differ by `effort` and context rather than by model.
     /// Env: `SQUELCH_STAGE1_MODEL`.
@@ -1137,8 +1160,8 @@ pub struct Stage1Config {
     /// Global per-account-per-day call cap — the only cap Stage-1 has, since it
     /// must see every email, and SHARED with the specialist extractors.
     ///
-    /// THIS IS A DOLLAR CEILING WEARING A COUNT. At the defaults below (opus-5 at
-    /// $5/$25 per MTok, a 6000-char body, and thinking billing against
+    /// THIS IS A DOLLAR CEILING WEARING A COUNT. At the defaults below (opus-5-5
+    /// at $4/$20 per MTok, a 6000-char body, and thinking billing against
     /// [`crate::triage::llm::MAX_TOKENS`]) a Stage-1 call runs on the order of
     /// four cents, so this number times four cents is the most one account can
     /// spend here in a day. It was 1000 when the pass ran a small model with a
@@ -1147,11 +1170,11 @@ pub struct Stage1Config {
     /// Re-derive it whenever `model`, `max_body_chars`, or the prices move.
     /// Env: `SQUELCH_STAGE1_GLOBAL_DAILY_CAP`.
     pub global_daily_cap: u32,
-    /// Per-million-input-token price (USD) for the Stage-1 model. Default 5.0
-    /// (claude-opus-5). Env: `SQUELCH_STAGE1_PRICE_IN_PER_MTOK`.
+    /// Per-million-input-token price (USD) for the Stage-1 model. Default 4.0
+    /// (claude-opus-5-5). Env: `SQUELCH_STAGE1_PRICE_IN_PER_MTOK`.
     pub price_in_per_mtok: f64,
-    /// Per-million-output-token price (USD) for the Stage-1 model. Default 25.0
-    /// (claude-opus-5). Env: `SQUELCH_STAGE1_PRICE_OUT_PER_MTOK`.
+    /// Per-million-output-token price (USD) for the Stage-1 model. Default 20.0
+    /// (claude-opus-5-5). Env: `SQUELCH_STAGE1_PRICE_OUT_PER_MTOK`.
     pub price_out_per_mtok: f64,
 }
 
@@ -1168,8 +1191,8 @@ impl Default for Stage1Config {
             fallthrough_importance: 40,
             bill_unknown_sender_importance: 55,
             bill_absurd_amount_threshold: 50_000.0,
-            // Stage-1 LLM defaults.
-            model: "claude-opus-5".to_string(),
+            // Stage-1 LLM defaults. Same model as Stage-2; see there.
+            model: "claude-opus-5-5".to_string(),
             effort: Some("low".to_string()),
             escalation_boundary_margin: 10,
             // 6000, not 1500: the old cap was sized for a 200K-context small
@@ -1183,18 +1206,29 @@ impl Default for Stage1Config {
             // extractors share this counter), and low enough that a runaway
             // cannot quietly bill an order of magnitude more than the pass costs.
             global_daily_cap: 500,
-            price_in_per_mtok: 5.0,
-            price_out_per_mtok: 25.0,
+            price_in_per_mtok: 4.0,
+            price_out_per_mtok: 20.0,
         }
     }
 }
 
 /// Prompt-cache multipliers on the per-MTok INPUT price, for costing the
-/// ledger's cache-token columns at read time. These are Anthropic's standard
-/// 5-minute-ephemeral-cache rates (the TTL our `cache_control` blocks use):
-/// cache writes bill at 1.25x the input price, cache reads at 0.1x.
-pub const CACHE_WRITE_INPUT_MULT: f64 = 1.25;
-pub const CACHE_READ_INPUT_MULT: f64 = 0.1;
+/// ledger's cache-token columns at read time. Anthropic's standard rates for
+/// the cache our `cache_control` blocks ask for: the ONE-HOUR TTL (see
+/// `triage::llm::CacheControl` for why), whose writes bill at 2x the input
+/// price where the 5-minute write is 1.25x. Reads are 0.05x on Claude Opus
+/// 5.5 (the triage model), against 0.1x on Opus 5 and Haiku 4.5; the notify
+/// and access lanes on Haiku never reach the cache minimum, so the triage
+/// rate is the one that prices real tokens. Change the write multiplier with
+/// the TTL and the read multiplier with the model.
+///
+/// Known drift: the daily ledger holds one cache_creation total, so rows
+/// written before the 1-hour TTL (at 1.25x) are re-priced at 2x here, and so
+/// would every row if a gateway dropped the `ttl` field. The per-TTL split
+/// is stored per run in `agent_triage_runs.metadata_json.usage[].cache_creation`;
+/// pricing from it needs a ledger column, which is a follow-up.
+pub const CACHE_WRITE_INPUT_MULT: f64 = 2.0;
+pub const CACHE_READ_INPUT_MULT: f64 = 0.05;
 
 /// Stage-2 LLM triage tunables. The pass runs only over rows Stage-1 refined but
 /// left non-confident: `stage1_model_used IS NOT NULL AND needs_stage2=1 AND
@@ -1271,8 +1305,12 @@ impl Default for Stage2Config {
             stage2_provider: None,
             anthropic_base_url: None,
             // Stage-2 is the ESCALATION pass: same model as Stage-1, more
-            // context and more thinking.
-            model: "claude-opus-5".to_string(),
+            // context and more thinking. This is also the agent's model
+            // (`SQUELCH_MODEL`), and Opus 5.5 is the current Opus at $4/$20
+            // against Opus 5's $5/$25 with cache reads at a quarter of the
+            // price. Effort stays explicit: Opus 5.5's own default is
+            // `medium`, one level under the old default.
+            model: "claude-opus-5-5".to_string(),
             effort: Some("xhigh".to_string()),
             // Roomier than Stage-1's: an escalated row is one where the detail
             // that settles it may be deep in the body.
@@ -1283,9 +1321,9 @@ impl Default for Stage2Config {
             global_daily_cap: 120,
             sender_daily_cap: 5,
             max_age_days: 7,
-            // claude-opus-5 per-MTok (input / output).
-            price_in_per_mtok: 5.0,
-            price_out_per_mtok: 25.0,
+            // claude-opus-5-5 per-MTok (input / output).
+            price_in_per_mtok: 4.0,
+            price_out_per_mtok: 20.0,
         }
     }
 }
@@ -1841,6 +1879,10 @@ impl Config {
         env_override("SQUELCH_BACKFILL_DAYS", &mut self.sync.backfill_days);
         env_override("SQUELCH_POLL_SECS", &mut self.sync.poll_secs);
         env_override(
+            "SQUELCH_FETCH_CONCURRENCY",
+            &mut self.sync.fetch_concurrency,
+        );
+        env_override(
             "SQUELCH_GMAIL_QUOTA_PROFILE",
             &mut self.sync.gmail_quota_profile,
         );
@@ -2395,6 +2437,7 @@ mod tests {
         let c = Config::default();
         assert_eq!(c.sync.backfill_days, 30);
         assert_eq!(c.sync.poll_secs, 5);
+        assert_eq!(c.sync.fetch_concurrency, 2);
         assert!(c.client_id.is_none());
     }
 
@@ -2923,7 +2966,7 @@ backfill_days = 90
     #[test]
     fn stage2_defaults_are_sane() {
         let c = Stage2Config::default();
-        assert_eq!(c.model, "claude-opus-5");
+        assert_eq!(c.model, "claude-opus-5-5");
         assert_eq!(c.effort.as_deref(), Some("xhigh"));
         assert_eq!(c.max_body_chars, 12_000);
         assert_eq!(c.batch_per_cycle, 10);
@@ -2931,20 +2974,20 @@ backfill_days = 90
         assert_eq!(c.global_daily_cap, 120);
         assert_eq!(c.sender_daily_cap, 5);
         assert_eq!(c.max_age_days, 7);
-        assert_eq!(c.price_in_per_mtok, 5.0);
-        assert_eq!(c.price_out_per_mtok, 25.0);
+        assert_eq!(c.price_in_per_mtok, 4.0);
+        assert_eq!(c.price_out_per_mtok, 20.0);
     }
 
     #[test]
     fn stage1_llm_defaults_are_sane() {
         let c = Stage1Config::default();
-        assert_eq!(c.model, "claude-opus-5");
+        assert_eq!(c.model, "claude-opus-5-5");
         assert_eq!(c.effort.as_deref(), Some("low"));
         assert_eq!(c.global_daily_cap, 500);
         assert_eq!(c.batch_per_cycle, 10);
         assert_eq!(c.max_body_chars, 6000);
-        assert_eq!(c.price_in_per_mtok, 5.0);
-        assert_eq!(c.price_out_per_mtok, 25.0);
+        assert_eq!(c.price_in_per_mtok, 4.0);
+        assert_eq!(c.price_out_per_mtok, 20.0);
     }
 
     /// An operator typo in a revisit knob must not be able to panic the sync

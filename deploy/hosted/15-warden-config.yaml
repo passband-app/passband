@@ -120,7 +120,7 @@ data:
   # unless this one is set.
   SQUELCH_WARDEN_LLM_BASE_URL: "https://bifrost.passband.app/anthropic"
   # PROVIDER-QUALIFIED MODEL IDS, and the reason is the gateway, not the model.
-  # The daemon's own default is the bare `claude-opus-5`, which is correct for
+  # The daemon's own default is the bare `claude-opus-5-5`, which is correct for
   # self-host talking straight to api.anthropic.com — and which this gateway
   # answers 400 "could not auto resolve a provider for the request, please
   # specify a provider explicitly", BEFORE it ever checks the virtual key. That
@@ -165,8 +165,8 @@ data:
   # `squelch-control llm sync` covers it (DEFAULT_LLM_MODELS lists Haiku in
   # both spellings); moving the notify model is a daemon code-default change
   # plus a roll until the warden grows the passthrough.
-  SQUELCH_WARDEN_LLM_STAGE1_MODEL: "anthropic/claude-opus-5"
-  SQUELCH_WARDEN_LLM_STAGE2_MODEL: "anthropic/claude-opus-5"
+  SQUELCH_WARDEN_LLM_STAGE1_MODEL: "anthropic/claude-opus-5-5"
+  SQUELCH_WARDEN_LLM_STAGE2_MODEL: "anthropic/claude-opus-5-5"
   # 3. EDIT ME. The control plane's origin, handed to every tenant daemon as
   # SQUELCH_CONSOLE_SSO_URL. It is what puts "Continue with Google" on a tenant's
   # own /console login page: Google forbids wildcard redirect URIs, so a

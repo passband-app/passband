@@ -69,6 +69,11 @@
 	     secrets — a compromised feed host cannot forge an update without it. -->
 	<key>SUFeedURL</key>
 	<string>https://passband.app/appcast.xml</string>
+	<!-- Every four hours rather than Sparkle's daily default, so a release
+	     reaches people (and their update banner) the same working day. The
+	     feed is one static file; a check costs the site nothing. -->
+	<key>SUScheduledCheckInterval</key>
+	<integer>14400</integer>
 	<key>SUPublicEDKey</key>
 	<string>QqVsdIdhyz8E/iZ+ZhvwYe4aaQSMtIkObys6PYhFgkg=</string>
 	<key>NSAppTransportSecurity</key>

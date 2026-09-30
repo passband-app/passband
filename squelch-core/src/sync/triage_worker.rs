@@ -518,6 +518,12 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
             self.metrics.note_triage_cooldown(until.timestamp());
             let _ = self.store.defer_agent_job(job, until, &error.kind);
             self.metrics.record_agent(AgentVerdict::Retryable);
+        } else if crate::triage::llm::is_content_refusal(&error.kind) {
+            // See is_content_refusal: fail once, in either lane.
+            self.metrics.record_agent(AgentVerdict::Failed);
+            if let Err(error) = self.store.fail_agent_job(job, &error.kind) {
+                eprintln!("squelch: could not record refused triage job: {error}");
+            }
         } else {
             self.retry_agent(job, &error.kind);
         }
@@ -773,6 +779,8 @@ mod budget_tests {
                         is_sent: false,
                         is_spam: false,
                         to_addrs: None,
+                        cc_addrs: None,
+                        bcc_addrs: None,
                         list_unsubscribe: None,
                         list_unsub_one_click: false,
                         auth_pass: None,

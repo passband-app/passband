@@ -388,11 +388,14 @@ refine_lane: stage1_pass -> stage2_pass -> extract_pass -> revisit_pass
   await, which leaves the in-flight row queued (`stage1_model_used` NULL), the
   same state a crash leaves it in.
 - `refine_wake` is a `tokio::sync::Notify` held by the engine, poked once per
-  poll tick that ingested `> 0` rows. It coalesces like `refresh` does.
+  row ingested, on a backfill as much as on a walk. It coalesces like
+  `refresh` does.
 - `stamp_sync_success` stays in the poll lane. Sync freshness measures polling,
   not refinement, which is what the staleness alert was always meant to mean.
-- `run_once`'s first-run sequence (backfill, then the three passes inline,
-  then `backfill_missing_vectors`) is unchanged.
+- `run_once`'s first run is the backfill with the refine lane running beside
+  it (the poll lane cannot exist until the backfill establishes a cursor).
+  The backfill's INBOX listing is what sets `poll_healthy` there, so the lane
+  starts on rows as they land rather than after the last one.
 - The fast lane (§11.5) is spawned from inside `fetch_raw_and_ingest`, so it
   lives in neither loop and blocks neither.
 

@@ -39,6 +39,11 @@ final class SitrepPoller {
 
     private init() {}
 
+    /// Whether the loop is up. False between an account switch's `stop()`
+    /// and the next `start()`: nothing can land in `stats` meanwhile,
+    /// which is what a writer waiting on that verdict needs to know.
+    var isPolling: Bool { resident.isRunning }
+
     /// Start interval + focus polling. Idempotent.
     func start() {
         // The observer rides on the loop's own guard: `ResidentTask` refuses a
@@ -161,11 +166,15 @@ final class SitrepPoller {
             // One ordered list. The older bands remain empty until the shared
             // reader state no longer needs their compatibility fields.
             let next = SitrepData(
-                standing: page.items.map(\.row), new: [], open: [], stats: st, sealed: sl, totalCount: page.total_count)
+                standing: page.items.map(\.row), new: [], open: [], sealed: sl, totalCount: page.total_count)
             // ASSIGN ONLY ON CHANGE: @Observable notifies on assignment, not on
             // value difference, so writing an identical read model every 10s
-            // re-lays out the whole dashboard for nothing.
+            // re-lays out the whole dashboard for nothing. The stats are
+            // assigned apart from the bands for the same reason — they carry
+            // the sync clock and change on nearly every tick, and while they
+            // rode inside `SitrepData` this compare never once said "same".
             if next != store.sitrep { store.sitrep = next }
+            if st != store.stats { store.stats = st }
             noteCatchUp(st.catch_up)
             // THE BADGE IS REFRESHED EVEN WHEN NOTHING CHANGED, and this is the
             // second write point rather than an accident. `AppStore.sitrep`'s
@@ -240,6 +249,10 @@ final class SitrepPoller {
             // first visit of a session still pays five round-trips. Its own TTL
             // makes this a date compare on most polls.
             await store.refreshZones()
+            // The outbox, so a scheduled mail that FAILS toasts wherever the
+            // person is, not only on the Sent page. Its own TTL and an
+            // empty-outbox skip make this free on most ticks.
+            await store.pollScheduled()
             return true
         } catch {
             guard !Task.isCancelled, store.isCurrent(e) else { return true }

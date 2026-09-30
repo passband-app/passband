@@ -68,11 +68,34 @@ actor APIClient {
     }
 
     /// Set the base URL + bearer token used by all subsequent requests.
+    ///
+    /// DEVELOPER HOOK: `PASSBAND_API_URL` and `PASSBAND_API_TOKEN` in the
+    /// process environment override whatever the active account says, for the
+    /// whole life of the process. That is how a build of a branch is pointed
+    /// at a scratch daemon of the same branch without adding an account to
+    /// the keychain or touching the account the user actually reads mail
+    /// through. Same posture as `PASSBAND_FORCE_TOUR`: a launch environment
+    /// only a developer sets, never a preference, never persisted. A user
+    /// double-clicking the app has neither variable.
+    ///
+    /// ALL OR NOTHING: the override applies only when BOTH are set and
+    /// non-empty. Half of one is worse than none: a shell that exports only
+    /// the token would present it to every account's real daemon (and fail
+    /// them all), and only the URL would send a real account's token to the
+    /// scratch daemon.
     func configure(baseURL: String, token: String) {
-        // Normalize: strip trailing slashes so we can join with `/client/...`.
+        let env = ProcessInfo.processInfo.environment
         var base = baseURL
+        var bearer = token
+        if let url = env["PASSBAND_API_URL"], !url.isEmpty,
+            let devToken = env["PASSBAND_API_TOKEN"], !devToken.isEmpty
+        {
+            base = url
+            bearer = devToken
+        }
+        // Normalize: strip trailing slashes so we can join with `/client/...`.
         while base.hasSuffix("/") { base.removeLast() }
-        config = Config(baseURL: base, token: token)
+        config = Config(baseURL: base, token: bearer)
     }
 
     /// Forget the configured daemon. After this, requests fail with "client
@@ -327,6 +350,12 @@ actor APIClient {
     /// mail), unlike `contacts`, so it is sent rather than short-circuited.
     func senders(_ q: String, limit: Int = 8) async throws -> [SenderHit] {
         try await get("/client/senders", query: ["q": q, "limit": String(limit)])
+    }
+
+    /// The reader's contact card for one address. A daemon older than the
+    /// route answers 404, which the card treats as "no history to show".
+    func person(_ addr: String) async throws -> PersonCard {
+        try await get("/client/person", query: ["addr": addr])
     }
 
     /// The sent page: mail the user WROTE, newest first, already ordered by the
@@ -738,9 +767,8 @@ actor APIClient {
         replyAll: Bool = false, forwardOfMessageId: Int? = nil, attachmentIds: [Int] = [],
         attachmentBytes: Int = 0
     ) async throws -> SendResult {
-        try await post(
-            "/client/actions/send",
-            body: SendBody(
+        try await send(
+            SendBody(
                 reply_to_message_id: replyToMessageId,
                 // Omitted when absent, like every other optional here — and
                 // never set beside `reply_to_message_id`: the daemon refuses a
@@ -771,15 +799,70 @@ actor APIClient {
                 reply_all: replyAll ? true : nil,
                 // Omitted when empty, like everything else here.
                 attachment_ids: attachmentIds.isEmpty ? nil : attachmentIds),
-            // A send that re-reads and base64s megabytes of files, then
-            // hands them to Gmail, gets a budget sized to what it carries —
-            // the forward's floor plus a second per 50 KB. A 20 MB send on
-            // a slow uplink that timed out CLIENT-side while the daemon
-            // finished would be retried, and the recipient would get it
-            // twice.
-            timeout: forwardOfMessageId == nil && attachmentIds.isEmpty
-                ? Self.requestTimeout
-                : Self.forwardTimeout + TimeInterval(attachmentBytes / 50_000))
+            attachmentBytes: attachmentBytes)
+    }
+
+    /// The send route with its body already built: `SendBody(compose:)` for
+    /// the composers, the parameter list above for the agent's tool.
+    @discardableResult
+    func send(_ body: SendBody, attachmentBytes: Int = 0) async throws -> SendResult {
+        try await post(
+            "/client/actions/send", body: body, timeout: Self.sendTimeout(body, attachmentBytes))
+    }
+
+    /// A send that re-reads and base64s megabytes of files, then hands them to
+    /// Gmail, gets a budget sized to what it carries: the forward's floor plus
+    /// a second per 50 KB. A 20 MB send on a slow uplink that timed out
+    /// CLIENT-side while the daemon finished would be retried, and the
+    /// recipient would get it twice.
+    ///
+    /// A schedule gets the same budget. It sends nothing, but a forward is
+    /// guard-scanned by fetching the original from Gmail, and a tray full of
+    /// files is read back and scanned too, all before the 201.
+    private static func sendTimeout(_ body: SendBody, _ attachmentBytes: Int) -> TimeInterval {
+        body.forward_of_message_id == nil && (body.attachment_ids ?? []).isEmpty
+            ? Self.requestTimeout
+            : Self.forwardTimeout + TimeInterval(attachmentBytes / 50_000)
+    }
+
+    // MARK: - scheduled send
+
+    /// Put a mail in the daemon's outbox: the send body a send would carry,
+    /// plus when. Everything a send checks before Gmail (validation, the
+    /// files, the outbound guard, the write credential) is checked NOW, while
+    /// the sender is here to answer: a 422 carries `.guardKinds` exactly as a
+    /// send's does, and a resend with `override_guard` goes through. The
+    /// draft named by `draft_id` is consumed by this call.
+    func scheduleSend(_ body: SendBody, at sendAt: Date, attachmentBytes: Int = 0) async throws
+        -> ScheduledCreated
+    {
+        try await post(
+            "/client/scheduled", body: ScheduleBody(send: body, send_at: Self.rfc3339(sendAt)),
+            timeout: Self.sendTimeout(body, attachmentBytes))
+    }
+
+    /// The outbox: rows `scheduled`, `sending` or `failed`, oldest first.
+    func listScheduled() async throws -> [ScheduledSendView] {
+        try await get("/client/scheduled")
+    }
+
+    /// Pull a mail back out of the outbox. Answers the frozen request and its
+    /// (now released) files so a composer can reopen it. A row already in
+    /// Gmail's hands is a 409 (`status == 409`, kind `.unknown`); an unknown,
+    /// sent or cancelled one a 404.
+    func cancelScheduled(_ id: Int) async throws -> ScheduledCancel {
+        let req = try buildRequest(
+            path: "/client/scheduled/\(id)", method: .DELETE, query: [:], body: nil,
+            timeout: Self.requestTimeout)
+        let (data, _) = try await perform(req)
+        return try decode(ScheduledCancel.self, from: data)
+    }
+
+    /// Send a `scheduled` or `failed` row on the worker's next tick. Queued,
+    /// not sent: the listing is where it is seen to go.
+    @discardableResult
+    func sendScheduledNow(_ id: Int) async throws -> ScheduledNow {
+        try await post("/client/scheduled/\(id)/now", body: EmptyBody())
     }
 
     // MARK: - compose attachments
@@ -881,25 +964,70 @@ actor APIClient {
 
     // MARK: - drafts
 
-    /// Every draft this account holds. At most one per reply target plus one
-    /// new-message draft, enforced server-side, and a draft whose parent has since
-    /// been sealed is already filtered out — so what comes back is exactly what
-    /// can be restored.
-    func listDrafts() async throws -> [DraftView] { try await get("/client/drafts") }
+    /// Every draft this account holds: at most one per reply target (and, on a
+    /// `drafts_v2` daemon, per forwarded message), plus the new-message drafts,
+    /// which are one on an older daemon and any number on a newer one.
+    ///
+    /// NOT filtered for sealed parents. The daemon lists what the human door
+    /// saved, and it lets the human save a draft against a restricted parent
+    /// on purpose (pinned by the daemon test
+    /// `human_can_save_draft_for_restricted_parent_but_unknown_still_fails`),
+    /// so a row here is not a promise its parent is still readable.
+    ///
+    /// `forwards=1` opts in to forward drafts, which the daemon hides from a
+    /// bare GET: an app predating them would restore one as a plain new
+    /// message. An older daemon ignores the parameter.
+    func listDrafts() async throws -> [DraftView] {
+        try await get("/client/drafts", query: ["forwards": "1"])
+    }
 
-    /// Upsert by KEY: `replyToMessageId` (nil = the new-message slot) names the
+    /// Upsert by KEY: `replyToMessageId` or `forwardOfMessageId` names the
     /// draft, so a second PUT edits the same row rather than making another. A
     /// sealed or unknown parent is a 404 and stores nothing.
+    ///
+    /// BOTH nil is the OLD new-message slot. On a `drafts_v2` daemon it edits
+    /// the NEWEST new-message row (the compat rule that keeps an older app
+    /// working), so a current client must never send it there; plain new mail
+    /// goes through `createDraft` / `updateDraft` instead. See `DraftSaver.save`.
     @discardableResult
     func putDraft(
-        replyToMessageId: Int?, to: String, cc: String = "", bcc: String = "", subject: String,
-        body: String, attachmentIds: [Int] = []
+        replyToMessageId: Int?, forwardOfMessageId: Int? = nil, to: String, cc: String = "",
+        bcc: String = "", subject: String, body: String, attachmentIds: [Int] = []
     ) async throws -> DraftView {
         try await put(
             "/client/drafts",
             body: DraftBody(
-                reply_to_message_id: replyToMessageId, to: to, cc: cc, bcc: bcc, subject: subject,
-                body: body, attachment_ids: attachmentIds))
+                reply_to_message_id: replyToMessageId, forward_of_message_id: forwardOfMessageId,
+                to: to, cc: cc, bcc: bcc, subject: subject, body: body,
+                attachment_ids: attachmentIds))
+    }
+
+    /// Mint a NEW new-message draft (`drafts_v2` daemons only). Every call is
+    /// another row, so the caller adopts the returned id and edits by it from
+    /// then on; creating twice for one composer is the duplicate the saver's
+    /// `resolved` map exists to prevent.
+    func createDraft(
+        to: String, cc: String = "", bcc: String = "", subject: String, body: String,
+        attachmentIds: [Int] = []
+    ) async throws -> DraftView {
+        try await post(
+            "/client/drafts",
+            body: NewDraftBody(
+                to: to, cc: cc, bcc: bcc, subject: subject, body: body,
+                attachment_ids: attachmentIds))
+    }
+
+    /// Edit one new-message draft by id (`drafts_v2` daemons only). An unknown
+    /// id and another account's are the same 404, like `deleteDraft`.
+    func updateDraft(
+        id: Int, to: String, cc: String = "", bcc: String = "", subject: String, body: String,
+        attachmentIds: [Int] = []
+    ) async throws -> DraftView {
+        try await put(
+            "/client/drafts/\(id)",
+            body: NewDraftBody(
+                to: to, cc: cc, bcc: bcc, subject: subject, body: body,
+                attachment_ids: attachmentIds))
     }
 
     /// Discard one draft. Another account's id and an unknown id are the same 404.

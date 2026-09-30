@@ -25,24 +25,133 @@ fn map_meta(r: &rusqlite::Row<'_>) -> rusqlite::Result<OutboundAttachmentMeta> {
 
 const META_COLS: &str = "id, filename, mime, size_bytes, content_id";
 
+/// THE "is claimed" predicate over an `outbound_attachments` row, spelled once.
+/// A claimed row belongs to something that will send it (a draft, or a
+/// scheduled send) and is never swept for age or re-claimed by another owner;
+/// `NOT ({CLAIMED})` is the unclaimed state an upload starts in. Changing this
+/// constant covers the claim path, the send path ([`sendable`]) and the
+/// unclaimed arm of [`sweep`]; EVERY claim column ALSO needs its own orphan arm
+/// in `sweep` (rows whose referent is gone).
+///
+/// ALWAYS PARENTHESISE IT where it is negated or combined: it is an `OR`, and
+/// `NOT {CLAIMED}` would bind to the first arm only.
+pub(super) const CLAIMED: &str = "draft_id IS NOT NULL OR scheduled_send_id IS NOT NULL";
+
+/// A row a send may carry and consume. For a send made while the user waits
+/// (`?4` bound `NULL`): unclaimed, or claimed by the draft THIS send consumes
+/// (bound as `?3`, `NULL` for none; `col = NULL` matches nothing). The
+/// send-side twin of the claim path's `NOT ({CLAIMED})`: neither a claim nor
+/// a send may take a file another composition holds, and a plain send may not
+/// take a file a scheduled mail is waiting to carry.
+///
+/// A FIRED SCHEDULED SEND (`?4` bound to its row) takes ONLY the files that
+/// row holds, never an unclaimed one. Row ids are reused rowids: if a file the
+/// row named were deleted and its id handed to somebody's fresh upload, the
+/// unclaimed arm would send that new, never-scanned file in its place, and
+/// then delete it out from under the composer that owns it. The row's files
+/// are claimed by it from schedule time on, so this arm loses nothing real.
+fn sendable() -> String {
+    format!(
+        "(CASE WHEN ?4 IS NULL THEN (NOT ({CLAIMED}) OR draft_id = ?3)
+               ELSE scheduled_send_id = ?4 END)"
+    )
+}
+
 /// Drop this account's leftovers: unclaimed rows past the TTL, and rows
-/// claimed by a draft that no longer exists (every draft delete cascades, so
-/// the second predicate is a belt for a row that slipped past one). Run from
-/// BOTH doors a composer uses — the upload and the draft save — so a mailbox
-/// that attaches once and never again still heals on its next autosave.
+/// claimed by a draft or a scheduled send that no longer exists (every delete
+/// of either cascades, so those arms are a belt for a row that slipped past
+/// one). Run from BOTH doors a composer uses — the upload and the draft save —
+/// so a mailbox that attaches once and never again still heals on its next
+/// autosave.
 pub(super) fn sweep(
     conn: &Connection,
     account_id: AccountId,
     now: DateTime<Utc>,
 ) -> rusqlite::Result<()> {
     let cutoff = (now - OUTBOUND_UNCLAIMED_TTL).to_rfc3339();
+    // Each orphan arm tests ITS OWN column's referent, not the generic claim:
+    // the arm's `IS NOT NULL` is what keeps `NULL NOT IN (<no rows>)`, which
+    // SQLite answers TRUE, from reading an unclaimed row (or a row held by the
+    // OTHER claim) as an orphan.
     conn.execute(
-        "DELETE FROM outbound_attachments
-         WHERE account_id = ?1
-           AND ((draft_id IS NULL AND created_at < ?2)
-                OR (draft_id IS NOT NULL
-                    AND draft_id NOT IN (SELECT id FROM drafts WHERE account_id = ?1)))",
+        &format!(
+            "DELETE FROM outbound_attachments
+             WHERE account_id = ?1
+               AND ((NOT ({CLAIMED}) AND created_at < ?2)
+                    OR (draft_id IS NOT NULL
+                        AND draft_id NOT IN (SELECT id FROM drafts WHERE account_id = ?1))
+                    OR (scheduled_send_id IS NOT NULL
+                        AND scheduled_send_id NOT IN
+                            (SELECT id FROM scheduled_sends WHERE account_id = ?1)))"
+        ),
         params![account_id, cutoff],
+    )?;
+    Ok(())
+}
+
+/// The files a scheduled send has claimed, upload order. The
+/// [`draft_attachments`] twin, for the scheduled reads that embed it.
+pub(super) fn scheduled_attachments(
+    conn: &Connection,
+    account_id: AccountId,
+    scheduled_send_id: i64,
+) -> rusqlite::Result<Vec<OutboundAttachmentMeta>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {META_COLS} FROM outbound_attachments
+         WHERE account_id = ?1 AND scheduled_send_id = ?2
+         ORDER BY id"
+    ))?;
+    stmt.query_map(params![account_id, scheduled_send_id], map_meta)?
+        .collect()
+}
+
+/// Move `ids` onto scheduled send `scheduled_send_id`, on a connection (or
+/// transaction) the caller holds. ALL OR NOTHING is the caller's: this answers
+/// whether EVERY id moved, and `false` means a file the user reviewed would not
+/// go out, which the callers turn into a rollback.
+///
+/// A row moves only when it is unclaimed or held by exactly `from_draft` (the
+/// draft scheduling consumes). Another draft's file, or another scheduled
+/// send's, is never stolen: the same rule as [`SqliteStore::claim_outbound_attachments`].
+pub(super) fn move_claims_to_scheduled(
+    conn: &Connection,
+    account_id: AccountId,
+    scheduled_send_id: i64,
+    ids: &[i64],
+    from_draft: Option<i64>,
+) -> rusqlite::Result<bool> {
+    let mut stmt = conn.prepare(&format!(
+        "UPDATE outbound_attachments SET scheduled_send_id = ?2, draft_id = NULL
+         WHERE account_id = ?1 AND id = ?3
+           AND (NOT ({CLAIMED}) OR (draft_id = ?4 AND scheduled_send_id IS NULL))"
+    ))?;
+    // Distinct ids: a duplicate would find its row already moved (claimed by
+    // this send, so not movable again) and read as missing.
+    let mut seen = std::collections::HashSet::new();
+    let mut all = true;
+    for id in ids {
+        if seen.insert(*id) {
+            all &= stmt.execute(params![account_id, scheduled_send_id, id, from_draft])? == 1;
+        }
+    }
+    Ok(all)
+}
+
+/// Hand a scheduled send's files back to unclaimed, on a connection the caller
+/// holds. The unclaimed clock RESTARTS here (`created_at = now`): the TTL is
+/// measured from `created_at`, and a file scheduled days ago would otherwise be
+/// past it the moment it is released, swept by the very autosave that was
+/// about to re-claim it for the reopened composer.
+pub(super) fn release_scheduled_claims(
+    conn: &Connection,
+    account_id: AccountId,
+    scheduled_send_id: i64,
+    now: DateTime<Utc>,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE outbound_attachments SET scheduled_send_id = NULL, created_at = ?3
+         WHERE account_id = ?1 AND scheduled_send_id = ?2",
+        params![account_id, scheduled_send_id, now.to_rfc3339()],
     )?;
     Ok(())
 }
@@ -138,20 +247,52 @@ impl SqliteStore {
     /// account's) is simply absent from the result: the caller compares
     /// lengths and refuses the send, because a mail going out with fewer files
     /// than were reviewed is the one failure this table must never allow.
+    ///
+    /// SENDABLE BY THIS SEND ONLY: a row claimed by some OTHER draft is absent
+    /// too (see [`sendable`]), so a send cannot carry — and then consume —
+    /// a file another composition holds. `draft_id` is the draft this send
+    /// consumes, `None` for a send with no draft.
     pub fn outbound_attachments(
         &self,
         account_id: AccountId,
+        draft_id: Option<i64>,
+        ids: &[i64],
+    ) -> Result<Vec<OutboundAttachment>> {
+        self.sendable_files(account_id, draft_id, None, ids)
+    }
+
+    /// [`Self::outbound_attachments`] for the scheduled-send WORKER: the files
+    /// scheduled send `scheduled_send_id` holds and NOTHING ELSE (see
+    /// [`sendable`] for why an unclaimed row is never taken), in the order
+    /// asked. The frozen request carries no `draft_id` (scheduling
+    /// consumed the draft), so a fire that read through the draft door would
+    /// find its own files claimed and absent.
+    pub fn scheduled_outbound_attachments(
+        &self,
+        account_id: AccountId,
+        scheduled_send_id: i64,
+        ids: &[i64],
+    ) -> Result<Vec<OutboundAttachment>> {
+        self.sendable_files(account_id, None, Some(scheduled_send_id), ids)
+    }
+
+    fn sendable_files(
+        &self,
+        account_id: AccountId,
+        draft_id: Option<i64>,
+        scheduled_send_id: Option<i64>,
         ids: &[i64],
     ) -> Result<Vec<OutboundAttachment>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(&format!(
             "SELECT {META_COLS}, data FROM outbound_attachments
-             WHERE account_id = ?1 AND id = ?2"
+             WHERE account_id = ?1 AND id = ?2 AND {}",
+            sendable()
         ))?;
         let mut out = Vec::with_capacity(ids.len());
         for id in ids {
             let row = stmt
-                .query_row(params![account_id, id], |r| {
+                .query_row(params![account_id, id, draft_id, scheduled_send_id], |r| {
                     Ok(OutboundAttachment {
                         meta: map_meta(r)?,
                         data: r.get(5)?,
@@ -167,21 +308,47 @@ impl SqliteStore {
 
     /// The `(id, size_bytes, content_id)` of each staged file among `ids`, in
     /// the order asked, ids that name nothing absent — everything a send has
-    /// to refuse on, without a byte of the files themselves.
+    /// to refuse on, without a byte of the files themselves. The same
+    /// [`sendable`] filter as [`Self::outbound_attachments`].
     pub fn outbound_attachment_sizes(
         &self,
         account_id: AccountId,
+        draft_id: Option<i64>,
+        ids: &[i64],
+    ) -> Result<Vec<(i64, i64, String)>> {
+        self.sendable_sizes(account_id, draft_id, None, ids)
+    }
+
+    /// [`Self::outbound_attachment_sizes`] for a scheduled send; see
+    /// [`Self::scheduled_outbound_attachments`] for why it is its own door.
+    /// The worker reads the files whole, so only the tests ask for this.
+    #[cfg(test)]
+    pub(crate) fn scheduled_outbound_attachment_sizes(
+        &self,
+        account_id: AccountId,
+        scheduled_send_id: i64,
+        ids: &[i64],
+    ) -> Result<Vec<(i64, i64, String)>> {
+        self.sendable_sizes(account_id, None, Some(scheduled_send_id), ids)
+    }
+
+    fn sendable_sizes(
+        &self,
+        account_id: AccountId,
+        draft_id: Option<i64>,
+        scheduled_send_id: Option<i64>,
         ids: &[i64],
     ) -> Result<Vec<(i64, i64, String)>> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT id, size_bytes, content_id FROM outbound_attachments
-             WHERE account_id = ?1 AND id = ?2",
-        )?;
+             WHERE account_id = ?1 AND id = ?2 AND {}",
+            sendable()
+        ))?;
         let mut out = Vec::with_capacity(ids.len());
         for id in ids {
             let row = stmt
-                .query_row(params![account_id, id], |r| {
+                .query_row(params![account_id, id, draft_id, scheduled_send_id], |r| {
                     Ok((
                         r.get::<_, i64>(0)?,
                         r.get::<_, i64>(1)?,
@@ -198,10 +365,16 @@ impl SqliteStore {
 
     /// Drop one staged file. `false` when nothing matched, so another account's
     /// id is indistinguishable from an unknown one.
+    ///
+    /// A FILE A SCHEDULED SEND HOLDS IS NOT DELETABLE HERE: it answers `false`
+    /// like an unknown id (the route's 404). Cancel is the only door that
+    /// releases it. A stale composer tray deleting it would leave the row
+    /// naming an id the next upload may be handed.
     pub fn delete_outbound_attachment(&self, account_id: AccountId, id: i64) -> Result<bool> {
         let conn = self.lock()?;
         let n = conn.execute(
-            "DELETE FROM outbound_attachments WHERE account_id = ?1 AND id = ?2",
+            "DELETE FROM outbound_attachments
+             WHERE account_id = ?1 AND id = ?2 AND scheduled_send_id IS NULL",
             params![account_id, id],
         )?;
         Ok(n > 0)
@@ -210,14 +383,109 @@ impl SqliteStore {
     /// Drop the files a send has CONSUMED. Called once the mail is away — the
     /// bytes are in the sent copy now, and a row that outlived its send would
     /// come back on the next draft restore as a file attached to nothing.
-    pub fn delete_outbound_attachments(&self, account_id: AccountId, ids: &[i64]) -> Result<()> {
+    /// Only rows this send could carry ([`sendable`]) go: a file another draft
+    /// claimed between the send's read and here stays with that draft.
+    pub fn delete_outbound_attachments(
+        &self,
+        account_id: AccountId,
+        draft_id: Option<i64>,
+        ids: &[i64],
+    ) -> Result<()> {
+        self.delete_sendable(account_id, draft_id, None, ids)
+    }
+
+    /// [`Self::delete_outbound_attachments`] for the scheduled-send worker,
+    /// once a fired mail is away; see [`Self::scheduled_outbound_attachments`].
+    pub fn delete_scheduled_outbound_attachments(
+        &self,
+        account_id: AccountId,
+        scheduled_send_id: i64,
+        ids: &[i64],
+    ) -> Result<()> {
+        self.delete_sendable(account_id, None, Some(scheduled_send_id), ids)
+    }
+
+    fn delete_sendable(
+        &self,
+        account_id: AccountId,
+        draft_id: Option<i64>,
+        scheduled_send_id: Option<i64>,
+        ids: &[i64],
+    ) -> Result<()> {
         let conn = self.lock()?;
-        let mut stmt =
-            conn.prepare("DELETE FROM outbound_attachments WHERE account_id = ?1 AND id = ?2")?;
+        let mut stmt = conn.prepare(&format!(
+            "DELETE FROM outbound_attachments
+             WHERE account_id = ?1 AND id = ?2 AND {}",
+            sendable()
+        ))?;
         for id in ids {
-            stmt.execute(params![account_id, id])?;
+            stmt.execute(params![account_id, id, draft_id, scheduled_send_id])?;
         }
         Ok(())
+    }
+
+    /// HUMAN-DOOR ONLY (`POST /client/scheduled`): move `ids` onto scheduled
+    /// send `scheduled_send_id`, clearing their draft claim. A row moves only
+    /// when unclaimed or held by exactly `from_draft`, the draft scheduling
+    /// consumes; another draft's file or another scheduled send's is never
+    /// stolen.
+    ///
+    /// ALL OR NOTHING: if any id did not move (unknown, swept, another
+    /// account's, held by someone else) nothing moves and this answers
+    /// `CoreError::InvalidInput("attachment_missing")`, which the handler maps
+    /// to `400 rejected:attachment_missing`. A mail scheduled with fewer files
+    /// than the user reviewed is the failure this table exists to refuse.
+    ///
+    /// The handler moves claims inside [`Self::schedule_send`]'s own
+    /// transaction; this standalone door is for the tests.
+    #[cfg(test)]
+    pub(crate) fn claim_attachments_for_scheduled_send(
+        &self,
+        account_id: AccountId,
+        scheduled_send_id: i64,
+        ids: &[i64],
+        from_draft: Option<i64>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        sweep(&tx, account_id, now)?;
+        if !move_claims_to_scheduled(&tx, account_id, scheduled_send_id, ids, from_draft)? {
+            // Dropping `tx` rolls the partial move back.
+            return Err(CoreError::InvalidInput(
+                crate::store::ATTACHMENT_MISSING.into(),
+            ));
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Hand every file scheduled send `scheduled_send_id` holds back to
+    /// unclaimed, with the unclaimed clock restarted at `now` (see
+    /// [`release_scheduled_claims`]). The cancel path does this inside its own
+    /// transaction; this standalone door is a TEST HOOK, `pub` only because
+    /// squelch-api's integration tests strand a row's files with it.
+    #[doc(hidden)]
+    pub fn release_scheduled_send_attachments(
+        &self,
+        account_id: AccountId,
+        scheduled_send_id: i64,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let conn = self.lock()?;
+        release_scheduled_claims(&conn, account_id, scheduled_send_id, now)?;
+        Ok(())
+    }
+
+    /// The files scheduled send `scheduled_send_id` holds, upload order,
+    /// metadata only. `[]` for an unknown id and for another account's.
+    pub fn scheduled_send_attachments(
+        &self,
+        account_id: AccountId,
+        scheduled_send_id: i64,
+    ) -> Result<Vec<OutboundAttachmentMeta>> {
+        let conn = self.lock()?;
+        Ok(scheduled_attachments(&conn, account_id, scheduled_send_id)?)
     }
 
     /// Make `ids` EXACTLY the set of files draft `draft_id` holds: each named
@@ -248,10 +516,10 @@ impl SqliteStore {
             params![account_id, draft_id],
         )?;
         {
-            let mut stmt = tx.prepare(
+            let mut stmt = tx.prepare(&format!(
                 "UPDATE outbound_attachments SET draft_id = ?2
-                 WHERE account_id = ?1 AND id = ?3 AND draft_id IS NULL",
-            )?;
+                 WHERE account_id = ?1 AND id = ?3 AND NOT ({CLAIMED})"
+            ))?;
             for id in ids {
                 stmt.execute(params![account_id, draft_id, id])?;
             }
@@ -284,7 +552,9 @@ mod tests {
         assert_eq!(a.size_bytes, 3);
         assert_eq!(b.size_bytes, 2);
 
-        let got = store.outbound_attachments(acct, &[b.id, a.id]).unwrap();
+        let got = store
+            .outbound_attachments(acct, None, &[b.id, a.id])
+            .unwrap();
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].meta.id, b.id, "the caller's order, not the table's");
         assert_eq!(got[0].data, b"BB");
@@ -293,7 +563,9 @@ mod tests {
 
         // An id that names nothing is ABSENT, not an error: the length check
         // at the send is what refuses it.
-        let got = store.outbound_attachments(acct, &[a.id, 9999]).unwrap();
+        let got = store
+            .outbound_attachments(acct, None, &[a.id, 9999])
+            .unwrap();
         assert_eq!(got.len(), 1);
     }
 
@@ -322,7 +594,8 @@ mod tests {
             .stage_outbound_attachment(acct, "kept.txt", "text/plain", "cid-kept", b"y", t0)
             .unwrap();
         let draft = store
-            .upsert_draft(acct, None, DraftFields::default(), t0)
+            .upsert_draft(acct, DraftKey::NewLatest, DraftFields::default(), t0)
+            .unwrap()
             .unwrap();
         store
             .claim_outbound_attachments(acct, draft.id, &[claimed.id], t0)
@@ -386,7 +659,8 @@ mod tests {
         // the old row is past the TTL now, the fresh one is not.
         let later = t0 + chrono::Duration::hours(24) + chrono::Duration::minutes(1);
         let d2 = store
-            .upsert_draft(acct, None, DraftFields::default(), later)
+            .upsert_draft(acct, DraftKey::NewLatest, DraftFields::default(), later)
+            .unwrap()
             .unwrap();
         store
             .claim_outbound_attachments(acct, d2.id, &[fresh.id], later)
@@ -426,7 +700,8 @@ mod tests {
             .stage_outbound_attachment(acct, "b", "text/plain", "cid-b", b"b", now)
             .unwrap();
         let d1 = store
-            .upsert_draft(acct, None, DraftFields::default(), now)
+            .upsert_draft(acct, DraftKey::NewLatest, DraftFields::default(), now)
+            .unwrap()
             .unwrap();
         store
             .claim_outbound_attachments(acct, d1.id, &[a.id, b.id], now)
@@ -461,13 +736,16 @@ mod tests {
                 is_sent: false,
                 is_spam: false,
                 to_addrs: None,
+                cc_addrs: None,
+                bcc_addrs: None,
                 list_unsubscribe: None,
                 list_unsub_one_click: false,
                 auth_pass: None,
             })
             .unwrap();
         let d2 = store
-            .upsert_draft(acct, Some(m), DraftFields::default(), now)
+            .upsert_draft(acct, DraftKey::Reply(m), DraftFields::default(), now)
+            .unwrap()
             .unwrap();
         store
             .claim_outbound_attachments(acct, d2.id, &[b.id], now)
@@ -479,6 +757,102 @@ mod tests {
         assert_eq!(d1.attachments.len(), 1, "still the first draft's");
     }
 
+    /// The ONE claim predicate reads what the claim path writes: claimed after
+    /// a save names the file, unclaimed again after a save drops it.
+    #[test]
+    fn the_claimed_predicate_tracks_claim_and_release() {
+        let (store, acct) = store();
+        let now = Utc::now();
+        let a = store
+            .stage_outbound_attachment(acct, "a", "text/plain", "cid-a", b"a", now)
+            .unwrap();
+        let claimed = |store: &SqliteStore| -> bool {
+            store
+                .lock()
+                .unwrap()
+                .query_row(
+                    &format!("SELECT {CLAIMED} FROM outbound_attachments WHERE id = ?1"),
+                    params![a.id],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert!(!claimed(&store), "an upload starts unclaimed");
+        let d = store
+            .upsert_draft(acct, DraftKey::NewCreate, DraftFields::default(), now)
+            .unwrap()
+            .unwrap();
+        store
+            .claim_outbound_attachments(acct, d.id, &[a.id], now)
+            .unwrap();
+        assert!(claimed(&store));
+        store
+            .claim_outbound_attachments(acct, d.id, &[], now)
+            .unwrap();
+        assert!(!claimed(&store), "dropped from the tray = unclaimed");
+    }
+
+    /// The same predicate reads the SECOND claim: a file moved onto a
+    /// scheduled send is claimed (its draft claim gone), and a cancel's release
+    /// makes it unclaimed again. A regression to the draft-only predicate would
+    /// leave a scheduled file sweepable at 24h and claimable by any draft.
+    #[test]
+    fn the_claimed_predicate_tracks_the_scheduled_claim_too() {
+        let (store, acct) = store();
+        let now = Utc::now();
+        let a = store
+            .stage_outbound_attachment(acct, "a", "text/plain", "cid-a", b"a", now)
+            .unwrap();
+        let claimed = |store: &SqliteStore| -> bool {
+            store
+                .lock()
+                .unwrap()
+                .query_row(
+                    &format!("SELECT {CLAIMED} FROM outbound_attachments WHERE id = ?1"),
+                    params![a.id],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        let d = store
+            .upsert_draft(acct, DraftKey::NewCreate, DraftFields::default(), now)
+            .unwrap()
+            .unwrap();
+        store
+            .claim_outbound_attachments(acct, d.id, &[a.id], now)
+            .unwrap();
+        let s = store
+            .insert_scheduled_send(acct, "{}", now, "<x@passband>", now)
+            .unwrap();
+        store
+            .claim_attachments_for_scheduled_send(acct, s.id, &[a.id], Some(d.id), now)
+            .unwrap();
+        assert!(claimed(&store), "held by the scheduled send alone");
+        // A draft save cannot take it back, and the upload sweep leaves it.
+        store
+            .claim_outbound_attachments(acct, d.id, &[a.id], now)
+            .unwrap();
+        store
+            .stage_outbound_attachment(
+                acct,
+                "b",
+                "text/plain",
+                "cid-b",
+                b"b",
+                now + chrono::Duration::days(2),
+            )
+            .unwrap();
+        assert_eq!(
+            store.scheduled_send_attachments(acct, s.id).unwrap().len(),
+            1,
+            "still the scheduled send's, days past the unclaimed TTL"
+        );
+        store
+            .release_scheduled_send_attachments(acct, s.id, now)
+            .unwrap();
+        assert!(!claimed(&store), "released = unclaimed");
+    }
+
     #[test]
     fn deleting_a_draft_takes_its_files_with_it() {
         let (store, acct) = store();
@@ -487,7 +861,8 @@ mod tests {
             .stage_outbound_attachment(acct, "a", "text/plain", "cid-a", b"a", now)
             .unwrap();
         let d = store
-            .upsert_draft(acct, None, DraftFields::default(), now)
+            .upsert_draft(acct, DraftKey::NewLatest, DraftFields::default(), now)
+            .unwrap()
             .unwrap();
         store
             .claim_outbound_attachments(acct, d.id, &[a.id], now)

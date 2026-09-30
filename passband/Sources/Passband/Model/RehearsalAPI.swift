@@ -9,6 +9,11 @@ actor RehearsalAPI {
     private var referenceDate: Date
     private var rules: [SenderRule] = []
     private var nextRuleID = 1
+    /// The drafts the practice composer saved, kept for the session only so
+    /// the picker is not empty right after a save. `reset` drops them, so a
+    /// practice draft never outlives the rehearsal.
+    private var drafts: [Int: DraftView] = [:]
+    private var nextDraftID = 1
     private var clearedShipments: Set<Int> = []
     private var statusOverrides: [Int: AttentionStatus] = [:]
     private var tierOverrides: [Int: Tier] = [:]
@@ -33,7 +38,7 @@ actor RehearsalAPI {
         mailbox.reset()
         self.accountEmail = accountEmail
         referenceDate = Date()
-        rules = []; nextRuleID = 1; clearedShipments = []
+        rules = []; nextRuleID = 1; drafts = [:]; nextDraftID = 1; clearedShipments = []
         statusOverrides = [:]; tierOverrides = [:]; importanceOverrides = [:]; reminders = [:]
     }
     func snapshot() -> OnboardingRehearsal { mailbox }
@@ -93,7 +98,11 @@ actor RehearsalAPI {
                 last_surfaced_at: stamp(),
                 inbox_unread: InboxUnread(messages: mailbox.messages.filter { !$0.isRead }.count, threads: Set(mailbox.messages.filter { !$0.isRead }.map { threadID($0.id) }).count),
                 assistant_relay: false, invite_sharing: false, forwarding: false,
-                gmail: GmailHealth(connected: true))
+                gmail: GmailHealth(connected: true),
+                // Without it the saver falls back to the key-less PUT, which
+                // is not stubbed here: every practice save would fail
+                // silently under a "kept in drafts" toast.
+                drafts_v2: true)
             data = try encode(stats)
         case ("GET", "/client/updates"):
             var rows = query["band"].map { bandRows($0) } ?? allUpdates()
@@ -143,8 +152,33 @@ actor RehearsalAPI {
                 (term.isEmpty || "\(message.sender) \(message.subject) \(message.body)".lowercased().contains(term))
             }.map { SearchHit(id: $0.id, thread_id: threadID($0.id), from_addr: address($0), from_name: $0.sender, subject: $0.subject, received_at: stamp(), snippet: $0.explanation, legs: ["keyword"]) }
             data = try encode(SearchPage(items: hits, match_kind: "keyword", sort: query["sort"]))
-        case ("GET", "/client/sealed"), ("GET", "/client/marketing"), ("GET", "/client/drafts"), ("GET", "/client/groups"), ("GET", "/client/unsubscribes"), ("GET", "/client/audit"), ("GET", "/client/triage-feedback"), ("GET", "/client/contacts"), ("GET", "/client/senders"):
+        case ("GET", "/client/sealed"), ("GET", "/client/marketing"), ("GET", "/client/groups"), ("GET", "/client/unsubscribes"), ("GET", "/client/audit"), ("GET", "/client/triage-feedback"), ("GET", "/client/contacts"), ("GET", "/client/senders"):
             data = Data("[]".utf8)
+        case ("GET", "/client/person"):
+            // The practice inbox has no history behind its senders: the card
+            // shows who they are and nothing else.
+            data = try json([
+                "addr": query["addr"] ?? "", "is_self": false, "known_contact": false,
+                "groups": [Any](), "recent_threads": [Any](),
+            ])
+        case ("GET", "/client/drafts"):
+            // Newest first, like the daemon. `forwards=1` is not consulted:
+            // there is no older app in a rehearsal to hide forwards from.
+            data = try encode(drafts.values.sorted { $0.id > $1.id })
+        case ("POST", "/client/drafts"):
+            // The draft routes, stubbed so a practice composer's autosave
+            // answers like a daemon's rather than failing (see `drafts`).
+            data = try practiceDraft(body, id: nil)
+        case ("PUT", "/client/drafts"):
+            // The keyed upsert replies and forwards use. Key-less is the old
+            // new-message slot, which a `drafts_v2` client never sends.
+            let reply = body["reply_to_message_id"] as? Int
+            let forward = body["forward_of_message_id"] as? Int
+            guard reply != nil || forward != nil else { throw unsupported() }
+            let existing = drafts.values.first {
+                $0.reply_to_message_id == reply && $0.forward_of_message_id == forward
+            }
+            data = try practiceDraft(body, id: existing?.id)
         case ("GET", "/client/sent"):
             data = try json(["items": []])
         case ("GET", "/client/invites"):
@@ -200,6 +234,14 @@ actor RehearsalAPI {
                     reminders[id] = nil
                     data = try json(["ok": true])
                 } else { throw unsupported() }
+            } else if components.count == 3, components[1] == "drafts", method == "PUT",
+                      let id = Int(components[2]) {
+                guard drafts[id] != nil else { throw missing() }
+                data = try practiceDraft(body, id: id)
+            } else if components.count == 3, components[1] == "drafts", method == "DELETE",
+                      let id = Int(components[2]) {
+                guard drafts.removeValue(forKey: id) != nil else { throw missing() }
+                data = Data()
             } else if components.count == 3, components[1] == "rules", let id = Int(components[2]) {
                 guard rules.contains(where: { $0.id == id }) else { throw missing() }
                 if method == "PUT" { data = try saveRule(body, id: id) }
@@ -210,6 +252,24 @@ actor RehearsalAPI {
             } else { throw unsupported() }
         }
         return (data, HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!)
+    }
+
+    /// A saved practice draft, stored for the session and echoed back as the
+    /// daemon's `DraftView` would be. `id` nil mints one; an id is kept.
+    private func practiceDraft(_ body: [String: Any], id: Int?) throws -> Data {
+        let draftID = id ?? nextDraftID
+        if id == nil { nextDraftID += 1 }
+        let now = stamp()
+        let draft = DraftView(
+            id: draftID, reply_to_message_id: body["reply_to_message_id"] as? Int,
+            forward_of_message_id: body["forward_of_message_id"] as? Int,
+            to: body["to"] as? String ?? "", cc: body["cc"] as? String,
+            bcc: body["bcc"] as? String, subject: body["subject"] as? String ?? "",
+            body: body["body"] as? String ?? "",
+            created_at: id.flatMap { drafts[$0]?.created_at } ?? now, updated_at: now,
+            attachments: [])
+        drafts[draftID] = draft
+        return try encode(draft)
     }
 
     /// Fictional record facts use the same typed surface as real triage.

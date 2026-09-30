@@ -274,8 +274,25 @@ struct MainShell: View {
         // window itself is narrow.
         GeometryReader { geo in
             let composeWidth = max(420, geo.size.width / 2)
+            // How much of the page's width is spoken for by a surface beside
+            // it, named only so its change can be told NOT to animate — see
+            // the `.animation(nil, value:)` on the page and on the reader.
+            let pageInset: CGFloat = store.composeOpen && !store.composeExpanded ? composeWidth : 0
+            let readerInset: CGFloat = (store.sideView.isOpen ? sidePanelWidth : 0) + pageInset
 
         ZStack(alignment: .topLeading) {
+            // THE QUIET BOARD: the sitrep with nothing on it sits on the live
+            // P7 squelch. Drawn HERE, under the rail and the traffic lights,
+            // so it fills the window rather than the page; and OUTSIDE the
+            // layer below, because that layer blurs under a modal and a
+            // blurred live Metal layer stutters. Not while an email is open:
+            // the sitrep stays mounted under the reader, and a scene nobody
+            // can see would keep rendering behind it.
+            if QuietBoard.shared.isQuiet && store.threadId == nil {
+                ClearScene()
+                    .ignoresSafeArea()
+                    .transition(.opacity)
+            }
             // EVERYTHING A MODAL SITS ON TOP OF, blurred as one layer while a
             // modal is up. Blurring is what keeps the app visible behind ⌘K:
             // layout and colour survive a defocus, a material scrim paints
@@ -295,18 +312,39 @@ struct MainShell: View {
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // INVISIBLE UNDER A SETTLED READER, and still mounted. The
+                // reader is opaque and covers the page, but a covered page is
+                // still composited — six glass cards re-sampling whatever is
+                // under them, on every frame the reader is up and every
+                // frame of a done+next resolve re-rendering the board beneath
+                // it. Opacity keeps the page's state, layout and geometry
+                // reports (the tour measures it) and drops only the drawing.
+                // Visible again the moment the reader is in flight, so the
+                // board is there under a departing email.
+                .opacity(
+                    (store.threadId != nil && store.threadFlight == .settled)
+                        || store.scheduledPreviewRow != nil ? 0 : 1)
                 // The composer's STRIP: a working surface in the layout, NOT an
                 // overlay — no scrim, no blur, the page beside it shrinks and
                 // stays live. The pane itself is drawn in its own layer below,
                 // so that opening it out to full screen moves ONE view rather
                 // than swapping in a second one (which would drop the caret,
                 // the focus and the editor's undo stack on every toggle).
-                if store.compose != nil && !store.composeExpanded {
+                if store.composeOpen && !store.composeExpanded {
                     Color.clear
                         .frame(width: composeWidth)
                         .allowsHitTesting(false)
                 }
             }
+            // THE STRIP IS RESERVED IN ONE STEP, NOT SLID INTO. The pane slides
+            // (its own transition below); the page beside it must not shrink
+            // along with it, because the page is a live layout — the board
+            // re-judges its rail breakpoint at every width it passes through
+            // and rebuilds every zone when it crosses, and a reader's web
+            // frames reflow their documents on every one of the thirteen
+            // frames. One reflow at the start, then the pane arrives over the
+            // space it left. Innermost animation wins for the values it names.
+            .animation(nil, value: pageInset)
 
             // Side panel surfaces (browse / search).
             if store.sideView.isOpen {
@@ -320,7 +358,14 @@ struct MainShell: View {
             // open side panel's strip: opening a hit from search must leave the
             // results visible beside the email. Esc sheds the panel first (the
             // email stays), a second Esc closes the reader.
-            if let threadId = store.threadId {
+            //
+            // THE SAME SLOT holds a scheduled mail's read-only preview
+            // (ScheduledPreview): opened from Sent where a sent row's thread
+            // would open, with the same rail, insets and layer. The two never
+            // share it (`openThread` and `openScheduledPreview` each clear
+            // the other).
+            let preview = store.threadId == nil ? store.scheduledPreviewRow : nil
+            if store.threadId != nil || preview != nil {
                 HStack(spacing: 0) {
                     // THE RAIL STAYS: the reader insets past it instead of
                     // covering it, so 1..5 stay clickable while you read. The
@@ -351,11 +396,22 @@ struct MainShell: View {
                         // (see ThreadViewer.deck), so the window holds still.
                         let flight: AppStore.ThreadFlight =
                             store.readingStack ? .settled : store.threadFlight
-                        ThreadViewer(threadId: threadId)
-                            .id(threadId)
-                            .offset(flight.offset(in: geo.size))
-                            .scaleEffect(flight.scale)
-                            .opacity(flight.opacity)
+                        // OFFSET AND OPACITY ONLY — no scale. The reader is a
+                        // column of live WKWebViews, and a transform on a
+                        // platform view is re-rasterised every frame it
+                        // changes; the departure ran on the same main thread
+                        // it was starving.
+                        if let threadId = store.threadId {
+                            ThreadViewer(threadId: threadId)
+                                .id(threadId)
+                                .offset(flight.offset(in: geo.size))
+                                .opacity(flight.opacity)
+                        } else if let preview {
+                            // No flight: a preview is opened and closed, never
+                            // walked through.
+                            ScheduledPreview(row: preview)
+                                .id(preview.id)
+                        }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipped()
@@ -370,12 +426,17 @@ struct MainShell: View {
                     // Same reservation for the compose pane: `c` from the reader
                     // opens it in the layout BELOW this layer, and the reader
                     // insetting past it is what keeps it visible.
-                    if store.compose != nil && !store.composeExpanded {
+                    if store.composeOpen && !store.composeExpanded {
                         Color.clear
                             .frame(width: composeWidth)
                             .allowsHitTesting(false)
                     }
                 }
+                // Same as the page above: the reader steps aside once, and the
+                // pane slides in over the space. Animating the inset made every
+                // web frame in the thread reflow per frame, which is the
+                // flicker `f` used to show.
+                .animation(nil, value: readerInset)
                 // NO TRANSITION. Opening an email is a jump, not a dissolve: a
                 // crossfade shows two surfaces at once on a surface the reader
                 // enters and leaves constantly, which reads as lag.
@@ -390,7 +451,7 @@ struct MainShell: View {
             // column (ComposePane holds the measure). The rail stays, as it
             // does for the reader. Same view in both: only its frame and its
             // layer change.
-            if store.compose != nil {
+            if store.composeOpen {
                 HStack(spacing: 0) {
                     if store.composeExpanded {
                         Color.clear
@@ -419,10 +480,12 @@ struct MainShell: View {
         // sitrep that reports them and the action layer that draws on them.
         .coordinateSpace(.named(tourSpace))
         .animation(.easeOut(duration: 0.18), value: store.modalOverlayOpen)
+        // Mail landing on a quiet board fades the scene out, never cuts it.
+        .animation(.easeInOut(duration: 0.9), value: QuietBoard.shared.isQuiet)
         .animation(.smooth(duration: 0.22), value: store.sideView)
         // The BOOL, never the ComposeState: the state changes on every
         // keystroke, and animating that would smear typing.
-        .animation(.smooth(duration: 0.22), value: store.compose != nil)
+        .animation(.smooth(duration: 0.22), value: store.composeOpen)
         .animation(.smooth(duration: 0.22), value: store.composeExpanded)
         // threadId is deliberately NOT animated HERE — opening a thread is a
         // jump. The one motion it has is the done+next flight, and that one is
@@ -488,8 +551,7 @@ struct MainShell: View {
         // ahead of the lowercase ⌘K above.
         bindings.append(
             KeyBinding("K", "new ask chat", meta: true, allowInInput: true) {
-                store.assistant.clear()
-                store.askBarOpen = true
+                store.newAskChat()
             })
         // Global, not list-only: `/`, `\` and `?` must work on every surface,
         // including the sitrep the app lands on. All three stay input-guarded
@@ -631,11 +693,11 @@ extension AppStore.ThreadFlight {
         }
     }
 
-    /// Only the departure fades and shrinks, and both are slight: enough for the
-    /// email to read as leaving the reader's plane rather than merely sliding,
-    /// not so much that it becomes a card trick. What arrives arrives whole.
+    /// Only the departure fades, and slightly: enough for the email to read as
+    /// leaving the reader's plane rather than merely sliding. What arrives
+    /// arrives whole. (It used to shrink to 0.96 as well; a scale on a column
+    /// of web frames re-rasterises every one of them per frame, so it went.)
     var opacity: Double { isDeparting ? 0 : 1 }
-    var scale: CGFloat { isDeparting ? 0.96 : 1 }
 
     /// Both exits, whichever way they leave. The next variant added is a
     /// departure or an arrival, and it says so here once.

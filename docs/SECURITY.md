@@ -255,7 +255,31 @@ on MCP, never audit file contents, and use `no-store`. Byte responses use the sa
 content-type whitelist, `nosniff`, and attachment disposition as inbound files.
 The outbound guard scans text and message parts at send time; binary files are
 not scanned. Restricting external-agent access does not delete human drafts or
-their attachments.
+their attachments. However many drafts an account holds (one per reply target,
+one per forwarded message, any number of new-message drafts), they are served
+only on `/client/drafts`, are never audited, and have no MCP surface.
+
+A staged file has a SECOND claim, `scheduled_send_id`, beside `draft_id`: the
+outbox row (`scheduled_sends`, docs/SCHEDULED-SEND.md) that will send it. The
+outbox is human-only like drafts, served only on `/client/scheduled`, with no
+MCP surface; unlike drafts it IS audited (ids and reasons only, never the
+frozen request). A scheduled row holds its files for as long as it waits, up
+to 366 days, and a failed row for 30 days more; only a cancel releases them
+(back to unclaimed, the one-day clock restarted), and the compose door's
+DELETE answers 404 for a file an outbox row holds. A fired row reads, sends and
+consumes ONLY the files it holds, never an unclaimed one: file ids are reused
+rowids, and the unclaimed arm would let somebody's fresh, unscanned upload go
+out in place of a file the row lost.
+
+**Recipients and the contact card are human-door data.** To and Cc are stored
+for every message and Bcc only for the account's own sends. The store enforces
+the Bcc rule in SQL, because on received mail that header is a leak or a
+forgery. They ride on `ClientMessage` beside `html`; the agent door's
+`SanitizedMessage` has no recipient fields at all. `GET /client/person` (the
+reader's contact card) answers for one address at a time, excludes sealed mail
+from every count and list, and has no MCP counterpart. The contacts seed stays
+sent-only, so being copied in beside a stranger never earns them the
+known-contact floor.
 
 ## 4b. Provider spam
 
@@ -326,7 +350,8 @@ explicitly overrides, and the matched text is never copied anywhere — not into
 response, a log, or the audit row.
 
 **Enforcement.** `squelch-api/src/guard.rs:scan` / `scan_kinds`, called from
-`handlers::action_send` before the message leaves the process. Detects `pem_block`,
+`handlers::action_send` before the message leaves the process, and from
+`scheduled_send::schedule` when a mail is scheduled. Detects `pem_block`,
 `api_key` (vendor prefixes), `otp_code` (6–8 digits near an auth word), `long_hex`
 (≥32), `long_base64` (≥40). A non-empty match set returns HTTP 422 listing only the
 **kinds**; `override_guard: true` sends anyway and writes a `guard_override:<kinds>`
@@ -371,6 +396,24 @@ out of what it RENDERS to its user, not out of what its user chooses to pass on.
 Rewriting a stranger's markup on the way out would forward something other than what
 arrived, and the user's decision is to send *this message*.
 
+**Scheduled sends are judged once, when scheduled.** `scheduled_send::schedule`
+runs the same scan while the user is there to answer: the note, the staged text
+files, and for a forward the ORIGINAL, read on the write token at schedule time
+and unioned into one verdict. `override_guard: true` persists in the frozen
+request. At fire time the worker calls `perform_send` with `SendGuard::Settled`,
+so nothing re-scans: the content is frozen, and a forward's original is
+re-fetched from Gmail at fire (Gmail's raw bytes are immutable, so what is sent
+is what was judged). A cancel hands the request back WITHOUT `override_guard`,
+so a reschedule is judged again.
+
+**Scheduled sends carry a visible fingerprint (privacy).** Every mail the outbox
+fires goes out with `X-Passband-Outbox: <token>` and a `Message-ID` of
+`<token@passband.app>`, where the token is 48 hex chars of fresh randomness minted
+per row (docs/SCHEDULED-SEND.md §4). Recipients can see both: they reveal that the
+mail was sent by Passband's scheduler, and carry nothing else, no account, mailbox,
+user or row id, so two scheduled mails from one user are not linkable by them.
+Interactive sends carry neither.
+
 **Do not break.** `GuardMatch::kind()` is the only thing that may leave the process —
 never return, log, or audit the matched substring. Keep the override audited; an
 un-audited bypass is not a bypass we can reason about.
@@ -394,7 +437,10 @@ with fewer files than the tray showed), `rejected:attachment_cid_clash` (two sta
 files carry one `content_id`, so the body's reference would resolve to a coin flip),
 `failed:fetch_original` (the forwarded
 original could not be read back, so nothing was sent), `rejected:compose`,
-`failed:gmail`, `ok`, `ok:forward`):
+`paced` (the mailbox's Gmail budget held a call on the way, the send itself, a
+forward's original or a reply's parent, so nothing was posted; answered 503),
+`failed:gmail`, `ok`, `ok:forward`). A fired scheduled send's `send.echo` detail
+is marked `scheduled:<id>:` exactly as its `send` row is:
 
 | `send.echo` detail | meaning |
 | --- | --- |
@@ -416,6 +462,33 @@ pre-echo status quo. The read-back is also capped at **5s**
 already made two serial Gmail calls, so bookkeeping may not spend the rest of that
 budget. Keep the echo's failures audited and swallowed; keep it out of core's write
 surface (the fetch lives in `squelch-api/src/gmail_write.rs`, core takes bytes).
+
+**Scheduled send (audit contract).** The outbox door audits under three actions of
+its own, target = the message a reply or forward is about (`schedule`) or the row id
+(`schedule.cancel`, `schedule.now`), details ids and reasons only. A FIRED send
+writes the ordinary `send` row, marked with its outbox row:
+
+| action / detail | meaning |
+| --- | --- |
+| `schedule` · every `send` refusal above | the same ordered refusals a send meets (`rejected:confirm`, `rejected:attachment_missing`, `rejected:no_write_credential`, `failed:target`, ...), in the same order. |
+| `schedule` · `rejected:send_at` | `send_at` missing, not RFC3339, not in the future, or more than 366 days out. |
+| `schedule` · `rejected:group_fanout` | an `individual` group: one minted Message-ID cannot name N messages. |
+| `schedule` · `rejected:too_many_scheduled` | the account already holds 100 live outbox rows. |
+| `schedule` · `failed:group` / `failed:store` | the group did not resolve / the insert failed. |
+| `schedule` · `blocked:guard` / `guard_override:<kinds>` | the verdict, given at schedule time. |
+| `schedule` · `ok:<id>` | scheduled; `<id>` is the outbox row. |
+| `schedule.cancel` · `ok` / `rejected:sending` / `failed:not_found` | cancelled / in Gmail's hands (409) / unknown, another account's, sent or cancelled (404). |
+| `schedule.now` · `ok` / `rejected:sending` / `failed:not_found` | queued for the next tick / in Gmail's hands (409) / nothing to queue (404). |
+| `send` · `scheduled:<id>:<outcome>` | a fired row went out; `<outcome>` is the plain send's (`ok`, `ok:forward`, `ok:bcc:N`, ...). |
+| `send` · `scheduled:<id>:recovered` | Gmail already held the row's mail, found by its minted Message-ID or its `X-Passband-Outbox` token (a lapsed lease, or a re-fire after an ambiguous failure): settled, NOT sent again. |
+| `send` · `scheduled:<id>:failed:*` / `scheduled:<id>:rejected:*` / `scheduled:<id>:paced` | a fired row's refusal, the plain send's detail marked with the row. `paced` spent no attempt. |
+| `send` · `scheduled:<id>:failed:request` / `failed:attachment_missing` / `failed:crash_loop` / `failed:recovery` / `failed:group_fanout` | a TERMINAL outcome the worker decided without reaching the send (so no plain send row exists to mark): an unreadable request, a lost file, a row that kept dying mid-send, a recovery or pre-fire search never able to ask Gmail, an (unreachable) fan-out. The worker writes these itself. |
+| `send` · `scheduled:<id>:rejected:no_write_credential` / `failed:search` / `failed:store` | a worker-side attempt that never reached the send: no credential before the pre-fire search, the search refused (a revoked grant surfaces here, or a 4xx other than 403/429, which are "not now" like a transport error), the row's files unreadable. Each spends an attempt, and is written only when the settle moved the row (a worker that outlived its claim writes nothing). |
+| `send.echo` · `scheduled:<id>:<detail>` | the echo of a fired or recovered row, the plain detail marked with the row. |
+
+The fire-time grace deferral (`recovery:grace`) and an unreachable pre-fire
+search (`recovery:unreachable`) are "not now" answers that spend no attempt and
+write no ledger row; the listing's `last_error` says why the row waits.
 
 ## 6. The embedded assistant
 

@@ -21,6 +21,7 @@ mod http_metrics;
 mod invite_mail;
 mod markdown;
 mod pair;
+mod scheduled_send;
 mod sharing;
 mod state;
 pub mod tracking;
@@ -34,6 +35,9 @@ pub use error::ApiError;
 /// WRITE credential, which the readonly-bound sync loop must never touch.
 pub use handlers::run_shred_pass;
 pub use http_metrics::record_http_metrics;
+/// The scheduled-send worker's pass. Exported for the daemon's timer for the
+/// same reason as the shredder: it sends on the WRITE credential.
+pub use scheduled_send::{ScheduledPassReport, run_scheduled_send_pass};
 /// The invite minter. Exported for the daemon binaries that build state by
 /// hand and for the integration suite, which points it at a mock control plane.
 pub use sharing::Sharing;
@@ -172,13 +176,31 @@ fn client_router(state: ApiState) -> Router {
         .route("/client/rules/{id}", delete(handlers::delete_rule))
         // Local drafts: served EXCLUSIVELY here. Unsent compositions stay on
         // this machine — the agent door has no drafts route and never learns the
-        // table exists. PUT is keyed (one draft per reply target, one for new
-        // mail), so it edits in place instead of piling up rows.
+        // table exists. The keyed PUT edits in place (one draft per reply
+        // target, one per forwarded message; no key edits the newest new-message
+        // draft, for apps that predate many drafts). New-message drafts are
+        // many: POST creates one, PUT /{id} edits one by id. GET omits forward
+        // drafts unless asked with `forwards=1`: an app predating them would
+        // restore one as its plain new message (see `ListDraftsQuery`).
         .route(
             "/client/drafts",
-            get(handlers::list_drafts).put(handlers::put_draft),
+            get(handlers::list_drafts)
+                .put(handlers::put_draft)
+                .post(handlers::create_draft),
         )
-        .route("/client/drafts/{id}", delete(handlers::delete_draft))
+        .route(
+            "/client/drafts/{id}",
+            put(handlers::update_draft).delete(handlers::delete_draft),
+        )
+        // The outbox: finished mail the daemon sends later. Served EXCLUSIVELY
+        // here, like drafts — the agent door has no route to it and never
+        // learns the table exists. POST schedules (running every check a send
+        // runs, guard included, while the user is there to answer), GET lists
+        // what is still owed an outcome, DELETE pulls one back into the
+        // composer, and /now sends one on the next tick. Its own router so
+        // one `no-store` layer covers every response on it, an extractor's
+        // rejection included.
+        .merge(scheduled_send::routes())
         // The composer/signature preview: the send path's own markdown render,
         // exposed so the client never grows a second, drifting renderer.
         .route("/client/markdown/preview", post(handlers::markdown_preview))
@@ -188,6 +210,9 @@ fn client_router(state: ApiState) -> Router {
         // Sender autocomplete for the search field's `from:` operator: who
         // writes to the user. Human door only, for the reason contacts is.
         .route("/client/senders", get(handlers::get_senders))
+        // The reader's contact card: one address, everything known about it.
+        // Human door only, for the reason contacts is.
+        .route("/client/person", get(handlers::get_person))
         .merge(groups::routes())
         .route("/client/sealed", get(handlers::list_sealed))
         .route(

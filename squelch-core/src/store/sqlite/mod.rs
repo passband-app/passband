@@ -23,7 +23,9 @@ mod messages;
 mod migrate;
 mod notify;
 mod outbound;
+pub mod people;
 mod rules;
+mod scheduled;
 mod search;
 mod senders;
 mod specialists;
@@ -45,15 +47,14 @@ use crate::error::{CoreError, Result};
 use crate::metrics::{NotifyDecision, NotifyLane};
 use crate::store::{
     AttachmentBytes, BankingApplied, BlankBodyScan, ContactEntry, Device, DeviceToken, Draft,
-    DraftFields, ExtractQueued, FtsQuery, HealScope, InboxUnread, IssuedDeviceToken, LeggedHit,
-    MailActivityDay, MarketingApplied, MarketingOffer, MessageOpen, MessageUnsub,
-    MintedPairingCode, MissingVector, NewAuditEntry, NewEvent, NewNotifyDecision,
-    NotifyDecisionRow, RevisitQueued, SPAM_SYNCED_AT_KEY, SealedBody, SealedMessage,
-    SearchDiagnostics, SearchFilter, SearchSort, SeedVerdict, SenderDigestRow, SenderEntry,
-    SenderHistory, SentMessage, SentMissingRecipients, SitrepBand, SpamScope, Stage1Applied,
-    Stage1Queued, Stage2Applied, Stage2CapOverrides, Stage2Queued, Stage2Usage, Stage2UsageDay,
-    Store, SyncState, TermDf, ThreadSibling, TrackedMessage, TriageDebug, TriagedMessage,
-    UsageTokens,
+    DraftFields, DraftKey, ExtractQueued, FtsQuery, HealScope, InboxUnread, IssuedDeviceToken,
+    LeggedHit, MailActivityDay, MarketingApplied, MarketingOffer, MessageMissingRecipients,
+    MessageOpen, MessageUnsub, MintedPairingCode, MissingVector, NewAuditEntry, NewEvent,
+    NewNotifyDecision, NotifyDecisionRow, RevisitQueued, SPAM_SYNCED_AT_KEY, SealedBody,
+    SealedMessage, SearchDiagnostics, SearchFilter, SearchSort, SeedVerdict, SenderDigestRow,
+    SenderEntry, SenderHistory, SentMessage, SitrepBand, SpamScope, Stage1Applied, Stage1Queued,
+    Stage2Applied, Stage2CapOverrides, Stage2Queued, Stage2Usage, Stage2UsageDay, Store, SyncState,
+    TermDf, ThreadSibling, TrackedMessage, TriageDebug, TriagedMessage, UsageTokens,
 };
 use crate::types::{
     AccountId, AttachmentInfo, AttentionStatus, AttentionUpdate, AuditEntry, BandCounts, Banking,
@@ -172,7 +173,8 @@ impl SqliteStore {
         conn.execute_batch(SCHEMA)?;
         // SCHEMA is all `CREATE TABLE IF NOT EXISTS`, so a pre-existing DB never
         // picks up freshly-added columns from the CREATE — `migrate` adds them.
-        // New tables/indexes need no migration (IF NOT EXISTS covers them).
+        // New tables/indexes need no migration (IF NOT EXISTS covers them),
+        // EXCEPT an index naming a migrated column, which lives in `migrate`.
         migrate(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -323,8 +325,15 @@ impl SqliteStore {
     /// HUMAN-DOOR ACTION SUPPORT (squelch-api only): resolve a local message id
     /// to the Gmail ids + headers an action needs (archive/label/send).
     ///
-    /// SECURITY: excludes `sensitivity = 'sealed'` in SQL, so an action can never
-    /// target sealed mail — missing and sealed both return NotFound.
+    /// UNFILTERED by sensitivity: a sealed or access-restricted message resolves
+    /// like any other; only an unknown id or another account's id is NotFound.
+    /// This is deliberate, not a hole. Human-door actions do not treat a legacy
+    /// `sensitivity = 'sealed'` as a denial (docs/SECURITY.md §4); what gates
+    /// them is the confirm flag and audit ladder in squelch-api's
+    /// `guarded_action`. The access authority for the agent door is
+    /// `messages.rs:external_message_allowed_conn` (via `thread_guard_and_subject`
+    /// / [`Self::external_thread_allowed`]), which this lookup does NOT apply, so
+    /// never hand its result to an agent-facing path.
     pub fn action_message_ref(
         &self,
         account_id: AccountId,
@@ -965,12 +974,12 @@ impl Store for SqliteStore {
         self.sent_listing(account_id, limit, offset)
     }
 
-    fn sent_missing_recipients(
+    fn messages_missing_recipients(
         &self,
         account_id: AccountId,
         limit: u32,
-    ) -> Result<Vec<SentMissingRecipients>> {
-        self.sent_missing_recipients(account_id, limit)
+    ) -> Result<Vec<MessageMissingRecipients>> {
+        self.messages_missing_recipients(account_id, limit)
     }
 
     fn blank_body_messages(
@@ -982,13 +991,15 @@ impl Store for SqliteStore {
         self.blank_body_messages(account_id, before_id, limit)
     }
 
-    fn set_message_to_addrs(
+    fn set_message_recipients(
         &self,
         account_id: AccountId,
         message_id: i64,
         to_addrs: &str,
+        cc_addrs: &str,
+        bcc_addrs: &str,
     ) -> Result<bool> {
-        self.set_message_to_addrs(account_id, message_id, to_addrs)
+        self.set_message_recipients(account_id, message_id, to_addrs, cc_addrs, bcc_addrs)
     }
 
     fn append_audit(&self, account_id: AccountId, entry: &NewAuditEntry) -> Result<i64> {

@@ -61,11 +61,14 @@ fn tables_exist(conn: &Connection, tables: &[&str]) -> Result<bool> {
     Ok(n as usize == tables.len())
 }
 
-/// Additive, idempotent column migrations for pre-existing DBs. New tables and
-/// indexes are handled by `CREATE ... IF NOT EXISTS` in `schema.sql`; only new
-/// COLUMNS on an existing table need this seam.
+/// Additive, idempotent migrations for pre-existing DBs. New tables and most
+/// indexes are handled by `CREATE ... IF NOT EXISTS` in `schema.sql`; this seam
+/// carries new COLUMNS on an existing table, plus any index that NAMES such a
+/// column (schema.sql runs first, so it cannot create one against an old table)
+/// and the rare index that has to be dropped.
 pub(super) fn migrate(conn: &Connection) -> Result<()> {
     retire_records_destination(conn)?;
+    retire_preference_retriage(conn)?;
     add_column_if_missing(conn, "messages", "list_unsubscribe", "TEXT")?;
     add_column_if_missing(
         conn,
@@ -77,11 +80,19 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // backfilled: NULL is the safe reading (no tracking-pixel bypass), and a
     // re-sync refills it through the message upsert.
     add_column_if_missing(conn, "messages", "auth_pass", "INTEGER")?;
-    // Display recipients of sent mail. NULL on every pre-existing row, which is
-    // exactly the recipients-backfill queue predicate (`is_sent=1 AND to_addrs
-    // IS NULL`); the backfill runs from the sync engine, over the network, so it
+    // Display recipients, one column per header. NULL on every pre-existing row,
+    // which is exactly the recipients-backfill queue predicate (`cc_addrs IS
+    // NULL`); the backfill runs from the sync engine, over the network, so it
     // cannot live in this synchronous seam.
+    //
+    // `cc_addrs` is the queue's predicate and not `to_addrs` deliberately:
+    // `to_addrs` has been filling for sent mail since before the split, holding
+    // To+Cc+Bcc mashed into one string, and those rows need re-reading too — a
+    // predicate keyed on the old column would call them done and leave the Cc
+    // list rendered as though everyone on it had been in To.
     add_column_if_missing(conn, "messages", "to_addrs", "TEXT")?;
+    add_column_if_missing(conn, "messages", "cc_addrs", "TEXT")?;
+    add_column_if_missing(conn, "messages", "bcc_addrs", "TEXT")?;
     // Gmail's own spam verdict. 0 on every pre-existing row, which is the honest
     // reading: this daemon never fetched the SPAM label before, so nothing
     // already stored came from it. The first sync after the upgrade backfills
@@ -91,6 +102,92 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // the composer can show, or closing one silently drops recipients.
     add_column_if_missing(conn, "drafts", "cc_addr", "TEXT NOT NULL DEFAULT ''")?;
     add_column_if_missing(conn, "drafts", "bcc_addr", "TEXT NOT NULL DEFAULT ''")?;
+
+    // A staged file's SECOND claim, beside `draft_id`: the scheduled send that
+    // holds it (docs/SCHEDULED-SEND.md). Every pre-existing row is unclaimed by
+    // a schedule, which NULL says: no backfill. The index names the new column,
+    // so it lives here, behind the column check, and never in schema.sql.
+    add_column_if_missing(conn, "outbound_attachments", "scheduled_send_id", "INTEGER")?;
+    if has_columns(
+        conn,
+        "outbound_attachments",
+        &["account_id", "scheduled_send_id"],
+    )? {
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_outbound_attachments_scheduled
+                 ON outbound_attachments(account_id, scheduled_send_id)
+                 WHERE scheduled_send_id IS NOT NULL",
+            [],
+        )?;
+    }
+    // The outbox's recovery columns (docs/SCHEDULED-SEND.md §4), for a DB
+    // whose `scheduled_sends` predates them. 0 and NULL are the honest
+    // readings: no earlier attempt is known to have reached Gmail, and no
+    // recovery search is being waited out.
+    add_column_if_missing(
+        conn,
+        "scheduled_sends",
+        "maybe_sent",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(conn, "scheduled_sends", "recover_at", "TEXT")?;
+    // The fire-time grace and the pre-fire search's give-up clock. NULL is the
+    // honest reading for both: no attempt's end is known (the grace does not
+    // hold a row back), and no search is being waited out.
+    add_column_if_missing(conn, "scheduled_sends", "last_attempt_at", "TEXT")?;
+    add_column_if_missing(conn, "scheduled_sends", "search_deferred_since", "TEXT")?;
+    // MANY NEW-MESSAGE DRAFTS. The old single-slot index made a second
+    // new-message draft a constraint violation; new mail is keyed by row id now.
+    // No dedupe is owed: that index guaranteed at most one nil-keyed row.
+    //
+    // ROLLBACK GUARD, deliberate: the name is kept, on a NON-unique index. An
+    // older binary's schema.sql runs `CREATE UNIQUE INDEX IF NOT EXISTS
+    // idx_drafts_new` on every open, and `IF NOT EXISTS` checks only the name,
+    // so with this index in place that create is a no-op. Without it, rolling
+    // back after a user holds two keyless drafts fails every open with a
+    // UNIQUE violation; with it, the old binary merely edits one of several
+    // keyless rows. Dropped only while still UNIQUE, so a normal open is a
+    // no-op rather than a drop and rebuild.
+    //
+    // The SECOND degradation under rollback: the older binary's key-less upsert
+    // selects `reply_to_message_id IS NULL` and knows nothing of forwards, so
+    // it can pick a forward row and rewrite its text while the forward key
+    // survives: the forward's note is overwritten, and a later newer binary
+    // shows the old app's new message as a forward of that message. Accepted,
+    // not fixed: it needs a rollback AND a held forward draft, and no schema
+    // trick here can change an old binary's WHERE clause.
+    let unique_new_index: bool = conn
+        .prepare("SELECT 1 FROM pragma_index_list('drafts') WHERE name = 'idx_drafts_new' AND \"unique\" = 1")?
+        .exists([])?;
+    if unique_new_index {
+        conn.execute("DROP INDEX idx_drafts_new", [])?;
+    }
+    // NOT the same kind of guard as the forward index's below. On every real
+    // open schema.sql has already created `drafts` with both of these columns,
+    // so in production this is always true. It exists for the migrate unit
+    // tests, which run `migrate` over partial schemas with no `drafts` table at
+    // all; without it ~15 of them fail on a missing table. Nothing here adds
+    // either column.
+    if has_columns(conn, "drafts", &["account_id", "reply_to_message_id"])? {
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_drafts_new
+             ON drafts(account_id) WHERE reply_to_message_id IS NULL",
+            [],
+        )?;
+    }
+    // Forwards are kept too, one per forwarded message like replies. The
+    // index lives HERE, not in schema.sql, because it names the migrated column:
+    // schema.sql runs before this seam, so on an old DB it would reference a
+    // column that does not exist yet and fail every open.
+    add_column_if_missing(conn, "drafts", "forward_of_message_id", "INTEGER")?;
+    if has_columns(conn, "drafts", &["account_id", "forward_of_message_id"])? {
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_drafts_forward
+             ON drafts(account_id, forward_of_message_id)
+             WHERE forward_of_message_id IS NOT NULL",
+            [],
+        )?;
+    }
     // The push routing tag. NULL on every pre-existing row and NOT backfilled:
     // nothing here can know which account a device filed itself under, and the
     // client re-registers (tag included) on its next foreground.
@@ -1060,39 +1157,55 @@ fn clear_stale_no_extractor_markers(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// ONE-SHOT (and resumable): fill `message_recipients` from the `to_addrs`
+/// ONE-SHOT (and resumable): fill `message_recipients` from the recipient
 /// display strings already on disk.
 ///
 /// Local and parse-only — no network, unlike the recipients sweep in the sync
-/// engine that produced `to_addrs` in the first place. Rows whose `to_addrs` is
-/// NULL are not candidates here: they are that sweep's queue, and it writes the
-/// index itself as it fills them.
+/// engine that produced those strings in the first place. Rows with no
+/// recipients stored at all are not candidates here: they are that sweep's
+/// queue, and it writes the index itself as it fills them.
 ///
-/// An EMPTY `to_addrs` ("looked, and the headers named nobody") yields no rows
-/// and therefore stays a candidate forever. That is a handful of rows parsing to
+/// ALL THREE HEADERS, because the index answers "did this message go to that
+/// address" and a Cc'd or Bcc'd recipient received the mail exactly like a To'd
+/// one. Pre-split rows carry all three in `to_addrs` already (it held To+Cc+Bcc
+/// mashed together), and the concatenation below is a no-op on them.
+///
+/// EMPTY strings ("looked, and the headers named nobody") yield no rows and
+/// therefore stay candidates forever. That is a handful of rows parsing to
 /// nothing on each open, which is cheaper than a done-flag per account for a
 /// table this seam scans once.
 fn backfill_message_recipients(conn: &Connection) -> Result<()> {
     if !tables_exist(conn, &["messages", "message_recipients"])?
-        || !has_columns(conn, "messages", &["to_addrs", "is_sent"])?
+        || !has_columns(
+            conn,
+            "messages",
+            &["to_addrs", "cc_addrs", "bcc_addrs", "is_sent"],
+        )?
     {
         return Ok(());
     }
-    let rows: Vec<(i64, i64, String)> = conn
+    let rows: Vec<(i64, i64, String, String, String)> = conn
         .prepare(
-            "SELECT m.id, m.account_id, m.to_addrs FROM messages m
+            "SELECT m.id, m.account_id, COALESCE(m.to_addrs, ''),
+                    COALESCE(m.cc_addrs, ''), COALESCE(m.bcc_addrs, '')
+             FROM messages m
              WHERE m.is_sent = 1
-               AND m.to_addrs IS NOT NULL
-               AND m.to_addrs != ''
+               AND (m.to_addrs IS NOT NULL OR m.cc_addrs IS NOT NULL)
+               AND (COALESCE(m.to_addrs, '') != ''
+                    OR COALESCE(m.cc_addrs, '') != ''
+                    OR COALESCE(m.bcc_addrs, '') != '')
                AND NOT EXISTS (
                    SELECT 1 FROM message_recipients r
                    WHERE r.account_id = m.account_id AND r.message_id = m.id)",
         )?
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
 
-    for (message_id, account_id, to_addrs) in rows {
-        for addr in crate::sync::ingest::parse_stored_recipients(&to_addrs) {
+    for (message_id, account_id, to, cc, bcc) in rows {
+        let joined = crate::sync::ingest::join_recipient_lists(&[&to, &cc, &bcc]);
+        for addr in crate::sync::ingest::parse_stored_recipients(&joined) {
             conn.execute(
                 "INSERT OR IGNORE INTO message_recipients(account_id, message_id, addr)
                  VALUES(?1,?2,?3)",
@@ -1233,6 +1346,25 @@ fn clear_recoverable_no_body_markers(conn: &Connection) -> Result<usize> {
     }
     tx.commit()?;
     Ok(cleared)
+}
+
+/// Drop re-triage work queued by sender-rule changes. Rules now apply only to
+/// mail that arrives after them (see `rules.rs`), and a backlog left by the old
+/// fan-out would otherwise keep draining the background budget for days: one
+/// `*` rule queued ~1,000 investigations. Every such job targets a message that
+/// already has a decision, so closing it leaves that placement as it was.
+/// Marked `completed` like a superseded revision, so lane and follow-up rows
+/// keep a valid job. Idempotent: nothing enqueues this trigger any more.
+pub(super) fn retire_preference_retriage(conn: &Connection) -> Result<()> {
+    if !tables_exist(conn, &["agent_triage_jobs"])? {
+        return Ok(());
+    }
+    conn.execute(
+        "UPDATE agent_triage_jobs SET state='completed',lease_token=NULL,lease_until=NULL
+         WHERE state='queued' AND trigger LIKE 'preference:%'",
+        [],
+    )?;
+    Ok(())
 }
 
 /// Retire the old independent placement without dropping typed record facts.

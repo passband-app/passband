@@ -1,0 +1,205 @@
+# The alerts. Every one of them is something that happened, or that
+# deploy/monitoring/README.md said we should be told about and nothing told us.
+#
+# WHY NoData IS OK ON THE FIRST THREE: when carrier stops reporting, every
+# query here goes empty at once, and three alerts saying "I cannot see" is
+# noise around the one that matters. `carrier-metrics-missing` is that one.
+#
+# `$labels` and `$values` are written bare, and that was checked rather than
+# assumed: Grafana 12.2 does NOT run env-var interpolation over alert rules, so
+# the `$$` escape the other provisioning files would need arrives here as a
+# literal `$$` and breaks every summary.
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: tenants
+    folder: Passband
+    interval: 1m
+    rules:
+      # 2026-09-28: the tenants ResourceQuota had been full at five for who
+      # knows how long, and the first anyone heard of it was a new user stuck
+      # on a signup that timed out. Every dimension, not just memory: on the
+      # 16 GB box cpu, ephemeral storage, pods and PVCs all used to bind before
+      # memory did (PRODUCTION.md, "How many tenants fit").
+      - uid: tenants-quota-near-full
+        title: Tenants quota near full
+        condition: C
+        for: 15m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: 'tenants quota: {{ $labels.resource }} at {{ humanizePercentage $values.A.Value }}'
+          description: >-
+            Signups start failing when any dimension reaches 100%: the warden applies the
+            Deployment, the pod is refused, and the user sees a timeout.
+            Add RAM or raise the quota (PRODUCTION.md, "How many tenants fit").
+            Re-applying 70-tenant-limits.yaml on carrier also causes this.
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 600, to: 0 }
+            model:
+              refId: A
+              instant: true
+              expr: >-
+                max by (resource) (
+                  kube_resourcequota{namespace="tenants",type="used"}
+                    / ignoring(type) kube_resourcequota{namespace="tenants",type="hard"}
+                )
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gte, params: [0.8] }
+
+      # The general form of the same night: a tenant whose Deployment wants a
+      # pod and has none available. Quota, scheduling, image pull, crash loop,
+      # a probe that never passes; this does not care which. Ten minutes is
+      # well past the 30s minReadySeconds soak and a Recreate roll. A tenant
+      # stopped on purpose is scaled to 0 and so never fires.
+      - uid: tenant-no-available-pod
+        title: Tenant has no running pod
+        condition: C
+        for: 10m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: critical
+        annotations:
+          summary: 'tenant {{ $labels.deployment }} has no available pod'
+          description: >-
+            The mailbox is down. `kubectl -n tenants get events | grep {{ $labels.deployment }}`
+            for a refused or unschedulable pod, `kubectl -n tenants describe pod -l
+            app.kubernetes.io/instance={{ $labels.deployment }}` for one that is failing.
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 600, to: 0 }
+            model:
+              refId: A
+              instant: true
+              expr: >-
+                kube_deployment_spec_replicas{namespace="tenants"}
+                  - kube_deployment_status_replicas_available{namespace="tenants"}
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+
+      # The one README.md has recommended since the metrics shipped: a pod can
+      # be Running, Ready and stuck since Tuesday, and only the daemon knows.
+      # A timestamp of 0 (never synced since start) fires too, on purpose.
+      - uid: tenant-sync-stale
+        title: Tenant mail sync stale
+        condition: C
+        for: 15m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: 'tenant {{ $labels.tenant }} has not synced in 15+ minutes'
+          description: >-
+            One tenant: usually a dead Google refresh token (its
+            squelchd_gmail_api_errors_total{kind="auth"} climbs) and the user has to reconnect.
+            Every tenant at once: the box, or Google.
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 600, to: 0 }
+            model:
+              refId: A
+              instant: true
+              expr: time() - squelchd_sync_last_success_timestamp_seconds
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [900] }
+
+      # 2026-09-29: memory is what carrier runs out of first, and the only
+      # wall it has is the RAM itself. Nothing is reserved for k3s and there
+      # is no swap (PRODUCTION.md, "The box"), so past 100% is a global OOM
+      # that kills whichever tenant daemon is biggest. MemAvailable counts
+      # reclaimable page cache as free, so this is memory actually held. 85%
+      # of 16 GB leaves ~2.4 GB, a handful of tenants loading the embedder at
+      # once. Asked for as "ever goes over", so 2m: two evaluations in a row,
+      # enough to drop a single odd scrape and nothing more. If the embedder
+      # sawtooth makes it chatty, raise this rather than the threshold.
+      - uid: carrier-memory-high
+        title: carrier memory high
+        condition: C
+        for: 2m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: 'carrier memory at {{ humanizePercentage $values.A.Value }}'
+          description: >-
+            The box is close to a global OOM, which kills the largest tenant daemon.
+            "Memory used" on the dashboard shows who grew ("of which tenant daemons");
+            "Memory by pod" names them. Resize RAM (CPU and RAM only) before adding
+            tenants (PRODUCTION.md, "How many tenants fit").
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 600, to: 0 }
+            model:
+              refId: A
+              instant: true
+              expr: 1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gte, params: [0.85] }
+
+      # The alert that makes the others worth trusting. Everything above reads
+      # series the Prometheus agent on carrier remote-writes; when the box, the
+      # agent or kube-state-metrics goes away they all fall silent together.
+      - uid: carrier-metrics-missing
+        title: carrier metrics missing
+        condition: C
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: critical
+        annotations:
+          summary: 'no metrics from carrier for 10+ minutes'
+          description: >-
+            Every other alert is blind until this clears. The box, the Prometheus agent
+            (monitoring namespace), or kube-state-metrics is down, or remote write to
+            Railway's Prometheus is failing.
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 600, to: 0 }
+            model:
+              refId: A
+              instant: true
+              expr: absent_over_time(kube_resourcequota{namespace="tenants",type="hard"}[10m])
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }

@@ -286,6 +286,23 @@ struct ClientMessage: Codable, Sendable, Identifiable, Hashable, SenderStringCon
     /// subject have to name the message rather than the conversation it landed
     /// in — the daemon's own fallback quotes this same header.
     var subject: String?
+    /// WHO ELSE WAS ON THIS MESSAGE, one field per header, each a comma-joined
+    /// `Name <addr>` list exactly as the header spelled it. ABSENT on a daemon
+    /// too old to send them, and absent on a row whose headers have never been
+    /// read (the daemon's one-shot recipients sweep is still walking back
+    /// through the mailbox) — both draw nothing, which is what the reader did
+    /// before these existed.
+    ///
+    /// `""` is the DIFFERENT statement that the header was read and named
+    /// nobody. It also draws nothing; the distinction is the daemon's, and the
+    /// client is careful not to collapse the two on its way past.
+    ///
+    /// `bcc_addrs` only ever arrives on mail this account sent. The daemon
+    /// refuses to keep a `Bcc:` header on received mail, where it is the
+    /// sender's leak or a forgery rather than who the mail went to.
+    var to_addrs: String?
+    var cc_addrs: String?
+    var bcc_addrs: String?
     var attachments: [Attachment]?
     /// True for a message the USER authored, false for anything received.
     /// ABSENT on an older daemon, which reads as unknown — and unknown is
@@ -976,6 +993,18 @@ struct StoreStats: Codable, Sendable, Hashable {
     /// the key and mails the words without the files. See
     /// `AppStore.composeAttachmentsAvailable`.
     var compose_attachments: Bool?
+    /// Whether this daemon keys new-message drafts by id (many per account,
+    /// POST /client/drafts + PUT /client/drafts/{id}). ABSENT on an older
+    /// daemon, which keeps ONE new-message slot, and absence reads as no: the
+    /// new routes would 404 there, and the old nil-key PUT is the only write
+    /// that means anything. See `AppStore.draftsV2Available` and
+    /// `DraftSaver.save`, which also has to tell "no" from "not asked yet".
+    var drafts_v2: Bool?
+    /// Whether this daemon keeps an outbox (`/client/scheduled`). ABSENT on an
+    /// older daemon, and absence reads as no: every schedule door is hidden
+    /// rather than offered as a 404 on the click. See
+    /// `AppStore.scheduledSendAvailable`.
+    var scheduled_send: Bool?
 }
 
 /// The 30-day re-walk the daemon falls back to when Gmail's history cursor
@@ -1449,6 +1478,48 @@ struct SenderHit: Codable, Sendable, Equatable, Identifiable {
     var id: String { addr }
 }
 
+/// GET /client/person?addr= — the reader's contact card: everything the daemon
+/// knows about one address. The optional parts are ABSENT when there is
+/// nothing to say (no mail from them, never written to, no rule), and sealed
+/// mail is in no count and no list on it.
+struct PersonCard: Codable, Sendable, Equatable {
+    struct Received: Codable, Sendable, Equatable {
+        var count: Int
+        var first_at: String
+        var last_at: String
+    }
+    struct Sent: Codable, Sendable, Equatable {
+        var count: Int
+        var last_at: String?
+    }
+    struct Rule: Codable, Sendable, Equatable {
+        var id: Int
+        var match_pattern: String
+        var want_text: String
+        var disposition: Disposition
+    }
+    struct Group: Codable, Sendable, Equatable, Identifiable {
+        var id: Int
+        var name: String
+    }
+    struct RecentThread: Codable, Sendable, Equatable, Identifiable {
+        var thread_id: String
+        var subject: String
+        var last_at: String
+        var id: String { thread_id }
+    }
+
+    var addr: String
+    var display_name: String?
+    var is_self: Bool
+    var known_contact: Bool
+    var received: Received?
+    var sent: Sent?
+    var rule: Rule?
+    var groups: [Group]
+    var recent_threads: [RecentThread]
+}
+
 struct StatusResult: Codable, Sendable {
     var status: String
     var message_id: Int?
@@ -1481,8 +1552,25 @@ struct UnsubResolutionResult: Codable, Sendable {
 /// spelling of the field, not the store's `to_addr`.
 struct DraftView: Codable, Sendable, Identifiable, Hashable {
     var id: Int
-    /// The message this answers. nil = the account's single new-message draft.
+    /// The message this answers. nil on a forward and on plain new mail, which
+    /// on a `drafts_v2` daemon is one of MANY rows told apart by `id` (an older
+    /// daemon still holds at most one).
     var reply_to_message_id: Int?
+    /// The message this passes on. Mutually exclusive with
+    /// `reply_to_message_id`; both nil is a plain new message.
+    ///
+    /// THIS AND THE FOUR BELOW ARE OPTIONAL for the reason `cc` is: an older
+    /// daemon sends no such keys, and a decode that failed over them would
+    /// lose every draft rather than the context it could not describe.
+    var forward_of_message_id: Int?
+    /// The parent's thread, so the picker can open a reply draft where it
+    /// belongs. nil for plain new mail, and for a parent no longer stored.
+    var thread_id: String?
+    /// The parent's subject and sender, for the picker's `re:` / `fwd:` line.
+    /// Display only; nothing is sent from them.
+    var parent_subject: String?
+    var parent_from: String?
+    var parent_from_addr: String?
     var to: String
     /// The other two lists. A draft that could not hold these would silently
     /// lose the audience of a bcc send. OPTIONAL here for exactly one reason:
@@ -1514,6 +1602,10 @@ struct OutboundAttachment: Codable, Sendable, Identifiable, Hashable {
 
 struct DraftBody: Codable, Sendable {
     var reply_to_message_id: Int?
+    /// The forward key, one row per forwarded message like replies. nil is
+    /// OMITTED from the JSON (synthesized Codable skips a nil optional), so an
+    /// older daemon never sees the key at all.
+    var forward_of_message_id: Int?
     var to: String
     /// Sent unconditionally, `""` and all: unlike the SEND route, absence has
     /// no second meaning here — nothing is ever derived into a draft — and a
@@ -1525,6 +1617,132 @@ struct DraftBody: Codable, Sendable {
     /// The staged files this draft holds — EXACTLY these, so a file taken out
     /// of the tray is released by the next save. Always sent, `[]` included.
     var attachment_ids: [Int]
+}
+
+/// POST /client/drafts and PUT /client/drafts/{id}: a plain new-message draft,
+/// named by the ROUTE (create, or this id) rather than by a key in the body.
+/// Same field rules as `DraftBody`: everything always sent, `""` and `[]`
+/// included, so an emptied field is said rather than left stale.
+struct NewDraftBody: Codable, Sendable {
+    var to: String
+    var cc: String
+    var bcc: String
+    var subject: String
+    var body: String
+    var attachment_ids: [Int]
+}
+
+// MARK: - scheduled send (the outbox)
+
+/// POST /client/scheduled: EXACTLY the send route's body, plus when. Encoded
+/// flat, as one JSON object, because the daemon reads it as its own `SendBody`
+/// with one extra key; nesting the send would be a second shape to keep in
+/// step with the first.
+struct ScheduleBody: Encodable, Sendable {
+    var send: SendBody
+    /// RFC3339. The daemon accepts any offset and refuses the past and
+    /// anything more than a year out (400).
+    var send_at: String
+
+    private enum Keys: String, CodingKey { case send_at }
+
+    func encode(to encoder: Encoder) throws {
+        try send.encode(to: encoder)
+        var c = encoder.container(keyedBy: Keys.self)
+        try c.encode(send_at, forKey: .send_at)
+    }
+}
+
+/// 201 from POST /client/scheduled.
+struct ScheduledCreated: Codable, Sendable, Hashable {
+    var id: Int
+    var send_at: String
+}
+
+/// The frozen send body an outbox row holds, as a cancel hands it back. EVERY
+/// key optional: the daemon serializes its `SendBody` with absent options
+/// skipped, and a cancel of a row whose request no longer parses answers
+/// `null` for the whole thing (see `ScheduledCancel.request`). No `draft_id`
+/// (scheduling consumed the draft) and no `send_at` (the row's column, not
+/// the request's).
+struct ScheduledRequest: Codable, Sendable, Hashable {
+    var reply_to_message_id: Int?
+    var forward_of_message_id: Int?
+    var to: String?
+    /// PRESENT, `""` included, means the composer had stated its copy list;
+    /// absent means the daemon derives it. Same rule as `SendBody.cc`.
+    var cc: String?
+    var bcc: String?
+    var group_id: Int?
+    var subject: String?
+    var body: String?
+    var body_format: String?
+    var confirm: Bool?
+    var override_guard: Bool?
+    var include_tracker: Bool?
+    var reply_all: Bool?
+    var attachment_ids: [Int]?
+}
+
+/// 200 from DELETE /client/scheduled/{id}: the row is `cancelled`, and this is
+/// everything needed to put it back in a composer. `attachments` are the files
+/// it held, now UNCLAIMED on the daemon: the reopened composer's next autosave
+/// claims them again, well inside the unclaimed sweep's window.
+struct ScheduledCancel: Codable, Sendable {
+    var status: String
+    var id: Int
+    /// nil when the daemon could not parse its own frozen request (the worker
+    /// fails such a row as `failed:request`). There is nothing to reopen then.
+    var request: ScheduledRequest?
+    var attachments: [OutboundAttachment]
+}
+
+/// 202 from POST /client/scheduled/{id}/now: queued for the worker's next
+/// tick, NOT sent. The listing shows it go.
+struct ScheduledNow: Codable, Sendable {
+    var status: String
+    var id: Int
+}
+
+/// One row of GET /client/scheduled: a mail still owed an outcome or the
+/// user's attention, oldest `send_at` first. Settled rows (`sent`,
+/// `cancelled`) are never listed.
+struct ScheduledSendView: Codable, Sendable, Identifiable, Hashable {
+    var id: Int
+    var send_at: String
+    /// `scheduled`, `sending` or `failed`.
+    var state: String
+    /// Claims so far. A `scheduled` row with attempts > 0 is waiting out a
+    /// retry, and `last_error` says why.
+    var attempts: Int
+    /// A redacted reason (`failed:gmail`, `rejected:no_write_credential`, ...).
+    /// Never content.
+    var last_error: String?
+    /// STICKY: an earlier attempt may have reached Gmail, whatever
+    /// `last_error` says. Absent from a daemon older than the flag (nil).
+    var maybe_sent: Bool? = nil
+    /// `""` when the request had none (a reply's audience derives at fire
+    /// time); never absent, like a draft's.
+    var to: String
+    /// The frozen request's copy lists, `""` when it had none. nil from a
+    /// daemon older than these fields, which the preview reads as "not said".
+    var cc: String? = nil
+    var bcc: String? = nil
+    /// `""` when none was typed; `parent_subject` is what a row can show then.
+    var subject: String
+    var body: String
+    var reply_to_message_id: Int?
+    var forward_of_message_id: Int?
+    /// Upload order. Always present, `[]` when none.
+    var attachments: [OutboundAttachment]
+    /// Parent context for a reply or a forward, exactly as `DraftView` carries
+    /// it. Null for new mail.
+    var thread_id: String?
+    var parent_subject: String?
+    var parent_from: String?
+    var parent_from_addr: String?
+    var created_at: String
+    var updated_at: String
 }
 
 // MARK: - triage debug / shredder / feedback / marketing

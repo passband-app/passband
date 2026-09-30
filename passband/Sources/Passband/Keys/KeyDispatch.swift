@@ -13,6 +13,9 @@
 //     colliding with bare "[" / "]".
 //   * A handler returning false DECLINES the key and dispatch continues to the
 //     next candidate.
+//   * A binding marked `exactCase` sits the fold out: it answers only its own
+//     spelling, for a verb whose shifted twin must NOT mean the same thing
+//     (the Sent page's `s` / `x`, the clock's ⌘⇧L against a bare ⌘L).
 
 import SwiftUI
 
@@ -39,6 +42,8 @@ struct KeyBinding: Identifiable {
     var meta: Bool = false
     /// Fire even when a text field has focus (chords and Escape opt in).
     var allowInInput: Bool = false
+    /// Match this spelling only, never through the case-folded pass.
+    var exactCase: Bool = false
     var handler: () -> Bool
 
     let id = UUID()
@@ -60,12 +65,13 @@ struct KeyBinding: Identifiable {
     /// Declining variant: the handler returns false to pass the key on.
     init(
         declining key: String, _ description: String, meta: Bool = false,
-        allowInInput: Bool = false, handler: @escaping () -> Bool
+        allowInInput: Bool = false, exactCase: Bool = false, handler: @escaping () -> Bool
     ) {
         self.key = key
         self.description = description
         self.meta = meta
         self.allowInInput = allowInInput
+        self.exactCase = exactCase
         self.handler = handler
     }
 }
@@ -175,11 +181,12 @@ final class KeyRegistry {
             { $0.lowercased() == $1.lowercased() },          // case-folded fallback
         ]
 
-        for matcher in matchers {
+        for (pass, matcher) in matchers.enumerated() {
             for context in order {
                 for set in sets.sorted(by: { $0.seq > $1.seq }) where set.context == context {
                     for b in set.box.bindings {
                         guard b.meta == metaHeld else { continue }
+                        if pass > 0 && b.exactCase { continue }
                         guard matcher(b.key, eventStr) else { continue }
                         // Escape is NEVER input-suppressed: "Esc closes this" is
                         // the app's universal contract, so a surface that

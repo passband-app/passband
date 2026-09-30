@@ -33,6 +33,7 @@
 
 pub mod activation;
 pub mod admin;
+pub mod alert;
 mod appearance;
 pub mod bifrost;
 pub mod config;
@@ -178,6 +179,7 @@ pub fn router(state: ControlState) -> Router {
         ));
     let app = Router::new()
         .route("/healthz", get(handlers::healthz))
+        .route(pages::FONT_PATH, get(pages::newsreader))
         .merge(accounts)
         .merge(tenant);
 

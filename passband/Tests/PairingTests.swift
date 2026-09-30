@@ -27,6 +27,7 @@ struct PairingTests {
         linkParsing()
         linkRejection()
         linkAnalyticsIds()
+        linkRouting()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -141,6 +142,31 @@ struct PairingTests {
     /// 2. A bad one NEVER COSTS THE PAIRING. Analytics is decoration on a link
     ///    whose actual job is connecting a person to their mail, so every
     ///    rejected `aid` below is asserted to leave the url and code intact.
+    /// Which arrivals are taken at all. The phone row that matters: connected
+    /// with no Add Account sheet up is DROPPED, so a page redirecting to a
+    /// pair link cannot raise a pre-filled form over somebody's inbox.
+    static func linkRouting() {
+        for phone in [false, true] {
+            for open in [false, true] {
+                equal(
+                    PairLink.admits(connected: false, addAccountOpen: open, phone: phone), true,
+                    "the gate takes a link (phone: \(phone), sheet: \(open))")
+            }
+        }
+        equal(
+            PairLink.admits(connected: true, addAccountOpen: false, phone: false), true,
+            "the Mac raises Add Account for a link while connected")
+        equal(
+            PairLink.admits(connected: true, addAccountOpen: true, phone: false), true,
+            "the Mac fills an open Add Account sheet")
+        equal(
+            PairLink.admits(connected: true, addAccountOpen: true, phone: true), true,
+            "the phone fills the Add Account sheet it sent to Gmail sign in")
+        equal(
+            PairLink.admits(connected: true, addAccountOpen: false, phone: true), false,
+            "the phone drops a link while connected with no sheet up")
+    }
+
     static func linkAnalyticsIds() {
         let base = "passband://pair?url=https%3A%2F%2Fa.passband.email&code=ABCD-EFGH"
         let aid = "8b1f2c34-5d6e-4a7b-8c9d-0e1f2a3b4c5d"

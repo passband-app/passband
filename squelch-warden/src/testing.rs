@@ -48,7 +48,7 @@ pub fn test_config() -> Config {
         bind: DEFAULT_BIND.parse().unwrap(),
         token: TEST_TOKEN.to_string(),
         base_domain: "passband.email".to_string(),
-        image: "ghcr.io/braelyn-ai/squelchd:daemon-0.4.0".to_string(),
+        image: "ghcr.io/passband-app/squelchd:daemon-0.4.0".to_string(),
         namespace: DEFAULT_TENANT_NAMESPACE.to_string(),
         ingress_namespace: DEFAULT_INGRESS_NAMESPACE.to_string(),
         ingress_pod_label: ("app.kubernetes.io/name".to_string(), "traefik".to_string()),

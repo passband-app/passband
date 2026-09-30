@@ -1,7 +1,7 @@
 # Self-hosting squelchd with Docker
 
 The container path: every `daemon-X.Y.Z` tag pushed to this repo publishes
-`ghcr.io/braelyn-ai/squelchd` (linux/amd64 + linux/arm64) via
+`ghcr.io/passband-app/squelchd` (linux/amd64 + linux/arm64) via
 `.github/workflows/release-daemon.yml`, as both `:daemon-X.Y.Z` and `:latest`.
 Configuration is environment variables only — the full reference table lives in
 [DEPLOY.md](DEPLOY.md#environment-variables); this file covers what the image
@@ -23,7 +23,7 @@ takes SIGTERM directly for graceful shutdown.
 
 ## Pulling the image
 
-The package is public — `docker pull ghcr.io/braelyn-ai/squelchd:latest`
+The package is public — `docker pull ghcr.io/passband-app/squelchd:latest`
 works with no registry login. To build the same image from source instead
 (context must be the workspace root; the repo-root Dockerfile builds the
 relay, not the daemon):
@@ -50,7 +50,7 @@ x-squelch-env: &squelch-env
 
 services:
   squelchd:
-    image: ghcr.io/braelyn-ai/squelchd:latest
+    image: ghcr.io/passband-app/squelchd:latest
     restart: unless-stopped
     ports:
       - "127.0.0.1:8848:8848"   # loopback; front with `tailscale serve --bg 8848`
@@ -63,7 +63,7 @@ services:
   # Google desktop-app flow requires a loopback redirect — and a published
   # port can't reach a loopback bind inside a container.
   auth:
-    image: ghcr.io/braelyn-ai/squelchd:latest
+    image: ghcr.io/passband-app/squelchd:latest
     profiles: ["auth"]
     network_mode: host
     volumes:
@@ -147,6 +147,6 @@ the bearer, MCP `initialize` against `/mcp`).
 docker compose pull && docker compose up -d squelchd
 ```
 
-Pin a version (`image: ghcr.io/braelyn-ai/squelchd:daemon-0.0.1`) if you'd
+Pin a version (`image: ghcr.io/passband-app/squelchd:daemon-0.0.1`) if you'd
 rather upgrades be deliberate; `latest` tracks the newest tag. Released tags
 carry the `daemon-` prefix — that IS the tag, not a typo for a bare number.

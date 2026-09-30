@@ -1265,7 +1265,7 @@ private struct SelfHostGuide: View {
                         number: 1,
                         title: "Install squelchd",
                         detail: "Pull the public image for amd64 or arm64.",
-                        command: "docker pull ghcr.io/braelyn-ai/squelchd")
+                        command: "docker pull ghcr.io/passband-app/squelchd")
                     SetupStep(
                         number: 2,
                         title: "Authorize Gmail",
@@ -1282,7 +1282,7 @@ private struct SelfHostGuide: View {
 
                 Button("View detailed instructions on GitHub") {
                     Opener.open(
-                        "https://github.com/braelyn-ai/squelch/blob/main/docs/GETTING-STARTED.md")
+                        "https://github.com/passband-app/passband/blob/main/docs/GETTING-STARTED.md")
                 }
                 .buttonStyle(.textAction)
                 .padding(.top, 18)

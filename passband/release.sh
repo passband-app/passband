@@ -8,8 +8,8 @@
 #
 # Prerequisites (all one-time, all this machine): Developer ID cert, the
 # passband-notary notarytool profile, the Sparkle EdDSA key in the login
-# keychain, gh authed as someone who can write braelyn-ai/squelch and
-# braelyn-ai/homebrew-tap.
+# keychain, gh authed as someone who can write passband-app/passband and
+# passband-app/homebrew-tap.
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -21,7 +21,7 @@ VERSION=$(cat VERSION)
 TAG="passband-mac-$VERSION"
 ZIP="build/Passband-$VERSION.zip"
 SITE_DIR="../passband-site"
-TAP_REPO="braelyn-ai/homebrew-tap"
+TAP_REPO="passband-app/homebrew-tap"
 
 # ------------------------------------------------------------- preflight ---
 # A release is cut from committed history: the build number is the commit
@@ -61,7 +61,7 @@ fi
 echo "==> creating GitHub release $TAG"
 gh release create "$TAG" "$ZIP" \
   --title "Passband $VERSION" \
-  --notes "Passband $VERSION. Auto-update will offer this to existing installs; new installs: unzip and drag to Applications, or \`brew install braelyn-ai/tap/passband\`."
+  --notes "Passband $VERSION. Auto-update will offer this to existing installs; new installs: unzip and drag to Applications, or \`brew install passband-app/tap/passband\`."
 
 echo "==> regenerating appcast"
 ./make-appcast.sh

@@ -216,7 +216,7 @@ pub struct Config {
     /// in this crate ever hardcodes the domain.
     pub base_domain: String,
     /// The squelchd image every tenant Deployment runs, e.g.
-    /// `ghcr.io/braelyn-ai/squelchd:daemon-0.4.0`. Pinned by the operator: a tenant
+    /// `ghcr.io/passband-app/squelchd:daemon-0.4.0`. Pinned by the operator: a tenant
     /// that silently moved to a new daemon on a restart would be an upgrade
     /// nobody scheduled.
     pub image: String,
@@ -531,7 +531,7 @@ impl Config {
 
         let image = var(get, "SQUELCH_WARDEN_IMAGE").ok_or_else(|| {
             ConfigError::invalid(
-                "SQUELCH_WARDEN_IMAGE is required (the squelchd image tenants run, e.g. ghcr.io/braelyn-ai/squelchd:daemon-0.4.0)",
+                "SQUELCH_WARDEN_IMAGE is required (the squelchd image tenants run, e.g. ghcr.io/passband-app/squelchd:daemon-0.4.0)",
             )
         })?;
         let image = canonical_image(&image)?;
@@ -1043,7 +1043,7 @@ mod tests {
             ),
             (
                 "SQUELCH_WARDEN_IMAGE".to_string(),
-                "ghcr.io/braelyn-ai/squelchd:daemon-0.4.0".to_string(),
+                "ghcr.io/passband-app/squelchd:daemon-0.4.0".to_string(),
             ),
         ])
     }
@@ -1129,7 +1129,7 @@ mod tests {
             ("SQUELCH_WARDEN_TOKEN", &"a".repeat(MIN_TOKEN_LEN - 1)),
             ("SQUELCH_WARDEN_BASE_DOMAIN", "https://passband.email"),
             ("SQUELCH_WARDEN_BASE_DOMAIN", "passband"),
-            ("SQUELCH_WARDEN_IMAGE", "ghcr.io/braelyn-ai/squelchd"),
+            ("SQUELCH_WARDEN_IMAGE", "ghcr.io/passband-app/squelchd"),
             ("SQUELCH_WARDEN_BIND", "not-an-address"),
             // Namespaces and object names, which become metadata.name.
             ("SQUELCH_WARDEN_TENANT_NAMESPACE", "Tenants"),
@@ -1468,15 +1468,15 @@ mod tests {
 
     #[test]
     fn refuses_an_image_without_a_tag_or_a_digest() {
-        assert!(canonical_image("ghcr.io/braelyn-ai/squelchd:v1").is_ok());
+        assert!(canonical_image("ghcr.io/passband-app/squelchd:v1").is_ok());
         assert!(
             canonical_image(
-                "ghcr.io/braelyn-ai/squelchd@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                "ghcr.io/passband-app/squelchd@sha256:0000000000000000000000000000000000000000000000000000000000000000"
             )
             .is_ok()
         );
         // The one that would silently upgrade every tenant on a restart.
-        assert!(canonical_image("ghcr.io/braelyn-ai/squelchd").is_err());
+        assert!(canonical_image("ghcr.io/passband-app/squelchd").is_err());
         assert!(canonical_image("ghcr.io/x/y:v1 && rm -rf /").is_err());
         assert!(canonical_image("ghcr.io/x/y:v1\nSOMETHING=else").is_err());
     }

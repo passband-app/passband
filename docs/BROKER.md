@@ -7,7 +7,7 @@
 > by `squelchd auth --export` / `--import` (shipped — see
 > [GETTING-STARTED.md](GETTING-STARTED.md) §3), with the encrypted token
 > courier that saves this crate tracked in
-> [issue #15](https://github.com/braelyn-ai/squelch/issues/15). Details in
+> [issue #15](https://github.com/passband-app/passband/issues/15). Details in
 > "The blocker" immediately below, and the replacement design in "Where this
 > goes instead". The hosted tier's web-client callback is unaffected and is
 > where this code lands next.

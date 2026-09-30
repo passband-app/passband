@@ -690,12 +690,12 @@ the git tag verbatim, so the normal path is to pull `daemon-0.0.1` rather than
 build anything. By hand, from a checkout:
 
 ```sh
-git clone https://github.com/braelyn-ai/squelch && cd squelch
+git clone https://github.com/passband-app/passband && cd passband
 
-docker build -f squelchd/Dockerfile -t ghcr.io/braelyn-ai/squelchd:daemon-0.0.1 .
-docker build -f Dockerfile.warden -t ghcr.io/braelyn-ai/squelch-warden:daemon-0.0.1 .
-docker push ghcr.io/braelyn-ai/squelchd:daemon-0.0.1
-docker push ghcr.io/braelyn-ai/squelch-warden:daemon-0.0.1
+docker build -f squelchd/Dockerfile -t ghcr.io/passband-app/squelchd:daemon-0.0.1 .
+docker build -f Dockerfile.warden -t ghcr.io/passband-app/squelch-warden:daemon-0.0.1 .
+docker push ghcr.io/passband-app/squelchd:daemon-0.0.1
+docker push ghcr.io/passband-app/squelch-warden:daemon-0.0.1
 ```
 
 Tag them. The warden refuses to start with an untagged tenant image, because an

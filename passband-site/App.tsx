@@ -1490,7 +1490,7 @@ export function App() {
             <nav className="pb-nav">
               <a href="/self-host">Self-host</a>
               <a href="/trust">Trust</a>
-              <a className="pb-keep" href="https://github.com/braelyn-ai/squelch">GitHub</a>
+              <a className="pb-keep" href="https://github.com/passband-app/passband">GitHub</a>
             </nav>
           </header>
 
@@ -1563,7 +1563,7 @@ export function App() {
             <dd>
               <div className="pb-fact-val">Open <em>source</em></div>
               <p>
-                MIT licensed. Every line is <a href="https://github.com/braelyn-ai/squelch">on GitHub</a>,
+                MIT licensed. Every line is <a href="https://github.com/passband-app/passband">on GitHub</a>,
                 the threat model included.
               </p>
             </dd>
@@ -1607,7 +1607,7 @@ export function App() {
           <a href="/trust">Trust</a>
           <a href="/privacy">Privacy</a>
           <a href="/terms">Terms</a>
-          <a href="https://github.com/braelyn-ai/squelch">GitHub</a>
+          <a href="https://github.com/passband-app/passband">GitHub</a>
         </nav>
       </footer>
     </main>

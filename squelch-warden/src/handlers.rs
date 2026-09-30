@@ -820,7 +820,7 @@ mod tests {
             .as_mut()
             .unwrap()
             .containers[0]
-            .image = Some("ghcr.io/braelyn-ai/squelchd:hand-edited".to_string());
+            .image = Some("ghcr.io/passband-app/squelchd:hand-edited".to_string());
         deployment.metadata.managed_fields = Some(vec![ManagedFieldsEntry {
             manager: Some("kubectl-set".to_string()),
             operation: Some("Update".to_string()),
@@ -875,7 +875,7 @@ mod tests {
         );
         assert_eq!(
             body["changes"][0]["live"],
-            "ghcr.io/braelyn-ai/squelchd:hand-edited"
+            "ghcr.io/passband-app/squelchd:hand-edited"
         );
         // From the config rather than spelled out: what this asserts is that
         // the render's image is what a re-apply would restore, not which tag

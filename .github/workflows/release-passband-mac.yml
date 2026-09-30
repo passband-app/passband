@@ -100,7 +100,7 @@ jobs:
           fi
           printf '%s\n' \
             'Existing installs get this via auto-update. New installs: unzip and drag' \
-            'to Applications, or `brew install --cask braelyn-ai/tap/passband`.' \
+            'to Applications, or `brew install --cask passband-app/tap/passband`.' \
             >> "$NOTES"
           gh release create "$GITHUB_REF_NAME" "passband/build/Passband-$VERSION.zip" \
             --title "Passband $VERSION" \
@@ -112,7 +112,7 @@ jobs:
       # instead (passband-site/server.ts). BEFORE the appcast on purpose: if
       # the mirror upload fails, the feed never advertises a zip nobody can
       # fetch. To undo when the repo is public again: delete this step, point
-      # server.ts back at this repo, and delete braelyn-ai/passband-releases.
+      # server.ts back at this repo, and delete passband-app/passband-releases.
       - name: Mirror the zip to the public releases repo
         env:
           GH_TOKEN: ${{ secrets.RELEASES_PUSH_TOKEN }}
@@ -123,9 +123,9 @@ jobs:
             exit 1
           fi
           gh release create "$GITHUB_REF_NAME" "passband/build/Passband-$VERSION.zip" \
-            --repo braelyn-ai/passband-releases \
+            --repo passband-app/passband-releases \
             --title "Passband $VERSION" \
-            --notes "Passband for Mac $VERSION. Existing installs update automatically. New installs: unzip and drag to Applications, or \`brew install --cask braelyn-ai/tap/passband\`."
+            --notes "Passband for Mac $VERSION. Existing installs update automatically. New installs: unzip and drag to Applications, or \`brew install --cask passband-app/tap/passband\`."
 
       # The feed lists exactly the zips in releases/, so hydrate it with every
       # previously shipped archive — the workflow is stateless, the releases
@@ -171,7 +171,7 @@ jobs:
           VERSION=$(cat passband/VERSION)
           SHA=$(shasum -a 256 "passband/build/Passband-$VERSION.zip" | cut -d' ' -f1)
           git clone --depth 1 \
-            "https://x-access-token:${TAP_PUSH_TOKEN}@github.com/braelyn-ai/homebrew-tap" tap
+            "https://x-access-token:${TAP_PUSH_TOKEN}@github.com/passband-app/homebrew-tap" tap
           sed -i '' \
             -e "s/^  version \".*\"/  version \"$VERSION\"/" \
             -e "s/^  sha256 \".*\"/  sha256 \"$SHA\"/" \

@@ -159,11 +159,11 @@
           <div>
             <h3>Run the daemon</h3>
             <p>Prebuilt multi-arch images are public on GHCR, no registry login needed:</p>
-<pre><code>docker pull ghcr.io/braelyn-ai/squelchd:latest</code></pre>
+<pre><code>docker pull ghcr.io/passband-app/squelchd:latest</code></pre>
             <p>A minimal <code>docker-compose.yml</code>:</p>
 <pre><code><span class="k">services:</span>
   <span class="k">squelchd:</span>
-    image: ghcr.io/braelyn-ai/squelchd:latest
+    image: ghcr.io/passband-app/squelchd:latest
     restart: unless-stopped
     ports:
       - "127.0.0.1:8848:8848"   <span class="c"># loopback only</span>
@@ -181,9 +181,9 @@
               <code>tailscale serve --bg 8848</code> or your own proxy to reach it
               from your Mac. The full environment-variable reference and the OAuth
               consent flow live in
-              <a href="https://github.com/braelyn-ai/squelch/blob/main/deploy/DOCKER.md">deploy/DOCKER.md</a>,
+              <a href="https://github.com/passband-app/passband/blob/main/deploy/DOCKER.md">deploy/DOCKER.md</a>,
               and
-              <a href="https://github.com/braelyn-ai/squelch/blob/main/docs/GETTING-STARTED.md">docs/GETTING-STARTED.md</a>
+              <a href="https://github.com/passband-app/passband/blob/main/docs/GETTING-STARTED.md">docs/GETTING-STARTED.md</a>
               walks a complete setup end to end: daemon in Docker on a NAS, Passband
               on a Mac.
             </p>
@@ -198,7 +198,7 @@
               <a class="cta" href="/download/latest">Download Passband for Mac &rarr;</a>
               <span class="note">or</span>
             </div>
-<pre><code>brew install --cask braelyn-ai/tap/passband</code></pre>
+<pre><code>brew install --cask passband-app/tap/passband</code></pre>
             <p>
               Point it at your daemon, pair the device, and you're done. Updates
               arrive in the app.
@@ -219,7 +219,7 @@
           </div>
           <div>
             <h3>Open source</h3>
-            <p>MIT licensed, daemon and apps alike. Read the <a href="https://github.com/braelyn-ai/squelch">source on GitHub</a>, threat model included.</p>
+            <p>MIT licensed, daemon and apps alike. Read the <a href="https://github.com/passband-app/passband">source on GitHub</a>, threat model included.</p>
           </div>
         </div>
       </section>

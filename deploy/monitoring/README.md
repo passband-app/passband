@@ -165,7 +165,7 @@ for a while the fleet runs two versions at once. The **Daemon rollout** row is
 that window, told twice over.
 
 The version a panel means is the image tag with its `daemon-` prefix stripped,
-so `ghcr.io/braelyn-ai/squelchd:daemon-0.4.0` reads as `0.4.0` — the same
+so `ghcr.io/passband-app/squelchd:daemon-0.4.0` reads as `0.4.0` — the same
 spelling `squelchd_build_info` uses, which is what lets the two sides be
 compared. A digest-pinned image has no tag to strip and reads as its digest.
 

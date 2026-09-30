@@ -186,7 +186,7 @@ trait MemoryContextProvider {
 }
 ```
 
-Ship `EmptyMemoryContext`. Reserve a separate future `MemoryEditor` capability boundary in documentation; do not register an active write tool, create a memory table, or expose memory UI. Future entries need ID, scope, provenance, revision, and deletion support. Email text and inferred memory must not acquire the authority of direct user instructions. Issue [#213](https://github.com/braelyn-ai/passband/issues/213) owns preference-feedback UX.
+Ship `EmptyMemoryContext`. Reserve a separate future `MemoryEditor` capability boundary in documentation; do not register an active write tool, create a memory table, or expose memory UI. Future entries need ID, scope, provenance, revision, and deletion support. Email text and inferred memory must not acquire the authority of direct user instructions. Issue [#213](https://github.com/passband-app/passband/issues/213) owns preference-feedback UX.
 
 ## 5. Persistence and concurrency
 

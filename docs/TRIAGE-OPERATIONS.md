@@ -121,7 +121,7 @@ Legacy stage-1/stage-2 escalation caps, including per-thread/per-sender override
 no longer gate agent triage. Their compatibility fields remain exposed but the
 agent config explicitly reports `legacy_stage_caps_are_active_ceilings: false`.
 Configure agent ceilings through the TOML/environment controls above; moving the
-usage-page and warden controls to a dollar budget is [follow-up #216](https://github.com/braelyn-ai/passband/issues/216).
+usage-page and warden controls to a dollar budget is [follow-up #216](https://github.com/passband-app/passband/issues/216).
 `/client/triage-config` reports the configured/effective background cap, total cap,
 and protected arrival capacity. When the true total is exhausted, mail stays
 human-readable and visibly pending until the next UTC day.
@@ -221,7 +221,7 @@ lookup reads model-assessed actionable auth, but never opens an automatic modal
 or emits its own notification. The ordered FYE list has no separate auth insert.
 
 The feedback UX is tracked separately in
-[issue #213](https://github.com/braelyn-ai/passband/issues/213).
+[issue #213](https://github.com/passband-app/passband/issues/213).
 Live-mail quality and latency evaluation is still needed before judging the
 starting model/budget/ranking defaults. Unit and mocked-provider tests verify the
 contracts, not the accuracy of a production model on a user's inbox.

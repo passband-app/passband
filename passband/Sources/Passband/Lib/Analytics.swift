@@ -41,7 +41,17 @@ enum Analytics {
         // in the ordinary app and reports like the rest of it (see `capture`).
         guard !RehearsalMode.launchedStandalone else { return nil }
         let env = ProcessInfo.processInfo.environment
-        let key = env["PASSBAND_POSTHOG_KEY"] ?? apiKey
+        // A dev build is not a user: its launches and clicks landed in the
+        // same project as the fleet's and read as real usage on the
+        // dashboard. Only a shipped build (build-release.sh on the Mac, the
+        // Release config on iOS, both of which define PASSBAND_RELEASE) gets
+        // the baked-in key. A dev build reports only when PASSBAND_POSTHOG_KEY
+        // is set on purpose, which is how analytics work gets tested.
+        #if PASSBAND_RELEASE
+            let key = env["PASSBAND_POSTHOG_KEY"] ?? apiKey
+        #else
+            guard let key = env["PASSBAND_POSTHOG_KEY"] else { return nil }
+        #endif
         let endpoint = env["PASSBAND_POSTHOG_HOST"] ?? host
         guard key.hasPrefix("phc_"), let url = URL(string: "\(endpoint)/batch/")
         else { return nil }

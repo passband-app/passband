@@ -549,6 +549,81 @@
    }
   },
   {
+   "type": "stat",
+   "title": "Emails triaged",
+   "id": 53,
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "description": "Every received, non-spam message across the fleet that has a verdict, read from each tenant's own database (squelchd_store_messages minus the pending tier), so it survives pod restarts where the verdict counters do not. Sent mail and provider spam are not in it. A deleted tenant takes its mail out of the total, so the 24h number can dip below zero on the day one goes.",
+   "gridPos": {
+    "h": 4,
+    "w": 24,
+    "x": 0,
+    "y": 5
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(squelchd_store_messages{tier!=\"pending\"})",
+     "refId": "A",
+     "range": true,
+     "instant": false,
+     "legendFormat": "all time"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(squelchd_store_messages{tier!=\"pending\"}) - sum(squelchd_store_messages{tier!=\"pending\"} offset 24h)",
+     "refId": "B",
+     "range": true,
+     "instant": false,
+     "legendFormat": "last 24h"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "purple"
+     },
+     "unit": "short",
+     "decimals": 0,
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "purple",
+        "value": null
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value_and_name",
+    "wideLayout": true,
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    }
+   }
+  },
+  {
    "type": "row",
    "title": "carrier (the box)",
    "collapsed": false,
@@ -557,7 +632,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 5
+    "y": 9
    },
    "panels": []
   },
@@ -574,7 +649,7 @@
     "h": 8,
     "w": 8,
     "x": 0,
-    "y": 15
+    "y": 10
    },
    "targets": [
     {
@@ -656,7 +731,7 @@
     "h": 8,
     "w": 8,
     "x": 8,
-    "y": 15
+    "y": 10
    },
    "targets": [
     {
@@ -738,10 +813,10 @@
    },
    "description": "The whole box in bytes, against the RAM it has. MemAvailable counts page cache the kernel can drop, so \"used\" is memory someone actually holds. Past the RAM line is a global OOM: the kernel kills the biggest process, which is a tenant daemon unrelated to whatever grew (PRODUCTION.md, \"If a tenant is OOM-killed\"). Nothing is reserved for k3s on carrier and there is no swap, so the RAM line is the only wall. The tenants quota is a different limit, on requests rather than use; the \"Tenants quota near full\" alert watches that one.",
    "gridPos": {
-    "h": 9,
-    "w": 24,
-    "x": 0,
-    "y": 6
+    "h": 8,
+    "w": 8,
+    "x": 16,
+    "y": 10
    },
    "targets": [
     {
@@ -925,12 +1000,9 @@
    "options": {
     "legend": {
      "showLegend": true,
-     "displayMode": "table",
-     "placement": "right",
-     "calcs": [
-      "lastNotNull",
-      "max"
-     ]
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": []
     },
     "tooltip": {
      "mode": "multi",
@@ -950,8 +1022,8 @@
    "gridPos": {
     "h": 8,
     "w": 8,
-    "x": 16,
-    "y": 15
+    "x": 0,
+    "y": 18
    },
    "targets": [
     {
@@ -1047,8 +1119,8 @@
    "gridPos": {
     "h": 8,
     "w": 8,
-    "x": 0,
-    "y": 23
+    "x": 8,
+    "y": 18
    },
    "targets": [
     {
@@ -1150,8 +1222,8 @@
    "gridPos": {
     "h": 8,
     "w": 8,
-    "x": 8,
-    "y": 23
+    "x": 16,
+    "y": 18
    },
    "targets": [
     {
@@ -1224,75 +1296,6 @@
    }
   },
   {
-   "type": "stat",
-   "title": "Memory left",
-   "id": 53,
-   "datasource": {
-    "type": "prometheus",
-    "uid": "prometheus"
-   },
-   "description": "MemAvailable: what the box can still hand out before a global OOM, reclaimable page cache included. A tenant daemon peaks around 500 MB with the embedder loaded, so under ~1.5 GiB is a couple of busy tenants from the edge.",
-   "gridPos": {
-    "h": 8,
-    "w": 8,
-    "x": 16,
-    "y": 23
-   },
-   "targets": [
-    {
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus"
-     },
-     "expr": "node_memory_MemAvailable_bytes",
-     "refId": "A",
-     "range": true,
-     "instant": false,
-     "legendFormat": "available"
-    }
-   ],
-   "fieldConfig": {
-    "defaults": {
-     "color": {
-      "mode": "thresholds"
-     },
-     "unit": "bytes",
-     "mappings": [],
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
-        "color": "red",
-        "value": null
-       },
-       {
-        "color": "yellow",
-        "value": 1610612736
-       },
-       {
-        "color": "green",
-        "value": 3221225472
-       }
-      ]
-     }
-    },
-    "overrides": []
-   },
-   "options": {
-    "colorMode": "value",
-    "graphMode": "area",
-    "justifyMode": "auto",
-    "reduceOptions": {
-     "calcs": [
-      "lastNotNull"
-     ],
-     "fields": "",
-     "values": false
-    },
-    "textMode": "auto"
-   }
-  },
-  {
    "type": "row",
    "title": "Kubernetes",
    "collapsed": false,
@@ -1301,7 +1304,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 31
+    "y": 26
    },
    "panels": []
   },
@@ -1318,7 +1321,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 32
+    "y": 27
    },
    "targets": [
     {
@@ -1392,7 +1395,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 32
+    "y": 27
    },
    "targets": [
     {
@@ -1466,7 +1469,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 40
+    "y": 35
    },
    "targets": [
     {
@@ -1540,7 +1543,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 40
+    "y": 35
    },
    "targets": [
     {
@@ -1639,7 +1642,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 48
+    "y": 43
    },
    "panels": []
   },
@@ -1656,7 +1659,7 @@
     "h": 8,
     "w": 8,
     "x": 0,
-    "y": 49
+    "y": 44
    },
    "targets": [
     {
@@ -1741,7 +1744,7 @@
     "h": 8,
     "w": 8,
     "x": 8,
-    "y": 49
+    "y": 44
    },
    "targets": [
     {
@@ -1826,7 +1829,7 @@
     "h": 8,
     "w": 8,
     "x": 16,
-    "y": 49
+    "y": 44
    },
    "targets": [
     {
@@ -1898,7 +1901,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 57
+    "y": 52
    },
    "panels": []
   },
@@ -1915,7 +1918,7 @@
     "h": 8,
     "w": 4,
     "x": 0,
-    "y": 58
+    "y": 53
    },
    "targets": [
     {
@@ -1974,7 +1977,7 @@
     "h": 8,
     "w": 10,
     "x": 4,
-    "y": 58
+    "y": 53
    },
    "targets": [
     {
@@ -2048,7 +2051,7 @@
     "h": 8,
     "w": 10,
     "x": 14,
-    "y": 58
+    "y": 53
    },
    "targets": [
     {
@@ -2122,7 +2125,7 @@
     "h": 8,
     "w": 8,
     "x": 0,
-    "y": 66
+    "y": 61
    },
    "targets": [
     {
@@ -2217,7 +2220,7 @@
     "h": 8,
     "w": 8,
     "x": 8,
-    "y": 66
+    "y": 61
    },
    "targets": [
     {
@@ -2286,7 +2289,7 @@
     "h": 8,
     "w": 8,
     "x": 16,
-    "y": 66
+    "y": 61
    },
    "targets": [
     {
@@ -2356,7 +2359,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 74
+    "y": 69
    },
    "panels": []
   },
@@ -2373,7 +2376,7 @@
     "h": 5,
     "w": 4,
     "x": 0,
-    "y": 75
+    "y": 70
    },
    "targets": [
     {
@@ -2440,7 +2443,7 @@
     "h": 5,
     "w": 4,
     "x": 4,
-    "y": 75
+    "y": 70
    },
    "targets": [
     {
@@ -2503,7 +2506,7 @@
     "h": 5,
     "w": 4,
     "x": 8,
-    "y": 75
+    "y": 70
    },
    "targets": [
     {
@@ -2566,7 +2569,7 @@
     "h": 5,
     "w": 4,
     "x": 12,
-    "y": 75
+    "y": 70
    },
    "targets": [
     {
@@ -2629,7 +2632,7 @@
     "h": 5,
     "w": 8,
     "x": 16,
-    "y": 75
+    "y": 70
    },
    "targets": [
     {
@@ -2705,7 +2708,7 @@
     "h": 5,
     "w": 6,
     "x": 0,
-    "y": 80
+    "y": 75
    },
    "targets": [
     {
@@ -2768,7 +2771,7 @@
     "h": 5,
     "w": 6,
     "x": 6,
-    "y": 80
+    "y": 75
    },
    "targets": [
     {
@@ -2835,7 +2838,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 85
+    "y": 80
    },
    "targets": [
     {
@@ -2912,7 +2915,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 85
+    "y": 80
    },
    "targets": [
     {
@@ -2989,7 +2992,7 @@
     "h": 10,
     "w": 24,
     "x": 0,
-    "y": 93
+    "y": 88
    },
    "targets": [
     {
@@ -3067,7 +3070,7 @@
     "h": 8,
     "w": 24,
     "x": 0,
-    "y": 103
+    "y": 98
    },
    "targets": [
     {
@@ -3277,7 +3280,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 111
+    "y": 106
    },
    "panels": []
   },
@@ -3294,7 +3297,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 112
+    "y": 107
    },
    "targets": [
     {
@@ -3379,7 +3382,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 112
+    "y": 107
    },
    "targets": [
     {
@@ -3460,7 +3463,7 @@
     "h": 8,
     "w": 8,
     "x": 0,
-    "y": 120
+    "y": 115
    },
    "targets": [
     {
@@ -3529,7 +3532,7 @@
     "h": 8,
     "w": 8,
     "x": 8,
-    "y": 120
+    "y": 115
    },
    "targets": [
     {
@@ -3603,7 +3606,7 @@
     "h": 8,
     "w": 8,
     "x": 16,
-    "y": 120
+    "y": 115
    },
    "targets": [
     {
@@ -3677,7 +3680,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 128
+    "y": 123
    },
    "targets": [
     {
@@ -3762,7 +3765,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 128
+    "y": 123
    },
    "targets": [
     {
@@ -3843,7 +3846,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 136
+    "y": 131
    },
    "targets": [
     {
@@ -3919,7 +3922,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 136
+    "y": 131
    },
    "targets": [
     {

@@ -135,11 +135,13 @@ groups:
       # that kills whichever tenant daemon is biggest. MemAvailable counts
       # reclaimable page cache as free, so this is memory actually held. 85%
       # of 16 GB leaves ~2.4 GB, a handful of tenants loading the embedder at
-      # once. 15m rides out a sync-tick sawtooth.
+      # once. Asked for as "ever goes over", so 2m: two evaluations in a row,
+      # enough to drop a single odd scrape and nothing more. If the embedder
+      # sawtooth makes it chatty, raise this rather than the threshold.
       - uid: carrier-memory-high
         title: carrier memory high
         condition: C
-        for: 15m
+        for: 2m
         noDataState: OK
         execErrState: Error
         labels:

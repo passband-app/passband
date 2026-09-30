@@ -269,7 +269,7 @@ through an incoming webhook.
 | Tenants quota near full | any `tenants` ResourceQuota dimension is at 80% or more | 15m |
 | Tenant has no running pod | a tenant Deployment wants a pod and has none available | 10m |
 | Tenant mail sync stale | `time() - squelchd_sync_last_success_timestamp_seconds > 900` | 15m |
-| carrier memory high | the box is 85% or more used (`1 - MemAvailable / MemTotal`) | 15m |
+| carrier memory high | the box is 85% or more used (`1 - MemAvailable / MemTotal`) | 2m |
 | carrier metrics missing | no kube-state-metrics series from carrier for 10 minutes | 5m |
 
 The first two are 2026-09-28: the quota was full at five tenants and the first

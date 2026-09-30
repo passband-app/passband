@@ -1790,9 +1790,19 @@ struct ThreadViewer: View {
         /// A READING STACK IS THE EXCEPTION: there the reader stays and walks to
         /// the sender's next email, which is a motion the phone DOES draw
         /// (`stackFlight`), so it takes the Mac's done+next whole.
+        ///
+        /// BUT ONLY WITH A NEXT EMAIL TO WALK TO. On the stack's last card
+        /// done+next would drop the email out and then pop, and the pop clears
+        /// the queue: `readingStack` goes false under the reader the pop is
+        /// still animating away, `stackFlight` snaps back to settled, and the
+        /// email that just left reappears for the length of the pop. The last
+        /// card leaves the way any other reader does.
         private func doneFromBar() async {
+            // A tap during the walk would be dropped by done+next's own guard;
+            // it must not buzz as if it had done something.
+            guard store.threadFlight == .settled || !store.readingStack else { return }
             Haptics.commit()
-            if store.readingStack {
+            if store.readingStack, store.nextQueuedThread != nil {
                 await doneAndNext()
                 return
             }

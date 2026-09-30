@@ -68,7 +68,7 @@ struct DraftsList: View {
                                 DraftRow(
                                     draft: draft,
                                     inert: store.isInert(draft),
-                                    selected: cursor == index,
+                                    selected: showsCursor && cursor == index,
                                     onHover: { cursor = index },
                                     onOpen: { open(draft) },
                                     onDelete: { delete(draft) }
@@ -103,15 +103,35 @@ struct DraftsList: View {
             await store.refreshDrafts()
             loaded = true
         }
-        .onChange(of: rows.count) { _, count in
-            // Rows arrived or left under the cursor: keep it on a row that
-            // can be opened, preferring the one just above where it was.
-            if cursor >= count { cursor = max(count - 1, 0) }
-            if rows.indices.contains(cursor), store.isInert(rows[cursor]) {
-                cursor = step(from: cursor, by: -1, in: rows)
-                    ?? step(from: cursor, by: 1, in: rows) ?? cursor
-            }
+        // Rows arrived, left or REORDERED under the cursor (a save bumps a
+        // row's `updated_at` to the top at the same count), and on APPEAR:
+        // a page that opens with the row being edited at the top would
+        // otherwise leave the cursor on it, inert, nothing highlighted, and
+        // Enter and ⌫ dead.
+        .onChange(of: rows.map(\.id), initial: true) { _, _ in
+            normaliseCursor(in: rows)
         }
+    }
+
+    /// Keep the cursor on a row that can be opened, preferring the one just
+    /// above where it was.
+    private func normaliseCursor(in rows: [DraftView]) {
+        if cursor >= rows.count { cursor = max(rows.count - 1, 0) }
+        if rows.indices.contains(cursor), store.isInert(rows[cursor]) {
+            cursor = step(from: cursor, by: -1, in: rows)
+                ?? step(from: cursor, by: 1, in: rows) ?? cursor
+        }
+    }
+
+    /// The selection fill is the KEYBOARD's cursor. A phone has none, so a
+    /// fill parked on the first row there would be a permanent highlight
+    /// that means nothing (a tap opens whichever row it lands on).
+    private var showsCursor: Bool {
+        #if os(macOS)
+            true
+        #else
+            false
+        #endif
     }
 
     private func note(_ text: String) -> some View {
@@ -128,14 +148,17 @@ struct DraftsList: View {
         /// key that does nothing here is worse than none.
         private var hints: some View {
             HStack(spacing: 4) {
-                KeyHint(["↑", "↓"], "move")
-                dot
-                KeyHint("↵", "open")
+                // Move, open and delete only while there is a draft under
+                // the cursor: none on an empty list, none when the only row
+                // is the one being edited.
                 if rows.indices.contains(cursor), !store.isInert(rows[cursor]) {
+                    KeyHint(["↑", "↓"], "move")
+                    dot
+                    KeyHint("↵", "open")
                     dot
                     KeyHint("⌫", "delete")
+                    dot
                 }
-                dot
                 KeyHint("esc", returning ? "back" : "close")
                 Spacer()
             }

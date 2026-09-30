@@ -113,6 +113,9 @@ Response `201 {"id", "send_at"}`.
 
 Group `individual` fan-out is refused for v1 (`400 rejected:group_fanout`);
 `to`/`bcc` mode groups are fine because the composer already expanded them.
+The group's mode AT SCHEDULE TIME is frozen into the request as `group_mode`
+(stamped by the route, whatever a client sent; absent on rows scheduled before
+it existed), for the fire's attribution (§4 step 5).
 
 Step 1 of the build (a01c6f3) fixed the shapes the handler and worker use:
 `validate_send(&SendBody) -> Result<(), SendFailure>` is pure (the caller
@@ -151,7 +154,12 @@ Per tick:
 
 1. **Recover** rows in `sending` whose `lease_until` passed at least
    `RECOVERY_GRACE` ago (a crash mid-send) and whose `recover_at` (if set) has
-   come. Search Gmail on the write token for `rfc822msgid:<header>`.
+   come. Search Gmail on the write token for `rfc822msgid:<id>`, the
+   header's value WITHOUT its angle brackets (live finding, eb71173: Gmail's
+   operator takes `id@host`; with the brackets in, the search for a mail the
+   daemon had just sent came back empty, and the row was requeued as
+   maybe-sent, one grace away from a duplicate). The pre-fire search (step 3)
+   is the same query.
    - Found: echo it, mark `sent`, audit `send` `scheduled:<id>:recovered`. No send.
    - Not found, attempts left: back to `scheduled` at `now + RECOVERY_GRACE`
      with `maybe_sent` set. NOT sent in the same pass: the re-fire searches
@@ -228,11 +236,16 @@ Per tick:
    `scheduled:<id>:<reason>` shape; the "not now" deferrals are not.
    Attribution: a fired `group_id` records the direct recipients of the ONE
    field the group's mode expanded into (`to` for a To group, `bcc` for a
-   Bcc group; an `individual` group flipped since reads as Bcc when the
-   request carried blind copies, else To), as frozen in the request: who the
-   mail went to, not the group's members at fire time. That list may include
+   Bcc group), as frozen in the request: who the mail went to, not the
+   group's members at fire time. The mode is the one it was SCHEDULED under
+   (the request's `group_mode`), not the group's mode now: a Bcc group
+   flipped to To since would otherwise read the frozen `to`, which for that
+   mail is empty. A row without `group_mode` (scheduled before it existed)
+   falls back to the group's mode now, an `individual` one reading as Bcc
+   when the request carried blind copies, else To. That list may include
    non-members the user typed into the same field; addresses in the other
-   field are never recorded.
+   field are never recorded. An EMPTY list records nothing (no
+   zero-recipient `group_sends` row).
 6. **Sweep**: `sent`/`cancelled` rows after 7 days, `failed` rows (and their
    files) after 30, then the staged-file sweep, so files a cancel released
    and nobody re-claimed go at their one-day TTL even if no composer runs.
@@ -247,14 +260,16 @@ follow-up if it ever bites.
 
 Two things only a live Gmail can confirm (the mock cannot): that
 `messages.send` keeps a client-supplied `Message-ID` rather than replacing it,
-and that `rfc822msgid:<...>` with the brackets percent-encoded finds the
-message (and how long after the send it starts to).
+and that `rfc822msgid:` finds the message (and how long after the send it
+starts to). The first is still unconfirmed. The second was answered on
+2026-09-29: the operator takes the BARE id (`id@host`, the `@`
+percent-encoded); `rfc822msgid:<id@host>` finds nothing (see step 1).
 
 ## 5. The rest of the door
 
 | route | does |
 |---|---|
-| `GET /client/scheduled` | rows in `scheduled`/`sending`/`failed`, oldest `send_at` first, with `to`, `subject`, `reply_to_message_id`, `forward_of_message_id`, `send_at`, `state`, `last_error`, `attempts`, `attachments`, plus the parent context PR #289's `DRAFT_SELECT` LEFT JOIN computes for the picker (`thread_id`, `parent_subject`, `parent_from`, `parent_from_addr`). Lift that join into a shared helper rather than pasting it |
+| `GET /client/scheduled` | rows in `scheduled`/`sending`/`failed`, oldest `send_at` first, with `to`, `cc`, `bcc` (each `""` when the request had none; a reply's `""` cc still derives at fire time), `subject`, `reply_to_message_id`, `forward_of_message_id`, `send_at`, `state`, `last_error`, `attempts`, `attachments`, plus the parent context PR #289's `DRAFT_SELECT` LEFT JOIN computes for the picker (`thread_id`, `parent_subject`, `parent_from`, `parent_from_addr`). Lift that join into a shared helper rather than pasting it |
 | `DELETE /client/scheduled/{id}` | `scheduled` or `failed` → `cancelled`, releases attachment claims back to unclaimed, returns the `request` so the client can reopen it in the composer, WITHOUT `override_guard` and `confirm` (the client sets `confirm` itself, and a reschedule is judged by the guard again). A `sending` row is 409 (it is in Gmail's hands). No server-side draft is created: the composer's next autosave does that through the normal keyed/by-id path, and re-claims the files (well inside the 24h unclaimed TTL) |
 | `POST /client/scheduled/{id}/now` | `scheduled`/`failed` → `send_at = now`; the next tick sends it. 202. A `maybe_sent` row still waits out `RECOVERY_GRACE` from its last attempt and is searched for first (§4 step 3): "now" moves the clock, never the double-send defense. A `sending` row is 409, the same answer a cancel gets; `sent`/`cancelled`/unknown is 404 |
 | `/client/stats` | gains `scheduled_send: true`. The client hides every schedule door without it (same trap as `compose_attachments`: an old daemon must not 404 a click) |
@@ -316,6 +331,24 @@ in `Palette.danger` with the reason. Keys on a scheduled row:
   (cancel + reopen with the request and time, via PR #289's
   `openDraft`/`fill(_:from:)` machinery; a reply needs its thread open, a
   forward its original). Nothing about opening a row moves it to drafts.
+  The preview prints cc and bcc only when the request states them, shows an
+  inline picture as its name in brackets (`[photo.png]`: there are no bytes
+  to draw, and the reading frame drops a `cid:` it cannot resolve), and a
+  verb the store would refuse (a row gone `sending`, a row whose last verb
+  is on the wire) toasts why and leaves the preview open. Opening it takes
+  the caret out of a side-strip composer, or Enter would type into it.
+- **The pull-back opens in the DELETE's own turn.** From the moment the row
+  is gone the only copy of the mail is in the app, and the only things the
+  account switch and ⌘Q flush are composers. So nothing is awaited between
+  the answer and the composer taking it (autosave armed at once); the group
+  pill and the drafts check ("replaced your unsent draft…") land after, and
+  only on a composer that is still that mail. The drafts list for that check
+  is fetched without `settle` and leaves out the mail's own row, since its
+  first save is a debounce away. A pane reply to the same parent is closed
+  into drafts before the inline reply opens, so its flush goes first.
+- ⌘Q while a schedule POST, a pull-back DELETE or an undo's re-POST is on
+  the wire waits for the answer (bounded, 8s), then flushes whatever
+  composer that answer reopened (`AppStore.outboxOnWire`).
 - `s` (or the row's "send now" verb): `POST .../now`.
 - `x` / delete: cancel outright, toast with undo (undo = re-POST the
   returned request). Same shape as PR #289's `pendingDraftDeletes` +
@@ -363,8 +396,9 @@ a few of its answers changed with the split. For the PR description:
 
 - **Paced parent read on a plain reply**: a Gmail-budget hold on the
   parent-headers read now answers 503 ("Gmail is pacing this mailbox") and
-  audits `send` `paced`. Before, a plain reply degraded to an unthreaded
-  reply with no derived audience and was sent.
+  audits `send` `paced`. Before, a plain reply could degrade to an
+  unthreaded reply with no derived audience and be sent (in practice the
+  send right behind the read was usually held by the same budget too).
 - **Paced parent read on reply-all**: 503 + audit `paced`, where it was a
   502 audited `failed:gmail`.
 - **Paced forward original read**: 503 + audit `paced`, where the empty
@@ -376,6 +410,9 @@ a few of its answers changed with the split. For the PR description:
 Each is pinned by a `client_api` test on the live route
 (`a_live_reply_whose_parent_read_is_paced_is_503_and_audited_paced`,
 `a_live_forward_whose_original_read_is_paced_is_503_and_audited_paced`).
+The reply test's parent has no stored From, so a read that fell through to
+the unthreaded path would be a 400 (nobody to address) or, on reply-all, a
+502: only the Paced arm answers 503, and the test fails if it is reverted.
 
 ## 9. Phasing
 

@@ -45,16 +45,16 @@ enum ComposeSubmit {
             let result = try await APIClient.shared.send(
                 SendBody(compose: c, override: override, draftId: c.draftId),
                 attachmentBytes: c.attachments.reduce(0) { $0 + $1.size })
-            capture(c, override, "sent")
+            capture(c, override, scheduled: false, "sent")
             return .sent(result)
         } catch let apiError as APIError where apiError.kind == .guardBlocked {
-            capture(c, override, "guard_blocked")
+            capture(c, override, scheduled: false, "guard_blocked")
             return .guardBlocked(apiError.guardKinds ?? [])
         } catch let apiError as APIError where apiError.kind == .forbidden {
-            capture(c, override, "forbidden")
+            capture(c, override, scheduled: false, "forbidden")
             return .forbidden
         } catch {
-            capture(c, override, "failure")
+            capture(c, override, scheduled: false, "failure")
             return .failure(errText(error, "send failed"))
         }
     }
@@ -74,17 +74,17 @@ enum ComposeSubmit {
             let created = try await APIClient.shared.scheduleSend(
                 SendBody(compose: c, override: override, draftId: draftId), at: sendAt,
                 attachmentBytes: c.attachments.reduce(0) { $0 + $1.size })
-            capture(c, override, "scheduled")
+            capture(c, override, scheduled: true, "scheduled")
             return .scheduled(created)
         } catch let apiError as APIError where apiError.kind == .guardBlocked {
-            capture(c, override, "guard_blocked")
+            capture(c, override, scheduled: true, "guard_blocked")
             return .guardBlocked(apiError.guardKinds ?? [])
         } catch let apiError as APIError where apiError.kind == .forbidden {
-            capture(c, override, "forbidden")
+            capture(c, override, scheduled: true, "forbidden")
             // The daemon's own sentence, which names the missing credential.
             return .forbidden(apiError.message)
         } catch {
-            capture(c, override, "failure")
+            capture(c, override, scheduled: true, "failure")
             return .failure(errText(error, "could not schedule it"))
         }
     }
@@ -94,7 +94,12 @@ enum ComposeSubmit {
     /// `group_mode` is the audience SHAPE and nothing about who is in it: whether
     /// people reach for bcc or for a fan-out is the "does the product work"
     /// question this feature has, and no count or address answers it.
-    private static func capture(_ c: ComposeState, _ override: Bool, _ outcome: String) {
+    /// `scheduled`: which door it went through (`fire` or `schedule`), NOT
+    /// `c.sendAt`: a composer can hold a time and still send at once (the
+    /// scheduling gate off, an older daemon), and that send is not a schedule.
+    private static func capture(
+        _ c: ComposeState, _ override: Bool, scheduled: Bool, _ outcome: String
+    ) {
         var props: [String: Any] = [
             "kind": c.analyticsKind,
             "outcome": outcome,
@@ -103,7 +108,7 @@ enum ComposeSubmit {
             // Whether it went to the outbox rather than out. A bool, so a
             // guard verdict on a schedule is still told from one on a send
             // without a second outcome vocabulary.
-            "scheduled": c.sendAt != nil,
+            "scheduled": scheduled,
             // Whether the send used the copy lists at all — booleans, so
             // nothing about WHO is anywhere near this (see Analytics' closed
             // string vocabulary).

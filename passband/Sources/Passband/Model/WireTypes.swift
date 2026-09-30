@@ -1724,6 +1724,10 @@ struct ScheduledSendView: Codable, Sendable, Identifiable, Hashable {
     /// `""` when the request had none (a reply's audience derives at fire
     /// time); never absent, like a draft's.
     var to: String
+    /// The frozen request's copy lists, `""` when it had none. nil from a
+    /// daemon older than these fields, which the preview reads as "not said".
+    var cc: String? = nil
+    var bcc: String? = nil
     /// `""` when none was typed; `parent_subject` is what a row can show then.
     var subject: String
     var body: String

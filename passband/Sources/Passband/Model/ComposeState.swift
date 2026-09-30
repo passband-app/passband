@@ -374,19 +374,12 @@ extension ComposeState {
         // daemon was deriving it, and the reopened reply derives it again.
         state.recipientsStated = r.cc != nil
         state.groupId = r.group_id
-        if let gid = r.group_id, state.to.isEmpty {
-            if let base, base.groupId == gid, base.groupMode == .individual {
-                state.to = base.to
-            } else if let group, group.id == gid, group.mode == .individual {
-                state.to = GroupToken.encode(group)
-            }
+        if let gid = r.group_id, state.to.isEmpty, let base, base.groupId == gid,
+            base.groupMode == .individual
+        {
+            state.to = base.to
         }
-        // The pill's name and mode, from the daemon's own answer when there
-        // is one: fresher than `base`, which only knows the group as it was.
-        if let gid = r.group_id, let group, group.id == gid {
-            state.groupMode = group.mode
-            state.groupName = group.name
-        }
+        if let group { state.adoptGroup(group, request: r) }
         state.subject = r.subject ?? ""
         state.body = r.body ?? ""
         state.includeTracker = r.include_tracker ?? false
@@ -401,5 +394,18 @@ extension ComposeState {
             .map { ComposeAttachment($0.element) }
         state.sendAt = sendAt
         return state
+    }
+
+    /// The fan-out's pill, from the daemon's own answer about the request's
+    /// group: fresher than `base`, which only knows the group as it was. A
+    /// fan-out with no stated `to` wears the group's token. Also how a
+    /// composer that opened BEFORE the lookup came back is patched
+    /// (`AppStore.finishPulledBack`), so it is one rule, not two. A group
+    /// whose id is not the request's lends nothing.
+    mutating func adoptGroup(_ group: SendGroup, request r: ScheduledRequest) {
+        guard let gid = r.group_id, group.id == gid else { return }
+        if to.isEmpty, group.mode == .individual { to = GroupToken.encode(group) }
+        groupMode = group.mode
+        groupName = group.name
     }
 }

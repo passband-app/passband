@@ -11910,6 +11910,8 @@ async fn the_outbox_lists_what_is_owed_an_outcome_with_its_parent() {
         "/client/scheduled",
         Some(serde_json::json!({
             "reply_to_message_id": parent,
+            "cc": "carol@example.com",
+            "bcc": "dan@example.com",
             "body": "yes, noon works",
             "confirm": true,
             "send_at": in_minutes(30),
@@ -11998,6 +12000,8 @@ async fn the_outbox_lists_what_is_owed_an_outcome_with_its_parent() {
             "last_error",
             "maybe_sent",
             "to",
+            "cc",
+            "bcc",
             "subject",
             "body",
             "reply_to_message_id",
@@ -12026,11 +12030,18 @@ async fn the_outbox_lists_what_is_owed_an_outcome_with_its_parent() {
     assert_eq!(items[1]["attempts"], 1);
     assert_eq!(items[1]["to"], "sending@example.com");
     assert_eq!(items[1]["maybe_sent"], false);
+    assert_eq!(
+        (&items[1]["cc"], &items[1]["bcc"]),
+        (&Value::from(""), &Value::from("")),
+        "absent copy lists read as \"\", like `to`"
+    );
 
     let r = &items[2];
     assert_eq!(r["state"], "scheduled");
     assert_eq!(r["reply_to_message_id"], parent);
     assert_eq!(r["to"], "", "a reply's audience derives at fire time");
+    assert_eq!(r["cc"], "carol@example.com");
+    assert_eq!(r["bcc"], "dan@example.com");
     assert_eq!(r["body"], "yes, noon works");
     assert_eq!(r["thread_id"], "thread-77");
     assert_eq!(r["parent_subject"], "Lunch?");
@@ -13843,6 +13854,138 @@ async fn a_fired_group_send_records_who_it_went_to_not_who_is_in_the_group_now()
 }
 
 #[tokio::test]
+async fn a_fired_group_send_records_the_mode_it_was_scheduled_under() {
+    let (base, _gmail) = mock_gmail_seq(vec![
+        (
+            200,
+            "{\"id\":\"sent-p\",\"threadId\":\"thread-new\"}".to_string(),
+        ),
+        (200, echo_response("sent-p")),
+        (
+            200,
+            "{\"id\":\"sent-q\",\"threadId\":\"thread-new-2\"}".to_string(),
+        ),
+        (200, echo_response("sent-q")),
+        (
+            200,
+            "{\"id\":\"sent-r\",\"threadId\":\"thread-new-3\"}".to_string(),
+        ),
+        (200, echo_response("sent-r")),
+    ])
+    .await;
+    let (Harness { app, store, acct }, state) = scheduled_rig(Some(base), |_, _| {});
+    use squelch_core::types::GroupMode;
+    let member = |addr: &str| squelch_core::store::sqlite::groups::NewGroupMember {
+        addr: addr.into(),
+        display_name: None,
+    };
+    let members = [member("ann@fund.com"), member("bo@fund.com")];
+    let blind = store
+        .create_send_group(acct, "Blind", GroupMode::Bcc, "", &members)
+        .unwrap();
+    let open = store
+        .create_send_group(acct, "Open", GroupMode::To, "", &members)
+        .unwrap();
+    let schedule = |body: Value| {
+        let app = app.clone();
+        async move {
+            let (status, created) = outbox(&app, "POST", "/client/scheduled", Some(body)).await;
+            assert_eq!(status, StatusCode::CREATED, "{created}");
+            created["id"].as_i64().unwrap()
+        }
+    };
+    // A client cannot stamp the mode: the route overwrites it.
+    let a = schedule(serde_json::json!({
+        "group_id": blind,
+        "group_mode": "to",
+        "bcc": "ann@fund.com, bo@fund.com",
+        "subject": "Update",
+        "body": "hi all",
+        "confirm": true,
+        "send_at": in_minutes(60),
+    }))
+    .await;
+    let b = schedule(serde_json::json!({
+        "group_id": open,
+        "to": "ann@fund.com, bo@fund.com",
+        "subject": "Update",
+        "body": "hi all",
+        "confirm": true,
+        "send_at": in_minutes(60),
+    }))
+    .await;
+    let frozen = |id: i64| -> Value {
+        serde_json::from_str(
+            &store
+                .scheduled_send_by_id(acct, id)
+                .unwrap()
+                .unwrap()
+                .request,
+        )
+        .unwrap()
+    };
+    assert_eq!(frozen(a)["group_mode"], "bcc");
+    assert_eq!(frozen(b)["group_mode"], "to");
+
+    // Between scheduling and firing, each group flips to the other mode.
+    store
+        .update_send_group(acct, blind, "Blind", GroupMode::To, "", &members)
+        .unwrap();
+    store
+        .update_send_group(acct, open, "Open", GroupMode::Bcc, "", &members)
+        .unwrap();
+
+    // A row scheduled before `group_mode` existed, whose group reads `to`
+    // now while its frozen request addressed `bcc`: the field the current
+    // mode names is EMPTY, so nothing is recorded, rather than a row of
+    // zero recipients.
+    let legacy = due_row(
+        &store,
+        acct,
+        &format!(
+            r#"{{"group_id":{blind},"bcc":"ann@fund.com, bo@fund.com","subject":"Old","body":"hi","confirm":true}}"#
+        ),
+        "<legacy-group@passband.local>",
+    );
+
+    for id in [a, b] {
+        store
+            .send_scheduled_now(acct, id, chrono::Utc::now())
+            .unwrap();
+    }
+    let report = squelch_api::run_scheduled_send_pass(&state).await;
+    assert_eq!(report.sent, 3, "{report:?}");
+    assert_eq!(
+        store
+            .scheduled_send_by_id(acct, legacy)
+            .unwrap()
+            .unwrap()
+            .state,
+        ScheduledSendState::Sent
+    );
+
+    let recorded = |group: i64| {
+        store
+            .group_history(acct, group, 10, 0)
+            .unwrap()
+            .into_iter()
+            .filter(|h| h.group_send_id.is_some())
+            .map(|h| (h.mode, h.reached, h.group_size))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        recorded(blind),
+        vec![(GroupMode::Bcc, 2, 2)],
+        "scheduled as Bcc: recorded as Bcc with its frozen bcc list; the legacy row wrote nothing"
+    );
+    assert_eq!(
+        recorded(open),
+        vec![(GroupMode::To, 2, 2)],
+        "scheduled as To: recorded as To with its frozen to list"
+    );
+}
+
+#[tokio::test]
 async fn a_search_gmail_answers_403_is_not_now_not_an_attempt() {
     // Gmail answers a per-user rate limit with a 403 as often as a permission
     // refusal: "not now", bounded by the give-up, never an attempt spent.
@@ -13944,9 +14087,21 @@ fn paced_send_app() -> (axum::Router, Arc<SqliteStore>, i64, i64) {
             ),
     );
     budget.note_quota_refusal(None);
+    // A parent with NO STORED FROM, so the paced read's own arm is the only
+    // way to a 503 here: had the read degraded to an unthreaded reply
+    // instead, the stored-From fallback would have nobody to address, and
+    // the send would be refused as unaddressable before it ever asked the
+    // budget again. (A forward reads its original the same way and never
+    // gets as far as an address.)
     let mut parent = 0;
     let (state, store, acct) = state_with(|store, acct| {
-        parent = seed_one_signal(store, acct, "gmail-parent", "thread-77", "Quarterly");
+        parent = store
+            .upsert_message(&squelch_core::types::NewMessage {
+                from_addr: String::new(),
+                from_name: None,
+                ..msg(acct, "gmail-parent", "thread-77", "Quarterly", "body")
+            })
+            .unwrap();
     });
     // Nothing listens: a request that got past the budget would fail loudly
     // as a transport error, never as the 503 asserted.
@@ -13962,6 +14117,10 @@ fn paced_send_app() -> (axum::Router, Arc<SqliteStore>, i64, i64) {
 async fn a_live_reply_whose_parent_read_is_paced_is_503_and_audited_paced() {
     // Plain reply and reply-all alike: a paced parent read is "not now", not
     // an unthreaded reply with no derived audience, and not a Gmail failure.
+    // The two legs cannot pass by accident: the parent has no stored From
+    // (see `paced_send_app`), so a plain reply that fell through to the
+    // unthreaded path is a 400 (nobody to address), and a reply-all that
+    // fell through is a 502 (`failed:gmail`); only the Paced arm is a 503.
     for reply_all in [false, true] {
         let (app, store, acct, parent) = paced_send_app();
         let resp = app

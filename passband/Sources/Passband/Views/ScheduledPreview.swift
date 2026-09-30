@@ -28,6 +28,15 @@ struct ScheduledPreview: View {
     /// it fails: the raw markdown stays on screen then, which is the mail's
     /// words all the same.
     @State private var html: String?
+    /// The render came back with an error (not merely "not yet"): the words
+    /// as typed stay on screen, and a line under them says why they look plain.
+    @State private var renderFailed = false
+
+    /// The words the preview shows: inline pictures as `[name]` placeholders,
+    /// since there are no bytes here to draw (`placeholdingInlineImages`).
+    private var source: String {
+        ScheduledPreviewCopy.placeholdingInlineImages(row.body, attachments: row.attachments)
+    }
 
     private var actionable: Bool { ScheduledPreviewCopy.actionable(row) }
 
@@ -64,12 +73,14 @@ struct ScheduledPreview: View {
         // failure) must not re-render the body.
         .task(id: row.body) {
             html = nil
-            let source = row.body
+            renderFailed = false
+            let source = source
             guard !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-            if let rendered = try? await APIClient.shared.markdownPreview(source),
-                !Task.isCancelled
-            {
-                html = rendered
+            do {
+                let rendered = try await APIClient.shared.markdownPreview(source)
+                if !Task.isCancelled { html = rendered }
+            } catch {
+                if !Task.isCancelled { renderFailed = true }
             }
         }
     }
@@ -160,7 +171,14 @@ struct ScheduledPreview: View {
                 .font(Typo.micro)
                 .foregroundStyle(Palette.inkFaintest)
         } else {
-            PlainBody(content: row.body)
+            VStack(alignment: .leading, spacing: 8) {
+                PlainBody(content: source)
+                if renderFailed {
+                    Text(ScheduledPreviewCopy.renderFailed)
+                        .font(Typo.micro)
+                        .foregroundStyle(Palette.inkFaintest)
+                }
+            }
         }
     }
 
@@ -227,12 +245,17 @@ struct ScheduledPreview: View {
         }
     #endif
 
-    /// Every verb closes the preview FIRST: `edit` hands the mail to a
-    /// composer (a reply's opens its thread in this very slot), `cancel` takes
-    /// the row off the page behind its undo toast, and `send now` hands it to
-    /// the worker. None of them leaves anything here to look at.
+    /// Every verb the store would take closes the preview FIRST: `edit` hands
+    /// the mail to a composer (a reply's opens its thread in this very slot),
+    /// `cancel` takes the row off the page behind its undo toast, and `send
+    /// now` hands it to the worker. None of them leaves anything here to look
+    /// at. One the store would REFUSE (a `sending` row, or one whose last verb
+    /// is still on the wire) is asked about first and says so, and the
+    /// preview stays open: closing it for a verb that then did nothing read
+    /// as the verb having worked.
     private func run(_ verb: ScheduledPreviewCopy.Verb) {
         let row = row
+        if verb != .back, store.refusesScheduledVerb(row) { return }
         switch verb {
         case .back:
             store.closeScheduledPreview()

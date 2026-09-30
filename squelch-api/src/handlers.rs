@@ -3923,6 +3923,16 @@ pub struct SendBody {
     /// Another account's id and an unknown id are the same 404.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) group_id: Option<i64>,
+    /// THE GROUP'S MODE AS IT WAS SCHEDULED, stamped by the schedule route
+    /// (never taken from a client: that route overwrites it) and read ONLY
+    /// when the worker fires the row, for attribution: the frozen `to`/`bcc`
+    /// lists were addressed under this mode, and a group flipped since must
+    /// not make the record read the other, possibly empty, field. Ignored on
+    /// the live route, which resolves the group's mode as it sends. Absent on
+    /// rows scheduled before it existed, which fall back to the group's
+    /// current mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) group_mode: Option<GroupMode>,
     /// Explicit subject (overrides the reply-derived subject).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) subject: Option<String>,
@@ -4947,8 +4957,13 @@ pub(crate) async fn perform_send(
         // now: a member added since never got this mail, and one removed
         // since did. Only that field: a Bcc group mail with the user's boss
         // typed in `to` does not record the boss as a group recipient.
+        //
+        // The MODE is the one it was scheduled under (`group_mode`, frozen
+        // by the schedule route), not the group's mode now: a Bcc group
+        // flipped to To since would otherwise read the frozen `to`, which
+        // for that mail is empty.
         let recorded = if fire.is_some() {
-            let mode = match audience.mode {
+            let mode = match body.group_mode.unwrap_or(audience.mode) {
                 GroupMode::Individual if bcc_requested.trim().is_empty() => GroupMode::To,
                 GroupMode::Individual => GroupMode::Bcc,
                 mode => mode,
@@ -4965,7 +4980,18 @@ pub(crate) async fn perform_send(
                 addrs: audience.addrs.clone(),
             }
         };
-        group_send::record_single(state, &recorded, subject_for_record, *echo_message_id).await;
+        // Nobody in the field the mode names: there is nothing to attribute,
+        // and a `group_sends` row of zero recipients would read as a send
+        // that reached nobody.
+        if recorded.addrs.is_empty() {
+            eprintln!(
+                "squelch-api: group send {} went out with no recipients in its group's field; \
+                 not recorded",
+                recorded.group_id
+            );
+        } else {
+            group_send::record_single(state, &recorded, subject_for_record, *echo_message_id).await;
+        }
     }
     result
 }

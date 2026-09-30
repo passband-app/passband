@@ -263,6 +263,8 @@ enum ScheduledRowCopy {
     }
 
     static let alreadySending = "already being sent"
+    /// A verb on a row whose last verb is still on the wire.
+    static let stillWorking = "still working on that mail"
     static let sendingNow = "sending now"
     static let noLongerScheduled = "that mail is no longer scheduled"
 }
@@ -310,6 +312,54 @@ struct ScheduledFailures: Sendable, Equatable {
     mutating func clear() { self = ScheduledFailures() }
 }
 
+/// THE GROUP NAME OF EACH FAN-OUT THIS APP SCHEDULED, by outbox id: the listing
+/// carries no `group_id`, so without this a fan-out's row could only say
+/// "group or bcc" (`ScheduledRowCopy.emptyRecipient`).
+///
+/// Outbox ids are REUSED (no AUTOINCREMENT), so a name must not outlive its
+/// row: a listing that no longer carries an id drops its name (`prune`), or a
+/// later row under the same id, scheduled from another device, would wear a
+/// group it never had. Only names older than the listing are dropped: a POST
+/// that came back while the listing was in the air named a row that listing
+/// could not have seen yet. The generation is the same trick `Tombstones`
+/// plays for the same reason.
+struct ScheduledGroupNames: Equatable {
+    private var names: [Int: (name: String, gen: Int)] = [:]
+    private var next = 0
+
+    static func == (a: Self, b: Self) -> Bool {
+        a.names.mapValues(\.name) == b.names.mapValues(\.name)
+    }
+
+    subscript(id: Int) -> String? { names[id]?.name }
+
+    /// Where a fetch starts: names set from here on survive its prune.
+    var generation: Int { next }
+
+    /// A row this app scheduled: its group's name, or none (a reused id must
+    /// not keep an older row's name).
+    mutating func set(_ id: Int, _ name: String?) {
+        guard let name else {
+            names[id] = nil
+            return
+        }
+        names[id] = (name, next)
+        next += 1
+    }
+
+    /// A pulled-back or cancelled row: its name leaves with it, and is handed
+    /// back for the row an undo re-creates.
+    @discardableResult
+    mutating func take(_ id: Int) -> String? {
+        names.removeValue(forKey: id)?.name
+    }
+
+    /// A listing that started at `since` came back with `listed`.
+    mutating func prune(listed: Set<Int>, since: Int) {
+        names = names.filter { listed.contains($0.key) || $0.value.gen >= since }
+    }
+}
+
 /// Whether the sitrep tick asks for the outbox. Every tick while it holds
 /// anything; once a listing came back EMPTY, only every `emptyEvery`: nothing
 /// this app does can fill it without clearing the flag, but ANOTHER device
@@ -340,6 +390,15 @@ enum ScheduledCursor {
             return new.isEmpty ? 0 : min(index, new.count - 1)
         }
         return max(0, index + new.count - old.count)
+    }
+
+    /// Re-anchor, THEN clamp to a page of `count` rows: the one order that
+    /// keeps a sent row's mail under the cursor when an outbox row above it
+    /// left in the same update that shortened the page. Clamping first moves
+    /// the index onto a position whose outbox identity is a different row,
+    /// and the re-anchor then follows THAT row, one too high.
+    static func follow(_ index: Int, old: [Int], new: [Int], count: Int) -> Int {
+        max(0, min(reanchor(index, old: old, new: new), count - 1))
     }
 }
 
@@ -405,23 +464,68 @@ enum ScheduledCancelUndo {
 /// keystroke (the previous rule) made Esc-without-typing LOSE the scheduled
 /// mail, which is the worse of the two losses. So the save is ALWAYS armed, and
 /// when it will land on somebody's words the toast says so, not silently.
+///
+/// AND IT OPENS AT ONCE. The composer takes the mail in the same turn the
+/// DELETE's answer arrives (`AppStore.openPulledBack`), before anything else is
+/// awaited: from the moment the row is gone the composer is the only place the
+/// mail exists, and a composer is what the account switch and ⌘Q already
+/// flush. The group lookup and this drafts check run AFTER, and patch or toast
+/// only a composer that is still the pulled-back one (`stillOpen`).
 enum PullBackDraft {
-    /// What the reopened composer does on arrival.
-    struct Arrival: Equatable {
-        /// Always true; spelled out so a test holds the invariant.
-        var armsAutosave: Bool
-        /// Said once the composer is open, when a keyed row held words.
-        var toast: String?
+    /// Where a pulled-back mail opens.
+    enum Route: Equatable {
+        /// Its thread's inline composer. `closePane`: the pane holds a reply
+        /// to the SAME parent, which writes the same keyed row; it is closed
+        /// (and flushed) first, so its save is on the wire before this one's
+        /// and the pulled-back mail's lands last.
+        case inline(threadId: String, closePane: Bool)
+        /// The compose pane.
+        case pane
     }
 
-    static func arrival(
-        _ state: ComposeState, drafts: [DraftView], open: [ComposeState], keyedNewMail: Bool
-    ) -> Arrival {
-        let replaces = wouldReplace(state, drafts: drafts, open: open, keyedNewMail: keyedNewMail)
-        return Arrival(
-            armsAutosave: true,
-            toast: replaces
-                ? ScheduleCopy.replacedDraft(forward: state.forwardOfMessageId != nil) : nil)
+    static func route(_ state: ComposeState, threadId: String?, pane: ComposeState?) -> Route {
+        guard state.replyToMessageId != nil, state.forwardOfMessageId == nil, let threadId else {
+            return .pane
+        }
+        let rival =
+            pane.map {
+                $0.id != state.id && $0.forwardOfMessageId == nil
+                    && $0.replyToMessageId == state.replyToMessageId
+            } ?? false
+        return .inline(threadId: threadId, closePane: rival)
+    }
+
+    enum Slot: Equatable { case pane, inline }
+
+    /// Which slot still holds the pulled-back composer, for the late patch and
+    /// the late toast. nil once it was sent, closed or replaced: then the
+    /// group's name belongs to nobody and a "replaced" toast would describe a
+    /// composer that is not on screen.
+    static func stillOpen(_ id: UUID, pane: ComposeState?, inline: ComposeState?) -> Slot? {
+        if pane?.id == id { return .pane }
+        if inline?.id == id { return .inline }
+        return nil
+    }
+
+    /// Whether the drafts list has to be asked at all: only a mail that lands
+    /// on a KEYED row can replace somebody's words.
+    static func keyed(_ state: ComposeState, keyedNewMail: Bool) -> Bool {
+        state.replyToMessageId != nil || state.forwardOfMessageId != nil || keyedNewMail
+    }
+
+    /// The toast, or nil. `drafts` is listed AFTER the composer opened, so
+    /// the pulled-back composer's own row (`ownDraftId`, once its first save
+    /// has landed) is left out: it is this mail, not a rival. `open` is the
+    /// composers that held words BEFORE this one took its slot.
+    static func replacedToast(
+        _ state: ComposeState, drafts: [DraftView], open: [ComposeState], ownDraftId: Int?,
+        keyedNewMail: Bool
+    ) -> String? {
+        let rivals = drafts.filter { $0.id != ownDraftId }
+        guard wouldReplace(state, drafts: rivals, open: open, keyedNewMail: keyedNewMail) else {
+            return nil
+        }
+        return ScheduleCopy.replacedDraft(forward: state.forwardOfMessageId != nil)
     }
 
     /// `drafts`: the daemon's rows. `open`: the composers on screen that hold
@@ -494,11 +598,13 @@ enum ScheduledPreviewCopy {
         var value: String
     }
 
-    /// The header block, top to bottom. The listing carries `to` ONLY (no cc,
-    /// no bcc), so the preview shows what it has rather than inventing empty
-    /// copy lists that would read as "nobody else".
+    /// The header block, top to bottom. `cc` and `bcc` show only when the
+    /// request states them: a daemon older than those fields says nothing
+    /// (nil), and an empty list is not printed as "nobody else".
     ///
     /// - NEW: `to` (or the fan-out / bcc truth, as the row says it), subject.
+    ///   A new mail with no `to` but a cc or bcc names nobody on the `to`
+    ///   line rather than guessing "group or bcc": the lines below say who.
     /// - REPLY: `to` when stated, else the thread decides at fire time; then
     ///   "re: <parent subject> · <parent sender>", then its own subject if it
     ///   typed one (blank means the daemon titles it from the parent, and the
@@ -508,14 +614,28 @@ enum ScheduledPreviewCopy {
         let reply = row.forward_of_message_id == nil && row.reply_to_message_id != nil
         let forward = row.forward_of_message_id != nil
         var lines: [Line] = []
-        let to = SenderID.recipients(row.to).joined(separator: ", ")
+        func list(_ raw: String?) -> String {
+            SenderID.recipients(raw ?? "").joined(separator: ", ")
+        }
+        let to = list(row.to)
+        let cc = list(row.cc)
+        let bcc = list(row.bcc)
         if !to.isEmpty {
             lines.append(Line(label: "to", value: to))
         } else if reply {
             lines.append(Line(label: "to", value: replyAudience))
+        } else if let name = groupName?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !name.isEmpty
+        {
+            lines.append(Line(label: "to", value: name))
+        } else if !cc.isEmpty || !bcc.isEmpty {
+            // Stated copies and no `to`: nothing to guess about.
+            lines.append(Line(label: "to", value: nobody))
         } else {
-            lines.append(Line(label: "to", value: ScheduledRowCopy.emptyRecipient(groupName: groupName)))
+            lines.append(Line(label: "to", value: ScheduledRowCopy.emptyRecipient(groupName: nil)))
         }
+        if !cc.isEmpty { lines.append(Line(label: "cc", value: cc)) }
+        if !bcc.isEmpty { lines.append(Line(label: "bcc", value: bcc)) }
         let parent = row.parent_subject?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let parentSubject = parent.isEmpty ? noSubject : parent
         if reply {
@@ -538,6 +658,36 @@ enum ScheduledPreviewCopy {
     /// thread when it fires, so naming anyone here would be a guess.
     static let replyAudience = "the thread's people, when it sends"
     static let noSubject = "(no subject)"
+    /// A `to` line with nobody on it, when the copy lines below name everyone.
+    static let nobody = "(nobody)"
+
+    /// THE BODY AS THE PREVIEW RENDERS IT: every inline picture's marker
+    /// (`![name](cid:token)`, `ComposeMarkers.marker`) swapped for its file's
+    /// name in brackets, `[photo.png]`. The preview has no bytes to draw
+    /// (they are staged on the daemon for the send), and the reading frame
+    /// DROPS an image it cannot resolve (`CidImages`), so without this a
+    /// picture in the middle of the mail vanished with no trace. The name is
+    /// the tray's, found by token; a token no file carries keeps its alt.
+    static func placeholdingInlineImages(
+        _ body: String, attachments: [OutboundAttachment]
+    ) -> String {
+        guard body.contains("(cid:") else { return body }
+        return body.replacing(inlineMarker) { match in
+            let token = String(match.2)
+            let alt = String(match.1)
+            let name =
+                attachments.first { $0.content_id == token }?.filename
+                ?? (alt.isEmpty ? "image" : alt)
+            return "[\(name.filter { !"[]()".contains($0) })]"
+        }
+    }
+
+    nonisolated(unsafe) private static let inlineMarker = /!\[([^\]]*)\]\(cid:([^)\s]+)\)/
+
+    /// Under the body when the daemon could not render it: the words as typed
+    /// are on screen instead, and they are not what the HTML half will look
+    /// like.
+    static let renderFailed = "could not render the formatting; this is the text as typed"
 
     enum Verb: Equatable {
         case back, edit, sendNow, cancel
@@ -573,12 +723,16 @@ enum ScheduledPreviewCopy {
             Key(key: "Enter", hint: "↵", verb: .edit),
             Key(key: "s", hint: "s", verb: .sendNow),
             Key(key: "x", hint: "x", verb: .cancel),
+            // As on the row: Backspace and Delete cancel too. Not printed;
+            // `x` is the one the verb bar shows.
+            Key(key: "Backspace", hint: "", verb: .cancel),
+            Key(key: "Delete", hint: "", verb: .cancel),
         ]
     }
 
     /// The verbs at the bottom, in reading order. None for a `sending` row.
     static func verbs(_ row: ScheduledSendView) -> [Key] {
-        keys(row).filter { $0.verb != .back }
+        keys(row).filter { $0.verb != .back && !$0.hint.isEmpty }
     }
 
     static func actionable(_ row: ScheduledSendView) -> Bool { row.state != "sending" }

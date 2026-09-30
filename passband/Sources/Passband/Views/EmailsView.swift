@@ -78,6 +78,12 @@ struct EmailsView: View {
     private var selectedSent: SentItem? { sent[safe: index - scheduled.count] }
     /// However many rows the page on screen has — the cursor's only bound.
     private var rowCount: Int { mode == .sent ? scheduled.count + sent.count : rows.count }
+    /// What the cursor is anchored against: the outbox ids above the sent
+    /// rows (none off Sent) and the page's length.
+    private struct CursorShape: Equatable {
+        var outbox: [Int]
+        var count: Int
+    }
     /// The row under the cursor as the two things every page can answer: the
     /// message id (a `.task` key, and the scroll target) and the thread to warm.
     /// An outbox row answers only when it has a thread (a reply's), which is
@@ -156,16 +162,17 @@ struct EmailsView: View {
             guard !Task.isCancelled else { return }
             ThreadPrefetch.shared.prefetch(row.threadId)
         }
-        .onChange(of: rowCount) { _, count in
-            index = max(0, min(index, count - 1))
-        }
-        // A poll that adds or drops an outbox row shifts every position under
-        // it; the cursor follows the row it was on (`ScheduledCursor`), or the
-        // next Enter / `s` / `x` would act on somebody else's mail.
-        .onChange(of: store.scheduledRows.map(\.id)) { old, new in
-            guard mode == .sent else { return }
-            let count = new.count + sent.count
-            index = max(0, min(ScheduledCursor.reanchor(index, old: old, new: new), count - 1))
+        // ONE HANDLER for the cursor's bound and the outbox's shifts, in that
+        // order: re-anchor to the row it was on (a poll that adds or drops an
+        // outbox row shifts every position under it, and the next Enter / `s`
+        // / `x` would act on somebody else's mail), THEN clamp to the page.
+        // Two handlers fired in the same update in no set order, and clamping
+        // first moved the cursor one row too high (`ScheduledCursor.follow`).
+        // Off Sent the outbox is `[]` on both sides, so this is the plain
+        // clamp, and reads nothing of the store's outbox.
+        .onChange(of: CursorShape(outbox: scheduled.map(\.id), count: rowCount)) { old, new in
+            index = ScheduledCursor.follow(
+                index, old: old.outbox, new: new.outbox, count: new.count)
         }
         // A mode switch replaces every row, so the cursor cannot keep its index —
         // it would land on an unrelated email, and the verbs act on the highlight.

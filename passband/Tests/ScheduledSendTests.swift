@@ -45,6 +45,10 @@ struct ScheduledSendTests {
         aFanOutRowSaysWhoItIsFor()
         // The read-only preview.
         anEditArmsItsSaveAndSaysWhatItReplaced()
+        aPullBackOpensWhereItBelongs()
+        aLateAnswerLandsOnlyOnItsOwnComposer()
+        aFanOutNameLeavesWithItsRow()
+        anInlinePictureIsNamedNotDropped()
         thePreviewSaysWhereTheMailIs()
         thePreviewHeaderNamesTheMail()
         thePreviewKeysAreEnterSXAndEsc()
@@ -256,6 +260,12 @@ struct ScheduledSendTests {
             raw.replacingOccurrences(of: #""maybe_sent":true,"#, with: ""))
         equal(old?.first?.maybe_sent, nil, "an older daemon without the flag still decodes")
         equal(rows?.first?.parent_subject, "lunch", "parent context")
+        equal(rows?.first?.cc, nil, "a daemon without the copy lists: not said")
+        let copied = decode(
+            [ScheduledSendView].self,
+            raw.replacingOccurrences(of: #""to":"","#, with: #""to":"","cc":"bo@x.test","bcc":"","#))
+        equal(copied?.first?.cc, "bo@x.test", "cc")
+        equal(copied?.first?.bcc, "", "a blank bcc is said as blank")
         equal(
             decode(ScheduledCreated.self, #"{"id":9,"send_at":"2027-01-15T08:00:00Z"}"#)?.id, 9,
             "201")
@@ -622,43 +632,171 @@ struct ScheduledSendTests {
     }
 
     /// THE M2 RULE, revised (2026-09-29): `edit` is an explicit choice, so the
-    /// scheduled mail WINS. The save is armed at once, always, and a keyed
-    /// draft with words in it earns a toast saying it was replaced. Held back
-    /// for a keystroke, Esc-without-typing lost the scheduled mail.
+    /// scheduled mail WINS. The save is armed at once, always (that is the
+    /// composer opening in the DELETE's turn, `AppStore.openPulledBack`, which
+    /// arms unconditionally), and a keyed draft with words in it earns a toast
+    /// saying it was replaced. This is the toast's half. The list is taken
+    /// AFTER the composer opened, so its own row is not a rival.
     static func anEditArmsItsSaveAndSaysWhatItReplaced() {
-        typealias A = PullBackDraft.Arrival
+        func toast(
+            _ s: ComposeState, _ drafts: [DraftView], open: [ComposeState] = [], own: Int? = nil,
+            keyed: Bool = false
+        ) -> String? {
+            PullBackDraft.replacedToast(
+                s, drafts: drafts, open: open, ownDraftId: own, keyedNewMail: keyed)
+        }
         var reply = ComposeState()
         reply.replyToMessageId = 10
         var forward = ComposeState()
         forward.forwardOfMessageId = 20
         let fresh = ComposeState()
         equal(
-            PullBackDraft.arrival(
-                reply, drafts: [draft(id: 1, replyTo: 10)], open: [], keyedNewMail: false),
-            A(armsAutosave: true, toast: "replaced your unsent draft to this thread"),
-            "a reply over the parent's draft: armed, and it says so")
+            toast(reply, [draft(id: 1, replyTo: 10)]),
+            "replaced your unsent draft to this thread", "a reply over the parent's draft")
         equal(
-            PullBackDraft.arrival(
-                forward, drafts: [draft(id: 2, forwardOf: 20)], open: [], keyedNewMail: false),
-            A(armsAutosave: true, toast: "replaced your unsent forward of this email"),
-            "a forward over the original's draft: the forward's words")
+            toast(forward, [draft(id: 2, forwardOf: 20)]),
+            "replaced your unsent forward of this email", "a forward: the forward's words")
         var typing = ComposeState()
         typing.replyToMessageId = 10
         equal(
-            PullBackDraft.arrival(reply, drafts: [], open: [typing], keyedNewMail: false),
-            A(armsAutosave: true, toast: "replaced your unsent draft to this thread"),
+            toast(reply, [], open: [typing]), "replaced your unsent draft to this thread",
             "an open composer to the same parent counts")
+        equal(toast(reply, [draft(id: 4, replyTo: 11)]), nil, "no rival: nothing said")
+        equal(toast(fresh, [draft(id: 3)]), nil, "new mail on drafts_v2: nothing to replace")
         equal(
-            PullBackDraft.arrival(
-                reply, drafts: [draft(id: 4, replyTo: 11)], open: [], keyedNewMail: false),
-            A(armsAutosave: true, toast: nil), "no rival: armed, nothing said")
-        equal(
-            PullBackDraft.arrival(fresh, drafts: [draft(id: 3)], open: [], keyedNewMail: false),
-            A(armsAutosave: true, toast: nil), "new mail on drafts_v2: nothing to replace")
-        equal(
-            PullBackDraft.arrival(fresh, drafts: [draft(id: 3)], open: [], keyedNewMail: true),
-            A(armsAutosave: true, toast: "replaced your unsent draft to this thread"),
+            toast(fresh, [draft(id: 3)], keyed: true), "replaced your unsent draft to this thread",
             "new mail on the one nil-keyed row")
+        // The pulled-back mail's own first save, landed before the list did.
+        equal(
+            toast(reply, [draft(id: 1, replyTo: 10)], own: 1), nil,
+            "its own row is this mail, not a rival")
+        equal(
+            toast(reply, [draft(id: 1, replyTo: 10)], open: [typing], own: 1),
+            "replaced your unsent draft to this thread",
+            "but a rival that was open before it still counts")
+        check(PullBackDraft.keyed(reply, keyedNewMail: false), "a reply is keyed")
+        check(PullBackDraft.keyed(forward, keyedNewMail: false), "a forward is keyed")
+        check(!PullBackDraft.keyed(fresh, keyedNewMail: false), "new mail on drafts_v2 is not")
+        check(PullBackDraft.keyed(fresh, keyedNewMail: true), "new mail on an old daemon is")
+    }
+
+    /// Where a pulled-back mail opens, decided in the DELETE's own turn, and
+    /// the pane rival closed first (MIN S1): a pane reply to the same parent
+    /// writes the same keyed row, and left open its later flush would land on
+    /// top of the scheduled mail.
+    static func aPullBackOpensWhereItBelongs() {
+        typealias R = PullBackDraft.Route
+        var reply = ComposeState()
+        reply.replyToMessageId = 10
+        var forward = ComposeState()
+        forward.forwardOfMessageId = 10
+        equal(
+            PullBackDraft.route(reply, threadId: "t1", pane: nil),
+            R.inline(threadId: "t1", closePane: false), "a reply opens in its thread")
+        equal(
+            PullBackDraft.route(reply, threadId: nil, pane: nil), R.pane,
+            "a reply whose parent is gone opens in the pane")
+        equal(PullBackDraft.route(forward, threadId: "t1", pane: nil), R.pane, "a forward: pane")
+        equal(PullBackDraft.route(ComposeState(), threadId: nil, pane: nil), R.pane, "new mail")
+        var paneReply = ComposeState()
+        paneReply.replyToMessageId = 10
+        equal(
+            PullBackDraft.route(reply, threadId: "t1", pane: paneReply),
+            R.inline(threadId: "t1", closePane: true),
+            "a pane reply to the same parent is closed first")
+        var paneOther = ComposeState()
+        paneOther.replyToMessageId = 11
+        equal(
+            PullBackDraft.route(reply, threadId: "t1", pane: paneOther),
+            R.inline(threadId: "t1", closePane: false), "another parent's reply stays")
+        var paneForward = ComposeState()
+        paneForward.forwardOfMessageId = 7
+        paneForward.replyToMessageId = 10
+        equal(
+            PullBackDraft.route(reply, threadId: "t1", pane: paneForward),
+            R.inline(threadId: "t1", closePane: false), "a forward is keyed elsewhere")
+        equal(
+            PullBackDraft.route(reply, threadId: "t1", pane: ComposeState()),
+            R.inline(threadId: "t1", closePane: false), "new mail in the pane stays")
+    }
+
+    /// The group lookup and the drafts check land AFTER the composer opened,
+    /// and only on a composer that is still the pulled-back one.
+    static func aLateAnswerLandsOnlyOnItsOwnComposer() {
+        let mine = ComposeState()
+        let other = ComposeState()
+        equal(PullBackDraft.stillOpen(mine.id, pane: mine, inline: nil), .pane, "in the pane")
+        equal(PullBackDraft.stillOpen(mine.id, pane: other, inline: mine), .inline, "inline")
+        equal(
+            PullBackDraft.stillOpen(mine.id, pane: other, inline: nil), nil,
+            "sent, closed or replaced: nobody's")
+        equal(PullBackDraft.stillOpen(mine.id, pane: nil, inline: nil), nil, "both empty")
+        // The patch itself: the group's pill onto a composer opened without it.
+        var r = ScheduledRequest()
+        r.group_id = 4
+        let crew = SendGroup(
+            id: 4, name: "Book club", slug: "book-club", mode: .individual, note: "",
+            member_count: 6, members: nil, last_sent_at: nil, created_at: "", updated_at: "")
+        var open = ComposeState.reopened(request: r, attachments: [], sendAt: nil)
+        equal(open.groupName, nil, "opened before the lookup came back")
+        open.adoptGroup(crew, request: r)
+        equal(open.groupName, "Book club", "patched with the name")
+        equal(open.to, GroupToken.encode(crew), "and the fan-out token")
+        var typed = ComposeState.reopened(request: r, attachments: [], sendAt: nil)
+        typed.to = "someone@x.test"
+        typed.adoptGroup(crew, request: r)
+        equal(typed.to, "someone@x.test", "a to typed in the meantime is kept")
+        var elsewhere = crew
+        elsewhere.id = 5
+        var untouched = ComposeState.reopened(request: r, attachments: [], sendAt: nil)
+        untouched.adoptGroup(elsewhere, request: r)
+        equal(untouched.groupName, nil, "another group lends nothing")
+    }
+
+    /// MIN S4: outbox ids are reused, so a fan-out's name leaves with its row,
+    /// but not because of a listing that could not have seen it yet.
+    static func aFanOutNameLeavesWithItsRow() {
+        var names = ScheduledGroupNames()
+        names.set(3, "Book club")
+        let since = names.generation
+        names.set(4, "Crew")
+        names.prune(listed: [], since: since)
+        equal(names[3], nil, "listed without it: gone")
+        equal(names[4], "Crew", "named after the listing left: kept")
+        names.prune(listed: [], since: names.generation)
+        equal(names[4], nil, "and dropped by the next listing without it")
+        names.set(5, "A")
+        names.prune(listed: [5], since: names.generation)
+        equal(names[5], "A", "a listed row keeps its name")
+        names.set(5, nil)
+        equal(names[5], nil, "a reused id scheduled with no group sheds the old name")
+        names.set(6, "B")
+        equal(names.take(6), "B", "a pull-back takes it")
+        equal(names[6], nil, "and it is gone")
+    }
+
+    /// MIN S6: the preview has no bytes for an inline picture, and the frame
+    /// drops a `cid:` image it cannot resolve, so the marker becomes a name.
+    static func anInlinePictureIsNamedNotDropped() {
+        let photo = OutboundAttachment(
+            id: 1, filename: "photo.png", mime: "image/png", size: 10, content_id: "tok-1@passband")
+        let body = "look:\n![photo.png](cid:tok-1@passband)\nnice"
+        equal(
+            ScheduledPreviewCopy.placeholdingInlineImages(body, attachments: [photo]),
+            "look:\n[photo.png]\nnice", "the file's name in brackets")
+        equal(
+            ScheduledPreviewCopy.placeholdingInlineImages(
+                "![old name](cid:gone@passband)", attachments: [photo]),
+            "[old name]", "a token no file carries keeps its alt")
+        equal(
+            ScheduledPreviewCopy.placeholdingInlineImages(
+                "![](cid:gone@passband)", attachments: []),
+            "[image]", "and a bare one says image")
+        equal(
+            ScheduledPreviewCopy.placeholdingInlineImages(
+                "![a](https://x.test/a.png) and (cid:x)", attachments: []),
+            "![a](https://x.test/a.png) and (cid:x)", "anything else is left alone")
+        check(!ScheduledPreviewCopy.renderFailed.contains("\u{2014}"), "no em dash")
     }
 
     // MARK: - the read-only preview
@@ -729,6 +867,33 @@ struct ScheduledSendTests {
             ScheduledPreviewCopy.header(reply).first,
             L(label: "to", value: ScheduledPreviewCopy.replyAudience),
             "a reply with no stated audience says the thread decides")
+        // Copy lists, when the request states them.
+        var copied = row()
+        copied.cc = "Bo Lee <bo@x.test>"
+        copied.bcc = "dana@x.test"
+        equal(
+            ScheduledPreviewCopy.header(copied),
+            [
+                L(label: "to", value: "ana@x.test"), L(label: "cc", value: "Bo Lee <bo@x.test>"),
+                L(label: "bcc", value: "dana@x.test"), L(label: "subject", value: "lunch"),
+            ],
+            "cc and bcc lines")
+        copied.cc = ""
+        equal(ScheduledPreviewCopy.header(copied).map(\.label), ["to", "bcc", "subject"], "a blank cc is not printed")
+        var bccOnly = row()
+        bccOnly.to = ""
+        bccOnly.bcc = "dana@x.test"
+        equal(
+            ScheduledPreviewCopy.header(bccOnly).first,
+            L(label: "to", value: ScheduledPreviewCopy.nobody),
+            "bcc only: no guessing at a group")
+        bccOnly.bcc = ""
+        equal(
+            ScheduledPreviewCopy.header(bccOnly).first, L(label: "to", value: "group or bcc"),
+            "nothing stated at all: the old guess")
+        equal(
+            ScheduledPreviewCopy.header(bccOnly, groupName: "Crew").first,
+            L(label: "to", value: "Crew"), "a known group names itself")
         // A forward: to, fwd: original, subject when typed.
         var forward = row()
         forward.forward_of_message_id = 20
@@ -745,9 +910,12 @@ struct ScheduledSendTests {
 
     static func thePreviewKeysAreEnterSXAndEsc() {
         let keys = ScheduledPreviewCopy.keys(row())
-        equal(keys.map(\.key), ["Escape", "Enter", "s", "x"], "the four keys")
         equal(
-            keys.map(\.verb), [.back, .edit, .sendNow, .cancel], "each to its verb")
+            keys.map(\.key), ["Escape", "Enter", "s", "x", "Backspace", "Delete"],
+            "the keys, Backspace and Delete as on the row")
+        equal(
+            keys.map(\.verb), [.back, .edit, .sendNow, .cancel, .cancel, .cancel],
+            "each to its verb")
         check(!keys.contains { $0.key == "e" || $0.key == "E" }, "never e: e is done")
         equal(
             ScheduledPreviewCopy.verbs(row()).map(\.verb.label), ["edit", "send now", "cancel"],
@@ -758,7 +926,7 @@ struct ScheduledSendTests {
         equal(ScheduledPreviewCopy.keys(sending).map(\.key), ["Escape"], "sending: back only")
         equal(ScheduledPreviewCopy.verbs(sending).count, 0, "sending: no verbs")
         equal(
-            ScheduledPreviewCopy.keys(row(state: "failed")).count, 4,
+            ScheduledPreviewCopy.keys(row(state: "failed")).count, 6,
             "a failed row can still be edited, sent or cancelled")
     }
 
@@ -809,6 +977,16 @@ struct ScheduledSendTests {
         equal(ScheduledCursor.reanchor(4, old: [5, 6], new: [5, 6, 7]), 5, "a sent row keeps its mail")
         equal(ScheduledCursor.reanchor(4, old: [5, 6], new: [6]), 3, "and the other way")
         equal(ScheduledCursor.reanchor(0, old: [5, 6], new: [5, 6]), 0, "nothing moved")
+        // MIN S3: an outbox row above a sent row left in the same update that
+        // shortened the page. Re-anchor then clamp keeps the sent mail; clamp
+        // then re-anchor landed one row too high, on the outbox row.
+        equal(
+            ScheduledCursor.follow(2, old: [5, 6], new: [6], count: 2), 1,
+            "the sent row under the cursor stays under it")
+        let clampFirst = ScheduledCursor.reanchor(min(2, 1), old: [5, 6], new: [6])
+        check(clampFirst != 1, "the other order is the bug (lands on \(clampFirst))")
+        equal(ScheduledCursor.follow(3, old: [], new: [], count: 2), 1, "off Sent: the plain clamp")
+        equal(ScheduledCursor.follow(0, old: [], new: [], count: 0), 0, "an empty page")
     }
 
     /// Minors 5 and 9: a row an earlier claim may have put in Gmail is never

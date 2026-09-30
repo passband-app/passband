@@ -203,17 +203,23 @@ async fn schedule(state: &ApiState, req: ScheduleBody) -> Result<Response, ApiEr
     // minted Message-ID cannot name N messages, so the crash recovery that
     // makes a scheduled send exactly-once has nothing to search for. Refused
     // for v1. `to`/`bcc` groups are one message the composer already
-    // addressed; `group_id` stays in the request for attribution at fire time
-    // (and only for that: the fire never re-reads the group's mode).
+    // addressed; `group_id` stays in the request for attribution at fire time,
+    // and the mode it was addressed under is FROZEN beside it (`group_mode`),
+    // so the fire records the list the mail was addressed with even if the
+    // group's mode changes before it goes. Whatever a client sent in
+    // `group_mode` is overwritten here: only this route may stamp it.
+    body.group_mode = None;
     if let Some(group_id) = body.group_id {
         match group_send::resolve(state, group_id).await {
-            Ok(audience) if audience.mode == GroupMode::Individual => {
+            Ok(audience) if audience.mode != GroupMode::Individual => {
+                body.group_mode = Some(audience.mode);
+            }
+            Ok(_) => {
                 audit_action(state, AUDIT_SCHEDULE, target, "rejected:group_fanout").await;
                 return Err(ApiError::bad_request(
                     "a one-message-per-person group cannot be scheduled yet; send it now",
                 ));
             }
-            Ok(_) => {}
             Err(e) => {
                 audit_action(state, AUDIT_SCHEDULE, target, "failed:group").await;
                 return Err(e);
@@ -412,6 +418,11 @@ struct ScheduledSendView {
     /// `""` when the request had none (a reply's audience derives at fire
     /// time), so a client need not branch on absence, as with drafts.
     to: String,
+    /// The copy lists as frozen, `""` when the request had none, the same
+    /// no-branching shape as `to`. `""` here does NOT say "nobody": a reply
+    /// that left `cc` absent derives the parent's copy list at fire time.
+    cc: String,
+    bcc: String,
     /// `""` when none was typed: a reply's `Re:` derives at fire time, and
     /// `parent_subject` is what the row can show meanwhile.
     subject: String,
@@ -452,6 +463,8 @@ impl ScheduledSendView {
             last_error: row.last_error,
             maybe_sent: row.maybe_sent,
             to: req.as_ref().and_then(|r| r.to.clone()).unwrap_or_default(),
+            cc: req.as_ref().and_then(|r| r.cc.clone()).unwrap_or_default(),
+            bcc: req.as_ref().and_then(|r| r.bcc.clone()).unwrap_or_default(),
             subject: req
                 .as_ref()
                 .and_then(|r| r.subject.clone())
@@ -935,9 +948,11 @@ async fn fire(state: &ApiState, row: ScheduledSend, report: &mut ScheduledPassRe
             Ok(c) => c,
             Err(_) => {
                 // Nothing could be sent without it either: the ordinary
-                // retryable failure a fire without a credential is.
-                audit_fire(state, &row, "rejected:no_write_credential").await;
-                settle_retry(state, &row, "rejected:no_write_credential", false, report).await;
+                // retryable failure a fire without a credential is. Audited
+                // only when the settle moved the row (see `fail_unsent`).
+                if settle_retry(state, &row, "rejected:no_write_credential", false, report).await {
+                    audit_fire(state, &row, "rejected:no_write_credential").await;
+                }
                 return;
             }
         };
@@ -984,8 +999,9 @@ async fn fire(state: &ApiState, row: ScheduledSend, report: &mut ScheduledPassRe
                 return;
             }
             Err(_) => {
-                audit_fire(state, &row, "failed:store").await;
-                settle_retry(state, &row, "failed:store", false, report).await;
+                if settle_retry(state, &row, "failed:store", false, report).await {
+                    audit_fire(state, &row, "failed:store").await;
+                }
                 return;
             }
         }
@@ -1046,7 +1062,9 @@ async fn fire(state: &ApiState, row: ScheduledSend, report: &mut ScheduledPassRe
             .await;
         }
         // `perform_send` already wrote the refusal to the ledger.
-        Err(failure) => settle_retry(state, &row, failure.reason, failure.maybe_sent, report).await,
+        Err(failure) => {
+            settle_retry(state, &row, failure.reason, failure.maybe_sent, report).await;
+        }
     }
 }
 
@@ -1090,8 +1108,9 @@ async fn search_failed(
     };
     if let Some(reason) = refused {
         eprintln!("squelch-api: scheduled send {id} could not be searched for ({reason})");
-        audit_fire(state, row, reason).await;
-        settle_retry(state, row, reason, true, report).await;
+        if settle_retry(state, row, reason, true, report).await {
+            audit_fire(state, row, reason).await;
+        }
         return;
     }
     let now = clock(state);
@@ -1101,6 +1120,10 @@ async fn search_failed(
     {
         eprintln!("squelch-api: scheduled send {id} could never be searched for; failed");
         // This claim sent nothing: the last attempt's end stays what it was.
+        // Never NULL here: only a `maybe_sent` row is searched for, and every
+        // write that sets that flag stamps `last_attempt_at` with it (a
+        // failed or requeued claim), so the `None` = now fallback of
+        // `settle_failed` cannot fire on this path.
         fail_unsent(
             state,
             row,
@@ -1163,21 +1186,24 @@ async fn fail_unsent(
 /// marks the row so the re-fire searches first, and waits at least
 /// [`RECOVERY_GRACE`] so the search can see it. THE MARK SURVIVES THE LAST
 /// ATTEMPT TOO: a row that goes `failed` on an ambiguous post is searched for
-/// before a send-now sends it again. The caller has audited the attempt.
+/// before a send-now sends it again.
+///
+/// `true` when the row moved. A caller that audits the attempt itself (the
+/// worker's own refusals; `perform_send` audits its own) does so only then,
+/// the `fail_unsent` rule: a worker that outlived its claim decided nothing.
 async fn settle_retry(
     state: &ApiState,
     row: &ScheduledSend,
     reason: &'static str,
     maybe_sent: bool,
     report: &mut ScheduledPassReport,
-) {
+) -> bool {
     if row.attempts >= SCHEDULED_MAX_ATTEMPTS {
         eprintln!(
             "squelch-api: scheduled send {} failed ({reason}) on attempt {}; giving up",
             row.id, row.attempts
         );
-        settle_failed(state, row, reason, maybe_sent, None, report).await;
-        return;
+        return settle_failed(state, row, reason, maybe_sent, None, report).await;
     }
     let (id, attempts) = (row.id, row.attempts);
     let mut wait = retry_backoff(attempts);
@@ -1194,9 +1220,13 @@ async fn settle_retry(
         Ok(true) => {
             eprintln!("squelch-api: scheduled send {id} failed ({reason}); retrying at {next}");
             report.retried += 1;
+            true
         }
-        Ok(false) => {}
-        Err(_) => eprintln!("squelch-api: scheduled send {id} retry not recorded"),
+        Ok(false) => false,
+        Err(_) => {
+            eprintln!("squelch-api: scheduled send {id} retry not recorded");
+            false
+        }
     }
 }
 
@@ -1381,7 +1411,15 @@ mod tests {
             attachments: Vec::new(),
         };
         let v = ScheduledSendView::new(row, ParentContext::default());
-        assert_eq!((v.to.as_str(), v.subject.as_str()), ("", ""));
+        assert_eq!(
+            (
+                v.to.as_str(),
+                v.cc.as_str(),
+                v.bcc.as_str(),
+                v.subject.as_str()
+            ),
+            ("", "", "", "")
+        );
         assert_eq!(v.state, "failed");
     }
 

@@ -837,7 +837,8 @@ impl SquelchServer {
     #[tool(
         name = "set_sender_rule",
         description = "Create/update a LOCAL sender rule (surface|squelch|filtered). \
-                       Writes only squelch's local store, never the mailbox."
+                       Writes only squelch's local store, never the mailbox. \
+                       Applies to mail that arrives after it; stored mail is not re-triaged."
     )]
     async fn set_sender_rule(
         &self,

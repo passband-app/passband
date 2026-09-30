@@ -496,7 +496,9 @@ struct ConnectView: View {
             linkedPairForm
         } else {
             // Only the sheet reaches here (the gate has its rig), and adding a
-            // daemon offers both ways in.
+            // daemon offers every way in: the hosted sign in first, because
+            // it is the one a hosted person takes, then the manual pairing.
+            sheetSignIn
             GlassSegmented(
                 options: [(ConnectMode.pair, "pair with code"), (.token, "api token")],
                 selection: modeBinding)
@@ -508,6 +510,53 @@ struct ConnectView: View {
             }
             nameField.padding(.top, 14)
         }
+    }
+
+    /// The sheet's hosted door, and the same one the gate opens: Google's
+    /// account chooser names the mailbox, the control plane finds the daemon
+    /// that mailbox owns, and the browser comes back with a `passband://pair`
+    /// link. The store raises THIS sheet for a link while connected, so the
+    /// link lands in the form below exactly as a hand-typed code would —
+    /// filled and ringed, and a press away from adding, never added on its own.
+    private var sheetSignIn: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                signInOpened = true
+                Opener.open(Hosted.signIn(theme: colorScheme))
+            } label: {
+                HStack(spacing: 9) {
+                    Image(systemName: "envelope.fill")
+                    Text(signInOpened ? "open sign in again" : "sign in with Gmail")
+                    Spacer(minLength: 0)
+                    Image(systemName: "arrow.up.right")
+                }
+                .font(.system(size: 14, weight: .semibold))
+                .padding(.vertical, 9)
+                .padding(.horizontal, 8)
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Palette.accent)
+            .disabled(busy)
+
+            Text(signInOpened
+                ? "finish in the browser tab that opened. this sheet fills in when passband comes back."
+                : "pick the Google account whose mail you want to add.")
+                .font(.system(size: 12))
+                .foregroundStyle(Palette.inkFaint)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 10) {
+                Rectangle().fill(Palette.hairlineStrong).frame(height: 0.75)
+                Text("or pair a server")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Palette.inkFaint)
+                    .fixedSize()
+                Rectangle().fill(Palette.hairlineStrong).frame(height: 0.75)
+            }
+            .padding(.vertical, 10)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: - the gate's rig

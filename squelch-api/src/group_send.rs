@@ -291,6 +291,7 @@ async fn send_one(
         // Gmail mints each member's. One minted id cannot serve N messages, and a
         // scheduled fan-out is refused for v1 (docs/SCHEDULED-SEND.md §3).
         message_id: None,
+        outbox_token: None,
     };
     let raw = build_reply_rfc822(&parts).map_err(|_| "could not compose".to_string())?;
     let sent = client

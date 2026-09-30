@@ -2733,6 +2733,9 @@ async fn include_tracker_mints_a_pixel_the_store_can_resolve() {
 
     let reqs = handle.await.unwrap();
     let mime = sent_mime(&reqs[0]);
+    // An interactive send is not a scheduled one: Gmail mints its id, and it
+    // carries no outbox token.
+    assert!(!mime.contains("X-Passband-Outbox") && !mime.contains("Message-ID:"));
     // The pixel rides the HTML alternative only; the plain part stays clean.
     assert!(mime.contains("multipart/alternative"));
     let token = pixel_token(&mime);
@@ -12662,6 +12665,145 @@ async fn recovery_settles_a_mail_gmail_already_has_without_resending_it() {
     );
 }
 
+/// Gmail's `format=metadata` answer for a Sent candidate of the scan.
+fn scan_meta(id: &str, outbox: &str, msgid: &str) -> String {
+    format!(
+        "{{\"id\":\"{id}\",\"payload\":{{\"headers\":[\
+           {{\"name\":\"Message-ID\",\"value\":\"{msgid}\"}},\
+           {{\"name\":\"X-Passband-Outbox\",\"value\":\"{outbox}\"}}]}}}}"
+    )
+}
+
+#[tokio::test]
+async fn recovery_finds_a_mail_whose_message_id_gmail_rewrote_by_its_outbox_header() {
+    // THE LIVE FINDING (2026-09-29): the mail went out, but `rfc822msgid:`
+    // for the minted id finds nothing. The Sent scan reads the outbox header
+    // and settles it: recovered, never sent again.
+    let (base, gmail) = mock_gmail_seq(vec![
+        (200, "{\"resultSizeEstimate\":0}".to_string()),
+        (
+            200,
+            "{\"messages\":[{\"id\":\"gm-other\"},{\"id\":\"gm-9\"}]}".to_string(),
+        ),
+        (200, scan_meta("gm-other", "", "<CAx@mail.gmail.com>")),
+        (200, scan_meta("gm-9", "crashed", "<CAy@mail.gmail.com>")),
+        (200, echo_response("gm-9")),
+    ])
+    .await;
+    let (Harness { store, acct, .. }, state) = scheduled_rig(Some(base), |_, _| {});
+    let id = lapsed_row(&store, acct, "<crashed@passband>", 10);
+
+    let before = chrono::Utc::now();
+    let report = squelch_api::run_scheduled_send_pass(&state).await;
+    assert_eq!((report.recovered_sent, report.sent), (1, 0), "{report:?}");
+    let reqs = gmail.await.unwrap();
+    assert_eq!(reqs.len(), 5);
+    assert!(reqs[0].contains("rfc822msgid%3Acrashed%40passband"));
+    assert!(reqs[1].contains("q=in%3Asent%20after%3A"));
+    assert!(reqs[1].contains("includeSpamTrash=true"));
+    // The floor reaches back past the lapsed attempt, with the slack.
+    let floor: i64 = reqs[1]
+        .split("after%3A")
+        .nth(1)
+        .unwrap()
+        .split('&')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(floor <= (before - chrono::Duration::minutes(70)).timestamp());
+    assert!(floor >= (before - chrono::Duration::days(1)).timestamp());
+    assert!(reqs[2].contains("/messages/gm-other?format=metadata"));
+    assert!(reqs[3].contains("/messages/gm-9?format=metadata&metadataHeaders=X-Passband-Outbox"));
+    assert!(reqs[4].contains("/messages/gm-9?format=raw"), "the echo");
+    assert!(
+        !reqs.iter().any(|r| r.contains("/messages/send")),
+        "EXACTLY ONCE: no second send"
+    );
+    let row = store.scheduled_send_by_id(acct, id).unwrap().unwrap();
+    assert_eq!(row.state, ScheduledSendState::Sent);
+    assert!(row.sent_message_id.is_some());
+    assert_eq!(
+        audited(&store, acct, "send"),
+        vec![format!("scheduled:{id}:recovered")]
+    );
+}
+
+#[tokio::test]
+async fn a_scan_that_fails_midway_defers_recovery_and_requeues_nothing() {
+    let (base, gmail) = mock_gmail_seq(vec![
+        (200, "{\"resultSizeEstimate\":0}".to_string()),
+        (200, "{\"messages\":[{\"id\":\"gm-a\"}]}".to_string()),
+        (503, "{}".to_string()),
+    ])
+    .await;
+    let (Harness { store, acct, .. }, state) = scheduled_rig(Some(base), |_, _| {});
+    let id = lapsed_row(&store, acct, "<midway@passband>", 10);
+
+    let report = squelch_api::run_scheduled_send_pass(&state).await;
+    assert_eq!(
+        (report.deferred, report.requeued, report.sent),
+        (1, 0, 0),
+        "{report:?}"
+    );
+    assert_eq!(gmail.await.unwrap().len(), 3, "no send");
+    let row = store.scheduled_send_by_id(acct, id).unwrap().unwrap();
+    assert_eq!(
+        row.state,
+        ScheduledSendState::Sending,
+        "a half-read scan is could-not-ask, never did-not-go-out"
+    );
+    assert_eq!(row.last_error.as_deref(), Some("recovery:unreachable"));
+}
+
+#[tokio::test]
+async fn the_pre_fire_search_reads_the_outbox_header_too() {
+    // Gmail took the send and answered 500. The re-fire's msgid search
+    // misses (the id was rewritten); the Sent scan finds the header the fired
+    // send carried, and nothing is sent twice.
+    let (base, gmail) = mock_gmail_seq(vec![
+        (500, "{\"error\":\"backend\"}".to_string()),
+        (200, "{\"resultSizeEstimate\":0}".to_string()),
+        (200, "{\"messages\":[{\"id\":\"gm-5\"}]}".to_string()),
+        (200, scan_meta("gm-5", "prefire", "<CAz@mail.gmail.com>")),
+        (200, echo_response("gm-5")),
+    ])
+    .await;
+    let (Harness { store, acct, .. }, state) = scheduled_rig(Some(base), |_, _| {});
+    let id = due_row(&store, acct, COLD_REQUEST, "<prefire@passband>");
+
+    let report = squelch_api::run_scheduled_send_pass(&state).await;
+    assert_eq!(report.retried, 1, "{report:?}");
+    let later = state
+        .clone()
+        .with_worker_clock_skew(chrono::Duration::minutes(6));
+    assert!(
+        store
+            .send_scheduled_now(acct, id, chrono::Utc::now())
+            .unwrap()
+    );
+    let report = squelch_api::run_scheduled_send_pass(&later).await;
+    assert_eq!((report.recovered_sent, report.sent), (1, 0), "{report:?}");
+    let reqs = gmail.await.unwrap();
+    assert_eq!(reqs.len(), 5);
+    // The fired send carried both fingerprints.
+    let mime = sent_mime(&reqs[0]);
+    assert!(mime.contains("Message-ID: <prefire@passband>\r\n"));
+    assert!(mime.contains("X-Passband-Outbox: prefire\r\n"));
+    assert!(reqs[1].contains("rfc822msgid%3Aprefire%40passband"));
+    assert!(reqs[2].contains("q=in%3Asent%20after%3A"));
+    assert!(reqs[3].contains("/messages/gm-5?format=metadata"));
+    assert_eq!(
+        reqs.iter().filter(|r| r.contains("/messages/send")).count(),
+        1,
+        "EXACTLY ONE send hit Gmail"
+    );
+    assert_eq!(
+        store.scheduled_send_by_id(acct, id).unwrap().unwrap().state,
+        ScheduledSendState::Sent
+    );
+}
+
 #[tokio::test]
 async fn a_lease_that_lapsed_inside_the_grace_is_not_asked_about_yet() {
     let (base, gmail) = mock_gmail(0).await;
@@ -12679,8 +12821,11 @@ async fn a_lease_that_lapsed_inside_the_grace_is_not_asked_about_yet() {
 #[tokio::test]
 async fn recovery_requeues_a_mail_gmail_never_saw_and_does_not_send_it_in_the_same_pass() {
     let (base, gmail) = mock_gmail_seq(vec![
+        // Recovery: the msgid search misses, and so does the Sent scan.
         (200, "{\"resultSizeEstimate\":0}".to_string()),
-        // The re-fire, a grace later: asked AGAIN, then sent.
+        (200, "{\"resultSizeEstimate\":0}".to_string()),
+        // The re-fire, a grace later: asked AGAIN (both looks), then sent.
+        (200, "{\"resultSizeEstimate\":0}".to_string()),
         (200, "{\"resultSizeEstimate\":0}".to_string()),
         (
             200,
@@ -12708,10 +12853,13 @@ async fn recovery_requeues_a_mail_gmail_never_saw_and_does_not_send_it_in_the_sa
     let report = squelch_api::run_scheduled_send_pass(&state).await;
     assert_eq!(report.sent, 1, "{report:?}");
     let reqs = gmail.await.unwrap();
-    assert_eq!(reqs.len(), 4);
-    assert!(reqs[0].contains("rfc822msgid") && reqs[1].contains("rfc822msgid"));
-    assert!(reqs[2].contains("/messages/send"));
-    assert!(sent_mime(&reqs[2]).contains("Message-ID: <never@passband>\r\n"));
+    assert_eq!(reqs.len(), 6);
+    assert!(reqs[0].contains("rfc822msgid") && reqs[2].contains("rfc822msgid"));
+    assert!(reqs[1].contains("q=in%3Asent%20after%3A") && reqs[3].contains("q=in%3Asent"));
+    assert!(reqs[4].contains("/messages/send"));
+    let mime = sent_mime(&reqs[4]);
+    assert!(mime.contains("Message-ID: <never@passband>\r\n"));
+    assert!(mime.contains("X-Passband-Outbox: never\r\n"));
     let row = store.scheduled_send_by_id(acct, id).unwrap().unwrap();
     assert_eq!(row.state, ScheduledSendState::Sent);
     assert_eq!(row.attempts, 2, "the lapsed attempt counted");
@@ -12719,7 +12867,11 @@ async fn recovery_requeues_a_mail_gmail_never_saw_and_does_not_send_it_in_the_sa
 
 #[tokio::test]
 async fn a_row_that_keeps_dying_mid_send_stops_at_its_last_attempt() {
-    let (base, gmail) = mock_gmail_seq(vec![(200, "{\"resultSizeEstimate\":0}".to_string())]).await;
+    let (base, gmail) = mock_gmail_seq(vec![
+        (200, "{\"resultSizeEstimate\":0}".to_string()),
+        (200, "{\"resultSizeEstimate\":0}".to_string()),
+    ])
+    .await;
     let (Harness { store, acct, .. }, state) = scheduled_rig(Some(base), |_, _| {});
     let id = lapsed_row(&store, acct, "<loop@passband>", 10);
     let now = chrono::Utc::now();
@@ -12739,7 +12891,11 @@ async fn a_row_that_keeps_dying_mid_send_stops_at_its_last_attempt() {
     }
     let report = squelch_api::run_scheduled_send_pass(&state).await;
     assert_eq!((report.failed, report.requeued), (1, 0), "{report:?}");
-    assert_eq!(gmail.await.unwrap().len(), 1);
+    assert_eq!(
+        gmail.await.unwrap().len(),
+        2,
+        "the msgid search and the scan"
+    );
     let row = store.scheduled_send_by_id(acct, id).unwrap().unwrap();
     assert_eq!(row.state, ScheduledSendState::Failed);
     assert_eq!(row.last_error.as_deref(), Some("failed:crash_loop"));
@@ -14045,6 +14201,7 @@ async fn a_send_now_right_after_a_recovery_give_up_owes_no_fresh_grace() {
 
     let (base, gmail) = mock_gmail_seq(vec![
         (200, "{\"resultSizeEstimate\":0}".to_string()),
+        (200, "{\"resultSizeEstimate\":0}".to_string()),
         (
             200,
             "{\"id\":\"sent-p\",\"threadId\":\"thread-new\"}".to_string(),
@@ -14067,7 +14224,8 @@ async fn a_send_now_right_after_a_recovery_give_up_owes_no_fresh_grace() {
     );
     let reqs = gmail.await.unwrap();
     assert!(reqs[0].contains("rfc822msgid"), "searched first");
-    assert!(reqs[1].contains("/messages/send"));
+    assert!(reqs[1].contains("q=in%3Asent"), "then scanned");
+    assert!(reqs[2].contains("/messages/send"));
     assert_eq!(
         store.scheduled_send_by_id(acct, id).unwrap().unwrap().state,
         ScheduledSendState::Sent

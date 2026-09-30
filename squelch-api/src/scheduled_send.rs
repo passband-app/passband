@@ -135,11 +135,12 @@ async fn no_store_layer(mut resp: Response) -> Response {
     resp
 }
 
-/// The `Message-ID` a scheduled send goes out with, minted NOW: the only thing
-/// that answers "did it go out?" after a crash mid-send (the worker's
-/// recovery searches Gmail for it before any retry). 24 bytes of OS entropy as
-/// hex, so the id is plain `atext` and the `rfc822msgid:` search needs no
-/// quoting.
+/// The `Message-ID` a scheduled send goes out with, minted NOW. Its 48-hex
+/// local part is also the row's outbox token (`X-Passband-Outbox`, see
+/// [`crate::gmail_write::outbox_token`]): together they are what answers "did
+/// it go out?" after a crash mid-send (the worker's recovery asks Gmail before
+/// any retry). 24 bytes of OS entropy as hex, so the id is plain `atext` and
+/// neither search needs quoting.
 fn mint_message_id() -> Result<String, ApiError> {
     let token = squelch_core::tracking::mint_token()
         .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?;
@@ -721,9 +722,25 @@ pub(crate) fn lease_for(row: &ScheduledSend) -> chrono::Duration {
     SCHEDULED_LEASE_BASE + budget
 }
 
+/// The earliest instant an earlier attempt of `row` can have posted its mail:
+/// the scan's floor for [`GmailWriteClient::find_scheduled_send`] (which
+/// subtracts its own slack on top). The earliest of `send_at`, the last
+/// attempt's end and the live lease's end, less one whole lease: `send_at`
+/// alone will not do, because a retry or a requeue moves it PAST the attempt
+/// being asked about. The scan reads newest first, so the floor only bounds
+/// how far back it pages, never what it finds first.
+fn scan_floor(row: &ScheduledSend) -> DateTime<Utc> {
+    let earliest = [Some(row.send_at), row.last_attempt_at, row.lease_until]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(row.send_at);
+    earliest - lease_for(row)
+}
+
 /// Step 1: every `sending` row whose lease lapsed at least [`RECOVERY_GRACE`]
 /// ago (a worker that died mid-send) is asked of Gmail by its minted
-/// Message-ID. At most [`MAX_PER_PASS`] rows a pass, like the claims: a
+/// Message-ID and, failing that, its `X-Passband-Outbox` token (§4). At most [`MAX_PER_PASS`] rows a pass, like the claims: a
 /// backlog of lapsed rows (a long outage) is asked about over ticks, not in
 /// one burst of searches a shutdown has to wait out.
 async fn recover(state: &ApiState, report: &mut ScheduledPassReport) {
@@ -761,7 +778,10 @@ async fn recover(state: &ApiState, report: &mut ScheduledPassReport) {
         if stopping(state) {
             return;
         }
-        match client.find_by_rfc822_msgid(&row.message_id_header).await {
+        match client
+            .find_scheduled_send(&row.message_id_header, scan_floor(&row))
+            .await
+        {
             Ok(Some(gmail_id)) => {
                 if settle_recovered(state, &client, &row, gmail_id).await {
                     report.recovered_sent += 1;
@@ -922,7 +942,7 @@ async fn fire(state: &ApiState, row: ScheduledSend, report: &mut ScheduledPassRe
 
     // THE PRE-FIRE SEARCH. An earlier attempt of this row may be in Gmail (it
     // failed after the post, or its lease lapsed and recovery did not find it
-    // YET): ask by Message-ID before sending again. Found: settled, no send.
+    // YET): ask by Message-ID and outbox token before sending again. Found: settled, no send.
     // Could not ask: nothing is sent.
     if row.maybe_sent {
         // THE GRACE HOLDS AT FIRE, whoever moved `send_at`: a send-now on a
@@ -956,7 +976,10 @@ async fn fire(state: &ApiState, row: ScheduledSend, report: &mut ScheduledPassRe
                 return;
             }
         };
-        match client.find_by_rfc822_msgid(&row.message_id_header).await {
+        match client
+            .find_scheduled_send(&row.message_id_header, scan_floor(&row))
+            .await
+        {
             Ok(Some(gmail_id)) => {
                 if settle_recovered(state, &client, &row, gmail_id).await {
                     report.recovered_sent += 1;

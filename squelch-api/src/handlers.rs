@@ -34,7 +34,7 @@ use crate::error::ApiError;
 use crate::gmail_write::{
     ForwardParts, ForwardedOriginal, GmailWriteClient, MailAttachment, ReplyParts, SentRef,
     WriteError, addrs_excluding, build_forward_rfc822, build_references, build_reply_rfc822,
-    cc_excluding, count_addrs, derive_reply_recipients, forward_subject, mark_inline,
+    cc_excluding, count_addrs, derive_reply_recipients, forward_subject, mark_inline, outbox_token,
     parse_addr_list, parse_forwarded_original, reply_subject,
 };
 use crate::group_send;
@@ -4437,7 +4437,10 @@ pub(crate) enum SendGuard {
 }
 
 /// A scheduled send being FIRED by the worker (docs/SCHEDULED-SEND.md §4): the
-/// row it came from and the `Message-ID` minted when it was scheduled.
+/// row it came from and the `Message-ID` minted when it was scheduled. Every
+/// fired send carries both that id and its outbox token ([`outbox_token`], the
+/// `X-Passband-Outbox` header recovery reads back); an interactive send
+/// carries neither.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Fire<'a> {
     pub(crate) id: i64,
@@ -4625,8 +4628,9 @@ pub async fn action_send(
 /// `attachments` are the files [`load_send_attachments`] resolved for
 /// `body.attachment_ids`. `owed` is what the outbound guard is still owed (see
 /// [`SendGuard`]). `fire` is the scheduled send being fired: its minted
-/// `Message-ID` is written onto the outgoing message, and its row id marks the
-/// success ledger row (see [`Fire`]); `None` lets Gmail mint the id, which is
+/// `Message-ID` and its `X-Passband-Outbox` token are written onto the
+/// outgoing message, and its row id marks the success ledger row (see
+/// [`Fire`]); `None` lets Gmail mint the id and writes no token, which is
 /// every send made while the user waits.
 ///
 /// Dispatch: a FORWARD goes to [`forward_send`] (unthreaded, reads the
@@ -4892,6 +4896,7 @@ pub(crate) async fn perform_send(
         pixel_url: tracker.as_ref().map(|(_, url)| url.clone()),
         attachments,
         message_id: message_id.map(str::to_string),
+        outbox_token: message_id.map(outbox_token),
     };
     let raw = match build_reply_rfc822(&parts) {
         Ok(r) => r,
@@ -5342,6 +5347,7 @@ async fn forward_send(
         pixel_url: tracker.as_ref().map(|(_, url)| url.clone()),
         original,
         message_id: fire.map(|f| f.message_id.to_string()),
+        outbox_token: fire.map(|f| outbox_token(f.message_id)),
     };
     let raw = match build_forward_rfc822(&parts) {
         Ok(r) => r,

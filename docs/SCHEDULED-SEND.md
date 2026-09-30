@@ -42,7 +42,7 @@ so a database created by an earlier build of this branch gains them.
 | `lease_until` | TEXT, set while `sending` |
 | `attempts` | INTEGER, default 0 |
 | `last_error` | TEXT, redacted reason (never content) |
-| `message_id_header` | TEXT, the `Message-ID` minted at schedule time: `<` + 48 hex chars + `@passband>` |
+| `message_id_header` | TEXT, the `Message-ID` minted at schedule time: `<` + 48 hex chars + `@passband>`. The 48 hex are also the row's OUTBOX TOKEN (`X-Passband-Outbox`, §4), derived, not stored |
 | `sent_message_id` | INTEGER, local echo id once sent |
 | `sent_thread_id` | TEXT |
 | `maybe_sent` | INTEGER 0/1, STICKY: an earlier attempt may have reached Gmail (§4) |
@@ -154,12 +154,8 @@ Per tick:
 
 1. **Recover** rows in `sending` whose `lease_until` passed at least
    `RECOVERY_GRACE` ago (a crash mid-send) and whose `recover_at` (if set) has
-   come. Search Gmail on the write token for `rfc822msgid:<id>`, the
-   header's value WITHOUT its angle brackets (live finding, eb71173: Gmail's
-   operator takes `id@host`; with the brackets in, the search for a mail the
-   daemon had just sent came back empty, and the row was requeued as
-   maybe-sent, one grace away from a duplicate). The pre-fire search (step 3)
-   is the same query.
+   come. Ask Gmail on the write token whether the mail went out: THE LOOKUP
+   below. The pre-fire search (step 3) is the same lookup.
    - Found: echo it, mark `sent`, audit `send` `scheduled:<id>:recovered`. No send.
    - Not found, attempts left: back to `scheduled` at `now + RECOVERY_GRACE`
      with `maybe_sent` set. NOT sent in the same pass: the re-fire searches
@@ -174,8 +170,55 @@ Per tick:
      MAY have been sent, and the client says so. "Send now" on it searches
      before it sends (it is `maybe_sent`).
    At most `MAX_PER_PASS` rows are asked about per pass.
-   This is why the daemon mints the Message-ID: it is the only thing that
-   makes "did it go out?" answerable, and it is the whole double-send defense.
+   This is why the daemon mints the Message-ID and the outbox token: they
+   are the only things that make "did it go out?" answerable, and the lookup
+   is the whole double-send defense.
+
+   **THE LOOKUP** (`GmailWriteClient::find_scheduled_send(message_id,
+   sent_after)`). Every fired send carries two fingerprints: the minted
+   `Message-ID: <48hex@passband>` and a custom header
+   `X-Passband-Outbox: 48hex`. The lookup asks for them in two steps:
+
+   a. `messages.list?q=rfc822msgid:<48hex@passband, brackets off,
+      percent-encoded>&maxResults=1&includeSpamTrash=true`. A hit returns at
+      once. A miss proves NOTHING (below).
+   b. The Sent scan: `messages.list?q=in:sent after:<epoch seconds>
+      &maxResults=25&includeSpamTrash=true`, newest first, following
+      `pageToken` for at most 4 pages (100 candidates), and for each
+      candidate `messages.get?format=metadata&metadataHeaders=X-Passband-Outbox
+      &metadataHeaders=Message-ID`. A candidate whose `X-Passband-Outbox`
+      equals the token (exact, trimmed), or whose `Message-ID` is the minted
+      one, is the mail. The floor is the earliest of the row's `send_at`,
+      `last_attempt_at` and `lease_until`, less one lease (a retry or requeue
+      moves `send_at` PAST the attempt being asked about), less one hour of
+      clock slack.
+
+   WHY TWO STEPS (live finding, 2026-09-29, real Gmail): the daemon sent a
+   scheduled mail with its minted Message-ID, the mail went out and was
+   echoed back into the store, and `rfc822msgid:` for the bare id (brackets
+   already off, eb71173) found NOTHING at 9 and at 28 minutes. Recovery
+   requeued a delivered mail as maybe-sent, one grace from a duplicate. The
+   likeliest reading is that `messages.send` replaces a client-supplied
+   Message-ID; the design holds either way, because step (b) reads a header
+   Gmail has no reason to touch. Step (a) stays because it is one cheap call
+   and, where the id survives, it answers without the scan.
+
+   Every request of both steps goes through the write client's budget
+   (`admit`, the 5 s wait cap), timeout and `settle`, like any other write
+   call. Outcomes: a match is `Found`; a scan that reaches the end of the
+   listing without one is `Not found`; ANY error (transport, 5xx, 4xx,
+   pacing) is "could not ask"; and a scan that hits its 4-page cap with more
+   pages still listed is ALSO "could not ask" (a transport-class error, so
+   UNREACHABLE in step 3): it could not rule the mail out, and reading that
+   as "not sent" is the double send this exists to prevent. A row in that
+   state (over 100 Sent mails since its attempt) ends `failed:recovery` for
+   the user after `RECOVERY_GIVE_UP`.
+
+   `X-Passband-Outbox` IS A STABLE CONTRACT: every mail a daemon has fired is
+   recognised by that exact header name and by the token being the minted
+   id's 48-hex local part. Renaming either strands the recovery of any row
+   in flight across the upgrade. Interactive sends (the live send route)
+   carry neither the minted id nor the header: nothing ever asks about them.
 2. **Claim** one due row atomically, in one IMMEDIATE transaction: the oldest
    `scheduled` row with `send_at <= now` and `attempts < 3` moves to
    `sending`, `lease_until = now + lease(row)`, `attempts + 1`. The returned
@@ -185,7 +228,7 @@ Per tick:
    `MAX_PER_PASS`, or shutdown.
 3. **Pre-fire search.** A row with `maybe_sent` set (an earlier attempt failed
    after the post, or its lease lapsed and recovery did not find it) is asked
-   about by Message-ID BEFORE it is sent again. First the GRACE, enforced
+   about through THE LOOKUP (step 1) BEFORE it is sent again. First the GRACE, enforced
    here and not by `send_at` (which a send-now moves): inside
    `last_attempt_at + RECOVERY_GRACE` the claim is handed back untried
    (`recovery:grace`). Then the search. Found: settled as in step 1, no send.
@@ -254,16 +297,18 @@ Late is fine. A laptop that slept through 9:00 sends at wake. The response
 to "was it very late?" is the Sent row's time, not a refusal. A cap is a
 follow-up if it ever bites.
 
-`build_reply_rfc822` gains an optional `message_id` on `ReplyParts`; absent
-= today's byte-identical output. The write client gains one method:
-`find_by_rfc822_msgid(&str) -> Option<gmail id>`.
+`ReplyParts` and `ForwardParts` gain an optional `message_id` and an optional
+`outbox_token`; both absent = today's byte-identical output, and both are set
+only when the worker fires a row (`Fire`). The write client gains
+`find_by_rfc822_msgid(&str)` (step a) and `find_scheduled_send(&str,
+sent_after)` (the whole lookup).
 
-Two things only a live Gmail can confirm (the mock cannot): that
-`messages.send` keeps a client-supplied `Message-ID` rather than replacing it,
-and that `rfc822msgid:` finds the message (and how long after the send it
-starts to). The first is still unconfirmed. The second was answered on
-2026-09-29: the operator takes the BARE id (`id@host`, the `@`
-percent-encoded); `rfc822msgid:<id@host>` finds nothing (see step 1).
+What only a live Gmail can confirm (the mock cannot): whether `messages.send`
+keeps a client-supplied `Message-ID` (the 2026-09-29 finding says probably
+not; the received mail's headers will settle it), that the Sent copy keeps
+`X-Passband-Outbox` (custom `X-` headers are not known to be stripped), and
+how long after a send `in:sent` lists it. `rfc822msgid:` takes the BARE id
+(`id@host`, the `@` percent-encoded); `rfc822msgid:<id@host>` finds nothing.
 
 ## 5. The rest of the door
 
@@ -384,7 +429,8 @@ request.
 - The guard runs at schedule time and its `override_guard` is honored at
   fire time; nothing re-scans.
 - Exactly-once: a row is sent only from `sending` under a lease, and
-  recovery answers via the minted Message-ID before any retry.
+  recovery answers via the minted Message-ID and the `X-Passband-Outbox`
+  token (the §4 lookup) before any retry.
 - Sealed/read-only tenants: scheduling needs the write credential at
   schedule time (403), and the worker treats a missing credential as a
   retryable failure, never a silent drop.

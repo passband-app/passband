@@ -685,6 +685,9 @@ pub(crate) fn enqueue_agent_triage_lane(
     } else {
         "triage"
     };
+    if m.is_sent && !m.is_spam {
+        retire_inbound_verdict(conn, account, message)?;
+    }
     let new_arrival = arrival_eligible && previous.is_none();
     let eligible = (new_arrival || (changed && pending_arrival)) && !m.is_sent && !m.is_spam;
     let foreground = kind == "triage"
@@ -715,7 +718,7 @@ pub(crate) fn enqueue_agent_triage_lane(
     }
     // A sent reply is evidence that can resolve an existing obligation. It gets
     // no placement or arrival push of its own; re-evaluate the inbound target.
-    if changed && m.is_sent && !m.is_spam && trigger != "source_access" {
+    if changed && m.is_sent && !m.is_spam && trigger != "source_access" && !m.thread_id.is_empty() {
         let target: Option<i64> = conn
             .query_row(
                 concat!(
@@ -743,6 +746,51 @@ pub(crate) fn enqueue_agent_triage_lane(
     }
     Ok(())
 }
+/// The account's own mail is never placed, so whatever a triage run decided
+/// about it while it was being read as inbound goes when it is filed
+/// access-only. Nothing would ever refresh it otherwise: an access commit
+/// writes `access` alone, so the decision's source rows would stay pinned to a
+/// revision the message has left, and the external door reads a stale source
+/// as "changed" and fails closed. That would take the message, its thread and
+/// everything that cites it off the agent door for good.
+///
+/// A no-op for a stored sent copy, which never had a verdict to retire.
+fn retire_inbound_verdict(conn: &Connection, account: AccountId, message: i64) -> Result<()> {
+    conn.execute(
+        "DELETE FROM agent_decision_sources WHERE account_id=?1 AND message_id=?2",
+        params![account, message],
+    )?;
+    conn.execute(
+        "DELETE FROM agent_message_destinations WHERE account_id=?1 AND message_id=?2",
+        params![account, message],
+    )?;
+    let previous: Option<String> = conn
+        .query_row(
+            "SELECT decision_json FROM agent_message_decisions WHERE account_id=?1 AND message_id=?2",
+            params![account, message],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(previous) = previous else {
+        return Ok(());
+    };
+    conn.execute(
+        "DELETE FROM agent_message_decisions WHERE account_id=?1 AND message_id=?2",
+        params![account, message],
+    )?;
+    // Shipments are derived from the decisions still standing. One that no
+    // longer decodes proposed nothing a current reader could have used.
+    if let Ok(previous) = decode::<MessageDecision>(&previous) {
+        super::agent_deliveries::reconcile(
+            conn,
+            account,
+            Some(&previous),
+            &MessageDecision::default(),
+        )?;
+    }
+    Ok(())
+}
+
 /// A source revision invalidates its consumers' model results, never their
 /// human corrections. The existing per-message queue absorbs overlapping waves.
 fn queue_dependent_refreshes(
@@ -2097,8 +2145,9 @@ fn list_items_with_query(
     // wrote it. A thread whose representative is theirs (see `OWN_MAIL` for how
     // a sent message comes to sit in the inbound listing at all) is never the
     // model's to surface, and the same two human acts still win. The other
-    // lists hold placements only a model makes, so there the exclusion is flat:
-    // rows placed before own mail stopped being triaged as inbound stay hidden.
+    // lists exclude it flatly, as they always have the stored sent copy: own
+    // mail carries no decision to place, so a placement on it is a leftover
+    // from being triaged as inbound and stays hidden until it is retired.
     let sql = if destination == "fye" {
         concat!("SELECT
              m.id,m.thread_id,m.from_addr,m.subject,
@@ -4868,10 +4917,18 @@ fn human_inventory(
             .as_ref()
             .map(|d| d.summary.clone())
             .unwrap_or_else(|| row.subject.clone());
+        // Own mail is never triaged, so there is nothing for it to be pending.
         let reason = decision
             .as_ref()
             .map(|d| d.reason.clone())
-            .unwrap_or_else(|| "Triage pending".into());
+            .unwrap_or_else(|| {
+                if row.own {
+                    "You sent this"
+                } else {
+                    "Triage pending"
+                }
+                .into()
+            });
         let deadline = attention
             .as_ref()
             .and_then(|a| a.factors.attention_at.as_ref())
@@ -5574,6 +5631,32 @@ mod own_mail_tests {
             .unwrap()
     }
 
+    fn count(store: &SqliteStore, sql: &str, message: i64) -> i64 {
+        store
+            .lock()
+            .unwrap()
+            .query_row(sql, [message], |row| row.get(0))
+            .unwrap()
+    }
+    fn notification_jobs(store: &SqliteStore, message: i64) -> i64 {
+        count(
+            store,
+            "SELECT count(*) FROM agent_triage_jobs WHERE message_id=?1 AND kind LIKE '%notification'",
+            message,
+        )
+    }
+    fn representative(store: &SqliteStore, thread: &str) -> i64 {
+        store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT message_id FROM agent_thread_attention WHERE account_id=1 AND thread_id=?1",
+                [thread],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
     #[test]
     fn own_mail_in_the_inbox_is_evidence_not_an_arrival() {
         let store = fixture();
@@ -5586,6 +5669,17 @@ mod own_mail_tests {
             jobs(&store, 4),
             vec![("access".to_string(), "arrival".to_string())]
         );
+        assert_eq!(notification_jobs(&store, 4), 0);
+        store.enqueue_agent_triage(1, 2, "arrival", true).unwrap();
+        assert_eq!(
+            notification_jobs(&store, 2),
+            1,
+            "the same call on inbound mail"
+        );
+        // The mail list has nothing pending to say about it either.
+        let listed = inventory(&store, None);
+        let own = listed.iter().find(|item| item.update.id == 4).unwrap();
+        assert_eq!(own.update.reason, "You sent this");
         // And like a sent reply it re-opens the inbound mail it answers, never
         // itself: the newest `is_sent = 0` row in the thread IS the own copy.
         assert_eq!(
@@ -5603,10 +5697,10 @@ mod own_mail_tests {
         assert!(context.thread.iter().any(|m| m.id == 1 && !m.is_sent));
         // An access review writes no decision, so the tier count has to place
         // the row itself or it reads "pending triage" for as long as it exists.
-        // Pending is message 1 alone, queued above; 2 keeps its legacy tier.
+        // Pending is the two inbound messages queued above, and only them.
         let stats = store.stats(1, Utc::now() - Duration::days(30)).unwrap();
-        assert_eq!(stats.tier_counts.get("pending"), Some(&1));
-        assert_eq!(stats.tier_counts.get("noise"), Some(&2));
+        assert_eq!(stats.tier_counts.get("pending"), Some(&2));
+        assert_eq!(stats.tier_counts.get("noise"), Some(&1));
     }
 
     #[test]
@@ -5727,6 +5821,22 @@ mod own_mail_tests {
             jobs(&store, 1),
             vec![("triage".to_string(), "thread_changed:4:2".to_string())]
         );
+        // Nothing decided about it as inbound mail outlives the refiling.
+        for table in [
+            "agent_message_decisions",
+            "agent_message_destinations",
+            "agent_decision_sources",
+        ] {
+            assert_eq!(
+                count(
+                    &store,
+                    &format!("SELECT count(*) FROM {table} WHERE message_id=?1"),
+                    4
+                ),
+                0,
+                "{table}"
+            );
+        }
         // The re-read lands on the inbound message, and the thread is back.
         let job = store
             .claim_agent_job(1, "triage", Utc::now(), 60)
@@ -5744,5 +5854,198 @@ mod own_mail_tests {
             AgentCommitOutcome::Applied
         );
         assert_eq!(fye(&store), vec![("one".to_string(), 1)]);
+
+        // On the agent door too, once the access review lands. A source row
+        // left at the old revision reads as "changed" there and fails closed
+        // for the message, its thread and everything citing it, for good.
+        let job = store
+            .claim_agent_job(1, "access", Utc::now(), 60)
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.message_id, 4);
+        let own = store.agent_read_message(1, 4).unwrap();
+        let verdict = crate::triage::access::AccessDecision {
+            restricted: false,
+            reason: "No credential".into(),
+        };
+        assert_eq!(
+            store
+                .commit_agent_access(&job, &own, &verdict, &serde_json::json!({}))
+                .unwrap(),
+            AgentCommitOutcome::Applied
+        );
+        assert!(store.agent_access_allowed(1, 4).unwrap());
+        assert!(store.agent_access_allowed(1, 1).unwrap());
+        assert!(store.external_thread_allowed(1, "one").unwrap());
+        let external = store
+            .external_agent_fye(1, 10, &RankingConfig::default(), Utc::now())
+            .unwrap();
+        assert_eq!(external.len(), 1);
+        assert_eq!(external[0].message_id, 1);
+    }
+
+    #[test]
+    fn mail_delivered_under_the_users_address_is_inbound_whatever_the_verdict() {
+        // Anyone can type a From. A copy the mailbox wrote never crossed the
+        // inbound edge and has no verdict; a delivered one has, pass or fail.
+        for verdict in [0, 1] {
+            let store = fixture();
+            own_inbox_copy(&store, 4, "one");
+            store
+                .lock()
+                .unwrap()
+                .execute("UPDATE messages SET auth_pass=?1 WHERE id=4", [verdict])
+                .unwrap();
+            store.enqueue_agent_triage(1, 4, "arrival", true).unwrap();
+            assert!(!store.agent_read_message(1, 4).unwrap().is_sent);
+            assert_eq!(
+                jobs(&store, 4),
+                vec![("triage".to_string(), "arrival".to_string())]
+            );
+            assert_eq!(notification_jobs(&store, 4), 1);
+            assert!(
+                jobs(&store, 1).is_empty(),
+                "it answers nothing on the user's behalf"
+            );
+            // And it can stand for the thread like any other inbound mail.
+            let mut seen = decision(4);
+            seen.attention.relevant_message_ids = vec![1, 4];
+            let job = store
+                .claim_agent_job(1, "investigation", Utc::now(), 60)
+                .unwrap()
+                .unwrap();
+            let context = store.load_agent_context(&job).unwrap();
+            let sources = store.snapshot_agent_sources(1, &[1, 4]).unwrap();
+            store
+                .commit_agent_decision(&job, &context, &seen, &sources)
+                .unwrap();
+            assert_eq!(fye(&store), vec![("one".to_string(), 4)]);
+        }
+    }
+
+    #[test]
+    fn a_thread_only_the_user_is_relevant_to_still_shows_its_inbound_mail() {
+        let store = fixture();
+        own_inbox_copy(&store, 4, "one");
+        // The model cites the user's reply alone. No inbound message is
+        // relevant, so the representative falls back to the thread, where the
+        // newer own copy used to outrank the inbound one.
+        let mut verdict = decision(1);
+        verdict.attention.relevant_message_ids = vec![4];
+        commit(&store, 1, &verdict);
+        assert_eq!(representative(&store, "one"), 1);
+    }
+
+    #[test]
+    fn evidence_from_another_thread_does_not_keep_an_own_representative() {
+        use crate::triage::decision::RelatedAttentionUpdate;
+        let store = fixture();
+        // Thread "one" took message 4 as its representative while 4 was being
+        // read as inbound.
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO messages(id,account_id,gmail_msg_id,thread_id,from_addr,subject,received_at,snippet,body)
+                 VALUES(4,1,'4','one','sender@test','subject',?1,'snippet','body')",
+                [(Utc::now() + Duration::seconds(5)).to_rfc3339()],
+            )
+            .unwrap();
+        commit(&store, 4, &decision(4));
+        assert_eq!(representative(&store, "one"), 4);
+        store
+            .lock()
+            .unwrap()
+            .execute("UPDATE messages SET from_addr='a@test' WHERE id=4", [])
+            .unwrap();
+        // A message in thread "two" updates it. A cross-thread update keeps the
+        // target's representative, but only one that is inbound mail.
+        let (job, context) = claim(&store, 2);
+        assert_eq!(job.message_id, 2);
+        let target = store.agent_thread_context(1, "one").unwrap();
+        let mut attention = decision(1).attention;
+        attention.relevant_message_ids = vec![1, 4];
+        let mut verdict = decision(2);
+        verdict.related_updates.push(RelatedAttentionUpdate {
+            thread_id: "one".into(),
+            expected_revision: target.revision.attention_revision,
+            attention,
+            evidence: vec![],
+        });
+        let sources = store.snapshot_agent_sources(1, &[1, 2, 4]).unwrap();
+        assert_eq!(
+            store
+                .commit_agent_decision(&job, &context, &verdict, &sources)
+                .unwrap(),
+            AgentCommitOutcome::Applied
+        );
+        assert_eq!(representative(&store, "one"), 1);
+    }
+
+    #[test]
+    fn a_changed_source_refreshes_own_mail_as_an_access_review() {
+        let store = fixture();
+        // A thread of the user's own, whose attention cites message 1.
+        own_inbox_copy(&store, 4, "mine");
+        store.enqueue_agent_triage(1, 4, "ingest", false).unwrap();
+        store.enqueue_agent_triage(1, 1, "ingest", false).unwrap();
+        {
+            let conn = store.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agent_thread_attention(decision_message_id,account_id,thread_id,message_id,
+                     show_in_fye,attention_json,relevant_activity)
+                 VALUES(4,1,'mine',4,0,'{}',?1)",
+                [Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO agent_attention_sources(account_id,thread_id,source_message_id,source_revision)
+                 VALUES(1,'mine',1,1)",
+                [],
+            )
+            .unwrap();
+            conn.execute("UPDATE messages SET body='edited' WHERE id=1", [])
+                .unwrap();
+        }
+        store.enqueue_agent_triage(1, 1, "ingest", false).unwrap();
+        assert_eq!(
+            jobs(&store, 4),
+            vec![("access".to_string(), "source_changed:1:2".to_string())]
+        );
+    }
+
+    #[test]
+    fn retriage_redoes_inbound_mail_and_never_the_users_own() {
+        let store = fixture();
+        own_inbox_copy(&store, 4, "one");
+        // A window is the inbound mail in it.
+        assert_eq!(store.retriage_reset(1, None, 7).unwrap(), 2);
+        assert!(jobs(&store, 4).is_empty());
+        assert!(jobs(&store, 1)[0].1.starts_with("manual:"));
+        assert!(jobs(&store, 2)[0].1.starts_with("manual:"));
+
+        // Naming the own message asks about the conversation it is in.
+        let store = fixture();
+        own_inbox_copy(&store, 4, "one");
+        assert_eq!(store.retriage_reset(1, Some(4), 7).unwrap(), 1);
+        assert!(jobs(&store, 4).is_empty());
+        let asked = jobs(&store, 1);
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0].0, "triage");
+        assert!(asked[0].1.starts_with("manual:"));
+        assert_eq!(
+            count(
+                &store,
+                "SELECT count(*) FROM triage WHERE message_id=?1 AND retriage_at IS NOT NULL",
+                1
+            ),
+            1
+        );
+
+        // With no inbound mail in the thread there is only itself to review.
+        let store = fixture();
+        own_inbox_copy(&store, 4, "mine");
+        assert_eq!(store.retriage_reset(1, Some(4), 7).unwrap(), 1);
+        assert_eq!(jobs(&store, 4)[0].0, "access");
     }
 }

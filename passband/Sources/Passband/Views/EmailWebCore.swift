@@ -1875,6 +1875,15 @@ final class FramePrewarmer {
         }
     }
 
+    /// Render these next, ahead of whatever the board wants, without
+    /// replacing its queue: a lesson about to ask for a click on them.
+    func prefer(_ threadIds: [String]) {
+        let ids = threadIds.filter { !$0.isEmpty }
+        queue.removeAll { ids.contains($0) }
+        queue.insert(contentsOf: ids, at: 0)
+        kick()
+    }
+
     private func kick() {
         guard !running else { return }
         running = true

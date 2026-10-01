@@ -9,6 +9,9 @@ struct PracticeProductTour: View {
     @Environment(\.displayScale) private var displayScale
     @State private var frame: CGRect = .zero
     @State private var cardHeight: CGFloat = 270
+    /// The Next button, in the tour space: what the arrow points at when a
+    /// lesson has nothing on the board to click.
+    @State private var nextButton: CGRect?
 
     private var tour: TourController { store.tour }
     private var step: PracticeTourStep { tour.practiceStep }
@@ -25,6 +28,13 @@ struct PracticeProductTour: View {
                         .offset(x: ring.minX, y: ring.minY)
                         .allowsHitTesting(false)
                 }
+                if store.ruleEditor == nil, let arrow = clickArrow(in: geometry.size) {
+                    ClickArrow(direction: arrow.direction, reduceMotion: reduceMotion)
+                        .frame(width: ClickArrow.size, height: ClickArrow.size)
+                        .offset(x: arrow.origin.x, y: arrow.origin.y)
+                        .allowsHitTesting(false)
+                        .transition(.opacity)
+                }
                 if store.ruleEditor == nil {
                     guideCard
                         .id(step)
@@ -37,6 +47,7 @@ struct PracticeProductTour: View {
         }
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(tourSpace)) } action: { frame = $0 }
         .animation(reduceMotion ? nil : .smooth(duration: 0.2), value: ringRects)
+        .animation(reduceMotion ? nil : .smooth(duration: 0.2), value: clickRect)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.24), value: step)
         .onChange(of: store.threadId) { _, _ in reconcile() }
         .onChange(of: store.openThreadSummary) { _, _ in reconcile() }
@@ -127,6 +138,9 @@ struct PracticeProductTour: View {
                             .font(.system(size: 14, weight: .semibold))
                             .controlSize(.large)
                             .help("Next step · ⌘→")
+                            .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(tourSpace)) } action: {
+                                nextButton = $0
+                            }
                     }
                 }
             }
@@ -281,46 +295,86 @@ struct PracticeProductTour: View {
         }
     }
 
-    private var highlightedBounds: CGRect? {
-        ringRects.reduce(nil as CGRect?) { bounds, rect in bounds?.union(rect) ?? rect }
+    /// The click target for this lesson in overlay coordinates, if it is on
+    /// screen. Board targets only count while the board is showing; the
+    /// reader's verbs and the undo toast are measured wherever they are.
+    private var clickRect: CGRect? {
+        guard let target = step.clickTarget else { return nil }
+        // Done once restored: nothing left to click.
+        if step == .undo && undoWasRestored { return nil }
+        // Reading a calendar record, the way on is esc, not another click.
+        if readingRecord { return nil }
+        let onBoard: Bool
+        switch target {
+        case .readerDone, .readerRule, .undoToast: onBoard = false
+        default: onBoard = true
+        }
+        if onBoard, store.threadId != nil || store.activeView != .sitrep { return nil }
+        if target == .undoToast, store.undos.isEmpty { return nil }
+        if target == .readerDone || target == .readerRule, store.threadId == nil { return nil }
+        guard let raw = tour.targets[target] else { return nil }
+        let local = raw.offsetBy(dx: -frame.minX, dy: -frame.minY)
+        let visible = local.intersection(CGRect(origin: .zero, size: frame.size))
+        guard !visible.isNull, visible.width > 4, visible.height > 4 else { return nil }
+        return visible
+    }
+
+    /// The card never moves: bottom left, clear of the rail and any undo
+    /// toast. Chasing the highlight made it the thing people looked at, and
+    /// the thing they clicked was its Skip step button.
+    private func cardRect(in size: CGSize) -> CGRect {
+        let width = min(cardWidth, max(240, size.width - 32))
+        let margin: CGFloat = 18
+        let maxX = max(margin, size.width - width - margin)
+        let maxY = max(margin, size.height - cardHeight - margin)
+        let toastClearance: CGFloat = store.undos.isEmpty ? 0 : 64
+        let x = min(maxX, max(margin, SidebarRail.railWidth + margin - frame.minX))
+        let y = max(margin, maxY - toastClearance)
+        return CGRect(x: x, y: y, width: width, height: cardHeight)
     }
 
     private func cardOrigin(in size: CGSize) -> CGSize {
-        let width = min(cardWidth, max(240, size.width - 32))
-        let margin: CGFloat = 18
-        let gap: CGFloat = 14
-        let maxX = max(margin, size.width - width - margin)
-        let maxY = max(margin, size.height - cardHeight - margin)
-        guard let target = highlightedBounds else {
-            // Leave room for the sidebar and any live undo toast.
-            let toastClearance: CGFloat = store.undos.isEmpty ? 0 : 64
-            return CGSize(width: min(maxX, max(margin, SidebarRail.railWidth + margin - frame.minX)),
-                          height: max(margin, maxY - toastClearance))
-        }
-        var x: CGFloat
-        var y: CGFloat
-        // Stay immediately beside the thing being explained. If neither side
-        // fits, sit just below or above it instead of drifting to a corner.
-        if target.maxX + gap + width <= size.width - margin {
-            x = target.maxX + gap
-            y = target.midY - cardHeight / 2
-        } else if target.minX - gap - width >= margin {
-            x = target.minX - gap - width
-            y = target.midY - cardHeight / 2
-        } else {
-            x = target.midX - width / 2
-            if target.maxY + gap + cardHeight <= size.height - margin {
-                y = target.maxY + gap
-            } else if target.minY - gap - cardHeight >= margin {
-                y = target.minY - gap - cardHeight
-            } else {
-                // Small windows cannot fit both surfaces without overlap;
-                // retain proximity and keep every guide control reachable.
-                x = maxX
-                y = target.midY - cardHeight / 2
+        let rect = cardRect(in: size)
+        return CGSize(width: rect.minX, height: rect.minY)
+    }
+
+    /// Whether the card is showing Next (rather than Skip step) right now.
+    private var showsNext: Bool {
+        step != .wrap && step != .welcome
+            && !(step.isInteraction && !(step == .undo && undoWasRestored))
+    }
+
+    /// Where the arrow goes: at the thing to click, or, when a lesson has
+    /// nothing to click, at Next. A board row is pointed at from its left,
+    /// level with it, the way a finger would; anything else from above when
+    /// there is room, then below, then beside it, never over the guide card.
+    private func clickArrow(in size: CGSize) -> (origin: CGPoint, direction: ClickArrow.Direction)? {
+        let side = ClickArrow.size
+        let gap: CGFloat = 6
+        let card = cardRect(in: size)
+        if let target = clickRect {
+            let bounds = CGRect(origin: .zero, size: size).insetBy(dx: 4, dy: 4)
+            let leftOf = (CGPoint(x: target.minX - gap - side, y: target.midY - side / 2), ClickArrow.Direction.right)
+            let above = (CGPoint(x: target.midX - side / 2, y: target.minY - gap - side), ClickArrow.Direction.down)
+            let below = (CGPoint(x: target.midX - side / 2, y: target.maxY + gap), ClickArrow.Direction.up)
+            let rightOf = (CGPoint(x: target.maxX + gap, y: target.midY - side / 2), ClickArrow.Direction.left)
+            let isRow = step.clickTarget == .maya || step.clickTarget == .brightly
+            let candidates = isRow ? [leftOf, above, below, rightOf] : [above, below, rightOf, leftOf]
+            let fits = candidates.first { origin, _ in
+                let rect = CGRect(origin: origin, size: CGSize(width: side, height: side))
+                return bounds.contains(rect) && !rect.intersects(card)
             }
+            // Somewhere is better than nowhere: a cramped window still gets
+            // an arrow at the target rather than no hint at all.
+            return fits ?? candidates[0]
         }
-        return CGSize(width: min(max(x, margin), maxX), height: min(max(y, margin), maxY))
+        // Nothing to click: point at Next from just outside the card's right
+        // edge, level with the button.
+        guard showsNext, !readingRecord, let raw = nextButton else { return nil }
+        let button = raw.offsetBy(dx: -frame.minX, dy: -frame.minY)
+        let x = card.maxX + gap
+        guard x + side <= size.width else { return nil }
+        return (CGPoint(x: x, y: button.midY - side / 2), .left)
     }
 
     private func next() {
@@ -331,6 +385,7 @@ struct PracticeProductTour: View {
     private func prepare(_ next: PracticeTourStep) {
         guard tour.active else { return }
         if store.activeView != .sitrep { store.setView(.sitrep) }
+        prerender(for: next)
         // The learner just opened these readers. Preserve their loaded content
         // as the instruction changes instead of closing and fetching it again.
         if next == .done {
@@ -339,6 +394,21 @@ struct PracticeProductTour: View {
             if store.threadId != "practice-11" { openExample(11) }
         } else { store.closeThread() }
         reconcile()
+    }
+
+    /// Render what this lesson asks the learner to open BEFORE they click
+    /// it, so the reader opens on a finished frame instead of a blank one.
+    private func prerender(for step: PracticeTourStep) {
+        var ids: [String] = []
+        switch step.clickTarget {
+        case .calendar: ids = store.zones.calendar.compactMap(\.thread_id)
+        default: break
+        }
+        if step == .shipments { ids = store.zones.shipments.compactMap(\.thread_id) }
+        if let example = step.exampleID { ids.insert("practice-\(example)", at: 0) }
+        guard !ids.isEmpty else { return }
+        for id in ids { ThreadPrefetch.shared.prefetch(id, fresh: SitrepView.boardFresh) }
+        FramePrewarmer.shared.prefer(ids)
     }
 
     private func openExample(_ id: Int) {
@@ -384,6 +454,51 @@ struct PracticeProductTour: View {
                 tour.advancePractice()
             }
         default: break
+        }
+    }
+}
+
+/// A bobbing arrow at the thing to click. Large and accent-coloured on
+/// purpose: it is the one mark in the lesson that says "your turn".
+private struct ClickArrow: View {
+    enum Direction { case down, up, left, right }
+    static let size: CGFloat = 40
+
+    let direction: Direction
+    let reduceMotion: Bool
+    @State private var bob = false
+
+    var body: some View {
+        Image(systemName: "arrow.down")
+            .font(.system(size: 26, weight: .heavy))
+            .foregroundStyle(Palette.accent)
+            .shadow(color: Palette.accent.opacity(0.45), radius: 8)
+            .rotationEffect(rotation)
+            .offset(x: travel.width * (bob ? 1 : 0), y: travel.height * (bob ? 1 : 0))
+            .frame(width: Self.size, height: Self.size)
+            .onAppear {
+                guard !reduceMotion else { return }
+                withAnimation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true)) { bob = true }
+            }
+            .accessibilityHidden(true)
+    }
+
+    private var rotation: Angle {
+        switch direction {
+        case .down: .zero
+        case .up: .degrees(180)
+        case .left: .degrees(90)
+        case .right: .degrees(-90)
+        }
+    }
+
+    /// Nudges toward the target, so the motion itself points.
+    private var travel: CGSize {
+        switch direction {
+        case .down: CGSize(width: 0, height: 5)
+        case .up: CGSize(width: 0, height: -5)
+        case .left: CGSize(width: -5, height: 0)
+        case .right: CGSize(width: 5, height: 0)
         }
     }
 }

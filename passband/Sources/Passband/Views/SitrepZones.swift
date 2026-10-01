@@ -66,6 +66,7 @@ struct CalendarZone: View {
                             }
                             .buttonStyle(RecordRowStyle())
                             .modifier(CalendarSeenMarker(account: accountScope, item: c.id))
+                            .warmsThreadOnHover(c.thread_id)
                         }
                     }
                 }
@@ -334,6 +335,7 @@ private struct ShipmentCard: View {
         )
         .contentShape(Rectangle())
         .onTapGesture { if let target { store.openThread(target) } }
+        .warmsThreadOnHover(target)
         .onHover { over in
             hovering = over
             guard let cursor else { return }
@@ -528,6 +530,7 @@ struct BankingZone: View {
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(RecordRowStyle())
+                        .warmsThreadOnHover(r.thread_id)
                     }
                     if inWindow.count > Self.collapsed {
                         Button {
@@ -611,6 +614,7 @@ struct ReceiptsZone: View {
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(RecordRowStyle())
+                        .warmsThreadOnHover(r.thread_id)
                     }
                 }
             }
@@ -1023,5 +1027,18 @@ struct RecordRowStyle: ButtonStyle {
             )
             .opacity(configuration.isPressed ? 0.7 : 1)
             .onHover { hovering = $0 }
+    }
+}
+
+extension View {
+    /// The pointer resting on a record is the likeliest next click: cache its
+    /// thread and, a beat later, render its newest message, as a board row
+    /// does (SitrepView's row hover). Without it a record opened cold.
+    func warmsThreadOnHover(_ threadId: String?) -> some View {
+        onHover { over in
+            guard over, let threadId, !threadId.isEmpty else { return }
+            ThreadPrefetch.shared.prefetch(threadId, fresh: SitrepView.boardFresh)
+            FramePrewarmer.shared.nudge(threadId)
+        }
     }
 }

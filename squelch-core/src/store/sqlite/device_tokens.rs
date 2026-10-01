@@ -70,6 +70,14 @@ const MAX_FAILED_CLAIMS: i64 = 5;
 /// column nobody reads at that resolution.
 const LAST_USED_THROTTLE_SECS: i64 = 60;
 
+/// Most (platform, version) pairs [`SqliteStore::client_versions_seen`] hands
+/// back, newest first. Each one is a metric series, and a row keeps the last
+/// version its device ran forever, so without a bound an account that has
+/// paired and abandoned devices across fifty releases exports fifty series
+/// nobody reads. Eight is two platforms with room for a rollout in flight on
+/// several devices at once.
+pub const CLIENT_VERSIONS_CAP: usize = 8;
+
 /// Cap on a device name. It is a label in `token list`, not data, and an
 /// unbounded one from an unauthenticated claim body is just a way to grow the DB.
 const MAX_DEVICE_NAME_CHARS: usize = 100;
@@ -290,6 +298,26 @@ impl SqliteStore {
     /// [`LAST_USED_THROTTLE_SECS`], so a chatty client does not turn reads into a
     /// write storm.
     pub fn verify_device_token(&self, presented: &str) -> Result<Option<DeviceToken>> {
+        self.verify_device_token_from(presented, None)
+    }
+
+    /// [`SqliteStore::verify_device_token`] for a request that also said WHICH
+    /// APP it is, which is recorded on the token's row when the token is good.
+    ///
+    /// The three `client_*` columns move together, under the same once-a-minute
+    /// throttle as `last_used_at`, with one exception: a platform or version
+    /// that DIFFERS from what is stored is written at once. That happens once
+    /// per app update, and waiting a minute to notice it buys nothing.
+    ///
+    /// `client: None` leaves the stored columns exactly as they are. That is
+    /// what keeps them meaning "the app", not "the token": the iOS notification
+    /// extension and a console session both present tokens and name nothing,
+    /// and neither must be able to move or blank what the app last said.
+    pub fn verify_device_token_from(
+        &self,
+        presented: &str,
+        client: Option<&ClientTag>,
+    ) -> Result<Option<DeviceToken>> {
         let presented = presented.trim();
         // A structural reject before hashing. This leaks only the token FORMAT,
         // which is public, and keeps unrelated traffic from touching the store.
@@ -302,14 +330,24 @@ impl SqliteStore {
         // must be as absent to this method as a row that never existed.
         let row = conn
             .query_row(
-                "SELECT id, account_id, name, created_at, last_used_at, revoked_at, token_hash
+                "SELECT id, account_id, name, created_at, last_used_at, revoked_at, token_hash,
+                        client_platform, client_version, client_seen_at
                  FROM device_tokens
                  WHERE token_hash = ?1 AND revoked_at IS NULL",
                 params![hash],
-                |r| Ok((map_device_token(r)?, r.get::<_, String>(6)?)),
+                |r| {
+                    Ok((
+                        map_device_token(r)?,
+                        r.get::<_, String>(6)?,
+                        r.get::<_, Option<String>>(7)?,
+                        r.get::<_, Option<String>>(8)?,
+                        dt_opt(r, 9)?,
+                    ))
+                },
             )
             .optional()?;
-        let Some((mut token, stored_hash)) = row else {
+        let Some((mut token, stored_hash, stored_platform, stored_version, client_seen_at)) = row
+        else {
             return Ok(None);
         };
         // Belt-and-braces. The lookup already matched on equality, so this can
@@ -321,16 +359,35 @@ impl SqliteStore {
         }
 
         let now = Utc::now();
-        let stale = match token.last_used_at {
-            None => true,
-            Some(last) => {
+        let stale = |at: Option<DateTime<Utc>>| {
+            at.is_none_or(|last| {
                 now.signed_duration_since(last) > Duration::seconds(LAST_USED_THROTTLE_SECS)
-            }
+            })
         };
-        if stale {
-            // Scoped by the account the row itself named, not just by id — the
-            // standing invariant holds even where the id came from a row this
-            // method just read.
+        let named = client.filter(|c| {
+            stored_platform.as_deref() != Some(c.platform.as_str())
+                || stored_version.as_deref() != Some(c.version())
+                || stale(client_seen_at)
+        });
+        // Scoped by the account the row itself named, not just by id — the
+        // standing invariant holds even where the id came from a row this
+        // method just read.
+        if let Some(client) = named {
+            conn.execute(
+                "UPDATE device_tokens
+                 SET last_used_at = ?3, client_platform = ?4, client_version = ?5,
+                     client_seen_at = ?3
+                 WHERE id = ?1 AND account_id = ?2",
+                params![
+                    token.id,
+                    token.account_id,
+                    now.to_rfc3339(),
+                    client.platform.as_str(),
+                    client.version(),
+                ],
+            )?;
+            token.last_used_at = Some(now);
+        } else if stale(token.last_used_at) {
             conn.execute(
                 "UPDATE device_tokens SET last_used_at = ?3
                  WHERE id = ?1 AND account_id = ?2",
@@ -454,6 +511,62 @@ impl SqliteStore {
         // COUNT(*) is never negative; the clamp is so a gauge can never be built
         // out of a wrapped cast.
         Ok(count.max(0) as u64)
+    }
+
+    /// Which app versions have connected to this mailbox, and when each last
+    /// did: one entry per (platform, version), newest first, at most
+    /// [`CLIENT_VERSIONS_CAP`].
+    ///
+    /// For the operator's dashboard (`squelchd_client_last_seen_timestamp_seconds`),
+    /// and deliberately no more than that needs: no device name, no token id,
+    /// no count of devices per version. Two phones on the same build are one
+    /// entry.
+    ///
+    /// REVOKED ROWS COUNT, for the reason they count in
+    /// [`SqliteStore::first_client_pairing_at`]: "a Mac on 0.0.12 last connected
+    /// on Tuesday" stays true after that Mac is unpaired. No console filter is
+    /// needed here, unlike its two neighbours: a browser session never sends
+    /// the header, so its row never has these columns.
+    ///
+    /// Folded and ordered in Rust over PARSED timestamps, like every other
+    /// time comparison in this module. A stored platform this build does not
+    /// know (a row written by a NEWER daemon, then a rollback) is skipped
+    /// rather than exported under a label outside the closed set.
+    pub fn client_versions_seen(&self, account_id: AccountId) -> Result<Vec<ClientSeen>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT client_platform, client_version, client_seen_at FROM device_tokens
+             WHERE account_id = ?1 AND client_platform IS NOT NULL
+               AND client_version IS NOT NULL AND client_seen_at IS NOT NULL",
+        )?;
+        let rows = stmt
+            .query_map(params![account_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, dt(r, 2)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        let mut newest =
+            std::collections::BTreeMap::<(ClientPlatform, String), DateTime<Utc>>::new();
+        for (platform, version, seen_at) in rows {
+            let Some(platform) = ClientPlatform::parse(&platform) else {
+                continue;
+            };
+            let at = newest.entry((platform, version)).or_insert(seen_at);
+            *at = (*at).max(seen_at);
+        }
+        let mut seen = newest
+            .into_iter()
+            .map(|((platform, version), seen_at)| ClientSeen {
+                platform,
+                version,
+                seen_at,
+            })
+            .collect::<Vec<_>>();
+        // Stable over the BTreeMap's key order, so two pairs seen in the same
+        // instant come out in the same order on every scrape.
+        seen.sort_by_key(|c| std::cmp::Reverse(c.seen_at));
+        seen.truncate(CLIENT_VERSIONS_CAP);
+        Ok(seen)
     }
 
     // ---- pairing ---------------------------------------------------------

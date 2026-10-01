@@ -192,6 +192,13 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // nothing here can know which account a device filed itself under, and the
     // client re-registers (tag included) on its next foreground.
     add_column_if_missing(conn, "devices", "tag", "TEXT")?;
+    // Which app last presented each device token. NULL on every pre-existing
+    // row and NOT backfilled: a client that predates `X-Passband-Client` never
+    // said what it was, and the columns fill in on its first request after it
+    // updates.
+    add_column_if_missing(conn, "device_tokens", "client_platform", "TEXT")?;
+    add_column_if_missing(conn, "device_tokens", "client_version", "TEXT")?;
+    add_column_if_missing(conn, "device_tokens", "client_seen_at", "TEXT")?;
     // Per-property triage reasons (JSON object). NULL on pre-existing rows.
     add_column_if_missing(conn, "triage", "field_reasons", "TEXT")?;
 

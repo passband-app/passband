@@ -465,6 +465,74 @@ pub struct DeviceToken {
     pub revoked_at: Option<DateTime<Utc>>,
 }
 
+/// The request header a client names itself in: `<platform>/<version>`, e.g.
+/// `macos/0.0.12`. Lowercase because that is how `http` spells header names.
+///
+/// ITS OWN HEADER rather than `User-Agent`, because the apps fetch remote
+/// images an email chose from the same process: a header the app only ever
+/// attaches to requests for its own daemon cannot leak to a sender's server
+/// the way a session-wide User-Agent would.
+pub const CLIENT_HEADER: &str = "x-passband-client";
+
+crate::types::str_enum! {
+    /// Which app a client says it is. A CLOSED set, because it ends up as a
+    /// metric label (`squelchd_client_last_seen_timestamp_seconds`) and a label
+    /// is a series: an app this daemon has never heard of is not recorded at
+    /// all rather than recorded under whatever it called itself.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub enum ClientPlatform {
+        Macos => "macos",
+        Ios => "ios",
+    }
+}
+
+/// What a client said about itself in [`CLIENT_HEADER`], already validated.
+///
+/// The only way to build one is [`ClientTag::parse`], so a version that reaches
+/// the store or a metric label is always dotted digits and nothing else. The
+/// header is sent by whoever holds a token, which makes it the tenant's own
+/// text, not a stranger's, but it is still text that becomes a label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientTag {
+    pub platform: ClientPlatform,
+    version: String,
+}
+
+impl ClientTag {
+    /// Parse `<platform>/<version>`. `None` for anything else: an unknown
+    /// platform, a version that is not two to four dot-separated runs of one to
+    /// five digits, or a missing half. A request with an unparseable header
+    /// authenticates exactly as it would with none; it just is not recorded.
+    pub fn parse(header: &str) -> Option<Self> {
+        let (platform, version) = header.trim().split_once('/')?;
+        let platform = ClientPlatform::parse(platform)?;
+        let parts = version.split('.').collect::<Vec<_>>();
+        let numeric =
+            |p: &&str| (1..=5).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_digit());
+        if !(2..=4).contains(&parts.len()) || !parts.iter().all(numeric) {
+            return None;
+        }
+        Some(Self {
+            platform,
+            version: version.to_string(),
+        })
+    }
+
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+}
+
+/// One (platform, version) pair and the last time any of this account's
+/// devices connected as it. See
+/// [`SqliteStore::client_versions_seen`](sqlite::SqliteStore::client_versions_seen).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientSeen {
+    pub platform: ClientPlatform,
+    pub version: String,
+    pub seen_at: DateTime<Utc>,
+}
+
 /// A device token at the ONE moment its plaintext exists.
 ///
 /// Returned by [`SqliteStore::issue_device_token`](sqlite::SqliteStore::issue_device_token)

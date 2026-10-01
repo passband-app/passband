@@ -5,7 +5,7 @@
 //! failure, and that no plaintext ever reaches a listing or the audit log.
 
 use super::super::device_tokens::{
-    CONSOLE_DEVICE_NAME, PAIRING_CODE_LEN, PAIRING_TTL_SECS, TOKEN_PREFIX,
+    CLIENT_VERSIONS_CAP, CONSOLE_DEVICE_NAME, PAIRING_CODE_LEN, PAIRING_TTL_SECS, TOKEN_PREFIX,
 };
 use super::super::*;
 use super::support::*;
@@ -248,6 +248,199 @@ fn last_used_at_is_touched_once_then_throttled() {
     let refreshed = raw_token_row(&store, issued.id).1.unwrap();
     assert_ne!(refreshed, stale, "a stale stamp is refreshed");
     assert!(seen.last_used_at.is_some());
+}
+
+// ---- client identity ---------------------------------------------------
+
+/// The three `client_*` columns straight off the row.
+fn raw_client(store: &SqliteStore, id: i64) -> (Option<String>, Option<String>, Option<String>) {
+    let conn = store.lock().unwrap();
+    conn.query_row(
+        "SELECT client_platform, client_version, client_seen_at FROM device_tokens WHERE id = ?1",
+        params![id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )
+    .unwrap()
+}
+
+/// Rewrite when a token's client was last seen, to order entries and to reach
+/// the throttle's stale branch without sleeping.
+fn set_client_seen(store: &SqliteStore, id: i64, at: DateTime<Utc>) {
+    let conn = store.lock().unwrap();
+    conn.execute(
+        "UPDATE device_tokens SET client_seen_at = ?2 WHERE id = ?1",
+        params![id, at.to_rfc3339()],
+    )
+    .unwrap();
+}
+
+fn tag(header: &str) -> ClientTag {
+    ClientTag::parse(header).unwrap_or_else(|| panic!("{header:?} should parse"))
+}
+
+/// What becomes a metric label is a closed platform and dotted digits, or it
+/// is nothing.
+#[test]
+fn client_tag_parses_only_a_known_platform_and_a_numeric_version() {
+    for good in [
+        "macos/0.0.12",
+        "ios/0.0.6",
+        " ios/1.2 ",
+        "macos/10.20.30.40",
+    ] {
+        let parsed = tag(good);
+        assert_eq!(
+            format!("{}/{}", parsed.platform.as_str(), parsed.version()),
+            good.trim()
+        );
+    }
+    for bad in [
+        "",
+        "macos",
+        "macos/",
+        "/0.0.12",
+        "windows/0.0.12",
+        "macOS/0.0.12",
+        "macos/1",
+        "macos/1.2.3.4.5",
+        "macos/0.0.12-beta",
+        "macos/0..12",
+        "macos/0.0.123456",
+        "macos/0.0.12\",evil=\"1",
+        "macos/0.0.12/extra",
+    ] {
+        assert!(ClientTag::parse(bad).is_none(), "{bad:?} must not parse");
+    }
+}
+
+#[test]
+fn a_named_client_is_recorded_and_an_unnamed_request_leaves_it_alone() {
+    let (store, acct) = store();
+    let issued = store.issue_device_token(acct, "laptop").unwrap();
+
+    // A token used by something that names nothing has no client columns.
+    store.verify_device_token(&issued.token).unwrap().unwrap();
+    assert_eq!(raw_client(&store, issued.id), (None, None, None));
+    assert!(store.client_versions_seen(acct).unwrap().is_empty());
+
+    store
+        .verify_device_token_from(&issued.token, Some(&tag("macos/0.0.12")))
+        .unwrap()
+        .unwrap();
+    let (platform, version, first_seen) = raw_client(&store, issued.id);
+    assert_eq!(platform.as_deref(), Some("macos"));
+    assert_eq!(version.as_deref(), Some("0.0.12"));
+    let first_seen = first_seen.expect("stamped with the tag");
+
+    // The same client again inside the window writes nothing, and neither does
+    // the notification extension's unnamed request: it must not move the
+    // stamp OR blank the tag.
+    store
+        .verify_device_token_from(&issued.token, Some(&tag("macos/0.0.12")))
+        .unwrap()
+        .unwrap();
+    store.verify_device_token(&issued.token).unwrap().unwrap();
+    assert_eq!(
+        raw_client(&store, issued.id),
+        (
+            Some("macos".to_string()),
+            Some("0.0.12".to_string()),
+            Some(first_seen)
+        )
+    );
+
+    // An UPDATE is not throttled: the new version lands on the next request.
+    store
+        .verify_device_token_from(&issued.token, Some(&tag("macos/0.0.13")))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        raw_client(&store, issued.id).1.as_deref(),
+        Some("0.0.13"),
+        "a changed version is written inside the throttle window"
+    );
+
+    // Past the window the stamp moves for an unchanged client too.
+    let stale = Utc::now() - Duration::seconds(120);
+    set_client_seen(&store, issued.id, stale);
+    store
+        .verify_device_token_from(&issued.token, Some(&tag("macos/0.0.13")))
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        raw_client(&store, issued.id).2,
+        Some(stale.to_rfc3339()),
+        "a stale stamp is refreshed"
+    );
+}
+
+#[test]
+fn client_versions_seen_is_one_entry_per_version_newest_first() {
+    let (store, acct) = store();
+    let now = Utc::now();
+    let pair = |name: &str, client: &str, ago_hours: i64| {
+        let issued = store.issue_device_token(acct, name).unwrap();
+        store
+            .verify_device_token_from(&issued.token, Some(&tag(client)))
+            .unwrap()
+            .unwrap();
+        set_client_seen(&store, issued.id, now - Duration::hours(ago_hours));
+        issued
+    };
+
+    // Two Macs on one build fold into one entry carrying the NEWER stamp.
+    pair("laptop", "macos/0.0.12", 30);
+    pair("desktop", "macos/0.0.12", 2);
+    pair("old laptop", "macos/0.0.9", 400);
+    let phone = pair("phone", "ios/0.0.6", 5);
+    // Unpairing does not un-happen the connection.
+    assert!(store.revoke_device_token(acct, phone.id).unwrap());
+    // A device that never named itself is not an entry.
+    let silent = store.issue_device_token(acct, "tablet").unwrap();
+    store.verify_device_token(&silent.token).unwrap().unwrap();
+
+    let seen = store.client_versions_seen(acct).unwrap();
+    let got = seen
+        .iter()
+        .map(|c| {
+            (
+                c.platform.as_str(),
+                c.version.as_str(),
+                (now - c.seen_at).num_hours(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        got,
+        vec![
+            ("macos", "0.0.12", 2),
+            ("ios", "0.0.6", 5),
+            ("macos", "0.0.9", 400)
+        ]
+    );
+
+    // Another account's clients are not this account's.
+    let other = store.ensure_account("other@example.com").unwrap();
+    assert!(store.client_versions_seen(other).unwrap().is_empty());
+}
+
+#[test]
+fn client_versions_seen_is_capped_at_the_newest() {
+    let (store, acct) = store();
+    let now = Utc::now();
+    for patch in 0..(CLIENT_VERSIONS_CAP as i64 + 3) {
+        let issued = store.issue_device_token(acct, "laptop").unwrap();
+        store
+            .verify_device_token_from(&issued.token, Some(&tag(&format!("macos/0.0.{patch}"))))
+            .unwrap()
+            .unwrap();
+        // Higher patch = seen more recently.
+        set_client_seen(&store, issued.id, now - Duration::days(100 - patch));
+    }
+    let seen = store.client_versions_seen(acct).unwrap();
+    assert_eq!(seen.len(), CLIENT_VERSIONS_CAP);
+    assert_eq!(seen[0].version, format!("0.0.{}", CLIENT_VERSIONS_CAP + 2));
+    assert_eq!(seen[CLIENT_VERSIONS_CAP - 1].version, "0.0.3");
 }
 
 // ---- activation --------------------------------------------------------

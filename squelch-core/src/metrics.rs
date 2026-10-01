@@ -1226,6 +1226,11 @@ pub struct StoreSnapshot {
     /// this is here so an operator can see the fleet's paired devices on a
     /// dashboard, and nothing reads it back.
     pub devices_paired: u64,
+    /// Which app versions have connected, and when each last did
+    /// ([`crate::store::SqliteStore::client_versions_seen`]): already folded to
+    /// one entry per (platform, version) and capped, so this is the series list
+    /// as it will be exported.
+    pub clients: Vec<crate::store::ClientSeen>,
     /// Durable investigation jobs, including delayed retries; excludes notifications.
     pub triage_jobs: [u64; 2],
     /// The same rolling 24-hour manual re-triage window as /client/retriage.
@@ -1681,6 +1686,32 @@ pub fn render(metrics: &SyncMetrics, db: Option<&StoreSnapshot>) -> String {
             db.devices_paired as f64,
         );
 
+        // LABELLED, unlike the gauge above, and still inside this module's
+        // rule, because neither label can carry anything about a device or a
+        // person: `platform` is a closed enum and `version` is dotted digits
+        // by construction (`store::ClientTag::parse`), the same string for
+        // everyone on that release. The store hands over at most
+        // `CLIENT_VERSIONS_CAP` pairs, which is the cardinality bound.
+        //
+        // A family with NO samples until a client that names itself connects.
+        // There is no honest zero to stand in: 0 here would read as "last seen
+        // in 1970" on a dashboard that subtracts it from now.
+        e.family(
+            "squelchd_client_last_seen_timestamp_seconds",
+            MetricKind::Gauge,
+            "Unix time an app of this platform and version last made an authenticated request, per the X-Passband-Client header. Clients that do not send the header are not counted.",
+        );
+        for client in &db.clients {
+            e.sample(
+                "squelchd_client_last_seen_timestamp_seconds",
+                &[
+                    ("platform", client.platform.as_str()),
+                    ("version", &client.version),
+                ],
+                client.seen_at.timestamp() as f64,
+            );
+        }
+
         e.family(
             "squelchd_db_size_bytes",
             MetricKind::Gauge,
@@ -2032,6 +2063,7 @@ mod tests {
         assert!(!text.contains("squelchd_retriage_messages"));
         assert!(text.contains("squelchd_catchup_messages_total 0\n"));
         assert!(!text.contains("squelchd_devices_paired"));
+        assert!(!text.contains("squelchd_client_last_seen_timestamp_seconds"));
         assert!(text.ends_with('\n'));
     }
 
@@ -2077,6 +2109,18 @@ mod tests {
             db_bytes: 4096,
             wal_bytes: 0,
             devices_paired: 2,
+            clients: vec![
+                crate::store::ClientSeen {
+                    platform: crate::store::ClientPlatform::Macos,
+                    version: "0.0.12".to_string(),
+                    seen_at: chrono::DateTime::from_timestamp(1_790_000_000, 0).unwrap(),
+                },
+                crate::store::ClientSeen {
+                    platform: crate::store::ClientPlatform::Ios,
+                    version: "0.0.6".to_string(),
+                    seen_at: chrono::DateTime::from_timestamp(1_789_000_000, 0).unwrap(),
+                },
+            ],
             triage_jobs: [9, 2],
             retriage: crate::types::RetriageProgress {
                 total: 7,
@@ -2111,6 +2155,15 @@ mod tests {
         assert!(text.contains("# TYPE squelchd_devices_paired gauge\n"));
         assert!(text.contains("squelchd_devices_paired 2\n"));
         assert!(!text.contains("squelchd_devices_paired{"));
+        // One series per (platform, version), and the value is the stamp
+        // itself, not an age: the dashboard does the subtraction.
+        assert!(text.contains("# TYPE squelchd_client_last_seen_timestamp_seconds gauge\n"));
+        assert!(text.contains(
+            "squelchd_client_last_seen_timestamp_seconds{platform=\"macos\",version=\"0.0.12\"} 1790000000\n"
+        ));
+        assert!(text.contains(
+            "squelchd_client_last_seen_timestamp_seconds{platform=\"ios\",version=\"0.0.6\"} 1789000000\n"
+        ));
     }
 
     #[test]

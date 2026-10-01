@@ -109,6 +109,10 @@ targets:
           - "Views/UpdateAlert.swift"
           # The iPhone ask is a Mac card about the iPhone app.
           - "Views/TestFlightNudgeModal.swift"
+          # The discovery ring lives on the Mac's rail, and its menu and found
+          # moment hang off the Mac shell. The ledger (Lib/DiscoveryLedger,
+          # Model/Discovery) does cross: the phone records finds too.
+          - "Views/Discovery/**"
           # The AppKit HALF of the reader, and only that: an NSViewRepresentable
           # plus the WKWebView subclass that hands the scroll wheel back to the
           # column. Everything the reader is made of — the body-preparation

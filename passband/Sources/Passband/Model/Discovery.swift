@@ -51,7 +51,9 @@ final class Discovery {
     private init() {
         let env = ProcessInfo.processInfo.environment
         if let spec = env["PASSBAND_DISCOVERY"] {
-            ledger = DiscoveryLedger.forcing(DiscoveryLedger.parseOverride(spec), now: Date())
+            ledger = DiscoveryLedger.forcing(
+                DiscoveryLedger.parseOverride(spec),
+                fresh: DiscoveryLedger.parseFreshOverride(spec), now: Date())
             persists = false
         } else {
             ledger = DiscoveryLedger.decoded(from: defaults.data(forKey: Self.ledgerKey))

@@ -1,7 +1,8 @@
 // SIDEBAR — the slim icon rail: Sitrep / Emails / Auth / Rules / Groups on the
-// 1..5 keys; Share + Usage + Settings sit below a divider, out of that sequence
-// so adding one never renumbers it. Share is the odd one there: it opens a sheet
-// rather than routing, so it carries no selector (see `shareButton`). ONE long-lived pane behind the icons is the selector,
+// 1..5 keys; Usage and Settings sit below a divider, out of that sequence so
+// adding one never renumbers it. The discovery ring sits just ABOVE that
+// divider, alone after the spacer: it opens a menu rather than routing, so it
+// carries no selector (see DiscoveryRailButton). ONE long-lived pane behind the icons is the selector,
 // moved by GEOMETRY not identity: per-icon glass drags the glyph along and
 // swallows clicks, and a GlassEffectContainer would hoist the pane over it.
 
@@ -21,9 +22,6 @@ struct SidebarRail: View {
     @State private var slots: [MainView: CGRect] = [:]
     /// True for the span of a slide, so the pane can firm up while it moves.
     @State private var traveling = false
-    /// The share tile's own hover, which `RailButton` keeps for itself.
-    @State private var shareHovering = false
-    @State private var shareDeniedAttempts = 0
     @State private var accountDeniedAttempts = 0
 
     static let railWidth: CGFloat = 60
@@ -108,12 +106,19 @@ struct SidebarRail: View {
 
                 Spacer(minLength: 8)
 
+                // WAYS THROUGH YOUR MAIL: the discovery ring, alone between the
+                // spacer and the divider. It is about how you use the five
+                // destinations above, not about your account like the group
+                // below, so it sits on the line between them. Its tile is
+                // RailButton's 44x36 with the same wash (see
+                // DiscoveryRailButton); the divider's own vertical padding is
+                // the gap under it, the same gap the bottom group gets above.
+                DiscoveryRailButton()
+
                 Rectangle()
                     .fill(Palette.hairline)
                     .frame(width: 22, height: 0.5)
                     .padding(.vertical, 4)
-
-                shareButton
 
                 ForEach(MainView.bottomViews, id: \.self) { view in
                     RailButton(
@@ -136,52 +141,6 @@ struct SidebarRail: View {
             .frame(width: Self.railWidth)
             .frame(maxHeight: .infinity)
             .ignoresSafeArea(edges: .top)
-    }
-
-    /// HAND A FRIEND AN INVITE. Above Usage in the bottom group, because it
-    /// belongs with the things that are about your account rather than with the
-    /// five destinations on the number keys.
-    ///
-    /// Deliberately NOT a `RailButton`, for the same reason `accountBadge` is
-    /// not: it opens a sheet rather than routing, so it has no `MainView` to be
-    /// active for, takes no selector pane, and reports no slot. What it does
-    /// borrow is the tile — the same 44x36 target and the same hover wash — so
-    /// it reads as one of the rail's own rather than as a thing pinned to it.
-    ///
-    /// ABSENT unless the daemon says it can share, like the button in Settings.
-    /// A rail is 60 points wide and its whole argument is that everything in it
-    /// earns the space; an icon that can only refuse does not.
-    @ViewBuilder
-    private var shareButton: some View {
-        if store.shareAvailable {
-            Button {
-                guard !RehearsalMode.isEnabled else {
-                    shareDeniedAttempts += 1
-                    return
-                }
-                store.openShareSheet(from: .rail)
-            } label: {
-                Image(systemName: "gift")
-                    .font(.system(size: 16, weight: .regular))
-                    .foregroundStyle(Palette.inkDim)
-                    .frame(width: Self.iconWidth, height: Self.iconHeight)
-                    // THE WHOLE TILE IS THE TARGET, for the reason RailButton
-                    // spells out: every rail symbol is an outline, and a click
-                    // through the middle of one otherwise lands in a hole.
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .background {
-                RoundedRectangle(cornerRadius: Self.selectorRadius, style: .continuous)
-                    .fill(Palette.hairline.opacity(shareHovering ? 0.7 : 0))
-                    .frame(width: Self.iconWidth, height: Self.iconHeight)
-            }
-            .onHover { shareHovering = $0 }
-            .help("share Passband with a friend")
-            .accessibilityLabel("share Passband")
-            .accessibilityHint(RehearsalMode.isEnabled ? "Available after onboarding." : "")
-            .modifier(PracticeRailFeedback(attempts: shareDeniedAttempts))
-        }
     }
 
     /// WHICH MAILBOX YOU ARE IN, at the foot of the rail — and the fastest way
@@ -368,7 +327,8 @@ private struct RailButton: View {
 
 /// Keep practice navigation recognizable and responsive without leaving the
 /// lesson. With Reduce Motion the same refusal is a short, stationary outline.
-private struct PracticeRailFeedback: ViewModifier {
+/// Not private: the discovery ring (DiscoveryRailButton) refuses the same way.
+struct PracticeRailFeedback: ViewModifier {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let attempts: Int
     @State private var highlighted = false

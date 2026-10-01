@@ -171,10 +171,14 @@ struct DiscoveryLedger: Equatable, Sendable {
 
     /// A ledger in exactly these states, for `PASSBAND_DISCOVERY`. A forced
     /// keep gets synthetic day keys so it reads as kept by every path, not
-    /// just `state(of:)`. Nothing is fresh: the override is for looking at
-    /// states, and the glow is its own state to force.
-    static func forcing(_ states: [FeatureSet: SetState], now: Date) -> DiscoveryLedger {
+    /// just `state(of:)`. Nothing is fresh unless named in `fresh` (the
+    /// override's `:fresh` entries), and only a set that is found or kept can
+    /// be: the glow means "found and not yet looked at", never "unseen".
+    static func forcing(
+        _ states: [FeatureSet: SetState], fresh: Set<FeatureSet> = [], now: Date
+    ) -> DiscoveryLedger {
         var ledger = DiscoveryLedger()
+        ledger.fresh = fresh.filter { (states[$0] ?? .unseen) != .unseen }
         for (set, state) in states where state != .unseen {
             var record = SetRecord(foundAt: now)
             if state == .kept {
@@ -190,22 +194,35 @@ struct DiscoveryLedger: Equatable, Sendable {
 
     /// `"clear:kept,flow:found"` to states. Entries that do not parse are
     /// skipped rather than failing the lot: a typo in a debug variable should
-    /// cost that one set, not the whole look.
+    /// cost that one set, not the whole look. `fresh` is FOUND as far as the
+    /// state goes; `parseFreshOverride` is what reads it as the glow.
     static func parseOverride(_ spec: String) -> [FeatureSet: SetState] {
         var states: [FeatureSet: SetState] = [:]
-        for entry in spec.split(separator: ",") {
-            let parts = entry.split(separator: ":").map {
-                $0.trimmingCharacters(in: .whitespaces).lowercased()
-            }
-            guard parts.count == 2, let set = FeatureSet(rawValue: parts[0]) else { continue }
-            switch parts[1] {
+        for (set, word) in overrideEntries(spec) {
+            switch word {
             case "unseen": states[set] = .unseen
-            case "found": states[set] = .found
+            case "found", "fresh": states[set] = .found
             case "kept": states[set] = .kept
             default: continue
             }
         }
         return states
+    }
+
+    /// The sets an override spelled `:fresh`: found, and glowing on the ring
+    /// as if the menu had not been opened since.
+    static func parseFreshOverride(_ spec: String) -> Set<FeatureSet> {
+        Set(overrideEntries(spec).filter { $0.word == "fresh" }.map(\.set))
+    }
+
+    private static func overrideEntries(_ spec: String) -> [(set: FeatureSet, word: String)] {
+        spec.split(separator: ",").compactMap { entry in
+            let parts = entry.split(separator: ":").map {
+                $0.trimmingCharacters(in: .whitespaces).lowercased()
+            }
+            guard parts.count == 2, let set = FeatureSet(rawValue: parts[0]) else { return nil }
+            return (set, parts[1])
+        }
     }
 }
 

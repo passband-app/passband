@@ -188,6 +188,16 @@ struct DiscoveryLedgerTests {
         expect(l.state(of: .clear) == .kept, "forced kept")
         expect(l.state(of: .flow) == .found, "forced found")
         expect(l.state(of: .later) == .unseen, "unlisted is unseen")
+        expect(l.fresh.isEmpty, "nothing glows unless asked")
+
+        let spec = "flow:fresh,later:kept,find:bogus"
+        let glowing = DiscoveryLedger.forcing(
+            DiscoveryLedger.parseOverride(spec),
+            fresh: DiscoveryLedger.parseFreshOverride(spec), now: now)
+        expect(glowing.state(of: .flow) == .found, "fresh is found")
+        expect(glowing.fresh == [.flow], "fresh glows, kept does not")
+        let unseenFresh = DiscoveryLedger.forcing([:], fresh: [.read], now: now)
+        expect(unseenFresh.fresh.isEmpty, "an unseen set never glows")
     }
 
     static func expect(_ condition: Bool, _ message: String) {

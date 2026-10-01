@@ -1424,6 +1424,15 @@ struct ThreadViewer: View {
             },
             KeyBinding("E", "done + next") { Task { await doneAndNext() } },
             KeyBinding("D", "done + next") { Task { await doneAndNext() } },
+            // `S` = SKIP: E's twin with the done left out. The email stays on
+            // the board and the walk moves on, so E and S together are a
+            // two-key pass through everything Space opened. exactCase because
+            // a bare `s` falling through the fold to this would turn a typo
+            // into a jump to another email.
+            KeyBinding(declining: "S", "skip to next", exactCase: true) {
+                Task { await skipToNext() }
+                return true
+            },
             // Plain `h`, the same key as every other surface — it took "prev
             // email"'s key (see the queue block above) rather than moving to
             // `H`, which would have made remind a verb you can ONLY reach
@@ -1919,6 +1928,31 @@ struct ThreadViewer: View {
         // sleep is the whole reason this works: an offset that is set and
         // cleared inside one update has never been drawn, so there is nothing
         // for the animation to move away from.
+        store.openThread(next.thread_id, queue: queue, entering: edge, readingMail: store.readingMail)
+        try? await Task.sleep(for: .milliseconds(30))
+        guard store.threadId == next.thread_id else { return }
+        withAnimation(Motion.deckCard) { store.threadFlight = .settled }
+    }
+
+    /// S — the walk from `doneAndNext` without the done. Nothing is resolved, so
+    /// nothing lifts off: the next email simply walks in over this one, which is
+    /// how a skip reads differently from a finish at a glance. `l` / → also step
+    /// forward, but onto the very next ROW; this goes where E would, past
+    /// siblings of this thread and mail already dealt with.
+    private func skipToNext() async {
+        guard store.threadFlight == .settled else { return }
+        let queue = store.threadQueue
+        guard let cur = queue.firstIndex(where: { $0.thread_id == threadId }),
+            let next = store.nextQueuedThread
+        else {
+            // Skipping the last one is leaving: the email is still on the
+            // board, the reader just has nothing left to show.
+            store.closeThread()
+            return
+        }
+        let edge: AppStore.ThreadEdge =
+            (store.readingStack || sameSender(next, queue[cur])) ? .trailing : .bottom
+        // Same off-screen mount and next-frame walk as `doneAndNext`.
         store.openThread(next.thread_id, queue: queue, entering: edge, readingMail: store.readingMail)
         try? await Task.sleep(for: .milliseconds(30))
         guard store.threadId == next.thread_id else { return }

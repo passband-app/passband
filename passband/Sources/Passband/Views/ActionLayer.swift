@@ -299,6 +299,7 @@ struct ShortcutsOverlay: View {
                 (["c"], "new message"),
                 (["e", "d"], "done, and close the reader"),
                 (["E", "D"], "done, and open the next email"),
+                (["S"], "skip to the next email, leave this one"),
                 (["h"], "remind + next"),
                 (["u"], "unsubscribe from this sender"),
                 (["t"], "new rule for this sender"),

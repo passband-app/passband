@@ -388,17 +388,6 @@ struct SitrepView: View {
                 DemoAppearancePicker()
             }
             RetriageButton()
-            if needNow > 0 {
-                HStack(spacing: 5) {
-                    Circle().fill(Palette.danger).frame(width: 5, height: 5)
-                    Text("\(needNow) need you now")
-                }
-                .font(Typo.chip)
-                .foregroundStyle(Palette.danger)
-                .padding(.horizontal, 9)
-                .padding(.vertical, 3)
-                .glassCapsule(tint: Palette.danger.opacity(0.18), interactive: false)
-            }
             #if os(macOS)
                 // The practice board has no `/` (the global set is cut down to
                 // undo + theme there), so an icon for it would be a button
@@ -415,12 +404,6 @@ struct SitrepView: View {
         // bar if neither can drift.
         .frame(height: TopBar.height)
     }
-
-    /// Obligations that are overdue or due by end of today — the "need you" set.
-    /// The count itself lives in `Lib/NeedToday.swift`: the app icon's badge says
-    /// this same number, and the badge is read without the sentence beside it
-    /// that would correct a disagreement.
-    private var needNow: Int { NeedToday.count(store.sitrep.standing) }
 
     // MARK: - (a) for your eyes
 

@@ -225,6 +225,16 @@ struct SitrepView: View {
         // traffic lights), so the sitrep only says whether it should.
         .onChange(of: quiet, initial: true) { _, q in QuietBoard.shared.isQuiet = q }
         .onDisappear { QuietBoard.shared.isQuiet = false }
+        #if os(macOS)
+            // The end of a Space walk: the bottom of the list, celebrated.
+            .overlay(alignment: .top) {
+                if let summary = store.walkFinished {
+                    WalkComplete(summary: summary) { store.walkFinished = nil }
+                        .id(summary.id)
+                        .padding(.top, TopBar.height + 36)
+                }
+            }
+        #endif
         .animation(.easeInOut(duration: 0.3), value: recordsEmpty)
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { pageWidth = $0 }
         .keyContext(.sitrep)
@@ -417,7 +427,17 @@ struct SitrepView: View {
     /// row at urgency 0, which is what keeps the real dates at the top.
     private func forYourEyes(visible: [AttentionUpdate], overflow: Int) -> some View {
         ZoneCard(
-            symbol: "eye", title: "For your eyes", count: store.sitrep.standing.count
+            symbol: "eye", title: "For your eyes", count: store.sitrep.standing.count,
+            trailing: store.sitrep.standing.isEmpty
+                ? nil
+                : AnyView(
+                    FlowModeButton {
+                        // Exactly what Space does from a board with no row
+                        // highlighted: the first row, the whole band as the walk.
+                        let walk = eyesWalk(store)
+                        guard let first = walk.first else { return }
+                        store.startWalk(first.thread_id, queue: walk)
+                    })
         ) {
             VStack(spacing: 1) {
                 ForEach(Array(visible.enumerated()), id: \.element.id) { i, u in
@@ -520,7 +540,7 @@ struct SitrepView: View {
                 let walk = eyesWalk(store)
                 let u = eyesActionable ? reachable[safe: cursor.index] : walk.first
                 guard let u else { return false }
-                store.openThread(u.thread_id, queue: walk)
+                store.startWalk(u.thread_id, queue: walk)
                 return true
             },
             // Same guard as every other verb here — inert unless a row is
@@ -1185,5 +1205,157 @@ struct FlowLayout: Layout {
             x += size.width + spacing
             rowHeight = max(rowHeight, size.height)
         }
+    }
+}
+
+#if os(macOS)
+    // MARK: - the end of a Space walk
+
+    /// THE BOTTOM OF THE LIST. A Space walk that stepped past its last email
+    /// lands back here, and this is the small reward for it: a ring that draws
+    /// itself closed, a check that follows, two soft pulses, and what the run
+    /// came to. Then it gets out of the way on its own.
+    ///
+    /// Only good news, like the headline above it: what was done, what was
+    /// set aside, how quick it was. Never what is left.
+    struct WalkComplete: View {
+        let summary: AppStore.WalkSummary
+        let dismiss: () -> Void
+
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
+        @State private var ring: CGFloat = 0
+        @State private var check: CGFloat = 0
+        @State private var pulse = false
+        @State private var shown = false
+
+        private var tally: String {
+            var parts: [String] = []
+            if summary.done > 0 { parts.append("\(summary.done) done") }
+            if summary.skipped > 0 { parts.append("\(summary.skipped) set aside") }
+            parts.append(Self.duration(summary.duration))
+            return parts.joined(separator: " · ")
+        }
+
+        static func duration(_ t: TimeInterval) -> String {
+            let s = max(1, Int(t.rounded()))
+            if s < 60 { return "\(s)s" }
+            return "\(s / 60)m \(s % 60)s"
+        }
+
+        var body: some View {
+            VStack(spacing: 14) {
+                ZStack {
+                    if !reduceMotion {
+                        ForEach(0..<2) { i in
+                            Circle()
+                                .stroke(Palette.accent.opacity(0.5), lineWidth: 1.5)
+                                .frame(width: 56, height: 56)
+                                .scaleEffect(pulse ? 2.6 : 1)
+                                .opacity(pulse ? 0 : 0.9)
+                                .animation(
+                                    .easeOut(duration: 1.1).delay(0.35 + Double(i) * 0.22),
+                                    value: pulse)
+                        }
+                    }
+                    Circle()
+                        .fill(Palette.accentSoft)
+                        .frame(width: 56, height: 56)
+                    Circle()
+                        .trim(from: 0, to: ring)
+                        .stroke(Palette.accent, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                        .frame(width: 56, height: 56)
+                    CheckShape()
+                        .trim(from: 0, to: check)
+                        .stroke(
+                            Palette.accent,
+                            style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round)
+                        )
+                        .frame(width: 22, height: 16)
+                }
+                VStack(spacing: 4) {
+                    Text("Through the list.")
+                        .font(Typo.serif(24, weight: .medium))
+                        .foregroundStyle(Palette.ink)
+                    Text(tally)
+                        .font(Typo.chip)
+                        .foregroundStyle(Palette.inkDim)
+                        .monospacedDigit()
+                }
+            }
+            .padding(.horizontal, 36)
+            .padding(.vertical, 26)
+            .background {
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .fill(.clear)
+                    .glassEffect(.regular, in: .rect(cornerRadius: 22))
+            }
+            .scaleEffect(shown ? 1 : 0.86)
+            .opacity(shown ? 1 : 0)
+            .allowsHitTesting(false)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Through the list. \(tally)")
+            .task {
+                NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now)
+                withAnimation(.spring(response: 0.38, dampingFraction: 0.62)) { shown = true }
+                if reduceMotion {
+                    ring = 1
+                    check = 1
+                } else {
+                    withAnimation(.easeInOut(duration: 0.45)) { ring = 1 }
+                    pulse = true
+                    try? await Task.sleep(for: .milliseconds(330))
+                    withAnimation(.easeOut(duration: 0.28)) { check = 1 }
+                }
+                try? await Task.sleep(for: .milliseconds(2400))
+                withAnimation(.easeIn(duration: 0.3)) { shown = false }
+                try? await Task.sleep(for: .milliseconds(320))
+                dismiss()
+            }
+        }
+    }
+
+    /// A check mark drawn as one stroke, so it can be trimmed on.
+    private struct CheckShape: Shape {
+        func path(in rect: CGRect) -> Path {
+            var p = Path()
+            p.move(to: CGPoint(x: rect.minX, y: rect.midY))
+            p.addLine(to: CGPoint(x: rect.minX + rect.width * 0.36, y: rect.maxY))
+            p.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+            return p
+        }
+    }
+#endif
+
+// MARK: - flow mode
+
+/// `space` flow mode: the Space walk, as a button in For-your-eyes' corner.
+/// It is how the key gets found: the reader who clicks it learns, from the
+/// keycap on the button they just pressed, that Space was the way all along.
+private struct FlowModeButton: View {
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Kbd("space")
+                Text("flow mode")
+                    .font(Typo.micro)
+                    .foregroundStyle(hovering ? Palette.ink : Palette.inkFaint)
+            }
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Palette.hairline.opacity(hovering ? 0.7 : 0))
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+        .help("Walk through For your eyes one email at a time (Space)")
+        .accessibilityLabel("Flow mode")
     }
 }

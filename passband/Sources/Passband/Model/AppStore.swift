@@ -583,6 +583,60 @@ final class AppStore {
     /// The ordered list the viewer was opened FROM, so "done + next" (e/d) can
     /// advance in place. Empty when opened from a surface without a queue.
     var threadQueue: [AttentionUpdate] = []
+
+    /// THE SPACE WALK: a run through For-your-eyes started with Space on the
+    /// sitrep, alive for as long as the reader stays open. While it is, the
+    /// reader shows the E/S hint; when it reaches the end of the list it
+    /// becomes a `WalkSummary` and the sitrep celebrates. Any other way out of
+    /// the reader (Esc, the rail, a plain `e`) just ends it, quietly.
+    struct Walk: Equatable {
+        var startedAt = Date()
+        var done = 0
+        var skipped = 0
+    }
+    var walk: Walk?
+    /// What a FINISHED walk came to, for the sitrep's moment. Cleared by the
+    /// moment itself once it has played.
+    struct WalkSummary: Equatable {
+        var done: Int
+        var skipped: Int
+        var duration: TimeInterval
+        let id = UUID()
+    }
+    var walkFinished: WalkSummary?
+
+    /// AN S IN FLIGHT: the page turn from one email to the next, with BOTH on
+    /// screen. The outgoing reader stays mounted (its mail already loaded, so
+    /// it never flashes back to "loading") and recedes left while the next
+    /// one slides in over it from the right; the subject bar fades out and
+    /// back in rather than sliding. RootView reads this to lay the two
+    /// readers out; ThreadViewer's skip drives it and clears it.
+    struct SkipTurn: Equatable {
+        let outgoing: String
+        /// 0 = the turn has not moved yet, 1 = the new email is home.
+        var progress: CGFloat = 0
+        var outgoingHeader: Double = 1
+        var incomingHeader: Double = 0
+    }
+    var skipTurn: SkipTurn?
+
+    /// Space on the sitrep: open the first row with the whole band as the
+    /// queue, and start counting.
+    func startWalk(_ threadId: String, queue: [AttentionUpdate]) {
+        openThread(threadId, queue: queue)
+        walk = Walk()
+    }
+
+    /// The walk stepped past its last email. Close the reader and hand the
+    /// tally to the sitrep, which plays the moment.
+    func finishWalk() {
+        let finished = walk
+        closeThread()
+        guard let finished, finished.done + finished.skipped > 0 else { return }
+        walkFinished = WalkSummary(
+            done: finished.done, skipped: finished.skipped,
+            duration: Date().timeIntervalSince(finished.startedAt))
+    }
     var readingMail = false
     var readingStack: Bool {
         guard readingMail, let first = threadQueue.first else { return false }
@@ -2013,6 +2067,10 @@ final class AppStore {
     }
 
     func closeThread() {
+        // Every way out of the reader ends a Space walk; only `finishWalk`
+        // turns one into a celebration, and it reads the walk before this.
+        walk = nil
+        skipTurn = nil
         // The preview lives in the reader's slot, so every way out of the
         // reader (Esc, the rail, an account switch) is a way out of it too.
         scheduledPreviewId = nil

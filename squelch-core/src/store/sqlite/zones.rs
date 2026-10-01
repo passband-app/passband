@@ -6,40 +6,80 @@
 //! LEARNED AT INGEST, and only when a message brings something to learn: a
 //! non-zero `Date` offset from its sender, or an invitation naming a zone. Bulk
 //! mail stamped UTC (nearly all of it) costs one UPDATE, one indexed DELETE
-//! and two indexed reads of this message's own rows, and nothing else. When there is something to learn, the sender's whole
-//! answer is RECOMPUTED from the stored observations rather than adjusted, for
-//! the reason `senders::bump_sender_conn` recomputes its count: a re-ingest of
-//! the same message must not count it twice. The offsets read is an indexed
+//! and two indexed reads of this message's own rows, and nothing else. When
+//! there is something to learn, the sender's whole answer is RECOMPUTED from
+//! the stored observations rather than adjusted, for the reason
+//! `senders::bump_sender_conn` recomputes its count: a re-ingest of the same
+//! message must not count it twice. The offsets read is a covering index
 //! probe on the sender bounded by the inference's twelve-month window and its
 //! cap on observations (see [`OFFSETS_SQL`]).
+//!
+//! ONLY AUTHENTICATED MAIL TEACHES ANYTHING (`messages.auth_pass = 1`; NULL,
+//! never evaluated, reads as no). Anyone can put any From and any Date on a
+//! message, and a zone inferred from forged mail would put the user's
+//! suggested meeting times in the wrong place for a real person. An
+//! invitation is BOUND to its sender as well: see [`invitation_is_bound`].
 //!
 //! A failure here never fails ingest (see [`guarded`]): a timezone is worth
 //! less than the mail it rides on.
 
 use super::*;
 use crate::timezone::{
-    InferredZone, InviteZone, MAX_OFFSET_OBSERVATIONS, OFFSET_WINDOW_DAYS, OffsetObservation,
-    ZoneConfidence, ZoneSource, infer_zone,
+    FUTURE_TOLERANCE_DAYS, InferredZone, InviteZone, MAX_OFFSET_OBSERVATIONS, MAX_ORGANIZER_BYTES,
+    OFFSET_WINDOW_DAYS, OffsetObservation, ZoneConfidence, ZoneSource, canonical_zone, infer_zone,
 };
+use crate::triage::ghost::organisation_domain;
 
-/// One sender's offset observations, newest first. The window and the cap
-/// are applied here for cost and again in `infer_zone` as the rule.
+/// One sender's offset observations, newest first: authenticated, inbound,
+/// not spam, inside the twelve-month window and not dated more than
+/// [`FUTURE_TOLERANCE_DAYS`] ahead. The window and the cap are applied here
+/// for cost and again in `infer_zone` as the rule; the future bound only
+/// here, because what it protects is which rows fill the cap.
 ///
-/// THE PARTIAL INDEX `idx_messages_zone_obs` serves it (created in `migrate`,
-/// because it names a migrated column): only rows with a non-zero offset are
-/// in it, keyed by sender and time, so the probe walks this sender's
-/// observations newest-first and stops at the cap. A sender's UTC-stamped
-/// mail is never read at all, and a prolific sender costs the cap, not their
-/// history. The `date_offset_minutes != 0` term must stay spelled as the
-/// index's WHERE is, or SQLite will not prove the index usable.
-/// `tests/zones.rs` pins the plan.
+/// THE PARTIAL COVERING INDEX `idx_messages_zone_offsets` serves it (created
+/// in `migrate`, because it names migrated columns): only rows with a
+/// non-zero offset are in it, and it holds every column this query reads, so
+/// the probe never visits the message row. That matters because the row's
+/// later columns sit after the body, on its overflow pages, and this runs
+/// inside ingest with the store mutex held. The index is keyed sender, then
+/// the three flags this query pins to one value, then time, so a flood of
+/// forged or spam mail in a real person's name is skipped by the seek rather
+/// than walked, and the walk goes newest-first and stops at the cap. A
+/// sender's UTC-stamped mail is never read at all. The
+/// `date_offset_minutes != 0` term must stay spelled as the index's WHERE
+/// is, or SQLite will not prove the index usable. `tests/zones.rs` pins the
+/// plan.
 pub(super) const OFFSETS_SQL: &str = "SELECT received_at, date_offset_minutes FROM messages
      WHERE account_id = ?1 AND from_addr = ?2 COLLATE NOCASE
+       AND auth_pass = 1 AND is_sent = 0 AND is_spam = 0
        AND date_offset_minutes != 0
-       AND is_sent = 0 AND is_spam = 0
-       AND received_at >= ?3
+       AND received_at >= ?3 AND received_at <= ?4
      ORDER BY received_at DESC
-     LIMIT ?4";
+     LIMIT ?5";
+
+/// THE INVITATION BINDING. An `.ics` names its own organizer, and anyone can
+/// write one: a forged invitation naming a real person as organizer would set
+/// that person's zone at high confidence, above any number of their real
+/// offsets. So an invitation is credited only when the message is
+/// AUTHENTICATED and its From is the organizer (compared case-insensitively,
+/// as the addresses are stored) or belongs to the same organisation
+/// ([`organisation_domain`]: Some and equal for both, so a freemail or
+/// shared-tenant domain never vouches for another address on it). That keeps
+/// what the signal is for: a person's own invitation, or one their assistant
+/// or their company's calendar address sent for them.
+fn invitation_is_bound(from_addr: &str, auth_pass: Option<i64>, organizer: &str) -> bool {
+    if auth_pass != Some(1) {
+        return false;
+    }
+    let (from, organizer) = (from_addr.trim(), organizer.trim());
+    if from.eq_ignore_ascii_case(organizer) {
+        return true;
+    }
+    matches!(
+        (organisation_domain(from), organisation_domain(organizer)),
+        (Some(a), Some(b)) if a == b
+    )
+}
 
 /// Is `addr` the account's own address? Its owner's zone is the device's,
 /// and a row for it would let the composer "infer" the user from their own
@@ -69,19 +109,32 @@ pub(super) fn refresh_sender_zone_conn(
         return Ok(());
     }
 
+    // `now` is the wall clock at the recompute (every caller passes
+    // `Utc::now()`), so the bound moves with time: a message dated next week
+    // starts counting next week, as the ordinary mail it will then be.
+    let until = (now + chrono::Duration::days(FUTURE_TOLERANCE_DAYS)).to_rfc3339();
+
     // Newest first, and only from mail that counts: a spam or sent message's
-    // invitation stays on file, unread, until a rescue makes it count.
+    // invitation stays on file, unread, until a rescue makes it count. The
+    // rows were bound to their sender when written (`observe`). A probe on
+    // the primary key's (account_id, addr) prefix; the date bound filters it.
     let mut stmt = conn.prepare_cached(
         "SELECT i.zone FROM sender_zone_invites i
          JOIN messages m ON m.account_id = i.account_id AND m.id = i.message_id
          WHERE i.account_id = ?1 AND i.addr = ?2
            AND m.is_sent = 0 AND m.is_spam = 0
+           AND i.observed_at <= ?4
          ORDER BY i.observed_at DESC, i.message_id DESC
          LIMIT ?3",
     )?;
     let invites = stmt
         .query_map(
-            params![account_id, addr, crate::timezone::INVITE_WINDOW as i64],
+            params![
+                account_id,
+                addr,
+                crate::timezone::INVITE_WINDOW as i64,
+                until
+            ],
             |r| r.get::<_, String>(0),
         )?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -90,7 +143,13 @@ pub(super) fn refresh_sender_zone_conn(
     let mut stmt = conn.prepare_cached(OFFSETS_SQL)?;
     let offsets = stmt
         .query_map(
-            params![account_id, addr, since, MAX_OFFSET_OBSERVATIONS as i64],
+            params![
+                account_id,
+                addr,
+                since,
+                until,
+                MAX_OFFSET_OBSERVATIONS as i64
+            ],
             |r| {
                 Ok(OffsetObservation {
                     at: dt(r, 0)?,
@@ -183,7 +242,7 @@ fn refresh_for_message(
 /// concern, in the ingest transaction. The offset is written with the
 /// recipients' rule (`None` is "no opinion" and keeps what is stored); the
 /// invitation row is REPLACED, so a re-ingest leaves exactly what this
-/// sighting says.
+/// sighting says (and a re-ingest that no longer authenticates removes it).
 fn observe(
     conn: &Connection,
     account_id: AccountId,
@@ -201,17 +260,51 @@ fn observe(
         "DELETE FROM sender_zone_invites WHERE account_id = ?1 AND message_id = ?2",
         params![account_id, message_id],
     )?;
-    if let Some(invite) = invite
-        && !is_own_address(conn, account_id, &invite.organizer)?
-    {
-        conn.execute(
-            "INSERT INTO sender_zone_invites(account_id, addr, zone, message_id, observed_at)
-             SELECT ?1, lower(trim(?2)), ?3, id, received_at FROM messages
-             WHERE account_id = ?1 AND id = ?4",
-            params![account_id, invite.organizer, invite.zone, message_id],
-        )?;
+    if let Some(invite) = invite {
+        record_invite(conn, account_id, message_id, invite)?;
     }
     refresh_for_message(conn, account_id, message_id, now)
+}
+
+/// Write one invitation observation, or nothing. Nothing unless the message
+/// is bound to the organizer ([`invitation_is_bound`]), the organizer is an
+/// address of a sane length and not the account's own, and the zone is a
+/// place; the zone is stored under its [`canonical_zone`] name for the
+/// message's own year, so every later vote counts one clock once.
+fn record_invite(
+    conn: &Connection,
+    account_id: AccountId,
+    message_id: i64,
+    invite: &InviteZone,
+) -> Result<()> {
+    let row: Option<(String, Option<i64>, DateTime<Utc>)> = conn
+        .query_row(
+            "SELECT from_addr, auth_pass, received_at FROM messages
+             WHERE account_id = ?1 AND id = ?2",
+            params![account_id, message_id],
+            |r| Ok((r.get(0)?, r.get(1)?, dt(r, 2)?)),
+        )
+        .optional()?;
+    let Some((from_addr, auth_pass, received_at)) = row else {
+        return Ok(());
+    };
+    let organizer = invite.organizer.trim();
+    if organizer.len() > MAX_ORGANIZER_BYTES
+        || !invitation_is_bound(&from_addr, auth_pass, organizer)
+        || is_own_address(conn, account_id, organizer)?
+    {
+        return Ok(());
+    }
+    let Some(zone) = canonical_zone(&invite.zone, received_at) else {
+        return Ok(());
+    };
+    conn.execute(
+        "INSERT INTO sender_zone_invites(account_id, addr, zone, message_id, observed_at)
+         SELECT ?1, lower(?2), ?3, id, received_at FROM messages
+         WHERE account_id = ?1 AND id = ?4",
+        params![account_id, organizer, zone, message_id],
+    )?;
+    Ok(())
 }
 
 /// Run `work` under its own savepoint, inside the caller's transaction: the
@@ -333,6 +426,10 @@ impl SqliteStore {
         zone: Option<&str>,
     ) -> Result<Option<InferredZone>> {
         let addr = addr.trim().to_ascii_lowercase();
+        // VALIDATED, NOT CANONICALISED: the override is the user's word and is
+        // stored as they wrote it. It never votes, so an alias splits nothing,
+        // and renaming "Europe/Paris" to Berlin's name (one clock under the
+        // curated list's rule) would show them a city they did not pick.
         let zone = match zone {
             Some(z) => Some(
                 z.trim()

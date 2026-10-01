@@ -9819,6 +9819,9 @@ async fn person_card_reports_one_address_without_its_sealed_mail() {
 
 /// Ingest one inbound message from `from` dated `days_ago`, stamped with a
 /// `Date` offset of `offset` (`+0530` and so on), through the real pipeline.
+/// Delivered the way Gmail delivers authenticated mail (its own `Received`
+/// above a passing verdict for the From's domain): only authenticated mail
+/// teaches a correspondent's timezone.
 fn ingest_dated(
     store: &SqliteStore,
     acct: i64,
@@ -9830,8 +9833,14 @@ fn ingest_dated(
     use squelch_core::config::Stage1Config;
     use squelch_core::sync::ingest::{RawFetched, ingest};
     let when = chrono::Utc::now() - chrono::Duration::days(days_ago);
+    let domain = from
+        .rsplit_once('@')
+        .map(|(_, d)| d.trim_end_matches('>'))
+        .unwrap_or_default();
     let eml = format!(
-        "From: {from}\r\nTo: me@example.com\r\nSubject: hi\r\nDate: {} {offset}\r\n\r\nhello\r\n",
+        "Received: from mail.{domain} (mail.{domain}. [192.0.2.1]) by mx.google.com with SMTPS id a1\r\n\
+         Authentication-Results: mx.google.com; dkim=pass header.i=@{domain}; dmarc=pass header.from={domain}\r\n\
+         From: {from}\r\nTo: me@example.com\r\nSubject: hi\r\nDate: {} {offset}\r\n\r\nhello\r\n",
         when.format("%a, %d %b %Y %H:%M:%S")
     );
     let fetched = RawFetched {

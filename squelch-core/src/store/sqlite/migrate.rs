@@ -77,8 +77,9 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
         "INTEGER NOT NULL DEFAULT 0",
     )?;
     // Email-authentication verdict. NULL on every pre-existing row and NOT
-    // backfilled: NULL is the safe reading (no tracking-pixel bypass), and a
-    // re-sync refills it through the message upsert.
+    // backfilled: NULL is the safe reading (it grants nothing: no
+    // tracking-pixel bypass, no ghost sender scope, no timezone observation),
+    // and a re-sync refills it through the message upsert.
     add_column_if_missing(conn, "messages", "auth_pass", "INTEGER")?;
     // Automatic-unsubscribe job state. NULL on every pre-existing row, which is
     // exactly a legacy browser unsubscribe: no job, and the detector armed.
@@ -110,23 +111,35 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     add_column_if_missing(conn, "messages", "date_offset_minutes", "INTEGER")?;
     // ITS INDEX, partial: only mail with a non-zero offset is an observation,
     // and most mail is stamped UTC, so the index holds a fraction of the table
-    // and costs nothing on the bulk mail it leaves out. Keyed sender-then-time
-    // so the recompute reads one sender's newest observations and stops at
-    // its cap (`zones::OFFSETS_SQL`). Every named column guarded, as for the
-    // spam index below.
+    // and costs nothing on the bulk mail it leaves out. COVERING: it carries
+    // every column `zones::OFFSETS_SQL` reads, so the recompute never visits a
+    // message row (whose later columns sit past the body on overflow pages).
+    // Keyed sender, then the flags the query pins (authenticated, inbound, not
+    // spam), then time, so the read seeks straight to one sender's countable
+    // observations, newest first, and stops at its cap. Every named column
+    // guarded, as for the spam index below.
+    //
+    // `idx_messages_zone_obs` was this index without the flags; it never
+    // shipped, but a development database may hold it, and it is dropped by
+    // name so the two never coexist.
+    conn.execute("DROP INDEX IF EXISTS idx_messages_zone_obs", [])?;
     if has_columns(
         conn,
         "messages",
         &[
             "account_id",
+            "auth_pass",
             "date_offset_minutes",
             "from_addr",
+            "is_sent",
+            "is_spam",
             "received_at",
         ],
     )? {
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_messages_zone_obs
-             ON messages(account_id, from_addr COLLATE NOCASE, received_at)
+            "CREATE INDEX IF NOT EXISTS idx_messages_zone_offsets
+             ON messages(account_id, from_addr COLLATE NOCASE, auth_pass, is_sent, is_spam,
+                         received_at, date_offset_minutes)
              WHERE date_offset_minutes != 0",
             [],
         )?;

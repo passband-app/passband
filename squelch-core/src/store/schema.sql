@@ -60,10 +60,19 @@ CREATE TABLE IF NOT EXISTS messages (
     -- neither held, NULL = never evaluated (no Gmail header, or the row was
     -- ingested before this column existed).
     --
-    -- NULL MUST READ AS "NO". Its only consumer is the human door's PERMISSIVE
-    -- known-sender tracking-pixel bypass, so absence of proof withholds the
-    -- bypass rather than granting it. Nothing is backfilled: any re-sync refills
-    -- the column through the message upsert.
+    -- NULL MUST READ AS "NO": every consumer tests `= 1` (or `Some(true)`),
+    -- so absence of proof withholds what the verdict would grant. It gates:
+    --   * the human door's PERMISSIVE known-sender tracking-pixel bypass;
+    --   * calendar ghosts (docs/CALENDAR.md §3.2): only an authenticated
+    --     record has a sender scope, so only it can carry identity keys, join
+    --     or edit a ghost, or mark one committed;
+    --   * correspondent timezones (§7): only authenticated mail's Date offset
+    --     counts, and an invitation is recorded only from authenticated mail
+    --     bound to its organizer.
+    -- So the residual gap `sync::ingest::extract_auth_pass` describes (a
+    -- verdict forged on an ingestion path where Gmail prepends nothing)
+    -- reaches all three, not only the pixel. Nothing is backfilled: any
+    -- re-sync refills the column through the message upsert.
     auth_pass   INTEGER,
     -- THE PROVIDER'S SPAM VERDICT, not ours: 1 when this message was fetched
     -- from Gmail's SPAM label, 0 otherwise. Gmail sorted it; nothing in squelch
@@ -1728,12 +1737,15 @@ END;
 -- remember (see `idx_contacts_addr_nocase` for what forgetting cost).
 --
 -- One row per invitation that named a zone: the iCalendar ORGANIZER, credited
--- with the TZID of the first DTSTART. Keyed by message, so a re-ingest
+-- with the TZID of the first DTSTART under its canonical name
+-- (`timezone::canonical_zone`). Written ONLY for authenticated mail whose From
+-- is the organizer or the organizer's organisation (`zones::invitation_is_bound`),
+-- so a forged invitation leaves no row. Keyed by message, so a re-ingest
 -- replaces its own row instead of adding one, and the row goes with its
 -- message (trigger below). Rows are written for spam and sent mail too (never
 -- for an invitation the account itself organized); the inference reads only
--- those whose message is inbound and not spam, so a message rescued from spam
--- starts counting without a rewrite.
+-- those whose message is inbound, not spam and not dated more than a day
+-- ahead, so a message rescued from spam starts counting without a rewrite.
 CREATE TABLE IF NOT EXISTS sender_zone_invites (
     account_id  INTEGER NOT NULL,
     addr        TEXT NOT NULL COLLATE NOCASE,

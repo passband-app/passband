@@ -518,8 +518,14 @@ const AUTH_RESULTS_HEADER: &str = "Authentication-Results";
 /// credentials — a sender who writes BOTH a fake `Received: ... by
 /// mx.google.com` and a fake verdict still gets through. Closing that needs
 /// out-of-band evidence this parser cannot see (the Gmail API's own delivery
-/// metadata), and the blast radius is bounded: the verdict only ever gates the
-/// tracking-pixel bypass for an already-known contact.
+/// metadata). The verdict (`messages.auth_pass`) now gates more than the
+/// tracking-pixel bypass for an already-known contact: it is what gives a
+/// calendar ghost's record a sender scope (identity keys, editing a ghost,
+/// marking it committed) and what lets a message teach a correspondent's
+/// timezone (its Date offset, and an invitation bound to its organizer). So
+/// a sender who gets through this gap can also edit or commit that sender's
+/// ghosts and move that person's inferred zone, and the gap matters for all
+/// of those, not only the pixel.
 pub fn extract_auth_pass(msg: &mail_parser::Message, from_addr: &str) -> Option<bool> {
     let headers = msg.headers();
     if headers
@@ -2742,19 +2748,32 @@ mod tests {
     fn captured_observations_reach_the_store_and_the_card() {
         let store = SqliteStore::open_in_memory().unwrap();
         let acct = store.ensure_account("me@example.com").unwrap();
-        for i in 1..=3 {
-            let when = Utc::now() - chrono::Duration::days(i);
-            let header = (when + chrono::Duration::minutes(330))
-                .format("%a, %d %b %Y %H:%M:%S +0530")
-                .to_string();
-            let mut f = raw(acct, &format!("g{i}"), &dated(Some(&header)), false);
-            f.account_addr = "me@example.com".into();
-            store
-                .ingest_message(&ingest(&f, &Stage1Config::default(), Utc::now(), |_| false))
-                .unwrap();
+        // Only mail Gmail authenticated teaches a zone: the same three
+        // messages with no verdict are recorded and never counted.
+        let verdict = format!(
+            "{GOOGLE_PREAMBLE}Authentication-Results: mx.google.com; \
+             dkim=pass header.i=@example.com; dmarc=pass header.from=example.com\r\n"
+        );
+        for (prefix, preamble) in [("u", ""), ("g", verdict.as_str())] {
+            for i in 1..=3 {
+                let when = Utc::now() - chrono::Duration::days(i);
+                let header = (when + chrono::Duration::minutes(330))
+                    .format("%a, %d %b %Y %H:%M:%S +0530")
+                    .to_string();
+                let eml = format!("{preamble}{}", dated(Some(&header)));
+                let mut f = raw(acct, &format!("{prefix}{i}"), &eml, false);
+                f.account_addr = "me@example.com".into();
+                store
+                    .ingest_message(&ingest(&f, &Stage1Config::default(), Utc::now(), |_| false))
+                    .unwrap();
+            }
+            let card = store.person_record(acct, "dan@example.com").unwrap();
+            if prefix == "u" {
+                assert_eq!(card.timezone, None, "unauthenticated mail");
+            } else {
+                assert_eq!(card.timezone.unwrap().zone, "Asia/Kolkata");
+            }
         }
-        let card = store.person_record(acct, "dan@example.com").unwrap();
-        assert_eq!(card.timezone.unwrap().zone, "Asia/Kolkata");
     }
 
     #[test]

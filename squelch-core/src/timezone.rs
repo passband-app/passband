@@ -8,13 +8,15 @@
 //!
 //! 1. A zone the user set by hand. Always wins.
 //! 2. The `TZID` of the first `DTSTART` in an invitation that person ORGANIZED
-//!    (the iCalendar `ORGANIZER`, which need not be the mail's From: a Google
-//!    invitation arrives from a calendar address on the organizer's behalf).
-//!    The subject's "(PDT)" is never read: Google renders it in the
-//!    RECIPIENT's zone.
-//! 3. The UTC offset of the `Date` header on their own inbound mail. Zero is
-//!    discarded: many clients and nearly every automated sender stamp UTC, so
-//!    a zero says nothing about where a person is.
+//!    (the iCalendar `ORGANIZER`). The organizer is whatever the `.ics` says,
+//!    so the store records an invitation only from AUTHENTICATED mail whose
+//!    From is the organizer or the organizer's own organisation (a delegate
+//!    or a company calendar address): see `store::sqlite::zones`. The zone is
+//!    counted under its canonical name ([`canonical_zone`]). The subject's
+//!    "(PDT)" is never read: Google renders it in the RECIPIENT's zone.
+//! 3. The UTC offset of the `Date` header on their own inbound, authenticated
+//!    mail. Zero is discarded: many clients and nearly every automated sender
+//!    stamp UTC, so a zero says nothing about where a person is.
 //!
 //! An offset is not a zone. Each observation is compared with each curated
 //! zone's offset AT THAT OBSERVATION'S INSTANT, so mail from both sides of a
@@ -22,7 +24,7 @@
 //! matches several (Denver and Phoenix agree all winter) and is served as a
 //! best guess.
 
-use chrono::{DateTime, Duration, Offset, TimeZone, Utc};
+use chrono::{DateTime, Datelike, Duration, Offset, TimeZone, Utc};
 use chrono_tz::Tz;
 
 /// Offsets older than this say little about where someone is now.
@@ -48,6 +50,23 @@ const MAX_OFFSET_MINUTES: i32 = 14 * 60;
 /// An invitation part bigger than this is not scanned: real ones are a few
 /// KiB, and the scan runs inside ingest.
 const ICS_SCAN_CAP_BYTES: usize = 256 * 1024;
+/// How many calendar parts of one message are looked at. A real invitation
+/// has one (two when the `.ics` is attached as well); a message built with
+/// hundreds would otherwise cost that many scans inside ingest.
+pub const MAX_CALENDAR_PARTS: usize = 3;
+/// The longest organizer address recorded, in bytes: RFC 5321's 64-octet
+/// local part, the `@` and a 255-octet domain. Anything longer is not an
+/// address, and no observation.
+pub const MAX_ORGANIZER_BYTES: usize = 320;
+/// Mail dated more than this far ahead of now does not vote. Observations are
+/// read NEWEST FIRST up to a cap, so a Date header set in the future would
+/// sit at the top of the window and keep its slot for as long as the date
+/// stays ahead; a day covers any honest clock that is merely fast.
+pub const FUTURE_TOLERANCE_DAYS: i64 = 1;
+/// Instants, a fortnight apart, at which a zone's clock is compared with a
+/// curated zone's to decide it is that zone under another name. Twenty-six
+/// span the year, so both sides of any daylight-saving change are seen.
+const CANONICAL_SAMPLES: i64 = 26;
 
 /// The representative zones offsets can be matched to, IN PRIORITY ORDER:
 /// where several reach the share, the first one named wins. One zone per
@@ -59,9 +78,12 @@ const ICS_SCAN_CAP_BYTES: usize = 256 * 1024;
 /// Phoenix (UTC-7 in winter), Los Angeles before Phoenix (UTC-7 in summer),
 /// Sydney before Brisbane (UTC+10 in the southern winter), London before
 /// Lagos (UTC+1 in the northern summer), Berlin before Lagos and
-/// Johannesburg. The half-hour and 45-minute zones (St. John's, Tehran,
-/// Kabul, India, Nepal, Yangon, Darwin, Adelaide) have no rival at their
-/// offset and so are always high confidence when they match.
+/// Johannesburg. Most half-hour and 45-minute zones (St. John's, Tehran,
+/// Kabul, India, Nepal, Yangon) have no rival at their offsets and so come
+/// out high when they match. Darwin and Adelaide are the exception: Adelaide
+/// in its winter is Darwin's +9:30, so a winter of Adelaide mail matches both
+/// and is served as Darwin at medium, until mail from its summer (+10:30,
+/// Adelaide's alone) pins it.
 pub const CURATED_ZONES: &[&str] = &[
     // North America
     "America/New_York",
@@ -212,28 +234,87 @@ fn offset_minutes_at(tz: Tz, at: DateTime<Utc>) -> i32 {
         / 60
 }
 
-/// An IANA zone a person can be in, or `None`. `Etc/*` and the UTC aliases
-/// parse but name no place: an invitation in "UTC" is a UTC time, which the
-/// contract treats like a `Z` start.
+/// An IANA zone a person can be in, or `None`. Validation only: the name is
+/// returned as given (see [`canonical_zone`] for counting).
+///
+/// A place has a `/` ("America/New_York", "US/Pacific"). Every name without
+/// one parses but names no place: the fixed offsets ("EST", "MST", "HST",
+/// wrong by an hour all summer wherever they are read), the POSIX-style rule
+/// sets ("EST5EDT", "CET") and the UTC aliases ("UTC", "GMT", "Zulu"; an
+/// invitation in UTC is a UTC time, which capture treats like a `Z` start).
+/// `Etc/*` has a `/` and is the same thing again ("Etc/GMT+5").
 pub fn place_zone(name: &str) -> Option<Tz> {
     let name = name.trim();
-    let tz: Tz = name.parse().ok()?;
-    let placeless = name.starts_with("Etc/")
-        || matches!(
-            name,
-            "UTC" | "UCT" | "GMT" | "GMT0" | "GMT+0" | "GMT-0" | "Greenwich" | "Universal" | "Zulu"
-        );
-    (!placeless).then_some(tz)
+    if !name.contains('/') || name.starts_with("Etc/") {
+        return None;
+    }
+    name.parse().ok()
+}
+
+/// A zone under the name inference COUNTS it by, or `None` when it is no
+/// place ([`place_zone`]).
+///
+/// A curated zone is itself. Any other place whose clock agrees with a
+/// curated zone's at [`CANONICAL_SAMPLES`] instants a fortnight apart across
+/// `at`'s calendar year is that curated zone for every purpose inference
+/// has: "US/Pacific" counts as America/Los_Angeles, "Asia/Calcutta" as
+/// Asia/Kolkata, and (by the curated list's one-zone-per-rule-set design)
+/// "Europe/Paris" as Europe/Berlin. Without this, two invitations from one
+/// person split their vote across two names for one clock. Where several
+/// curated zones agree at every sample (Athens and Jerusalem change their
+/// clocks two days apart, which a fortnight can step over), the first that
+/// also agrees on every day of the year wins, else the first in priority
+/// order. Curated zones that keep the same clock all year cannot be told
+/// apart this way, so an alias of the later one counts as the earlier:
+/// "America/Buenos_Aires" as America/Sao_Paulo (both UTC-3 since Brazil
+/// dropped daylight saving), "Asia/Hong_Kong" as Asia/Shanghai. The offsets
+/// inference names the same zone for the same mail. A place that agrees with
+/// no curated zone keeps its own name.
+///
+/// `at` is the observation's instant: zones change their rules over the
+/// years, and the year an invitation was sent is the one it speaks for.
+pub fn canonical_zone(name: &str, at: DateTime<Utc>) -> Option<String> {
+    let tz = place_zone(name)?;
+    if CURATED_ZONES.contains(&tz.name()) {
+        return Some(tz.name().to_string());
+    }
+    let year_start = Utc.with_ymd_and_hms(at.year(), 1, 1, 12, 0, 0).single()?;
+    let same_clock = |other: Tz, step_days: i64, samples: i64| {
+        (0..samples).all(|k| {
+            let t = year_start + Duration::days(step_days * k);
+            offset_minutes_at(tz, t) == offset_minutes_at(other, t)
+        })
+    };
+    let agreeing: Vec<Tz> = CURATED_ZONES
+        .iter()
+        .filter_map(|name| name.parse::<Tz>().ok())
+        .filter(|curated| same_clock(*curated, 14, CANONICAL_SAMPLES))
+        .collect();
+    let chosen = match agreeing.as_slice() {
+        [] => tz,
+        [only] => *only,
+        several => several
+            .iter()
+            .copied()
+            .find(|curated| same_clock(*curated, 1, 365))
+            .unwrap_or(several[0]),
+    };
+    Some(chosen.name().to_string())
 }
 
 /// Decide a person's zone from everything known about them.
 ///
 /// `invites` is the invitation zones they organized, NEWEST FIRST; only the
-/// newest [`INVITE_WINDOW`] vote. `offsets` is the non-sent, non-spam mail
-/// they wrote, in any order; zero offsets and anything older than
-/// [`OFFSET_WINDOW_DAYS`] before `now` are dropped here, and only the newest
+/// newest [`INVITE_WINDOW`] vote, each under its [`canonical_zone`] name (at
+/// `now`'s year: the store already wrote them canonical at their own, and a
+/// curated name is itself in any year), and a name that is no place does not
+/// vote. `offsets` is the authenticated, non-sent, non-spam mail they wrote,
+/// in any order; zero offsets and anything older than [`OFFSET_WINDOW_DAYS`]
+/// before `now` are dropped here, and only the newest
 /// [`MAX_OFFSET_OBSERVATIONS`] vote, whatever the caller passed, so the rule
-/// lives in one place.
+/// lives in one place. Mail dated in the future is the store's to drop
+/// ([`FUTURE_TOLERANCE_DAYS`]): it matters for which rows fill the cap, and
+/// the cap is applied in the read.
 pub fn infer_zone(
     user_override: Option<&str>,
     invites: &[String],
@@ -247,7 +328,7 @@ pub fn infer_zone(
             confidence: ZoneConfidence::High,
         });
     }
-    if let Some(zone) = invite_majority(invites) {
+    if let Some(zone) = invite_majority(invites, now) {
         return Some(InferredZone {
             zone,
             source: ZoneSource::Invite,
@@ -260,11 +341,11 @@ pub fn infer_zone(
 /// The most frequent zone among the newest invitations, when it holds at
 /// least half of them. A tie between two zones goes to the one seen most
 /// recently, which is the order `invites` arrives in.
-fn invite_majority(invites: &[String]) -> Option<String> {
+fn invite_majority(invites: &[String], now: DateTime<Utc>) -> Option<String> {
     let window: Vec<String> = invites
         .iter()
         .take(INVITE_WINDOW)
-        .filter_map(|z| place_zone(z).map(|tz| tz.name().to_string()))
+        .filter_map(|z| canonical_zone(z, now))
         .collect();
     if window.is_empty() {
         return None;
@@ -346,29 +427,35 @@ pub fn date_offset_minutes(date: &mail_parser::DateTime) -> Option<i32> {
 
 /// The first invitation in a parsed message that yields an observation:
 /// a `text/calendar` (or `application/ics`) part, or any part named `*.ics`.
-/// Nested messages are not descended into: a forwarded invitation is the
-/// forwarder's mail, and its parts belong to the inner message.
+/// Only the first [`MAX_CALENDAR_PARTS`] such parts are looked at, an
+/// oversized one included. Nested messages are not descended into: a
+/// forwarded invitation is the forwarder's mail, and its parts belong to the
+/// inner message.
 pub fn invite_zone(message: &mail_parser::Message) -> Option<InviteZone> {
     use mail_parser::MimeHeaders;
-    message.parts.iter().find_map(|part| {
-        let typed = part.content_type().is_some_and(|ct| {
-            let sub = ct.subtype().unwrap_or_default();
-            (ct.ctype().eq_ignore_ascii_case("text") && sub.eq_ignore_ascii_case("calendar"))
-                || (ct.ctype().eq_ignore_ascii_case("application")
-                    && sub.eq_ignore_ascii_case("ics"))
-        });
-        let named = part
-            .attachment_name()
-            .is_some_and(|n| n.trim().to_ascii_lowercase().ends_with(".ics"));
-        if !(typed || named) {
-            return None;
-        }
-        let bytes = part.contents();
-        if bytes.len() > ICS_SCAN_CAP_BYTES {
-            return None;
-        }
-        scan_ics(&String::from_utf8_lossy(bytes))
-    })
+    message
+        .parts
+        .iter()
+        .filter(|part| {
+            let typed = part.content_type().is_some_and(|ct| {
+                let sub = ct.subtype().unwrap_or_default();
+                (ct.ctype().eq_ignore_ascii_case("text") && sub.eq_ignore_ascii_case("calendar"))
+                    || (ct.ctype().eq_ignore_ascii_case("application")
+                        && sub.eq_ignore_ascii_case("ics"))
+            });
+            typed
+                || part
+                    .attachment_name()
+                    .is_some_and(|n| n.trim().to_ascii_lowercase().ends_with(".ics"))
+        })
+        .take(MAX_CALENDAR_PARTS)
+        .find_map(|part| {
+            let bytes = part.contents();
+            if bytes.len() > ICS_SCAN_CAP_BYTES {
+                return None;
+            }
+            scan_ics(&String::from_utf8_lossy(bytes))
+        })
 }
 
 /// Read the two things inference needs out of an iCalendar body: the first
@@ -842,6 +929,10 @@ mod tests {
             "DTSTART;VALUE=DATE:20261006",
             "DTSTART;TZID=UTC:20261006T140000",
             "DTSTART;TZID=Etc/GMT+5:20261006T140000",
+            "DTSTART;TZID=EST:20260706T140000",
+            "DTSTART;TZID=MST:20261006T140000",
+            "DTSTART;TZID=HST:20261006T140000",
+            "DTSTART;TZID=EST5EDT:20261006T140000",
         ] {
             assert_eq!(scan_ics(&with(dtstart)), None, "{dtstart}");
         }
@@ -855,5 +946,126 @@ mod tests {
         assert_eq!(scan_ics(two), None);
         assert_eq!(scan_ics("garbage\0\u{fffd}"), None);
         assert_eq!(scan_ics(""), None);
+    }
+
+    #[test]
+    fn a_fixed_offset_abbreviation_is_no_place() {
+        // "EST" is a valid tz name for a clock fixed at -5, which is New York
+        // only in winter. Without a `/` nothing is a place.
+        for name in [
+            "EST",
+            "MST",
+            "HST",
+            "EST5EDT",
+            "CET",
+            "UTC",
+            "GMT",
+            "Etc/GMT+5",
+        ] {
+            assert!(name.parse::<Tz>().is_ok(), "{name} parses");
+            assert_eq!(place_zone(name), None, "{name}");
+            assert_eq!(canonical_zone(name, now()), None, "{name}");
+        }
+        // Validation keeps the name as given: only counting canonicalises.
+        assert_eq!(place_zone(" US/Pacific ").unwrap().name(), "US/Pacific");
+    }
+
+    #[test]
+    fn an_alias_counts_as_the_curated_zone_with_its_clock() {
+        for (alias, curated) in [
+            ("US/Pacific", "America/Los_Angeles"),
+            ("US/Eastern", "America/New_York"),
+            ("America/Toronto", "America/New_York"),
+            ("Asia/Calcutta", "Asia/Kolkata"),
+            ("Asia/Katmandu", "Asia/Kathmandu"),
+            // Same clock all year as Sao Paulo, which is listed first: the
+            // name is lost, the clock is not (see `canonical_zone`).
+            ("America/Buenos_Aires", "America/Sao_Paulo"),
+            (
+                "America/Argentina/Buenos_Aires",
+                "America/Argentina/Buenos_Aires",
+            ),
+            ("Europe/Paris", "Europe/Berlin"),
+            // Athens and Jerusalem agree at all 26 fortnightly samples of
+            // 2026 and differ for two days in March: the daily check decides.
+            ("Asia/Tel_Aviv", "Asia/Jerusalem"),
+            // A curated zone is itself, whatever else shares its clock.
+            ("Asia/Jerusalem", "Asia/Jerusalem"),
+            ("Australia/Brisbane", "Australia/Brisbane"),
+        ] {
+            assert_eq!(
+                canonical_zone(alias, now()).as_deref(),
+                Some(curated),
+                "{alias}"
+            );
+        }
+        // A place no curated zone keeps time with stays itself.
+        assert_eq!(
+            canonical_zone("Pacific/Chatham", now()).as_deref(),
+            Some("Pacific/Chatham")
+        );
+    }
+
+    #[test]
+    fn us_pacific_and_los_angeles_vote_together() {
+        let invites = vec![
+            "US/Pacific".to_string(),
+            "America/Los_Angeles".to_string(),
+            "America/New_York".to_string(),
+        ];
+        assert_eq!(
+            zone_of(infer_zone(None, &invites, &[], now())),
+            Some((
+                "America/Los_Angeles".into(),
+                ZoneSource::Invite,
+                ZoneConfidence::High
+            ))
+        );
+        // "EST" is no vote at all, not a vote for New York: one Tokyo
+        // invitation is then a majority of one.
+        let est = vec![
+            "EST".to_string(),
+            "EST".to_string(),
+            "Asia/Tokyo".to_string(),
+        ];
+        assert_eq!(
+            infer_zone(None, &est, &[], now()).unwrap().zone,
+            "Asia/Tokyo"
+        );
+    }
+
+    /// A message with `parts` calendar parts, in order, as a Google-style
+    /// `multipart/mixed`.
+    fn with_calendar_parts(parts: &[&str]) -> Vec<u8> {
+        let mut eml = String::from(
+            "From: sam@example.com\r\nTo: me@example.com\r\nSubject: x\r\n\
+             MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"b1\"\r\n\r\n",
+        );
+        for ics in parts {
+            eml.push_str("--b1\r\nContent-Type: text/calendar; charset=UTF-8\r\n\r\n");
+            eml.push_str(ics);
+            eml.push_str("\r\n");
+        }
+        eml.push_str("--b1--\r\n");
+        eml.into_bytes()
+    }
+
+    #[test]
+    fn the_fourth_calendar_part_is_not_scanned() {
+        let junk = "BEGIN:VCALENDAR\r\nEND:VCALENDAR";
+        let good = "BEGIN:VEVENT\r\nORGANIZER:mailto:sam@example.com\r\n\
+                    DTSTART;TZID=Asia/Tokyo:20261006T140000\r\nEND:VEVENT";
+        let parse = |bytes: &[u8]| {
+            let message = mail_parser::MessageParser::default()
+                .parse(bytes)
+                .expect("parses");
+            invite_zone(&message)
+        };
+        // The third part is still read...
+        let third = with_calendar_parts(&[junk, junk, good]);
+        assert_eq!(parse(&third).unwrap().zone, "Asia/Tokyo");
+        // ...the fourth is not.
+        let fourth = with_calendar_parts(&[junk, junk, junk, good]);
+        assert_eq!(parse(&fourth), None);
     }
 }

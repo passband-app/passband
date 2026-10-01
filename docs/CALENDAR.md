@@ -85,19 +85,30 @@ confirmation, a "your reservation was modified" and a cancellation from the
 same sender feed the same row.
 
 - **A reference only means something within its sender.** Every record takes
-  a scope from its message: the sender's registrable domain, or the full
-  address on a freemail domain, and only when the message passed
-  authentication. Its identity refs (an iCalendar UID, a confirmation or
-  booking number, an event page URL) are keyed under that scope. A stranger
-  quoting the user's booking number from another domain gets a ghost of their
-  own and cannot move, rename or cancel the user's.
+  a scope from its message, and only when the message passed authentication:
+  the sender's registrable domain under the Public Suffix List (so
+  `hotel.com.mx` and `evil.com.mx` are two senders), or the full address on a
+  freemail domain or a shared tenant (`*.onmicrosoft.com`,
+  `googlegroups.com`), where a domain says nothing about who wrote. Its
+  identity refs (an iCalendar UID, a confirmation or booking number, an event
+  page URL) are keyed under that scope. A stranger quoting the user's booking
+  number from another domain gets a ghost of their own and cannot move,
+  rename or cancel the user's.
+- **A ghost belongs to the sender that made it, for good.** Its owner scope
+  is set when it is created and never changes, and only records of that
+  scope are ever assigned to it. Another person's "let's do 8 instead" in the
+  same thread is a second ghost, not an edit of the first; the scheduling
+  wave handles negotiation properly.
 - **Unauthenticated mail speaks for nobody.** Its records match no other
   ghost, never join a ghost other mail feeds, and never commit one.
-- **Matching, in order:** a ghost holding one of the record's scoped refs;
-  with no usable ref, a ghost from the same thread on the same date (or, for a
-  ref-less update, the thread's only live ghost); the ghost this message fed
-  before, which is what keeps a ghost's id and the user's dismissal when a
-  re-triage rewords a title; otherwise a new ghost.
+- **Matching, in order:** a ghost of the same sender holding one of the
+  record's scoped refs and starting within a day of it (only an update may
+  move a date); with no usable ref, a ghost of the same sender from the same
+  thread on the same date (or, for a ref-less update or cancellation, the
+  thread's only live ghost); the ghost this message alone fed before, within a
+  day, which is what keeps a ghost's id and the user's dismissal when a
+  re-triage rewords a title; otherwise a new ghost. A cancellation that
+  matches nothing creates nothing: there is no event to cancel.
 - **Ghosts never merge.** Each record is assigned to exactly one ghost and the
   assignment is remembered. A record that could match several is given to one
   and the others are left alone. A duplicate ghost is an acceptable outcome;
@@ -113,10 +124,14 @@ same sender feed the same row.
   index into its mail (§9).
 - **Expiry replaces the 24-hour hide.** A ghost lives at its time and leaves
   when that time passes. `CalendarVisibility` is deleted.
-- **Sealed, spam and sent mail feeds nothing.** Its records keep their place
-  on a ghost but supply nothing. A ghost whose facts came from such a message
-  is hidden until another source supplies them, and un-sealing or un-spamming
-  the message brings the ghost back with the user's marks intact.
+- **Sealed, spam, sent and restricted mail feeds nothing.** Its records keep
+  their place on a ghost but supply nothing. A ghost whose facts came from
+  such a message is hidden until another source supplies them, and
+  un-sealing or un-spamming the message matches its stored records again,
+  which brings the ghost back with the user's marks intact unless the
+  message now describes something else. Deleting the message a ghost's facts
+  came from hides the ghost too, until another of its messages is decided
+  again.
 
 ### 3.3 What goes on the real calendar (DECIDED)
 
@@ -239,17 +254,21 @@ to the scheduling wave (§12, wave 5), and `hold` is not a kind yet.
 never rejected:
 
 - Title trimmed and capped at 200 characters; an empty title drops the
-  record. It is the ONLY reason a record is dropped, because a record's
-  position among the kept ones is part of its stored identity.
+  record. It is the only reason a record is dropped, apart from the cap of 20
+  event records per message (the first 20 kept), because a record's position
+  among the kept ones is part of its stored identity.
 - A start or end that is neither RFC3339 nor `YYYY-MM-DD` is dropped, and so
   is an end not after the start at the same precision.
-- `start_timezone` is kept only as a valid IANA zone name (`chrono-tz`):
-  "Eastern Standard Time" and "PDT" are dropped.
+- `start_timezone` is kept only as an IANA place zone: a valid name with a
+  `/`, not under `Etc/`. "Eastern Standard Time", "PDT", "EST" and "UTC" are
+  dropped. A valid alias is kept as written ("US/Eastern"): the zone is
+  shown, not counted, so it is validated and not renamed.
 - The estimate is clamped to 15 minutes to 3 days, and dropped when an end is
   stated or the start is date-only.
 - `basis` and `reason` are capped at 80 characters, and dropped (the minutes
   and the band stay) when they carry a URL, an `@` or a run of 6 or more
-  digits.
+  digits, counted across the separators a number is printed with ("call
+  555-1234" is a run).
 - At most 5 refs per record. A URL ref loses its query and fragment and is
   kept only when the path names one event: a last segment with a digit, or a
   last segment of 6 or more characters under another one. A bare site, a
@@ -257,59 +276,89 @@ never rejected:
   OpenTable's `book/view?rid=`) and any path with a secret-shaped segment are
   dropped: an unbroken run of more than 24 characters mixing letters and
   digits (a magic link), or a UUID (a cancellation link). A hyphenated slug is
-  not a secret, however long. A ref with a URL inside
-  other text is that URL alone. Other refs fold to lowercase alphanumerics
-  without leading label words; short fragments and plain words are dropped.
-- Every URL in a location keeps host and path only ("Zoom:
-  https://zoom.us/j/123?pwd=abc" becomes "Zoom: zoom.us/j/123"); a path with a
-  credential-shaped segment is cut back to the host.
+  not a secret, however long. A ref with a URL anywhere in it, glued to a
+  label or not ("Event page:https://..."), is that URL alone.
+- Any other ref is split into words. Label words ("confirmation", "order",
+  "booking", "ref", "flight" and the like) go wherever they stand, and so do
+  a position word and its number ("Seat 12A", "Gate 4"). If a word with a
+  digit is left, the key is those words joined: "OpenTable confirmation
+  123456789" and "123456789" agree. A key under 5 characters takes the 1 to 3
+  letter word just before it, so "UA 123" and "Flight UA123" are both
+  `ua123`. With no digit, only a single all-capitals word that is not a
+  status word is kept (a record locator, "QXJZKM"). Dropped: a key under 5
+  characters, an all-digit key under 6 digits, and an 8-digit key that is a
+  date.
+- Every URL in a location, glued to a label or not, keeps host and path only
+  ("Zoom:https://zoom.us/j/123?pwd=abc" becomes "Zoom:zoom.us/j/123"); a
+  path with a credential-shaped segment is cut back to the host.
 - All text, titles included, loses control, bidi and invisible characters
   (zero-width, word joiner, BOM, tag characters). A title with nothing else in
   it is empty, and its record is dropped. That rule fixes each record's
   stored position, so it must not change once ghosts exist in the field.
 - A `basis` or `reason` that laundering blanks is served as null.
 
-**Identity.** Scope is `triage::ghost::sender_scope`: the registrable domain of
-an authenticated sender, the full address on freemail, none otherwise. Keys
-are `ref:<scope>:<ref>` and nothing else: there is no thread key and no title
+**Identity.** Scope is `triage::ghost::sender_scope`, for authenticated mail
+only: the sender's registrable domain under the Public Suffix List (the `psl`
+crate, private section included), or the full lowercased address on a
+freemail domain or a shared tenant (`onmicrosoft.com`, `googlegroups.com`);
+none otherwise. A ghost's `owner_scope` is the scope of the record that
+created it (NULL from unauthenticated mail), set once, and every rule below
+considers only ghosts with the record's own scope. Keys are
+`ref:<scope>:<ref>` and nothing else: there is no thread key and no title
 key. Each laundered record of a message (by its `position`) is matched once,
 against the state before the message's old assignment is removed:
 
-1. By ref: ghosts holding any of its keys. A `created` record skips a ghost
-   whose start is more than a day from its own. Most shared keys win, then
-   nearest start, then lowest id.
-2. By thread, only with no usable ref: ghosts fed from the same thread that
-   hold no other scope's keys. Same date wins; failing that, a record that is
-   not `created` takes the thread's only live ghost.
-3. The ghost this message fed at that position (or its only ghost).
-4. A new ghost.
+1. By ref: ghosts holding any of its keys. Any record but an `updated` one
+   skips a ghost whose start is more than a day from its own. Most shared
+   keys win, then the rank below.
+2. By thread, only with no usable ref: ghosts fed from the same thread. Same
+   date wins; failing that, a record that is not `created` takes the
+   thread's only live ghost. With several live ghosts and none on its date it
+   matches nothing, so an ambiguous ref-less cancellation cancels nothing.
+3. A ghost this message alone fed before, within a day of the record's start
+   (or with either start missing): the one at the record's position, or,
+   when that one is claimed or does not qualify, the nearest-starting other
+   one that does.
+4. A new ghost, owned by the record's scope. Not for a `cancelled` record:
+   one that matched nothing is dropped.
 
-Among equals a ghost the message already fed wins, and no two records of one
-message share a ghost. An unauthenticated record skips 1 and 2 and reuses only
-a ghost no other message feeds. Ghosts are never merged.
+The rank among equals: a ghost the message already fed, then the nearest
+start, then the lowest id. A record with no start prefers the ghost next to
+start after its mail arrived, then the latest before it. No two records of
+one message share a ghost. An unauthenticated record skips 1 and 2. Ghosts
+are never merged.
 
 **Daemon tables:**
 
 - `ghost_events`: kind, title, `starts_at` (as given) and `start_timezone`,
   `ends_at` (stated only), `est_minutes` and `est_basis` (the model's only),
-  location, commitment, `mail_state` (`live` / `cancelled`), likelihood band
-  and reason, `supplier_message_id` (the message whose record supplied the
-  facts), `last_message_id`. Derived: `start_sort` (UTC text, for the coarse
-  range query) and `venue_key` (what the priors are keyed by). Only the user
-  writes `user_state` (`dismissed` / `going`), `user_state_at`, and the end
-  correction as a SPAN from the start: `user_end_minutes` for a timed ghost,
-  `user_end_days` for an all-day one. Mail that moves the start moves the
-  corrected end with it; a span at the other precision is ignored.
+  location, commitment, `owner_scope`, `mail_state` (`live` / `cancelled`),
+  likelihood band and reason, `supplier_message_id` (the message whose record
+  supplied the facts), `last_message_id`. Derived: `start_sort` (UTC text,
+  for the coarse range query) and `venue_key` (what the priors are keyed by).
+  The user writes `user_state` (`dismissed` / `going`), `user_state_at`, and
+  the end correction as a SPAN from the start: `user_end_minutes` for a timed
+  ghost, `user_end_days` for an all-day one. Mail that moves the start moves
+  the corrected end with it. Mail that changes the start's precision (timed
+  to all-day or back) clears the span at the other precision, so it cannot
+  come back after a second change; that is the projection's one write to a
+  user column.
 - `ghost_event_sources`: the assignment, one row per record: account, ghost,
-  message, `position`, role (its `change`), scope (NULL when
-  unauthenticated). Primary key `(account, message, position)`. At most 50
-  per ghost; a new record past that replaces the oldest. Rows go with their
-  ghost or their message.
+  message, `position`, role (its `change`). Primary key `(account, message,
+  position)`. At most 50 per ghost; a new record past that replaces the
+  oldest, and since only the owner's scope adds rows, another sender cannot
+  evict the owner's. Rows go with their ghost or their message. Deleting a
+  message also clears `supplier_message_id` on the ghost it supplied, which
+  hides that ghost until the next reconcile of a message that feeds it.
 - `ghost_event_keys`: the scoped ref keys of a ghost's currently assigned
   eligible records, recomputed on every rebuild. Not unique: a flight number
   can name two ghosts on two dates.
 - `event_duration_priors`: venue key and kind to minutes, written when the
-  user corrects a timed end at a known venue. Tier 2 of §3.4.
+  user corrects a timed end at a known venue, with the ghost that taught it.
+  Never written or read for travel, which has no default: one long flight
+  from an airport says nothing about the next. Clearing a correction removes
+  the prior it wrote while the prior still holds that number. Tier 2 of
+  §3.4.
 
 `ghost_outcomes`, the real event id and the Passband-created flag are not
 built; they arrive with likelihood (wave 3) and calendar access (wave 4).
@@ -318,11 +367,11 @@ built; they arrive with likelihood (wave 3) and calendar access (wave 4).
 stored decisions. Facts come from the newest eligible record that does not
 cancel (the newest eligible one if all do), and that message is recorded as
 the supplier. `mail_state` is `cancelled` when the newest eligible record
-cancels. The ghost is `committed` only through an authenticated record of the
-ghost's own sender (the scope of its oldest authenticated record) that is
-committed or `agreed`; a committed claim from unauthenticated or other-sender
-mail is served as `unknown`. A source that is sent, spam or restricted, or
-whose decision does not deserialize, keeps its row and contributes nothing. A
+cancels. The ghost is `committed` only when it has an owner and one of its
+records is committed or `agreed`; every record already has the owner's
+scope, and a ghost made from unauthenticated mail is `unknown` whatever its
+mail claims. A source that is sent, spam, restricted or sealed, or whose
+decision does not deserialize, keeps its row and contributes nothing. A
 row whose message no longer carries a record at that position goes. No rows
 left deletes the ghost; rows but no eligible record keeps its facts, clears
 the supplier and its keys, and hides it.
@@ -331,12 +380,17 @@ the supplier and its keys, and hides it.
 back the ghosts alone, logs ids and an error kind, and the decision commits.
 The exception is an error after which SQLite has already rolled back the whole
 transaction (SQLITE_FULL can): the commit then fails and the job stays open,
-as it would with no ghosts. The same guarded rebuild runs for the message's
-ghosts when its eligibility changes outside triage: the access job, the
-user's `external_access` correction, and the not-spam action.
+as it would with no ghosts. When a message's eligibility changes outside
+triage (the access job, the user's `external_access` correction, the
+not-spam action), the same guarded reconcile runs again from its STORED
+decision and matches its records afresh, rather than rebuilding its old
+ghosts by position: a decision that changed while the message was
+restricted would otherwise take over the old ghost, marks and all.
 
 **Listing.** A ghost is served only while its supplier is eligible now (not
-sent, not spam, not restricted), judged in SQL, so a status no rebuild has
+sent, not spam, not restricted, not sealed by `triage.sensitivity`, the
+predicate the other human-door listings use), judged in SQL, so a status no
+rebuild has
 seen yet cannot serve facts from it. At most 2000. A timed start compares as
 an instant; a date-only start is listed from `from`'s date in `from`'s offset
 up to `to`'s date in `to`'s own offset, and sorts at midnight in the caller's
@@ -350,10 +404,12 @@ offset.
   `all_day`, `end` (resolved), `end_estimated`, `end_source` (`stated` /
   `user` / `history` / `model` / `default`), `estimate` (the model's
   `{minutes, basis}` as stored), `location`, `commitment`, `state`
-  (`dismissed` / `going` / `cancelled` / `expired` / `ghost`), `likelihood`
-  (null when committed) and `sources` (eligible ones only: `message_id`,
-  `thread_id`, `role`). A date-only ghost with no stated or corrected end has
-  no end.
+  (`dismissed` / `going` / `cancelled` / `expired` / `ghost`), `mail_state`
+  (`live` / `cancelled`: what the mail says, since `state` puts the user's
+  `going` or `dismissed` over a real cancellation), `verified` (false for a
+  ghost made from unauthenticated mail), `likelihood` (null when committed)
+  and `sources` (eligible ones only: `message_id`, `thread_id`, `role`). A
+  date-only ghost with no stated or corrected end has no end.
 - `PATCH /client/timeline/ghosts/{id}` with `state` and or `end`, applied in
   one transaction. An absent field is left alone and `null` clears it. An end
   not after the start, or a timed end on a date-only ghost, is a 400 and
@@ -538,16 +594,28 @@ Rules:
   would be answering a different message.
 - **How the zone is inferred** (DECIDED: use every signal, and save the result
   on the sender's profile). Strongest first:
-  1. A zone the user set by hand on the contact card. It always wins.
+  1. A zone the user set by hand on the contact card. It always wins, and is
+     kept as they wrote it.
   2. The zone in a calendar invitation that person organized: the IANA `TZID`
-     of the first event's start, credited to the invitation's `ORGANIZER`
-     rather than the From. When at least half of their newest 20 invitations
-     agree, that zone wins. Windows zone names, UTC starts and the zone in the
-     subject line (Google writes the recipient's) are ignored.
-  3. The UTC offset in the `Date` header of their own mail (not sent, not
-     spam): at least three non-UTC offsets from the last year, newest 500 at
-     most. Mail stamped UTC is ignored, which also discards most automated
-     senders, and means a London correspondent only shows up in summer.
+     of the first event's start, credited to the invitation's `ORGANIZER`.
+     Anyone can write an invitation naming anyone as organizer, so one counts
+     only when the mail passed authentication and its From is the organizer
+     or someone at the organizer's own organisation (the same registrable
+     domain, which a freemail or shared-tenant domain never is for two
+     addresses). A forged invitation records nothing. A zone is counted under
+     its canonical name: an alias with the same clock as a listed zone all
+     year becomes that zone ("US/Pacific" counts as America/Los_Angeles), so
+     two names never split one person's vote. When at least half of their
+     newest 20 invitations agree, that zone wins. Windows zone names, names
+     without a `/` ("EST", "UTC"), UTC starts and the zone in the subject line
+     (Google writes the recipient's) are ignored.
+  3. The UTC offset in the `Date` header of their own authenticated mail (not
+     sent, not spam): at least three non-UTC offsets from the last year,
+     newest 500 at most. Mail stamped UTC is ignored, which also discards most
+     automated senders, and means a London correspondent only shows up in
+     summer.
+  Mail dated more than a day ahead counts for neither 2 nor 3: newest comes
+  first, so a future date would otherwise hold its place in the window.
   An offset is not a zone. Each offset is checked against a list of about 45
   representative zones at the moment that mail was sent, and the first zone
   in the list's priority order that explains 90% of them wins. It is marked
@@ -557,7 +625,8 @@ Rules:
   then the zone is a best guess marked as lower confidence. A traveller or a
   shared mailbox gets no zone.
 - **Where it lives.** Ingest keeps each message's `Date` offset on the message
-  row (`received_at` alone loses it) and each invitation's zone beside it,
+  row (`received_at` alone loses it, and unauthenticated mail's is kept but
+  never counted) and each bound invitation's canonical zone beside it,
   and whenever a message brings a non-zero offset or an invitation, the
   sender's zone is recomputed from those rows and stored with its source and
   confidence. It is served on the person record behind the contact card
@@ -649,6 +718,23 @@ or lets mail move or delete one, these exist:
   de-duplicates them; identity stays apart.
 - **The model's words are attributed.** `basis` and `reason` are the model's
   text and are shown as such, never in Passband's own voice.
+- **On a platform, every host shares the scope.** A sender scope is a domain.
+  On an event platform every host mails from the platform's domain, so one
+  host's message to their guests can cancel or move another host's event if
+  the model reads the same ref out of it. Updates and cancellations that
+  touch a real event must come from structured platform content (the
+  iCalendar UID of a calendar part), not from body text the model read.
+- **Evidence must cite the message being decided.** The triage model reads
+  the whole thread, so a record's `change`, `commitment` and refs can repeat
+  what an earlier message said. They are honoured only when the record's
+  evidence cites the message it is attached to.
+- **A venue is not an event.** A venue-level URL ref (a restaurant's page, a
+  personal meeting room) identifies a place every event there shares. It must
+  not identify an event that is written to a real calendar.
+- **The all-day range is exact only at midnight.** A date-only ghost is
+  listed by date, so a window whose bounds are not midnight in the caller's
+  zone can list one in two adjacent windows. Anything that writes from a
+  listing uses midnight-aligned windows.
 
 ## 9. What only a mail client can do
 

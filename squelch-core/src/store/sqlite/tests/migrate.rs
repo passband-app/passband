@@ -95,15 +95,18 @@ fn migrate_adds_date_offset_null_and_its_partial_index_to_a_preexisting_messages
     // An install predating the timezone capture. The column arrives NULL on
     // every old row (the raw mail is gone, so nothing can fill it locally),
     // and the observation index arrives with it, on the second open as on
-    // the first.
+    // the first. A development database may hold the index's earlier,
+    // non-covering shape under its old name; that one goes.
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(
         "CREATE TABLE messages(
              id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL,
              gmail_msg_id TEXT NOT NULL, from_addr TEXT NOT NULL,
-             received_at TEXT NOT NULL, body TEXT);
+             received_at TEXT NOT NULL, body TEXT,
+             is_sent INTEGER NOT NULL DEFAULT 0);
          INSERT INTO messages(id, account_id, gmail_msg_id, from_addr, received_at, body)
-             VALUES (1, 1, 'g1', 'dan@example.com', '2026-01-01T00:00:00+00:00', 'old');",
+             VALUES (1, 1, 'g1', 'dan@example.com', '2026-01-01T00:00:00+00:00', 'old');
+         CREATE INDEX idx_messages_zone_obs ON messages(account_id, from_addr, received_at);",
     )
     .unwrap();
     migrate(&conn).unwrap();
@@ -118,12 +121,20 @@ fn migrate_adds_date_offset_null_and_its_partial_index_to_a_preexisting_messages
     assert_eq!(existing, None, "pre-existing mail is never backfilled");
     let index: String = conn
         .query_row(
-            "SELECT sql FROM sqlite_master WHERE name = 'idx_messages_zone_obs'",
+            "SELECT sql FROM sqlite_master WHERE name = 'idx_messages_zone_offsets'",
             [],
             |r| r.get(0),
         )
         .unwrap();
     assert!(index.contains("WHERE date_offset_minutes != 0"), "{index}");
+    let old: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'idx_messages_zone_obs'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(old, 0, "the superseded index is dropped");
 }
 
 #[test]

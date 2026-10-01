@@ -91,6 +91,42 @@ fn migrate_adds_to_addrs_null_so_old_sent_mail_enters_the_backfill_queue() {
 }
 
 #[test]
+fn migrate_adds_date_offset_null_and_its_partial_index_to_a_preexisting_messages_table() {
+    // An install predating the timezone capture. The column arrives NULL on
+    // every old row (the raw mail is gone, so nothing can fill it locally),
+    // and the observation index arrives with it, on the second open as on
+    // the first.
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE messages(
+             id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL,
+             gmail_msg_id TEXT NOT NULL, from_addr TEXT NOT NULL,
+             received_at TEXT NOT NULL, body TEXT);
+         INSERT INTO messages(id, account_id, gmail_msg_id, from_addr, received_at, body)
+             VALUES (1, 1, 'g1', 'dan@example.com', '2026-01-01T00:00:00+00:00', 'old');",
+    )
+    .unwrap();
+    migrate(&conn).unwrap();
+    migrate(&conn).unwrap(); // idempotent
+    let existing: Option<i64> = conn
+        .query_row(
+            "SELECT date_offset_minutes FROM messages WHERE id=1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(existing, None, "pre-existing mail is never backfilled");
+    let index: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name = 'idx_messages_zone_obs'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(index.contains("WHERE date_offset_minutes != 0"), "{index}");
+}
+
+#[test]
 fn migrate_adds_field_reasons_to_a_preexisting_triage_table() {
     // An install whose `triage` has no field_reasons. `model_used`/`status`
     // are present because the two-stage backfill in migrate() reads them.

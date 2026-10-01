@@ -454,18 +454,33 @@ answer without the mail being opened:
 - **How the zone is inferred** (DECIDED: use every signal, and save the result
   on the sender's profile). Strongest first:
   1. A zone the user set by hand on the contact card. It always wins.
-  2. The zone in a calendar invitation that person organized.
-  3. The UTC offset in the `Date` header of their own mail: the most common
-     non-UTC offset over several recent messages. Mail stamped UTC is ignored,
-     which also discards most automated senders.
-  An offset is not a zone. Observations either side of a daylight-saving
-  change pin the zone down; one season alone gives a best guess marked as
-  lower confidence.
-- **Where it lives.** The daemon counts offsets per sender at ingest (it keeps
-  only `received_at` today), infers a zone with a confidence, and stores it
-  with its source. It is served on the person record behind the contact card
-  (`GET /client/person`), where the user can see it and correct it. It learns
-  forward from the day it ships. Human door only.
+  2. The zone in a calendar invitation that person organized: the IANA `TZID`
+     of the first event's start, credited to the invitation's `ORGANIZER`
+     rather than the From. When at least half of their newest 20 invitations
+     agree, that zone wins. Windows zone names, UTC starts and the zone in the
+     subject line (Google writes the recipient's) are ignored.
+  3. The UTC offset in the `Date` header of their own mail (not sent, not
+     spam): at least three non-UTC offsets from the last year, newest 500 at
+     most. Mail stamped UTC is ignored, which also discards most automated
+     senders, and means a London correspondent only shows up in summer.
+  An offset is not a zone. Each offset is checked against a list of about 45
+  representative zones at the moment that mail was sent, and the first zone
+  in the list's priority order that explains 90% of them wins. It is marked
+  high confidence only when no other listed zone explains the same mail.
+  Observations either side of a daylight-saving change usually settle that;
+  one season alone often does not (Denver and Phoenix agree all winter), and
+  then the zone is a best guess marked as lower confidence. A traveller or a
+  shared mailbox gets no zone.
+- **Where it lives.** Ingest keeps each message's `Date` offset on the message
+  row (`received_at` alone loses it) and each invitation's zone beside it,
+  and whenever a message brings a non-zero offset or an invitation, the
+  sender's zone is recomputed from those rows and stored with its source and
+  confidence. It is served on the person record behind the contact card
+  (`GET /client/person`), where the user can see it and correct it
+  (`PUT /client/person/timezone`; clearing the correction hands it back to
+  inference). It learns forward from the day it ships: the raw mail is not
+  kept, so filling in existing correspondents would take a Gmail request per
+  message. Human door only.
 
 The peek alone is table stakes; other clients have had it for years. Holds
 and settling are what make it better.

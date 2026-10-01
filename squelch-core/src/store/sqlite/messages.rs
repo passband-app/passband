@@ -482,6 +482,8 @@ impl SqliteStore {
             from_name.as_deref(),
             &received_at,
         )?;
+        // Its offset and any invitation it holds count from now on.
+        super::zones::refresh_for_message_guarded(&tx, account_id, message_id)?;
         super::agent_triage::enqueue_agent_triage_conn(
             &tx, account_id, message_id, "not_spam", false,
         )?;
@@ -844,6 +846,19 @@ impl SqliteStore {
                 &triaged.recipient_addrs,
             )?;
         }
+
+        // 1b''. TIMEZONE OBSERVATIONS: the Date header's offset onto the row,
+        //       the invitation's organizer and zone beside it, and the zone of
+        //       whoever they concern recomputed, when there is anything to
+        //       learn. Under its own savepoint, so a failure costs the zone and
+        //       not the message (see `zones::guarded` for the one exception).
+        super::zones::observe_guarded(
+            &tx,
+            triaged.message.account_id,
+            id,
+            triaged.date_offset_minutes,
+            triaged.invite_zone.as_ref(),
+        )?;
 
         // 1c. UNSUBSCRIBE VIOLATION LEDGER: inbound mail from a sender the user
         //     unsubscribed from, past the 72h grace, bumps that sender's

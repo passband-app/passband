@@ -2612,6 +2612,28 @@ pub struct PersonThreadView {
     last_at: String,
 }
 
+/// A person's timezone on the card: the zone, where it came from (`user`,
+/// `invite`, `offsets`), how sure the inference is (`high`, `medium`), and the
+/// zone's offset from UTC right now, so a client without a zone database can
+/// still write "5:00pm ET" without guessing whether daylight saving is on.
+#[derive(Debug, Serialize)]
+pub struct PersonTimezoneView {
+    zone: String,
+    source: &'static str,
+    confidence: &'static str,
+    utc_offset_minutes: i32,
+}
+
+fn timezone_view(tz: Option<squelch_core::timezone::InferredZone>) -> Option<PersonTimezoneView> {
+    let tz = tz?;
+    Some(PersonTimezoneView {
+        utc_offset_minutes: tz.utc_offset_minutes(Utc::now())?,
+        source: tz.source.as_str(),
+        confidence: tz.confidence.as_str(),
+        zone: tz.zone,
+    })
+}
+
 /// The wire shape of the reader's contact card. The optional parts are ABSENT,
 /// never null, when there is nothing to say: no mail from them, never written
 /// to, no rule covers them.
@@ -2630,6 +2652,8 @@ pub struct PersonView {
     rule: Option<PersonRuleView>,
     groups: Vec<PersonGroupView>,
     recent_threads: Vec<PersonThreadView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timezone: Option<PersonTimezoneView>,
 }
 
 /// GET /client/person?addr= — everything the store knows about one address,
@@ -2692,8 +2716,61 @@ pub async fn get_person(
                 last_at: t.last_at.to_rfc3339(),
             })
             .collect(),
+        timezone: timezone_view(p.timezone),
     };
     Ok((no_store(), Json(view)))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PersonTimezoneBody {
+    addr: String,
+    /// An IANA zone name to set, or `null` to clear the override. REQUIRED,
+    /// null included: a body that forgot the key must not read as "clear".
+    #[serde(deserialize_with = "required_nullable")]
+    zone: Option<String>,
+}
+
+/// `Option<T>` that must be PRESENT in the body: `null` is `None`, a missing
+/// key is a 4xx. Plain `Option` would read an absent key as `None`.
+fn required_nullable<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d)
+}
+
+/// PUT /client/person/timezone `{"addr": "...", "zone": "America/Chicago"}`:
+/// the user's own word on where someone is, which outranks every inferred
+/// signal. `"zone": null` clears it and the card goes back to inference.
+/// Answers `{"timezone": {...}}` or `{"timezone": null}`: what the card now
+/// shows, so the client need not re-read the whole card.
+///
+/// HUMAN DOOR ONLY, like the card it edits. A local write: nothing reaches
+/// Gmail. 400 for an address that is not one, a zone name `chrono-tz` does not
+/// know ("Eastern Standard Time", "PDT"), or the account's own address, whose
+/// zone is the device's. Not audited, like the user's word on a ghost: it
+/// changes a suggestion on this machine and acts on nothing.
+pub async fn put_person_timezone(
+    State(state): State<ApiState>,
+    Json(body): Json<PersonTimezoneBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let addr = body.addr.trim().to_string();
+    if addr.is_empty() || !addr.contains('@') || addr.len() > 320 {
+        return Err(ApiError::bad_request("addr must be an email address"));
+    }
+    let zone = body.zone.map(|z| z.trim().to_string());
+    if zone.as_ref().is_some_and(|z| z.is_empty() || z.len() > 64) {
+        return Err(ApiError::bad_request("unknown timezone"));
+    }
+    let shown = store_call(&state, move |store, account_id| {
+        store.set_person_timezone(account_id, &addr, zone.as_deref())
+    })
+    .await?;
+    Ok((
+        no_store(),
+        Json(json!({ "timezone": timezone_view(shown) })),
+    ))
 }
 
 #[derive(Debug, Deserialize)]

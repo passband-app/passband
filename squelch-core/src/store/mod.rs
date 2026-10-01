@@ -240,6 +240,14 @@ pub struct TriagedMessage {
     /// re-scan structurally unable to storm: a row it re-ingests already exists
     /// and keeps whatever it was stamped with, NULL included.
     pub notify_eligible_at: Option<DateTime<Utc>>,
+    /// The `Date` header's UTC offset in minutes, east positive, written to
+    /// `messages.date_offset_minutes`. `None` when no Date header parsed.
+    /// Header metadata, not content, so it is captured for every message;
+    /// what counts as an observation is the timezone inference's call.
+    pub date_offset_minutes: Option<i32>,
+    /// The first calendar invitation in the message that named a real zone,
+    /// credited to its ORGANIZER (not the From). See [`crate::timezone`].
+    pub invite_zone: Option<crate::timezone::InviteZone>,
 }
 
 /// The full body of one sealed message. HUMAN-DOOR-ONLY: returned solely by

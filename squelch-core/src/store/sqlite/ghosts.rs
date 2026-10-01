@@ -101,7 +101,7 @@ fn local_date(time: &EventTime) -> chrono::NaiveDate {
 
 /// What failed, as a kind a log line may carry: no message text. A SQLite
 /// failure keeps its result code.
-fn error_kind(error: &CoreError) -> String {
+pub(super) fn error_kind(error: &CoreError) -> String {
     match error {
         CoreError::Sqlite(rusqlite::Error::SqliteFailure(code, _)) => {
             format!("sqlite:{:?}", code.code)

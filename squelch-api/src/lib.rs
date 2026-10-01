@@ -221,6 +221,12 @@ fn client_router(state: ApiState) -> Router {
         // The reader's contact card: one address, everything known about it.
         // Human door only, for the reason contacts is.
         .route("/client/person", get(handlers::get_person))
+        // The user's correction of that person's inferred timezone. A local
+        // write, human door only, for the reason the card is.
+        .route(
+            "/client/person/timezone",
+            put(handlers::put_person_timezone),
+        )
         .merge(groups::routes())
         .route("/client/sealed", get(handlers::list_sealed))
         .route(

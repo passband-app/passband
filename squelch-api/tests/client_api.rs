@@ -9817,6 +9817,199 @@ async fn person_card_reports_one_address_without_its_sealed_mail() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
+/// Ingest one inbound message from `from` dated `days_ago`, stamped with a
+/// `Date` offset of `offset` (`+0530` and so on), through the real pipeline.
+fn ingest_dated(
+    store: &SqliteStore,
+    acct: i64,
+    gmail: &str,
+    from: &str,
+    days_ago: i64,
+    offset: &str,
+) {
+    use squelch_core::config::Stage1Config;
+    use squelch_core::sync::ingest::{RawFetched, ingest};
+    let when = chrono::Utc::now() - chrono::Duration::days(days_ago);
+    let eml = format!(
+        "From: {from}\r\nTo: me@example.com\r\nSubject: hi\r\nDate: {} {offset}\r\n\r\nhello\r\n",
+        when.format("%a, %d %b %Y %H:%M:%S")
+    );
+    let fetched = RawFetched {
+        account_id: acct,
+        gmail_msg_id: gmail.to_string(),
+        gmail_thread_id: Some(gmail.to_string()),
+        raw: eml.into_bytes(),
+        internal_date: Some(when),
+        is_sent: false,
+        is_spam: false,
+        account_addr: "me@example.com".to_string(),
+    };
+    let triaged = ingest(
+        &fetched,
+        &Stage1Config::default(),
+        chrono::Utc::now(),
+        |_| false,
+    );
+    store.ingest_message(&triaged).unwrap();
+}
+
+#[tokio::test]
+async fn person_card_carries_the_inferred_timezone_and_put_overrides_it() {
+    // WIRE CONTRACT: the card gains `timezone: {zone, source, confidence,
+    // utc_offset_minutes}`, ABSENT (like the card's other optional parts) when
+    // nothing is known. PUT /client/person/timezone {addr, zone} sets the
+    // user's override, `zone: null` clears it, and both answer
+    // {"timezone": ...|null}: what the card now shows.
+    let Harness { app, .. } = harness(|store, acct| {
+        for (i, gmail) in ["g1", "g2", "g3"].into_iter().enumerate() {
+            ingest_dated(
+                store,
+                acct,
+                gmail,
+                "Priya <priya@example.in>",
+                i as i64 + 1,
+                "+0530",
+            );
+        }
+    });
+
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", "/client/person?addr=priya%40example.in"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let card = body_json(resp).await;
+    assert_eq!(
+        card["timezone"],
+        serde_json::json!({
+            "zone": "Asia/Kolkata",
+            "source": "offsets",
+            "confidence": "high",
+            "utc_offset_minutes": 330
+        }),
+        "{card}"
+    );
+    // Somebody nothing is known about: absent, not null.
+    let resp = app
+        .clone()
+        .oneshot(authed(
+            "GET",
+            "/client/person?addr=nobody%40nowhere.example",
+        ))
+        .await
+        .unwrap();
+    let card = body_json(resp).await;
+    assert!(
+        !card.as_object().unwrap().contains_key("timezone"),
+        "{card}"
+    );
+
+    // The override outranks the inference.
+    let resp = app
+        .clone()
+        .oneshot(authed_json(
+            "PUT",
+            "/client/person/timezone",
+            serde_json::json!({"addr": "Priya@Example.in", "zone": "America/Chicago"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-store"
+    );
+    let put = body_json(resp).await;
+    assert_eq!(put["timezone"]["zone"], "America/Chicago");
+    assert_eq!(put["timezone"]["source"], "user");
+    assert_eq!(put["timezone"]["confidence"], "high");
+    let chicago = put["timezone"]["utc_offset_minutes"].as_i64().unwrap();
+    assert!(chicago == -300 || chicago == -360, "{put}");
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", "/client/person?addr=priya%40example.in"))
+        .await
+        .unwrap();
+    assert_eq!(body_json(resp).await["timezone"]["source"], "user");
+
+    // Clearing hands the card back to inference.
+    let resp = app
+        .clone()
+        .oneshot(authed_json(
+            "PUT",
+            "/client/person/timezone",
+            serde_json::json!({"addr": "priya@example.in", "zone": null}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let cleared = body_json(resp).await;
+    assert_eq!(cleared["timezone"]["zone"], "Asia/Kolkata", "{cleared}");
+    assert_eq!(cleared["timezone"]["source"], "offsets");
+    // Clearing for somebody with nothing inferred answers null.
+    let resp = app
+        .clone()
+        .oneshot(authed_json(
+            "PUT",
+            "/client/person/timezone",
+            serde_json::json!({"addr": "ann@example.com", "zone": null}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await, serde_json::json!({"timezone": null}));
+
+    // An unknown zone, a non-address, and the account's own address are 400s;
+    // a body without the zone key is not read as "clear".
+    for body in [
+        serde_json::json!({"addr": "priya@example.in", "zone": "Eastern Standard Time"}),
+        serde_json::json!({"addr": "priya@example.in", "zone": "PDT"}),
+        serde_json::json!({"addr": "priya@example.in", "zone": ""}),
+        serde_json::json!({"addr": "priya", "zone": "Asia/Tokyo"}),
+        serde_json::json!({"addr": "Me@Example.com", "zone": "Asia/Tokyo"}),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(authed_json("PUT", "/client/person/timezone", body.clone()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{body}");
+    }
+    let resp = app
+        .clone()
+        .oneshot(authed_json(
+            "PUT",
+            "/client/person/timezone",
+            serde_json::json!({"addr": "priya@example.in"}),
+        ))
+        .await
+        .unwrap();
+    assert!(resp.status().is_client_error(), "{}", resp.status());
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", "/client/person?addr=priya%40example.in"))
+        .await
+        .unwrap();
+    assert_eq!(
+        body_json(resp).await["timezone"]["source"],
+        "offsets",
+        "no rejected PUT changed anything"
+    );
+
+    // No token, no write.
+    let resp = app
+        .oneshot(common::json_request(
+            "PUT",
+            "/client/person/timezone",
+            &serde_json::json!({"addr": "priya@example.in", "zone": "Asia/Tokyo"}),
+            false,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
 // --- search: diagnostics, legs and the as-you-type prefix -------------------
 //
 // The additions of docs/SEARCH.md §4.8. They are what lets a client tell "no

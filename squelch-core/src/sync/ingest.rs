@@ -1179,6 +1179,23 @@ pub fn ingest(
         true
     });
 
+    // TIMEZONE OBSERVATIONS (`crate::timezone`): the Date header's offset,
+    // which `received_at` above normalizes away, and the first invitation's
+    // organizer and start zone. Header metadata, so it is captured for every
+    // message; the store decides what counts. Taken from the same parse that
+    // dated the message, so an offset never outlives a Date the fallback
+    // replaced. An invitation the account organized itself is dropped here,
+    // and the store refuses the account's address again on its own side.
+    let date_offset_minutes = parsed
+        .as_ref()
+        .and_then(|m| m.date())
+        .filter(|d| DateTime::parse_from_rfc3339(&d.to_rfc3339()).is_ok())
+        .and_then(crate::timezone::date_offset_minutes);
+    let invite_zone = parsed
+        .as_ref()
+        .and_then(crate::timezone::invite_zone)
+        .filter(|i| i.organizer != self_addr);
+
     let message = NewMessage {
         account_id: fetched.account_id,
         gmail_msg_id,
@@ -1223,6 +1240,8 @@ pub fn ingest(
         calendar: None,
         confident: false,
         notify_eligible_at: None,
+        date_offset_minutes,
+        invite_zone,
     }
 }
 
@@ -2580,6 +2599,162 @@ mod tests {
             "sealed mail's attachment is still extracted for storage"
         );
         assert_eq!(t.attachments[0].filename, "statement.pdf");
+    }
+
+    fn dated(date: Option<&str>) -> String {
+        let date = date.map(|d| format!("Date: {d}\r\n")).unwrap_or_default();
+        format!(
+            "From: Dan <dan@example.com>\r\nTo: me@example.com\r\nSubject: hi\r\n{date}\r\nhello\r\n"
+        )
+    }
+
+    fn offset_of(eml: &str) -> Option<i32> {
+        let t = ingest(
+            &raw(1, "g1", eml, false),
+            &Stage1Config::default(),
+            Utc::now(),
+            |_| false,
+        );
+        t.date_offset_minutes
+    }
+
+    #[test]
+    fn the_date_headers_offset_is_captured_with_its_sign_and_half_hours() {
+        assert_eq!(
+            offset_of(&dated(Some("Tue, 29 Sep 2026 10:00:00 -0400"))),
+            Some(-240)
+        );
+        assert_eq!(
+            offset_of(&dated(Some("Tue, 29 Sep 2026 10:00:00 +0530"))),
+            Some(330)
+        );
+        assert_eq!(
+            offset_of(&dated(Some("Tue, 29 Sep 2026 10:00:00 +0545"))),
+            Some(345)
+        );
+        assert_eq!(
+            offset_of(&dated(Some("Tue, 29 Sep 2026 10:00:00 -0330"))),
+            Some(-210)
+        );
+        assert_eq!(
+            offset_of(&dated(Some("Tue, 29 Sep 2026 10:00:00 +0000"))),
+            Some(0)
+        );
+        // No Date header, or one that does not parse: no observation, and
+        // received_at falls back to the transport's date as before.
+        assert_eq!(offset_of(&dated(None)), None);
+        assert_eq!(offset_of(&dated(Some("sometime last week"))), None);
+    }
+
+    /// An invitation the way calendars send one: the calendar part beside the
+    /// prose in a `multipart/alternative` (Google, Outlook), or an `.ics`
+    /// attachment in a `multipart/mixed`.
+    fn invitation(from: &str, ics: &str, as_attachment: bool) -> String {
+        let container = if as_attachment {
+            "mixed"
+        } else {
+            "alternative"
+        };
+        let part_headers = if as_attachment {
+            "Content-Type: application/ics; name=\"invite.ics\"\r\n\
+             Content-Disposition: attachment; filename=\"invite.ics\"\r\n"
+        } else {
+            "Content-Type: text/calendar; charset=UTF-8; method=REQUEST\r\n"
+        };
+        format!(
+            "From: {from}\r\nTo: me@example.com\r\nSubject: Invitation: Sync @ Tue Oct 6 (EDT)\r\n\
+             Date: Tue, 29 Sep 2026 10:00:00 +0000\r\nMIME-Version: 1.0\r\n\
+             Content-Type: multipart/{container}; boundary=\"b1\"\r\n\r\n\
+             --b1\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nYou are invited.\r\n\
+             --b1\r\n{part_headers}\r\n{ics}\r\n--b1--\r\n"
+        )
+    }
+
+    const ICS: &str = "BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\n\
+                       DTSTART;TZID=America/Los_Angeles:20261006T140000\r\n\
+                       ORGANIZER;CN=Sam:mailto:sam@example.com\r\n\
+                       END:VEVENT\r\nEND:VCALENDAR";
+
+    #[test]
+    fn an_invitation_credits_its_organizer_not_the_from() {
+        for as_attachment in [false, true] {
+            let eml = invitation(
+                "Google Calendar <calendar-notification@google.com>",
+                ICS,
+                as_attachment,
+            );
+            let t = ingest(
+                &raw(1, "g1", &eml, false),
+                &Stage1Config::default(),
+                Utc::now(),
+                |_| false,
+            );
+            assert_eq!(t.message.from_addr, "calendar-notification@google.com");
+            assert_eq!(
+                t.invite_zone,
+                Some(crate::timezone::InviteZone {
+                    organizer: "sam@example.com".into(),
+                    zone: "America/Los_Angeles".into(),
+                }),
+                "attachment: {as_attachment}"
+            );
+            // The calendar part is also stored as an attachment row either
+            // way, which is what would let invitations already on disk be
+            // re-scanned without asking Gmail for anything.
+            assert!(
+                t.attachments.iter().any(|a| a
+                    .data
+                    .as_deref()
+                    .is_some_and(|d| d.starts_with(b"BEGIN:VCALENDAR"))),
+                "attachment: {as_attachment}"
+            );
+        }
+        // The subject's "(EDT)" is the recipient's zone and is never read: a
+        // calendar part with no usable start says nothing.
+        let windows = ICS.replace("TZID=America/Los_Angeles", "TZID=Pacific Standard Time");
+        let utc = ICS.replace(
+            "DTSTART;TZID=America/Los_Angeles:20261006T140000",
+            "DTSTART:20261006T210000Z",
+        );
+        for ics in [windows, utc] {
+            let eml = invitation("sam@example.com", &ics, false);
+            let t = ingest(
+                &raw(1, "g1", &eml, false),
+                &Stage1Config::default(),
+                Utc::now(),
+                |_| false,
+            );
+            assert_eq!(t.invite_zone, None, "{ics}");
+        }
+        // An invitation the account organized is the user's own zone.
+        let own = ICS.replace("sam@example.com", "Me@Example.com");
+        let eml = invitation("calendar-notification@google.com", &own, false);
+        let t = ingest(
+            &raw(1, "g1", &eml, false),
+            &Stage1Config::default(),
+            Utc::now(),
+            |_| false,
+        );
+        assert_eq!(t.invite_zone, None);
+    }
+
+    #[test]
+    fn captured_observations_reach_the_store_and_the_card() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let acct = store.ensure_account("me@example.com").unwrap();
+        for i in 1..=3 {
+            let when = Utc::now() - chrono::Duration::days(i);
+            let header = (when + chrono::Duration::minutes(330))
+                .format("%a, %d %b %Y %H:%M:%S +0530")
+                .to_string();
+            let mut f = raw(acct, &format!("g{i}"), &dated(Some(&header)), false);
+            f.account_addr = "me@example.com".into();
+            store
+                .ingest_message(&ingest(&f, &Stage1Config::default(), Utc::now(), |_| false))
+                .unwrap();
+        }
+        let card = store.person_record(acct, "dan@example.com").unwrap();
+        assert_eq!(card.timezone.unwrap().zone, "Asia/Kolkata");
     }
 
     #[test]

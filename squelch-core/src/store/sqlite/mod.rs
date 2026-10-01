@@ -34,6 +34,7 @@ mod specialists;
 mod tests;
 mod tracking;
 mod triage_stages;
+mod zones;
 
 use self::migrate::migrate;
 

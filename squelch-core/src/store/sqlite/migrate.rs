@@ -103,6 +103,34 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // already stored came from it. The first sync after the upgrade backfills
     // the label's window like any other.
     add_column_if_missing(conn, "messages", "is_spam", "INTEGER NOT NULL DEFAULT 0")?;
+    // The Date header's UTC offset, for the timezone inference. NULL on every
+    // pre-existing row and NOT backfilled: the raw mail is not stored, so only
+    // a Gmail fetch per message could fill it, and the inference learns
+    // forward instead. A re-sync of a message fills its row.
+    add_column_if_missing(conn, "messages", "date_offset_minutes", "INTEGER")?;
+    // ITS INDEX, partial: only mail with a non-zero offset is an observation,
+    // and most mail is stamped UTC, so the index holds a fraction of the table
+    // and costs nothing on the bulk mail it leaves out. Keyed sender-then-time
+    // so the recompute reads one sender's newest observations and stops at
+    // its cap (`zones::OFFSETS_SQL`). Every named column guarded, as for the
+    // spam index below.
+    if has_columns(
+        conn,
+        "messages",
+        &[
+            "account_id",
+            "date_offset_minutes",
+            "from_addr",
+            "received_at",
+        ],
+    )? {
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_zone_obs
+             ON messages(account_id, from_addr COLLATE NOCASE, received_at)
+             WHERE date_offset_minutes != 0",
+            [],
+        )?;
+    }
     // The composer grew Cc and Bcc fields; a draft has to be able to hold what
     // the composer can show, or closing one silently drops recipients.
     add_column_if_missing(conn, "drafts", "cc_addr", "TEXT NOT NULL DEFAULT ''")?;

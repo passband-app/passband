@@ -81,6 +81,16 @@ CREATE TABLE IF NOT EXISTS messages (
     -- spam sighting. Nothing moves a row the other way except the user's own
     -- "not spam", which clears it here and in Gmail together.
     is_spam     INTEGER NOT NULL DEFAULT 0,
+    -- THE `Date` HEADER'S UTC OFFSET in minutes, east positive (-240 for New
+    -- York in summer, 330 for India), as the sender's clock stamped it.
+    -- `received_at` is normalized to UTC, so this is the only place the offset
+    -- survives. NULL when the header did not parse, and on every row ingested
+    -- before the column existed (the raw mail is not kept, so nothing can
+    -- backfill it locally). Zero is stored as zero; the timezone inference is
+    -- what ignores it. The observation lives ON THE ROW so a re-ingest cannot
+    -- count it twice: the per-sender histogram is always a query
+    -- (`sqlite::zones`).
+    date_offset_minutes INTEGER,
     UNIQUE(account_id, gmail_msg_id)
 );
 
@@ -1703,6 +1713,52 @@ AFTER DELETE ON messages BEGIN
     WHERE account_id = OLD.account_id AND supplier_message_id = OLD.id;
     DELETE FROM ghost_event_sources WHERE account_id = OLD.account_id AND message_id = OLD.id;
 END;
+
+-- A CORRESPONDENT'S TIMEZONE (docs/CALENDAR.md §7), inferred at ingest and
+-- served on the contact card. HUMAN-DOOR ONLY. `addr` is COLLATE NOCASE in
+-- the column itself, so the key, the index and every comparison agree that
+-- `Dan@X.com` and `dan@x.com` are one person without each query having to
+-- remember (see `idx_contacts_addr_nocase` for what forgetting cost).
+--
+-- One row per invitation that named a zone: the iCalendar ORGANIZER, credited
+-- with the TZID of the first DTSTART. Keyed by message, so a re-ingest
+-- replaces its own row instead of adding one, and the row goes with its
+-- message (trigger below). Rows are written for spam and sent mail too (never
+-- for an invitation the account itself organized); the inference reads only
+-- those whose message is inbound and not spam, so a message rescued from spam
+-- starts counting without a rewrite.
+CREATE TABLE IF NOT EXISTS sender_zone_invites (
+    account_id  INTEGER NOT NULL,
+    addr        TEXT NOT NULL COLLATE NOCASE,
+    zone        TEXT NOT NULL,
+    message_id  INTEGER NOT NULL,
+    -- The message's received_at, RFC3339 UTC: "newest invitations" order.
+    observed_at TEXT NOT NULL,
+    PRIMARY KEY(account_id, addr, message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_sender_zone_invites_message
+    ON sender_zone_invites(account_id, message_id);
+CREATE TRIGGER IF NOT EXISTS sender_zone_invites_follow_message
+AFTER DELETE ON messages BEGIN
+    DELETE FROM sender_zone_invites
+    WHERE account_id = OLD.account_id AND message_id = OLD.id;
+END;
+-- The result, one row per person. `zone`/`source`/`confidence` are the
+-- INFERENCE's (source 'invite' or 'offsets'; all three NULL when it has no
+-- answer) and are rewritten whenever a message that carries an observation
+-- from this person is ingested. `user_zone` is the user's override, written
+-- only by `PUT /client/person/timezone` and never by inference; the read
+-- side serves it first. Never a row for the account's own address.
+CREATE TABLE IF NOT EXISTS sender_zones (
+    account_id  INTEGER NOT NULL,
+    addr        TEXT NOT NULL COLLATE NOCASE,
+    zone        TEXT,
+    source      TEXT,
+    confidence  TEXT,
+    updated_at  TEXT NOT NULL,
+    user_zone   TEXT,
+    PRIMARY KEY(account_id, addr)
+);
 
 -- Independent model assessments for human notification diagnostics. Multiple
 -- attempts remain inspectable; the notification ledger still records delivery.

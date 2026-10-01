@@ -4,18 +4,25 @@
 //
 // Numbers are always monospaced-digit so columns of amounts, importances and
 // token counts line up rather than jittering as they update.
+//
+// EVERY SIZE HERE IS A COMPACT SIZE, resolved through the current density
+// (Lib/Density.swift): `Typo.ui(13)` is 13pt in compact and 14pt in
+// comfortable. A view that sets type through `Typo` follows the setting; a bare
+// `.system(size:)` does not, which is the only reason to write one (the brand
+// renderers, a glyph drawn to a fixed box).
 
 import SwiftUI
 
+@MainActor
 enum Typo {
     /// The bundled variable serif. Falls back to New York (the system serif) if
     /// the resource is missing, which keeps the editorial voice either way.
-    static let serifFamily = "Newsreader"
+    nonisolated static let serifFamily = "Newsreader"
 
     /// Register the bundled fonts. `ATSApplicationFontsPath` in Info.plist
     /// covers the normal case; this is the fallback when the resources landed
     /// somewhere unexpected in the bundle.
-    static func registerBundledFonts() {
+    nonisolated static func registerBundledFonts() {
         guard PlatformFont(name: serifFamily, size: 12) == nil else { return }
         for name in ["newsreader-var", "newsreader-italic-var"] {
             guard let url = Bundle.main.url(forResource: name, withExtension: "ttf") else {
@@ -27,6 +34,7 @@ enum Typo {
 
     /// The editorial headline. Newsreader when available, New York otherwise.
     static func hero(_ size: CGFloat = 40) -> Font {
+        let size = Typo.size(size)
         if PlatformFont(name: serifFamily, size: size) != nil {
             return .custom(serifFamily, size: size).weight(.medium)
         }
@@ -35,6 +43,7 @@ enum Typo {
 
     /// A smaller serif moment (empty states, the connect card's wordmark).
     static func serif(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
+        let size = Typo.size(size)
         if PlatformFont(name: serifFamily, size: size) != nil {
             return .custom(serifFamily, size: size).weight(weight)
         }
@@ -43,25 +52,39 @@ enum Typo {
 
     // MARK: - interface scale
 
+    /// A compact point size in the current density. For the few places that
+    /// need the number itself (an AppKit font, a line height derived from it).
+    static func size(_ compact: CGFloat) -> CGFloat {
+        Density.typeSize(compact, in: Prefs.shared.density)
+    }
+
+    /// Interface text at a compact size. The general form: the named roles
+    /// below are for the shapes that recur, this is for everything else.
+    static func ui(
+        _ size: CGFloat, weight: Font.Weight = .regular, design: Font.Design = .default
+    ) -> Font {
+        .system(size: Typo.size(size), weight: weight, design: design)
+    }
+
     /// Engraved uppercase section label ("CONNECTION", "For your eyes").
-    static let sectionLabel = Font.system(size: 11, weight: .semibold).width(.expanded)
+    static var sectionLabel: Font { ui(11, weight: .semibold).width(.expanded) }
     /// Zone heading.
-    static let zoneTitle = Font.system(size: 13, weight: .semibold)
+    static var zoneTitle: Font { ui(13, weight: .semibold) }
     /// Dense row text.
-    static let row = Font.system(size: 13)
+    static var row: Font { ui(13) }
     /// A row's secondary line.
-    static let rowSub = Font.system(size: 12)
+    static var rowSub: Font { ui(12) }
     /// Chips, tags, counts.
-    static let chip = Font.system(size: 11, weight: .medium)
+    static var chip: Font { ui(11, weight: .medium) }
     /// The smallest legible metadata.
-    static let micro = Font.system(size: 10, weight: .medium)
+    static var micro: Font { ui(10, weight: .medium) }
 
     /// Numbers — monospaced digits so columns don't jitter.
     static func mono(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
-        .system(size: size, weight: weight, design: .monospaced)
+        ui(size, weight: weight, design: .monospaced)
     }
     static func num(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
-        .system(size: size, weight: weight).monospacedDigit()
+        ui(size, weight: weight).monospacedDigit()
     }
 }
 
@@ -81,8 +104,8 @@ struct Kbd: View {
         Text(label)
             .font(Typo.mono(size, weight: .medium))
             .foregroundStyle(Palette.inkFaint)
-            .padding(.horizontal, 5 * size / 10)
-            .padding(.vertical, 1.5 * size / 10)
+            .padding(.horizontal, 5 * Typo.size(size) / 10)
+            .padding(.vertical, 1.5 * Typo.size(size) / 10)
             .background(
                 RoundedRectangle(cornerRadius: 4, style: .continuous)
                     .fill(Palette.hairline.opacity(0.6))

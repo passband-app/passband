@@ -613,6 +613,18 @@ struct AppearanceSection: View {
                     options: ThemeChoice.allCases.map { ($0, $0.label) },
                     selection: $prefs.theme)
             }
+            // The Mac only: the phone is pinned to the metrics it was laid out
+            // in (see `Prefs.defaultDensity`).
+            #if os(macOS)
+                SettingsRow(
+                    title: "Density",
+                    detail: "Comfortable gives everything more room. Compact fits more on screen."
+                ) {
+                    GlassSegmented(
+                        options: DensityChoice.allCases.map { ($0, $0.label) },
+                        selection: $prefs.density)
+                }
+            #endif
         }
     }
 }

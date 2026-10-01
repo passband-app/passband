@@ -108,7 +108,16 @@ struct RootView: View {
         // and not before; `askIfEarned` is what decides whether a fortnight has
         // actually been used, and it can only ever say yes once.
         .onChange(of: store.shareAvailable) { _, canShare in
+            guard !TestFlightNudge.shared.showingNudge else { return }
             ShareNudge.shared.askIfEarned(canShare: canShare)
+        }
+        // THE IPHONE ASK, two days in, for a mailbox no phone has ever
+        // connected to. Hung on the daemon's answer for the same reason as the
+        // share ask: it arrives with the first stats and not before.
+        .overlay { TestFlightNudgeModal() }
+        .onChange(of: store.iosConnected) { _, connected in
+            TestFlightNudge.shared.askIfEarned(
+                iosConnected: connected, othersShowing: ShareNudge.shared.showingNudge)
         }
         .task {
             // Pay WebKit's process-launch cost at boot rather than on the first

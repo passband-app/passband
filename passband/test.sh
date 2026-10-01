@@ -229,6 +229,14 @@ run_suite share-nudge \
   Sources/Passband/Lib/ShareNudge.swift \
   Tests/ShareNudgeTests.swift
 
+# When the iPhone ask fires: two days in, never to somebody whose mailbox has
+# seen the phone app, never on a daemon that has not said, and once.
+run_suite testflight-nudge \
+  Sources/Passband/Lib/Platform.swift \
+  Sources/Passband/Lib/ShareNudge.swift \
+  Sources/Passband/Lib/TestFlightNudge.swift \
+  Tests/TestFlightNudgeTests.swift
+
 # What "remind me…" resolves to. Foundation only, and every date computed
 # through an injected now/calendar — which is the whole reason it is testable:
 # a reminder is only ever wrong LATER, so the arithmetic has to be pinned here

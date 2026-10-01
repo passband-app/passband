@@ -496,6 +496,52 @@ fn client_versions_seen_is_one_entry_per_version_newest_first() {
 }
 
 #[test]
+fn client_platform_seen_survives_revocation_and_stays_per_account() {
+    let (store, acct) = store();
+    assert!(
+        !store
+            .client_platform_seen(acct, ClientPlatform::Ios)
+            .unwrap()
+    );
+
+    let mac = store.issue_device_token(acct, "laptop").unwrap();
+    store
+        .verify_device_token_from(&mac.token, Some(&tag("macos/0.0.12")))
+        .unwrap()
+        .unwrap();
+    assert!(
+        store
+            .client_platform_seen(acct, ClientPlatform::Macos)
+            .unwrap()
+    );
+    assert!(
+        !store
+            .client_platform_seen(acct, ClientPlatform::Ios)
+            .unwrap()
+    );
+
+    let phone = store.issue_device_token(acct, "phone").unwrap();
+    store
+        .verify_device_token_from(&phone.token, Some(&tag("ios/0.0.6")))
+        .unwrap()
+        .unwrap();
+    assert!(store.revoke_device_token(acct, phone.id).unwrap());
+    assert!(
+        store
+            .client_platform_seen(acct, ClientPlatform::Ios)
+            .unwrap(),
+        "unpairing the phone does not un-happen it"
+    );
+
+    let other = store.ensure_account("other@example.com").unwrap();
+    assert!(
+        !store
+            .client_platform_seen(other, ClientPlatform::Ios)
+            .unwrap()
+    );
+}
+
+#[test]
 fn client_versions_seen_is_capped_at_the_newest() {
     let (store, acct) = store();
     let now = Utc::now();

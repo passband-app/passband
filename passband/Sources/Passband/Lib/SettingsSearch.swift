@@ -384,6 +384,13 @@ enum SettingsSearch {
                 "invite", "invites", "invitation", "share", "sharing", "refer", "referral",
                 "friend", "friends", "give access",
             ]),
+        SettingsEntry(
+            card: .account,
+            title: "iPhone app",
+            blurb: "Join the Passband for iPhone beta on TestFlight.",
+            keywords: [
+                "iphone", "ios", "phone", "mobile", "app", "testflight", "beta",
+            ]),
     ]
 
     // MARK: - matching

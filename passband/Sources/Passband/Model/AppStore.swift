@@ -5011,6 +5011,11 @@ final class AppStore {
     /// fires.
     var shareAvailable: Bool { stats?.invite_sharing == true }
 
+    /// The daemon's answer to "has an iPhone app ever talked to this mailbox",
+    /// or nil when it has not given one yet (or is too old to). Drives the
+    /// TestFlight ask; see `TestFlightNudge`.
+    var iosConnected: Bool? { stats?.ios_connected }
+
     // MARK: - forwarding
 
     /// Whether this daemon understands `forward_of_message_id`. Read off the

@@ -22,6 +22,9 @@ final class PhosphorScene {
     /// so two views sharing one would resize it every frame and smear each
     /// other's persistence; the quiet board and the card can be up at once.
     static let card = PhosphorScene()
+    /// The What's New card's, for the same reason: it lands over the board on
+    /// the first sync, which is exactly when the iPhone ad can be up too.
+    static let whatsNew = PhosphorScene()
 
     private(set) var renderer: PhosphorRenderer?
     private(set) var isUnavailable = false

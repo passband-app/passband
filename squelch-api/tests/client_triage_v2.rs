@@ -379,7 +379,7 @@ async fn headline_mock(
     let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let seen = hits.clone();
     let body = format!(
-        r#"{{"content":[{{"type":"text","text":"{{\"headline\":\"{headline}\"}}"}}],"stop_reason":"end_turn","usage":{{"input_tokens":300,"output_tokens":12}}}}"#
+        r#"{{"content":[{{"type":"text","text":"{{\"candidates\":[\"{headline}\"]}}"}}],"stop_reason":"end_turn","usage":{{"input_tokens":300,"output_tokens":12}}}}"#
     );
     tokio::spawn(async move {
         while let Ok((mut sock, _)) = listener.accept().await {

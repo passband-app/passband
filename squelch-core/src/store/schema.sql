@@ -588,8 +588,9 @@ CREATE INDEX IF NOT EXISTS idx_marketing_received ON marketing(account_id, recei
 -- UNSUBSCRIBES. One row per (account, sender_addr): the human-door record that
 -- the user asked a sender to stop, plus the "did they honor it?" violation
 -- ledger. A fresh request RESETS violation_count/last_violation_at/resolution,
--- restarting the 72h grace clock. `method` is always 'browser' — the client
--- opens the link; the server never delivers anything itself.
+-- restarting the 72h grace clock. `method` is how it went out: 'browser' (the
+-- client opened the link), 'one_click' or 'page' (the daemon's automatic job,
+-- docs/SECURITY.md §7), or 'auto' while that job is running or needs the user.
 -- `source_message_id` is nullable (the message may later be deleted).
 -- `resolution` is blocked|dismissed|NULL, NULL meaning the request is still
 -- outstanding and the violation detector armed.
@@ -597,6 +598,15 @@ CREATE INDEX IF NOT EXISTS idx_marketing_received ON marketing(account_id, recei
 -- VIOLATION SEMANTICS, applied in the ingest transaction: storing a NON-SENT
 -- inbound message whose sender has an unresolved row, more than 72h after
 -- requested_at, increments violation_count and stamps last_violation_at.
+--
+-- AUTOMATIC UNSUBSCRIBES (`method` auto | one_click | page) carry a `status`:
+-- running -> done | needs_you, and needs_you -> opened once the user follows
+-- `status_url` to finish it themselves. The violation detector is armed only
+-- for a request that actually went out: status NULL (legacy browser rows),
+-- done, or opened. A job still running, or one waiting on the user, has not
+-- asked the sender for anything yet, so their next email is not a violation.
+-- `requested_at` moves to the moment it went out, so the 72h grace runs from
+-- there rather than from the click.
 CREATE TABLE IF NOT EXISTS unsubscribes (
     id                INTEGER PRIMARY KEY,
     account_id        INTEGER NOT NULL,
@@ -607,6 +617,10 @@ CREATE TABLE IF NOT EXISTS unsubscribes (
     violation_count   INTEGER NOT NULL DEFAULT 0,
     last_violation_at TEXT,
     resolution        TEXT,
+    status            TEXT,
+    status_url        TEXT,
+    status_reason     TEXT,
+    status_at         TEXT,
     UNIQUE(account_id, sender_addr)
 );
 

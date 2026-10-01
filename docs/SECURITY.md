@@ -538,3 +538,60 @@ the call goes out.
 - Do not log the relay body, in either direction, at any level.
 - A decline is a legitimate answer with `is_error` false. Do not turn it into a
   failure the model feels invited to retry.
+
+## 7. Automatic unsubscribe
+
+**Invariant.** The daemon fetches a URL a stranger chose only after the user asked
+to unsubscribe from that stranger, reaches only the public internet when it does,
+and takes at most one action on the page it finds: the one a person would take by
+pressing its single button.
+
+This reverses an older rule ("the server never fetches the unsubscribe link") on
+purpose. The link is no more dangerous than it was; what changed is who follows
+it. That move is what the guard below exists for.
+
+**Enforcement.**
+- **Never before the ask.** Nothing prefetches, previews or probes an unsubscribe
+  link: an unsubscribe may complete on a plain GET. The job starts from
+  `POST /client/unsubscribe` with `auto: true` (`squelch-api/src/unsub_job.rs`),
+  human door only; the agent door has no unsubscribe route at all, and the
+  assistant's tool goes through the confirm card (§6).
+- **Not for mail we cannot trust.** Spam (`is_spam`) and mail without a passing
+  authentication verdict (`auth_pass` not true) are never unsubscribed from
+  automatically: fetching a spammer's link confirms the address is live, and an
+  unauthenticated From line may not be the link's real author. Both fall back to
+  the browser, with the reason (`auto_refused`) for the client to say.
+- **SSRF guard, in code, for every deployment** (`squelch-api/src/unsub_fetch.rs`).
+  http/https only, ports 80/443 only, no userinfo. Names resolve through a resolver
+  that returns PUBLIC addresses only (no loopback, private, link-local, CGNAT,
+  multicast, reserved, or v4-in-v6 forms of those); reqwest connects to exactly what
+  it returned, so DNS rebinding has nothing to rebind. IP literals, which never
+  reach a resolver, are checked per hop. Redirects are followed by hand so every
+  hop passes both checks. Hosted tenants also sit behind their NetworkPolicy; a
+  self-host has only this, which is why it is not optional.
+- **One action, and it has to prove itself** (`squelch-api/src/unsub_html.rs`). A
+  form is submitted only when it has exactly one plausible submit control, no
+  password or file field, no required choice left unmade, and nothing to type
+  except the account's own address, which is typed only into a form on the page's
+  own host. The page that comes back must say the user is unsubscribed (in so many
+  words, or by the page reader's verdict); otherwise the job hands the link to the
+  user. Optional surveys are never answered.
+- **The page reader is fenced, cheap, capped and billed**
+  (`squelch-core/src/triage/unsub_page.rs`). The page is untrusted input inside the
+  usual fence; any non-answer is `unclear`, which costs the user one click. Its
+  calls bill to `unsub_page` and stop at a daily cap.
+- **Bounded.** 1 MiB bodies, per-request timeouts, a 45s job budget, four jobs at
+  once, a cookie jar that lives for one job.
+- **The link stays out of logs and the audit.** Audit rows carry the sender and the
+  verdict; transport errors are reduced to their kind before they can be printed.
+
+**What a maintainer must not break.**
+- Do not build a second outbound client for sender-chosen URLs, or call
+  `reqwest` directly on one: `Fetcher` is the guard, and a client without it is an
+  SSRF primitive aimed at the daemon's own door on loopback.
+- Do not prefetch an unsubscribe link to "show a preview" or to classify it early.
+- Do not widen what `Action::submission` will fill in. Typing anything but the
+  account's own address, or into another site's form, is acting for the user in a
+  way they never saw.
+- `needs_you` sends the user to the ORIGINAL link, not a post-redirect hop that may
+  depend on this job's cookies.

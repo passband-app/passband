@@ -1121,6 +1121,47 @@ impl Store for SqliteStore {
         self.list_unsubscribes(account_id)
     }
 
+    fn begin_unsubscribe_job(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+        source_message_id: Option<i64>,
+        url: &str,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        self.begin_unsubscribe_job(account_id, sender, source_message_id, url, now)
+    }
+
+    fn finish_unsubscribe_job(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+        status: &str,
+        method: &str,
+        reason: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        self.finish_unsubscribe_job(account_id, sender, status, method, reason, now)
+    }
+
+    fn mark_unsubscribe_opened(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+        now: DateTime<Utc>,
+    ) -> Result<bool> {
+        self.mark_unsubscribe_opened(account_id, sender, now)
+    }
+
+    fn reap_unsubscribe_jobs(
+        &self,
+        account_id: AccountId,
+        live: &[String],
+        now: DateTime<Utc>,
+    ) -> Result<usize> {
+        self.reap_unsubscribe_jobs(account_id, live, now)
+    }
+
     fn set_unsubscribe_resolution(
         &self,
         account_id: AccountId,

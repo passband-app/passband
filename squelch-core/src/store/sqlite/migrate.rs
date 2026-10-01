@@ -80,6 +80,11 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // backfilled: NULL is the safe reading (no tracking-pixel bypass), and a
     // re-sync refills it through the message upsert.
     add_column_if_missing(conn, "messages", "auth_pass", "INTEGER")?;
+    // Automatic-unsubscribe job state. NULL on every pre-existing row, which is
+    // exactly a legacy browser unsubscribe: no job, and the detector armed.
+    for col in ["status", "status_url", "status_reason", "status_at"] {
+        add_column_if_missing(conn, "unsubscribes", col, "TEXT")?;
+    }
     // Display recipients, one column per header. NULL on every pre-existing row,
     // which is exactly the recipients-backfill queue predicate (`cc_addrs IS
     // NULL`); the backfill runs from the sync engine, over the network, so it

@@ -40,8 +40,8 @@ struct UsageView: View {
             }
             ScrollView {
                 content
-                    .padding(.horizontal, 24)
-                    .padding(.vertical, 18)
+                    .padding(.horizontal, Space.s24)
+                    .padding(.vertical, Space.scaled(18))
                     .frame(maxWidth: 980, alignment: .leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -76,7 +76,7 @@ struct UsageView: View {
 
     @ViewBuilder private var content: some View {
         if let series {
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: Space.s14) {
                 if !page.isLoading, let error = page.error {
                     Text(error).font(Typo.micro).foregroundStyle(Palette.danger)
                 }
@@ -85,9 +85,9 @@ struct UsageView: View {
                 mailCard(series)
                 signalCard(series)
                 spendCard(series)
-                HStack(alignment: .top, spacing: 14) {
+                HStack(alignment: .top, spacing: Space.s14) {
                     categoryCard(series)
-                    assistantCard.frame(width: 280)
+                    assistantCard.frame(width: Space.scaled(280))
                 }
             }
             // A refetch keeps the frame: the last render dims rather than
@@ -106,9 +106,9 @@ struct UsageView: View {
     /// The page's one line of voice. Nothing here is load-bearing, and the
     /// masthead says so.
     private var masthead: some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: Space.scaled(3)) {
             Text("Fun charts")
-                .font(.system(size: 20, weight: .semibold))
+                .font(Typo.ui(20, weight: .semibold))
                 .foregroundStyle(Palette.ink)
             // VERBATIM: a literal handed to Text is Markdown, and Markdown
             // reads the shrug's `\\_` as an escaped underscore and eats the arm.
@@ -116,14 +116,14 @@ struct UsageView: View {
                 .font(Typo.rowSub)
                 .foregroundStyle(Palette.inkFaint)
         }
-        .padding(.bottom, 2)
+        .padding(.bottom, Space.s2)
     }
 
     // MARK: - tiles
 
     private func tiles(_ s: UsageSeries) -> some View {
         let versus = "vs prior \(s.days) days"
-        return HStack(alignment: .top, spacing: 12) {
+        return HStack(alignment: .top, spacing: Space.s12) {
             StatTile(
                 label: "Received", value: UsageText.count(s.received),
                 delta: deltaLabel(s.receivedDelta, upIsGood: nil), versus: versus,
@@ -424,7 +424,7 @@ struct UsageView: View {
             if s.categories.isEmpty {
                 EmptyNote("No triage spend in this window.")
             } else {
-                Grid(alignment: .trailing, horizontalSpacing: 14, verticalSpacing: 5) {
+                Grid(alignment: .trailing, horizontalSpacing: Space.s14, verticalSpacing: Space.scaled(5)) {
                     GridRow {
                         Text("").gridColumnAlignment(.leading)
                         Text("model").gridColumnAlignment(.leading)
@@ -436,7 +436,7 @@ struct UsageView: View {
                     .foregroundStyle(Palette.inkFaintest)
                     ForEach(s.categories) { c in
                         GridRow {
-                            HStack(spacing: 6) {
+                            HStack(spacing: Space.s6) {
                                 RoundedRectangle(cornerRadius: 2, style: .continuous)
                                     .fill(Self.stageColor(c.stage))
                                     .frame(width: 8, height: 8)
@@ -471,7 +471,7 @@ struct UsageView: View {
             if assistant.asks == 0 {
                 EmptyNote("Press ⌘K to ask your inbox a question.")
             } else {
-                HStack(spacing: 18) {
+                HStack(spacing: Space.scaled(18)) {
                     miniStat("asks", UsageText.count(assistant.asks))
                     miniStat("tokens", Fmt.compactCount(assistant.inputTokens + assistant.outputTokens))
                     miniStat("est cost", Fmt.fmtCost(assistant.estimatedCost), tone: Palette.accent)
@@ -559,15 +559,15 @@ private struct ChartCard<Plot: View, Table: View>: View {
     @State private var showTable = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 12) {
+        VStack(alignment: .leading, spacing: Space.s10) {
+            HStack(spacing: Space.s12) {
                 Text(title).font(Typo.zoneTitle).foregroundStyle(Palette.ink)
                 if let note {
                     Text(note).font(Typo.micro).foregroundStyle(Palette.inkFaintest)
                 }
-                Spacer(minLength: 8)
+                Spacer(minLength: Space.s8)
                 ForEach(legend) { key in
-                    HStack(spacing: 5) {
+                    HStack(spacing: Space.scaled(5)) {
                         if key.line {
                             Capsule().fill(key.color).frame(width: 10, height: 2)
                         } else {
@@ -607,10 +607,10 @@ private struct ChartReadout: View {
     let rows: [Row]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: Space.scaled(3)) {
             Text(title).font(Typo.micro).foregroundStyle(Palette.inkFaint)
             ForEach(rows.indices, id: \.self) { i in
-                HStack(spacing: 6) {
+                HStack(spacing: Space.s6) {
                     Capsule()
                         .fill(rows[i].color ?? .clear)
                         .frame(width: 8, height: 2.5)
@@ -623,8 +623,8 @@ private struct ChartReadout: View {
                 }
             }
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 7)
+        .padding(.horizontal, Space.scaled(9))
+        .padding(.vertical, Space.scaled(7))
         .background(
             RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.readerBackground)
         )
@@ -654,12 +654,12 @@ private struct StatTile: View {
     var sub: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: Space.s4) {
             Text(label).font(Typo.micro).foregroundStyle(Palette.inkFaint)
             Text(value)
-                .font(.system(size: 22, weight: .semibold))
+                .font(Typo.ui(22, weight: .semibold))
                 .foregroundStyle(Palette.ink)
-            HStack(spacing: 4) {
+            HStack(spacing: Space.s4) {
                 if let delta {
                     Text(delta.text).font(Typo.num(11, weight: .semibold)).foregroundStyle(delta.tone)
                     Text(versus).font(Typo.micro).foregroundStyle(Palette.inkFaintest)
@@ -670,13 +670,13 @@ private struct StatTile: View {
             .lineLimit(1)
             Sparkline(values: spark, tint: tint)
                 .frame(height: 24)
-                .padding(.top, 4)
+                .padding(.top, Space.s4)
             if let sub {
                 Text(sub).font(Typo.micro).foregroundStyle(Palette.inkFaintest).lineLimit(1)
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
+        .padding(.horizontal, Space.s14)
+        .padding(.vertical, Space.s12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .passbandGlass(.pane, cornerRadius: 14, tint: Palette.glassTint)
     }
@@ -721,7 +721,7 @@ private struct DayTable: View {
 
     var body: some View {
         ScrollView {
-            Grid(alignment: .trailing, horizontalSpacing: 14, verticalSpacing: 3) {
+            Grid(alignment: .trailing, horizontalSpacing: Space.s14, verticalSpacing: Space.scaled(3)) {
                 GridRow {
                     ForEach(columns.indices, id: \.self) { c in
                         Text(columns[c])

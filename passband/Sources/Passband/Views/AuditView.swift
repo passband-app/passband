@@ -122,7 +122,7 @@ struct AuditSection: View {
         // ledger there: a control below the thing it controls is a control you
         // scroll past before you know it exists.
         #if os(macOS)
-            HStack(alignment: .top, spacing: 34) {
+            HStack(alignment: .top, spacing: Space.scaled(34)) {
                 // The card takes everything the rail leaves it — SectionCard is
                 // already `maxWidth: .infinity`, and the pane above hands this
                 // section the window's full height, so the ledger runs from the
@@ -141,13 +141,13 @@ struct AuditSection: View {
                 // reach it.
                 ScrollView { sidebar }
                     .scrollIndicators(.hidden)
-                    .frame(width: 200)
+                    .frame(width: Space.scaled(200))
             }
             .frame(maxHeight: .infinity, alignment: .top)
             .task { await load(Self.pageSize) }
             .task { await loadVocabulary() }
         #else
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: Space.s14) {
                 sidebar
                 card
             }
@@ -194,7 +194,7 @@ struct AuditSection: View {
     /// that better than a paragraph does, and a wall of prose at the top of a
     /// filter rail is read once and then scrolled past for ever.
     @ViewBuilder private var sidebar: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: Space.s14) {
             if !rows.isEmpty { filters }
             reloadRow
         }
@@ -255,14 +255,14 @@ struct AuditSection: View {
     /// happens on the last row above it.
     @ViewBuilder private var spinner: some View {
         if !exhausted {
-            HStack(spacing: 8) {
+            HStack(spacing: Space.s8) {
                 WaitDots()
                 Text("older entries")
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaintest)
             }
-            .padding(.horizontal, 11)
-            .padding(.vertical, 8)
+            .padding(.horizontal, Space.scaled(11))
+            .padding(.vertical, Space.s8)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -279,8 +279,8 @@ struct AuditSection: View {
             )
             .font(Typo.micro)
             .foregroundStyle(Palette.inkFaintest)
-            .padding(.horizontal, 11)
-            .padding(.top, 8)
+            .padding(.horizontal, Space.scaled(11))
+            .padding(.top, Space.s8)
         }
     }
 
@@ -288,7 +288,7 @@ struct AuditSection: View {
     /// than a button with chrome: it is about the list, and a column of filters
     /// should not grow something that looks like one more setting.
     @ViewBuilder private var reloadRow: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: Space.s10) {
             Button("refresh") { Task { await reload() } }
                 .buttonStyle(.plain)
                 .font(Typo.micro)
@@ -313,8 +313,8 @@ struct AuditSection: View {
     /// something new grows a filter for it the day it ships, and an action
     /// nobody has taken never appears as a dead option.
     @ViewBuilder private var filters: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: Space.s12) {
+            HStack(spacing: Space.s6) {
                 Text("filter")
                     .font(Typo.sectionLabel)
                     .foregroundStyle(Palette.inkFaint)
@@ -371,13 +371,13 @@ struct AuditSection: View {
     }
 
     private var searchField: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: Space.scaled(5)) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 10, weight: .medium))
+                .font(Typo.ui(10, weight: .medium))
                 .foregroundStyle(Palette.inkFaintest)
             TextField("sender or subject", text: $query)
                 .textFieldStyle(.plain)
-                .font(.system(size: 11))
+                .font(Typo.ui(11))
                 .foregroundStyle(Palette.ink)
                 .autocorrectionDisabled()
                 #if os(iOS)
@@ -388,15 +388,15 @@ struct AuditSection: View {
                     query = ""
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 10))
+                        .font(Typo.ui(10))
                         .foregroundStyle(Palette.inkFaintest)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
         }
-        .padding(.horizontal, 7)
-        .padding(.vertical, 5)
+        .padding(.horizontal, Space.scaled(7))
+        .padding(.vertical, Space.scaled(5))
         .background(
             RoundedRectangle(cornerRadius: 7, style: .continuous)
                 .fill(Palette.canvas.opacity(0.65))
@@ -414,11 +414,11 @@ struct AuditSection: View {
     @ViewBuilder private func filterGroup<Content: View>(
         _ label: String, @ViewBuilder pills: () -> Content
     ) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
+        VStack(alignment: .leading, spacing: Space.scaled(5)) {
             Text(label)
                 .font(Typo.micro)
                 .foregroundStyle(Palette.inkFaintest)
-            FlowRow(spacing: 5, lineSpacing: 5) { pills() }
+            FlowRow(spacing: Space.scaled(5), lineSpacing: Space.scaled(5)) { pills() }
         }
     }
 
@@ -713,25 +713,25 @@ private struct AuditRow: View {
         ListRow(
             selected: open, cornerRadius: 8, hPadding: 11, vPadding: 7, action: onToggle
         ) { _, _ in
-            HStack(alignment: .top, spacing: 10) {
+            HStack(alignment: .top, spacing: Space.s10) {
                 // The gutter. Fixed width and leading-aligned so the times make
                 // a column you can run a finger down, which is the whole reason
                 // they moved off the ragged right edge.
                 Text(age)
                     .font(Typo.num(10))
                     .foregroundStyle(open ? Palette.inkDim : Palette.inkFaintest)
-                    .frame(width: 34, alignment: .leading)
+                    .frame(width: Space.scaled(34), alignment: .leading)
                     .help(entry.ts)
 
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                VStack(alignment: .leading, spacing: Space.scaled(3)) {
+                    HStack(alignment: .firstTextBaseline, spacing: Space.s8) {
                         AuditSection.actorChip(entry.actor)
                         Text(AuditSection.actionVerb(entry))
                             .font(Typo.rowSub)
                             .foregroundStyle(Palette.ink)
                             .lineLimit(1)
                             .help(entry.action)
-                        Spacer(minLength: 6)
+                        Spacer(minLength: Space.s6)
                         if let undo, open {
                             Button(undo.label, action: onUndo)
                                 .buttonStyle(.glass)
@@ -752,7 +752,7 @@ private struct AuditRow: View {
     }
 
     @ViewBuilder private var target: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: Space.s4) {
             if hasResolved {
                 if let sender = entry.target_sender, !sender.isEmpty {
                     Text(sender)
@@ -788,7 +788,7 @@ private struct FilterPill: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 5) {
+            HStack(spacing: Space.scaled(5)) {
                 Text(label)
                     .font(Typo.chip)
                     .foregroundStyle(active ? .white : Palette.inkDim)
@@ -799,8 +799,8 @@ private struct FilterPill: View {
                         .foregroundStyle(active ? Color.white.opacity(0.7) : Palette.inkFaintest)
                 }
             }
-            .padding(.horizontal, 9)
-            .padding(.vertical, 4)
+            .padding(.horizontal, Space.scaled(9))
+            .padding(.vertical, Space.s4)
             .background(
                 Capsule().fill(active ? Palette.accent.opacity(0.85) : Palette.hairline.opacity(0.6))
             )

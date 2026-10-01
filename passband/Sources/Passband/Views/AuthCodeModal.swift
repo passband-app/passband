@@ -30,7 +30,7 @@ struct AuthCodeModal: View {
                             .foregroundStyle(Palette.ink)
                             .tracking(6)
                             .frame(maxWidth: .infinity)
-                            .padding(.vertical, 22)
+                            .padding(.vertical, Space.scaled(22))
                             .accessibilityLabel("login code")
                     } else {
                         Text(
@@ -40,12 +40,12 @@ struct AuthCodeModal: View {
                         .foregroundStyle(Palette.inkFaint)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 20)
+                        .padding(.vertical, Space.s20)
                     }
 
                     actions
 
-                    HStack(spacing: 4) {
+                    HStack(spacing: Space.s4) {
                         Text("not stored · revealing it was audited")
                             .font(Typo.micro)
                             .foregroundStyle(Palette.inkFaintest)
@@ -57,8 +57,8 @@ struct AuthCodeModal: View {
                         }
                         Spacer()
                     }
-                    .padding(.horizontal, 18)
-                    .padding(.bottom, 10)
+                    .padding(.horizontal, Space.scaled(18))
+                    .padding(.bottom, Space.s10)
 
                     // Draining countdown bar; freezes green once copied.
                     GeometryReader { geo in
@@ -75,10 +75,10 @@ struct AuthCodeModal: View {
                 // A ceiling on the phone, not a measure: 420 is wider than the
                 // screen it would have to fit on. See ModalCard's note.
                 #if os(macOS)
-                    .frame(width: 420)
+                    .frame(width: Space.scaled(420))
                 #else
-                    .frame(maxWidth: 420)
-                    .padding(.horizontal, 14)
+                    .frame(maxWidth: Space.scaled(420))
+                    .padding(.horizontal, Space.s14)
                 #endif
                 .passbandGlass(.pane, cornerRadius: 22, tint: Palette.lockSoft.opacity(0.9))
                 .shadow(color: .black.opacity(0.34), radius: 50, y: 22)
@@ -98,36 +98,36 @@ struct AuthCodeModal: View {
     }
 
     private func header(_ entry: AuthCodeEntry) -> some View {
-        HStack(spacing: 10) {
+        HStack(spacing: Space.s10) {
             Avatar(sender: entry.meta.sender, size: 28)
             VStack(alignment: .leading, spacing: 1) {
                 Text(SenderCache.resolved(entry.meta.sender).displayName)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(Typo.ui(13, weight: .semibold))
                     .foregroundStyle(Palette.ink)
                     .help(entry.meta.sender)
                 Label(AuthCopy.label(entry.meta.kind), systemImage: AuthCopy.symbol(entry.meta.kind))
                     .font(Typo.micro)
                     .foregroundStyle(Palette.lock)
             }
-            Spacer(minLength: 6)
+            Spacer(minLength: Space.s6)
             if store.authQueue.count > 1 {
                 Text("+\(store.authQueue.count - 1)")
                     .font(Typo.num(11, weight: .semibold))
                     .foregroundStyle(Palette.inkFaintest)
-                    .padding(.horizontal, 7).padding(.vertical, 2)
+                    .padding(.horizontal, Space.scaled(7)).padding(.vertical, Space.s2)
                     .background(Capsule().fill(Palette.hairline))
                     .help("more codes waiting")
             }
         }
-        .padding(.horizontal, 18)
-        .padding(.top, 16)
+        .padding(.horizontal, Space.scaled(18))
+        .padding(.top, Space.s16)
     }
 
     private var actions: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: Space.s8) {
             if let code, !code.isEmpty {
                 Button(action: copy) {
-                    HStack(spacing: 6) {
+                    HStack(spacing: Space.s6) {
                         Image(systemName: copied ? "checkmark" : "doc.on.doc")
                         Text(copied ? "copied" : "copy")
                         // A keycap beside a button on a device with no keyboard
@@ -137,8 +137,8 @@ struct AuthCodeModal: View {
                             Kbd("c")
                         #endif
                     }
-                    .font(.system(size: 12, weight: .medium))
-                    .padding(.horizontal, 12).padding(.vertical, 5)
+                    .font(Typo.ui(12, weight: .medium))
+                    .padding(.horizontal, Space.s12).padding(.vertical, Space.scaled(5))
                 }
                 .buttonStyle(.glassProminent)
                 .tint(Palette.lock)
@@ -148,8 +148,8 @@ struct AuthCodeModal: View {
                     store.setView(.auth)
                 } label: {
                     Label("open Auth", systemImage: "key.fill")
-                        .font(.system(size: 12, weight: .medium))
-                        .padding(.horizontal, 12).padding(.vertical, 5)
+                        .font(Typo.ui(12, weight: .medium))
+                        .padding(.horizontal, Space.s12).padding(.vertical, Space.scaled(5))
                 }
                 .buttonStyle(.glassProminent)
                 .tint(Palette.lock)
@@ -157,21 +157,21 @@ struct AuthCodeModal: View {
             Button {
                 store.dismissAuthCode()
             } label: {
-                HStack(spacing: 6) {
+                HStack(spacing: Space.s6) {
                     Text("dismiss")
                     #if os(macOS)
                         Kbd("esc")
                     #endif
                 }
-                .font(.system(size: 12))
-                .padding(.horizontal, 10).padding(.vertical, 5)
+                .font(Typo.ui(12))
+                .padding(.horizontal, Space.s10).padding(.vertical, Space.scaled(5))
             }
             .buttonStyle(.glass)
             .foregroundStyle(Palette.inkDim)
             Spacer()
         }
-        .padding(.horizontal, 18)
-        .padding(.bottom, 12)
+        .padding(.horizontal, Space.scaled(18))
+        .padding(.bottom, Space.s12)
     }
 
     private func copy() {

@@ -456,6 +456,40 @@ offset.
   writes nothing, the state included.
 - `/client/stats` carries `"timeline": true`.
 
+### 3.7 Known limits of wave 1 as built
+
+Found by the last review (2026-10-01) and left as they are. None is reachable
+from another sender's mail without that sender already sharing the ghost's
+scope, and none matters while ghosts are display-only. Each should be fixed
+with the wave that first depends on it.
+
+- **A re-decision made while a message is restricted re-keys its ghost.** The
+  ghost keeps the keys of ineligible sources so it can be found again. If the
+  message is re-triaged while restricted and its record now carries a
+  different ref, that new ref becomes a key, and later mail from the same
+  sender about that other thing joins the old ghost, with the user's mark.
+  Fix: remember each source's keys from when it was last eligible.
+- **A change of authentication at re-ingest rebuilds nothing.** A re-fetch
+  that changes a message's `auth_pass` or From leaves its ghost served as it
+  was until that message is re-triaged. In practice this needs a change to how
+  the verdict is read. Fix: refresh the message's ghosts from ingest when
+  either value changes.
+- **A ref is the first digit-bearing code run, even when that run is then
+  dropped.** "Table for 2, confirmation 1234567" and "Hotel confirmation 12345
+  / itinerary 6789012" yield no ref, and "Flight UA 123 PNR ABC123" keys on
+  the flight number, which two bookings share. The cost is usually a fallback
+  to thread matching or a duplicate ghost. Fix: take the first run that
+  survives the drops, and prefer a run that follows a label word.
+- **A letter-only locator is kept only when it stands alone or follows a
+  label** ("Booking ref QXJZKM"), not inside a sentence.
+- **Dotted text followed by `#` can be read as a link in a location**
+  ("Bldg.West#3"). Fix: accept a bare host only when it ends in a real public
+  suffix.
+- **Reference matching still trusts a domain.** A stranger at a shared mail
+  provider that is not on the list, who also knows the ref, can update a ghost
+  created by someone at that same provider. A ghost with no ref cannot be
+  reached this way.
+
 ## 4. One timeline, per-account ownership (DECIDED)
 
 - **Read:** one merged timeline across every account. Events and ghosts are

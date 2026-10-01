@@ -913,3 +913,46 @@ fn init_adds_both_tables_to_a_preexisting_db() {
     assert!(log.iter().any(|e| e.action == "archive"));
     assert!(log.iter().any(|e| e.action == "pairing.claim"));
 }
+
+/// THE UPGRADE THAT MUST NOT LOCK ANYBODY OUT. The verify path now SELECTs the
+/// `client_*` columns on every authenticated request, so a store from before
+/// they existed has to gain them at open, or every device this mailbox ever
+/// paired gets a 500 the moment the new daemon starts.
+#[test]
+fn a_store_from_before_the_client_columns_still_authenticates() {
+    let dir = std::env::temp_dir().join(format!("squelch-client-cols-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("pre-client-columns.db");
+    let _ = std::fs::remove_file(&path);
+
+    let (acct, issued) = {
+        let store = SqliteStore::open(&path).unwrap();
+        let acct = store.ensure_account("me@example.com").unwrap();
+        let issued = store.issue_device_token(acct, "laptop").unwrap();
+        // Back to the shape every deployed store has today.
+        store
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "ALTER TABLE device_tokens DROP COLUMN client_platform;
+                 ALTER TABLE device_tokens DROP COLUMN client_version;
+                 ALTER TABLE device_tokens DROP COLUMN client_seen_at;",
+            )
+            .unwrap();
+        (acct, issued)
+    };
+
+    let store = SqliteStore::open(&path).unwrap();
+    assert!(
+        store.verify_device_token(&issued.token).unwrap().is_some(),
+        "a token minted before the upgrade still authenticates after it"
+    );
+    assert!(store.client_versions_seen(acct).unwrap().is_empty());
+    store
+        .verify_device_token_from(&issued.token, Some(&tag("ios/0.0.6")))
+        .unwrap()
+        .unwrap();
+    assert_eq!(store.client_versions_seen(acct).unwrap().len(), 1);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

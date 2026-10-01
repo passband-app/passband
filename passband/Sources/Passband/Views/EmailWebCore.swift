@@ -241,8 +241,12 @@ struct EmailWebView: View {
     /// The document's own top and bottom padding (the body padding in
     /// `document`), which a caller counting lines of text knows nothing about.
     /// A bubble is padded like the plain-text bubble beside it, a card like a
-    /// card.
-    private var documentPadding: CGFloat { bubble ? 18 : 28 }
+    /// card. Read off the same metrics the stylesheet is written in, so the
+    /// guess opens at the padding the density actually draws.
+    private var documentPadding: CGFloat {
+        let metrics = ReaderMetrics.current
+        return 2 * (bubble ? metrics.bubblePaddingV : metrics.cardPadding)
+    }
     /// Height used when measurement never arrives at all — generous on purpose:
     /// too tall leaves whitespace, too short silently hides mail.
     private static let unmeasuredFallbackHeight: CGFloat = 900
@@ -251,7 +255,7 @@ struct EmailWebView: View {
         // A sent bubble's chrome — the image bar, the quoted-history chip —
         // keeps to the bubble's own side, or a short bubble would sit at the
         // left of a stack the chip had made wider and end up flush with nothing.
-        VStack(alignment: bubble && mine ? .trailing : .leading, spacing: 8) {
+        VStack(alignment: bubble && mine ? .trailing : .leading, spacing: Space.s8) {
             imageBar
             // The mail's own topline, where the sender put it — above the
             // body — but as a caption rather than the first line of the
@@ -263,7 +267,7 @@ struct EmailWebView: View {
                     .lineLimit(2)
                     .multilineTextAlignment(bubble && mine ? .trailing : .leading)
                     .textSelection(.enabled)
-                    .padding(.horizontal, 2)
+                    .padding(.horizontal, Space.s2)
             }
 
             EmailWebViewRepresentable(
@@ -343,15 +347,15 @@ struct EmailWebView: View {
             // footnote, on one line when both are here. Conditional as a
             // whole, or an empty row would still cost the stack's spacing.
             if hasQuoted || (prepared.trackers > 0 && !prepared.trackersAllowed) {
-              HStack(spacing: 10) {
+              HStack(spacing: Space.s10) {
                 if hasQuoted {
                     Button {
                         quotedHidden.toggle()
                     } label: {
                         Text(quotedHidden ? "··· show quoted history" : "hide quoted history")
                             .font(Typo.micro)
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 3)
+                            .padding(.horizontal, Space.scaled(9))
+                            .padding(.vertical, Space.scaled(3))
                     }
                     // Text-on-hover like the header actions: the only control
                     // INSIDE the reading surface, where a glass pill reads as
@@ -364,6 +368,9 @@ struct EmailWebView: View {
             }
         }
         .onAppear {
+            // Before the memory is read: a size filed at the other density is
+            // a frame that opens wrong and then snaps (see ReaderMetrics.sync).
+            ReaderMetrics.sync()
             if let cacheKey, let remembered = FrameHeights.shared.get(cacheKey) {
                 height = remembered
             }
@@ -383,6 +390,25 @@ struct EmailWebView: View {
         // stack recycles. Without it the new document's first measurement
         // arrives into a machine that has already stopped listening.
         .onChange(of: prepared.sourceHash) { _, _ in restartSizing(userDriven: false) }
+        // A DENSITY FLIP RESTYLES THIS DOCUMENT IN PLACE: the coordinator swaps
+        // the app's own stylesheet under the live document (ReaderMetrics)
+        // rather than reloading it, so the frame keeps its content process, its
+        // images and its quoted-history state. What it cannot keep is its size.
+        // Every height on file was taken at the old padding and type, so the
+        // file goes first, and a hugging bubble lets go of its old width so it
+        // can come to the new one. A settled machine goes straight to
+        // `.settling` for the reason a reflow does: no navigation starts, so
+        // nothing would ever move it on from `.waiting`. One still opening is
+        // left alone — the restyle lands before its own settle (see
+        // `EmailFrameCoordinator.documentDidLoad`).
+        .onChange(of: prefs.density) { _, _ in
+            ReaderMetrics.sync()
+            width = 0
+            if sizing == .done {
+                sizing = .settling
+                sizingIsUserDriven = false
+            }
+        }
         // COLD PATH ONLY — `init` already seeded `prepared` from the warmer; this
         // runs for a body opened before its thread warmed (or since evicted). Off
         // the main actor: the scans are a full regex walk of the body.
@@ -440,6 +466,9 @@ struct EmailWebView: View {
             trace("refused \(Int(h))")
             return
         }
+        // Everything below may file a size, and the file has to be for the
+        // density the document is now drawn at.
+        ReaderMetrics.sync()
         // THE WIDTH AND THE EMPTINESS ARE TAKEN FROM EVERY REPORT, ahead of
         // the phases below, which exist for the height alone. The height is
         // the viewport-feedback problem (a `vh` body is as tall as the box it
@@ -568,8 +597,8 @@ struct EmailWebView: View {
             } label: {
                 Label("remote images blocked — load for this email", systemImage: "photo")
                     .font(Typo.micro)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 4)
+                    .padding(.horizontal, Space.scaled(9))
+                    .padding(.vertical, Space.s4)
             }
             .buttonStyle(.glass)
             .foregroundStyle(Palette.inkFaint)
@@ -585,8 +614,8 @@ struct EmailWebView: View {
             )
             .font(Typo.micro)
             .foregroundStyle(Palette.inkFaint)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 4)
+            .padding(.horizontal, Space.scaled(9))
+            .padding(.vertical, Space.s4)
             .glassCapsule(interactive: false)
             .help(
                 "\(prepared.trackers) tracking pixel\(prepared.trackers == 1 ? "" : "s") left in place: you have emailed this sender, so they may see that you opened this"
@@ -610,7 +639,7 @@ struct EmailWebView: View {
             )
             .font(Typo.micro)
             .foregroundStyle(Palette.inkFaint)
-            .padding(.horizontal, 2)
+            .padding(.horizontal, Space.s2)
             .help(
                 "tracking pixels removed before render; links open externally and no referrer is ever sent"
             )
@@ -687,14 +716,17 @@ enum EmailFrame {
 
     /// What a LIVE frame would have to be holding to be reusable for this render,
     /// or nil if this render cannot use one (nothing to render yet, or no message
-    /// id).
+    /// id). At the density in force now: a frame parked under the other one is
+    /// a miss, not a frame to adopt and then restyle (see `WebFramePool.Key`).
+    @MainActor
     static func renderKey(
         poolKey: String?, html: String, source: Int, allowRemote: Bool, bubble: Bool
     ) -> WebFramePool.Key? {
         guard let poolKey, !html.isEmpty else { return nil }
         return WebFramePool.Key(
             message: poolKey, allowRemote: allowRemote,
-            document: EmailFrameCoordinator.documentHash(source: source, bubble: bubble))
+            document: EmailFrameCoordinator.documentHash(source: source, bubble: bubble),
+            metrics: .current)
     }
 
     /// Injected AFTER document end (the message cannot run script to interfere):
@@ -961,6 +993,22 @@ enum EmailFrame {
             measure();
           };
 
+          // ---- density -----------------------------------------------------
+          // The app's own stylesheet, swapped under the live document when the
+          // density setting flips (ReaderMetrics). Only OUR sheet: the mail's
+          // own <style> blocks and inline styles are untouched, and the
+          // full-bleed decision above wrote the body's padding inline, so a
+          // newsletter that gave its padding up keeps it given up. A different
+          // padding or type size is a different width as well as a different
+          // height, so the fit is retaken before the measurement.
+          window.__passbandRestyle = function (css) {
+            var sheet = document.getElementById('passband-sheet');
+            if (!sheet || sheet.textContent === css) return;
+            sheet.textContent = css;
+            fitWidth();
+            measure();
+          };
+
           // ---- links -------------------------------------------------------
           // Navigation is refused by the delegate anyway; reporting the href up
           // to native is what makes an in-frame click actually DO something.
@@ -973,6 +1021,67 @@ enum EmailFrame {
           }, true);
         })();
         """
+}
+
+// MARK: - density inside the frame
+
+/// THE NUMBERS THE APP'S OWN STYLESHEET IS WRITTEN IN, at one density. Web
+/// content does not observe anything, so the density reaches a mail frame as a
+/// value: the document is built with one of these (`EmailFrameCoordinator.
+/// document`), and when the setting flips the coordinator writes the sheet
+/// again at the new one and swaps it under the live document. Every field is a
+/// COMPACT number run through the curve, so compact is the identity and the
+/// sheet is the one that shipped before densities.
+///
+/// A value rather than a `DensityChoice` because it is what the document is
+/// actually drawn in: the pool keys on it, the measurer renders at it, and two
+/// densities that happened to agree on all four numbers would draw identical
+/// documents.
+struct ReaderMetrics: Hashable, Sendable {
+    /// The type a body falls back to when it names none of its own.
+    var bodyFont: CGFloat
+    /// A card document's padding, all four sides.
+    var cardPadding: CGFloat
+    /// A bubble document's padding: the plain-text bubble's (MessageCard's
+    /// `mail`), down and across.
+    var bubblePaddingV: CGFloat
+    var bubblePaddingH: CGFloat
+
+    /// The sheet as it was written, before there were densities.
+    static let compact = ReaderMetrics(
+        bodyFont: 14, cardPadding: 14, bubblePaddingV: 9, bubblePaddingH: 12)
+
+    /// At the density in force now.
+    @MainActor
+    static var current: ReaderMetrics {
+        ReaderMetrics(
+            bodyFont: Typo.size(14), cardPadding: Space.s14,
+            bubblePaddingV: Space.scaled(9), bubblePaddingH: Space.s12)
+    }
+
+    /// The metrics every height in `FrameHeights` was taken at, or nil before
+    /// anything has been filed.
+    @MainActor private static var filedUnder: ReaderMetrics?
+
+    /// FORGET EVERY HEIGHT TAKEN AT ANOTHER DENSITY. A measured height is the
+    /// answer to a question that included the padding and the type, the same
+    /// way `FrameHeights.using(width:)` says it included the column, and a
+    /// message painted at the other density's height opens wrong and then
+    /// snaps. The measurer takes the thread again behind it (ThreadViewer's
+    /// `MeasurePass` carries the density).
+    ///
+    /// Idempotent and cheap, and called from every place that is about to read
+    /// or file a height outside a view body: the flip itself reaches several
+    /// mounted frames and the reader at once, and whichever asks first clears
+    /// the file for all of them. The very first call only records, because the
+    /// file is empty: nothing can have been written before somebody asked.
+    @MainActor
+    static func sync() {
+        let now = current
+        defer { filedUnder = now }
+        guard let was = filedUnder, was != now else { return }
+        FrameHeights.shared.wipeAll()
+    }
 }
 
 // MARK: - the coordinator
@@ -1019,6 +1128,21 @@ final class EmailFrameCoordinator: NSObject {
     private var wantedCollapse = true
     private var appliedCollapse: Bool?
 
+    /// THE DENSITY THE HOST WANTS THE DOCUMENT DRAWN AT, and the one it is
+    /// drawn at. Kept apart for the reason the quoted history's two are: `load`
+    /// runs on every update, and a restyle is a script round trip and a full
+    /// relayout of the document, worth paying only when the setting moved.
+    /// `documentLive` is false while a load is in flight, when the function the
+    /// restyle calls does not exist yet; `documentDidLoad` catches up.
+    private var wantedMetrics: ReaderMetrics?
+    private var appliedMetrics: ReaderMetrics?
+    private var documentLive = false
+    /// Whether the document is a bubble's or a card's: the stylesheet differs
+    /// between the two, so a restyle has to know which one to write. Taken on
+    /// every `load`, including the ones the load guard turns away. The guard
+    /// covers the bubble flag, so what it turns away is the same document.
+    private var documentBubble = false
+
     init(
         onHeight: @escaping (FrameMeasurement) -> Void, onLoaded: @escaping () -> Void,
         onQuotedFound: @escaping (Bool) -> Void, onLink: @escaping (String) -> Void
@@ -1061,22 +1185,37 @@ final class EmailFrameCoordinator: NSObject {
         // a blank document lands the real one as a SECOND navigation — which
         // is what makes the load race reachable at all.
         guard !html.isEmpty else { return }
+        // THE DENSITY IS NOT PART OF THE SIGNATURE, on purpose: a flip is a
+        // restyle of the document already here, not a new document to load.
+        // Reloading every open message to change its padding would throw away
+        // the parse, the images and the measured size of each one.
+        let metrics = ReaderMetrics.current
+        wantedMetrics = metrics
+        documentBubble = bubble
         let document = Self.documentHash(source: source, bubble: bubble)
         let signature = Self.signature(allowRemote: allowRemote, document: document)
-        guard signature != loadedSignature else { return }
+        guard signature != loadedSignature else {
+            applyMetrics(webView, settle: true)
+            return
+        }
         loadedSignature = signature
         loadedPoolKey = poolKey.map {
-            WebFramePool.Key(message: $0, allowRemote: allowRemote, document: document)
+            WebFramePool.Key(
+                message: $0, allowRemote: allowRemote, document: document, metrics: metrics)
         }
         // The document about to be replaced is the one whose quote state we
         // knew. Until the new one lands there is nothing to toggle — the
         // function the toggle calls does not exist yet — and `documentDidLoad`
         // is what applies the host's wish once it does.
         appliedCollapse = nil
+        // The document about to land is written at these metrics, so there is
+        // nothing to restyle when it does, unless the setting moves first.
+        appliedMetrics = metrics
+        documentLive = false
         relay?.noteLoadStarted()
         pendingOwnLoads += 1
         webView.loadHTMLString(
-            Self.document(html: html, allowRemote: allowRemote, bubble: bubble),
+            Self.document(html: html, allowRemote: allowRemote, bubble: bubble, metrics: metrics),
             // A nil base URL gives the document a unique opaque origin, so
             // relative references resolve to nothing rather than to us.
             baseURL: nil)
@@ -1103,6 +1242,11 @@ final class EmailFrameCoordinator: NSObject {
         // which is also a fresh host's default — so the update that follows
         // this has nothing to toggle and does not say so twice.
         appliedCollapse = true
+        // A pool hit is a frame parked at the density in force now (the
+        // density is in the key), so it is already drawn the way it is wanted.
+        appliedMetrics = key.metrics
+        wantedMetrics = key.metrics
+        documentLive = true
 
         // A document that was not reloaded never re-runs the measuring script,
         // so a reused frame would sit at zero height behind the paint-hold
@@ -1174,6 +1318,12 @@ final class EmailFrameCoordinator: NSObject {
     /// produced it, while an answer belongs to the question.
     func documentDidLoad(_ webView: WKWebView) {
         appliedCollapse = true
+        documentLive = true
+        // The density FIRST, and without a settle of its own: script calls run
+        // in the order they are made, so a restyle issued here (the setting
+        // moved while this document was loading) is in place before the
+        // measurement the settle below asks for.
+        applyMetrics(webView, settle: false)
         applyCollapse(webView)
         settle(webView)
     }
@@ -1201,6 +1351,38 @@ final class EmailFrameCoordinator: NSObject {
             guard let self, let m = FrameMeasurement(payload: value) else { return }
             self.onHeight(m)
         }
+    }
+
+    /// Swap the app's stylesheet under the live document for the density the
+    /// host wants and, when `settle`, tell the host to take the size it came
+    /// to, which nothing else would: a restyle starts no navigation.
+    private func applyMetrics(_ webView: WKWebView, settle settleAfter: Bool) {
+        guard documentLive, let wanted = wantedMetrics, appliedMetrics != wanted else { return }
+        appliedMetrics = wanted
+        // The pool files a frame under the density it is DRAWN at, and that
+        // just changed: parked under the old key, it would be adopted by a
+        // reader at the old density and never by one at this.
+        loadedPoolKey = loadedPoolKey.map {
+            WebFramePool.Key(
+                message: $0.message, allowRemote: $0.allowRemote, document: $0.document,
+                metrics: wanted)
+        }
+        let css = Self.scriptLiteral(Self.stylesheet(bubble: documentBubble, metrics: wanted))
+        webView.evaluateJavaScript(
+            "window.__passbandRestyle && window.__passbandRestyle(\(css))"
+        ) { [weak self] _, _ in
+            guard settleAfter else { return }
+            self?.settle(webView)
+        }
+    }
+
+    /// A Swift string as a JavaScript string literal. JSON's string grammar is
+    /// a subset of JavaScript's, so the encoder's escaping is the right escaping.
+    nonisolated private static func scriptLiteral(_ text: String) -> String {
+        guard let data = try? JSONEncoder().encode(text),
+            let literal = String(data: data, encoding: .utf8)
+        else { return "''" }
+        return literal
     }
 
     private func applyCollapse(_ webView: WKWebView) {
@@ -1262,9 +1444,9 @@ final class EmailFrameCoordinator: NSObject {
     /// It does NOT cover `vh` units, which resolve against the viewport no
     /// matter what html and body are told to be. Those are bounded on the host
     /// side instead — see EmailWebView's sizing phases.
-    nonisolated static func document(html: String, allowRemote: Bool, bubble: Bool = false)
-        -> String
-    {
+    nonisolated static func document(
+        html: String, allowRemote: Bool, bubble: Bool = false, metrics: ReaderMetrics
+    ) -> String {
         // Which schemes an image may come from, and why the two custom ones are
         // gated differently, is MailCSP's — the policy lives where it can be
         // asserted without a WebKit process.
@@ -1285,27 +1467,53 @@ final class EmailFrameCoordinator: NSObject {
             <meta http-equiv="Content-Security-Policy" content="\(csp)">\
             <meta name="referrer" content="no-referrer">\
             <meta charset="utf-8">\(viewport)\
-            <style>\
-            html,body{margin:0;padding:0;background:#fff;color:#111;\
-            font:14px/1.55 -apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;\
-            word-break:break-word;overflow-wrap:anywhere;overflow:hidden;}\
-            html,body{height:auto!important;min-height:0!important;}\
-            \(bubble ? bubbleBody : cardBody)\
-            img{max-width:100%;height:auto;}\
-            a{color:#2b7fd4;}\
-            table{max-width:100%;}\
-            pre{white-space:pre-wrap!important;}\
-            blockquote{margin:8px 0;padding-left:10px;border-left:2px solid #d8dee6;color:#555;}\
-            </style>\
+            <style id="passband-sheet">\(stylesheet(bubble: bubble, metrics: metrics))</style>\
             </head><body\(bubble ? " class=\"hug\"" : "")>\(html)</body></html>
             """
+    }
+
+    /// THE APP'S OWN STYLESHEET, the one `<style>` in the document that is
+    /// ours, and the only thing the density reaches inside a mail frame.
+    ///
+    /// WHAT FOLLOWS THE DENSITY IS WHAT WE DREW: the padding between our frame
+    /// and the mail, and the type a body falls back to when it names none of
+    /// its own (a reply typed in Gmail, any message that is plain prose), so an
+    /// html reply reads at the size the plain-text one beside it does. WHAT
+    /// DOES NOT is anything that shapes the SENDER'S markup: the quote rule, the
+    /// link colour, the image and table caps. Those are defaults under the
+    /// mail, and the mail looks the way its author made it. A body that sets
+    /// its own type is untouched either way: its rules come after this sheet
+    /// and win.
+    ///
+    /// Swapped whole under a live document by `__passbandRestyle` when the
+    /// setting flips, so it is a function of its inputs and nothing else, and
+    /// in compact it is byte for byte the sheet that shipped before densities.
+    nonisolated static func stylesheet(bubble: Bool, metrics: ReaderMetrics) -> String {
+        "html,body{margin:0;padding:0;background:#fff;color:#111;"
+            + "font:\(px(metrics.bodyFont))/1.55 -apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;"
+            + "word-break:break-word;overflow-wrap:anywhere;overflow:hidden;}"
+            + "html,body{height:auto!important;min-height:0!important;}"
+            + (bubble ? bubbleBody(metrics) : cardBody(metrics))
+            + "img{max-width:100%;height:auto;}"
+            + "a{color:#2b7fd4;}"
+            + "table{max-width:100%;}"
+            + "pre{white-space:pre-wrap!important;}"
+            + "blockquote{margin:8px 0;padding-left:10px;border-left:2px solid #d8dee6;color:#555;}"
+    }
+
+    /// A length in CSS pixels, which are points here. Whole numbers print as
+    /// they always did; the comfortable curve snaps to the half point.
+    nonisolated private static func px(_ value: CGFloat) -> String {
+        value == value.rounded() ? "\(Int(value))px" : "\(Double(value))px"
     }
 
     /// THE BODY IS THE ONLY PADDED BOX. It used to be `html,body{padding:14px}`,
     /// which pads both and puts the text 28 points in — a slab, in a bubble.
     /// The measuring script reads the body's box, so what it reports is what
     /// is drawn.
-    nonisolated private static let cardBody = "body{padding:14px;}"
+    nonisolated private static func cardBody(_ metrics: ReaderMetrics) -> String {
+        "body{padding:\(px(metrics.cardPadding));}"
+    }
     /// A bubble is padded like the plain-text bubble beside it (PlainBody: 12
     /// across, 9 down) and is only as wide as what is in it: `fit-content` is
     /// min(the widest line, the frame), border-box so the cap includes the
@@ -1316,9 +1524,10 @@ final class EmailFrameCoordinator: NSObject {
     /// the question "how wide do you want to be" with nothing (percentages
     /// contribute zero to an intrinsic width), and a frame narrowed to that
     /// answer caps the document at it for good. Such a document fills.
-    nonisolated private static let bubbleBody =
-        "body{padding:9px 12px;box-sizing:border-box;}"
-        + "body.hug{width:-webkit-fit-content;width:fit-content;max-width:100%;}"
+    nonisolated private static func bubbleBody(_ metrics: ReaderMetrics) -> String {
+        "body{padding:\(px(metrics.bubblePaddingV)) \(px(metrics.bubblePaddingH));box-sizing:border-box;}"
+            + "body.hug{width:-webkit-fit-content;width:fit-content;max-width:100%;}"
+    }
 }
 
 /// THE LINE AHEAD OF THE DOCUMENT. A sanitized body very often opens with
@@ -1595,10 +1804,18 @@ final class WebFramePool {
     /// be a pool MISS. Quote collapse is deliberately NOT in the key: it is a JS
     /// call on the live document, and frames are checked in collapsed so a hit
     /// matches a fresh open's default state.
+    ///
+    /// THE DENSITY IS IN IT TOO, and unlike the other three it is not about the
+    /// sandbox: a frame parked at the other density is drawn with the other
+    /// padding and type, and its last measurement (what an adopting view shows
+    /// first) is that drawing's height. A live frame is restyled in place when
+    /// the setting flips and re-filed under the new key; a parked one is simply
+    /// a miss until it ages out.
     struct Key: Hashable {
         let message: String
         let allowRemote: Bool
         let document: Int
+        let metrics: ReaderMetrics
     }
 
     /// The frame is held as the BASE class: the Mac subclasses WKWebView to give

@@ -82,7 +82,7 @@ struct AttachmentStrip: View {
     var body: some View {
         if !attachments.isEmpty {
             strip
-                .padding(.top, 4)
+                .padding(.top, Space.s4)
                 .accessibilityLabel("attachments")
                 #if !os(macOS)
                     // A SHEET, not an overlay: an overlay is laid out against the
@@ -121,7 +121,7 @@ struct AttachmentStrip: View {
     /// pinned to THIS frame, before the padding, so a rect measured in one is a
     /// rect in the other's bounds and the panel's zoom lands on the card.
     private var strip: some View {
-        let content = VStack(alignment: .leading, spacing: 10) {
+        let content = VStack(alignment: .leading, spacing: Space.s10) {
             // The picture first, the filing second. A message that says "see
             // photo attached" is answered by the photo, and the card below is
             // then just where its name and its download live.
@@ -137,7 +137,7 @@ struct AttachmentStrip: View {
                         .previewSource(att.id, into: $sourceFrames)
                     #endif
             }
-            FlowLayout(spacing: 8) {
+            FlowLayout(spacing: Space.s8) {
                 ForEach(attachments) { att in
                     AttachmentCard(
                         attachment: att,
@@ -251,7 +251,7 @@ private struct AttachmentCard: View {
     private var glyph: String { pdf ? "doc.richtext" : "doc" }
 
     var body: some View {
-        HStack(spacing: 9) {
+        HStack(spacing: Space.scaled(9)) {
             ZStack {
                 if let source = AttachmentStrip.tileSource(attachment) {
                     ThumbTile(attachment: attachment, source: source, glyph: glyph)
@@ -270,27 +270,27 @@ private struct AttachmentCard: View {
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(attachment.filename)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(Typo.ui(11, weight: .medium))
                     .foregroundStyle(Palette.ink)
                     .lineLimit(1)
                 Text(stored ? Fmt.humanSize(attachment.size) : "too large — not stored")
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaintest)
             }
-            .frame(maxWidth: 150, alignment: .leading)
+            .frame(maxWidth: Space.scaled(150), alignment: .leading)
 
             if stored {
                 Button(action: onDownload) {
                     Image(systemName: "arrow.down.circle")
-                        .font(.system(size: 13))
-                        .padding(3)
+                        .font(Typo.ui(13))
+                        .padding(Space.scaled(3))
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(hovering ? Palette.accent : Palette.inkFaint)
                 .help("download \(attachment.filename)")
             }
         }
-        .padding(8)
+        .padding(Space.s8)
         .background(
             RoundedRectangle(cornerRadius: 11, style: .continuous)
                 .fill(Palette.hairline.opacity(hovering ? 0.7 : 0.4))

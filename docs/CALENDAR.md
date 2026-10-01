@@ -317,20 +317,21 @@ answer without the mail being opened:
   ("Tue Oct 6, 2:00pm PT / 5:00pm ET"). The pane says what it inferred ("Sam
   is usually on Eastern time") before anything is inserted. With no confident
   inference, only the user's zone is inserted.
-- **How the zone is inferred**, strongest first: the zone named in a calendar
-  invitation from that person; then the UTC offset in the `Date` header of
-  their own mail, taken as the most common non-UTC offset over several recent
-  messages. Automated mail and clients that stamp UTC are ignored. An offset
-  is not a zone: two observations either side of a daylight-saving change pin
-  it down, one alone gives only "their time is 3 hours ahead". The daemon does
-  not store the sender's offset today (`messages` keeps `received_at` only),
-  so it has to be captured at ingest, and it learns forward from there.
-- **Holds.** Every slot the user offers becomes a held ghost tied to the
-  thread, so the same hour is not offered twice. Holds take effect on send,
-  including a scheduled send.
-- **Settle.** When the reply picks a slot, triage marks the proposal agreed:
-  the chosen hold becomes the event and the others are released. Holds also
-  release when the thread goes quiet past the offered times.
+- **How the zone is inferred** (DECIDED: use every signal, and save the result
+  on the sender's profile). Strongest first:
+  1. A zone the user set by hand on the contact card. It always wins.
+  2. The zone in a calendar invitation that person organized.
+  3. The UTC offset in the `Date` header of their own mail: the most common
+     non-UTC offset over several recent messages. Mail stamped UTC is ignored,
+     which also discards most automated senders.
+  An offset is not a zone. Observations either side of a daylight-saving
+  change pin the zone down; one season alone gives a best guess marked as
+  lower confidence.
+- **Where it lives.** The daemon counts offsets per sender at ingest (it keeps
+  only `received_at` today), infers a zone with a confidence, and stores it
+  with its source. It is served on the person record behind the contact card
+  (`GET /client/person`), where the user can see it and correct it. It learns
+  forward from the day it ships. Human door only.
 
 The peek alone is table stakes; other clients have had it for years. Holds
 and settling are what make it better.

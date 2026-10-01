@@ -66,6 +66,7 @@ struct CalendarZone: View {
                             }
                             .buttonStyle(RecordRowStyle())
                             .modifier(CalendarSeenMarker(account: accountScope, item: c.id))
+                            .warmsThreadOnHover(c.thread_id)
                         }
                     }
                 }
@@ -334,6 +335,7 @@ private struct ShipmentCard: View {
         )
         .contentShape(Rectangle())
         .onTapGesture { if let target { store.openThread(target) } }
+        .warmsThreadOnHover(target)
         .onHover { over in
             hovering = over
             guard let cursor else { return }
@@ -528,6 +530,7 @@ struct BankingZone: View {
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(RecordRowStyle())
+                        .warmsThreadOnHover(r.thread_id)
                     }
                     if inWindow.count > Self.collapsed {
                         Button {
@@ -611,6 +614,7 @@ struct ReceiptsZone: View {
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(RecordRowStyle())
+                        .warmsThreadOnHover(r.thread_id)
                     }
                 }
             }
@@ -692,7 +696,9 @@ enum ReadingFeed {
             async let feed = APIClient.shared.getFeed(destination: "reading", limit: fetchLimit)
             async let rules = APIClient.shared.listRules()
             let (page, preferences) = try await (feed, rules)
-            return Reading.derive(updates: page.items.map(\.readingRow), rules: preferences)
+            let content = Set(page.items.filter(\.isReadingContent).map(\.message_id))
+            return Reading.derive(
+                updates: page.items.map(\.readingRow), rules: preferences, content: content)
         } catch {
             // Preserve the last successful reading feed on a transient error.
             return nil
@@ -757,7 +763,10 @@ private struct ReadingCard: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Palette.hairline.opacity(hovering ? 0.85 : 0.5))
+                    .fill(
+                        sender.isContent
+                            ? Palette.readingContent.opacity(hovering ? 1 : 0.8)
+                            : Palette.hairline.opacity(hovering ? 0.85 : 0.5))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -809,6 +818,12 @@ private struct ReadingHero: View {
     /// masthead fitted into the square becomes an unreadable few-point strip.
     private static let maxAspect: CGFloat = 7
 
+    /// Breathing room around a mark cut out of its banner (`Hero.isMark`). The
+    /// crop is tight to the ink, and a logo touching the square's edges reads
+    /// as a cropped photo of a logo. A fraction of `side` so it holds on the
+    /// phone's smaller square.
+    private static let markInset: CGFloat = side * 0.08
+
     /// Falling back to the cache INSIDE the read keeps a recycled card from
     /// flashing empty: `@State` is gone the moment the card is dropped, the
     /// cached hero is not, so it repaints on the very first frame.
@@ -853,19 +868,26 @@ private struct ReadingHero: View {
     /// behind it belong to the caller.
     @ViewBuilder
     private func art(_ hero: HeroCache.Hero) -> some View {
+        let inset = hero.isMark ? Self.markInset : 0
         if ultraWide(hero.image) {
             // Past `maxAspect`, draw at the capped ratio and let the ENDS crop:
             // `.fill` overflows on the long axis and `.clipped` keeps the middle,
             // which is where the wordmark lives.
+            let width = Self.side - inset * 2
             Image(platformImage: hero.image)
                 .resizable()
+                .interpolation(.high)
                 .aspectRatio(contentMode: .fill)
-                .frame(width: Self.side, height: Self.side / Self.maxAspect)
+                .frame(width: width, height: width / Self.maxAspect)
                 .clipped()
         } else {
+            // A mark is always drawn WHOLE: it was cut to the ink, so there is
+            // no margin left for a fill-crop to spend.
             Image(platformImage: hero.image)
                 .resizable()
-                .aspectRatio(contentMode: fit(hero.image))
+                .interpolation(.high)
+                .aspectRatio(contentMode: hero.isMark ? .fit : fit(hero.image))
+                .padding(inset)
         }
     }
 
@@ -1023,5 +1045,18 @@ struct RecordRowStyle: ButtonStyle {
             )
             .opacity(configuration.isPressed ? 0.7 : 1)
             .onHover { hovering = $0 }
+    }
+}
+
+extension View {
+    /// The pointer resting on a record is the likeliest next click: cache its
+    /// thread and, a beat later, render its newest message, as a board row
+    /// does (SitrepView's row hover). Without it a record opened cold.
+    func warmsThreadOnHover(_ threadId: String?) -> some View {
+        onHover { over in
+            guard over, let threadId, !threadId.isEmpty else { return }
+            ThreadPrefetch.shared.prefetch(threadId, fresh: SitrepView.boardFresh)
+            FramePrewarmer.shared.nudge(threadId)
+        }
     }
 }

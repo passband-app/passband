@@ -6,6 +6,10 @@ struct OnboardingIntroView: View {
     let onContinue: () -> Void
     var continueTitle = "Bring your inbox"
     var continueHint = "Continue to account connection"
+    /// When the caller draws the scene itself (ConnectView, so the login
+    /// steps after this stand on the SAME live layer), the intro leaves its
+    /// own backdrop out and reports whether the squelch has closed.
+    var sceneEngaged: Binding<Bool>? = nil
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
@@ -50,6 +54,7 @@ struct OnboardingIntroView: View {
                 if now == 1 { IntroHaptics.shared.sine() } else { IntroHaptics.shared.noise() }
             }
         #endif
+        .onChange(of: organized, initial: true) { _, now in sceneEngaged?.wrappedValue = now }
     }
 
     private func advance() {
@@ -82,7 +87,9 @@ struct OnboardingIntroView: View {
         GeometryReader { geometry in
             let wide = geometry.size.width >= 820
             ZStack(alignment: .topLeading) {
-                IntroSceneBackdrop(engaged: organized, wide: wide)
+                if sceneEngaged == nil {
+                    IntroSceneBackdrop(engaged: organized, wide: wide)
+                }
                 VStack(alignment: .leading, spacing: 0) {
                     masthead
                         .modifier(IntroEntrance(delay: 0, distance: 4))
@@ -397,6 +404,8 @@ struct IntroWordmark: View {
 /// spacers inside a scroll view never grow.
 struct IntroStage<Content: View, Footer: View>: View {
     var columnWidth: CGFloat = 440
+    /// False when the caller already draws the scene behind this stage.
+    var drawsScene = true
     @ViewBuilder var content: (_ wide: Bool) -> Content
     /// On a phone, pinned to the bottom of the screen where a thumb rests,
     /// clear of the theme toggle's corner. A step with nothing to pin passes
@@ -411,7 +420,7 @@ struct IntroStage<Content: View, Footer: View>: View {
             ZStack(alignment: .topLeading) {
                 if SquelchScene.shared.isUnavailable {
                     IntroFallbackGlow()
-                } else {
+                } else if drawsScene {
                     // Engaged: the intro's last beat left the squelch closed,
                     // and every step after it picks up exactly there.
                     IntroSceneBackdrop(engaged: true, wide: wide)
@@ -483,8 +492,10 @@ private struct ColumnScrim: View {
 }
 
 extension IntroStage where Footer == EmptyView {
-    init(columnWidth: CGFloat = 440, @ViewBuilder content: @escaping (_ wide: Bool) -> Content) {
-        self.init(columnWidth: columnWidth, content: content, footer: { _ in EmptyView() })
+    init(columnWidth: CGFloat = 440, drawsScene: Bool = true,
+         @ViewBuilder content: @escaping (_ wide: Bool) -> Content) {
+        self.init(columnWidth: columnWidth, drawsScene: drawsScene, content: content,
+                  footer: { _ in EmptyView() })
     }
 }
 

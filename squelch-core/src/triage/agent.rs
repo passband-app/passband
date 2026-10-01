@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const PROMPT_VERSION: &str = "agent-triage-v4";
+pub const PROMPT_VERSION: &str = "agent-triage-v5";
 const SYSTEM: &str = include_str!("prompts/agent-v1.txt");
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "step", rename_all = "snake_case")]
@@ -170,8 +170,15 @@ async fn run_bounded(
                     .and_then(|()| observed.validate(&decision, &context.thread_id))
                 {
                     Ok(()) => {
+                        let mut decision = *decision;
+                        // reading_kind only means something on Reading mail; a
+                        // stale one would colour the card if Reading is added
+                        // by a correction later.
+                        if !decision.destinations.contains(&MessageDestination::Reading) {
+                            decision.reading_kind = None;
+                        }
                         return Ok(AgentRun {
-                            decision: *decision,
+                            decision,
                             source_message_ids: sources.into_iter().collect(),
                             thread_revisions: revisions,
                             usage: usage.clone(),
@@ -821,6 +828,10 @@ fn decision_schema_body() -> Value {
             ])),
         ),
         ("destinations", array(enumeration(&["reading"]))),
+        (
+            "reading_kind",
+            nullable(enumeration(&["content", "promotion"])),
+        ),
         ("summary", text()),
         ("reason", text()),
         (
@@ -1190,6 +1201,26 @@ mod tests {
                 "schema status must be pollable or explicitly unknown: {value}"
             );
         }
+    }
+    #[test]
+    fn reading_kind_is_offered_and_defaults_on_stored_rows() {
+        // Product updates read like articles; the prompt must say they are not.
+        assert!(SYSTEM.contains("A company writing about its own product is promotion"));
+        let schema = decision_schema();
+        assert_eq!(
+            schema["properties"]["reading_kind"],
+            nullable(enumeration(&["content", "promotion"]))
+        );
+        let mut decision = serde_json::to_value(valid()).unwrap();
+        decision.as_object_mut().unwrap().remove("reading_kind");
+        let stored: MessageDecision = serde_json::from_value(decision.clone()).unwrap();
+        assert_eq!(stored.reading_kind, None);
+        decision["reading_kind"] = json!("content");
+        let fresh: MessageDecision = serde_json::from_value(decision).unwrap();
+        assert_eq!(
+            fresh.reading_kind,
+            Some(crate::triage::decision::ReadingKind::Content)
+        );
     }
     #[test]
     fn strict_schema_requires_all_object_fields() {

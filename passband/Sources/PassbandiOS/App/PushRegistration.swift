@@ -149,6 +149,7 @@ final class PushRegistration {
         request.setValue("Bearer \(settings.apiToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.identifyClient()
         request.httpBody = encoded
         _ = try? await session.data(for: request)
     }

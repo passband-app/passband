@@ -1802,7 +1802,7 @@ struct ThreadViewer: View {
             let cur = queue.firstIndex(where: { $0.thread_id == threadId }),
             let next = queue[safe: cur + delta]
         else { return }
-        store.openThread(next.thread_id, queue: queue, readingMail: store.readingMail)
+        store.openThread(next.thread_id, queue: queue, readingMail: store.readingMail, from: .reader)
     }
 
     /// Plain done walks a Reading sender's stack, or closes an ordinary reader.
@@ -1813,7 +1813,7 @@ struct ThreadViewer: View {
             return
         }
         let liftedAt = liftOff()
-        await resolveOpenThread()
+        await resolveOpenThread(via: .key)
         await flightOut(since: liftedAt)
         // Same outlived-its-reader guard as the walk: if this finished after the
         // reader moved to another thread, closing would close THAT one.
@@ -1899,9 +1899,9 @@ struct ThreadViewer: View {
     /// notification) has no row, so it resolves the newest message directly.
     /// There is no undo chip on that path: undo restores a row to a band, and
     /// this one never came from one.
-    private func resolveOpenThread() async {
+    private func resolveOpenThread(via: Actions.Via) async {
         if let row = store.threadQueue.first(where: { $0.thread_id == threadId }) {
-            await Actions.done(row)
+            await Actions.done(row, via: via, on: .reader)
             return
         }
         guard let newest else { return }
@@ -1936,7 +1936,7 @@ struct ThreadViewer: View {
         /// swipe gets on a list row, which is the other way this app says done.
         private func doneFromBar() async {
             Haptics.commit()
-            await resolveOpenThread()
+            await resolveOpenThread(via: .click)
             // Same outlived-its-reader guard the other two verbs take: a resolve
             // that finished after the reader moved on must not close the thread
             // that moved in.
@@ -1989,7 +1989,7 @@ struct ThreadViewer: View {
         // flight so nothing behind the reader flashes through the gap.
         store.flightContinues = next != nil
         let liftedAt = liftOff()
-        await resolveOpenThread()
+        await resolveOpenThread(via: .key)
         await flightOut(since: liftedAt)
         // Counted once the email is truly gone from this reader, not for a
         // done that was overtaken (Esc mid-flight).
@@ -2014,7 +2014,9 @@ struct ThreadViewer: View {
         // sleep is the whole reason this works: an offset that is set and
         // cleared inside one update has never been drawn, so there is nothing
         // for the animation to move away from.
-        store.openThread(next.thread_id, queue: queue, entering: edge, readingMail: store.readingMail)
+        store.openThread(
+            next.thread_id, queue: queue, entering: edge, readingMail: store.readingMail,
+            from: .reader)
         try? await Task.sleep(for: .milliseconds(30))
         guard store.threadId == next.thread_id else { return }
         withAnimation(Motion.deckCard) { store.threadFlight = .settled }
@@ -2042,6 +2044,9 @@ struct ThreadViewer: View {
         // fast as you can read is exactly as fast as it goes.
         store.settleSkipTurn()
         guard store.threadFlight == .settled else { return }
+        // Counted BEFORE the end check: skipping the last email is a skip
+        // too, and the tally it ends on has to include it.
+        store.walk?.skipped += 1
         let queue = store.threadQueue
         guard queue.contains(where: { $0.thread_id == threadId }),
             let next = store.nextQueuedThread
@@ -2052,11 +2057,11 @@ struct ThreadViewer: View {
             leaveAtEnd()
             return
         }
-        store.walk?.skipped += 1
         let outgoing = threadId
         // The open FIRST (it settles any turn), then this turn: both land in
         // the same render, so the new reader's first frame is at the edge.
-        store.openThread(next.thread_id, queue: queue, readingMail: store.readingMail)
+        store.openThread(
+            next.thread_id, queue: queue, readingMail: store.readingMail, from: .reader)
         store.skipTurn = AppStore.SkipTurn(outgoing: outgoing)
         // One frame with the new reader mounted at the right edge, so the
         // animation has somewhere to move it FROM (see `doneAndNext`).
@@ -2104,7 +2109,9 @@ struct ThreadViewer: View {
         }
         let edge: AppStore.ThreadEdge =
             (store.readingStack || sameSender(next, queue[cur])) ? .trailing : .bottom
-        store.openThread(next.thread_id, queue: queue, entering: edge, readingMail: store.readingMail)
+        store.openThread(
+            next.thread_id, queue: queue, entering: edge, readingMail: store.readingMail,
+            from: .reader)
         try? await Task.sleep(for: .milliseconds(30))
         guard store.threadId == next.thread_id else { return }
         withAnimation(Motion.deckCard) { store.threadFlight = .settled }
@@ -3336,28 +3343,78 @@ private final class WheelYield {
 #if os(macOS)
     // MARK: - the Space walk's hint
 
-    /// The two keys that make a Space walk fast, pinned to the reader's top left
+    /// The two keys that make a Space walk fast, pinned to the reader's bottom right
     /// for as long as the walk lasts. Mounted by RootView ABOVE the reader's
     /// flight, so it holds still while the emails move under it.
     struct WalkHint: View {
-        /// False on the walk's last email, where S has nowhere to go.
+        /// False only when S has nothing to act on: a walk of one email. On
+        /// the walk's LAST email S still works (it sets that one aside and
+        /// ends the walk), so it stays listed there.
         var canSkip = true
 
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
         var body: some View {
-            // Two short rows rather than one long one: it lives in the gutter
-            // left of the thread's timeline, where a single line would run
-            // into the first sender's name.
-            VStack(alignment: .leading, spacing: Space.s6) {
-                KeyHint("⇧E", "done + next")
-                if canSkip { KeyHint("⇧S", "skip") }
+            VStack(alignment: .leading, spacing: Space.scaled(7)) {
+                HStack(spacing: Space.scaled(5)) {
+                    Image(systemName: "wind")
+                        .font(Typo.ui(9, weight: .semibold))
+                    Text("FLOW MODE")
+                        .font(Typo.ui(8.5, weight: .bold).width(.expanded))
+                        .tracking(0.6)
+                }
+                .foregroundStyle(Palette.accent.opacity(0.85))
+                VStack(alignment: .leading, spacing: Space.s6) {
+                    row("⇧E", "done + next")
+                    if canSkip { row("⇧S", "skip") }
+                }
             }
-            .padding(.horizontal, Space.s10)
-            .padding(.vertical, Space.s8)
-            .glassEffect(.regular, in: .rect(cornerRadius: 10))
+            .padding(.horizontal, Space.scaled(11))
+            .padding(.vertical, Space.scaled(9))
+            .glassEffect(.regular, in: .rect(cornerRadius: 11))
+            .overlay { FlowBorder(radius: 11, moving: !reduceMotion) }
             .allowsHitTesting(false)
             .accessibilityElement(children: .combine)
             .accessibilityLabel(
-                canSkip ? "Shift E: done and next. Shift S: skip." : "Shift E: done and next.")
+                canSkip ? "Flow mode. Shift E: done and next. Shift S: skip." : "Flow mode. Shift E: done and next.")
+        }
+
+        private func row(_ key: String, _ label: String) -> some View {
+            HStack(spacing: Space.s6) {
+                Kbd(key, size: 11)
+                Text(label)
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.inkFaint)
+            }
+        }
+    }
+
+    /// The hint's border, with a soft glint of the accent drifting around it:
+    /// the only thing on screen that moves on its own while you read, slow
+    /// enough to sit in the corner of the eye. All the way round, never one
+    /// edge lit. Still under Reduce Motion.
+    private struct FlowBorder: View {
+        let radius: CGFloat
+        let moving: Bool
+
+        var body: some View {
+            TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !moving)) { context in
+                let angle = moving
+                    ? context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 6) / 6 * 360
+                    : 0
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .strokeBorder(
+                        AngularGradient(
+                            stops: [
+                                .init(color: Palette.hairline, location: 0),
+                                .init(color: Palette.accent.opacity(0.55), location: 0.12),
+                                .init(color: Palette.hairline, location: 0.28),
+                                .init(color: Palette.hairline, location: 1),
+                            ],
+                            center: .center,
+                            angle: .degrees(angle)),
+                        lineWidth: 1)
+            }
         }
     }
 #endif

@@ -406,7 +406,7 @@ struct EmailsView: View {
                         kbActive = false
                         index = i + offset
                     },
-                    onOpen: { store.openThread(item.thread_id) }
+                    onOpen: { store.openThread(item.thread_id, from: .emails) }
                 )
                 .id(item.id)
             }
@@ -488,7 +488,7 @@ struct EmailsView: View {
                 // the Mac. Elsewhere the hint cost the selected row's subject
                 // fifty points and reflowed it on every j/k.
                 verbHint: mode == .spam ? "[i][e][d]" : nil,
-                onOpen: { store.openThread(u.thread_id, queue: queue(opening: u)) },
+                onOpen: { store.openThread(u.thread_id, queue: queue(opening: u), from: .emails) },
                 // INFINITE SCROLL: a row this close to the end of what is
                 // loaded asks for the next page, well before the bottom shows.
                 onAppear: {
@@ -769,11 +769,11 @@ struct EmailsView: View {
                     guard let item = selectedSent else { return }
                     // No queue: "done + next" walks a triage list, and sent mail
                     // has nothing to finish.
-                    store.openThread(item.thread_id)
+                    store.openThread(item.thread_id, from: .emails)
                 } else if let u = selected {
                     // The ordered rows become the viewer's queue, so "done + next"
                     // (e/d) can advance in place.
-                    store.openThread(u.thread_id, queue: queue(opening: u))
+                    store.openThread(u.thread_id, queue: queue(opening: u), from: .emails)
                 }
             },
             KeyBinding("v", "fix triage") {
@@ -850,7 +850,7 @@ struct EmailsView: View {
             // names anything — mail elsewhere is already out of it.
             KeyBinding("i", "not spam · move to inbox") {
                 guard mode == .spam, actionable, let u = selected else { return }
-                Task { await Actions.notSpam(u) }
+                Task { await Actions.notSpam(u, via: .key, on: .emails) }
             },
             KeyBinding("a", "browse all") { store.openSide(.browse) },
             KeyBinding("T", "rules") { store.setView(.rules) },
@@ -878,7 +878,7 @@ struct EmailsView: View {
 
     private func resolveSelected() {
         guard triageable, let u = selected, !isDone(u) else { return }
-        Task { await Actions.done(u) }
+        Task { await Actions.done(u, via: .key, on: .emails) }
         // The row stays put (dimmed), so nothing slides under the cursor: step
         // to the next row still to do,
         // or "e e e" stalls on the first one.

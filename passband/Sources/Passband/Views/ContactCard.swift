@@ -279,7 +279,7 @@ private struct ContactCard: View {
                 let here = t.thread_id == store.threadId
                 Button {
                     dismiss()
-                    store.openThread(t.thread_id)
+                    store.openThread(t.thread_id, from: .reader)
                 } label: {
                     HStack(spacing: Space.s8) {
                         Text(t.subject.isEmpty ? "(no subject)" : t.subject)

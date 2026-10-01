@@ -26,6 +26,17 @@ enum ShareOrigin: String, Sendable, Hashable {
     case nudge
 }
 
+/// WHERE A READER WAS ENTERED FROM: the surface that produced the open, as
+/// `thread_opened`'s `source`. Closed and enumerable on purpose; every raw
+/// value is in Analytics' string vocabulary. `reader` is the walk from one
+/// queued thread to the next, an open the reader made rather than the person,
+/// so a dashboard can subtract it from "threads people chose to open".
+enum OpenSource: String, Sendable {
+    case sitrep, sitrepCard = "sitrep_card", reading, emails, search, browse
+    case assistant, deeperSearch = "deeper_search", groups, notification
+    case reply, reader, tour
+}
+
 enum MainView: String, Sendable, Hashable, CaseIterable {
     case sitrep, emails, auth, rules, groups, usage, settings, process
 
@@ -633,8 +644,13 @@ final class AppStore {
     /// Space on the sitrep: open the first row with the whole band as the
     /// queue, and start counting.
     func startWalk(_ threadId: String, queue: [AttentionUpdate]) {
-        openThread(threadId, queue: queue)
+        openThread(threadId, queue: queue, from: .sitrep)
         walk = Walk()
+        // Built now, off the main thread, so the end of the walk does not
+        // hitch compiling a shader at the exact moment it should feel good.
+        #if os(macOS)
+            PhosphorScene.walkDone.warm()
+        #endif
     }
 
     /// The walk stepped past its last email. Close the reader and hand the
@@ -1335,6 +1351,7 @@ final class AppStore {
                 await PushRegistration.shared.registerAndSync()
             #endif
             Analytics.capture("connect_succeeded")
+            identifyPerson()
             // Fresh connection = fresh sync history; a stale lastRefresh from a
             // prior session must not make a failing daemon look recently synced.
             lastRefresh = nil
@@ -1462,6 +1479,7 @@ final class AppStore {
             return (false, "could not save to the keychain")
         }
         Analytics.capture("account_added")
+        identifyPerson()
         // Hold the same gate from the credential probe through persistence
         // and switching, so practice cannot intercept any part of the add.
         // The switch can fail its credential read-back (a denied access panel
@@ -1926,12 +1944,23 @@ final class AppStore {
         pushHistory(HistoryEntry(view: .emails, selectedId: id))
     }
 
+    /// The person-level facts PostHog cohorts on (see `Analytics.identify`):
+    /// how many mailboxes, and the thread style. Called at launch, on every
+    /// activation, and whenever the account list changes, so the person row
+    /// tracks the install rather than its first day.
+    func identifyPerson() {
+        Analytics.identify([
+            "accounts": AccountManager.shared.accounts.count,
+            "thread_style": Prefs.shared.threadStyle.rawValue,
+        ])
+    }
+
     /// The record zones' shared click routing: open the row's thread, falling
     /// back to the emails-page jump when an older daemon sent no thread_id —
     /// the click always does SOMETHING.
     func openRecord(thread: String?, message: Int) {
         if let thread, !thread.isEmpty {
-            openThread(thread)
+            openThread(thread, from: .sitrepCard)
         } else {
             viewInEmails(message)
         }
@@ -1999,13 +2028,13 @@ final class AppStore {
     }
     @ObservationIgnored private(set) var readerSeed: ReaderSeed?
 
-    func openMessage(_ messageId: Int) {
+    func openMessage(_ messageId: Int, from source: OpenSource) {
         let openedEpoch = epoch
         Task {
             do {
                 let envelope = try await APIClient.shared.getMessage(messageId)
                 guard isCurrent(openedEpoch) else { return }
-                openThread(envelope.thread.thread_id, focusMessage: messageId)
+                openThread(envelope.thread.thread_id, focusMessage: messageId, from: source)
                 // Direct targets may contain credentials. Keep them only in
                 // active reader state, never the reusable prefetch cache.
                 focusedMessageView = envelope.thread
@@ -2020,15 +2049,18 @@ final class AppStore {
     /// id the reader should open its inline composer on once the thread loads.
     func openThread(
         _ threadId: String, queue: [AttentionUpdate] = [], replyTo: Int? = nil,
-        entering edge: ThreadEdge? = nil, focusMessage: Int? = nil, readingMail: Bool = false
+        entering edge: ThreadEdge? = nil, focusMessage: Int? = nil, readingMail: Bool = false,
+        from source: OpenSource
     ) {
         // from_noise: an open from below the squelch line — someone digging for
-        // mail the triage muted, which is the false-negative signal.
+        // mail the triage muted, which is the false-negative signal. source:
+        // which surface earned the open (see OpenSource).
         Analytics.capture(
             "thread_opened",
             [
                 "via_reply": replyTo != nil,
                 "from_noise": queue.first { $0.thread_id == threadId }?.placement == "noise",
+                "source": source.rawValue,
             ])
         // Opening is acknowledged by the reader once the exact message is
         // displayed. Fetching or prefetching a sibling is not a read.
@@ -3768,7 +3800,7 @@ final class AppStore {
                 return
             }
             closeCompose()
-            openThread(thread, replyTo: parent)
+            openThread(thread, replyTo: parent, from: .reply)
             return
         }
         // Through `closeCompose`, so the one being replaced says "kept in
@@ -5147,7 +5179,7 @@ final class AppStore {
             if closePane { closeCompose() }
             // Through `openThread`, which flushes any inline reply already
             // open (it is somebody's words) before this one takes the slot.
-            openThread(threadId)
+            openThread(threadId, from: .reply)
             inlineReply = state
             DraftSaver.shared.noteChange(.inlineReply)
         case .pane:

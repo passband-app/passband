@@ -206,7 +206,7 @@ struct MobileSearchView: View {
                     // on this shell as on the Mac: the ring's one rule, called
                     // from the one gesture here that acts on the results.
                     RecentSearchStore.shared.remember(store.search)
-                    store.openThread(hit.thread_id)
+                    store.openThread(hit.thread_id, from: .search)
                 }
                     .plainRow()
                     // Reaching the last row IS the request for the next

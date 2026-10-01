@@ -212,10 +212,10 @@ struct ProcessMode: View {
         private func phoneButtons(_ u: AttentionUpdate) -> some View {
             HStack(spacing: Space.s10) {
                 deckButton("arrowshape.turn.up.left", "reply", Palette.accent) { reply(u) }
-                deckButton("archivebox", "archive", Palette.warn) { archive(u) }
+                deckButton("archivebox", "archive", Palette.warn) { archive(u, via: .click) }
                 deckButton("slider.horizontal.3", "tune", Palette.accent) { tune(u) }
                 deckButton("forward", "skip", Palette.inkFaint) { skip() }
-                deckButton("checkmark", "done", Palette.positive) { done(u) }
+                deckButton("checkmark", "done", Palette.positive) { done(u, via: .click) }
             }
             .padding(.horizontal, Space.s16)
             .padding(.bottom, Space.scaled(22))
@@ -261,7 +261,7 @@ struct ProcessMode: View {
                         withAnimation(Motion.deckCard) { drag = .zero }
                         tune(u)
                     } else if t.width > Self.commitDistance {
-                        throwOut(CGSize(width: 900, height: t.height)) { done(u) }
+                        throwOut(CGSize(width: 900, height: t.height)) { done(u, via: .swipe) }
                     } else if t.width < -Self.commitDistance {
                         throwOut(CGSize(width: -900, height: t.height)) { skip() }
                     } else {
@@ -395,14 +395,14 @@ struct ProcessMode: View {
     }
 
     /// `e`. Cursor stays put: the handled item drops out, the next slides in.
-    private func archive(_ u: AttentionUpdate) {
-        Task { await Actions.archive(u) }
+    private func archive(_ u: AttentionUpdate, via: Actions.Via) {
+        Task { await Actions.archive(u, via: via, on: .process) }
         handled.insert(u.id)
     }
 
     /// `d`, and the phone's swipe right.
-    private func done(_ u: AttentionUpdate) {
-        Task { await Actions.done(u) }
+    private func done(_ u: AttentionUpdate, via: Actions.Via) {
+        Task { await Actions.done(u, via: via, on: .process) }
         handled.insert(u.id)
     }
 
@@ -438,11 +438,11 @@ struct ProcessMode: View {
             },
             KeyBinding("e", "archive") {
                 guard let current else { return }
-                archive(current)
+                archive(current, via: .key)
             },
             KeyBinding("d", "done") {
                 guard let current else { return }
-                done(current)
+                done(current, via: .key)
             },
             KeyBinding("t", "tune sender") {
                 guard let current else { return }

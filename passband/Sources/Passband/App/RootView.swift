@@ -475,11 +475,13 @@ struct MainShell: View {
                     // THE SPACE WALK'S HINT, outside the flight: the emails fly
                     // under it and it holds still, which is what lets it read
                     // as part of the window rather than part of each email.
-                    .overlay(alignment: .topLeading) {
+                    .overlay(alignment: .bottomTrailing) {
                         if store.walk != nil, store.threadId != nil {
-                            WalkHint(canSkip: store.nextQueuedThread != nil)
-                                .padding(.top, TopBar.height + 10)
-                                .padding(.leading, Space.s20)
+                            // S works on every email of a walk but a walk of
+                            // one, where there is nothing to skip to or past.
+                            WalkHint(canSkip: store.threadQueue.count > 1)
+                                .padding(.bottom, Space.scaled(18))
+                                .padding(.trailing, Space.s24)
                                 .transition(.opacity)
                         }
                     }

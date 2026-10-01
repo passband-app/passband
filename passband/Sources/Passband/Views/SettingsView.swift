@@ -1283,7 +1283,7 @@ struct PrivacySection: View {
             // The full disclosure stays, word for word in substance: this is
             // the one card whose fine print IS the setting.
             SettingsHint(
-                "No level ever includes email data or anything derived from it: no subjects, senders, bodies, labels, or assistant questions. Minimal sends app opens, screen views, and anonymous counters (emails sent, triage volume, corrections, connection health). Full adds which actions are used. None sends nothing."
+                "No level ever includes email data or anything derived from it: no subjects, senders, bodies, labels, or assistant questions. Minimal sends app opens, screen views, anonymous counters (emails sent, triage volume, corrections, connection health), first-time milestones, and your setup (hosted or self-run, how many mailboxes, which preferences). Full adds which actions are used and where. None sends nothing."
             )
         }
     }

@@ -67,6 +67,17 @@ enum ConnectPurpose: Hashable {
 /// never something a link does on its own.
 private enum ConnectField: Hashable { case url, code, device, token, name, submit }
 
+/// What the account is called in the switcher, on notification titles, and in
+/// Settings. Three ready-made names cover nearly every mailbox; `custom` opens
+/// a field for the rest. Renamed any time from Settings > Accounts.
+enum AccountNameChoice: String, CaseIterable, Hashable {
+    case personal, work, other, custom
+
+    /// The stored name: capitalized, because it reads as a proper name beside
+    /// the others in the switcher. `custom` has none of its own.
+    var preset: String? { self == .custom ? nil : rawValue.capitalized }
+}
+
 struct ConnectView: View {
     @Environment(AppStore.self) private var store
     @Environment(\.dismiss) private var dismiss
@@ -83,10 +94,12 @@ struct ConnectView: View {
     @State private var code = ""
     @State private var deviceName = Pairing.defaultDeviceName()
     @State private var token = ""
-    /// The human's name for this account. Optional everywhere: an empty label
-    /// leaves the switcher showing the daemon's host:port, which is a real
-    /// answer rather than a placeholder.
-    @State private var accountLabel = ""
+    /// The human's name for this account, picked from presets or typed under
+    /// `custom`. An empty custom name leaves the switcher showing the daemon's
+    /// host:port, which is a real answer rather than a placeholder.
+    @State private var nameChoice: AccountNameChoice = .personal
+    @State private var customName = ""
+    private var accountLabel: String { nameChoice.preset ?? customName }
     /// An add-account attempt is in flight. The gate reads `store.connStatus`
     /// for this, but adding deliberately never moves it — the shell behind the
     /// sheet is standing on it.
@@ -626,16 +639,11 @@ struct ConnectView: View {
                     }
                 }
                 RigDivider()
-                HStack(spacing: 0) {
-                    RigSlot(label: "account", focused: focus == .name) {
-                        TextField("Name it (optional)", text: $accountLabel)
-                            .autocorrectionDisabled()
-                            .focused($focus, equals: .name)
-                            .onSubmit { submit() }
-                    }
-                    rigSubmit
-                }
-                .fixedSize(horizontal: false, vertical: true)
+                accountNameChooser(inRig: true)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 13)
+                RigDivider()
+                rigSubmit
             }
             if linked {
                 pairingDetails.padding(.top, 14)
@@ -664,15 +672,12 @@ struct ConnectView: View {
             }
             .font(.system(size: 13, weight: .semibold))
             .foregroundStyle(canSubmit ? Palette.accent : Palette.inkFaint)
-            .padding(.horizontal, 18)
-            .frame(maxHeight: .infinity)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 13)
             .background(Palette.accent.opacity(canSubmit ? 0.12 : 0.04))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .overlay(alignment: .leading) {
-            Rectangle().fill(Palette.accent.opacity(0.18)).frame(width: 1)
-        }
         // A pair link filled the form and stopped: ring the one press left.
         .overlay {
             if linkArmed {
@@ -780,16 +785,52 @@ struct ConnectView: View {
         gateStep = .welcome
     }
 
-    /// The account's name, optional in both purposes. It matters most in the
-    /// sheet — a second row in the switcher wants a word a human picked — but
-    /// the first account is allowed one too, since it is about to have company.
+    /// The account's name, in both purposes. It matters most in the sheet (a
+    /// second row in the switcher wants a word a human picked) but the first
+    /// account gets one too, since it is about to have company.
     private var nameField: some View {
-        Field(label: "account name") {
-            TextField("optional, defaults to the server host", text: $accountLabel)
-                .textFieldStyle(.plain)
-                .autocorrectionDisabled()
-                .focused($focus, equals: .name)
-                .onSubmit { submit() }
+        accountNameChooser(inRig: false)
+    }
+
+    /// Presets first, because a mailbox is nearly always one of them and a
+    /// press beats typing; `custom` swaps in a field. The caption says what is
+    /// being named and that it is not final, because "account" alone next to a
+    /// pairing code read as one more credential to find.
+    @ViewBuilder private func accountNameChooser(inRig: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                FieldLabel("name this account")
+                Spacer(minLength: 8)
+                Text("rename any time in Settings")
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.inkFaint.opacity(0.7))
+            }
+            GlassSegmented(
+                options: AccountNameChoice.allCases.map { ($0, $0.rawValue) },
+                selection: $nameChoice)
+            if nameChoice == .custom {
+                let field = TextField("Name it", text: $customName)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 14))
+                    .foregroundStyle(Palette.ink)
+                    .autocorrectionDisabled()
+                    .focused($focus, equals: .name)
+                    .onSubmit { submit() }
+                if inRig { field } else { field.fieldWell() }
+            }
+        }
+        .onChange(of: nameChoice) { _, now in
+            if now == .custom { focus = .name }
+        }
+        // A second account starts on a name the switcher does not have yet.
+        .task {
+            let taken = Set(AccountManager.shared.accounts.map { $0.label.lowercased() })
+            if taken.contains(nameChoice.rawValue),
+               let free = AccountNameChoice.allCases.first(where: {
+                   $0.preset != nil && !taken.contains($0.rawValue)
+               }) {
+                nameChoice = free
+            }
         }
     }
 
@@ -805,18 +846,7 @@ struct ConnectView: View {
                     .focused($focus, equals: .device)
                     .onSubmit { focus = .name }
             }
-            Field(label: "Account name") {
-                TextField("Personal, work, or something else", text: $accountLabel)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 16, weight: .medium))
-                    .autocorrectionDisabled()
-                    .focused($focus, equals: .name)
-                    .onSubmit { submit() }
-            }
-            Text("Account name is optional. You can rename it later.")
-                .font(.system(size: 11))
-                .foregroundStyle(Palette.inkFaint)
-                .padding(.top, -10)
+            nameField
 
             pairingDetails
         }

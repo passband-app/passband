@@ -13,13 +13,27 @@ private let inboxLabel = "INBOX"
 enum Actions {
     private static var store: AppStore { AppStore.shared }
 
+    /// HOW a verb was input. The one question the keyboard-first design has to
+    /// answer about itself is whether anyone uses the keyboard; every verb
+    /// carries this so the answer is a filter, not a guess.
+    enum Via: String, Sendable { case key, click, swipe, assistant }
+
+    /// WHICH PAGE a verb was input on. Together with `Via` this says where
+    /// triage actually happens: on the sitrep, in the list, inside the reader,
+    /// or in the process deck.
+    enum Surface: String, Sendable { case sitrep, emails, reader, process }
+
+    private static func origin(_ via: Via, _ on: Surface) -> [String: Any] {
+        ["via": via.rawValue, "surface": on.rawValue]
+    }
+
     /// Archive (undo-first): the row leaves instantly, an INBOX-relabel is the
     /// revert.
-    static func archive(_ u: AttentionUpdate) async {
+    static func archive(_ u: AttentionUpdate, via: Via, on surface: Surface) async {
         let restore = store.removeFromBands(u.id)
         do {
             try await APIClient.shared.actionArchive(u.id)
-            Analytics.capture("email_archived")
+            Analytics.capture("email_archived", origin(via, surface))
             store.pushUndo(kind: .archive, messageId: u.id, label: "archived \(u.sender)") {
                 // archive undo = re-add the INBOX label; the poll refreshes.
                 try await APIClient.shared.actionLabel(u.id, add: [inboxLabel])
@@ -50,11 +64,11 @@ enum Actions {
     /// The row is evicted from the cached pages the same way `done` evicts it,
     /// for the same reason: the poll is ten seconds behind, and a rescued
     /// message sitting visibly in the spam list until then reads as a failure.
-    static func notSpam(_ u: AttentionUpdate) async {
+    static func notSpam(_ u: AttentionUpdate, via: Via, on surface: Surface) async {
         let restore = store.removeFromBands(u.id)
         do {
             try await APIClient.shared.actionNotSpam(u.id)
-            Analytics.capture("email_not_spam")
+            Analytics.capture("email_not_spam", origin(via, surface))
             store.removeFromMail(u.id)
             store.pushToast("moved to your inbox · \(u.sender)", .info)
         } catch {
@@ -68,11 +82,11 @@ enum Actions {
     }
 
     /// Done (undo-first): status->done, revert resets status to open.
-    static func done(_ u: AttentionUpdate) async {
+    static func done(_ u: AttentionUpdate, via: Via, on surface: Surface) async {
         let restore = store.removeFromBands(u.id)
         do {
             try await APIClient.shared.setStatus(u.id, .done)
-            Analytics.capture("email_done")
+            Analytics.capture("email_done", origin(via, surface))
             // The message leaves the working set: drop its remembered heights and
             // unpin its images. The bytes stay on disk — the undo below is five
             // seconds away and re-pins them.
@@ -236,7 +250,7 @@ enum Actions {
     /// `queue` is the caller's own row order, so "done + next" still walks it
     /// once the reader is open.
     static func reply(_ u: AttentionUpdate, queue: [AttentionUpdate] = []) {
-        store.openThread(u.thread_id, queue: queue, replyTo: u.id)
+        store.openThread(u.thread_id, queue: queue, replyTo: u.id, from: .reply)
     }
 
     /// Tune a sender: open the rule editor prefilled with *@domain.

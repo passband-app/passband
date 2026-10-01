@@ -497,7 +497,7 @@ struct AskBar: View {
     /// citation here: open the thread, close the bar.
     private func emailCards(_ cards: [EmailCard]) -> some View {
         EmailCardList(cards: cards) { threadId in
-            store.openThread(threadId)
+            store.openThread(threadId, from: .assistant)
             onClose()
         }
     }
@@ -514,7 +514,7 @@ struct AskBar: View {
                     .textCase(.uppercase)
                 ForEach(cites) { citation in
                     Button {
-                        store.openThread(citation.threadId)
+                        store.openThread(citation.threadId, from: .assistant)
                         onClose()
                     } label: {
                         HStack(spacing: 7) {

@@ -334,7 +334,7 @@ private struct ShipmentCard: View {
                 .fill(Palette.hairline.opacity(hovering && target != nil ? 0.85 : 0.5))
         )
         .contentShape(Rectangle())
-        .onTapGesture { if let target { store.openThread(target) } }
+        .onTapGesture { if let target { store.openThread(target, from: .sitrepCard) } }
         .warmsThreadOnHover(target)
         .onHover { over in
             hovering = over
@@ -822,7 +822,7 @@ private struct ReadingCard: View {
         guard !sender.latestThreadId.isEmpty else { return }
         store.openThread(
             sender.latestThreadId, queue: sender.items,
-            readingMail: true)
+            readingMail: true, from: .reading)
     }
 
 }

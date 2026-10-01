@@ -417,7 +417,7 @@ struct PracticeProductTour: View {
         // A real queue is essential: the reader resolves through Actions.done
         // with an undo only when the opened thread has its AttentionUpdate.
         let queue = store.update(id: id).map { [$0] } ?? []
-        store.openThread(thread, queue: queue)
+        store.openThread(thread, queue: queue, from: .tour)
     }
 
     private var undoWasRestored: Bool {

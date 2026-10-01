@@ -413,7 +413,7 @@ pub(super) fn correct_agent_triage_conn(
         )?;
         // The user's restriction (or lifting of it) applies to ghosts now,
         // from the corrected decision written above.
-        super::ghosts::refresh_message_guarded(conn, account, message);
+        super::ghosts::refresh_message_guarded(conn, account, message)?;
     }
     Ok(())
 }
@@ -1377,7 +1377,7 @@ impl AgentTriageStore for SqliteStore {
         )?;
         // Access changed outside the triage commit: the ghosts this message
         // feeds are rebuilt now, not at its next re-triage.
-        super::ghosts::refresh_message_guarded(&tx, job.account_id, job.message_id);
+        super::ghosts::refresh_message_guarded(&tx, job.account_id, job.message_id)?;
         finish(&tx, job, "access_applied", metadata)?;
         tx.commit()?;
         Ok(AgentCommitOutcome::Applied)
@@ -1642,8 +1642,11 @@ impl AgentTriageStore for SqliteStore {
             decision,
         )?;
         // Ghosts never block triage: the projection runs under its own
-        // savepoint and a failure costs only the ghosts. The decision row
-        // written above is what its rebuild reads for this message.
+        // savepoint and a failure costs only the ghosts. It errs only when
+        // SQLite already rolled the whole transaction back, and then this
+        // commit must fail rather than finish the job in autocommit. The
+        // decision row written above is what its rebuild reads for this
+        // message.
         super::ghosts::reconcile_guarded(
             &tx,
             job.account_id,
@@ -1652,7 +1655,7 @@ impl AgentTriageStore for SqliteStore {
                 && !current.message.is_spam
                 && !decision.external_access.restricted,
             decision,
-        );
+        )?;
         finish(&tx, job, "applied", &original.run_metadata)?;
         tx.commit()?;
         Ok(AgentCommitOutcome::Applied)

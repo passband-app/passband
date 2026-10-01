@@ -606,24 +606,15 @@ impl Store for SqliteStore {
         self.list_ghost_events(account_id, from, to)
     }
 
-    fn set_ghost_user_state(
+    fn patch_ghost_user(
         &self,
         account_id: AccountId,
         ghost_id: i64,
-        state: Option<crate::types::GhostUserState>,
+        end: Option<Option<crate::triage::ghost::EventTime>>,
+        state: Option<Option<crate::types::GhostUserState>>,
         at: DateTime<Utc>,
     ) -> Result<bool> {
-        self.set_ghost_user_state(account_id, ghost_id, state, at)
-    }
-
-    fn set_ghost_user_end(
-        &self,
-        account_id: AccountId,
-        ghost_id: i64,
-        end: Option<crate::triage::ghost::EventTime>,
-        at: DateTime<Utc>,
-    ) -> Result<bool> {
-        self.set_ghost_user_end(account_id, ghost_id, end, at)
+        self.patch_ghost_user(account_id, ghost_id, end, state, at)
     }
 
     fn shipments_redetect_cleanup(&self, account_id: AccountId) -> Result<u64> {

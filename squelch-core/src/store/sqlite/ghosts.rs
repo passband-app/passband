@@ -23,7 +23,9 @@
 //! THE PROJECTION NEVER BLOCKS TRIAGE. [`reconcile_guarded`] runs it under a
 //! savepoint inside the triage commit; an error rolls back the ghosts alone,
 //! logs ids and an error kind (never a title, location or subject), and the
-//! commit proceeds.
+//! commit proceeds. The one exception is an error after which SQLite has
+//! already rolled back the whole transaction: that fails the commit, as it
+//! would have with no ghosts at all.
 //!
 //! SENT, SPAM AND RESTRICTED MAIL NEVER FEEDS A GHOST. Its assigned records
 //! keep their rows (so un-spamming brings the ghost back with the user's
@@ -112,45 +114,53 @@ fn error_kind(error: &CoreError) -> String {
     }
 }
 
-/// Run `project` under its own savepoint. Infallible on purpose: a ghost is
-/// worth less than the write it rides on. `what` names the caller in the log
-/// line, which carries ids and an error kind only.
+/// Run `project` under its own savepoint, inside the caller's transaction.
+///
+/// A projection error is SWALLOWED while that transaction is alive: the
+/// savepoint rolls back, the log line carries ids and an error kind only, and
+/// the caller's write proceeds, because a ghost is worth less than the write
+/// it rides on. But some errors (SQLITE_FULL, IOERR, NOMEM, a trigger's
+/// `RAISE(ROLLBACK)`) can make SQLite roll back the WHOLE transaction. Then
+/// the connection is back in autocommit, the caller's earlier writes are
+/// gone, and anything it wrote after a swallowed error would commit alone, a
+/// statement at a time. So that case is returned, and the caller fails as it
+/// would have without ghosts.
 fn guarded(
     conn: &Connection,
     account: AccountId,
     message: i64,
     what: &str,
     project: impl FnOnce() -> Result<()>,
-) {
-    if let Err(e) = conn.execute_batch("SAVEPOINT ghost_projection") {
+) -> Result<()> {
+    let error = match conn.execute_batch("SAVEPOINT ghost_projection") {
+        Err(e) => CoreError::from(e),
+        Ok(()) => match project() {
+            Ok(()) => match conn.execute_batch("RELEASE ghost_projection") {
+                Ok(()) => return Ok(()),
+                Err(e) => e.into(),
+            },
+            Err(e) => e,
+        },
+    };
+    if conn.is_autocommit() {
         eprintln!(
-            "squelch: ghost {what} skipped for account {account} message {message} ({})",
-            error_kind(&e.into())
+            "squelch: ghost {what} failed for account {account} message {message} ({}) and the transaction was rolled back; the write fails",
+            error_kind(&error)
         );
-        return;
+        return Err(error);
     }
-    match project() {
-        Ok(()) => {
-            if let Err(e) = conn.execute_batch("RELEASE ghost_projection") {
-                eprintln!(
-                    "squelch: ghost {what} release failed for account {account} message {message} ({})",
-                    error_kind(&e.into())
-                );
-            }
-        }
-        Err(e) => {
-            eprintln!(
-                "squelch: ghost {what} failed for account {account} message {message} ({}); the write committed without it",
-                error_kind(&e)
-            );
-            // If even this fails the outer transaction is already gone, and
-            // its commit reports that on its own.
-            let _ = conn.execute_batch("ROLLBACK TO ghost_projection; RELEASE ghost_projection");
-        }
-    }
+    eprintln!(
+        "squelch: ghost {what} failed for account {account} message {message} ({}); the write proceeds without it",
+        error_kind(&error)
+    );
+    // Fails harmlessly when SAVEPOINT itself was what failed.
+    let _ = conn.execute_batch("ROLLBACK TO ghost_projection; RELEASE ghost_projection");
+    Ok(())
 }
 
-/// [`reconcile`] under its own savepoint, for the triage commit.
+/// [`reconcile`] under its own savepoint, for the triage commit. Err only
+/// when the transaction itself is gone (see [`guarded`]); the caller
+/// propagates it.
 ///
 /// `eligible` is false for sent, spam and restricted mail, which then feeds
 /// nothing: its assigned records keep their rows and stop contributing.
@@ -160,24 +170,29 @@ pub(super) fn reconcile_guarded(
     message: i64,
     eligible: bool,
     current: &MessageDecision,
-) {
+) -> Result<()> {
     guarded(conn, account, message, "projection", || {
         reconcile(conn, account, message, eligible, current)
-    });
+    })
 }
 
 /// Rebuild every ghost `message` is assigned to, under the same guard. For a
 /// path that changes whether a message may feed a ghost (its spam flag or its
 /// agent access) WITHOUT a triage commit: a rebuild reads stored decisions and
-/// current eligibility, so it needs no decision in hand.
-pub(super) fn refresh_message_guarded(conn: &Connection, account: AccountId, message: i64) {
+/// current eligibility, so it needs no decision in hand. Err only when the
+/// transaction itself is gone, as for [`reconcile_guarded`].
+pub(super) fn refresh_message_guarded(
+    conn: &Connection,
+    account: AccountId,
+    message: i64,
+) -> Result<()> {
     guarded(conn, account, message, "refresh", || {
         let now = Utc::now().to_rfc3339();
         for id in ghosts_fed_by(conn, account, message)? {
             rebuild(conn, account, id, &now)?;
         }
         Ok(())
-    });
+    })
 }
 
 /// The ghosts `message` is assigned to.
@@ -910,36 +925,25 @@ impl SqliteStore {
         Ok(listed)
     }
 
-    pub(super) fn set_ghost_user_state(
-        &self,
-        account: AccountId,
-        id: i64,
-        state: Option<GhostUserState>,
-        at: DateTime<Utc>,
-    ) -> Result<bool> {
-        let conn = self.lock()?;
-        let changed = conn.execute(
-            "UPDATE ghost_events SET user_state=?3,user_state_at=?4 WHERE account_id=?1 AND id=?2",
-            params![
-                account,
-                id,
-                state.map(GhostUserState::as_str),
-                state.map(|_| at.to_rfc3339())
-            ],
-        )?;
-        Ok(changed > 0)
-    }
-
+    /// The user's PATCH of a ghost, in ONE transaction. Each of `end` and
+    /// `state` is `None` to leave alone, `Some(None)` to clear, `Some(Some(_))`
+    /// to set. False (nothing written) for an unknown id or another account's;
+    /// `InvalidInput` (nothing written, the state included) for an end that
+    /// is not after the start at its precision, or a ghost with no start.
+    ///
     /// The end arrives absolute and is stored as a span from the CURRENT
     /// start: minutes for a timed ghost, days for an all-day one.
-    pub(super) fn set_ghost_user_end(
+    pub(super) fn patch_ghost_user(
         &self,
         account: AccountId,
         id: i64,
-        end: Option<EventTime>,
+        end: Option<Option<EventTime>>,
+        state: Option<Option<GhostUserState>>,
         at: DateTime<Utc>,
     ) -> Result<bool> {
         let mut conn = self.lock()?;
+        // Dropped uncommitted on any error below, so a refused end takes the
+        // state written before it with it.
         let tx = conn.transaction()?;
         let Some((starts_at, location, kind)) = tx
             .query_row(
@@ -957,48 +961,85 @@ impl SqliteStore {
         else {
             return Ok(false);
         };
-        let mut span: (Option<i64>, Option<i64>) = (None, None);
-        if let Some(end) = &end {
-            let start = starts_at
-                .as_deref()
-                .and_then(EventTime::parse)
-                .ok_or_else(|| CoreError::InvalidInput("ghost has no start".into()))?;
-            // Mixed precision is never "after": a timed end on a date-only
-            // ghost is refused rather than stored and ignored.
-            if !end.is_after(&start) {
-                return Err(CoreError::InvalidInput(
-                    "end must be after the start, at the same precision".into(),
-                ));
-            }
-            match (start, end) {
-                (EventTime::At(s), EventTime::At(e)) => {
-                    let minutes = (*e - s).num_minutes();
-                    span.0 = Some(minutes);
-                    if let Some(venue) = location.as_deref().and_then(ghost::venue_key) {
-                        let minutes = u32::try_from(minutes)
-                            .unwrap_or(u32::MAX)
-                            .clamp(*ESTIMATE_MINUTES.start(), *ESTIMATE_MINUTES.end());
-                        tx.execute(
-                            "INSERT INTO event_duration_priors(account_id,venue_key,kind,minutes,updated_at)
-                             VALUES(?1,?2,?3,?4,?5) ON CONFLICT(account_id,venue_key,kind) DO UPDATE SET
-                             minutes=excluded.minutes,updated_at=excluded.updated_at",
-                            params![account, venue, kind, minutes, at.to_rfc3339()],
-                        )?;
-                    }
-                }
-                (EventTime::Date(s), EventTime::Date(e)) => {
-                    span.1 = Some((*e - s).num_days());
-                }
-                // Refused above: `is_after` is false across precisions.
-                _ => {}
-            }
+        if let Some(state) = state {
+            tx.execute(
+                "UPDATE ghost_events SET user_state=?3,user_state_at=?4 WHERE account_id=?1 AND id=?2",
+                params![
+                    account,
+                    id,
+                    state.map(GhostUserState::as_str),
+                    state.map(|_| at.to_rfc3339())
+                ],
+            )?;
         }
-        tx.execute(
-            "UPDATE ghost_events SET user_end_minutes=?3,user_end_days=?4 WHERE account_id=?1 AND id=?2",
-            params![account, id, span.0, span.1],
-        )?;
+        if let Some(end) = end {
+            let mut span: (Option<i64>, Option<i64>) = (None, None);
+            if let Some(end) = &end {
+                let start = starts_at
+                    .as_deref()
+                    .and_then(EventTime::parse)
+                    .ok_or_else(|| CoreError::InvalidInput("ghost has no start".into()))?;
+                // Mixed precision is never "after": a timed end on a date-only
+                // ghost is refused rather than stored and ignored.
+                if !end.is_after(&start) {
+                    return Err(CoreError::InvalidInput(
+                        "end must be after the start, at the same precision".into(),
+                    ));
+                }
+                match (start, end) {
+                    (EventTime::At(s), EventTime::At(e)) => {
+                        let minutes = (*e - s).num_minutes();
+                        span.0 = Some(minutes);
+                        if let Some(venue) = location.as_deref().and_then(ghost::venue_key) {
+                            let minutes = u32::try_from(minutes)
+                                .unwrap_or(u32::MAX)
+                                .clamp(*ESTIMATE_MINUTES.start(), *ESTIMATE_MINUTES.end());
+                            tx.execute(
+                                "INSERT INTO event_duration_priors(account_id,venue_key,kind,minutes,updated_at)
+                                 VALUES(?1,?2,?3,?4,?5) ON CONFLICT(account_id,venue_key,kind) DO UPDATE SET
+                                 minutes=excluded.minutes,updated_at=excluded.updated_at",
+                                params![account, venue, kind, minutes, at.to_rfc3339()],
+                            )?;
+                        }
+                    }
+                    (EventTime::Date(s), EventTime::Date(e)) => {
+                        span.1 = Some((*e - s).num_days());
+                    }
+                    // Refused above: `is_after` is false across precisions.
+                    _ => {}
+                }
+            }
+            tx.execute(
+                "UPDATE ghost_events SET user_end_minutes=?3,user_end_days=?4 WHERE account_id=?1 AND id=?2",
+                params![account, id, span.0, span.1],
+            )?;
+        }
         tx.commit()?;
         Ok(true)
+    }
+
+    /// The state half of [`Self::patch_ghost_user`], for tests.
+    #[cfg(test)]
+    pub(super) fn set_ghost_user_state(
+        &self,
+        account: AccountId,
+        id: i64,
+        state: Option<GhostUserState>,
+        at: DateTime<Utc>,
+    ) -> Result<bool> {
+        self.patch_ghost_user(account, id, None, Some(state), at)
+    }
+
+    /// The end half of [`Self::patch_ghost_user`], for tests.
+    #[cfg(test)]
+    pub(super) fn set_ghost_user_end(
+        &self,
+        account: AccountId,
+        id: i64,
+        end: Option<EventTime>,
+        at: DateTime<Utc>,
+    ) -> Result<bool> {
+        self.patch_ghost_user(account, id, Some(end), None, at)
     }
 }
 
@@ -2031,6 +2072,48 @@ mod tests {
         assert_eq!(titles, ["Dentist", "Standup with Ana"]);
     }
 
+    /// RR1 on ONE day. Google's invite URL keeps its id in the query, so with
+    /// the query stripped both invites shared one generic route, and the date
+    /// test that kept RR1 apart cannot help on the same day. The route is
+    /// dropped as a ref (fix pass B2), so neither has a key and each stays in
+    /// its own thread.
+    #[test]
+    fn two_calendar_invites_on_the_same_day_in_different_threads_stay_two_ghosts() {
+        let store = fixture();
+        let google = "calendar-notification@google.com";
+        mail_from(&store, 1, 1, "t1", 60, google, Some(true));
+        mail_from(&store, 1, 2, "t2", 30, google, Some(true));
+        for (id, title, start, eid) in [
+            (
+                1,
+                "Standup with Ana",
+                "2026-10-20T09:00:00-04:00",
+                "AAAA111",
+            ),
+            (2, "Dentist", "2026-10-20T15:00:00-04:00", "BBBB222"),
+        ] {
+            let link = format!("https://calendar.google.com/calendar/event?action=VIEW&eid={eid}");
+            decide(
+                &store,
+                1,
+                id,
+                &Ev {
+                    title,
+                    start: Some(start),
+                    refs: &[link.as_str()],
+                    kind: EventRecordKind::Invite,
+                    ..Default::default()
+                }
+                .decision(),
+            );
+        }
+        let ghosts = listed(&store, 1);
+        let mut titles: Vec<&str> = ghosts.iter().map(|g| g.title.as_str()).collect();
+        titles.sort();
+        assert_eq!(titles, ["Dentist", "Standup with Ana"]);
+        assert_eq!(count(&store, "ghost_event_keys"), 0, "the route is no key");
+    }
+
     /// RR2. No refs: the second mail in the thread is the same dinner even
     /// though the model titled it differently.
     #[test]
@@ -2908,5 +2991,204 @@ mod tests {
             "the oldest went"
         );
         assert_eq!(g.last_message_id, Some(51));
+    }
+
+    // ---- The guard (fix pass B1) ----
+
+    /// A record per ghost, with titles and locations at their cap, so the
+    /// projection writes many pages of its own.
+    fn heavy_decision() -> MessageDecision {
+        let titles: Vec<String> = (0..40)
+            .map(|i| format!("{i} {}", "t".repeat(190)))
+            .collect();
+        let refs: Vec<[String; 1]> = (0..40).map(|i| [format!("REF{i:05}")]).collect();
+        let refs: Vec<Vec<&str>> = refs.iter().map(|r| vec![r[0].as_str()]).collect();
+        let location = "L".repeat(199);
+        decided(
+            titles
+                .iter()
+                .zip(&refs)
+                .map(|(title, refs)| {
+                    Ev {
+                        title,
+                        refs,
+                        location: Some(&location),
+                        ..Default::default()
+                    }
+                    .record()
+                })
+                .collect(),
+        )
+    }
+
+    /// Claim message 1's job, cap the database `headroom` pages above its
+    /// current size, and commit `decision` through the real triage commit.
+    fn commit_capped(
+        sent: bool,
+        headroom: i64,
+        decision: &MessageDecision,
+    ) -> (
+        SqliteStore,
+        crate::store::agent_triage::AgentJob,
+        crate::store::agent_triage::AgentContext,
+        Result<crate::store::agent_triage::AgentCommitOutcome>,
+    ) {
+        use crate::store::agent_triage::AgentTriageStore;
+        let store = fixture();
+        mail(&store, 1, 1, "t1", 60);
+        if sent {
+            set_flag(&store, "UPDATE messages SET is_sent=1 WHERE id=1");
+        }
+        store.enqueue_agent_triage(1, 1, "arrival", false).unwrap();
+        let job = store
+            .claim_agent_job(1, "investigation", Utc::now(), 60)
+            .unwrap()
+            .unwrap();
+        let context = store.load_agent_context(&job).unwrap();
+        {
+            let conn = store.lock().unwrap();
+            let pages: i64 = conn
+                .query_row("PRAGMA page_count", [], |r| r.get(0))
+                .unwrap();
+            let _: i64 = conn
+                .query_row(
+                    &format!("PRAGMA max_page_count={}", pages + headroom),
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+        }
+        let outcome = store.commit_agent_decision(
+            &job,
+            &context,
+            decision,
+            std::slice::from_ref(&context.message.source),
+        );
+        (store, job, context, outcome)
+    }
+    fn set_flag(store: &SqliteStore, sql: &str) {
+        store.lock().unwrap().execute(sql, []).unwrap();
+    }
+    fn job_state(store: &SqliteStore) -> String {
+        store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT state FROM agent_triage_jobs WHERE message_id=1 AND kind='triage'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    /// INVARIANT 5's exception, forced honestly. A write past
+    /// `max_page_count` fails with SQLITE_FULL, and SQLite answers that by
+    /// rolling back the WHOLE transaction (observed here: the connection is
+    /// back in autocommit), not just the statement. The guard must then fail
+    /// the commit: swallowing it would let the job's `completed` mark commit
+    /// on its own in autocommit, with no decision behind it.
+    ///
+    /// The headroom is found, not hardcoded: the same commit on SENT mail
+    /// (whose projection writes nothing) succeeds with less room than the
+    /// real one needs, and every headroom in between overflows inside the
+    /// projection.
+    #[test]
+    fn a_projection_that_kills_the_transaction_fails_the_commit_and_leaves_the_job() {
+        use crate::store::agent_triage::{AgentCommitOutcome, AgentTriageStore};
+        let decision = heavy_decision();
+        let fits = |sent: bool| {
+            (0..64)
+                .find(|&headroom| commit_capped(sent, headroom, &decision).3.is_ok())
+                .expect("some headroom fits")
+        };
+        let (without_ghosts, with_ghosts) = (fits(true), fits(false));
+        assert!(
+            without_ghosts < with_ghosts,
+            "the projection needs pages of its own ({without_ghosts} vs {with_ghosts})"
+        );
+        for headroom in without_ghosts..with_ghosts {
+            let (store, job, context, outcome) = commit_capped(false, headroom, &decision);
+            match outcome {
+                Err(CoreError::Sqlite(rusqlite::Error::SqliteFailure(e, _))) => {
+                    assert_eq!(e.code, rusqlite::ErrorCode::DiskFull, "{headroom}")
+                }
+                other => panic!("headroom {headroom}: {other:?}"),
+            }
+            assert_eq!(
+                job_state(&store),
+                "leased",
+                "{headroom}: the job stays open"
+            );
+            for table in [
+                "agent_message_decisions",
+                "ghost_events",
+                "ghost_event_sources",
+            ] {
+                assert_eq!(count(&store, table), 0, "{headroom}: {table}");
+            }
+            // Room again: the same job, retried, commits everything.
+            store
+                .lock()
+                .unwrap()
+                .execute_batch("PRAGMA max_page_count=1073741823")
+                .unwrap();
+            let retried = store
+                .commit_agent_decision(
+                    &job,
+                    &context,
+                    &decision,
+                    std::slice::from_ref(&context.message.source),
+                )
+                .unwrap();
+            assert_eq!(retried, AgentCommitOutcome::Applied);
+            assert_eq!(job_state(&store), "completed");
+            assert_eq!(count(&store, "agent_message_decisions"), 1);
+            assert_eq!(listed(&store, 1).len(), 40);
+        }
+    }
+
+    /// The guard's two branches, directly: a projection error with the
+    /// transaction alive is swallowed and its writes undone; one that ended
+    /// the transaction is returned.
+    #[test]
+    fn the_guard_returns_an_error_only_when_the_transaction_is_gone() {
+        let store = fixture();
+        let mut conn = store.lock().unwrap();
+        let tx = conn.transaction().unwrap();
+        tx.execute(
+            "INSERT INTO accounts(id,email,created_at) VALUES(3,'c@test','x')",
+            [],
+        )
+        .unwrap();
+        let swallowed = guarded(&tx, 3, 1, "test", || {
+            tx.execute(
+                "INSERT INTO accounts(id,email,created_at) VALUES(4,'d@test','x')",
+                [],
+            )?;
+            Err(CoreError::InvalidInput("forced".into()))
+        });
+        assert!(swallowed.is_ok());
+        assert!(!tx.is_autocommit());
+        let ids: i64 = tx
+            .query_row("SELECT COUNT(*) FROM accounts WHERE id IN (3,4)", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            ids, 1,
+            "the caller's write stands, the projection's is undone"
+        );
+
+        let returned = guarded(&tx, 3, 1, "test", || {
+            tx.execute_batch("ROLLBACK")?;
+            Err(CoreError::InvalidInput("forced".into()))
+        });
+        assert!(matches!(returned, Err(CoreError::InvalidInput(_))));
+        assert!(tx.is_autocommit());
+        // A failed RELEASE with the transaction gone is the same case.
+        let released = guarded(&tx, 3, 1, "test", || {
+            tx.execute_batch("ROLLBACK").map_err(Into::into)
+        });
+        assert!(released.is_err(), "{released:?}");
     }
 }

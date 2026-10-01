@@ -1458,13 +1458,14 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     ) -> Result<bool>;
 
     /// CALENDAR GHOSTS whose start falls in `[from, to)`, ordered by start,
-    /// HUMAN-DOOR ONLY. A timed start compares as an instant; a date-only one
-    /// is listed when its date overlaps the range read in `from`'s offset.
-    /// Each carries its eligible sources and the duration prior for its venue
-    /// and kind. A ghost with no start, or with no source that is still
-    /// eligible (not sent, not spam, not restricted), is never listed: that
-    /// test is in the SQL, so it holds even when no rebuild has run since a
-    /// message's status changed.
+    /// HUMAN-DOOR ONLY, at most 2000. A timed start compares as an instant; a
+    /// date-only one is listed when its date is on or after `from`'s date in
+    /// `from`'s offset and before `to`'s date in `to`'s own offset, and sorts
+    /// at midnight in `from`'s offset. Each carries its eligible sources and
+    /// the duration prior for its venue and kind. A ghost with no start, or
+    /// whose facts came from a message that is not eligible right now (sent,
+    /// spam or restricted), is never listed: that test is in the SQL, so it
+    /// holds even when no rebuild has run since the message's status changed.
     fn list_ghost_events(
         &self,
         account_id: AccountId,
@@ -1472,29 +1473,24 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
         to: DateTime<chrono::FixedOffset>,
     ) -> Result<Vec<crate::types::GhostEvent>>;
 
-    /// The user's word on a ghost (`None` clears it and its stamp). Returns
-    /// `false` for an unknown id or another account's. The projection never
-    /// overwrites it.
-    fn set_ghost_user_state(
-        &self,
-        account_id: AccountId,
-        ghost_id: i64,
-        state: Option<crate::types::GhostUserState>,
-        at: DateTime<Utc>,
-    ) -> Result<bool>;
-
-    /// The user's correction of a ghost's end (`None` clears it). Returns
-    /// `false` for an unknown id or another account's, and
+    /// The user's PATCH of a ghost, applied in ONE transaction. Each field is
+    /// `None` to leave it alone, `Some(None)` to clear it (a cleared state
+    /// clears its stamp), `Some(Some(_))` to set it. Returns `false` for an
+    /// unknown id or another account's, and
     /// [`CoreError::InvalidInput`](crate::error::CoreError::InvalidInput) for
     /// an end that is not after the start at the same precision, or a ghost
-    /// with no start. A timed end on a timed ghost with a venue also records
-    /// the duration as the prior for that venue and kind; clearing the end
-    /// keeps what was learned.
-    fn set_ghost_user_end(
+    /// with no start; either way NOTHING is written, the state included. The
+    /// end is stored as a span from the current start, so mail that later
+    /// moves the start moves it too. A timed end on a timed ghost with a venue
+    /// also records the duration as the prior for that venue and kind;
+    /// clearing the end keeps what was learned. The projection never
+    /// overwrites either field.
+    fn patch_ghost_user(
         &self,
         account_id: AccountId,
         ghost_id: i64,
-        end: Option<crate::triage::ghost::EventTime>,
+        end: Option<Option<crate::triage::ghost::EventTime>>,
+        state: Option<Option<crate::types::GhostUserState>>,
         at: DateTime<Utc>,
     ) -> Result<bool>;
 

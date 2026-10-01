@@ -1847,11 +1847,19 @@ fn ghost_view(
         "end": end.as_ref().map(|e| e.end.to_string()),
         "end_estimated": end.as_ref().is_some_and(|e| e.estimated),
         "end_source": end.as_ref().map(|e| e.source),
-        "estimate": ghost.estimate.as_ref().map(|e| json!({ "minutes": e.minutes, "basis": e.basis })),
+        // Laundering blanks a `basis` or `reason` it will not show; an empty
+        // string is served as null so a client has one "no text" to handle.
+        "estimate": ghost.estimate.as_ref().map(|e| json!({
+            "minutes": e.minutes,
+            "basis": (!e.basis.is_empty()).then_some(&e.basis),
+        })),
         "location": ghost.location,
         "commitment": ghost.commitment,
         "state": ghost.state(now),
-        "likelihood": ghost.served_likelihood(),
+        "likelihood": ghost.served_likelihood().map(|l| json!({
+            "band": l.band,
+            "reason": (!l.reason.is_empty()).then_some(&l.reason),
+        })),
         "sources": ghost.sources.iter().map(|s| json!({
             "message_id": s.message_id,
             "thread_id": s.thread_id,
@@ -1922,9 +1930,10 @@ pub struct GhostPatchBody {
 /// ONLY, like every write. Both fields are user-owned columns the projection
 /// never overwrites, so a later mail cannot undo a dismissal or a correction.
 ///
-/// Everything is validated before anything is written, and the end (the one
-/// write the store can refuse) is applied before the state, so a 400 leaves
-/// the ghost untouched. An unknown id and another account's are the same 404.
+/// The body is validated before the store is called, and the store applies
+/// both fields in ONE transaction, so a refused end (the one check that needs
+/// the ghost's start) is a 400 that leaves the state untouched too. An unknown
+/// id and another account's are the same 404.
 pub async fn patch_ghost(
     State(state): State<ApiState>,
     Path(ghost_id): Path<i64>,
@@ -1962,17 +1971,7 @@ pub async fn patch_ghost(
 
     let at = Utc::now();
     let found = store_call(&state, move |store, account_id| {
-        if let Some(end) = user_end
-            && !store.set_ghost_user_end(account_id, ghost_id, end, at)?
-        {
-            return Ok(false);
-        }
-        if let Some(user_state) = user_state
-            && !store.set_ghost_user_state(account_id, ghost_id, user_state, at)?
-        {
-            return Ok(false);
-        }
-        Ok(true)
+        store.patch_ghost_user(account_id, ghost_id, user_end, user_state, at)
     })
     .await?;
     if !found {

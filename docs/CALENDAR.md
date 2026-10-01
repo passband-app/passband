@@ -43,8 +43,9 @@ Standing rules (DECIDED):
   (`squelch-core/src/triage/decision.rs`, schema in `triage/agent.rs`). The structural detector in `triage/calendar.rs` covers
   invites, updates, cancellations, RSVPs and reservations.
 - **A record is per message.** One dinner can be three records. Wave 1's
-  ghosts (§3.6) link a confirmation to its later modification or cancellation,
-  but the Calendar zone below still lists the per-message records.
+  ghosts (§3.6) link a confirmation to its later modification or cancellation
+  from the same sender, but the Calendar zone below still lists the
+  per-message records.
 - **The Calendar zone** in the sitrep right rail (`SitrepZones.swift`, reused
   by `MobileRecordsView.swift` on iOS) lists those records. `CalendarVisibility`
   retires each one 24 hours after its first viewing, because a record has
@@ -79,24 +80,42 @@ all-day gutter; they never become time blocks.
 ### 3.2 Identity and lifecycle
 
 A ghost is one thing across many messages, the way a shipment is. A
-confirmation, a "your reservation was modified" and a cancellation feed the
-same row.
+confirmation, a "your reservation was modified" and a cancellation from the
+same sender feed the same row.
 
-- **Identity keys:** every iCalendar UID, confirmation or booking number and
-  event page URL the mail carries (matching any one of them is the same
-  ghost), and failing all of those the thread plus a normalized title.
+- **A reference only means something within its sender.** Every record takes
+  a scope from its message: the sender's registrable domain, or the full
+  address on a freemail domain, and only when the message passed
+  authentication. Its identity refs (an iCalendar UID, a confirmation or
+  booking number, an event page URL) are keyed under that scope. A stranger
+  quoting the user's booking number from another domain gets a ghost of their
+  own and cannot move, rename or cancel the user's.
+- **Unauthenticated mail speaks for nobody.** Its records match no other
+  ghost, never join a ghost other mail feeds, and never commit one.
+- **Matching, in order:** a ghost holding one of the record's scoped refs;
+  with no usable ref, a ghost from the same thread on the same date (or, for a
+  ref-less update, the thread's only live ghost); the ghost this message fed
+  before, which is what keeps a ghost's id and the user's dismissal when a
+  re-triage rewords a title; otherwise a new ghost.
+- **Ghosts never merge.** Each record is assigned to exactly one ghost and the
+  assignment is remembered. A record that could match several is given to one
+  and the others are left alone. A duplicate ghost is an acceptable outcome;
+  a ghost lost or rewritten by someone else's mail is not.
 - **States:** `ghost`, `held`, `materialized` (written to the real calendar),
   `cancelled`, `dismissed`, `expired` (its time passed).
-- **Self-healing.** A later message about the same identity moves, renames or
-  cancels the ghost. If the ghost was materialized by Passband, the real event
-  follows. That is the property a hand-made calendar entry never has.
+- **Self-healing.** A later message from the same sender about the same
+  identity moves, renames or cancels the ghost. If the ghost was materialized
+  by Passband, the real event follows. That is the property a hand-made
+  calendar entry never has.
 - **Sources are kept.** Every message that created, changed, cancelled or
   confirmed a ghost is recorded with its role. That trail is also the event's
   index into its mail (§9).
 - **Expiry replaces the 24-hour hide.** A ghost lives at its time and leaves
   when that time passes. `CalendarVisibility` is deleted.
-- **Sealing a source message** removes any ghost that message alone fed, as
-  with shipments.
+- **Sealed, spam and sent mail feeds nothing.** Its records keep their place
+  on a ghost but supply nothing. A ghost whose facts came from such a message
+  is hidden until another source supplies them, and un-sealing or un-spamming
+  the message brings the ghost back with the user's marks intact.
 
 ### 3.3 What goes on the real calendar (DECIDED)
 
@@ -208,49 +227,119 @@ row that fails to deserialize must not fail a pass:
 | `identity_refs` | `Vec<String>` | iCalendar UID, confirmation numbers, event URL |
 | `likelihood` | `Option<EventLikelihood { band, reason }>` | the triage prior; stored, not yet learned from |
 
-The prompt is `agent-triage-v6`. Rollout is forward-only: the version is
-recorded on new decisions and nothing is re-triaged. `candidates` (offered
-slots for a proposal) is deferred to the scheduling wave (§12, wave 5), and
-`hold` is not a kind yet.
+The prompt is `agent-triage-v6`. It tells the model that `duration_estimate`
+and `likelihood` are the only fields that are not stated facts, and that
+`committed` takes the word of the merchant, venue, platform or organizer
+itself. Rollout is forward-only: the version is recorded on new decisions and
+nothing is re-triaged. `candidates` (offered slots for a proposal) is deferred
+to the scheduling wave (§12, wave 5), and `hold` is not a kind yet.
 
-Bad model output is laundered in the projection (`triage/ghost.rs`), never
-rejected: a title is trimmed and capped, an empty one drops the record, a time
-that is neither RFC3339 nor `YYYY-MM-DD` is dropped, an end not after the start
-is dropped, and the estimate is clamped to 15 minutes to 3 days and dropped
-when an end is stated or the start is date-only.
+**Laundering** (`triage/ghost.rs`). Bad model output is cleaned or dropped,
+never rejected:
+
+- Title trimmed and capped at 200 characters; an empty title drops the
+  record. It is the ONLY reason a record is dropped, because a record's
+  position among the kept ones is part of its stored identity.
+- A start or end that is neither RFC3339 nor `YYYY-MM-DD` is dropped, and so
+  is an end not after the start at the same precision.
+- `start_timezone` is kept only as a valid IANA zone name (`chrono-tz`):
+  "Eastern Standard Time" and "PDT" are dropped.
+- The estimate is clamped to 15 minutes to 3 days, and dropped when an end is
+  stated or the start is date-only.
+- `basis` and `reason` are capped at 80 characters, and dropped (the minutes
+  and the band stay) when they carry a URL, an `@` or a run of 6 or more
+  digits.
+- At most 5 refs per record. A URL ref loses its query and fragment and is
+  kept only when the path names one event: a last segment with a digit, or a
+  last segment of 6 or more characters under another one. A bare site, a
+  route whose id lived in the query (Google Calendar's `event?eid=`,
+  OpenTable's `book/view?rid=`) and any path with a secret-shaped segment are
+  dropped: an unbroken run of more than 24 characters mixing letters and
+  digits (a magic link), or a UUID (a cancellation link). A hyphenated slug is
+  not a secret, however long. A ref with a URL inside
+  other text is that URL alone. Other refs fold to lowercase alphanumerics
+  without leading label words; short fragments and plain words are dropped.
+- Every URL in a location keeps host and path only ("Zoom:
+  https://zoom.us/j/123?pwd=abc" becomes "Zoom: zoom.us/j/123"); a path with a
+  credential-shaped segment is cut back to the host.
+- All text, titles included, loses control, bidi and invisible characters
+  (zero-width, word joiner, BOM, tag characters). A title with nothing else in
+  it is empty, and its record is dropped. That rule fixes each record's
+  stored position, so it must not change once ghosts exist in the field.
+- A `basis` or `reason` that laundering blanks is served as null.
+
+**Identity.** Scope is `triage::ghost::sender_scope`: the registrable domain of
+an authenticated sender, the full address on freemail, none otherwise. Keys
+are `ref:<scope>:<ref>` and nothing else: there is no thread key and no title
+key. Each laundered record of a message (by its `position`) is matched once,
+against the state before the message's old assignment is removed:
+
+1. By ref: ghosts holding any of its keys. A `created` record skips a ghost
+   whose start is more than a day from its own. Most shared keys win, then
+   nearest start, then lowest id.
+2. By thread, only with no usable ref: ghosts fed from the same thread that
+   hold no other scope's keys. Same date wins; failing that, a record that is
+   not `created` takes the thread's only live ghost.
+3. The ghost this message fed at that position (or its only ghost).
+4. A new ghost.
+
+Among equals a ghost the message already fed wins, and no two records of one
+message share a ghost. An unauthenticated record skips 1 and 2 and reuses only
+a ghost no other message feeds. Ghosts are never merged.
 
 **Daemon tables:**
 
 - `ghost_events`: kind, title, `starts_at` (as given) and `start_timezone`,
   `ends_at` (stated only), `est_minutes` and `est_basis` (the model's only),
   location, commitment, `mail_state` (`live` / `cancelled`), likelihood band
-  and reason, `last_message_id`. Two derived columns: `start_sort` (the start
-  as UTC text, for range queries) and `venue_key` (the normalized location the
-  priors are keyed by). Three columns only the user writes, which no rebuild
-  touches: `user_state` (`dismissed` / `going`), `user_state_at`,
-  `user_ends_at`.
-- `ghost_event_keys`: identity keys, unique per account. One `ref:` key per
-  usable identity ref, or with none a single `thread:` key of thread plus
-  title slug.
-- `ghost_event_sources`: ghost, message, role (its `change`). The evidence
-  trail, deleted with its ghost or its message.
+  and reason, `supplier_message_id` (the message whose record supplied the
+  facts), `last_message_id`. Derived: `start_sort` (UTC text, for the coarse
+  range query) and `venue_key` (what the priors are keyed by). Only the user
+  writes `user_state` (`dismissed` / `going`), `user_state_at`, and the end
+  correction as a SPAN from the start: `user_end_minutes` for a timed ghost,
+  `user_end_days` for an all-day one. Mail that moves the start moves the
+  corrected end with it; a span at the other precision is ignored.
+- `ghost_event_sources`: the assignment, one row per record: account, ghost,
+  message, `position`, role (its `change`), scope (NULL when
+  unauthenticated). Primary key `(account, message, position)`. At most 50
+  per ghost; a new record past that replaces the oldest. Rows go with their
+  ghost or their message.
+- `ghost_event_keys`: the scoped ref keys of a ghost's currently assigned
+  eligible records, recomputed on every rebuild. Not unique: a flight number
+  can name two ghosts on two dates.
 - `event_duration_priors`: venue key and kind to minutes, written when the
   user corrects a timed end at a known venue. Tier 2 of §3.4.
 
 `ghost_outcomes`, the real event id and the Passband-created flag are not
 built; they arrive with likelihood (wave 3) and calendar access (wave 4).
 
-**Reconcile** runs inside the triage commit, under a savepoint: an error rolls
+**Rebuild** loads exactly a ghost's assigned records from their messages'
+stored decisions. Facts come from the newest eligible record that does not
+cancel (the newest eligible one if all do), and that message is recorded as
+the supplier. `mail_state` is `cancelled` when the newest eligible record
+cancels. The ghost is `committed` only through an authenticated record of the
+ghost's own sender (the scope of its oldest authenticated record) that is
+committed or `agreed`; a committed claim from unauthenticated or other-sender
+mail is served as `unknown`. A source that is sent, spam or restricted, or
+whose decision does not deserialize, keeps its row and contributes nothing. A
+row whose message no longer carries a record at that position goes. No rows
+left deletes the ghost; rows but no eligible record keeps its facts, clears
+the supplier and its keys, and hides it.
+
+**When it runs.** Inside the triage commit, under a savepoint: an error rolls
 back the ghosts alone, logs ids and an error kind, and the decision commits.
-Sent, spam and restricted mail feeds nothing. A message is detached from its
-ghosts, then each of its event records attaches to the ghost holding any of
-its keys (a new one if none; several merge into the lowest id). Each affected
-ghost is rebuilt from its remaining sources' stored decisions: the newest
-non-cancelling proposal supplies the fields, the newest proposal decides
-`cancelled`, and any committed or `agreed` source makes it committed. A ghost
-with no sources left is deleted. The listing also checks eligibility in SQL,
-so a source that turned spam or restricted since the last rebuild cannot
-surface a ghost.
+The exception is an error after which SQLite has already rolled back the whole
+transaction (SQLITE_FULL can): the commit then fails and the job stays open,
+as it would with no ghosts. The same guarded rebuild runs for the message's
+ghosts when its eligibility changes outside triage: the access job, the
+user's `external_access` correction, and the not-spam action.
+
+**Listing.** A ghost is served only while its supplier is eligible now (not
+sent, not spam, not restricted), judged in SQL, so a status no rebuild has
+seen yet cannot serve facts from it. At most 2000. A timed start compares as
+an instant; a date-only start is listed from `from`'s date in `from`'s offset
+up to `to`'s date in `to`'s own offset, and sorts at midnight in the caller's
+offset.
 
 **Endpoints:**
 
@@ -261,11 +350,13 @@ surface a ghost.
   `user` / `history` / `model` / `default`), `estimate` (the model's
   `{minutes, basis}` as stored), `location`, `commitment`, `state`
   (`dismissed` / `going` / `cancelled` / `expired` / `ghost`), `likelihood`
-  (null when committed) and `sources` (`message_id`, `thread_id`, `role`). A
-  date-only ghost with no stated or corrected end has no end.
-- `PATCH /client/timeline/ghosts/{id}` with `state` and or `end`. An absent
-  field is left alone and `null` clears it. An end not after the start, or a
-  timed end on a date-only ghost, is a 400.
+  (null when committed) and `sources` (eligible ones only: `message_id`,
+  `thread_id`, `role`). A date-only ghost with no stated or corrected end has
+  no end.
+- `PATCH /client/timeline/ghosts/{id}` with `state` and or `end`, applied in
+  one transaction. An absent field is left alone and `null` clears it. An end
+  not after the start, or a timed end on a date-only ghost, is a 400 and
+  writes nothing, the state included.
 - `/client/stats` carries `"timeline": true`.
 
 ## 4. One timeline, per-account ownership (DECIDED)
@@ -439,6 +530,25 @@ real calendar.
   That document, the scope constants, the privacy policy and the trust page
   all change BEFORE the scope ships. Calendar content reaching the model
   through triage context (§9) is a disclosure of its own.
+
+### Before anything writes to a real calendar
+
+Wave 1's ghosts only ever show. Before wave 4 lets one become a real event,
+or lets mail move or delete one, these exist:
+
+- **"This mail is wrong."** The user can detach one source from a ghost, so a
+  bad message stops feeding it without dismissing the whole event.
+- **Backstops on automatic adds.** A committed ghost is added automatically
+  only when its sender already has history with the account, never from
+  promotional mail, and only from authenticated mail.
+- **The user's own reply is the real `agreed`.** A SENT reply accepting the
+  time is the trustworthy evidence of agreement. Sent mail contributes nothing
+  to ghosts today.
+- **One event, two senders.** A booking site and the airline describe one
+  flight from two sender scopes, so they are two ghosts by design. The display
+  de-duplicates them; identity stays apart.
+- **The model's words are attributed.** `basis` and `reason` are the model's
+  text and are shown as such, never in Passband's own voice.
 
 ## 9. What only a mail client can do
 

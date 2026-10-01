@@ -20,9 +20,14 @@ use chrono::{DateTime, Duration, FixedOffset, NaiveDate};
 use std::fmt;
 use std::ops::RangeInclusive;
 
-/// Cap on every free-text field the model writes: title, basis, reason,
-/// location.
+/// Cap on the free text the model copies from mail: title and location.
 pub const TEXT_CAP: usize = 200;
+/// Cap on the model's own explanations, `basis` and `reason`. The timeline
+/// shows them as the reason for a guess, so they stay a phrase long.
+pub const NOTE_CAP: usize = 80;
+/// A URL path segment longer than this that mixes letters and digits is a
+/// token (a magic link, a cancellation capability), not a page.
+const TOKEN_SEGMENT: usize = 24;
 /// Any estimated duration, in minutes: a quarter hour to three days. Three
 /// days covers a festival; anything longer is a model error, not an event.
 pub const ESTIMATE_MINUTES: RangeInclusive<u32> = 15..=4320;
@@ -173,14 +178,13 @@ pub fn launder(record: &RecordProposal) -> Option<GhostProposal> {
     else {
         return None;
     };
-    let title = clean_text(title)?;
+    let title = clean_title(title)?;
     let start_time = start.as_ref().and_then(|t| EventTime::parse(&t.value));
     let start_timezone = start
         .as_ref()
         .filter(|_| start_time.is_some())
         .and_then(|t| t.timezone.as_deref())
-        .map(|zone| truncate_trimmed(&plain(zone), TIMEZONE_CAP))
-        .filter(|zone| !zone.is_empty());
+        .and_then(iana_zone);
     // An end with no start to be after is meaningless, so it goes too.
     let end = end
         .as_ref()
@@ -193,7 +197,7 @@ pub fn launder(record: &RecordProposal) -> Option<GhostProposal> {
             let minutes = u32::try_from(d.minutes).ok().filter(|m| *m > 0)?;
             Some(GhostEstimate {
                 minutes: minutes.clamp(*ESTIMATE_MINUTES.start(), *ESTIMATE_MINUTES.end()),
-                basis: truncate_trimmed(&plain(&d.basis), TEXT_CAP),
+                basis: note(&d.basis),
             })
         }),
         _ => None,
@@ -220,7 +224,7 @@ pub fn launder(record: &RecordProposal) -> Option<GhostProposal> {
         identity_refs: refs,
         likelihood: likelihood.as_ref().map(|l| EventLikelihood {
             band: l.band,
-            reason: truncate_trimmed(&plain(&l.reason), TEXT_CAP),
+            reason: note(&l.reason),
         }),
     })
 }
@@ -273,19 +277,15 @@ pub fn identity_keys(event: &GhostProposal, scope: Option<&str>) -> Vec<String> 
 
 /// One identity ref as a key, or None when it cannot safely identify an event.
 ///
-/// A URL becomes lowercase host and path, with the query and fragment (where
-/// tokens live) gone, and a bare site with no path is dropped: every event on
-/// that platform would share it. Anything else becomes its lowercase
+/// A ref that is or contains a URL is that URL alone (see [`url_ref`]): the
+/// label around it identifies nothing, and folding it as text would keep the
+/// query's token as alphanumerics. Anything else becomes its lowercase
 /// alphanumerics with any leading label words removed. Prose is dropped.
 pub fn normalize_ref(raw: &str) -> Option<String> {
     let raw = plain(raw);
     let raw = raw.trim();
-    let key = if looks_like_url(raw) {
-        let (host, path) = url_host_path(raw)?;
-        if path.is_empty() {
-            return None;
-        }
-        format!("{host}{path}").to_lowercase()
+    let key = if let Some(url) = raw.split(' ').find_map(url_core) {
+        url_ref(url)?
     } else {
         let mut tokens: Vec<&str> = raw
             .split(|c: char| !c.is_alphanumeric())
@@ -315,6 +315,89 @@ fn is_bare_word(tokens: &[&str]) -> bool {
         return true;
     };
     !only.chars().all(char::is_uppercase) || STOP_WORDS.contains(&only.to_lowercase().as_str())
+}
+
+/// A URL ref as lowercase host and path, kept only when the path itself
+/// names one event. The query and fragment are gone (that is where tokens
+/// live), so a route whose id lived in the query (Google Calendar's
+/// `event?eid=`, OpenTable's `book/view?rid=`, OWA's `?itemid=`) is left a
+/// generic route every event on that platform shares, and is dropped like a
+/// bare site. Kept: a last segment with a digit (`/e/12345`), or a last
+/// segment of 6 or more characters under at least one other (`/e/summer-gala`).
+/// Dropped too: any credential-shaped segment, whatever else the path says.
+/// The record then falls back to thread matching.
+fn url_ref(url: &str) -> Option<String> {
+    let (host, path) = url_host_path(url)?;
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let last = segments.last()?;
+    if segments.iter().any(|s| credential_shaped(s)) {
+        return None;
+    }
+    let names_one = last.chars().any(|c| c.is_ascii_digit())
+        || (segments.len() >= 2 && last.chars().count() >= 6);
+    names_one.then(|| format!("{host}{path}").to_lowercase())
+}
+
+/// A path segment that looks like a secret: one unbroken run longer than
+/// [`TOKEN_SEGMENT`] mixing letters and digits, or a UUID. Runs are split on
+/// `-` and `_` so a readable slug ("some-event-name-tickets-123456789") is
+/// not mistaken for a token, which is also why a UUID, whose runs are short,
+/// needs its own test: a cancellation or magic link is often exactly that.
+fn credential_shaped(segment: &str) -> bool {
+    let token_run = segment.split(['-', '_']).any(|run| {
+        run.chars().count() > TOKEN_SEGMENT
+            && run.chars().any(|c| c.is_ascii_alphabetic())
+            && run.chars().any(|c| c.is_ascii_digit())
+    });
+    token_run || has_uuid(segment)
+}
+
+/// Whether five consecutive `-`-separated runs are hex of lengths 8-4-4-4-12.
+fn has_uuid(segment: &str) -> bool {
+    let runs: Vec<&str> = segment.split('-').collect();
+    runs.windows(5).any(|w| {
+        w.iter()
+            .zip([8, 4, 4, 4, 12])
+            .all(|(run, len)| run.len() == len && run.chars().all(|c| c.is_ascii_hexdigit()))
+    })
+}
+
+/// The URL in one whitespace-free token, without the punctuation prose wraps
+/// around it ("(see https://x/e/1)."), or None when the token is not a URL.
+/// A scheme or `www.` is enough; a bare `host/path` also needs an alphabetic
+/// top-level label, so "St./Elm" and "2.5/3h" stay text.
+fn url_core(token: &str) -> Option<&str> {
+    let core = token
+        .trim_start_matches(['(', '<', '[', '"', '\''])
+        .trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '>', ']', '"', '\'']);
+    let lower = core.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("www.") {
+        return Some(core);
+    }
+    let tld_ok = core
+        .split_once('/')
+        .and_then(|(host, _)| host.rsplit('.').next())
+        .is_some_and(|tld| tld.len() >= 2 && tld.chars().all(|c| c.is_ascii_alphabetic()));
+    (tld_ok && looks_like_url(core)).then_some(core)
+}
+
+/// Every URL in `text` passed through `rewrite` (None removes it), the rest
+/// of each token kept. `text` is already [`plain`], so tokens are
+/// single-space separated.
+fn map_urls(text: &str, mut rewrite: impl FnMut(&str) -> Option<String>) -> String {
+    text.split(' ')
+        .filter_map(|token| {
+            let Some(core) = url_core(token) else {
+                return Some(token.to_string());
+            };
+            // `core` is a slice of `token`, so its offset is exact.
+            let at = core.as_ptr() as usize - token.as_ptr() as usize;
+            let (before, after) = (&token[..at], &token[at + core.len()..]);
+            Some(format!("{before}{}{after}", rewrite(core)?))
+        })
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn looks_like_url(raw: &str) -> bool {
@@ -351,15 +434,58 @@ fn clean_text(raw: &str) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
-/// A location is display text, except that a URL (a meeting link) keeps only
-/// host and path: a query string is where a meeting passcode lives.
-fn launder_location(raw: &str) -> Option<String> {
+/// A title, cleaned like any text. An empty title drops its record, and which
+/// records are kept fixes every later record's stored `position`: changing
+/// this rule after ghosts exist shifts positions until each message is
+/// re-triaged, so it has to be right before the first release.
+fn clean_title(raw: &str) -> Option<String> {
+    let text = truncate_trimmed(&plain(raw), TEXT_CAP);
+    (!text.is_empty()).then_some(text)
+}
+
+/// The model's own explanation (`basis`, `reason`). The timeline shows it as
+/// the reason for a guess, so it is capped at [`NOTE_CAP`], and it is dropped
+/// outright (the number or band it explains stays) when it carries something
+/// mail-shaped: a URL, an address, or a run of 6 or more digits (a booking
+/// number, a phone number, a code).
+fn note(raw: &str) -> String {
     let text = plain(raw);
-    if looks_like_url(text.trim()) {
-        let (host, path) = url_host_path(text.trim())?;
-        return clean_text(&format!("{host}{path}"));
+    let mut run = 0;
+    let digits = text.chars().any(|c| {
+        run = if c.is_numeric() { run + 1 } else { 0 };
+        run >= 6
+    });
+    if digits || text.contains('@') || text.split(' ').any(|t| url_core(t).is_some()) {
+        return String::new();
     }
+    truncate_trimmed(&text, NOTE_CAP)
+}
+
+/// A location is display text, except that every URL in it (a meeting link,
+/// alone or after a label as in "Zoom: https://...") keeps only host and
+/// path: a query string is where a meeting passcode lives. A path with a
+/// credential-shaped segment (a join token) is cut back to the host.
+fn launder_location(raw: &str) -> Option<String> {
+    let text = map_urls(&plain(raw), |url| {
+        let (host, path) = url_host_path(url)?;
+        if path.split('/').any(credential_shaped) {
+            return Some(host);
+        }
+        Some(format!("{host}{path}"))
+    });
     clean_text(&text)
+}
+
+/// The zone a start claims, as its IANA name, or None. "Eastern Standard
+/// Time", "PDT" and other names a reader understands are not zones (an
+/// abbreviation names several), and the start is read in this zone.
+fn iana_zone(raw: &str) -> Option<String> {
+    let zone = plain(raw);
+    if zone.chars().count() > TIMEZONE_CAP {
+        return None;
+    }
+    let tz: chrono_tz::Tz = zone.parse().ok()?;
+    Some(tz.name().to_string())
 }
 
 /// A location reduced to the key duration priors are stored under: the part
@@ -535,7 +661,7 @@ mod tests {
             "Show",
             &[
                 "https://www.Eventbrite.com/e/12345/?aff=mail&token=secret#tickets",
-                "lu.ma/AbCd",
+                "lu.ma/AbCd7",
             ],
         ))
         .unwrap();
@@ -543,7 +669,7 @@ mod tests {
             identity_keys(&ghost, Some("eventbrite.com")),
             vec![
                 "ref:eventbrite.com:eventbrite.com/e/12345",
-                "ref:eventbrite.com:lu.ma/abcd"
+                "ref:eventbrite.com:lu.ma/abcd7"
             ]
         );
     }
@@ -763,7 +889,7 @@ mod tests {
         assert_eq!(with(timed, -60, "x"), None);
         assert_eq!(
             with(timed, 90, &"b".repeat(500)).unwrap().basis.len(),
-            TEXT_CAP
+            NOTE_CAP
         );
         assert_eq!(with("2026-10-03", 150, "x"), None);
     }
@@ -787,7 +913,7 @@ mod tests {
         assert_eq!(ghost.location.as_deref(), Some("zoom.us/j/123456"));
         let likelihood = ghost.likelihood.unwrap();
         assert_eq!(likelihood.band, LikelihoodBand::Likely);
-        assert_eq!(likelihood.reason.len(), TEXT_CAP);
+        assert_eq!(likelihood.reason.len(), NOTE_CAP);
 
         if let RecordProposal::Event { location, .. } = &mut record {
             *location = Some("   ".into());
@@ -931,5 +1057,227 @@ mod tests {
         }
         assert_eq!(EventTime::parse("2026-10-03T20:00:00"), None, "no offset");
         assert_eq!(EventTime::parse("Oct 3"), None);
+    }
+
+    // ---- Laundering hardening (fix pass B2) ----
+
+    /// One record with `edit` applied, laundered.
+    fn launder_with(edit: impl FnOnce(&mut RecordProposal)) -> GhostProposal {
+        let mut record = event("Show", &[]);
+        edit(&mut record);
+        launder(&record).unwrap()
+    }
+
+    #[test]
+    fn a_url_ref_is_kept_when_its_path_names_one_event() {
+        for (raw, key) in [
+            // A digit in the last segment.
+            (
+                "https://www.eventbrite.com/e/12345",
+                "eventbrite.com/e/12345",
+            ),
+            ("lu.ma/x7", "lu.ma/x7"),
+            // Two segments, the last at least 6 characters.
+            (
+                "https://partiful.com/e/summergala",
+                "partiful.com/e/summergala",
+            ),
+            ("lu.ma/event/abcdef", "lu.ma/event/abcdef"),
+            // Long but letters only: a slug, not a token.
+            (
+                "example.com/events/abcdefghijklmnopqrstuvwxyzabcd",
+                "example.com/events/abcdefghijklmnopqrstuvwxyzabcd",
+            ),
+            // Mixed, but exactly at the limit.
+            (
+                "example.com/e/a1b2c3d4e5f6g7h8i9j0k1l2",
+                "example.com/e/a1b2c3d4e5f6g7h8i9j0k1l2",
+            ),
+        ] {
+            assert_eq!(normalize_ref(raw).as_deref(), Some(key), "{raw}");
+        }
+    }
+
+    #[test]
+    fn a_url_ref_whose_id_lived_in_the_query_is_dropped() {
+        for raw in [
+            "https://calendar.google.com/calendar/event?action=VIEW&eid=AAAA111",
+            "https://www.opentable.com/book/view?rid=1",
+            "https://outlook.office.com/owa/?itemid=AAMkADQ5",
+            // A bare site, with or without a query.
+            "https://www.opentable.com/",
+            "https://ticketmaster.com?id=999",
+            // One short segment, or one long one with no digit.
+            "lu.ma/event/abcde",
+            "lu.ma/abcdef",
+        ] {
+            assert_eq!(normalize_ref(raw), None, "{raw} should drop");
+        }
+    }
+
+    #[test]
+    fn a_credential_shaped_url_segment_drops_the_ref() {
+        for raw in [
+            // 25 mixed characters: a magic link.
+            "https://example.com/login/aB3dE5fG7hJ9kL1mN3pQ5rS7t",
+            // Anywhere in the path, even with an id after it.
+            "https://tickets.example/cancel/aB3dE5fG7hJ9kL1mN3pQ5rS7t/123",
+            // A UUID is a capability even though its runs are short.
+            "https://calendly.com/cancellations/3f2b8c1e-9a4d-4e7b-8c21-0d5f6a7b8c9d",
+        ] {
+            assert_eq!(normalize_ref(raw), None, "{raw} should drop");
+        }
+        // A readable slug is not a token, however long: its runs are words.
+        assert_eq!(
+            normalize_ref("https://www.eventbrite.com/e/some-event-name-tickets-123456789")
+                .as_deref(),
+            Some("eventbrite.com/e/some-event-name-tickets-123456789")
+        );
+    }
+
+    #[test]
+    fn a_ref_with_a_url_inside_text_is_that_url_without_its_query() {
+        assert_eq!(
+            normalize_ref("Event page: https://x.example/e/1?token=SECRET").as_deref(),
+            Some("x.example/e/1")
+        );
+        assert_eq!(
+            normalize_ref("(see https://x.example/e/1#SECRET).").as_deref(),
+            Some("x.example/e/1")
+        );
+        // The URL inside decides alone: a generic route drops the ref rather
+        // than folding the label and the token into one key.
+        assert_eq!(
+            normalize_ref("Manage: https://calendar.google.com/calendar/event?eid=SECRET"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_location_with_a_url_inside_text_loses_the_query() {
+        let location = |raw: &str| {
+            launder_with(|r| {
+                if let RecordProposal::Event { location, .. } = r {
+                    *location = Some(raw.into());
+                }
+            })
+            .location
+        };
+        assert_eq!(
+            location("Zoom: https://zoom.us/j/123?pwd=abc").as_deref(),
+            Some("Zoom: zoom.us/j/123")
+        );
+        assert_eq!(
+            location("Online (join at https://zoom.us/j/9?pwd=abc).").as_deref(),
+            Some("Online (join at zoom.us/j/9).")
+        );
+        // A join token in the path goes too; the host still says where.
+        assert_eq!(
+            location(
+                "Teams https://teams.example.com/l/meetup-join/19aB3dE5fG7hJ9kL1mN3pQ5rS7t?ctx=1"
+            )
+            .as_deref(),
+            Some("Teams teams.example.com")
+        );
+        // Prose with a slash is not a URL.
+        assert_eq!(
+            location("Corner of Main St./Elm Ave").as_deref(),
+            Some("Corner of Main St./Elm Ave")
+        );
+    }
+
+    #[test]
+    fn invisible_characters_leave_refs_and_titles() {
+        assert_eq!(
+            normalize_ref("ABC\u{200B}123\u{FEFF}").as_deref(),
+            Some("abc123")
+        );
+        assert_eq!(
+            normalize_ref("QXJ\u{E0041}ZKM\u{2060}").as_deref(),
+            Some("qxjzkm")
+        );
+        // Hidden text never reaches a title the timeline shows...
+        assert_eq!(
+            launder(&event("Din\u{200B}ner\u{E0041}\u{E0042}", &[]))
+                .unwrap()
+                .title,
+            "Dinner"
+        );
+        // ...and a title of nothing else is no title: the record is dropped.
+        assert!(launder(&event("\u{200B}\u{FEFF}", &[])).is_none());
+        let events = launder_events(&[event("\u{200B}", &[]), event("Second", &[])]);
+        assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    fn start_timezone_must_be_an_iana_zone() {
+        let zone = |raw: &str| {
+            launder_with(|r| {
+                if let RecordProposal::Event {
+                    start: Some(start), ..
+                } = r
+                {
+                    start.timezone = Some(raw.into());
+                }
+            })
+            .start_timezone
+        };
+        assert_eq!(
+            zone("America/New_York").as_deref(),
+            Some("America/New_York")
+        );
+        assert_eq!(zone(" Europe/London ").as_deref(), Some("Europe/London"));
+        for junk in [
+            "Eastern Standard Time",
+            "PDT",
+            "garbage",
+            "",
+            "America/Nowhere",
+        ] {
+            assert_eq!(zone(junk), None, "{junk:?} should drop");
+        }
+    }
+
+    #[test]
+    fn basis_and_reason_are_capped_and_dropped_when_mail_shaped() {
+        let both = |text: &str| {
+            let ghost = launder_with(|r| {
+                if let RecordProposal::Event {
+                    duration_estimate,
+                    likelihood,
+                    ..
+                } = r
+                {
+                    *duration_estimate = Some(DurationEstimate {
+                        minutes: 150,
+                        basis: text.into(),
+                    });
+                    *likelihood = Some(EventLikelihood {
+                        band: LikelihoodBand::Maybe,
+                        reason: text.into(),
+                    });
+                }
+            });
+            let estimate = ghost.estimate.unwrap();
+            let likelihood = ghost.likelihood.unwrap();
+            // The number and the band survive whatever happens to the text.
+            assert_eq!(estimate.minutes, 150);
+            assert_eq!(likelihood.band, LikelihoodBand::Maybe);
+            assert_eq!(estimate.basis, likelihood.reason);
+            estimate.basis
+        };
+        assert_eq!(both(" doors 7, show 8 "), "doors 7, show 8");
+        assert_eq!(both(&"b".repeat(81)).chars().count(), NOTE_CAP);
+        assert_eq!(both("seats 12345, row 2"), "seats 12345, row 2", "5 digits");
+        for junk in [
+            "see https://venue.example/faq",
+            "per venue.example/faq",
+            "www.venue.example says so",
+            "ask box@venue.example",
+            "call 555123 for times",
+            "booking 1234567",
+        ] {
+            assert_eq!(both(junk), "", "{junk:?} should drop");
+        }
     }
 }

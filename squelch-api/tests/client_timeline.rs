@@ -687,6 +687,50 @@ async fn patch_end_corrects_clears_and_refuses_impossible_ends() {
     assert_eq!(g["end_estimated"], false);
 }
 
+/// Both fields land in ONE store transaction: a refused end takes the state
+/// change in the same body down with it, whichever the store writes first,
+/// and an accepted pair lands together.
+#[tokio::test]
+async fn patch_with_an_impossible_end_leaves_the_state_as_it_was() {
+    let start = Utc::now() + Duration::days(10);
+    let h = harness(|_, _| {});
+    decide(
+        &h.store,
+        h.acct,
+        "g1",
+        "t1",
+        5,
+        &[Ev {
+            start: rfc(start),
+            ..Default::default()
+        }],
+    );
+    let id = wide(&h.app).await[0]["id"].as_i64().unwrap();
+    let (status, _) = patch(&h.app, id, json!({ "state": "dismissed" })).await;
+    assert_eq!(status, StatusCode::OK);
+
+    for state in [json!("going"), Value::Null] {
+        let (status, body) = patch(
+            &h.app,
+            id,
+            json!({ "state": state, "end": rfc(start - Duration::hours(1)) }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{state}: {body}");
+        let ghost = wide(&h.app).await[0].clone();
+        assert_eq!(ghost["state"], "dismissed", "{state}: untouched");
+        assert_ne!(ghost["end_source"], "user", "{state}: no end written");
+    }
+
+    let end = rfc(start + Duration::hours(4));
+    let (status, _) = patch(&h.app, id, json!({ "state": "going", "end": end })).await;
+    assert_eq!(status, StatusCode::OK);
+    let ghost = wide(&h.app).await[0].clone();
+    assert_eq!(ghost["state"], "going");
+    assert_eq!(ghost["end"], end);
+    assert_eq!(ghost["end_source"], "user");
+}
+
 #[tokio::test]
 async fn patch_rejects_bad_bodies_and_unknown_ids() {
     let h = harness(|_, _| {});

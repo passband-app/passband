@@ -278,6 +278,13 @@ private struct ShellWatchers: View {
 }
 
 struct MainShell: View {
+    /// The readers on screen: the open thread, plus the one it is turning
+    /// away from while an S is in flight (behind it, so it is drawn first).
+    private func readerSlots(_ threadId: String) -> [String] {
+        guard let out = store.skipTurn?.outgoing, out != threadId else { return [threadId] }
+        return [out, threadId]
+    }
+
     @Environment(AppStore.self) private var store
     @Namespace private var shellGlass
 
@@ -418,10 +425,44 @@ struct MainShell: View {
                         // changes; the departure ran on the same main thread
                         // it was starving.
                         if let threadId = store.threadId {
-                            ThreadViewer(threadId: threadId)
-                                .id(threadId)
-                                .offset(flight.offset(in: geo.size))
-                                .opacity(flight.opacity)
+                            // THE GROUND THE EMAILS FLY OVER, and it does not
+                            // fly. Between one email leaving and the next
+                            // walking in there is a frame with no reader in
+                            // the window, and without this the sitrep under
+                            // it flashed through on every E and S. Only while
+                            // the flight CONTINUES: an exit that closes the
+                            // reader should reveal the sitrep as it goes.
+                            if store.skipTurn != nil || store.flightContinues {
+                                ReaderBackdrop()
+                                    .ignoresSafeArea()
+                            }
+                            // ONE READER, OR TWO FOR THE LENGTH OF AN S. A
+                            // ForEach keyed by thread id rather than an `.id`,
+                            // so the outgoing reader keeps its identity (and
+                            // its loaded mail) through the turn instead of
+                            // being rebuilt.
+                            ForEach(readerSlots(threadId), id: \.self) { id in
+                                let turn = store.skipTurn
+                                let outgoing = turn?.outgoing == id
+                                ThreadViewer(
+                                    threadId: id,
+                                    turn: turn.map { t in
+                                        outgoing
+                                            ? .init(
+                                                cardSlide: -0.3 * t.progress,
+                                                cardOpacity: 1 - 0.55 * t.progress,
+                                                headerOpacity: t.outgoingHeader,
+                                                incoming: false)
+                                            : .init(
+                                                cardSlide: 1 - t.progress,
+                                                cardOpacity: 1,
+                                                headerOpacity: t.incomingHeader,
+                                                incoming: true)
+                                    })
+                                .offset(outgoing ? .zero : flight.offset(in: geo.size))
+                                .opacity(outgoing ? 1 : flight.opacity)
+                                .allowsHitTesting(!outgoing)
+                            }
                         } else if let preview {
                             // No flight: a preview is opened and closed, never
                             // walked through.
@@ -431,6 +472,18 @@ struct MainShell: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipped()
+                    // THE SPACE WALK'S HINT, outside the flight: the emails fly
+                    // under it and it holds still, which is what lets it read
+                    // as part of the window rather than part of each email.
+                    .overlay(alignment: .topLeading) {
+                        if store.walk != nil, store.threadId != nil {
+                            WalkHint(canSkip: store.nextQueuedThread != nil)
+                                .padding(.top, TopBar.height + 10)
+                                .padding(.leading, 20)
+                                .transition(.opacity)
+                        }
+                    }
+                    .animation(.easeInOut(duration: 0.2), value: store.walk != nil)
 
                     if store.sideView.isOpen {
                         // Reserves the strip without taking clicks off the panel

@@ -26,7 +26,7 @@ final class PushRegistration {
     private var syncing = false
     private var needsAnotherSync = false
 
-    /// `.badge` rides along because the app icon carries the due-today count
+    /// `.badge` rides along because the app icon carries the For-your-eyes count
     /// (Model/Badge.swift). It is a separate grant from `.alert`, so a user can
     /// keep banners and refuse the number, and `setBadgeCount` then does nothing
     /// — which is the correct outcome, not a failure to handle.
@@ -55,7 +55,7 @@ final class PushRegistration {
         case .authorized:
             // BEST EFFORT, FOR THE INSTALLS THAT PREDATE THE BADGE. `.badge` was
             // not in the set this app asked for until the icon started carrying
-            // the due-today count, and iOS grants what was asked for at the
+            // the For-your-eyes count, and iOS grants what was asked for at the
             // time — so an install that said yes to alerts a month ago has no
             // badge permission and no prompt is coming. Asking again is silent
             // and instant on an already-authorized app (the system does not

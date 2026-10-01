@@ -19,18 +19,16 @@ struct ClientIdentityTests {
         }
         precondition(ClientIdentity.headerValue(version: nil) == nil, "No bundle version, no header")
 
-        // The stamp sets exactly the header the daemon reads, to exactly the
-        // value it was given.
+        // THE PATH THE APP TAKES: no argument, version read from the bundle.
+        // test.sh links ClientIdentityTests.plist into this binary as its
+        // Info.plist, so there is a version to read; without that, `current`
+        // is nil and a stamp that did nothing at all would pass.
+        precondition(
+            ClientIdentity.current == "macos/0.0.12",
+            "The version comes from the bundle's CFBundleShortVersionString")
         var request = URLRequest(url: URL(string: "https://daemon.example/client/stats")!)
-        request.identifyClient(as: value)
+        request.identifyClient()
         precondition(request.value(forHTTPHeaderField: "X-Passband-Client") == "macos/0.0.12")
-
-        // A test binary has no bundle version, and with none there is no
-        // header at all: a request is never sent a made-up one.
-        precondition(ClientIdentity.current == nil, "A test binary has no bundled version")
-        var silent = URLRequest(url: URL(string: "https://daemon.example/client/stats")!)
-        silent.identifyClient()
-        precondition(silent.value(forHTTPHeaderField: "X-Passband-Client") == nil)
 
         print("client-identity: ok")
     }

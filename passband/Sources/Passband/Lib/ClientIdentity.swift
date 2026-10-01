@@ -53,11 +53,8 @@ enum ClientIdentity {
 extension URLRequest {
     /// Name this app to the daemon the request is addressed to. Only for
     /// requests to the user's own daemon; see the top of this file.
-    ///
-    /// `value` is a parameter only so a test binary, which has no bundle
-    /// version to read, can exercise the stamp. Callers pass nothing.
-    mutating func identifyClient(as value: String? = ClientIdentity.current) {
-        guard let value else { return }
+    mutating func identifyClient() {
+        guard let value = ClientIdentity.current else { return }
         setValue(value, forHTTPHeaderField: ClientIdentity.headerField)
     }
 }

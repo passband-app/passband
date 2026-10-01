@@ -78,9 +78,13 @@ run_suite anthropic-stream \
 
 # What the app tells its daemon it is. The daemon drops anything that is not
 # <platform>/<dotted digits>, so the client must never build anything else.
+# The plist is linked in as the binary's Info.plist so the suite can read a
+# bundle version the way the app does; a bare test binary has none.
 run_suite client-identity \
   Sources/Passband/Lib/ClientIdentity.swift \
-  Tests/ClientIdentityTests.swift
+  Tests/ClientIdentityTests.swift \
+  -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist \
+  -Xlinker Tests/ClientIdentityTests.plist
 
 # Pairing pulls in Sessions.swift only because it builds its own URLSession
 # there; nothing in this suite makes a request. Same payoff as above: the code

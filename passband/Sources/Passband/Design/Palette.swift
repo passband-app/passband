@@ -110,6 +110,12 @@ enum Palette {
     static let readerBackground = Color(
         light: Color(hex: 0xF7FAFD), dark: Color(hex: 0x131A24))
 
+    /// A Reading card whose newest mail is something to read rather than a
+    /// promotion: a faint warm paper tint, so the pieces worth sitting down
+    /// with stand apart from the offers without shouting.
+    static let readingContent = Color(
+        light: Color(hex: 0xC9A15A).opacity(0.20), dark: Color(hex: 0xE8CF9E).opacity(0.12))
+
     /// The stand-in canvas when glass has nothing to sample.
     static let canvas = Color(light: Color(hex: 0xEDF3FA), dark: Color(hex: 0x0E141D))
 

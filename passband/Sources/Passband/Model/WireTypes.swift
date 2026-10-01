@@ -1967,11 +1967,23 @@ struct AgentFeedItem: Codable, Sendable {
         result.one_line = decision.summary
         return result
     }
+
+    /// A Reading piece meant to be read for its own sake (article, essay, post)
+    /// rather than a promotion. Decisions stored before `reading_kind` existed
+    /// fall back to the kinds triage already gave them: editorial and not
+    /// promotional.
+    var isReadingContent: Bool {
+        if let kind = decision.reading_kind { return kind == "content" }
+        return decision.kinds.contains("editorial") && !decision.kinds.contains("promotional")
+    }
 }
 
 struct AgentMessageDecision: Codable, Sendable {
     var kinds: [String]
     var destinations: [String]
+    /// "content" or "promotion" on Reading mail. ABSENT from an older daemon
+    /// and from decisions stored before it existed.
+    var reading_kind: String?
     var summary: String
     var reason: String
     var records: [AgentRecordProposal]?

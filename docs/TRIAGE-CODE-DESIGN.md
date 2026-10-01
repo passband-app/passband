@@ -76,6 +76,7 @@ enum ActionKind { Reply, Pay, Decide, Attend, Review, Other }
 struct MessageDecision {
     kinds: Vec<EmailKind>,                 // nonempty, unique; mixed content allowed
     destinations: Vec<MessageDestination>, // unique; FYE belongs to thread attention
+    reading_kind: Option<ReadingKind>,     // content | promotion on Reading mail; Reading sorts content first
     summary: String,
     reason: String,
     auth: AuthAssessment,

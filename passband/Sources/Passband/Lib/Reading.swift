@@ -22,6 +22,14 @@ struct ReadingSender: Identifiable, Hashable, Sendable {
     var items: [AttentionUpdate]
     /// The rule governing this sender, if any (drives the chip).
     var rule: SenderRule?
+    /// The items triage judged something to read (article, essay, post)
+    /// rather than a promotion.
+    var contentIds: Set<Int> = []
+
+    /// Content cards sort ahead of the rest and get their own tint. Taken from
+    /// the newest message, like `summary`, so the card's placement and the
+    /// summary it shows always agree, and `prune` stays right for free.
+    var isContent: Bool { items.first.map { contentIds.contains($0.id) } ?? false }
 
     var id: String { address }
 }
@@ -68,8 +76,14 @@ enum Reading {
 
     /// Group messages already selected for Reading by the agent. Grouping is
     /// presentation only: no sender shape, category, score or repetition test.
+    ///
+    /// `content` holds the ids triage judged to be content rather than
+    /// promotion; those senders sort first, newest-first within each half, and
+    /// the cap applies after, so a busy week of promotions never pushes the
+    /// reading off the board.
     static func derive(
-        updates: [AttentionUpdate], rules: [SenderRule], limit: Int = 24
+        updates: [AttentionUpdate], rules: [SenderRule], content: Set<Int> = [],
+        limit: Int = 24
     ) -> [ReadingSender] {
         let groups = Dictionary(grouping: updates) { SenderID.address($0.sender) }
         return groups.compactMap { address, messages -> ReadingSender? in
@@ -82,9 +96,13 @@ enum Reading {
                 address: address, sender: latest.senderString, count: ordered.count,
                 summary: latest.one_line, latest: dateOf(latest),
                 latestThreadId: latest.thread_id, items: ordered,
-                rule: rule(for: address, in: rules))
+                rule: rule(for: address, in: rules),
+                contentIds: content.intersection(ordered.map(\.id)))
         }
-        .sorted { $0.latest == $1.latest ? $0.address < $1.address : $0.latest > $1.latest }
+        .sorted { lhs, rhs in
+            if lhs.isContent != rhs.isContent { return lhs.isContent }
+            return lhs.latest == rhs.latest ? lhs.address < rhs.address : lhs.latest > rhs.latest
+        }
         .prefix(limit).map { $0 }
     }
 

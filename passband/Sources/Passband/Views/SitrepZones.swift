@@ -692,7 +692,9 @@ enum ReadingFeed {
             async let feed = APIClient.shared.getFeed(destination: "reading", limit: fetchLimit)
             async let rules = APIClient.shared.listRules()
             let (page, preferences) = try await (feed, rules)
-            return Reading.derive(updates: page.items.map(\.readingRow), rules: preferences)
+            let content = Set(page.items.filter(\.isReadingContent).map(\.message_id))
+            return Reading.derive(
+                updates: page.items.map(\.readingRow), rules: preferences, content: content)
         } catch {
             // Preserve the last successful reading feed on a transient error.
             return nil
@@ -757,7 +759,10 @@ private struct ReadingCard: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Palette.hairline.opacity(hovering ? 0.85 : 0.5))
+                    .fill(
+                        sender.isContent
+                            ? Palette.readingContent.opacity(hovering ? 1 : 0.7)
+                            : Palette.hairline.opacity(hovering ? 0.85 : 0.5))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)

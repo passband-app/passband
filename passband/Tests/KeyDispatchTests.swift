@@ -39,6 +39,7 @@ struct KeyDispatchTests {
         aHoldSwallowsItsOwnRepeatsAndHearsTheRelease()
         aHoldIsReleasedWhateverShiftDid()
         aCancelledHoldSaysSo()
+        aHoldOutlivesTheSurfaceThatStartedIt()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -236,6 +237,27 @@ struct KeyDispatchTests {
             equal(releases, [true], "cancelled")
             equal(KeyRegistry.shared.release(KeyEventLike(key: "e")), false, "and it is over")
         }
+    }
+
+    /// The reader's plain `e`: it closes the reader on key-down, so its set is
+    /// gone before the first autorepeat. The repeats must STILL go nowhere, not
+    /// to the `e` on the list underneath, until the key comes up.
+    static func aHoldOutlivesTheSurfaceThatStartedIt() {
+        let registry = KeyRegistry.shared
+        let under = registry.register(.thread, box: KeyRegistry.BindingsBox([
+            KeyBinding("e", "list done") { ran.append("list") }
+        ]))
+        stage([[KeyBinding("e", "reader done", onRelease: { _ in }) { ran.append("reader") }]]) {
+            equal(press("e"), ["reader"], "the reader takes the press")
+        }
+        let ctx = registry.pushContext(.thread)
+        ran = []
+        _ = registry.dispatch(KeyEventLike(key: "e", isRepeat: true), editing: false)
+        equal(ran, [], "a repeat after the reader closed reaches nothing")
+        equal(registry.release(KeyEventLike(key: "e")), true, "the key-up ends it")
+        equal(press("e"), ["list"], "the next real press is the list's")
+        registry.popContext(ctx)
+        registry.unregister(under)
     }
 
     /// Register `sets` into the thread context IN ORDER — later sets are asked

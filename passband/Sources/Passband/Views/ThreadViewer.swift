@@ -1414,8 +1414,12 @@ struct ThreadViewer: View {
                     "e", "done (hold: the whole stack)",
                     onRelease: { cancelled in endStackHold(cancelled: cancelled) }
                 ) { beginStackHold() }
-                : KeyBinding("e", "done") { Task { await doneAndClose() } },
-            KeyBinding("d", "done") { Task { await doneAndClose() } },
+                : KeyBinding("e", "done", onRelease: Self.swallowUntilKeyUp) {
+                    Task { await doneAndClose() }
+                },
+            KeyBinding("d", "done", onRelease: Self.swallowUntilKeyUp) {
+                Task { await doneAndClose() }
+            },
             KeyBinding("E", "done + next") { Task { await doneAndNext() } },
             KeyBinding("D", "done + next") { Task { await doneAndNext() } },
             // Plain `h`, the same key as every other surface — it took "prev
@@ -1733,12 +1737,18 @@ struct ThreadViewer: View {
 
     // MARK: - hold e: the whole stack
 
+    /// A done that closes the reader is a HOLD with nothing to do on release:
+    /// the reader is gone after the first key-down, so the key's autorepeats
+    /// would otherwise land on the surface underneath and mark whatever row the
+    /// cursor is on there. Holding it owns the key until it comes back up.
+    private static let swallowUntilKeyUp: (Bool) -> Void = { _ in }
+
     /// How long a press has to last before it stops being a tap. Short enough
     /// that the ring answers a deliberate hold at once, long enough that a
     /// quick `e` never flashes it.
     private static let holdGrace: Duration = .milliseconds(180)
     /// How long the ring takes to close, counted from when it appears.
-    static let holdDuration: Duration = .milliseconds(1500)
+    static let holdDuration: Duration = .milliseconds(1000)
 
     /// What a held `e` would clear: the stack's rows not already done.
     private var stackRemaining: [AttentionUpdate] {
@@ -2955,7 +2965,7 @@ private struct UnsubConfirm: View {
 /// being held is the only input it has.
 ///
 /// The ring is drawn from the clock rather than animated to a value, so it is
-/// the same 1.5s the reader is waiting on and cannot finish early or late.
+/// the same second the reader is waiting on and cannot finish early or late.
 private struct StackDoneHold: View {
     let startedAt: Date
     let duration: Duration

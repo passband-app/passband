@@ -58,7 +58,11 @@ struct WhatsNewCard: View {
     private static var pageHeight: CGFloat { artHeight + Space.scaled(128) }
 
     var body: some View {
-        OverlayScrim(onDismiss: dismiss) {
+        // A CLICK NEVER CLOSES IT. The scrim's backdrop click is the shortcuts
+        // sheet's way out, and here it was a way to lose the whole walk to one
+        // stray click, on the dim or on a quiet part of the card (which falls
+        // through to it). The card closes from its last page and nowhere else.
+        OverlayScrim(onDismiss: {}) {
             VStack(spacing: 0) {
                 if let newest = notes.first {
                     if features.isEmpty {
@@ -91,7 +95,9 @@ struct WhatsNewCard: View {
         }
         .keyContext(.modal)
         .keyBindings(.modal, [
-            KeyBinding("Escape", "close what's new") { dismiss() },
+            // Esc is "let me out", so it goes to the page that can: the last
+            // one, where Got it is. From there it closes.
+            KeyBinding("Escape", "skip to the end") { escape() },
             KeyBinding("Enter", "next") { advance() },
             KeyBinding("ArrowRight", "next") { go(to: page + 1) },
             KeyBinding("ArrowLeft", "back") { go(to: page - 1) },
@@ -103,6 +109,10 @@ struct WhatsNewCard: View {
     /// Next, and on the last page the same button closes the card.
     private func advance() {
         if onLast { dismiss() } else { go(to: page + 1) }
+    }
+
+    private func escape() {
+        if onLast { dismiss() } else { go(to: pageCount - 1) }
     }
 
     private func go(to target: Int) {

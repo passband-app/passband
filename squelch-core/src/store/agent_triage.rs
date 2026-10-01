@@ -29,6 +29,8 @@ pub struct AgentMessage {
     pub subject: String,
     pub body: String,
     pub received_at: String,
+    /// Authored by the account, which is wider than the stored `is_sent`
+    /// column: it is also true of the user's own mail that landed in the inbox.
     pub is_sent: bool,
     pub is_spam: bool,
     pub status: String,

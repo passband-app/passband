@@ -358,16 +358,52 @@ impl SqliteStore {
         let tx = conn.transaction()?;
         let now = Utc::now().to_rfc3339();
         let cutoff = (Utc::now() - chrono::Duration::days(days as i64)).to_rfc3339();
-        let ids = {
-            let mut stmt = tx.prepare(
-                "SELECT id FROM messages WHERE account_id=?1 AND
-                 ((?2 IS NOT NULL AND id=?2) OR
-                  (?2 IS NULL AND received_at>=?3 AND is_sent=0 AND is_spam=0))",
-            )?;
-            stmt.query_map(params![account_id, message_id, cutoff], |row| {
-                row.get::<_, i64>(0)
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?
+        // THE USER'S OWN MAIL HAS NO VERDICT TO REDO (see `OWN_MAIL`): it is
+        // never triaged, only reviewed for access. A window therefore skips it,
+        // and one named message that turns out to be theirs stands for the
+        // conversation, so the request goes to the newest inbound message in
+        // the thread. Enqueued as itself it would queue an access review and
+        // answer the human with nothing.
+        let ids = match message_id {
+            Some(id) => {
+                let named: Option<(String, bool)> = tx
+                    .query_row(
+                        concat!(
+                            "SELECT m.thread_id,",
+                            own_mail_sql!(),
+                            " AND m.is_spam=0 FROM messages m WHERE m.account_id=?1 AND m.id=?2"
+                        ),
+                        params![account_id, id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()?;
+                let inbound: Option<i64> = match &named {
+                    Some((thread, true)) if !thread.is_empty() => tx
+                        .query_row(
+                            concat!(
+                                "SELECT m.id FROM messages m WHERE m.account_id=?1 AND m.thread_id=?2
+                                 AND NOT ",
+                                own_mail_sql!(),
+                                " AND m.is_spam=0 ORDER BY m.received_at DESC,m.id DESC LIMIT 1"
+                            ),
+                            params![account_id, thread],
+                            |row| row.get(0),
+                        )
+                        .optional()?,
+                    _ => None,
+                };
+                named.map(|_| inbound.unwrap_or(id)).into_iter().collect()
+            }
+            None => {
+                let mut stmt = tx.prepare(concat!(
+                    "SELECT m.id FROM messages m WHERE m.account_id=?1 AND m.received_at>=?2
+                     AND NOT ",
+                    own_mail_sql!(),
+                    " AND m.is_spam=0"
+                ))?;
+                stmt.query_map(params![account_id, cutoff], |row| row.get::<_, i64>(0))?
+                    .collect::<std::result::Result<Vec<_>, _>>()?
+            }
         };
         // One named message is a human waiting on an answer: foreground, so it
         // pays from the global budget only. A window stays background so one

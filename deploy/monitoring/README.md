@@ -153,9 +153,10 @@ kubectl -n monitoring top pod -l app.kubernetes.io/name=prometheus-agent
   all, from the daemon's per-route request counters, so it reaches back only
   as far as Prometheus's 30 days; plus the newest Mac and iOS app version to
   have connected and when, from `squelchd_client_last_seen_timestamp_seconds`,
-  which the daemon keeps in its own store and which stays blank until both
-  the daemon and the app are on a release that knows the `X-Passband-Client`
-  header), pod count vs the 100-user cap, per-tenant CPU/memory/PVC/restarts.
+  which the daemon keeps in its own store; those columns do not appear until
+  some daemon exports the metric, and read `-` for a tenant whose daemon or
+  app predates the `X-Passband-Client` header), pod count vs the 100-user
+  cap, per-tenant CPU/memory/PVC/restarts.
 - **Daemon rollout** — which image version each tenant pod runs, and the
   switchover as it happens, plus the roller's own two vital signs: a casualty
   (a roll that exited 4, the fleet frozen, the one thing worth a page) and how

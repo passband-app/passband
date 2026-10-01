@@ -4809,6 +4809,7 @@ fn human_inventory(
                 preview: Some(row.snippet),
             },
             status,
+            received_at: Some(row.received),
             surfaced_at: row.surfaced,
             resolved_at: row.resolved,
             remind_at: row.reminder,
@@ -4895,6 +4896,8 @@ mod inventory_tests {
             .unwrap();
         assert!(item.update.deadline.is_none());
         assert_eq!(item.deadline_date.as_deref(), Some("2026-10-05"));
+        // The mail list dates rows by arrival, so every inventory row carries it.
+        assert!(item.received_at.is_some());
     }
 
     #[test]

@@ -141,6 +141,7 @@ final class Prefs {
         static let assistantTransport = "passband.assistant.transport"
         static let searchLaneModel = "passband.search.lane.model"
         static let deeperSearch = "passband.search.deeper"
+        static let mailShowsDone = "passband.pref.mailShowsDone"
         static let telemetry = TelemetryLevel.prefKey
     }
 
@@ -160,6 +161,7 @@ final class Prefs {
             Key.notificationSound: NotificationSound.system.rawValue,
             Key.telemetry: TelemetryLevel.full.rawValue,
             Key.deeperSearch: DeeperSearchChoice.automatic.rawValue,
+            Key.mailShowsDone: false,
         ])
         _loadRemoteImages = defaults.bool(forKey: Key.loadRemoteImages)
         _settingsSection =
@@ -200,6 +202,7 @@ final class Prefs {
         _deeperSearch =
             DeeperSearchChoice(rawValue: defaults.string(forKey: Key.deeperSearch) ?? "")
             ?? .automatic
+        _mailShowsDone = defaults.bool(forKey: Key.mailShowsDone)
 
         // LAST, because it writes: the verdict above has to be PINNED on the
         // launch that reaches it, not re-derived on the next one. A seed lands
@@ -468,6 +471,18 @@ final class Prefs {
         set {
             _deeperSearch = newValue
             defaults.set(newValue.rawValue, forKey: Key.deeperSearch)
+        }
+    }
+
+    /// The all-mail page's "to do / everything" switch. Remembered because
+    /// somebody who reads mail as one long list wants that list every time,
+    /// and a page that forgot overnight would hide their finished mail again.
+    private var _mailShowsDone: Bool
+    var mailShowsDone: Bool {
+        get { _mailShowsDone }
+        set {
+            _mailShowsDone = newValue
+            defaults.set(newValue, forKey: Key.mailShowsDone)
         }
     }
 

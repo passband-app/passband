@@ -358,10 +358,10 @@ impl SqliteStore {
                 update,
                 status: AttentionStatus::parse(&r.get::<_, String>(9)?)
                     .unwrap_or(AttentionStatus::New),
+                received_at: dt_opt(r, 15)?,
                 surfaced_at: dt_opt(r, 10)?,
                 resolved_at: dt_opt(r, 11)?,
-                // HUMAN DOOR again: columns 16/17, past the `received_at` (15)
-                // the outer sort needs but no field reads.
+                // HUMAN DOOR again: columns 16/17, past the `received_at` (15).
                 remind_at: dt_opt(r, 16)?,
                 reminded_at: dt_opt(r, 17)?,
             })

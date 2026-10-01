@@ -224,6 +224,12 @@ pub struct AttentionUpdate {
     #[serde(flatten)]
     pub update: Update,
     pub status: AttentionStatus,
+    /// When the mail ARRIVED, which is what a mail list dates and sorts by.
+    /// `surfaced_at` is when Passband first listed it, and for anything that
+    /// came in through a backfill the two are days apart. Optional on the wire
+    /// so an older client's decode and an older daemon's rows both still work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub received_at: Option<DateTime<Utc>>,
     pub surfaced_at: Option<DateTime<Utc>>,
     pub resolved_at: Option<DateTime<Utc>>,
     /// A PENDING reminder: when the user asked to see this again, `None` when

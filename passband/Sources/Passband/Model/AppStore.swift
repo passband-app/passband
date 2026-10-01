@@ -1560,6 +1560,7 @@ final class AppStore {
         remindersLoadedAt = nil
         remindersRefresh = nil
         reminderFilter = false
+        mailFilter = .all
         // The panel's state AND the conversation beside it. A lane left running
         // here would finish a search of the old mailbox into the new one's
         // panel, cards and all — it holds thread ids that mean something else
@@ -2345,14 +2346,14 @@ final class AppStore {
             // below return rather than fall through, so the `isLoading` write
             // at the bottom is only ever reached by the live epoch.
             guard e == epoch else { return }
-            // Done/archived mail leaves the inbox (gmail semantics), which also
-            // keeps auto-resolved receipts out — they're rail records, not rows.
+            // DONE MAIL STAYS IN THE CACHE. The page hides it on "to do" and
+            // shows it dimmed on "everything" (`MailList.visible`), and that is
+            // a view decision made per render, not a fetch decision made here.
             // The sort key is a date parse, taken ONCE per row rather than
             // twice per comparison: five hundred rows is nine thousand
             // comparisons, each of which took the date cache's lock twice.
             let next =
                 fetched.items
-                .filter { $0.status != .done }
                 .map { ($0, Self.receivedTS($0)) }
                 .sorted { a, b in a.1 != b.1 ? a.1 > b.1 : a.0.id > b.0.id }
                 .map(\.0)
@@ -2389,11 +2390,12 @@ final class AppStore {
         if page != before { mailPages[mode] = page }
     }
 
-    /// Epoch for "order received": surfaced_at approximates arrival, and items
-    /// the triage loop hasn't surfaced yet are the newest mail, so they sort to
-    /// the top. Ties (and the nil bucket) break on id, which is ingest order.
+    /// Epoch for "order received": the arrival stamp, or on an older daemon
+    /// surfaced_at, where items nothing has surfaced yet are the newest mail
+    /// and sort to the top. Ties (and the nil bucket) break on id, which is
+    /// ingest order.
     private static func receivedTS(_ u: AttentionUpdate) -> Double {
-        guard let s = u.surfaced_at else { return .greatestFiniteMagnitude }
+        guard let s = u.arrivedAt else { return .greatestFiniteMagnitude }
         return Fmt.date(s)?.timeIntervalSince1970 ?? 0
     }
 
@@ -2468,6 +2470,12 @@ final class AppStore {
     /// A FILTER, not a fourth MailMode: the segments are three pages of mail,
     /// and this is a lens over one of them that the Escape ladder sheds first.
     var reminderFilter = false
+
+    /// The all-mail page's other lenses (important / deadlines / attachments).
+    /// Separate from `reminderFilter` because that one swaps the DATA SOURCE
+    /// and these only narrow the rows already on screen; the filter bar keeps
+    /// the two mutually exclusive.
+    var mailFilter: MailFilter = .all
 
     // MARK: - the provider's spam folder
 

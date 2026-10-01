@@ -448,3 +448,14 @@ run_suite reading \
   Sources/Passband/Lib/SenderIdentity.swift \
   Sources/Passband/Lib/Reading.swift \
   Tests/ReadingTests.swift
+
+# The all-mail list: to do / everything, the filter lenses, day headings,
+# and the arrival stamp an older daemon does not send.
+run_suite mail-list \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Format.swift \
+  Sources/Passband/Lib/AsyncMemo.swift \
+  Sources/Passband/Lib/SenderIdentity.swift \
+  Sources/Passband/Lib/MailList.swift \
+  Tests/MailListTests.swift

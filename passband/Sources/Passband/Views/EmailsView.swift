@@ -58,10 +58,29 @@ struct EmailsView: View {
     /// The parked rows skip it entirely, and must: setting a reminder resolves
     /// the thread, so every id on that list is in `resolvedIds` by construction
     /// and the filter would empty the page it just filled.
+    ///
+    /// Done mail is in the cache (see `performMailRefresh`): "to do" drops it,
+    /// "everything" keeps it and the row dims. The filter bar's lens narrows
+    /// the inbox only — noise has no important mail by definition, and spam
+    /// has no verdict for any lens to read.
     private var rows: [AttentionUpdate] {
         let cached = page.value ?? []
-        return reminders ? cached : cached.filter { !store.resolvedIds.contains($0.id) }
+        if reminders { return cached }
+        return MailList.visible(
+            cached, showDone: showDone, filter: filter, resolved: store.resolvedIds)
     }
+    /// The "to do / everything" switch, on the two pages that have one.
+    private var hasDoneSwitch: Bool { !reminders && (mode == .inbox || mode == .noise) }
+    private var showDone: Bool { hasDoneSwitch && Prefs.shared.mailShowsDone }
+    private var filter: MailFilter { mode == .inbox && !reminders ? store.mailFilter : .all }
+    /// Finished, as this page draws it. Never on the reminder lens, whose rows
+    /// are all resolved by construction and are the point of the lens.
+    private func isDone(_ u: AttentionUpdate) -> Bool {
+        !reminders && MailList.isDone(u, resolved: store.resolvedIds)
+    }
+    /// What the reader walks with "done + next": the rows still to do. On
+    /// "everything" that skips the dimmed ones, which have nothing to finish.
+    private var queue: [AttentionUpdate] { showDone ? rows.filter { !isDone($0) } : rows }
     /// Sent rows are NOT filtered against `resolvedIds`: a resolve is an inbox
     /// verdict, and it must never delete a record of something you sent.
     private var sent: [SentItem] { sentPage.value ?? [] }
@@ -129,6 +148,9 @@ struct EmailsView: View {
                     .padding(.horizontal, 18)
                     .padding(.top, 10)
             }
+            if mode == .inbox || mode == .noise {
+                MailFilterBar(mode: mode, rows: page.value ?? [], showDone: showDone)
+            }
             #if os(macOS)
                 desktopList
             #else
@@ -181,9 +203,12 @@ struct EmailsView: View {
         // that survived one would silently re-narrow the inbox on the way back.
         .onChange(of: mode) { _, _ in
             store.reminderFilter = false
+            store.mailFilter = .all
             resetCursor()
         }
         .onChange(of: reminders) { _, _ in resetCursor() }
+        .onChange(of: store.mailFilter) { _, _ in resetCursor() }
+        .onChange(of: Prefs.shared.mailShowsDone) { _, _ in resetCursor() }
         // Jump to (and highlight) a hand-off target from the sitrep rails.
         .onChange(of: store.selectedId) { _, id in
             guard let id, let i = rows.firstIndex(where: { $0.id == id }) else { return }
@@ -222,9 +247,13 @@ struct EmailsView: View {
             BandNote(
                 reminders
                     ? "No pending reminders."
-                    : mode == .noise
-                        ? "No noise in the last 30 days."
-                        : mode == .spam ? spamEmptyNote : "No mail.")
+                    : filter != .all
+                        ? "Nothing in the last 30 days matches \(filter.label)."
+                        : !showDone && hasDoneSwitch && !(page.value ?? []).isEmpty
+                            ? "All caught up. Choose Everything to see mail you have finished."
+                            : mode == .noise
+                                ? "No noise in the last 30 days."
+                                : mode == .spam ? spamEmptyNote : "No mail.")
         }
     }
 
@@ -355,23 +384,19 @@ struct EmailsView: View {
                             sentList
                         } else if !hasRows {
                             note
-                        } else {
+                        } else if reminders {
+                            // Sorted by when each comes BACK, so a heading of
+                            // when each arrived would scatter the list.
                             ForEach(Array(rows.enumerated()), id: \.element.id) { i, u in
-                                UpdateRow(
-                                    update: u,
-                                    selected: kbActive && i == index,
-                                    verbHint: mode == .spam ? "[i][e][d]" : "[r][e][d]",
-                                    onHover: {
-                                        // A hover must NOT follow-scroll: a row near
-                                        // the viewport edge would jump the list out
-                                        // from under the cursor.
-                                        hovering = true
-                                        kbActive = false
-                                        index = i
-                                    },
-                                    onOpen: { store.openThread(u.thread_id, queue: rows) }
-                                )
-                                .id(u.id)
+                                mailRow(u, at: i)
+                            }
+                        } else {
+                            ForEach(MailList.sections(rows), id: \.start) { section in
+                                DayHeading(section.title, first: section.start == 0)
+                                ForEach(Array(section.rows.enumerated()), id: \.element.id) {
+                                    j, u in
+                                    mailRow(u, at: section.start + j)
+                                }
                             }
                         }
                     }
@@ -388,6 +413,27 @@ struct EmailsView: View {
             .onContinuousHover { phase in
                 if case .ended = phase { hovering = false }
             }
+        }
+    #endif
+
+    #if os(macOS)
+        /// One row of the inbox / noise / spam list at flat position `i`.
+        private func mailRow(_ u: AttentionUpdate, at i: Int) -> some View {
+            MailRow(
+                update: u,
+                selected: kbActive && i == index,
+                done: isDone(u),
+                verbHint: mode == .spam ? "[i][e][d]" : "[r][e][d]",
+                onHover: {
+                    // A hover must NOT follow-scroll: a row near the viewport
+                    // edge would jump the list out from under the cursor.
+                    hovering = true
+                    kbActive = false
+                    index = i
+                },
+                onOpen: { store.openThread(u.thread_id, queue: queue) }
+            )
+            .id(u.id)
         }
     #endif
 
@@ -412,24 +458,35 @@ struct EmailsView: View {
                     sentList.plainRow()
                 } else if !hasRows {
                     note.plainRow()
+                } else if reminders {
+                    ForEach(rows) { u in phoneRow(u) }
                 } else {
-                    ForEach(rows) { u in
-                        let verbs = UpdateVerbs(update: u, queue: rows)
-                        UpdateRow(
-                            update: u,
-                            selected: false,
-                            onHover: {},
-                            onOpen: verbs.open
-                        )
-                        .plainRow()
-                        .swipeVerbs(verbs)
-                        .updateContextMenu(verbs)
+                    ForEach(MailList.sections(rows), id: \.start) { section in
+                        Section {
+                            ForEach(section.rows) { u in phoneRow(u) }
+                        } header: {
+                            DayHeading(section.title, first: section.start == 0)
+                        }
                     }
                 }
             }
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
             .environment(\.defaultMinListRowHeight, 0)
+        }
+
+        @ViewBuilder private func phoneRow(_ u: AttentionUpdate) -> some View {
+            let verbs = UpdateVerbs(update: u, queue: queue)
+            UpdateRow(
+                update: u,
+                selected: false,
+                onHover: {},
+                onOpen: verbs.open
+            )
+            .opacity(isDone(u) ? 0.55 : 1)
+            .plainRow()
+            .swipeVerbs(verbs)
+            .updateContextMenu(verbs)
         }
     #endif
 
@@ -603,18 +660,7 @@ struct EmailsView: View {
                         .font(Typo.micro).foregroundStyle(Palette.inkFaintest)
                 }
             }
-            // The reminder lens. Inbox only: `noise` and `sent` are pages, and
-            // narrowing either of them to parked mail would answer a question
-            // nobody asked from there.
-            if mode == .inbox {
-                ChromeChip(
-                    icon: reminders ? "bell.fill" : "bell",
-                    font: .system(size: 12),
-                    tone: reminders ? Palette.accent : Palette.inkFaint,
-                    help: "mail with pending reminders (h sets one)"
-                ) { store.reminderFilter.toggle() }
-                .accessibilityLabel(reminders ? "showing pending reminders" : "pending reminders")
-            }
+            // The reminder lens moved into the filter bar, beside the others.
             RetriageButton()
             ChromeChip(
                 text: "peer-review", font: .system(size: 12),
@@ -642,7 +688,9 @@ struct EmailsView: View {
             // the inbox steps back to it, and only then does Escape leave the
             // tab. Each rung undoes the narrowing you did last.
             KeyBinding("Escape", "back") {
-                if reminders {
+                if filter != .all {
+                    store.mailFilter = .all
+                } else if reminders {
                     store.reminderFilter = false
                 } else if mode != .inbox {
                     store.mailMode = .inbox
@@ -672,7 +720,7 @@ struct EmailsView: View {
                 } else if let u = selected {
                     // The ordered rows become the viewer's queue, so "done + next"
                     // (e/d) can advance in place.
-                    store.openThread(u.thread_id, queue: rows)
+                    store.openThread(u.thread_id, queue: queue)
                 }
             },
             KeyBinding("v", "fix triage") {
@@ -685,7 +733,7 @@ struct EmailsView: View {
             // queue Enter does — done + next keeps working from inside the reader.
             KeyBinding("r", "reply") {
                 guard triageable, let u = selected else { return }
-                Actions.reply(u, queue: rows)
+                Actions.reply(u, queue: queue)
             },
             // `sender` IS the address on this wire type (see AttentionUpdate's
             // SenderStringConvertible note) — the display name would search the
@@ -776,12 +824,13 @@ struct EmailsView: View {
     }
 
     private func resolveSelected() {
-        guard triageable, let u = selected else { return }
+        guard triageable, let u = selected, !isDone(u) else { return }
         Task { await Actions.done(u) }
-        // `rows` already filters on resolvedIds, so the row leaves on the next
-        // frame regardless; this keeps it out of the cached page too, so the
-        // next poll cannot briefly hand it back.
-        store.removeFromMail(u.id)
+        // NOT evicted from the cached page: `Actions.done` records the id in
+        // `resolvedIds`, which is all `rows` needs to drop the row on "to do"
+        // or dim it on "everything" on the next frame. A poll that lands before
+        // the server agrees still cannot hand it back for the same reason, and
+        // an undo, which clears the id, brings it back at once.
     }
 }
 

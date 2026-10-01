@@ -1773,7 +1773,11 @@ struct ThreadViewer: View {
         let wasTap = holdStartedAt == nil
         holdToken = nil
         withAnimation(Motion.disclose) { holdStartedAt = nil }
-        if wasTap && !cancelled { Task { await doneAndClose() } }
+        // The reader can have left between the key going down and coming up (Esc
+        // inside the grace). A tap then belongs to nothing: done on the closed
+        // thread would mark mail the reader just walked away from.
+        guard wasTap, !cancelled, store.threadId == threadId else { return }
+        Task { await doneAndClose() }
     }
 
     /// The ring closed: every email left in this sender's stack is done, in one

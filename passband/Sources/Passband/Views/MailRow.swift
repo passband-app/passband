@@ -124,17 +124,19 @@ struct MailRow: View {
                             .foregroundStyle(Palette.inkFaint)
                             .accessibilityLabel("has attachments")
                     }
-                    // A FIXED COLUMN when there is a zone, so the labels line up
-                    // down the list; NOTHING when there is not (an older
-                    // daemon sends none), rather than a blank column.
-                    if let zone = SitrepZone(update.placement) {
-                        PlacementLabel(zone: zone)
-                            .frame(width: 112, alignment: .leading)
-                    }
+                    // Left of the pill, so a selected row's hint never pushes
+                    // the pill out of line with the rows around it.
                     if selected {
                         Text(verbHint)
                             .font(Typo.mono(9))
                             .foregroundStyle(Palette.inkFaintest)
+                    }
+                    // THE SITREP ZONE, as a pill HUGGING ITS TEXT and right
+                    // aligned against the fixed time column, so the pills'
+                    // right edges line up down the list and every point a
+                    // short name does not use goes to the summary instead.
+                    if let zone = SitrepZone(update.placement) {
+                        PlacementPill(zone: zone)
                     }
                     // ARRIVAL ONLY. A daemon that does not send `received_at`
                     // has no arrival to print, and its listing time (every
@@ -145,7 +147,9 @@ struct MailRow: View {
                             .font(.system(size: 11.5, weight: emphasized ? .semibold : .regular))
                             .monospacedDigit()
                             .foregroundStyle(emphasized ? Palette.inkDim : Palette.inkFaint)
-                            .frame(minWidth: 52, alignment: .trailing)
+                            // FIXED, not a minimum: it is the edge the pills
+                            // line up against ("Sep 28, 2025" is the widest).
+                            .frame(width: 76, alignment: .trailing)
                     }
                 }
                 .layoutPriority(3)
@@ -184,21 +188,13 @@ struct MailRow: View {
 /// The sitrep zone a row lives in, by the daemon's `placement`. Same symbols
 /// and names as the sitrep's own zone headers, so the label points at a place
 /// the user has seen.
-enum SitrepZone {
+enum SitrepZone: String, CaseIterable {
+    // The raw values ARE the wire's `placement` strings.
     case eyes, auth, calendar, shipments, billing, receipts, reading, noise
 
     init?(_ wire: String?) {
-        switch wire {
-        case "eyes": self = .eyes
-        case "auth": self = .auth
-        case "calendar": self = .calendar
-        case "shipments": self = .shipments
-        case "billing": self = .billing
-        case "receipts": self = .receipts
-        case "reading": self = .reading
-        case "noise": self = .noise
-        default: return nil
-        }
+        guard let wire, let zone = SitrepZone(rawValue: wire) else { return nil }
+        self = zone
     }
 
     var title: String {
@@ -239,23 +235,27 @@ enum SitrepZone {
     }
 }
 
-/// The zone as an icon and its name, quiet enough to sit in every row.
-struct PlacementLabel: View {
-    let zone: SitrepZone?
+/// The zone as a tinted pill: its icon and name on a wash of its colour, the
+/// whole capsule filled evenly (never one lit edge). Noise is a neutral grey,
+/// the one zone that should not catch the eye.
+struct PlacementPill: View {
+    let zone: SitrepZone
 
     var body: some View {
-        if let zone {
-            HStack(spacing: 4) {
-                Image(systemName: zone.symbol)
-                    .font(.system(size: 9.5, weight: .semibold))
-                    .foregroundStyle(zone.tint)
-                Text(zone.title)
-                    .font(Typo.micro)
-                    .foregroundStyle(zone == .noise ? Palette.inkFaintest : Palette.inkFaint)
-                    .lineLimit(1)
-            }
-        } else {
-            Color.clear.frame(height: 1)
+        let tint = zone == .noise ? Palette.inkFaint : zone.tint
+        HStack(spacing: 4) {
+            Image(systemName: zone.symbol)
+                .font(.system(size: 9, weight: .semibold))
+            Text(zone.title)
+                .font(Typo.micro)
+                .lineLimit(1)
+                .fixedSize()
         }
+        .foregroundStyle(tint)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 2.5)
+        .background(Capsule().fill(tint.opacity(zone == .noise ? 0.10 : 0.15)))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("filed under \(zone.title)")
     }
 }

@@ -104,6 +104,18 @@ struct MailListTests {
         }
         precondition(MailList.sections(odd, now: now, calendar: cal).count == 1)
 
+        // The category picker: a hidden zone's mail drops out; mail with no
+        // zone always shows; counts follow.
+        var shipping = row(40); shipping.placement = "shipments"
+        var eyes = row(41); eyes.placement = "eyes"
+        let unzoned = row(42)
+        let picked = MailList.visible(
+            [shipping, eyes, unzoned], showDone: true, filter: .all, resolved: [],
+            hiddenZones: ["shipments"])
+        precondition(picked.map(\.id) == [41, 42], "got \(picked.map(\.id))")
+        precondition(
+            MailList.counts([shipping, eyes], showDone: true, resolved: [], hiddenZones: ["shipments"])[.important] == 1)
+
         // Within a day, importance first; days keep their order.
         func ranked(_ id: Int, _ importance: Int, _ at: String) -> AttentionUpdate {
             var u = row(id, received: at); u.importance = importance; return u

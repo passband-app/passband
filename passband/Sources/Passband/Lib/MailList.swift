@@ -61,11 +61,17 @@ enum MailList {
     }
 
     /// The rows a mail page shows, in the order fetched.
+    ///
+    /// `hiddenZones` are the category picker's unticked sitrep zones (the
+    /// wire's `placement` strings). Mail with no placement (untriaged, or from
+    /// an older daemon) has no category to hide by, so it always shows.
     static func visible(
-        _ rows: [AttentionUpdate], showDone: Bool, filter: MailFilter, resolved: Set<Int>
+        _ rows: [AttentionUpdate], showDone: Bool, filter: MailFilter, resolved: Set<Int>,
+        hiddenZones: Set<String> = []
     ) -> [AttentionUpdate] {
         rows.filter { u in
             (showDone || !isDone(u, resolved: resolved)) && filter.matches(u)
+                && !(u.placement.map(hiddenZones.contains) ?? false)
         }
     }
 
@@ -109,10 +115,14 @@ enum MailList {
 
     /// Counts per lens, for the filter bar's chips.
     static func counts(
-        _ rows: [AttentionUpdate], showDone: Bool, resolved: Set<Int>
+        _ rows: [AttentionUpdate], showDone: Bool, resolved: Set<Int>,
+        hiddenZones: Set<String> = []
     ) -> [MailFilter: Int] {
         var out: [MailFilter: Int] = [:]
-        for u in rows where showDone || !isDone(u, resolved: resolved) {
+        for u in rows
+        where (showDone || !isDone(u, resolved: resolved))
+            && !(u.placement.map(hiddenZones.contains) ?? false)
+        {
             for f in MailFilter.allCases where f.matches(u) { out[f, default: 0] += 1 }
         }
         return out
@@ -137,6 +147,7 @@ enum MailList {
             var showDone: Bool
             var filter: MailFilter
             var resolved: Set<Int>
+            var hiddenZones: Set<String>
             var grouped: Bool
             var day: Date
         }
@@ -147,14 +158,17 @@ enum MailList {
         /// reminder lens, sorted by when each comes back).
         func of(
             _ source: [AttentionUpdate], showDone: Bool, filter: MailFilter,
-            resolved: Set<Int>, grouped: Bool, now: Date = Date()
+            resolved: Set<Int>, hiddenZones: Set<String> = [], grouped: Bool,
+            now: Date = Date()
         ) -> Output {
             let k = Key(
                 source: source, showDone: showDone, filter: filter, resolved: resolved,
-                grouped: grouped, day: Calendar.current.startOfDay(for: now))
+                hiddenZones: hiddenZones, grouped: grouped,
+                day: Calendar.current.startOfDay(for: now))
             if k == key { return output }
             let shown = MailList.visible(
-                source, showDone: showDone, filter: filter, resolved: resolved)
+                source, showDone: showDone, filter: filter, resolved: resolved,
+                hiddenZones: hiddenZones)
             if grouped {
                 let rows = MailList.ordered(shown)
                 output = Output(rows: rows, sections: MailList.sections(rows, now: now))
@@ -170,12 +184,20 @@ enum MailList {
     @MainActor
     final class Counts {
         static let shared = Counts()
-        private var key: ([AttentionUpdate], Bool, Set<Int>)?
+        private var key: ([AttentionUpdate], Bool, Set<Int>, Set<String>)?
         private var value: [MailFilter: Int] = [:]
-        func of(_ rows: [AttentionUpdate], showDone: Bool, resolved: Set<Int>) -> [MailFilter: Int] {
-            if let key, key.0 == rows, key.1 == showDone, key.2 == resolved { return value }
-            value = MailList.counts(rows, showDone: showDone, resolved: resolved)
-            key = (rows, showDone, resolved)
+        func of(
+            _ rows: [AttentionUpdate], showDone: Bool, resolved: Set<Int>,
+            hiddenZones: Set<String> = []
+        ) -> [MailFilter: Int] {
+            if let key, key.0 == rows, key.1 == showDone, key.2 == resolved,
+                key.3 == hiddenZones
+            {
+                return value
+            }
+            value = MailList.counts(
+                rows, showDone: showDone, resolved: resolved, hiddenZones: hiddenZones)
+            key = (rows, showDone, resolved, hiddenZones)
             return value
         }
     }

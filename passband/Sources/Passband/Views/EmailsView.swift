@@ -88,7 +88,8 @@ struct EmailsView: View {
     private var listing: MailList.Listing.Output {
         MailList.Listing.shared.of(
             page.value ?? [], showDone: true, filter: filter,
-            resolved: reminders ? [] : store.resolvedIds, grouped: !reminders)
+            resolved: reminders ? [] : store.resolvedIds,
+            hiddenZones: hiddenZones, grouped: !reminders)
     }
     private var rows: [AttentionUpdate] { listing.rows }
     /// FINISHED MAIL ALWAYS SHOWS, dimmed and checked: a mail list where
@@ -96,6 +97,11 @@ struct EmailsView: View {
     /// the `e` walk both ask it.
     private let showDone = true
     private var filter: MailFilter { mode == .inbox && !reminders ? store.mailFilter : .all }
+    /// The category picker's choice, on the inbox only (the reminder lens is
+    /// the user's own parked list and shows whatever they parked).
+    private var hiddenZones: Set<String> {
+        mode == .inbox && !reminders ? Prefs.shared.mailHiddenZones : []
+    }
     /// Finished, as this page draws it. Never on the reminder lens, whose rows
     /// are all resolved by construction and are the point of the lens.
     private func isDone(_ u: AttentionUpdate) -> Bool {
@@ -180,7 +186,8 @@ struct EmailsView: View {
                 MailFilterBar(
                     counts: MailList.Counts.shared.of(
                         store.mailPage(mode).value ?? [], showDone: true,
-                        resolved: store.resolvedIds))
+                        resolved: store.resolvedIds,
+                        hiddenZones: Prefs.shared.mailHiddenZones))
             }
             #if os(macOS)
                 desktopList
@@ -235,6 +242,7 @@ struct EmailsView: View {
         }
         .onChange(of: reminders) { _, _ in resetCursor() }
         .onChange(of: store.mailFilter) { _, _ in resetCursor() }
+        .onChange(of: Prefs.shared.mailHiddenZones) { _, _ in resetCursor() }
         // Jump to (and highlight) a hand-off target from the sitrep rails.
         .onChange(of: store.selectedId) { _, id in
             guard let id, let i = rows.firstIndex(where: { $0.id == id }) else { return }
@@ -275,6 +283,8 @@ struct EmailsView: View {
                     ? "No pending reminders."
                     : filter != .all
                         ? "Nothing loaded matches \(filter.label)."
+                        : !hiddenZones.isEmpty
+                            ? "Nothing loaded in the categories you picked."
                         : mode == .noise
                                 ? "No noise in the last 30 days."
                                 : mode == .spam ? spamEmptyNote : "No mail.")
@@ -472,8 +482,19 @@ struct EmailsView: View {
         /// Under the last row: a quiet note while an older page is on its way,
         /// and nothing once the mailbox has run out.
         @ViewBuilder private var olderMailFooter: some View {
-            if store.mailPaging(mode).loadingMore {
+            let paging = store.mailPaging(mode)
+            if paging.loadingMore {
                 BandNote("Loading older mail…")
+            } else if !paging.exhausted, !reminders {
+                // A SENTINEL as well as the rows' own trigger: when a lens or
+                // the category picker hides most of a page, the rows that
+                // would have asked for the next one never appear. Keyed on how
+                // much is loaded, so it appears again after every page.
+                let mode = mode
+                Color.clear
+                    .frame(height: 1)
+                    .id("older-\(store.mailPage(mode).value?.count ?? 0)")
+                    .onAppear { Task { await store.loadMoreMail(mode) } }
             }
         }
     #endif

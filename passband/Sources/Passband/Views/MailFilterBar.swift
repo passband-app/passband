@@ -43,7 +43,8 @@ struct MailFilterBar: View {
                     }
                 }
             }
-            Spacer(minLength: 0)
+            Spacer(minLength: 8)
+            CategoryPicker()
         }
         #if os(macOS)
             .padding(.horizontal, 24)
@@ -64,6 +65,61 @@ struct MailFilterBar: View {
         ScrollView(.horizontal, showsIndicators: false) { content() }
             .scrollClipDisabled()
     #endif
+}
+
+/// WHICH SITREP ZONES THE LIST SHOWS, a menu of every zone with a tick each.
+/// Unticking one (Shipments, say) hides its mail from all mail until it is
+/// ticked again; the choice is remembered (`Prefs.mailHiddenZones`). It
+/// composes with the lens on the left rather than replacing it, so
+/// "Important, but no shipping" is two clicks. Mail with no zone yet always
+/// shows: there is nothing to hide it by.
+private struct CategoryPicker: View {
+    @State private var prefs = Prefs.shared
+
+    private var hidden: Set<String> { prefs.mailHiddenZones }
+
+    var body: some View {
+        Menu {
+            ForEach(SitrepZone.allCases, id: \.self) { zone in
+                Toggle(
+                    isOn: Binding(
+                        get: { !hidden.contains(zone.rawValue) },
+                        set: { on in
+                            var next = hidden
+                            if on { next.remove(zone.rawValue) } else { next.insert(zone.rawValue) }
+                            prefs.mailHiddenZones = next
+                        })
+                ) {
+                    Label(zone.title, systemImage: zone.symbol)
+                }
+            }
+            if !hidden.isEmpty {
+                Divider()
+                Button("Show every category") { prefs.mailHiddenZones = [] }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "line.3.horizontal.decrease")
+                    .font(.system(size: 10, weight: .semibold))
+                Text(hidden.isEmpty ? "All categories" : "\(hidden.count) hidden")
+                    .font(Typo.chip)
+            }
+            .foregroundStyle(hidden.isEmpty ? Palette.inkDim : Palette.accent)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background(Capsule().fill(hidden.isEmpty ? Color.clear : Palette.accentSoft))
+            .overlay(
+                Capsule().strokeBorder(
+                    hidden.isEmpty ? Palette.hairline : Palette.accent.opacity(0.45),
+                    lineWidth: 1))
+            .contentShape(Capsule())
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("choose which sitrep categories all mail shows")
+    }
 }
 
 /// One lens in the filter bar: a capsule whose WHOLE border lights when it is

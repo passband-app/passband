@@ -493,9 +493,13 @@ Rules:
   example: "I'll shoot over a cal invite"), the invitation replaces Passband's
   placeholder event; it does not sit beside it.
 - An offered WINDOW ("10am to 1pm") needs a start and a length. A click takes
-  the start of the free part of the window; the length is a default the user
-  can drag. Choosing a later start inside the window is a second gesture, to
-  be designed.
+  the start of the free part of the window. The length comes from context
+  clues in the thread (a stated length, "a quick intro", the size of the
+  window), and is one hour when there are none (DECIDED). The real invitation
+  corrects it when it arrives. Choosing a later start inside the window is a
+  second gesture, to be designed.
+- The filled reply is a light draft, a nudge in the right direction. The user
+  finishes and personalises it (DECIDED).
 - Needs the calendar grant. Before it, the click still fills the reply and
   keeps a hold inside Passband.
 
@@ -512,11 +516,17 @@ Rules:
   ranked down for the morning after a late event.
 - **Click a slot** to insert its time as text at the cursor. Nothing else is
   written.
-- **The recipient's zone.** When the recipient's timezone is known with
-  confidence and differs from the user's, the inserted text carries both
-  ("Tue Oct 6, 2:00pm PT / 5:00pm ET"). The pane says what it inferred ("Sam
-  is usually on Eastern time") before anything is inserted. With no confident
-  inference, only the user's zone is inserted.
+- **A time in a draft is a chip, shown in the user's own time** (DECIDED,
+  2026-10-01). In the composer an inserted time reads in the user's zone
+  ("7a PT") inside a small card, like the inline code cards. Hovering it says
+  what goes out: "recipient sees 10a ET". On send the chip becomes plain text
+  in the recipient's zone. The user thinks in their own time and never
+  converts; the recipient reads theirs.
+- **Which zone goes out.** In a reply to offered times, the zone the sender
+  offered them in. Otherwise the recipient's inferred zone when it is known
+  with confidence, and the pane says what it inferred ("Sam is usually on
+  Eastern time"). With no confident zone, the user's own zone is sent and the
+  hover says so. Recipients in several zones are an open question (§14).
 - **How the zone is inferred** (DECIDED: use every signal, and save the result
   on the sender's profile). Strongest first:
   1. A zone the user set by hand on the contact card. It always wins.
@@ -704,6 +714,7 @@ Each wave is useful on its own and is committed when verified.
   composer are written too, or stay holds inside Passband.
 - The default acceptance line, and whether its wording and time format ("10a"
   or "10am") should follow the user's own past replies.
+- What a time chip sends when the recipients are in several zones.
 - Which calendar inside an account receives writes when there are several.
   Leaning primary.
 - How much an expired, unanswered ghost counts as a "no".

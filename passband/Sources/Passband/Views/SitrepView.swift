@@ -95,7 +95,17 @@ struct SitrepView: View {
     /// squeezed side-by-side starves the left column first, and that column is
     /// the work surface. At the window's minimum the page measures ~920, so
     /// the smallest windows always stack.
-    private static let railBreakpoint: CGFloat = 960
+    ///
+    /// Stated as the narrowest work column worth pinning a rail beside (654,
+    /// a measure, since it is one-liners that have to fit) plus the rail, so
+    /// the comfortable rail's extra width moves the breakpoint with it.
+    private static var railBreakpoint: CGFloat { Typo.measure(654) + railWidth }
+
+    /// The records rail. On the spacing curve rather than the type's: a rail
+    /// row is a name beside two chips and an amount, and it is the chips'
+    /// padding that grows. Held at 306, comfortable left the name no room at
+    /// all ("Hertz P…", then a bare "…").
+    private static var railWidth: CGFloat { Space.scaled(306) }
 
     /// Measured page width the breakpoint is judged against. Starts infinite
     /// so the first pass lays out side-by-side rather than flashing stacked.
@@ -208,7 +218,7 @@ struct SitrepView: View {
                     .scrollBounceBehavior(.basedOnSize)
                     .scrollIndicators(.hidden)
                     .scrollShadowRoom(topFade: Space.s14)
-                    .frame(width: 306)
+                    .frame(width: Self.railWidth)
                     // The COLUMN, not its content: a rail taller than the window
                     // would put the ring's bottom edge off screen.
                     .tourTarget(.records)

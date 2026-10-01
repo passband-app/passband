@@ -618,15 +618,122 @@ struct AppearanceSection: View {
             #if os(macOS)
                 SettingsRow(
                     title: "Density",
-                    detail: "Comfortable gives everything more room. Compact fits more on screen."
+                    detail: "Compact fits more on screen. Comfortable gives everything more room."
                 ) {
-                    GlassSegmented(
-                        options: DensityChoice.allCases.map { ($0, $0.label) },
-                        selection: $prefs.density)
+                    DensityPicker(selection: $prefs.density)
                 }
             #endif
         }
     }
+}
+
+/// THE DENSITY SWITCH, AS TWO PICTURES OF WHAT IT DOES. "Comfortable" and
+/// "Compact" are words somebody has to try to understand; a few rows of mail
+/// drawn at each answer the question before the click. The same rows in the
+/// same box, so the only difference between the two tiles is the setting: one
+/// fits a row more than the other.
+///
+/// Tiles rather than a segmented control with a picture beside it, because the
+/// picture IS the option. Each is one button, and the whole tile is the target.
+private struct DensityPicker: View {
+    @Binding var selection: DensityChoice
+
+    var body: some View {
+        HStack(alignment: .top, spacing: Space.s10) {
+            ForEach(DensityChoice.allCases, id: \.self) { choice in
+                DensityTile(choice: choice, selected: selection == choice) {
+                    selection = choice
+                }
+            }
+        }
+    }
+}
+
+private struct DensityTile: View {
+    let choice: DensityChoice
+    let selected: Bool
+    let action: () -> Void
+
+    /// A FIXED BOX, in neither density's points. It is a picture frame: if it
+    /// grew with the setting, both pictures would change size on every flip and
+    /// the comparison between them would be of two different windows.
+    private static let size = CGSize(width: 156, height: 92)
+    private static let radius: CGFloat = 10
+
+    private static let sample: [(name: String, line: String)] = [
+        ("Maya Okafor", "Lunch on Thursday?"),
+        ("Stripe", "Your payout is on the way"),
+        ("Jon Bell", "Notes from today"),
+        ("Delta", "Check in for your flight"),
+    ]
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: Space.s6) {
+                preview
+                    .frame(width: Self.size.width, height: Self.size.height, alignment: .top)
+                    // The last row runs out under a fade instead of a hard
+                    // edge: it is cut off because the box is small, not because
+                    // the setting hides mail.
+                    .mask(
+                        LinearGradient(
+                            stops: [.init(color: .black, location: 0.72), .init(color: .clear, location: 1)],
+                            startPoint: .top, endPoint: .bottom)
+                    )
+                    .background(
+                        RoundedRectangle(cornerRadius: Self.radius, style: .continuous)
+                            .fill(selected ? Palette.accent.opacity(0.12) : Palette.hairline.opacity(0.45))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: Self.radius, style: .continuous)
+                            .strokeBorder(
+                                selected ? Palette.accent : Palette.hairline,
+                                lineWidth: selected ? 1.5 : 0.5)
+                    )
+                    .accessibilityHidden(true)
+                Text(choice.label)
+                    .font(Typo.chip)
+                    .foregroundStyle(selected ? Palette.ink : Palette.inkFaint)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .pointingHand()
+        .animation(Motion.disclose, value: selected)
+        .accessibilityLabel(choice.label)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    /// Sitrep rows at THIS TILE'S density, whatever the app is set to: the
+    /// numbers are the obligation row's own compact metrics put through the
+    /// curve by hand, which is the one place a view may do that.
+    private var preview: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(Self.sample.enumerated()), id: \.offset) { index, row in
+                let tone = Palette.avatarPalette[index % Palette.avatarPalette.count]
+                HStack(spacing: space(8)) {
+                    Circle()
+                        .fill(tone.fg.opacity(0.75))
+                        .frame(width: 13, height: 13)
+                    Text(row.name)
+                        .font(.system(size: type(11), weight: .medium))
+                        .foregroundStyle(Palette.ink)
+                        .fixedSize()
+                    Text(row.line)
+                        .font(.system(size: type(11)))
+                        .foregroundStyle(Palette.inkFaint)
+                }
+                .lineLimit(1)
+                .padding(.vertical, space(5))
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.top, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func space(_ compact: CGFloat) -> CGFloat { Density.space(compact, in: choice) }
+    private func type(_ compact: CGFloat) -> CGFloat { Density.typeSize(compact, in: choice) }
 }
 
 /// The banner chime. Picking an option plays it once, right here — judging a

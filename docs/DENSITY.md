@@ -1,12 +1,13 @@
 # Density: comfortable and compact
 
-Passband has two densities, switched in Settings → General → Appearance.
-**Comfortable** is the default on the Mac. **Compact** is the layout the app was
-originally drawn in, and it is pixel-for-pixel what shipped before the setting
-existed wherever a value went through `Space.scaled` or `Typo`.
+Passband has two densities, switched in Settings → General → Appearance, where
+each option is drawn as a small preview of the rows it produces. **Compact** is
+the default: it is the layout the app was originally drawn in, and it is
+pixel-for-pixel what shipped before the setting existed wherever a value went
+through `Space.scaled` or `Typo`. **Comfortable** gives everything more room.
 
-The phone is pinned to compact and shows no switch (`Prefs.defaultDensity`)
-until the comfortable curve has been looked at on a real one.
+The phone is pinned to compact and shows no switch until the comfortable curve
+has been looked at on a real one.
 
 ## Why it is not zoom
 

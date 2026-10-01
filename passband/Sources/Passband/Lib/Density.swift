@@ -19,9 +19,10 @@
 
 import CoreGraphics
 
-/// The setting itself. Comfortable is the default (see `Prefs.init`).
+/// The setting itself. Compact is the default (see `Prefs.init`), and comes
+/// first wherever the two are listed.
 enum DensityChoice: String, CaseIterable, Sendable {
-    case comfortable, compact
+    case compact, comfortable
 
     var label: String {
         switch self {

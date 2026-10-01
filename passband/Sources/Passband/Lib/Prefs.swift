@@ -323,17 +323,12 @@ final class Prefs {
         }
     }
 
-    /// Comfortable on the Mac, where "too dense" was the feedback. The phone
-    /// stays at the metrics it was laid out and tested in, and offers no
-    /// switch (see AppearanceSection), until somebody has looked at the
-    /// comfortable curve on a real one.
-    private static var defaultDensity: DensityChoice {
-        #if os(macOS)
-            .comfortable
-        #else
-            .compact
-        #endif
-    }
+    /// Compact is the default: it is the layout the app was drawn in, and
+    /// comfortable is the answer for whoever finds that too dense rather than
+    /// a change made to everybody. The phone offers no switch at all (see
+    /// AppearanceSection) until somebody has looked at the comfortable curve
+    /// on a real one.
+    private static let defaultDensity = DensityChoice.compact
 
     /// How much room the interface gives each thing (see Lib/Density.swift).
     /// `Space` and `Typo` read this on every access, so flipping it re-lays

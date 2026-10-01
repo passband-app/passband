@@ -646,6 +646,11 @@ final class AppStore {
     func startWalk(_ threadId: String, queue: [AttentionUpdate]) {
         openThread(threadId, queue: queue, from: .sitrep)
         walk = Walk()
+        // Built now, off the main thread, so the end of the walk does not
+        // hitch compiling a shader at the exact moment it should feel good.
+        #if os(macOS)
+            PhosphorScene.walkDone.warm()
+        #endif
     }
 
     /// The walk stepped past its last email. Close the reader and hand the

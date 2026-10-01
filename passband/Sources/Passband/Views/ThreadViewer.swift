@@ -2019,6 +2019,9 @@ struct ThreadViewer: View {
         // fast as you can read is exactly as fast as it goes.
         store.settleSkipTurn()
         guard store.threadFlight == .settled else { return }
+        // Counted BEFORE the end check: skipping the last email is a skip
+        // too, and the tally it ends on has to include it.
+        store.walk?.skipped += 1
         let queue = store.threadQueue
         guard queue.contains(where: { $0.thread_id == threadId }),
             let next = store.nextQueuedThread
@@ -2029,7 +2032,6 @@ struct ThreadViewer: View {
             leaveAtEnd()
             return
         }
-        store.walk?.skipped += 1
         let outgoing = threadId
         // The open FIRST (it settles any turn), then this turn: both land in
         // the same render, so the new reader's first frame is at the edge.
@@ -3315,28 +3317,78 @@ private final class WheelYield {
 #if os(macOS)
     // MARK: - the Space walk's hint
 
-    /// The two keys that make a Space walk fast, pinned to the reader's top left
+    /// The two keys that make a Space walk fast, pinned to the reader's bottom right
     /// for as long as the walk lasts. Mounted by RootView ABOVE the reader's
     /// flight, so it holds still while the emails move under it.
     struct WalkHint: View {
-        /// False on the walk's last email, where S has nowhere to go.
+        /// False only when S has nothing to act on: a walk of one email. On
+        /// the walk's LAST email S still works (it sets that one aside and
+        /// ends the walk), so it stays listed there.
         var canSkip = true
 
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
         var body: some View {
-            // Two short rows rather than one long one: it lives in the gutter
-            // left of the thread's timeline, where a single line would run
-            // into the first sender's name.
-            VStack(alignment: .leading, spacing: 6) {
-                KeyHint("⇧E", "done + next")
-                if canSkip { KeyHint("⇧S", "skip") }
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(spacing: 5) {
+                    Image(systemName: "wind")
+                        .font(.system(size: 9, weight: .semibold))
+                    Text("FLOW MODE")
+                        .font(.system(size: 8.5, weight: .bold).width(.expanded))
+                        .tracking(0.6)
+                }
+                .foregroundStyle(Palette.accent.opacity(0.85))
+                VStack(alignment: .leading, spacing: 6) {
+                    row("⇧E", "done + next")
+                    if canSkip { row("⇧S", "skip") }
+                }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .glassEffect(.regular, in: .rect(cornerRadius: 10))
+            .padding(.horizontal, 11)
+            .padding(.vertical, 9)
+            .glassEffect(.regular, in: .rect(cornerRadius: 11))
+            .overlay { FlowBorder(radius: 11, moving: !reduceMotion) }
             .allowsHitTesting(false)
             .accessibilityElement(children: .combine)
             .accessibilityLabel(
-                canSkip ? "Shift E: done and next. Shift S: skip." : "Shift E: done and next.")
+                canSkip ? "Flow mode. Shift E: done and next. Shift S: skip." : "Flow mode. Shift E: done and next.")
+        }
+
+        private func row(_ key: String, _ label: String) -> some View {
+            HStack(spacing: 6) {
+                Kbd(key, size: 11)
+                Text(label)
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.inkFaint)
+            }
+        }
+    }
+
+    /// The hint's border, with a soft glint of the accent drifting around it:
+    /// the only thing on screen that moves on its own while you read, slow
+    /// enough to sit in the corner of the eye. All the way round, never one
+    /// edge lit. Still under Reduce Motion.
+    private struct FlowBorder: View {
+        let radius: CGFloat
+        let moving: Bool
+
+        var body: some View {
+            TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !moving)) { context in
+                let angle = moving
+                    ? context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 6) / 6 * 360
+                    : 0
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .strokeBorder(
+                        AngularGradient(
+                            stops: [
+                                .init(color: Palette.hairline, location: 0),
+                                .init(color: Palette.accent.opacity(0.55), location: 0.12),
+                                .init(color: Palette.hairline, location: 0.28),
+                                .init(color: Palette.hairline, location: 1),
+                            ],
+                            center: .center,
+                            angle: .degrees(angle)),
+                        lineWidth: 1)
+            }
         }
     }
 #endif

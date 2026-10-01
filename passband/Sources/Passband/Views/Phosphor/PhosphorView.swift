@@ -25,6 +25,9 @@ final class PhosphorScene {
     /// The What's New card's, for the same reason: it lands over the board on
     /// the first sync, which is exactly when the iPhone ad can be up too.
     static let whatsNew = PhosphorScene()
+    /// The end of a Space walk's card: it lands over the sitrep, which can be
+    /// showing the quiet board's own scene at the same moment.
+    static let walkDone = PhosphorScene()
 
     private(set) var renderer: PhosphorRenderer?
     private(set) var isUnavailable = false

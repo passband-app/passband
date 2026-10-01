@@ -247,6 +247,15 @@ fn apply_correction(
     field: &str,
     value: &serde_json::Value,
 ) -> Result<()> {
+    use crate::triage::decision::{EmailKind, MessageDestination};
+    let reading_basis = |d: &MessageDecision| {
+        (
+            d.kinds.contains(&EmailKind::Editorial),
+            d.kinds.contains(&EmailKind::Promotional),
+            d.destinations.contains(&MessageDestination::Reading),
+        )
+    };
+    let before = reading_basis(decision);
     match field {
         "kinds" if value.is_object() => apply_list_delta(&mut decision.kinds, value)?,
         "destinations" if value.is_object() => apply_list_delta(&mut decision.destinations, value)
@@ -275,9 +284,11 @@ fn apply_correction(
         _ => return Err(CoreError::InvalidInput("unknown correction field".into())),
     }
     // The model's content-vs-promotion call was made against the kinds and
-    // destinations it chose. Once the user corrects either, it is no longer
-    // theirs to outrank: clear it and let clients read the corrected kinds.
-    if matches!(field, "kinds" | "destinations") {
+    // destinations it chose. A correction that changes what it rests on
+    // (editorial, promotional, or Reading membership) outranks it: clear it and
+    // let clients read the corrected kinds. Unrelated edits leave it alone,
+    // since the correction row is replayed over every later re-triage too.
+    if reading_basis(decision) != before {
         decision.reading_kind = None;
     }
     Ok(())
@@ -3729,18 +3740,29 @@ mod tests {
     }
 
     #[test]
-    fn kind_or_destination_corrections_clear_the_models_reading_kind() {
+    fn reading_relevant_corrections_clear_the_models_reading_kind() {
         use crate::triage::decision::ReadingKind;
         use serde_json::json;
-        for (field, value) in [
+        let cases = [
+            ("kinds", json!({"add": ["promotional"], "remove": []}), true),
+            ("kinds", json!({"add": [], "remove": ["editorial"]}), true),
+            ("kinds", json!(["promotional"]), true),
+            (
+                "destinations",
+                json!({"add": [], "remove": ["reading"]}),
+                true,
+            ),
+            // Unrelated or no-op edits keep the model's call.
             (
                 "kinds",
-                json!({"add": ["promotional"], "remove": ["editorial"]}),
+                json!({"add": ["event_reservation"], "remove": []}),
+                false,
             ),
-            ("kinds", json!(["promotional"])),
-            ("destinations", json!({"add": [], "remove": ["reading"]})),
-            ("destinations", json!(["reading"])),
-        ] {
+            ("kinds", json!(["editorial", "general"]), false),
+            ("destinations", json!(["reading"]), false),
+            ("show_in_fye", json!(true), false),
+        ];
+        for (field, value, clears) in cases {
             let mut decision = MessageDecision {
                 kinds: vec![EmailKind::Editorial],
                 destinations: vec![MessageDestination::Reading],
@@ -3748,14 +3770,13 @@ mod tests {
                 ..Default::default()
             };
             apply_correction(&mut decision, field, &value).unwrap();
-            assert_eq!(decision.reading_kind, None, "{field} {value}");
+            let expected = if clears {
+                None
+            } else {
+                Some(ReadingKind::Content)
+            };
+            assert_eq!(decision.reading_kind, expected, "{field} {value}");
         }
-        let mut decision = MessageDecision {
-            reading_kind: Some(ReadingKind::Content),
-            ..Default::default()
-        };
-        apply_correction(&mut decision, "show_in_fye", &json!(true)).unwrap();
-        assert_eq!(decision.reading_kind, Some(ReadingKind::Content));
     }
     #[test]
     fn additive_corrections_preserve_other_choices_and_future_model_categories() {

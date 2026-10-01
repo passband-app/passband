@@ -13,7 +13,7 @@ struct ReadingSender: Identifiable, Hashable, Sendable {
     var count: Int
     /// Latest one_line in the window (the summary line).
     var summary: String
-    /// Latest message date — cards sort newest-first.
+    /// Latest message date. Cards sort content first, then newest-first.
     var latest: Double
     /// The latest message's thread — clicking the card opens this email.
     var latestThreadId: String

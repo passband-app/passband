@@ -21,14 +21,14 @@ struct GroupPicker: View {
     private var rows: [SendGroup] { groups.value ?? [] }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: Space.s2) {
             Text("address a group")
                 .font(Typo.sectionLabel)
                 .foregroundStyle(Palette.inkFaint)
                 .textCase(.uppercase)
-                .padding(.horizontal, 9)
-                .padding(.top, 7)
-                .padding(.bottom, 3)
+                .padding(.horizontal, Space.scaled(9))
+                .padding(.top, Space.scaled(7))
+                .padding(.bottom, Space.scaled(3))
 
             if groups.isLoading && rows.isEmpty {
                 note("loading…")
@@ -43,10 +43,10 @@ struct GroupPicker: View {
                             row(group)
                         }
                     }
-                    .padding(.horizontal, 4)
-                    .padding(.bottom, 4)
+                    .padding(.horizontal, Space.s4)
+                    .padding(.bottom, Space.s4)
                 }
-                .frame(maxHeight: 260)
+                .frame(maxHeight: Space.scaled(260))
             }
         }
         .frame(width: 320)
@@ -58,17 +58,17 @@ struct GroupPicker: View {
             .font(Typo.micro)
             .foregroundStyle(Palette.inkFaintest)
             .fixedSize(horizontal: false, vertical: true)
-            .padding(.horizontal, 9)
-            .padding(.bottom, 9)
+            .padding(.horizontal, Space.scaled(9))
+            .padding(.bottom, Space.scaled(9))
     }
 
     private func row(_ group: SendGroup) -> some View {
         Button { onPick(group) } label: {
-            HStack(spacing: 8) {
+            HStack(spacing: Space.s8) {
                 Image(systemName: group.mode.symbol)
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(Typo.ui(10, weight: .semibold))
                     .foregroundStyle(group.mode.tone)
-                    .frame(width: 14)
+                    .frame(width: Space.scaled(14))
                 VStack(alignment: .leading, spacing: 1) {
                     Text(group.name)
                         .font(Typo.row)
@@ -79,13 +79,13 @@ struct GroupPicker: View {
                         .foregroundStyle(Palette.inkFaintest)
                         .lineLimit(1)
                 }
-                Spacer(minLength: 8)
+                Spacer(minLength: Space.s8)
                 Text("\(group.member_count)")
                     .font(Typo.num(11))
                     .foregroundStyle(Palette.inkFaintest)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
+            .padding(.horizontal, Space.s8)
+            .padding(.vertical, Space.s6)
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
         }

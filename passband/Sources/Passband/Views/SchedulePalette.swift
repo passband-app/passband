@@ -51,9 +51,9 @@ struct ScheduleClock: View {
                     // text; the chip a pick turns it into says the rest.
                     Button { store.schedulePicker = slot } label: {
                         Image(systemName: "clock")
-                            .font(.system(size: 13, weight: .regular))
+                            .font(Typo.ui(13))
                             .foregroundStyle(Palette.inkFaint)
-                            .frame(width: 22, height: 22)
+                            .frame(width: Space.scaled(22), height: Space.scaled(22))
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -74,12 +74,12 @@ struct ScheduleClock: View {
     /// reopens the palette (to move it); the × clears it, and the verb goes
     /// back to "send".
     private func setChip(_ sendAt: Date) -> some View {
-        HStack(spacing: 4) {
+        HStack(spacing: Space.s4) {
             Button {
                 if store.scheduledSendAvailable { store.schedulePicker = slot }
             } label: {
-                HStack(spacing: 3) {
-                    Image(systemName: "clock.fill").font(.system(size: 9, weight: .semibold))
+                HStack(spacing: Space.scaled(3)) {
+                    Image(systemName: "clock.fill").font(Typo.ui(9, weight: .semibold))
                     // A minute tick: "today 9:00" has to become "yesterday"
                     // or a weekday across midnight while the composer sits
                     // open, and nothing else re-renders the chip.
@@ -98,7 +98,7 @@ struct ScheduleClock: View {
             .accessibilityLabel("Scheduled for \(RemindTimes.detail(sendAt)), change")
             Button { store.setSendAt(slot, nil) } label: {
                 Image(systemName: "xmark")
-                    .font(.system(size: 8, weight: .bold))
+                    .font(Typo.ui(8, weight: .bold))
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -138,8 +138,8 @@ private struct ClockCapsule: ViewModifier {
         content
             .font(Typo.micro)
             .foregroundStyle(tone)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 2.5)
+            .padding(.horizontal, Space.scaled(7))
+            .padding(.vertical, Space.scaled(2.5))
             .background(Capsule().fill(on ? tone.opacity(0.16) : Color.clear))
             .overlay(Capsule().strokeBorder(tone.opacity(on ? 0.28 : 0.22), lineWidth: 0.75))
             .fixedSize()
@@ -221,14 +221,14 @@ struct SchedulePalette: View {
     }
 
     private var header: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: Space.s8) {
             Image(systemName: "clock")
-                .font(.system(size: 12, weight: .semibold))
+                .font(Typo.ui(12, weight: .semibold))
                 .foregroundStyle(Palette.accent)
             Text(composer?.sendAt == nil ? "Send later" : "Move the send time")
-                .font(.system(size: 13, weight: .semibold))
+                .font(Typo.ui(13, weight: .semibold))
                 .foregroundStyle(Palette.ink)
-            Spacer(minLength: 4)
+            Spacer(minLength: Space.s4)
             // What it is set to now, when this is a move: the one fact the
             // list itself cannot show.
             if let current = composer?.sendAt {
@@ -238,21 +238,21 @@ struct SchedulePalette: View {
                     .fixedSize()
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 14)
-        .padding(.bottom, 8)
+        .padding(.horizontal, Space.s16)
+        .padding(.top, Space.s14)
+        .padding(.bottom, Space.s8)
     }
 
     private var input: some View {
         TextField("send when...", text: $query)
             .textFieldStyle(.plain)
-            .font(.system(size: 15))
+            .font(Typo.ui(15))
             .foregroundStyle(Palette.ink)
             .focused($focused)
             .autocorrectionDisabled()
-            .padding(.horizontal, 16)
-            .padding(.top, 4)
-            .padding(.bottom, 12)
+            .padding(.horizontal, Space.s16)
+            .padding(.top, Space.s4)
+            .padding(.bottom, Space.s12)
             .onChange(of: query) { _, _ in
                 selection = 0
                 refreshHits()
@@ -271,7 +271,7 @@ struct SchedulePalette: View {
                         .foregroundStyle(Palette.inkFaintest)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(14)
+                        .padding(Space.s14)
                     } else {
                         ForEach(Array(hits.enumerated()), id: \.element.id) { i, hit in
                             RemindRow(
@@ -282,10 +282,10 @@ struct SchedulePalette: View {
                         }
                     }
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
+                .padding(.horizontal, Space.s8)
+                .padding(.vertical, Space.s6)
             }
-            .frame(maxHeight: 230)
+            .frame(maxHeight: Space.scaled(230))
             .onChange(of: selection) { _, i in
                 guard let hit = hits[safe: i] else { return }
                 withAnimation(.easeOut(duration: 0.1)) { proxy.scrollTo(hit.id, anchor: .center) }
@@ -294,7 +294,7 @@ struct SchedulePalette: View {
     }
 
     private var footer: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: Space.s4) {
             #if os(macOS)
                 Kbd("↑"); Kbd("↓")
                 Text("pick").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
@@ -314,8 +314,8 @@ struct SchedulePalette: View {
                 .font(Typo.micro)
                 .foregroundStyle(Palette.accent.opacity(0.8))
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.horizontal, Space.s16)
+        .padding(.vertical, Space.s10)
         .overlay(alignment: .top) { Hairline() }
     }
 

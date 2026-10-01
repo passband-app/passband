@@ -50,8 +50,8 @@ struct ScheduledPreview: View {
                 #endif
                 ScrollView {
                     content
-                        .padding(.horizontal, 22)
-                        .padding(.vertical, 18)
+                        .padding(.horizontal, Space.scaled(22))
+                        .padding(.vertical, Space.scaled(18))
                         .frame(maxWidth: ThreadViewer.columnWidth)
                         .frame(maxWidth: .infinity)
                 }
@@ -91,17 +91,17 @@ struct ScheduledPreview: View {
         /// The reader's bar: same height, same rule, `esc back` in the far
         /// corner. The status sits beside it, where the reader keeps its verbs.
         private var topBar: some View {
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                HStack(spacing: 5) {
+            HStack(alignment: .firstTextBaseline, spacing: Space.s12) {
+                HStack(spacing: Space.scaled(5)) {
                     Image(systemName: "clock")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(Typo.ui(10, weight: .semibold))
                     Text("scheduled mail").font(Typo.micro)
                 }
                 .foregroundStyle(Palette.inkFaint)
-                Spacer(minLength: 12)
+                Spacer(minLength: Space.s12)
                 status
                 Button { store.closeScheduledPreview() } label: {
-                    HStack(spacing: 4) {
+                    HStack(spacing: Space.s4) {
                         Kbd("esc")
                         Text("back").font(Typo.micro)
                     }
@@ -109,7 +109,7 @@ struct ScheduledPreview: View {
                 .buttonStyle(.textAction)
                 .help("close; it stays scheduled")
             }
-            .padding(.horizontal, 24)
+            .padding(.horizontal, Space.s24)
             .frame(height: TopBar.height)
             .overlay(alignment: .bottom) { Hairline() }
         }
@@ -131,7 +131,7 @@ struct ScheduledPreview: View {
     // MARK: - the mail
 
     private var content: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: Space.s16) {
             #if !os(macOS)
                 // The phone has no top bar of ours (the navigation bar holds
                 // the way back), so the status leads the page instead.
@@ -171,7 +171,7 @@ struct ScheduledPreview: View {
                 .font(Typo.micro)
                 .foregroundStyle(Palette.inkFaintest)
         } else {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: Space.s8) {
                 PlainBody(content: source)
                 if renderFailed {
                     Text(ScheduledPreviewCopy.renderFailed)
@@ -187,7 +187,7 @@ struct ScheduledPreview: View {
     /// a message part the reader's strip could fetch.
     @ViewBuilder private var files: some View {
         if !row.attachments.isEmpty {
-            FlowLayout(spacing: 6) {
+            FlowLayout(spacing: Space.s6) {
                 ForEach(row.attachments) { file in
                     ScheduledFileChip(file: file)
                 }
@@ -202,7 +202,7 @@ struct ScheduledPreview: View {
         /// The three verbs, keys printed beside them as the composer's footer
         /// prints its own.
         private var verbBar: some View {
-            HStack(spacing: 8) {
+            HStack(spacing: Space.s8) {
                 Spacer()
                 ForEach(ScheduledPreviewCopy.verbs(row), id: \.key) { key in
                     Button { run(key.verb) } label: { keyed(key.verb.label, key.hint) }
@@ -210,13 +210,13 @@ struct ScheduledPreview: View {
                         .tint(key.verb == .cancel ? Palette.danger : Palette.accent)
                 }
             }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 12)
+            .padding(.horizontal, Space.scaled(18))
+            .padding(.vertical, Space.s12)
             .overlay(alignment: .top) { Hairline() }
         }
 
         private func keyed(_ verb: String, _ key: String) -> some View {
-            HStack(spacing: 6) {
+            HStack(spacing: Space.s6) {
                 Text(verb)
                 Text(key)
                     .font(Typo.mono(10, weight: .medium))
@@ -226,7 +226,7 @@ struct ScheduledPreview: View {
     #else
         /// The phone's action bar: the same three verbs, where a thumb is.
         private var phoneBar: some View {
-            HStack(spacing: 10) {
+            HStack(spacing: Space.s10) {
                 ForEach(ScheduledPreviewCopy.verbs(row), id: \.key) { key in
                     Button {
                         Haptics.commit()
@@ -238,8 +238,8 @@ struct ScheduledPreview: View {
                     .tint(key.verb == .cancel ? Palette.danger : Palette.accent)
                 }
             }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 10)
+            .padding(.horizontal, Space.scaled(18))
+            .padding(.vertical, Space.s10)
             .background(Palette.readerBackground)
             .overlay(alignment: .top) { Hairline() }
         }
@@ -303,17 +303,17 @@ private struct ScheduledFileChip: View {
     }
 
     var body: some View {
-        HStack(spacing: 9) {
+        HStack(spacing: Space.scaled(9)) {
             Image(systemName: glyph)
-                .font(.system(size: 16, weight: .light))
+                .font(Typo.ui(16, weight: .light))
                 .foregroundStyle(Palette.inkFaintest)
-                .frame(width: 32, height: 32)
+                .frame(width: Space.scaled(32), height: Space.scaled(32))
                 .background(
                     RoundedRectangle(cornerRadius: 7, style: .continuous)
                         .fill(Palette.hairline.opacity(0.6)))
             VStack(alignment: .leading, spacing: 1) {
                 Text(file.filename)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(Typo.ui(11, weight: .medium))
                     .foregroundStyle(Palette.ink)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -321,10 +321,10 @@ private struct ScheduledFileChip: View {
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaintest)
             }
-            .frame(maxWidth: 170, alignment: .leading)
+            .frame(maxWidth: Space.scaled(170), alignment: .leading)
         }
-        .padding(6)
-        .padding(.trailing, 4)
+        .padding(Space.s6)
+        .padding(.trailing, Space.s4)
         .background(
             RoundedRectangle(cornerRadius: 11, style: .continuous)
                 .fill(Palette.hairline.opacity(0.4)))

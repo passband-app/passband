@@ -2017,6 +2017,9 @@ struct ThreadViewer: View {
         // fast as you can read is exactly as fast as it goes.
         store.settleSkipTurn()
         guard store.threadFlight == .settled else { return }
+        // Counted BEFORE the end check: skipping the last email is a skip
+        // too, and the tally it ends on has to include it.
+        store.walk?.skipped += 1
         let queue = store.threadQueue
         guard queue.contains(where: { $0.thread_id == threadId }),
             let next = store.nextQueuedThread
@@ -2027,7 +2030,6 @@ struct ThreadViewer: View {
             leaveAtEnd()
             return
         }
-        store.walk?.skipped += 1
         let outgoing = threadId
         // The open FIRST (it settles any turn), then this turn: both land in
         // the same render, so the new reader's first frame is at the edge.

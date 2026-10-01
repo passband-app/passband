@@ -3316,46 +3316,73 @@ private final class WheelYield {
     /// for as long as the walk lasts. Mounted by RootView ABOVE the reader's
     /// flight, so it holds still while the emails move under it.
     struct WalkHint: View {
-        /// False on the walk's last email, where S has nowhere to go.
+        /// False only when S has nothing to act on: a walk of one email. On
+        /// the walk's LAST email S still works (it sets that one aside and
+        /// ends the walk), so it stays listed there.
         var canSkip = true
 
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
         var body: some View {
-            // Two short rows rather than one long one: it lives in the gutter
-            // left of the thread's timeline, where a single line would run
-            // into the first sender's name.
-            VStack(alignment: .leading, spacing: 8) {
-                // Says what you are in, in the same voice as the button that
-                // started it.
+            VStack(alignment: .leading, spacing: 7) {
                 HStack(spacing: 5) {
                     Image(systemName: "wind")
-                        .font(.system(size: 9.5, weight: .semibold))
+                        .font(.system(size: 9, weight: .semibold))
                     Text("FLOW MODE")
-                        .font(.system(size: 9, weight: .bold).width(.expanded))
+                        .font(.system(size: 8.5, weight: .bold).width(.expanded))
                         .tracking(0.6)
                 }
-                .foregroundStyle(Palette.accent)
-                VStack(alignment: .leading, spacing: 7) {
+                .foregroundStyle(Palette.accent.opacity(0.85))
+                VStack(alignment: .leading, spacing: 6) {
                     row("⇧E", "done + next")
                     if canSkip { row("⇧S", "skip") }
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .glassEffect(.regular.tint(Palette.accent.opacity(0.10)), in: .rect(cornerRadius: 12))
+            .padding(.horizontal, 11)
+            .padding(.vertical, 9)
+            .glassEffect(.regular, in: .rect(cornerRadius: 11))
+            .overlay { FlowBorder(radius: 11, moving: !reduceMotion) }
             .allowsHitTesting(false)
             .accessibilityElement(children: .combine)
             .accessibilityLabel(
-                canSkip ? "Shift E: done and next. Shift S: skip." : "Shift E: done and next.")
+                canSkip ? "Flow mode. Shift E: done and next. Shift S: skip." : "Flow mode. Shift E: done and next.")
         }
 
-        /// One key and its verb, a size up from the list hints: this is the
-        /// whole keymap of the mode, so it can afford to be read at a glance.
         private func row(_ key: String, _ label: String) -> some View {
-            HStack(spacing: 7) {
-                Kbd(key, size: 12)
+            HStack(spacing: 6) {
+                Kbd(key, size: 11)
                 Text(label)
-                    .font(Typo.chip)
-                    .foregroundStyle(Palette.inkDim)
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.inkFaint)
+            }
+        }
+    }
+
+    /// The hint's border, with a soft glint of the accent drifting around it:
+    /// the only thing on screen that moves on its own while you read, slow
+    /// enough to sit in the corner of the eye. All the way round, never one
+    /// edge lit. Still under Reduce Motion.
+    private struct FlowBorder: View {
+        let radius: CGFloat
+        let moving: Bool
+
+        var body: some View {
+            TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !moving)) { context in
+                let angle = moving
+                    ? context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 6) / 6 * 360
+                    : 0
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .strokeBorder(
+                        AngularGradient(
+                            stops: [
+                                .init(color: Palette.hairline, location: 0),
+                                .init(color: Palette.accent.opacity(0.55), location: 0.12),
+                                .init(color: Palette.hairline, location: 0.28),
+                                .init(color: Palette.hairline, location: 1),
+                            ],
+                            center: .center,
+                            angle: .degrees(angle)),
+                        lineWidth: 1)
             }
         }
     }

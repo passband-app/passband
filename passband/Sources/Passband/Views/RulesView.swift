@@ -143,8 +143,10 @@ struct RulesView: View {
 
     private var bindings: [KeyBinding] {
         [
-            KeyBinding("j", "next") { index = min(ordered.count - 1, index + 1) },
-            KeyBinding("k", "prev") { index = max(0, index - 1) },
+            KeyBinding("j", "next") { step(+1) },
+            KeyBinding("k", "prev") { step(-1) },
+            KeyBinding("ArrowDown", "next") { step(+1) },
+            KeyBinding("ArrowUp", "prev") { step(-1) },
             KeyBinding("n", "new rule") { create() },
             KeyBinding("e", "edit rule") { if let r = ordered[safe: index] { edit(r) } },
             KeyBinding("Enter", "edit rule") { if let r = ordered[safe: index] { edit(r) } },
@@ -152,6 +154,12 @@ struct RulesView: View {
                 if let r = ordered[safe: index] { Task { await delete(r) } }
             },
         ]
+    }
+
+    /// Clamped to the drawn rules, and never below 0: an empty list used to
+    /// park the cursor at -1.
+    private func step(_ delta: Int) {
+        index = max(0, min(ordered.count - 1, index + delta))
     }
 
     private func create() {

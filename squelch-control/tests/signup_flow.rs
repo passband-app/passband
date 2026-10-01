@@ -1296,6 +1296,76 @@ async fn a_mailed_invite_stamps_the_row_it_was_minted_for() {
     );
 }
 
+/// The emailed link opens a form with a username already in it, made from the
+/// address the invite went to: the part before the `@`, or that part and the
+/// domain when the first is taken. A suggestion only: the address itself is
+/// never on the page, and a shared code (nobody's address) suggests nothing.
+#[tokio::test]
+async fn the_emailed_link_suggests_a_username_from_the_address() {
+    let h = Harness::new().await;
+    let store = h.state.store();
+    let mint_for = |email: &'static str| async move {
+        let user_id = store
+            .invite_directly(email, chrono::Utc::now())
+            .await
+            .unwrap()
+            .unwrap();
+        let minted = invites::mint().unwrap();
+        let invite_id = store
+            .insert_invite(&minted.code_hash, default_expiry(), None)
+            .await
+            .unwrap();
+        assert!(
+            store
+                .set_user_invite(user_id, invite_id, None)
+                .await
+                .unwrap()
+        );
+        minted.code
+    };
+    let username = |page: &str| {
+        let (_, field) = page
+            .split_once(r#"id="label" name="label" value=""#)
+            .expect(page);
+        field.split_once('"').unwrap().0.to_string()
+    };
+
+    let grace = mint_for("grace.hopper+news@navy.example.com").await;
+    let (status, _, page) = h.get(&format!("/?invite={grace}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(username(&page), "grace-hopper");
+    assert!(
+        !page.contains("navy.example.com"),
+        "the address stays off the page"
+    );
+
+    // Taken: the domain joins it.
+    store
+        .insert_tenant("grace-hopper", "someone@else.example")
+        .await
+        .unwrap();
+    let (_, _, page) = h.get(&format!("/?invite={grace}"), None).await;
+    assert_eq!(username(&page), "grace-hopper-navy");
+
+    // Both taken: an empty field, the form as it always was.
+    store
+        .insert_tenant("grace-hopper-navy", "another@else.example")
+        .await
+        .unwrap();
+    let (_, _, page) = h.get(&format!("/?invite={grace}"), None).await;
+    assert_eq!(username(&page), "");
+
+    // Asked of the store only: a page view never waits on the warden.
+    assert!(
+        h.rec.lock().unwrap().status_lookups.is_empty(),
+        "the form asked the warden nothing"
+    );
+
+    // The harness's own code was minted with no address behind it.
+    let (_, _, page) = h.get(&format!("/?invite={}", h.invite_code), None).await;
+    assert_eq!(username(&page), "");
+}
+
 /// The alerts, end to end through the real handler: a half-finished signup
 /// reaches the operator with the label and where to look, the finished retry
 /// reaches them too, and neither carries the mailbox. 2026-09-28 was a

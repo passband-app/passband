@@ -241,9 +241,10 @@ struct AuthView: View {
 
     private var bindings: [KeyBinding] {
         [
-            KeyBinding("j", "next") { index = min(shown.count - 1, index + 1) },
+            // Floored at 0 so an empty list never parks the cursor at -1.
+            KeyBinding("j", "next") { index = max(0, min(shown.count - 1, index + 1)) },
             KeyBinding("k", "prev") { index = max(0, index - 1) },
-            KeyBinding("ArrowDown", "next") { index = min(shown.count - 1, index + 1) },
+            KeyBinding("ArrowDown", "next") { index = max(0, min(shown.count - 1, index + 1)) },
             KeyBinding("ArrowUp", "prev") { index = max(0, index - 1) },
             KeyBinding("r", "reveal") { if let focus { Task { await reveal(focus) } } },
             KeyBinding("Enter", "reveal") { if let focus { Task { await reveal(focus) } } },

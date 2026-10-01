@@ -101,6 +101,13 @@ struct ThreadViewer: View {
     /// only thing that says it happened.
     @State private var arrivals = 0
 
+    /// A held `e` on a Reading stack, from key-down until key-up or the ring
+    /// closing. `holdToken` is the press (a stale timer checks it is still the
+    /// current one); `holdStartedAt` is set once the press has outlasted a tap
+    /// and the ring is on screen, and is the instant the ring counts from.
+    @State private var holdToken: UUID?
+    @State private var holdStartedAt: Date?
+
     enum ConfirmMode: Equatable { case ask, noLink }
 
     /// SEEDED FROM THE CACHE, SYNCHRONOUSLY. The prefetch machinery exists so
@@ -240,6 +247,13 @@ struct ThreadViewer: View {
                     onConfirm: { Task { await retriageThis() } },
                     onCancel: { if !retriaging { confirmRetriage = false } })
             }
+            #if os(macOS)
+                if let holdStartedAt {
+                    StackDoneHold(
+                        startedAt: holdStartedAt, duration: Self.holdDuration,
+                        count: stackRemaining.count)
+                }
+            #endif
         }
         .keyContext(.thread)
         .keyBindings(.thread, bindings)
@@ -1403,9 +1417,20 @@ struct ThreadViewer: View {
                 // subject headers; `openComposeForward` resolves the two.
                 store.openComposeForward(message: m, fallbackSubject: thread?.subject ?? "")
             },
-            // Reading's sender stack advances with plain done; other surfaces close.
-            KeyBinding("e", "done") { Task { await doneAndClose() } },
-            KeyBinding("d", "done") { Task { await doneAndClose() } },
+            // Reading's sender stack advances with plain done; other surfaces
+            // close. On a stack `e` is also a HOLD: a tap still walks, and
+            // holding it through the ring clears the whole stack.
+            store.readingStack
+                ? KeyBinding(
+                    "e", "done (hold: the whole stack)",
+                    onRelease: { cancelled in endStackHold(cancelled: cancelled) }
+                ) { beginStackHold() }
+                : KeyBinding("e", "done", onRelease: Self.swallowUntilKeyUp) {
+                    Task { await doneAndClose() }
+                },
+            KeyBinding("d", "done", onRelease: Self.swallowUntilKeyUp) {
+                Task { await doneAndClose() }
+            },
             KeyBinding("E", "done + next") { Task { await doneAndNext() } },
             KeyBinding("D", "done + next") { Task { await doneAndNext() } },
             // Plain `h`, the same key as every other surface — it took "prev
@@ -1717,6 +1742,75 @@ struct ThreadViewer: View {
         await flightOut(since: liftedAt)
         // Same outlived-its-reader guard as the walk: if this finished after the
         // reader moved to another thread, closing would close THAT one.
+        guard store.threadId == threadId else { return }
+        store.closeThread()
+    }
+
+    // MARK: - hold e: the whole stack
+
+    /// A done that closes the reader is a HOLD with nothing to do on release:
+    /// the reader is gone after the first key-down, so the key's autorepeats
+    /// would otherwise land on the surface underneath and mark whatever row the
+    /// cursor is on there. Holding it owns the key until it comes back up.
+    private static let swallowUntilKeyUp: (Bool) -> Void = { _ in }
+
+    /// How long a press has to last before it stops being a tap. Short enough
+    /// that the ring answers a deliberate hold at once, long enough that a
+    /// quick `e` never flashes it.
+    private static let holdGrace: Duration = .milliseconds(180)
+    /// How long the ring takes to close, counted from when it appears.
+    static let holdDuration: Duration = .milliseconds(750)
+
+    /// What a held `e` would clear: the stack's rows not already done.
+    private var stackRemaining: [AttentionUpdate] {
+        store.threadQueue.filter { !store.resolvedIds.contains($0.id) }
+    }
+
+    /// Key down. Nothing happens yet: the key coming up inside the grace is a
+    /// tap, and a tap has to stay exactly the walk it always was.
+    private func beginStackHold() {
+        guard store.threadFlight == .settled, holdToken == nil else { return }
+        let token = UUID()
+        holdToken = token
+        Task {
+            try? await Task.sleep(for: Self.holdGrace)
+            guard holdToken == token else { return }
+            withAnimation(Motion.disclose) { holdStartedAt = .now }
+            try? await Task.sleep(for: Self.holdDuration)
+            // Let go early, or the app lost the keyboard: the ring was the
+            // question, and the answer was no.
+            guard holdToken == token, store.threadId == threadId else { return }
+            holdToken = nil
+            withAnimation(Motion.disclose) { holdStartedAt = nil }
+            await doneWholeStack()
+        }
+    }
+
+    /// Key up (or the keyboard went elsewhere). Before the ring showed it was a
+    /// tap, so it does what a tap does; once the ring is up, letting go is the
+    /// way to back out, and nothing is marked.
+    private func endStackHold(cancelled: Bool) {
+        guard holdToken != nil else { return }
+        let wasTap = holdStartedAt == nil
+        holdToken = nil
+        withAnimation(Motion.disclose) { holdStartedAt = nil }
+        // The reader can have left between the key going down and coming up (Esc
+        // inside the grace). A tap then belongs to nothing: done on the closed
+        // thread would mark mail the reader just walked away from.
+        guard wasTap, !cancelled, store.threadId == threadId else { return }
+        Task { await doneAndClose() }
+    }
+
+    /// The ring closed: every email left in this sender's stack is done, in one
+    /// go, and the reader leaves with them. Same flight as a plain done, so it
+    /// reads as the stack going rather than the screen blinking.
+    private func doneWholeStack() async {
+        guard store.threadFlight == .settled else { return }
+        let items = stackRemaining
+        guard let first = items.first else { return }
+        let liftedAt = liftOff()
+        await store.markReadingDone(items, sender: first.sender)
+        await flightOut(since: liftedAt)
         guard store.threadId == threadId else { return }
         store.closeThread()
     }
@@ -2905,6 +2999,60 @@ private struct UnsubConfirm: View {
 /// The per-message twin of `RetriageConfirm`. Same shape as `UnsubConfirm`: own
 /// "modal" KeyContext so the thread's j/k/e/d/u are dead while it asks, Enter
 /// confirms, Esc cancels.
+/// The held `e` on a Reading stack: a big `e` and a ring that closes around it
+/// over `duration`. It is the confirmation — let go before it closes and
+/// nothing happens — so it takes no clicks and no keys of its own; the key
+/// being held is the only input it has.
+///
+/// The ring is drawn from the clock rather than animated to a value, so it is
+/// the same second the reader is waiting on and cannot finish early or late.
+private struct StackDoneHold: View {
+    let startedAt: Date
+    let duration: Duration
+    let count: Int
+
+    private var seconds: Double {
+        Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18
+    }
+
+    var body: some View {
+        ZStack {
+            Rectangle()
+                .fill(.black.opacity(0.14))
+                .ignoresSafeArea()
+            VStack(spacing: 14) {
+                TimelineView(.animation) { ctx in
+                    let p = min(1, max(0, ctx.date.timeIntervalSince(startedAt) / seconds))
+                    ZStack {
+                        Circle()
+                            .stroke(Palette.hairlineStrong, lineWidth: 5)
+                        Circle()
+                            .trim(from: 0, to: p)
+                            .stroke(Palette.accent, style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                            .rotationEffect(.degrees(-90))
+                        Text("e")
+                            .font(.system(size: 72, weight: .semibold, design: .rounded))
+                            .foregroundStyle(Palette.ink)
+                            .offset(y: -4)
+                    }
+                    .frame(width: 128, height: 128)
+                }
+                Text(count == 1 ? "hold to mark it done" : "hold to mark all \(count) done")
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.inkDim)
+            }
+            .padding(.horizontal, 28)
+            .padding(.vertical, 24)
+            .passbandGlass(.pane, cornerRadius: 24, tint: Palette.glassTint)
+            .shadow(color: .black.opacity(0.28), radius: 40, y: 18)
+        }
+        .allowsHitTesting(false)
+        .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .center)))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(count == 1 ? "Hold e to mark done" : "Hold e to mark all \(count) done")
+    }
+}
+
 private struct MessageRetriageConfirm: View {
     let busy: Bool
     let onConfirm: () -> Void

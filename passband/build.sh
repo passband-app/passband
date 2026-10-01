@@ -72,6 +72,11 @@ case "$MODE" in
   *)       SWIFT_FLAGS+=(-Onone -g) ;;
 esac
 
+# The shipped build, and only it, reports analytics (see Analytics.client).
+# HARDENED=1 is set by build-release.sh alone, so a local `./build.sh release`
+# for a perf check stays as silent as a debug one.
+if [ "${HARDENED:-0}" = 1 ]; then SWIFT_FLAGS+=(-D PASSBAND_RELEASE); fi
+
 echo "==> compiling ($MODE) v$MARKETING_VERSION build $BUILD_NUMBER"${BUILD_BRANCH:+ [$BUILD_BRANCH]}
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"

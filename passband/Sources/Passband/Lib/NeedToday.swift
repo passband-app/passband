@@ -10,10 +10,11 @@ enum NeedToday {
     }
 }
 
-/// THE HERO'S ONE SERIF LINE, Mac and phone alike. A sentence about what the
-/// band is ABOUT when the daemon's model wrote one (`/client/v2/fye/headline`),
-/// and otherwise a line that names no count: a number set at 38pt reads as a
-/// backlog, which is the feeling this screen exists to take away.
+/// THE HERO'S ONE SERIF LINE, Mac and phone alike. Good news about the mail
+/// when the daemon's model found some (`/client/v2/fye/headline`), and
+/// otherwise a line that is calm and true on any board. Never a count and
+/// never a chore: this line is a boost of confidence, and the rows beneath it
+/// are where the work lives.
 enum HeroLine {
     static func title(headline: String?, count: Int, empty: String?) -> String {
         guard count > 0 else {
@@ -21,7 +22,7 @@ enum HeroLine {
             return empty ?? "You're all clear."
         }
         if let headline, !headline.isEmpty { return headline }
-        return count == 1 ? "One thing for your eyes." : "A few things for your eyes."
+        return "Your inbox, quietly sorted."
     }
 }
 

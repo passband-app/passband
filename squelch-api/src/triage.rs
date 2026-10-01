@@ -68,8 +68,8 @@ pub struct HeadlineQuery {
     pub today: Option<String>,
 }
 
-/// GET /client/v2/fye/headline: one sentence about what the For-your-eyes band
-/// is ABOUT, for the sitrep's hero. Always 200; `headline` is null when there
+/// GET /client/v2/fye/headline: one sentence of GOOD NEWS about the owner's
+/// mail for the sitrep's hero, never a problem or a chore. Always 200; `headline` is null when there
 /// is no model, the band is empty, the day's cap is spent, or the model had
 /// nothing to say. Cached by board state, so asking again about the same band
 /// spends nothing. See [`squelch_core::triage::fye_headline`].
@@ -77,7 +77,7 @@ pub async fn fye_headline(
     State(state): State<ApiState>,
     Query(query): Query<HeadlineQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
-    use squelch_core::triage::fye_headline::{self as fh, HeadlineItem};
+    use squelch_core::triage::fye_headline::{self as fh, GoodNews, HeadlineItem};
     use std::hash::{Hash, Hasher};
 
     let none = || {
@@ -96,14 +96,42 @@ pub async fn fye_headline(
         .take(40)
         .collect::<String>();
     let ranking = state.triage_config.ranking.clone();
+    let policy = state.shipment_policy;
     let now = Utc::now();
     let read = store_call(&state, move |store, account| {
-        let items: Vec<HeadlineItem> = store
-            .agent_fye(account, usize::MAX, &ranking, now)?
+        let fye = store.agent_fye(account, usize::MAX, &ranking, now)?;
+        let on_board = fye.len();
+        let items: Vec<HeadlineItem> = fye
             .iter()
             .filter_map(HeadlineItem::from_list_item)
             .take(fh::ITEM_LIMIT)
             .collect();
+        // GOOD NEWS the daemon owns. Packages only while they are pleasant to
+        // hear about: moving, or landed in the last two days. An exception
+        // is a problem, and problems are not this line's to tell.
+        let recent = now - chrono::Duration::days(2);
+        let shipments: Vec<(String, String)> = store
+            .list_shipments(account, true, policy)?
+            .into_iter()
+            .filter(|s| !s.item_name.trim().is_empty())
+            .filter(|s| match s.status.as_str() {
+                "shipped" | "out_for_delivery" => true,
+                "delivered" => s.delivered_at.is_some_and(|d| d >= recent),
+                _ => false,
+            })
+            .take(5)
+            .map(|s| (s.item_name, s.status.replace('_', " ")))
+            .collect();
+        // Best effort: a count that fails to read is a sentence the model
+        // simply does not get to write.
+        let arrived_last_day = store
+            .count_inbound_since(account, now - chrono::Duration::days(1))
+            .ok();
+        let good = GoodNews {
+            shipments,
+            arrived_last_day,
+            on_board,
+        };
         // The runaway guard, read from the same ledger the calls bill into.
         let day = now.format("%Y-%m-%d").to_string();
         let spent: u64 = store
@@ -114,10 +142,10 @@ pub async fn fye_headline(
             .filter(|d| d.day == day)
             .map(|d| d.calls)
             .sum();
-        Ok((items, spent))
+        Ok((items, good, spent))
     })
     .await?;
-    let (items, spent) = read;
+    let (items, good, spent) = read;
     if items.is_empty() {
         return Ok(none());
     }
@@ -127,6 +155,12 @@ pub async fn fye_headline(
         let mut h = std::collections::hash_map::DefaultHasher::new();
         today.hash(&mut h);
         items.hash(&mut h);
+        good.shipments.hash(&mut h);
+        good.on_board.hash(&mut h);
+        // Bucketed: every newsletter that lands would otherwise be a new
+        // board, and "most of the day's mail was filed" does not change with
+        // one more.
+        good.arrived_last_day.map(|n| n / 25).hash(&mut h);
         h.finish()
     };
     let cached = state
@@ -144,7 +178,7 @@ pub async fn fye_headline(
     if spent >= u64::from(fh::DAILY_CAP) {
         return Ok(none());
     }
-    let (headline, usage) = fh::write_headline(&client, &today, &items).await;
+    let (headline, usage) = fh::write_headline(&client, &today, &items, &good).await;
     if let Ok(mut c) = state.fye_headline_cache.lock() {
         *c = Some((key, headline.clone()));
     }

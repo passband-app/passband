@@ -72,20 +72,38 @@ enum ReleaseSurface: String, CaseIterable, Sendable {
     }
 }
 
+/// The animation a headliner's page plays in the What's New walk. A KEY, not a
+/// drawing: this file stays free of SwiftUI, and the card maps each case to
+/// its scene (Views/Vignette/ReleaseVignettes.swift). The markdown ignores it.
+enum ReleaseVignette: String, CaseIterable, Sendable {
+    case mailList, flow, unsubscribe, clearStack
+}
+
 /// One bullet in a release.
 struct ReleaseItem: Sendable {
     let surface: ReleaseSurface
     let text: String
-    /// An SF Symbol makes this item a HEADLINER: the What's New card lifts it
-    /// out of its list into a tile at the top. The author picks them, a few
-    /// per release, because no rule can tell the feature people updated for
-    /// from the fix they will never notice. The markdown ignores it.
+    /// The line under a headliner's title on its page of the walk: how to use
+    /// the thing, in one sentence. A key written in backticks is set as a key.
+    let detail: String?
+    /// An SF Symbol makes this item a HEADLINER: the What's New card gives it
+    /// a page of its own in the walk (and a tile, once the release is an older
+    /// one). The author picks them, a few per release, because no rule can
+    /// tell the feature people updated for from the fix they will never
+    /// notice. The markdown ignores it.
     let symbol: String?
+    /// The picture on that page. Without one the page draws the symbol.
+    let vignette: ReleaseVignette?
 
-    init(_ surface: ReleaseSurface, _ text: String, symbol: String? = nil) {
+    init(
+        _ surface: ReleaseSurface, _ text: String, detail: String? = nil, symbol: String? = nil,
+        vignette: ReleaseVignette? = nil
+    ) {
         self.surface = surface
         self.text = text
+        self.detail = detail
         self.symbol = symbol
+        self.vignette = vignette
     }
 }
 
@@ -125,7 +143,11 @@ struct ReleaseNote: Identifiable, Sendable {
 struct ReleaseDigest: Sendable {
     struct Headliner: Sendable, Identifiable {
         let text: String
+        /// The page's second line, when the table wrote one.
+        let detail: String?
         let symbol: String
+        /// The page's animation, when the table named one.
+        let vignette: ReleaseVignette?
         /// Every surface the same words landed on, in surface order.
         let surfaces: [ReleaseSurface]
         var id: String { text }
@@ -159,7 +181,10 @@ struct ReleaseDigest: Sendable {
             let surfaces = ReleaseSurface.allCases.filter { surface in
                 note.items(on: surface).contains { Self.key($0.text) == key }
             }
-            headliners.append(Headliner(text: item.text, symbol: symbol, surfaces: surfaces))
+            headliners.append(
+                Headliner(
+                    text: item.text, detail: item.detail, symbol: symbol, vignette: item.vignette,
+                    surfaces: surfaces))
         }
         let claimed = Set(headliners.map { Self.key($0.text) })
 
@@ -199,6 +224,45 @@ struct ReleaseDigest: Sendable {
 enum ReleaseNotes {
     /// THE TABLE. Newest first, and the only place a release note is written.
     static let all: [ReleaseNote] = [
+        ReleaseNote(
+            version: "0.0.12",
+            date: "2026-10-01",
+            headline: "Philipp's Update",
+            items: [
+                ReleaseItem(
+                    .app, "All mail is a real mail list",
+                    detail: "Subjects, dates, day headings, filters",
+                    symbol: "list.bullet.rectangle", vignette: .mailList),
+                ReleaseItem(
+                    .app, "Flow mode",
+                    detail: "Press Space and walk For Your Eyes one email at a time",
+                    symbol: "wind", vignette: .flow),
+                ReleaseItem(
+                    .app, "Zero-effort Unsubscribe",
+                    detail: "Pressing `u` handles 98% of unsubscribing",
+                    symbol: "minus.circle", vignette: .unsubscribe),
+                ReleaseItem(
+                    .app, "Clear a stack",
+                    detail: "Hold `e` to clear every email in a Reading stack",
+                    symbol: "square.stack.3d.up", vignette: .clearStack),
+                ReleaseItem(.app, "Reading puts articles above promotions"),
+                ReleaseItem(.app, "Better logos in Reading cards"),
+                ReleaseItem(.app, "j and k wrap around on the sitrep. Arrow keys work on Rules and Groups"),
+                ReleaseItem(.app, "Backspace removes a recipient in a reply"),
+                ReleaseItem(.app, "Name an account Personal, Work or anything else"),
+                ReleaseItem(.app, "Click a sender to view their sender profile"),
+                ReleaseItem(.app, "Bug fixes"),
+                ReleaseItem(.ios, "All mail has day headings and filters, and finished mail stays visible"),
+                ReleaseItem(.ios, "Reading puts articles above promotions"),
+                ReleaseItem(.ios, "Reading shows every sender, folded after 8"),
+                ReleaseItem(.ios, "Name an account Personal, Work or anything else"),
+                ReleaseItem(.ios, "Bug fixes"),
+                ReleaseItem(.daemon, "Unsubscribes for you"),
+                ReleaseItem(.daemon, "Triage sorts Reading into articles and promotions"),
+                ReleaseItem(.daemon, "Writes the sitrep headline, and only ever good news"),
+                ReleaseItem(.daemon, "Cards carry the sender's real name"),
+                ReleaseItem(.daemon, "Bug fixes"),
+            ]),
         ReleaseNote(
             version: "0.0.11",
             date: "2026-09-29",

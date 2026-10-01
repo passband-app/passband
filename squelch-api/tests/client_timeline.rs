@@ -102,6 +102,9 @@ fn decide(
     let id = store
         .upsert_message(&NewMessage {
             received_at: Utc::now() - Duration::minutes(minutes_ago),
+            // Authenticated: only an authenticated sender's records match
+            // other mail by ref or commit a ghost (identity v2).
+            auth_pass: Some(true),
             ..msg(account, gmail, thread, "Your plans", "details")
         })
         .unwrap();

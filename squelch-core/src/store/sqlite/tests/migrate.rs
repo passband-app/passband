@@ -2035,12 +2035,14 @@ fn init_creates_the_ghost_tables_on_fresh_and_existing_dbs() {
         "mail_state",
         "likelihood_band",
         "likelihood_reason",
+        "supplier_message_id",
         "last_message_id",
         "created_at",
         "updated_at",
         "user_state",
         "user_state_at",
-        "user_ends_at",
+        "user_end_minutes",
+        "user_end_days",
     ] {
         assert!(cols.iter().any(|c| c == expected), "missing {expected}");
     }

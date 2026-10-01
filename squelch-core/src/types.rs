@@ -691,10 +691,17 @@ pub struct GhostEvent {
     pub likelihood: Option<crate::triage::decision::EventLikelihood>,
     pub user_state: Option<GhostUserState>,
     pub user_state_at: Option<DateTime<Utc>>,
-    /// The user's correction of the end: a fact.
+    /// The user's correction of the end: a fact. Stored as a span from the
+    /// start and resolved against the CURRENT start when listed, so mail that
+    /// moves the start moves this end with it; None when the span was stored
+    /// at the other precision (timed versus all-day).
     pub user_end: Option<crate::triage::ghost::EventTime>,
     /// Minutes from `event_duration_priors` for this ghost's venue and kind.
     pub history_minutes: Option<u32>,
+    /// The message whose record supplied the served facts. A listed ghost
+    /// always has one, and it is eligible (not sent, spam or restricted).
+    pub supplier_message_id: Option<i64>,
+    /// The message of the newest eligible assigned record.
     pub last_message_id: Option<i64>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

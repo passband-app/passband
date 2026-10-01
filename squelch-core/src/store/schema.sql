@@ -1560,62 +1560,83 @@ CREATE TABLE IF NOT EXISTS agent_delivery_projections (
 -- ONLY. New tables with no backfill, so they live here and need no migrate
 -- seam: an older DB gets them on its next open.
 --
--- Columns are projection-owned and rebuilt from the source messages' stored
--- decisions on every reconcile, EXCEPT the three user_* columns, which only
--- the user writes. `ends_at` is a STATED end and `est_minutes`/`est_basis`
--- the MODEL's guess: an estimate is never stored as a fact.
+-- Columns are projection-owned and rebuilt from the assigned records' stored
+-- decisions on every reconcile, EXCEPT the user_* columns, which only the user
+-- writes. `ends_at` is a STATED end and `est_minutes`/`est_basis` the MODEL's
+-- guess: an estimate is never stored as a fact.
 --
 -- `start_sort` is `starts_at` as a sortable UTC string (`YYYY-MM-DDTHH:MM:SSZ`,
--- a date-only start at 00:00Z of its date): `starts_at` keeps the mail's own
--- offset, so it cannot be compared as text. `venue_key` is
+-- a date-only start at 00:00Z of its date), for the listing's coarse SQL
+-- range only: `starts_at` keeps the mail's own offset, so it cannot be
+-- compared as text, and the exact order is decided in Rust. `venue_key` is
 -- `triage::ghost::venue_key(location)`, so the duration prior joins in SQL.
+--
+-- `supplier_message_id` is the message whose record supplied the served facts.
+-- The listing serves a ghost only while THAT message is eligible (not sent,
+-- spam or restricted), so a status change no rebuild has seen yet cannot serve
+-- facts from mail that may no longer feed a ghost. NULL when no assigned
+-- record is eligible: the facts are kept, the ghost is hidden.
+--
+-- The user's end correction is a SPAN from the start (`user_end_minutes` for a
+-- timed ghost, `user_end_days` for an all-day one), so mail that moves the
+-- start moves the end with it. A span at the other precision is ignored.
 --
 -- No CHECK on kind, commitment or user_state: those vocabularies are expected
 -- to grow (held, materialized), and SQLite cannot alter a CHECK.
 CREATE TABLE IF NOT EXISTS ghost_events (
-    id                INTEGER PRIMARY KEY,
-    account_id        INTEGER NOT NULL,
-    kind              TEXT NOT NULL,
-    title             TEXT NOT NULL,
-    starts_at         TEXT,
-    start_sort        TEXT,
-    start_timezone    TEXT,
-    ends_at           TEXT,
-    est_minutes       INTEGER,
-    est_basis         TEXT,
-    location          TEXT,
-    venue_key         TEXT,
-    commitment        TEXT NOT NULL,
-    mail_state        TEXT NOT NULL DEFAULT 'live' CHECK(mail_state IN ('live','cancelled')),
-    likelihood_band   TEXT,
-    likelihood_reason TEXT,
-    last_message_id   INTEGER,
-    created_at        TEXT NOT NULL,
-    updated_at        TEXT NOT NULL,
-    user_state        TEXT,
-    user_state_at     TEXT,
-    user_ends_at      TEXT
+    id                  INTEGER PRIMARY KEY,
+    account_id          INTEGER NOT NULL,
+    kind                TEXT NOT NULL,
+    title               TEXT NOT NULL,
+    starts_at           TEXT,
+    start_sort          TEXT,
+    start_timezone      TEXT,
+    ends_at             TEXT,
+    est_minutes         INTEGER,
+    est_basis           TEXT,
+    location            TEXT,
+    venue_key           TEXT,
+    commitment          TEXT NOT NULL,
+    mail_state          TEXT NOT NULL DEFAULT 'live' CHECK(mail_state IN ('live','cancelled')),
+    likelihood_band     TEXT,
+    likelihood_reason   TEXT,
+    supplier_message_id INTEGER,
+    last_message_id     INTEGER,
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL,
+    user_state          TEXT,
+    user_state_at       TEXT,
+    user_end_minutes    INTEGER,
+    user_end_days       INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_ghost_events_start ON ghost_events(account_id, start_sort);
--- What makes many messages one ghost (`triage::ghost::identity_keys`). A key
--- belongs to one ghost per account; a message whose keys reach two merges them.
+-- How later mail finds a ghost: `ref:<sender scope>:<ref>` for every identity
+-- ref of the ghost's currently assigned eligible records, recomputed on each
+-- rebuild, so a key leaves with its record. NOT unique: two ghosts may hold
+-- one key (a flight number on two dates), and matching picks between them.
 CREATE TABLE IF NOT EXISTS ghost_event_keys (
     account_id INTEGER NOT NULL,
     ghost_id   INTEGER NOT NULL,
-    key        TEXT NOT NULL,
-    UNIQUE(account_id, key)
+    key        TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_ghost_event_keys_key ON ghost_event_keys(account_id, key);
 CREATE INDEX IF NOT EXISTS idx_ghost_event_keys_ghost ON ghost_event_keys(account_id, ghost_id);
--- The evidence trail. `role` is the source's `change` (created, updated,
--- cancelled, agreed).
+-- The ASSIGNMENT of one record to one ghost: record `position` (its index
+-- among the message's laundered event records, `triage::ghost::launder_events`)
+-- of `message_id`. A record belongs to exactly one ghost; ghosts are never
+-- merged. `role` is the record's `change`; `scope` is the sender scope it was
+-- matched under (`triage::ghost::sender_scope`), NULL for an unauthenticated
+-- record.
 CREATE TABLE IF NOT EXISTS ghost_event_sources (
     account_id INTEGER NOT NULL,
     ghost_id   INTEGER NOT NULL,
     message_id INTEGER NOT NULL,
+    position   INTEGER NOT NULL,
     role       TEXT NOT NULL,
-    PRIMARY KEY(account_id, ghost_id, message_id)
+    scope      TEXT,
+    PRIMARY KEY(account_id, message_id, position)
 );
-CREATE INDEX IF NOT EXISTS idx_ghost_event_sources_message ON ghost_event_sources(account_id, message_id);
+CREATE INDEX IF NOT EXISTS idx_ghost_event_sources_ghost ON ghost_event_sources(account_id, ghost_id);
 -- The user's own corrections of how long things at a venue run, by kind:
 -- tier 2 of the estimated end.
 CREATE TABLE IF NOT EXISTS event_duration_priors (
@@ -1643,6 +1664,16 @@ AFTER DELETE ON messages BEGIN
       AND NOT EXISTS (SELECT 1 FROM ghost_event_sources s
                       WHERE s.account_id = OLD.account_id AND s.ghost_id = ghost_events.id
                         AND s.message_id <> OLD.id);
+    -- A surviving ghost whose supplier was this message would otherwise be
+    -- hidden until something rebuilds it (no SQL can): the newest remaining
+    -- source stands in, and the listing still requires it to be eligible.
+    UPDATE ghost_events SET supplier_message_id = (
+        SELECT s.message_id FROM ghost_event_sources s
+        JOIN messages m ON m.account_id = s.account_id AND m.id = s.message_id
+        WHERE s.account_id = OLD.account_id AND s.ghost_id = ghost_events.id
+          AND s.message_id <> OLD.id
+        ORDER BY m.received_at DESC, s.message_id DESC LIMIT 1)
+    WHERE account_id = OLD.account_id AND supplier_message_id = OLD.id;
     DELETE FROM ghost_event_sources WHERE account_id = OLD.account_id AND message_id = OLD.id;
 END;
 

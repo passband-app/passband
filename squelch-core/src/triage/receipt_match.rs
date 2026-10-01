@@ -106,6 +106,14 @@ pub fn registrable_domain(addr: &str) -> Option<String> {
     }
 }
 
+/// Is this registrable domain (from [`registrable_domain`]) a freemail
+/// provider, where the domain says nothing about who sent the mail and only
+/// the full address identifies a sender? Shared with the calendar's sender
+/// scope (`triage::ghost::sender_scope`) so the two never disagree.
+pub(crate) fn is_freemail_domain(registrable: &str) -> bool {
+    FREEMAIL_DOMAINS.contains(&registrable)
+}
+
 /// Minimum normalized-name length for a NAME-ONLY match; shorter keys ("GE")
 /// are too collision-prone to establish identity alone.
 const MIN_NAME_KEY_LEN: usize = 3;
@@ -126,7 +134,7 @@ pub fn merchant_matches(
         registrable_domain(bill_addr),
     ) && rd == bd
     {
-        if FREEMAIL_DOMAINS.contains(&rd.as_str()) {
+        if is_freemail_domain(&rd) {
             if receipt_addr.eq_ignore_ascii_case(bill_addr) {
                 return true;
             }

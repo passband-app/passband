@@ -452,6 +452,10 @@ impl SqliteStore {
         if cleared == 0 {
             return Ok(false);
         }
+        // The message may feed ghosts again: rebuild them now (the queued
+        // re-triage below re-decides it later), so a ghost it alone supplied
+        // comes back with the user's state intact.
+        super::ghosts::refresh_message_guarded(&tx, account_id, message_id);
         tx.execute(
             "UPDATE triage
                 SET stage1_model_used = NULL, model_used = NULL, needs_stage2 = 0,

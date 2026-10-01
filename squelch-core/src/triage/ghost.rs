@@ -1,6 +1,7 @@
 //! Calendar ghosts, the pure half: laundering a triage `event` record, deriving
-//! the identity keys that make many messages one ghost, and resolving an end
-//! time. Storage builds on this; nothing here touches a row.
+//! the sender scope and the scoped identity keys that let later mail find a
+//! ghost, and resolving an end time. Storage builds on this; nothing here
+//! touches a row.
 //!
 //! The model's words are UNTRUSTED text lifted from email, as in `order_link`.
 //! A bad value is dropped or clamped HERE rather than failing decision
@@ -26,8 +27,11 @@ pub const TEXT_CAP: usize = 200;
 /// days covers a festival; anything longer is a model error, not an event.
 pub const ESTIMATE_MINUTES: RangeInclusive<u32> = 15..=4320;
 const TIMEZONE_CAP: usize = 64;
-const SLUG_CAP: usize = 80;
 const VENUE_CAP: usize = 120;
+/// Identity refs kept per record. A real event has one or two (a booking
+/// number, a UID, a page); a record carrying dozens is a digest or an attack,
+/// and every ref is one more ghost the record could be matched against.
+pub const REFS_PER_RECORD: usize = 5;
 /// Shorter than 4 is a fragment ("12", "A1") that would merge strangers'
 /// events; longer than 200 is a body excerpt, not a reference.
 const REF_LEN: RangeInclusive<usize> = 4..=200;
@@ -196,6 +200,9 @@ pub fn launder(record: &RecordProposal) -> Option<GhostProposal> {
     };
     let mut refs: Vec<String> = Vec::new();
     for normalized in identity_refs.iter().filter_map(|r| normalize_ref(r)) {
+        if refs.len() == REFS_PER_RECORD {
+            break;
+        }
         if !refs.contains(&normalized) {
             refs.push(normalized);
         }
@@ -218,18 +225,49 @@ pub fn launder(record: &RecordProposal) -> Option<GhostProposal> {
     })
 }
 
-/// The keys that make several messages one ghost: `ref:<normalized>` for each
-/// identity ref, or, when the mail carried none, exactly one
-/// `thread:<thread_id>:<title slug>`, so a thread that keeps talking about
-/// "Dinner Friday" is one ghost and two threads are two.
-pub fn identity_keys(event: &GhostProposal, thread_id: &str) -> Vec<String> {
-    if event.identity_refs.is_empty() {
-        return vec![format!("thread:{thread_id}:{}", slug(&event.title))];
+/// Every laundered `event` record of a decision, in order. A record's index in
+/// THIS list is its `position`, the second half of its identity in
+/// `ghost_event_sources`: storage assigns and reloads records by it, so both
+/// sides must count the same way, and they do by both calling this.
+pub fn launder_events(records: &[RecordProposal]) -> Vec<GhostProposal> {
+    records.iter().filter_map(launder).collect()
+}
+
+/// Who a record speaks for: the sender's registrable domain, or the full
+/// address on a freemail domain (two strangers share `gmail.com`). None when
+/// the message is not AUTHENTICATED (`auth_pass` is anything but
+/// `Some(true)`, unknown included) or the address yields no domain: such a
+/// record speaks for nobody, so it never matches another ghost and never
+/// commits one.
+///
+/// Reuses `receipt_match`'s definition of a sender, the one the bill and
+/// shipment matchers use, rather than a second domain parser.
+pub fn sender_scope(from_addr: &str, auth_pass: Option<bool>) -> Option<String> {
+    if auth_pass != Some(true) {
+        return None;
     }
+    let address = from_addr.trim().to_lowercase();
+    let domain = super::receipt_match::registrable_domain(&address)?;
+    Some(if super::receipt_match::is_freemail_domain(&domain) {
+        address
+    } else {
+        domain
+    })
+}
+
+/// The keys a later message can find this record's ghost by:
+/// `ref:<scope>:<normalized>` for each identity ref. A ref only means
+/// something within the sender that issued it, so a stranger quoting the
+/// user's booking number from another domain reaches nothing. An
+/// unauthenticated record (no scope) has no keys at all.
+pub fn identity_keys(event: &GhostProposal, scope: Option<&str>) -> Vec<String> {
+    let Some(scope) = scope else {
+        return Vec::new();
+    };
     event
         .identity_refs
         .iter()
-        .map(|r| format!("ref:{r}"))
+        .map(|r| format!("ref:{scope}:{r}"))
         .collect()
 }
 
@@ -322,17 +360,6 @@ fn launder_location(raw: &str) -> Option<String> {
         return clean_text(&format!("{host}{path}"));
     }
     clean_text(&text)
-}
-
-fn slug(title: &str) -> String {
-    let words: Vec<String> = title
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| !w.is_empty())
-        .map(str::to_lowercase)
-        .collect();
-    truncate_chars(&words.join("-"), SLUG_CAP)
-        .trim_end_matches('-')
-        .to_string()
 }
 
 /// A location reduced to the key duration priors are stored under: the part
@@ -497,8 +524,8 @@ mod tests {
         // "Confirmation #ABC-123" and "abc123" are one ref.
         assert_eq!(ghost.identity_refs, vec!["abc123", "qxjzkm"]);
         assert_eq!(
-            identity_keys(&ghost, "t1"),
-            vec!["ref:abc123", "ref:qxjzkm"]
+            identity_keys(&ghost, Some("venue.com")),
+            vec!["ref:venue.com:abc123", "ref:venue.com:qxjzkm"]
         );
     }
 
@@ -513,24 +540,88 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(
-            identity_keys(&ghost, "t1"),
-            vec!["ref:eventbrite.com/e/12345", "ref:lu.ma/abcd"]
+            identity_keys(&ghost, Some("eventbrite.com")),
+            vec![
+                "ref:eventbrite.com:eventbrite.com/e/12345",
+                "ref:eventbrite.com:lu.ma/abcd"
+            ]
+        );
+    }
+
+    /// Identity v2: a ref is scoped to its sender, there is no thread or
+    /// title fallback key, and an unauthenticated record has no keys.
+    #[test]
+    fn keys_are_scoped_and_there_is_no_fallback_key() {
+        let ghost = launder(&event("Show", &["ABC123"])).unwrap();
+        assert_ne!(
+            identity_keys(&ghost, Some("venue.com")),
+            identity_keys(&ghost, Some("evil.com")),
+            "the same ref from two senders is two keys"
+        );
+        assert!(identity_keys(&ghost, None).is_empty(), "unauthenticated");
+        let refless = launder(&event("Dinner @ Lilia, Friday!", &[])).unwrap();
+        assert!(identity_keys(&refless, Some("lilia.com")).is_empty());
+        // Junk refs alone are the same as none.
+        let junk = launder(&event("Dinner @ Lilia, Friday!", &["Confirmed", "#12"])).unwrap();
+        assert!(identity_keys(&junk, Some("lilia.com")).is_empty());
+    }
+
+    #[test]
+    fn a_record_keeps_at_most_five_refs() {
+        let refs = [
+            "AAA111", "BBB222", "aaa111", "CCC333", "DDD444", "EEE555", "FFF666",
+        ];
+        let ghost = launder(&event("Show", &refs)).unwrap();
+        assert_eq!(
+            ghost.identity_refs,
+            vec!["aaa111", "bbb222", "ccc333", "ddd444", "eee555"],
+            "duplicates do not use up the cap"
         );
     }
 
     #[test]
-    fn no_usable_refs_falls_back_to_one_thread_key() {
-        let ghost = launder(&event("Dinner @ Lilia, Friday!", &[])).unwrap();
+    fn scope_is_the_authenticated_senders_domain_or_freemail_address() {
         assert_eq!(
-            identity_keys(&ghost, "thr-9"),
-            vec!["thread:thr-9:dinner-lilia-friday"]
+            sender_scope("Tickets@Mail.Venue.co.uk", Some(true)).as_deref(),
+            Some("venue.co.uk")
         );
-        // Junk refs alone are the same as none.
-        let junk = launder(&event("Dinner @ Lilia, Friday!", &["Confirmed", "#12"])).unwrap();
         assert_eq!(
-            identity_keys(&junk, "thr-9"),
-            identity_keys(&ghost, "thr-9")
+            sender_scope("events@sub.venue.com", Some(true)),
+            sender_scope("box@venue.com", Some(true)),
+            "one organisation across its mailboxes"
         );
+        // Freemail: the full address, so two strangers never share a scope.
+        assert_eq!(
+            sender_scope("Alice@Gmail.com", Some(true)).as_deref(),
+            Some("alice@gmail.com")
+        );
+        assert_ne!(
+            sender_scope("alice@gmail.com", Some(true)),
+            sender_scope("bob@gmail.com", Some(true))
+        );
+        // Failed, unknown, or no domain: no scope at all.
+        assert_eq!(sender_scope("box@venue.com", Some(false)), None);
+        assert_eq!(sender_scope("box@venue.com", None), None);
+        assert_eq!(sender_scope("nobody", Some(true)), None);
+    }
+
+    #[test]
+    fn positions_count_laundered_events_only() {
+        let bill = RecordProposal::Receipt {
+            merchant: "x".into(),
+            amount: None,
+            currency: None,
+            evidence: vec![],
+        };
+        let events = launder_events(&[
+            bill.clone(),
+            event("   ", &[]),
+            event("First", &[]),
+            bill,
+            event("Second", &[]),
+        ]);
+        let titles: Vec<&str> = events.iter().map(|e| e.title.as_str()).collect();
+        assert_eq!(titles, ["First", "Second"]);
     }
 
     #[test]

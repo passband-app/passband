@@ -78,9 +78,13 @@ run_suite anthropic-stream \
 
 # What the app tells its daemon it is. The daemon drops anything that is not
 # <platform>/<dotted digits>, so the client must never build anything else.
+# The plist is linked in as the binary's Info.plist so the suite can read a
+# bundle version the way the app does; a bare test binary has none.
 run_suite client-identity \
   Sources/Passband/Lib/ClientIdentity.swift \
-  Tests/ClientIdentityTests.swift
+  Tests/ClientIdentityTests.swift \
+  -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist \
+  -Xlinker Tests/ClientIdentityTests.plist
 
 # Pairing pulls in Sessions.swift only because it builds its own URLSession
 # there; nothing in this suite makes a request. Same payoff as above: the code
@@ -463,3 +467,12 @@ run_suite reading \
   Sources/Passband/Lib/SenderIdentity.swift \
   Sources/Passband/Lib/Reading.swift \
   Tests/ReadingTests.swift
+
+# The Reading card's logo extraction: which heroes are a mark on a flat field,
+# where the mark is, and which images must be left whole. CoreGraphics only,
+# over banners built pixel by pixel. ImageFill rides along for the colour type
+# the background is reported in.
+run_suite image-trim \
+  Sources/Passband/Lib/ImageFill.swift \
+  Sources/Passband/Lib/ImageTrim.swift \
+  Tests/ImageTrimTests.swift

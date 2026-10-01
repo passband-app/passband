@@ -102,6 +102,17 @@ pub struct AgentListItem {
     pub decision_source_message_id: i64,
     pub thread_id: String,
     pub from_addr: String,
+    /// The `From:` display name, so a feed card can say "Mopar.com National
+    /// eStore" instead of printing the 32 hex characters its mailer uses as a
+    /// local-part.
+    ///
+    /// HUMAN-DOOR ONLY, the same discipline as `Update::from_name` and for the
+    /// same reason: this is UNTRUSTED, attacker-chosen header text. Every
+    /// `external_*` listing clears it before the items leave the store, so an
+    /// agent keeps seeing only the address it can verify, whatever a door's
+    /// serializer goes on to pick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_name: Option<String>,
     pub subject: String,
     /// Effective list activity, capped at local ingestion; raw source dates
     /// remain available on AgentMessage and the human thread reader.

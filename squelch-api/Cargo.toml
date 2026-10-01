@@ -38,7 +38,11 @@ tokio-util = "0.7"
 # engine, base64url for send payloads, regex for the outbound secret guard.
 # `stream` on top of the workspace set: the assistant relay hands the upstream
 # SSE body to axum verbatim, and `Response::bytes_stream` is feature-gated.
-reqwest = { workspace = true, features = ["stream"] }
+# `cookies` for the automatic unsubscribe: a confirm form often needs the
+# session cookie its own page set (one jar per job, see src/unsub_fetch.rs).
+reqwest = { workspace = true, features = ["stream", "cookies"] }
+# Url joining and form encoding for the automatic unsubscribe's fetcher.
+url = { workspace = true }
 base64 = { workspace = true }
 regex = { workspace = true }
 # Markdown → HTML for the send path's multipart/alternative body. `html` only;

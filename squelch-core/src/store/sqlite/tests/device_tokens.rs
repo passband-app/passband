@@ -294,10 +294,15 @@ fn client_tag_parses_only_a_known_platform_and_a_numeric_version() {
             good.trim()
         );
     }
-    let oversized = format!("macos/{}", ".".repeat(100_000));
-    assert!(ClientTag::parse(&oversized).is_none());
-    // Padding alone can push a well-formed tag past the bound; that is refused
-    // too, rather than trimmed first, so the bound is on what was sent.
+    // The longest value the grammar allows is well inside the length bound,
+    // so tightening one without the other fails here.
+    assert_eq!(
+        tag("macos/99999.99999.99999.99999").version(),
+        "99999.99999.99999.99999"
+    );
+    // The bound is on what was SENT: padding that pushes a well-formed tag
+    // past it is refused, not trimmed first. (A megabyte of dots is refused
+    // either way, by its part count; this is the case only the bound stops.)
     assert!(ClientTag::parse(&format!("{}macos/0.0.12", " ".repeat(64))).is_none());
     for bad in [
         "",

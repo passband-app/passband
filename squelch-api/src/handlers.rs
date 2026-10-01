@@ -5471,9 +5471,11 @@ pub async fn reply_recipients(
 
 // --- UNSUBSCRIBE: human-door-only, no agent-door exposure --------------------
 //
-// POST /client/unsubscribe hands the CLIENT the first http(s) List-Unsubscribe
-// URL to confirm and open; the server NEVER makes the request itself. Sealed and
-// unknown messages are an indistinguishable 404; no http(s) link is a 422.
+// POST /client/unsubscribe picks the sender's http(s) unsubscribe link, header
+// first. By default it hands the link to the CLIENT to open. With `auto: true`
+// (a client that can show a running job) it starts the daemon's own job instead
+// (`crate::unsub_job`, docs/SECURITY.md §7), unless the mail is spam or failed
+// authentication. Unknown messages are a 404; no http(s) link is a 422.
 
 /// Upsert the unsubscribe ledger row, resetting the violation clock: a fresh
 /// request restarts the 72h grace.
@@ -5499,6 +5501,12 @@ async fn record_unsub(
 #[derive(Debug, Deserialize)]
 pub struct UnsubscribeBody {
     message_id: i64,
+    /// The client can show a running job and wants the daemon to do the
+    /// unsubscribe itself (`crate::unsub_job`). ABSENT ON EVERY OLDER CLIENT,
+    /// which decodes a response with a `url` it opens, so the default stays
+    /// exactly that response.
+    #[serde(default)]
+    auto: bool,
 }
 
 pub async fn unsubscribe(
@@ -5521,12 +5529,49 @@ pub async fn unsubscribe(
     // senders ship no header at all, and telling those readers "there is no
     // unsubscribe link" while one sits visible at the bottom of the message is
     // simply wrong.
-    let plan = match crate::unsubscribe::classify_unsubscribe(fields.list_unsubscribe.as_deref()) {
-        crate::unsubscribe::UnsubPlan::None => {
-            crate::unsubscribe::classify_unsubscribe_body(fields.body_html.as_deref())
+    let (plan, from_header) =
+        match crate::unsubscribe::classify_unsubscribe(fields.list_unsubscribe.as_deref()) {
+            crate::unsubscribe::UnsubPlan::None => (
+                crate::unsubscribe::classify_unsubscribe_body(fields.body_html.as_deref()),
+                false,
+            ),
+            header => (header, true),
+        };
+
+    // THE AUTOMATIC PATH, for a client that asked for it and mail we trust
+    // enough to act on. Spam is refused because fetching a spammer's link tells
+    // them the address is live; unauthenticated mail because the link's sender
+    // may not be who the From line says. Both fall through to the browser
+    // response, with the reason, so the person decides with the address bar in
+    // front of them.
+    let mut refused = if fields.is_spam {
+        Some("spam")
+    } else {
+        match fields.auth_pass {
+            Some(true) => None,
+            Some(false) => Some("unverified"),
+            // Mail from before the verdict was recorded: never checked, which
+            // is not the same claim as "failed", and the client says so.
+            None => Some("unchecked"),
         }
-        header => header,
     };
+    if body.auto
+        && refused.is_none()
+        && let crate::unsubscribe::UnsubPlan::Browser { url } = &plan
+    {
+        match crate::unsub_job::choose_plan(from_header, fields.list_unsub_one_click, url, &sender)
+        {
+            Some(job) => {
+                crate::unsub_job::start(&state, sender.clone(), message_id, job).await?;
+                audit_action(&state, "unsubscribe", target, &format!("auto:{sender}")).await;
+                resolve_sender_done(&state, &sender).await;
+                return Ok(Json(
+                    json!({ "method": "auto", "sender": sender, "status": "running" }),
+                ));
+            }
+            None => refused = Some("footer_link"),
+        }
+    }
 
     match plan {
         crate::unsubscribe::UnsubPlan::None => {
@@ -5537,17 +5582,21 @@ pub async fn unsubscribe(
             ))
         }
         crate::unsubscribe::UnsubPlan::Browser { url } => {
-            // No outbound request is made here. The audit records the sender
-            // only, never the URL.
+            // The browser path: no outbound request is made here. The audit
+            // records the sender only, never the URL.
             record_unsub(&state, &sender, "browser", message_id).await?;
             audit_action(&state, "unsubscribe", target, &format!("browser:{sender}")).await;
             // RESOLUTION: unsubscribing IS the disposition of this SENDER —
             // asking them to stop and leaving their mail open would demand a
             // second act, once per thread they already sent.
             resolve_sender_done(&state, &sender).await;
-            Ok(Json(
-                json!({ "method": "browser", "sender": sender, "url": url }),
-            ))
+            let mut out = json!({ "method": "browser", "sender": sender, "url": url });
+            if body.auto
+                && let Some(why) = refused
+            {
+                out["auto_refused"] = json!(why);
+            }
+            Ok(Json(out))
         }
     }
 }
@@ -5845,11 +5894,49 @@ pub async fn run_shredder(State(state): State<ApiState>) -> Result<impl IntoResp
 pub async fn list_unsubscribes(
     State(state): State<ApiState>,
 ) -> Result<impl IntoResponse, ApiError> {
+    // A `running` row no job in this process owns died with the last one.
+    crate::unsub_job::reap(&state).await;
     // Newest requested_at first.
     query(&state, |store, account_id| {
         store.list_unsubscribes(account_id)
     })
     .await
+}
+
+// --- POST /client/unsubscribes/opened ---------------------------------------
+//
+// The user followed a `needs_you` job's link to finish on the sender's site.
+// From here the request counts as made: the row arms the violation detector.
+
+#[derive(Debug, Deserialize)]
+pub struct OpenedBody {
+    sender: String,
+}
+
+pub async fn unsubscribe_opened(
+    State(state): State<ApiState>,
+    Json(body): Json<OpenedBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let sender = body.sender.trim().to_ascii_lowercase();
+    if sender.is_empty() {
+        return Err(ApiError::bad_request("sender must not be empty"));
+    }
+    let s = sender.clone();
+    let updated = store_call(&state, move |store, account_id| {
+        store.mark_unsubscribe_opened(account_id, &s, Utc::now())
+    })
+    .await?;
+    if !updated {
+        return Err(ApiError::not_found());
+    }
+    audit_action(
+        &state,
+        "unsubscribe",
+        Some(sender.clone()),
+        &format!("opened:{sender}"),
+    )
+    .await;
+    Ok(Json(json!({ "sender": sender, "status": "opened" })))
 }
 
 // --- POST /client/unsubscribes/resolution -----------------------------------

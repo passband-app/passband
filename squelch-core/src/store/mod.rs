@@ -328,6 +328,12 @@ pub struct MessageUnsub {
     /// Sanitized rather than raw on purpose: it is the markup the reader was
     /// actually shown, and scripts and handlers are already gone from it.
     pub body_html: Option<String>,
+    /// The email-authentication verdict (`messages.auth_pass`): `None` when it
+    /// was never recorded. The automatic path runs only on `Some(true)`.
+    pub auth_pass: Option<bool>,
+    /// Gmail filed it as spam. Never unsubscribed from automatically: fetching
+    /// a spammer's link tells them the address is live.
+    pub is_spam: bool,
 }
 
 /// A row to append to the human-door audit log.
@@ -2358,6 +2364,57 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
 
     /// List the account's unsubscribe records, newest `requested_at` first.
     fn list_unsubscribes(&self, account_id: AccountId) -> Result<Vec<UnsubscribeRecord>>;
+
+    /// Start an AUTOMATIC unsubscribe for `sender`: the row becomes
+    /// `method = 'auto'`, `status = 'running'`, with `url` kept as the page a
+    /// `needs_you` outcome will send the user to. Resets the violation ledger
+    /// exactly as [`Store::upsert_unsubscribe`] does.
+    fn begin_unsubscribe_job(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+        source_message_id: Option<i64>,
+        url: &str,
+        now: DateTime<Utc>,
+    ) -> Result<()>;
+
+    /// Settle a RUNNING job. `status` is `done` or `needs_you`; `method` says how
+    /// it went out (`one_click` | `page`) and is kept as `auto` when it did not.
+    /// `done` moves `requested_at` to `now`, so the violation grace runs from the
+    /// moment the sender was actually asked. A row that is no longer running
+    /// (the user re-asked through the browser meanwhile) is left alone.
+    fn finish_unsubscribe_job(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+        status: &str,
+        method: &str,
+        reason: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<()>;
+
+    /// The user followed a `needs_you` row's link to finish on the sender's
+    /// site: `status -> opened`, `requested_at -> now`, which arms the violation
+    /// detector. `false` when the sender has no `needs_you` row.
+    fn mark_unsubscribe_opened(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+        now: DateTime<Utc>,
+    ) -> Result<bool>;
+
+    /// Turn every `running` row whose sender is NOT in `live` and whose
+    /// `status_at` is before `stale_before` into `needs_you` with reason
+    /// `unclear`: the job that owned it died with the process. Its `status_url`
+    /// is still the original link, so the user can finish by hand. Returns how
+    /// many rows were reaped.
+    fn reap_unsubscribe_jobs(
+        &self,
+        account_id: AccountId,
+        live: &[String],
+        stale_before: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<usize>;
 
     /// Set the `resolution` (blocked|dismissed) on an existing unsubscribe row,
     /// disarming the violation detector for that sender. `false` when no row

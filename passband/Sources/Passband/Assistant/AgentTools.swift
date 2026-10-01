@@ -690,18 +690,32 @@ enum AgentTools {
             id: UUID(), tool: .unsubscribeSender, verb: "Unsubscribe",
             verifiedSender: target.sender, verifiedSubject: target.subject)
         return await confirmed(action, gate) {
+            let gen = UnsubscribeJobs.shared.generation
             let result = try await APIClient.shared.unsubscribe(messageId: target.messageId)
-            // THE DAEMON NEVER FETCHES THE LINK. Opening it in the user's own
-            // browser is the design: an unsubscribe is something the human did,
-            // from their machine, with their cookies. `Opener` hands the shell
-            // http(s) and nothing else, and logs at most the host.
-            guard Opener.isHTTP(result.url) else {
+            // USUALLY THE DAEMON DOES IT: the same job `u` starts, reported in
+            // the sitrep's tray, so the assistant does not have to wait on a
+            // stranger's website. The model hears only that it started.
+            if result.method == "auto" {
+                UnsubscribeJobs.shared.started(sender: result.sender, generation: gen)
+                return (
+                    json([
+                        "result": "unsubscribing", "sender": result.sender,
+                        "note": "Passband is unsubscribing in the background. If the sender's page "
+                            + "asks the user to choose what to stop, the user finishes it from "
+                            + "the corner of their dashboard.",
+                    ]), "Unsubscribing"
+                )
+            }
+            // The browser path (spam, unverified mail, an older daemon):
+            // `Opener` hands the shell http(s) and nothing else, and logs at
+            // most the host.
+            guard let url = result.url, Opener.isHTTP(url) else {
                 return (
                     json(["result": "no_http_link", "sender": result.sender]),
                     "No unsubscribe link"
                 )
             }
-            Opener.open(result.url)
+            Opener.open(url)
             // The URL itself stays out of the result: it is mail-derived, it
             // routinely carries a per-recipient token, and the model has no use
             // for it now that the browser has it.
@@ -1107,10 +1121,10 @@ enum AgentTools {
         Wire.ToolDef(
             name: Tool.unsubscribeSender.rawValue,
             description: """
-                Unsubscribe from the sender of one message: Passband finds their \
-                unsubscribe link and opens it in the user's browser for them to \
-                finish. Shows a confirmation card first and does nothing until they \
-                approve it. Pass both the message_id and the thread_id it came from: \
+                Unsubscribe from the sender of one message. Passband does it in the \
+                background when it can, and otherwise opens their unsubscribe page \
+                in the user's browser for them to finish. Shows a confirmation card \
+                first and does nothing until they approve it. Pass both the message_id and the thread_id it came from: \
                 the card names the sender Passband reads back, and the message has to \
                 be in that thread.
                 """,

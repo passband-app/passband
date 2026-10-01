@@ -41,7 +41,17 @@ enum Analytics {
         // in the ordinary app and reports like the rest of it (see `capture`).
         guard !RehearsalMode.launchedStandalone else { return nil }
         let env = ProcessInfo.processInfo.environment
-        let key = env["PASSBAND_POSTHOG_KEY"] ?? apiKey
+        // A dev build is not a user: its launches and clicks landed in the
+        // same project as the fleet's and read as real usage on the
+        // dashboard. Only a shipped build (build-release.sh on the Mac, the
+        // Release config on iOS, both of which define PASSBAND_RELEASE) gets
+        // the baked-in key. A dev build reports only when PASSBAND_POSTHOG_KEY
+        // is set on purpose, which is how analytics work gets tested.
+        #if PASSBAND_RELEASE
+            let key = env["PASSBAND_POSTHOG_KEY"] ?? apiKey
+        #else
+            guard let key = env["PASSBAND_POSTHOG_KEY"] else { return nil }
+        #endif
         let endpoint = env["PASSBAND_POSTHOG_HOST"] ?? host
         guard key.hasPrefix("phc_"), let url = URL(string: "\(endpoint)/batch/")
         else { return nil }
@@ -100,6 +110,7 @@ enum Analytics {
         "account_added",
         "tour_started", "tour_completed", "tour_skipped", "whats_new_shown",
         "invite_sent", "invite_nudge_accepted", "invite_nudge_dismissed",
+        "ios_nudge_closed",
         "group_created", "group_updated", "group_deleted",
         // Derived, never captured by a call site: see `milestones`.
         "milestone", "catchup_completed",
@@ -135,6 +146,9 @@ enum Analytics {
         // many did not, and whether the one-time ask was taken up. No address
         // is anywhere near this, at any level.
         "invite_sent", "invite_nudge_accepted", "invite_nudge_dismissed",
+        // The TestFlight ask closing, with one bool: whether the link was
+        // copied. A QR scan leaves no trace, so this is a floor on uptake.
+        "ios_nudge_closed",
         // Send groups carry a mode and a member COUNT. Whether people organize
         // their correspondents into audiences at all, and which shape they
         // reach for, is the "does the product work" question for this feature;

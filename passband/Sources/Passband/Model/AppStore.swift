@@ -119,7 +119,9 @@ enum MailMode: String, Sendable, Hashable, CaseIterable {
     /// a control that grew an option — you need to see where you are and how to
     /// get back.
     static func segments(showingSpam: Bool) -> [MailMode] {
-        showingSpam ? [.inbox, .noise, .sent, .spam] : [.inbox, .noise, .sent]
+        // No noise segment: all mail shows every message, noise labelled as
+        // such, so a page of only noise is a page nobody needs.
+        showingSpam ? [.inbox, .sent, .spam] : [.inbox, .sent]
     }
 
     /// The page's name — the header title and the segmented control both.
@@ -148,10 +150,6 @@ enum MailMode: String, Sendable, Hashable, CaseIterable {
     /// (`spam=only`) instead of the ordinary mailbox.
     var spamOnly: Bool { self == .spam }
 
-    /// What `n` flips to, so the key is one binding rather than two. It stays
-    /// the inbox/noise flip from every page: from `sent` or `spam`, `n` dips
-    /// into noise exactly as it would from the inbox.
-    var flipped: MailMode { self == .noise ? .inbox : .noise }
 }
 
 // MARK: - side views
@@ -545,6 +543,17 @@ final class AppStore {
             Badge.refresh(sitrep.standing)
         }
     }
+    /// The hero's sentence about what For-your-eyes is ABOUT, written by the
+    /// daemon's small model (`/client/v2/fye/headline`). nil until it answers,
+    /// and on a daemon with no model, where the hero keeps its own line.
+    var fyeHeadline: String?
+    /// The board `fyeHeadline` was written for (see `headlineKey`). The hero
+    /// keeps showing the last sentence while a newer board's is on its way:
+    /// a line a few seconds stale reads better than one that flips to the
+    /// fallback and back every time a row is cleared.
+    var fyeHeadlineKey: String?
+    /// True while a clicked-for headline is being written; the hero dims.
+    var fyeHeadlineRegenerating = false
     /// The daemon's stats, apart from the bands (see SitrepData): the sync
     /// clock, the queues, the capabilities. Assigned by the poller only on
     /// change, and it changes often — so only its readers pay for that.
@@ -583,6 +592,72 @@ final class AppStore {
     /// The ordered list the viewer was opened FROM, so "done + next" (e/d) can
     /// advance in place. Empty when opened from a surface without a queue.
     var threadQueue: [AttentionUpdate] = []
+
+    /// THE SPACE WALK: a run through For-your-eyes started with Space on the
+    /// sitrep, alive for as long as the reader stays open. While it is, the
+    /// reader shows the E/S hint; when it reaches the end of the list it
+    /// becomes a `WalkSummary` and the sitrep celebrates. Any other way out of
+    /// the reader (Esc, the rail, a plain `e`) just ends it, quietly.
+    struct Walk: Equatable {
+        var startedAt = Date()
+        var done = 0
+        var skipped = 0
+    }
+    var walk: Walk?
+    /// What a FINISHED walk came to, for the sitrep's moment. Cleared by the
+    /// moment itself once it has played.
+    struct WalkSummary: Equatable {
+        var done: Int
+        var skipped: Int
+        var duration: TimeInterval
+        let id = UUID()
+    }
+    var walkFinished: WalkSummary?
+
+    /// AN S IN FLIGHT: the page turn from one email to the next, with BOTH on
+    /// screen. The outgoing reader stays mounted (its mail already loaded, so
+    /// it never flashes back to "loading") and recedes left while the next
+    /// one slides in over it from the right; the subject bar fades out and
+    /// back in rather than sliding. RootView reads this to lay the two
+    /// readers out; ThreadViewer's skip drives it and clears it.
+    struct SkipTurn: Equatable {
+        let outgoing: String
+        /// 0 = the turn has not moved yet, 1 = the new email is home.
+        var progress: CGFloat = 0
+        var outgoingHeader: Double = 1
+        var incomingHeader: Double = 0
+    }
+    var skipTurn: SkipTurn?
+    /// True while an email is leaving and ANOTHER is about to take its place
+    /// (done + next, remind + next). Only then does RootView lay its
+    /// reader-coloured floor under the flight; on a departure that closes the
+    /// reader, the sitrep showing through IS the destination arriving.
+    var flightContinues = false
+
+    /// Finish an S turn that is still settling, at once: called before
+    /// anything else moves the reader, so the skipped card never ghosts
+    /// under the next flight.
+    func settleSkipTurn() {
+        skipTurn = nil
+    }
+
+    /// Space on the sitrep: open the first row with the whole band as the
+    /// queue, and start counting.
+    func startWalk(_ threadId: String, queue: [AttentionUpdate]) {
+        openThread(threadId, queue: queue, from: .sitrep)
+        walk = Walk()
+    }
+
+    /// The walk stepped past its last email. Close the reader and hand the
+    /// tally to the sitrep, which plays the moment.
+    func finishWalk() {
+        let finished = walk
+        closeThread()
+        guard let finished, finished.done + finished.skipped > 0 else { return }
+        walkFinished = WalkSummary(
+            done: finished.done, skipped: finished.skipped,
+            duration: Date().timeIntervalSince(finished.startedAt))
+    }
     var readingMail = false
     var readingStack: Bool {
         guard readingMail, let first = threadQueue.first else { return false }
@@ -822,6 +897,89 @@ final class AppStore {
     /// account-scoped writer outside this file makes.
     func isCurrent(_ e: Int) -> Bool { epoch == e }
 
+    // MARK: - fye headline
+
+    /// The owner clicked the headline: ask for a different one. An empty
+    /// answer keeps the line on screen (nothing flips to the fallback), and a
+    /// click while one is already being written is ignored.
+    func regenerateFyeHeadline() async {
+        guard !sitrep.standing.isEmpty, !fyeHeadlineRegenerating, connStatus == .connected
+        else { return }
+        let key = headlineKey
+        let e = epoch
+        fyeHeadlineRegenerating = true
+        defer { fyeHeadlineRegenerating = false }
+        let answer = try? await APIClient.shared.fyeHeadline(
+            today: Self.headlineToday(), fresh: true, previous: fyeHeadline)
+        guard isCurrent(e), headlineKey == key, let headline = answer?.headline else { return }
+        fyeHeadline = headline
+        fyeHeadlineKey = key
+        UserDefaults.standard.set([key, headline], forKey: Self.headlineDefaultsKey)
+    }
+
+    /// The owner's local date as the headline prompt reads it.
+    private static func headlineToday(_ now: Date = Date()) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd (EEEE)"
+        return f.string(from: now)
+    }
+
+    /// What a headline is ABOUT: the rows in the band and what triage said of
+    /// each, plus the day. Any change here is a board the old sentence may no
+    /// longer describe.
+    var headlineKey: String {
+        Self.headlineToday() + "|"
+            + sitrep.standing.map { "\($0.thread_id):\($0.one_line)" }.joined(separator: "|")
+    }
+
+    private static let headlineDefaultsKey = "fyeHeadline.last"
+
+    /// Ask the daemon for the hero's sentence, once the board has held still.
+    /// Called from the hero's `.task(id: headlineKey)`, so it only runs while
+    /// the sitrep is ON SCREEN (a reader walked with E/S never pays for the
+    /// boards it passes through) and a newer board cancels it mid-wait.
+    func refreshFyeHeadline() async {
+        let key = headlineKey
+        guard !sitrep.standing.isEmpty else { return }
+        if fyeHeadlineKey == key { return }
+        // Last launch's sentence, if it was about this exact board: shown at
+        // once instead of the fallback, and the daemon is not asked.
+        if let saved = UserDefaults.standard.stringArray(forKey: Self.headlineDefaultsKey),
+            saved.count == 2, saved[0] == key
+        {
+            fyeHeadline = saved[1]
+            fyeHeadlineKey = key
+            return
+        }
+        // Settle first. The poller reassigns the band as rows are cleared from
+        // the list or arrive in a burst; one call for the board that stuck.
+        try? await Task.sleep(for: .milliseconds(1200))
+        // A FAILED call (the daemon says `settled: false`) is asked again a
+        // couple of times, spaced out; it is not "nothing good to say", and
+        // remembering it as that would leave the fallback up all day.
+        for attempt in 0..<3 {
+            if attempt > 0 { try? await Task.sleep(for: .seconds(30)) }
+            let e = epoch
+            guard !Task.isCancelled, connStatus == .connected else { return }
+            let answer = try? await APIClient.shared.fyeHeadline(today: Self.headlineToday())
+            // A click for a new line wins over this background ask: whichever
+            // answered last would otherwise replace the line they asked for.
+            guard !Task.isCancelled, isCurrent(e), headlineKey == key, !fyeHeadlineRegenerating
+            else { return }
+            // No answer at all is an old daemon or a dropped connection: keep
+            // the fallback and do not retry against a route that is not there.
+            guard let answer else { return }
+            if answer.settled == false { continue }
+            fyeHeadline = answer.headline
+            fyeHeadlineKey = key
+            if let headline = answer.headline {
+                UserDefaults.standard.set([key, headline], forKey: Self.headlineDefaultsKey)
+            }
+            return
+        }
+    }
+
     private init() {}
 
     // MARK: - settings
@@ -1036,17 +1194,22 @@ final class AppStore {
     /// - No identity yet: the Connect gate is on screen and reads it there.
     /// - Already connected: the gate is not mounted, and the link is a SECOND
     ///   daemon asking to be added, so the Add Account sheet is opened for it.
+    ///   On the phone, only into a sheet that is already open — see
+    ///   `PairLink.admits` for why.
     ///   Re-pairing over the identity this install holds is still impossible —
     ///   the sheet adds an account beside it, it does not replace it.
     func receivePairLink(_ url: URL) {
         guard let link = PairLink(url) else { return }
         #if os(iOS)
-            // Nothing on the phone presents the Add Account sheet, so a link
-            // arriving while connected would park here forever — and then be
-            // applied, arbitrarily stale, by whatever Connect gate mounts
-            // next. Dropped instead; a link at the gate still fills the form.
-            guard connStatus != .connected else { return }
+            let phone = true
+        #else
+            let phone = false
         #endif
+        guard PairLink.admits(
+            connected: connStatus == .connected,
+            addAccountOpen: addAccountSheetOpen,
+            phone: phone)
+        else { return }
         // DROPPED, not parked, while the practice inbox is up: a link held
         // through a lesson would be applied the moment the live account came
         // back — the Add Account sheet over the summary card — and by then
@@ -1077,6 +1240,9 @@ final class AppStore {
                     #if os(iOS)
                         await PushRegistration.shared.registerAndSync()
                         guard !Task.isCancelled, isCurrent(recoveryEpoch) else { return }
+                        // Parked while loading, so nobody raised the sheet for
+                        // it, and the phone only takes a link into a sheet the
+                        // person opened themselves (`PairLink.admits`).
                         pairLink = nil
                     #else
                         if pairLink != nil { addAccountSheetOpen = true }
@@ -1358,6 +1524,10 @@ final class AppStore {
             SitrepPoller.shared.stop()
         }
         await AccountManager.shared.remove(id)
+        // The saved headline can name people and plans from the mailbox just
+        // forgotten. It is keyed by board, so it could never show for another
+        // account, but it should not outlive the account either.
+        UserDefaults.standard.removeObject(forKey: Self.headlineDefaultsKey)
         guard wasActive else { return }
 
         guard let survivor = AccountManager.shared.active else {
@@ -1552,7 +1722,13 @@ final class AppStore {
     /// per-daemon SQLite ints, so "looks plausible" is precisely the failure
     /// mode being prevented here: A's row 412 is B's row 412.
     private func wipeAccountState() {
+        // The unsubscribe tray's rows and buttons belong to the old account:
+        // "Finish on their site" would tell the NEW daemon about a job it has
+        // never heard of.
+        UnsubscribeJobs.shared.reset()
         sitrep = SitrepData()
+        fyeHeadline = nil
+        fyeHeadlineKey = nil
         zones = SitrepZoneCache()
         // The parked refresh tasks go too, not just their results: a joiner
         // arriving after the switch would otherwise wait on — and adopt the
@@ -1560,11 +1736,14 @@ final class AppStore {
         zoneRefresh = nil
         mailPages = [:]
         mailLoadedAt = [:]
+        mailPagingState = [:]
+        mailKeyset = false
         mailRefreshes = [:]
         reminderRows = .loading
         remindersLoadedAt = nil
         remindersRefresh = nil
         reminderFilter = false
+        mailFilter = .all
         // The panel's state AND the conversation beside it. A lane left running
         // here would finish a search of the old mailbox into the new one's
         // panel, cards and all — it holds thread ids that mean something else
@@ -1875,7 +2054,7 @@ final class AppStore {
             "thread_opened",
             [
                 "via_reply": replyTo != nil,
-                "from_noise": activeView == .emails && mailMode == .noise,
+                "from_noise": queue.first { $0.thread_id == threadId }?.placement == "noise",
                 "source": source.rawValue,
             ])
         // Opening is acknowledged by the reader once the exact message is
@@ -1894,8 +2073,21 @@ final class AppStore {
         // The arrivals ledger follows the thread, and declines to forget on a
         // REOPEN of the same one — see ThreadArrivals.reset.
         arrivals.reset(to: threadId)
+        // A SPACE WALK LIVES ON ONE QUEUE. Its own steps (E, S, h, the arrows)
+        // hand the same list back; anything else that opens a thread (a
+        // notification, a citation, the side panel) is a different journey,
+        // and a walk carried into it would celebrate mail it never held.
+        if walk != nil, queue.map(\.thread_id) != threadQueue.map(\.thread_id) {
+            walk = nil
+        }
         self.threadQueue = queue
         self.readingMail = readingMail
+        // Any open ends an S turn that is still settling: the turn's outgoing
+        // card would otherwise linger (or sit inert, if this re-opens it)
+        // until the skip's own timer cleared it. A skip sets its turn AFTER
+        // this call, so its own open does not cancel it.
+        skipTurn = nil
+        flightContinues = false
         // The seed, after `readingMail` (the style reads it) and before the
         // view mounts. A direct open (`openMessage`) has no cached view yet
         // and hands the reader its copy through `focusedMessageView` instead.
@@ -1928,6 +2120,11 @@ final class AppStore {
     }
 
     func closeThread() {
+        // Every way out of the reader ends a Space walk; only `finishWalk`
+        // turns one into a celebration, and it reads the walk before this.
+        walk = nil
+        skipTurn = nil
+        flightContinues = false
         // The preview lives in the reader's slot, so every way out of the
         // reader (Esc, the rail, an account switch) is a way out of it too.
         scheduledPreviewId = nil
@@ -2288,8 +2485,9 @@ final class AppStore {
 
     // MARK: - the flat mail pages
 
-    /// One generous page — the read model is local, so this is cheap.
-    private static let mailLimit = 500
+    /// The page size, for the head the poll refreshes and for every older
+    /// page the infinite scroll asks for.
+    private static let mailLimit = 100
     /// How many rows get their thread warmed ahead of any click. A bounded
     /// prefix: warming all 500 would stampede the daemon for mail nobody scrolls
     /// to, and hover warming picks up anything past it.
@@ -2311,6 +2509,103 @@ final class AppStore {
     /// inbox's TTL swallow the noise page's first fetch. Kept out of the
     /// `Loadable`s, which the list reads: these are bookkeeping, not rows.
     private var mailLoadedAt: [MailMode: Date] = [:]
+
+    /// Where each page's infinite scroll stands.
+    struct MailPaging: Equatable {
+        /// The offset cursor for a daemon that cannot page by arrival.
+        var nextCursor: String?
+        /// Nothing older to fetch.
+        var exhausted = false
+        var loadingMore = false
+        /// When the last older-page fetch failed. The scroll does not retry
+        /// on its own for a while after, or a sentinel left on screen would
+        /// re-request in a tight loop against a daemon that is down.
+        var failedAt: Date?
+    }
+    private static let mailRetryAfter: TimeInterval = 15
+
+    /// Whether this daemon pages by arrival (`before`) and so can be asked for
+    /// a mailbox-bounded head. Learned from the first rows that carry
+    /// `received_at`; until then the head asks for the default window.
+    private var mailKeyset = false
+    private var mailPagingState: [MailMode: MailPaging] = [:]
+    func mailPaging(_ mode: MailMode) -> MailPaging { mailPagingState[mode] ?? MailPaging() }
+
+    /// THE INFINITE SCROLL: fetch the page older than the last row loaded and
+    /// append it. By arrival (`before`) on a daemon that sends `received_at`,
+    /// which does not shift as new mail lands and reaches past the 30-day
+    /// window; by the offset cursor on one that does not, inside that window.
+    /// One in flight per page, and none once the mailbox has run out.
+    func loadMoreMail(_ mode: MailMode) async {
+        var paging = mailPaging(mode)
+        if let failed = paging.failedAt, Date().timeIntervalSince(failed) < Self.mailRetryAfter {
+            return
+        }
+        guard !paging.exhausted, !paging.loadingMore,
+            let last = mailPages[mode]?.value?.last
+        else { return }
+        var params = UpdatesParams(tier: mode.tier, limit: Self.mailLimit, spamOnly: mode.spamOnly)
+        if let at = last.received_at {
+            params.before = at
+            params.beforeId = last.id
+        } else if let cursor = paging.nextCursor {
+            params.cursor = cursor
+        } else {
+            paging.exhausted = true
+            mailPagingState[mode] = paging
+            return
+        }
+        paging.loadingMore = true
+        mailPagingState[mode] = paging
+        let e = epoch
+        do {
+            // PEEK: an older page is fetched AHEAD of the eye (and through rows
+            // a lens or the category picker hides), so listing it is not the
+            // user seeing it. A row is stamped when it is actually opened.
+            let fetched = try await APIClient.shared.getUpdates(params, peek: true)
+            guard e == epoch else { return }
+            var added = 0
+            withMailPage(mode) { page in
+                guard var rows = page.value else { return }
+                let have = Set(rows.map(\.id))
+                let fresh = fetched.items.filter { !have.contains($0.id) }
+                added = fresh.count
+                rows.append(contentsOf: MailList.sortedByArrival(fresh))
+                page.value = rows
+            }
+            paging = mailPaging(mode)
+            paging.nextCursor = fetched.next_cursor
+            // Short page, or a page of nothing new (an older daemon that
+            // ignored `before` and answered the head again): the end.
+            paging.exhausted = fetched.items.count < Self.mailLimit || added == 0
+            paging.failedAt = nil
+        } catch {
+            guard e == epoch else { return }
+            paging = mailPaging(mode)
+            paging.failedAt = Date()
+        }
+        paging.loadingMore = false
+        mailPagingState[mode] = paging
+    }
+
+    /// Clear a failed older-page fetch so the next scroll (or the footer's
+    /// Try again) asks straight away.
+    func retryOlderMail(_ mode: MailMode) {
+        mailPagingState[mode, default: MailPaging()].failedAt = nil
+        Task { await loadMoreMail(mode) }
+    }
+
+    /// Back to the head on page re-entry, when the daemon can page by arrival:
+    /// rows deep in the scroll are only refreshed by being fetched again, and
+    /// re-entry is where a stale status or a missing pill would be noticed.
+    /// The scroll refills them as you go.
+    func trimMailToHead(_ mode: MailMode) {
+        guard mailKeyset, let rows = mailPages[mode]?.value, rows.count > Self.mailLimit else {
+            return
+        }
+        withMailPage(mode) { $0.value = Array(rows.prefix(Self.mailLimit)) }
+        mailPagingState[mode] = MailPaging()
+    }
     private var mailRefreshes: [MailMode: Task<Void, Never>] = [:]
 
     /// One page's rows. Never fetched reads as LOADING, so the first paint of a
@@ -2341,9 +2636,24 @@ final class AppStore {
         if mailRefreshes[mode] == refresh { mailRefreshes[mode] = nil }
     }
 
-    /// Drop a message from the cached pages outright. For a resolve that must not
-    /// come back on the next poll's slower truth. EVERY page, not just the one on
-    /// screen: the inbox filters no tier, so a noise row sits in both.
+    /// Mark a cached `done` row open again on every mail page: the local half
+    /// of an undone resolve, until the next poll says the same.
+    func reopenInMail(_ messageId: Int) {
+        for mode in MailMode.allCases {
+            withMailPage(mode) { page in
+                guard var rows = page.value,
+                    let i = rows.firstIndex(where: { $0.id == messageId && $0.status == .done })
+                else { return }
+                rows[i].status = .open
+                rows[i].resolved_at = nil
+                page.value = rows
+            }
+        }
+    }
+
+    /// Drop a message from the cached pages outright, for mail that has LEFT
+    /// the listing (rescued out of spam), not mail that is merely finished:
+    /// finished mail stays, dimmed. Every page, not just the one on screen.
     func removeFromMail(_ messageId: Int) {
         for mode in MailMode.allCases {
             mailPages[mode]?.value?.removeAll { $0.id == messageId }
@@ -2356,36 +2666,67 @@ final class AppStore {
         // already showing has nothing to spin, and flipping the flag twice a
         // tick re-rendered the list twice a tick.
         withMailPage(mode) { if $0.value == nil { $0.isLoading = true } }
+        let fetchedAt = Date()
         do {
+            // A MAILBOX-BOUNDED head once the daemon is known to page by
+            // arrival: the newest `mailLimit` rows of all time, so the head's
+            // last row is a true floor for the merge and the keyset. The
+            // default 30-day window would end the scroll for anyone with less
+            // than a page of recent mail, and its out-of-window reminder rows
+            // would pose as the floor.
+            let bounded = mailKeyset
             let fetched = try await APIClient.shared.getUpdates(
                 UpdatesParams(
+                    since: bounded ? "1970-01-01T00:00:00Z" : nil,
                     tier: mode.tier, limit: Self.mailLimit, spamOnly: mode.spamOnly))
             // The rows belong to the account that asked for them. Both exits
             // below return rather than fall through, so the `isLoading` write
             // at the bottom is only ever reached by the live epoch.
             guard e == epoch else { return }
-            // Done/archived mail leaves the inbox (gmail semantics), which also
-            // keeps auto-resolved receipts out — they're rail records, not rows.
-            // The sort key is a date parse, taken ONCE per row rather than
-            // twice per comparison: five hundred rows is nine thousand
-            // comparisons, each of which took the date cache's lock twice.
-            let next =
-                fetched.items
-                .filter { $0.status != .done }
-                .map { ($0, Self.receivedTS($0)) }
-                .sorted { a, b in a.1 != b.1 ? a.1 > b.1 : a.0.id > b.0.id }
-                .map(\.0)
+            releaseReopened(fetched.items, fetchedAt: fetchedAt)
+            // DONE MAIL STAYS IN THE CACHE; the page shows it dimmed.
+            //
+            let keyset = mailKeyset || fetched.items.contains { $0.received_at != nil }
+            mailKeyset = keyset
+            var headRows = fetched.items
+            if keyset && !bounded {
+                // A window-bounded head (the first, before the daemon was
+                // known): drop the old reminder rows the window's OR clause
+                // lets in, or the oldest of them would pose as the floor and
+                // the scroll would page from months back.
+                let cutoff = Date().addingTimeInterval(-29 * 86_400).timeIntervalSince1970
+                headRows.removeAll { u in
+                    (u.remind_at != nil || u.reminded_at != nil) && MailList.arrivalTS(u) < cutoff
+                }
+            }
+            let head = MailList.sortedByArrival(headRows)
+            let full = fetched.items.count >= Self.mailLimit
+            let merge = MailList.mergeHead(
+                loaded: mailPages[mode]?.value, head: head, headIsFull: full)
             withMailPage(mode) { page in
                 // Only touch the value when the list actually CHANGED: the poll
-                // re-runs this, and an identical assignment re-renders 500 rows.
-                if next != page.value { page.value = next }
+                // re-runs this, and an identical assignment re-renders the list.
+                if merge.rows != page.value { page.value = merge.rows }
                 page.error = nil
+            }
+            if merge.reset {
+                // Exhausted only when a MAILBOX-bounded head came back short
+                // (that is the whole mailbox), or on a daemon that cannot page
+                // by arrival and has nothing past its window.
+                mailPagingState[mode] = MailPaging(
+                    nextCursor: fetched.next_cursor,
+                    exhausted: !full && (bounded || !keyset))
+            } else if full, mailPaging(mode).exhausted, keyset {
+                // The mailbox grew past one head: there is more again.
+                mailPagingState[mode, default: MailPaging()].exhausted = false
             }
             mailLoadedAt[mode] = Date()
             // Pull the head rows' threads before any click, so an open renders
             // from cache. Runs on the launch warm too, not just on a visit.
+            // Mail still to do first: it is what gets opened.
             ThreadPrefetch.shared.warm(
-                next.prefix(Self.mailWarmRows).map(\.thread_id), immediate: 5)
+                merge.rows.lazy.filter { $0.status != .done }
+                    .prefix(Self.mailWarmRows).map(\.thread_id), immediate: 5)
         } catch {
             guard e == epoch else { return }
             withMailPage(mode) { $0.error = errText(error, "load failed") }
@@ -2406,14 +2747,6 @@ final class AppStore {
         // comes through here three times a tick, and an identical write is a
         // re-render of every row.
         if page != before { mailPages[mode] = page }
-    }
-
-    /// Epoch for "order received": surfaced_at approximates arrival, and items
-    /// the triage loop hasn't surfaced yet are the newest mail, so they sort to
-    /// the top. Ties (and the nil bucket) break on id, which is ingest order.
-    private static func receivedTS(_ u: AttentionUpdate) -> Double {
-        guard let s = u.surfaced_at else { return .greatestFiniteMagnitude }
-        return Fmt.date(s)?.timeIntervalSince1970 ?? 0
     }
 
     // MARK: - the sent page
@@ -2487,6 +2820,12 @@ final class AppStore {
     /// A FILTER, not a fourth MailMode: the segments are three pages of mail,
     /// and this is a lens over one of them that the Escape ladder sheds first.
     var reminderFilter = false
+
+    /// The all-mail page's other lenses (important / deadlines / attachments).
+    /// Separate from `reminderFilter` because that one swaps the DATA SOURCE
+    /// and these only narrow the rows already on screen; the filter bar keeps
+    /// the two mutually exclusive.
+    var mailFilter: MailFilter = .all
 
     // MARK: - the provider's spam folder
 
@@ -2681,6 +3020,7 @@ final class AppStore {
     /// Preload the emails behind the records the columns show, so clicking one
     /// opens instantly.
     private func warmZoneThreads() {
+        ThreadPrefetch.shared.warm(zones.calendar.prefix(6).compactMap(\.thread_id), immediate: 2)
         ThreadPrefetch.shared.warm(zones.banking.prefix(6).compactMap(\.thread_id), immediate: 2)
         ThreadPrefetch.shared.warm(zones.shipments.prefix(6).compactMap(\.thread_id), immediate: 2)
         // Receipts rotate at local midnight, so match the cache TTL to that.
@@ -5029,6 +5369,11 @@ final class AppStore {
     /// fires.
     var shareAvailable: Bool { stats?.invite_sharing == true }
 
+    /// The daemon's answer to "has an iPhone app ever talked to this mailbox",
+    /// or nil when it has not given one yet (or is too old to). Drives the
+    /// TestFlight ask; see `TestFlightNudge`.
+    var iosConnected: Bool? { stats?.ios_connected }
+
     // MARK: - forwarding
 
     /// Whether this daemon understands `forward_of_message_id`. Read off the
@@ -5172,7 +5517,13 @@ final class AppStore {
             // it did nothing until the next poll. Harmless for undo kinds that
             // never resolved anything: the id simply is not in the set.
             // Only for a kind that resolved something: see `touchesSitrep`.
-            if entry.kind.touchesSitrep { resolvedIds.remove(entry.messageId) }
+            if entry.kind.touchesSitrep {
+                resolvedIds.remove(entry.messageId)
+                // The mail page may already hold the server's `done` row (a
+                // poll landed inside the undo window), and the next fetch is
+                // up to a TTL away; reopen it there too so the undo shows now.
+                reopenInMail(entry.messageId)
+            }
             pushToast("undone: \(entry.label)", .info)
             Analytics.capture("undo_fired", ["kind": String(describing: entry.kind)])
             // The bands dropped the row optimistically and the next poll is up
@@ -5237,7 +5588,26 @@ final class AppStore {
     /// `lastRefresh`) would keep showing a resolved row for up to a full poll —
     /// which reads as the action not working. This is the shared record such a
     /// list filters against; the poll still supplies the truth.
-    private(set) var resolvedIds: Set<Int> = []
+    private(set) var resolvedIds: Set<Int> = [] {
+        didSet {
+            for id in resolvedIds.subtracting(oldValue) { resolvedAt[id] = Date() }
+            for id in oldValue.subtracting(resolvedIds) { resolvedAt[id] = nil }
+        }
+    }
+    /// When each id joined `resolvedIds`, so a later poll can tell "the server
+    /// has not caught up yet" from "the server reopened it since".
+    private var resolvedAt: [Int: Date] = [:]
+
+    /// Let the server's word win over a resolve made this session, for the one
+    /// case where it reopens mail on its own: a reminder that fired. Only for a
+    /// fetch that STARTED well after the resolve, so a poll racing the resolve's
+    /// own write cannot hand the row back.
+    fileprivate func releaseReopened(_ rows: [AttentionUpdate], fetchedAt: Date) {
+        for u in rows where u.status != .done && u.reminded_at != nil {
+            guard let at = resolvedAt[u.id], fetchedAt.timeIntervalSince(at) > 30 else { continue }
+            resolvedIds.remove(u.id)
+        }
+    }
 
     /// Optimistically pull a message id out of whatever band holds it and keep
     /// the selection valid (advance to the next row, else the previous).
@@ -5284,6 +5654,43 @@ final class AppStore {
         sitrep.open.removeAll { $0.id == messageId }
     }
 
+    /// Done on a whole Reading sender at once: the tile's `e`, and the reader's
+    /// held `e` on that sender's stack. The tile leaves now and every message
+    /// is marked in PARALLEL, so a stack of twenty lands in one round trip's
+    /// time rather than twenty. One toast, and no undo on this path.
+    func markReadingDone(_ items: [AttentionUpdate], sender: String) async {
+        let ids = Set(items.map(\.id))
+        zones.reading.removeAll { $0.items.contains { ids.contains($0.id) } }
+        let landed = await withTaskGroup(of: Int?.self) { group in
+            for item in items {
+                group.addTask {
+                    do {
+                        try await APIClient.shared.setStatus(item.id, .done)
+                        // No undo, so nothing re-pins: unpin as each one lands.
+                        await ImageStore.shared.release(messageId: item.id)
+                        return item.id
+                    } catch {
+                        return nil
+                    }
+                }
+            }
+            var landed: [Int] = []
+            for await id in group { if let id { landed.append(id) } }
+            return landed
+        }
+        // Record each as resolved, not just gone from the zone: the same
+        // message can be sitting in a band or on the mail page, and this path
+        // never went through removeFromBands. Only the ones that LANDED — a
+        // resolved id is hidden for the rest of the session.
+        for id in landed { noteResolved(id) }
+        let failed = items.count - landed.count
+        if failed > 0 {
+            pushToast("some marks failed; refresh to re-sync", .error)
+        } else {
+            pushToast("done: \(SenderCache.resolved(sender).displayName) (\(items.count))", .info)
+        }
+    }
+
     /// The same, for every message from one sender: the client half of the
     /// server's `resolve_sender`, so unsubscribing or blocking empties that
     /// sender NOW rather than one poll later.
@@ -5300,9 +5707,13 @@ final class AppStore {
         for u in sitrep.standing + sitrep.new + sitrep.open where matches(u) {
             resolvedIds.insert(u.id)
         }
+        // ONE union, not an insert per row: the scroll can hold thousands of
+        // rows, and every insert fires `resolvedIds`' observers.
+        var ids = Set<Int>()
         for mode in MailMode.allCases {
-            for u in mailPage(mode).value ?? [] where matches(u) { resolvedIds.insert(u.id) }
+            for u in mailPage(mode).value ?? [] where matches(u) { ids.insert(u.id) }
         }
+        resolvedIds.formUnion(ids)
         sitrep.standing.removeAll(where: matches)
         sitrep.new.removeAll(where: matches)
         sitrep.open.removeAll(where: matches)

@@ -188,7 +188,7 @@ reviewer needs one continuous frame proving that client ID granted that consent.
 Up to three. Use:
 
 1. `https://passband.app/privacy`
-2. `https://github.com/braelyn-ai/squelch/blob/main/docs/SECURITY.md`
+2. `https://github.com/passband-app/passband/blob/main/docs/SECURITY.md`
 3. `https://passband.app/about`
 
 ## CASA Tier 2
@@ -220,7 +220,7 @@ to R2), and the deletion path.
 Answers we should have written down before we are asked, not after.
 
 - **Embedded client credentials in a public Docker image.** The self-host
-  Desktop client's id and secret ship in `ghcr.io/braelyn-ai/squelchd`. This is
+  Desktop client's id and secret ship in `ghcr.io/passband-app/squelchd`. This is
   the sanctioned installed-app model — Google treats Desktop client secrets as
   non-confidential and it is what rclone and Thunderbird do — and
   `docs/BROKER.md` sets out why the alternatives are worse. Be ready to say so

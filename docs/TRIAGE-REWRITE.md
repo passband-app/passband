@@ -92,7 +92,7 @@ Checks must cover fast decline followed by agent push, both lane completion orde
 
 ## Follow-up UX issue
 
-[Issue #213](https://github.com/braelyn-ai/passband/issues/213) tracks the agent asking whether the user wants to keep receiving "emails like this," offering keep, suppress sender, and suppress similar content across senders. Suppression controls Passband placement/notifications; unsubscribing is a separate explicit action. This feedback UI and long-term learned memory are outside the rewrite scope.
+[Issue #213](https://github.com/passband-app/passband/issues/213) tracks the agent asking whether the user wants to keep receiving "emails like this," offering keep, suppress sender, and suppress similar content across senders. Suppression controls Passband placement/notifications; unsubscribing is a separate explicit action. This feedback UI and long-term learned memory are outside the rewrite scope.
 
 ## Engineering defaults to evaluate
 

@@ -247,6 +247,15 @@ fn apply_correction(
     field: &str,
     value: &serde_json::Value,
 ) -> Result<()> {
+    use crate::triage::decision::{EmailKind, MessageDestination};
+    let reading_basis = |d: &MessageDecision| {
+        (
+            d.kinds.contains(&EmailKind::Editorial),
+            d.kinds.contains(&EmailKind::Promotional),
+            d.destinations.contains(&MessageDestination::Reading),
+        )
+    };
+    let before = reading_basis(decision);
     match field {
         "kinds" if value.is_object() => apply_list_delta(&mut decision.kinds, value)?,
         "destinations" if value.is_object() => apply_list_delta(&mut decision.destinations, value)
@@ -273,6 +282,14 @@ fn apply_correction(
             decision.external_access.evidence.clear();
         }
         _ => return Err(CoreError::InvalidInput("unknown correction field".into())),
+    }
+    // The model's content-vs-promotion call was made against the kinds and
+    // destinations it chose. A correction that changes what it rests on
+    // (editorial, promotional, or Reading membership) outranks it: clear it and
+    // let clients read the corrected kinds. Unrelated edits leave it alone,
+    // since the correction row is replayed over every later re-triage too.
+    if reading_basis(decision) != before {
+        decision.reading_kind = None;
     }
     Ok(())
 }
@@ -1858,6 +1875,11 @@ impl AgentTriageStore for SqliteStore {
     }
 }
 
+/// A blank display name is no display name.
+fn non_blank(value: Option<String>) -> Option<String> {
+    value.filter(|name| !name.trim().is_empty())
+}
+
 fn restrict_external_items(
     conn: &Connection,
     account: AccountId,
@@ -1874,7 +1896,13 @@ fn restrict_external_items(
             )?
         {
             match super::messages::thread_guard_and_subject(conn, account, &item.thread_id) {
-                Ok(_) => allowed.push(item),
+                Ok(_) => {
+                    // The display name is the human door's alone: untrusted
+                    // header text never rides out on an agent-facing listing.
+                    let mut item = item;
+                    item.from_name = None;
+                    allowed.push(item)
+                }
                 Err(CoreError::NotFound) => {}
                 Err(error) => return Err(error),
             }
@@ -2053,7 +2081,7 @@ fn list_items_with_query(
     let sql = if destination == "fye" {
         "SELECT
              m.id,m.thread_id,m.from_addr,m.subject,
-             strftime('%Y-%m-%dT%H:%M:%fZ',min(julianday(a.relevant_activity),COALESCE(julianday(t.created_at),julianday(?2)),julianday(?2))),d.decision_json,a.attention_json,a.unresolved_since,a.decision_message_id
+             strftime('%Y-%m-%dT%H:%M:%fZ',min(julianday(a.relevant_activity),COALESCE(julianday(t.created_at),julianday(?2)),julianday(?2))),d.decision_json,a.attention_json,a.unresolved_since,a.decision_message_id,m.from_name
              FROM agent_thread_attention a JOIN messages m ON m.account_id=a.account_id AND
              m.id=a.message_id LEFT JOIN agent_message_decisions d ON d.account_id=m.account_id AND
              d.message_id=m.id LEFT JOIN triage t ON t.account_id=m.account_id AND
@@ -2064,7 +2092,7 @@ fn list_items_with_query(
              (t.remind_at IS NULL OR t.remind_at<=?2) AND ?4 IS ?4 AND ?5 IS ?5"
     } else if destination == "records" {
         "SELECT m.id,m.thread_id,m.from_addr,m.subject,
-             strftime('%Y-%m-%dT%H:%M:%fZ',min(julianday(m.received_at),COALESCE(julianday(t.created_at),julianday(?2)),julianday(?2))),d.decision_json,a.attention_json,a.unresolved_since,d.message_id
+             strftime('%Y-%m-%dT%H:%M:%fZ',min(julianday(m.received_at),COALESCE(julianday(t.created_at),julianday(?2)),julianday(?2))),d.decision_json,a.attention_json,a.unresolved_since,d.message_id,m.from_name
              FROM agent_message_decisions d JOIN messages m ON m.account_id=d.account_id AND m.id=d.message_id
              LEFT JOIN triage t ON t.account_id=m.account_id AND t.message_id=m.id
              LEFT JOIN agent_thread_attention a ON a.account_id=m.account_id AND a.thread_id=m.thread_id
@@ -2076,7 +2104,7 @@ fn list_items_with_query(
     } else {
         "SELECT
              m.id,m.thread_id,m.from_addr,m.subject,
-             strftime('%Y-%m-%dT%H:%M:%fZ',min(julianday(m.received_at),COALESCE(julianday(t.created_at),julianday(?2)),julianday(?2))),d.decision_json,a.attention_json,a.unresolved_since,d.message_id
+             strftime('%Y-%m-%dT%H:%M:%fZ',min(julianday(m.received_at),COALESCE(julianday(t.created_at),julianday(?2)),julianday(?2))),d.decision_json,a.attention_json,a.unresolved_since,d.message_id,m.from_name
              FROM agent_message_destinations p JOIN messages m ON m.account_id=p.account_id AND
              m.id=p.message_id JOIN agent_message_decisions d ON d.account_id=m.account_id AND
              d.message_id=m.id LEFT JOIN triage t ON t.account_id=m.account_id AND t.message_id=m.id
@@ -2106,6 +2134,7 @@ fn list_items_with_query(
                     r.get::<_, Option<String>>(6)?,
                     r.get::<_, Option<String>>(7)?,
                     r.get::<_, i64>(8)?,
+                    r.get::<_, Option<String>>(9)?,
                 ))
             },
         )?
@@ -2123,6 +2152,7 @@ fn list_items_with_query(
                 a,
                 unresolved_since,
                 decision_source_message_id,
+                from_name,
             )| {
                 // Pending classification must not hide valid thread attention,
                 // nor borrow kinds/records from an unrelated update's source.
@@ -2140,6 +2170,7 @@ fn list_items_with_query(
                     decision_source_message_id,
                     thread_id,
                     from_addr,
+                    from_name: non_blank(from_name),
                     subject,
                     received_at,
                     decision,
@@ -2172,7 +2203,8 @@ fn append_due_reminders(
     items: &mut Vec<AgentListItem>,
 ) -> Result<()> {
     let mut statement = conn.prepare(
-        "SELECT m.id,m.thread_id,m.from_addr,m.subject,m.received_at,t.reminded_at,d.decision_json
+        "SELECT m.id,m.thread_id,m.from_addr,m.subject,m.received_at,t.reminded_at,d.decision_json,
+                m.from_name
          FROM messages m JOIN triage t ON t.account_id=m.account_id AND t.message_id=m.id
          LEFT JOIN agent_message_decisions d ON d.account_id=m.account_id AND d.message_id=m.id
          WHERE m.account_id=?1 AND m.is_sent=0 AND m.is_spam=0 AND t.status!='done'
@@ -2189,10 +2221,11 @@ fn append_due_reminders(
                 row.get::<_, String>(4)?,
                 row.get::<_, String>(5)?,
                 row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
             ))
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    for (id, thread, sender, subject, received, reminded, encoded) in rows {
+    for (id, thread, sender, subject, received, reminded, encoded, sender_name) in rows {
         if thread_fye_override(conn, account, &thread)? == Some(false) {
             continue;
         }
@@ -2220,6 +2253,7 @@ fn append_due_reminders(
             decision_source_message_id: id,
             thread_id: thread,
             from_addr: sender,
+            from_name: non_blank(sender_name),
             subject,
             received_at: received,
             decision,
@@ -3047,6 +3081,8 @@ mod tests {
                 .human_agent_updates(
                     1,
                     &AgentInventoryQuery {
+                        before: None,
+                        limit: None,
                         since: Utc::now() - chrono::Duration::days(30),
                         min_importance: None,
                         status: None,
@@ -3068,6 +3104,8 @@ mod tests {
             .human_agent_updates(
                 1,
                 &AgentInventoryQuery {
+                    before: None,
+                    limit: None,
                     since: Utc::now() - chrono::Duration::days(30),
                     min_importance: None,
                     status: None,
@@ -3722,6 +3760,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn reading_relevant_corrections_clear_the_models_reading_kind() {
+        use crate::triage::decision::ReadingKind;
+        use serde_json::json;
+        let cases = [
+            ("kinds", json!({"add": ["promotional"], "remove": []}), true),
+            ("kinds", json!({"add": [], "remove": ["editorial"]}), true),
+            ("kinds", json!(["promotional"]), true),
+            (
+                "destinations",
+                json!({"add": [], "remove": ["reading"]}),
+                true,
+            ),
+            // Unrelated or no-op edits keep the model's call.
+            (
+                "kinds",
+                json!({"add": ["event_reservation"], "remove": []}),
+                false,
+            ),
+            ("kinds", json!(["editorial", "general"]), false),
+            ("destinations", json!(["reading"]), false),
+            ("show_in_fye", json!(true), false),
+        ];
+        for (field, value, clears) in cases {
+            let mut decision = MessageDecision {
+                kinds: vec![EmailKind::Editorial],
+                destinations: vec![MessageDestination::Reading],
+                reading_kind: Some(ReadingKind::Content),
+                ..Default::default()
+            };
+            apply_correction(&mut decision, field, &value).unwrap();
+            let expected = if clears {
+                None
+            } else {
+                Some(ReadingKind::Content)
+            };
+            assert_eq!(decision.reading_kind, expected, "{field} {value}");
+        }
+    }
     #[test]
     fn additive_corrections_preserve_other_choices_and_future_model_categories() {
         let store = fixture();
@@ -4691,37 +4768,43 @@ fn human_inventory(
          LEFT JOIN agent_thread_attention a ON a.account_id=m.account_id AND a.thread_id=m.thread_id
          WHERE m.account_id=?1 AND m.is_sent=0 AND m.is_spam=?2
            AND (m.received_at>=?3 OR t.remind_at IS NOT NULL OR t.reminded_at IS NOT NULL)
+           AND (?4 IS NULL OR m.received_at<?4 OR (m.received_at=?4 AND m.id<?5))
          ORDER BY m.received_at DESC,m.id DESC"
     )?;
-    let rows = statement
-        .query_map(
-            params![
-                account,
-                query.spam == SpamScope::Only,
-                query.since.to_rfc3339()
-            ],
-            |row| {
-                Ok(InventoryRow {
-                    id: row.get(0)?,
-                    thread: row.get(1)?,
-                    sender: row.get(2)?,
-                    name: row.get(3)?,
-                    subject: row.get(4)?,
-                    snippet: row.get(5)?,
-                    received: super::dt(row, 6)?,
-                    status: row.get(7)?,
-                    surfaced: super::dt_opt(row, 8)?,
-                    resolved: super::dt_opt(row, 9)?,
-                    reminder: super::dt_opt(row, 10)?,
-                    reminded: super::dt_opt(row, 11)?,
-                    attachments: row.get(12)?,
-                    decision: row.get(13)?,
-                    attention: row.get(14)?,
-                    representative: row.get(15)?,
-                })
-            },
-        )?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let rows = statement.query_map(
+        params![
+            account,
+            query.spam == SpamScope::Only,
+            query.since.to_rfc3339(),
+            // The SAME text form ingest stores (`to_rfc3339`), so the
+            // keyset compares exactly as the ORDER BY sorts, and the
+            // received_at index serves both.
+            query.before.map(|(at, _)| at.to_rfc3339()),
+            query.before.map(|(_, id)| id).unwrap_or(i64::MIN)
+        ],
+        |row| {
+            Ok(InventoryRow {
+                id: row.get(0)?,
+                thread: row.get(1)?,
+                sender: row.get(2)?,
+                name: row.get(3)?,
+                subject: row.get(4)?,
+                snippet: row.get(5)?,
+                received: super::dt(row, 6)?,
+                status: row.get(7)?,
+                surfaced: super::dt_opt(row, 8)?,
+                resolved: super::dt_opt(row, 9)?,
+                reminder: super::dt_opt(row, 10)?,
+                reminded: super::dt_opt(row, 11)?,
+                attachments: row.get(12)?,
+                decision: row.get(13)?,
+                attention: row.get(14)?,
+                representative: row.get(15)?,
+            })
+        },
+    )?;
+    // ITERATED, not collected: with an early limit the statement stops
+    // stepping at the page, instead of decoding the whole window first.
     let mut output = Vec::new();
     let mut scores = std::collections::HashMap::new();
     if query.band == Some(SitrepBand::Standing) {
@@ -4729,7 +4812,16 @@ fn human_inventory(
         rank_items(&mut ranked, &query.ranking, Utc::now());
         scores.extend(ranked.iter().map(|item| (item.message_id, item.score)));
     }
+    // Only when nothing below re-sorts: then the rows come out in SQL order
+    // and the first `limit` produced are the page.
+    let early_limit = query
+        .limit
+        .filter(|_| !query.pending_reminders && query.band != Some(SitrepBand::Standing));
     for row in rows {
+        if early_limit.is_some_and(|limit| output.len() >= limit) {
+            break;
+        }
+        let row = row?;
         let decision: Option<MessageDecision> = row.decision.as_deref().map(decode).transpose()?;
         let attention: Option<ThreadAttentionDecision> =
             row.attention.as_deref().map(decode).transpose()?;
@@ -4745,11 +4837,16 @@ fn human_inventory(
         // it unless the human pinned the thread.
         let wants_fye = attention.as_ref().is_some_and(|a| a.show_in_fye);
         let is_auth = decision.as_ref().is_some_and(|d| d.auth.is_auth());
-        let selected = wants_fye
-            && (!is_auth || thread_fye_override(conn, account, &row.thread)? == Some(true));
+        let pinned = thread_fye_override(conn, account, &row.thread)?;
+        let selected = wants_fye && (!is_auth || pinned == Some(true));
         let is_standing = ((selected && row.representative == Some(row.id))
             || row.reminded.is_some())
-            && thread_fye_override(conn, account, &row.thread)? != Some(false);
+            && pinned != Some(false);
+        // The sitrep's own FYE membership, for the placement label: the
+        // human's pin either way wins, then the model's pick (auth mail
+        // excepted), then a fired reminder.
+        let in_fye = pinned != Some(false)
+            && (pinned == Some(true) || (wants_fye && !is_auth) || row.reminded.is_some());
         if let Some(band) = query.band {
             let visible = match band {
                 SitrepBand::Standing => is_standing && status != AttentionStatus::Done,
@@ -4809,6 +4906,8 @@ fn human_inventory(
                 preview: Some(row.snippet),
             },
             status,
+            received_at: Some(row.received),
+            placement: placement(decision.as_ref(), in_fye, is_auth),
             surfaced_at: row.surfaced,
             resolved_at: row.resolved,
             remind_at: row.reminder,
@@ -4831,11 +4930,39 @@ fn human_inventory(
     Ok(output.into_iter().map(|(item, _)| item).collect())
 }
 
+/// The sitrep zone a message lands in, in the order the sitrep itself claims
+/// it: the attention band first (it outranks a verdict), then the Auth page,
+/// then the record zones, then Reading. Anything else that was triaged is noise.
+fn placement(decision: Option<&MessageDecision>, attention: bool, is_auth: bool) -> Option<String> {
+    use crate::triage::decision::RecordProposal;
+    if attention {
+        return Some("eyes".into());
+    }
+    let decision = decision?;
+    let zone = if is_auth {
+        "auth"
+    } else if let Some(record) = decision.records.first() {
+        match record {
+            RecordProposal::Event { .. } => "calendar",
+            RecordProposal::Delivery { .. } => "shipments",
+            RecordProposal::Receipt { .. } => "receipts",
+            RecordProposal::Bill { .. } | RecordProposal::FinancialUpdate { .. } => "billing",
+        }
+    } else if decision.destinations.contains(&MessageDestination::Reading) {
+        "reading"
+    } else {
+        "noise"
+    };
+    Some(zone.into())
+}
+
 #[cfg(test)]
 mod inventory_tests {
     use super::*;
     fn query() -> AgentInventoryQuery {
         AgentInventoryQuery {
+            before: None,
+            limit: None,
             since: Utc::now() - Duration::days(30),
             min_importance: None,
             status: None,
@@ -4870,6 +4997,98 @@ mod inventory_tests {
         assert!(store.external_agent_reading(1, 10).unwrap().is_empty());
     }
     #[test]
+    fn placement_follows_the_sitreps_zones() {
+        use crate::triage::decision::RecordProposal;
+        let record = |kind: &str| -> RecordProposal {
+            let fields = match kind {
+                "event" => serde_json::json!({"kind": "event", "title": "t", "evidence": []}),
+                "delivery" => {
+                    serde_json::json!({"kind": "delivery", "status": "shipped", "evidence": []})
+                }
+                "financial_update" => serde_json::json!({
+                    "kind": "financial_update", "institution": "i", "description": "d", "evidence": []
+                }),
+                other => serde_json::json!({"kind": other, "merchant": "m", "evidence": []}),
+            };
+            serde_json::from_value(fields).unwrap()
+        };
+        let with = |records: Vec<RecordProposal>, reading: bool| MessageDecision {
+            records,
+            destinations: if reading {
+                vec![MessageDestination::Reading]
+            } else {
+                vec![]
+            },
+            ..Default::default()
+        };
+        let plain = with(vec![], false);
+        assert_eq!(placement(None, false, false), None, "untriaged has no zone");
+        assert_eq!(placement(None, true, false).as_deref(), Some("eyes"));
+        assert_eq!(
+            placement(Some(&plain), true, true).as_deref(),
+            Some("eyes"),
+            "a pin beats auth"
+        );
+        assert_eq!(
+            placement(Some(&plain), false, true).as_deref(),
+            Some("auth")
+        );
+        for (kind, zone) in [
+            ("event", "calendar"),
+            ("delivery", "shipments"),
+            ("receipt", "receipts"),
+            ("bill", "billing"),
+            ("financial_update", "billing"),
+        ] {
+            let d = with(vec![record(kind)], true);
+            assert_eq!(
+                placement(Some(&d), false, false).as_deref(),
+                Some(zone),
+                "{kind}"
+            );
+        }
+        assert_eq!(
+            placement(Some(&with(vec![], true)), false, false).as_deref(),
+            Some("reading")
+        );
+        assert_eq!(
+            placement(Some(&plain), false, false).as_deref(),
+            Some("noise")
+        );
+    }
+
+    #[test]
+    fn human_inventory_pages_by_keyset_without_gaps_or_repeats() {
+        let store = tests::fixture();
+        let all = store.human_agent_updates(1, &query()).unwrap();
+        assert!(all.len() >= 2, "fixture has at least two messages");
+        // One row per page, walking back by (received_at, id).
+        let mut walked = Vec::new();
+        let mut before = None;
+        loop {
+            let page = store
+                .human_agent_updates(
+                    1,
+                    &AgentInventoryQuery {
+                        before,
+                        limit: Some(1),
+                        since: DateTime::<Utc>::UNIX_EPOCH,
+                        ..query()
+                    },
+                )
+                .unwrap();
+            assert!(page.len() <= 1, "the limit caps the page");
+            let Some(row) = page.into_iter().next() else {
+                break;
+            };
+            before = Some((row.received_at.unwrap(), row.update.id));
+            walked.push(row.update.id);
+            assert!(walked.len() <= all.len(), "paging never repeats");
+        }
+        assert_eq!(walked, all.iter().map(|u| u.update.id).collect::<Vec<_>>());
+    }
+
+    #[test]
     fn human_inventory_keeps_date_only_deadline_precision() {
         let store = tests::fixture();
         let (job, context) = tests::claim(&store, 1);
@@ -4895,6 +5114,11 @@ mod inventory_tests {
             .unwrap();
         assert!(item.update.deadline.is_none());
         assert_eq!(item.deadline_date.as_deref(), Some("2026-10-05"));
+        // The mail list dates rows by arrival, so every inventory row carries it.
+        assert!(item.received_at.is_some());
+        // And names the sitrep zone it lands in: this fixture's verdict picks
+        // it for attention.
+        assert_eq!(item.placement.as_deref(), Some("eyes"));
     }
 
     #[test]

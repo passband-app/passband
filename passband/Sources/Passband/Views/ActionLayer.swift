@@ -37,6 +37,23 @@ struct ActionLayer: View {
             .padding(.leading, 74)
             .padding(.bottom, 18)
 
+            // AUTOMATIC UNSUBSCRIBES, bottom-right of the sitrep: the toasts'
+            // opposite corner, so a job and an undo chip never fight for one.
+            // Sitrep only, with no reader or composer over it: `u` leaves the
+            // reader on purpose, and this is where the user lands.
+            if showsUnsubscribeTray {
+                VStack(spacing: 0) {
+                    Spacer(minLength: 0)
+                    HStack(spacing: 0) {
+                        Spacer(minLength: 0)
+                        UnsubscribeTray().fixedSize()
+                    }
+                }
+                .padding(.trailing, 18)
+                .padding(.bottom, 18)
+                .transition(.opacity)
+            }
+
             if let request = store.ruleEditor {
                 // Keyed by the request: a click on an in-effect rule swaps the
                 // request under an open card, and without a fresh identity the
@@ -102,6 +119,11 @@ struct ActionLayer: View {
         // every toast, undo chip and modal in the app, and reading the tick
         // here re-evaluated all of it every ten seconds.
         .background { ViolationScanKeeper(scan: scanViolations) }
+    }
+
+    private var showsUnsubscribeTray: Bool {
+        store.activeView == .sitrep && store.threadId == nil && !store.composeOpen
+            && !UnsubscribeJobs.shared.items.isEmpty
     }
 
     // MARK: - toasts
@@ -171,6 +193,7 @@ struct ActionLayer: View {
                             .padding(.vertical, 6)
                     }
                     .transition(.move(edge: .leading).combined(with: .opacity))
+                    .tourTarget(.undoToast)
                 }
             }
         }
@@ -217,7 +240,11 @@ struct ActionLayer: View {
     }
 
     private func scanViolations() async {
+        let gen = UnsubscribeJobs.shared.generation
         guard let rows = try? await APIClient.shared.getUnsubscribes() else { return }
+        // The same rows carry automatic-unsubscribe jobs: a `needs_you` left
+        // from before a relaunch reaches the tray through this fetch.
+        UnsubscribeJobs.shared.absorb(rows, generation: gen)
         // Surface one at a time: a stack of these is a nag, not a prompt.
         let next = rows.first {
             $0.violation_count > 0 && $0.resolution == nil && !acted.contains($0.sender)
@@ -298,6 +325,7 @@ struct ShortcutsOverlay: View {
                 (["c"], "new message"),
                 (["e", "d"], "done, and close the reader"),
                 (["E", "D"], "done, and open the next email"),
+                (["S"], "skip to the next email, leave this one"),
                 (["h"], "remind + next"),
                 (["u"], "unsubscribe from this sender"),
                 (["t"], "new rule for this sender"),

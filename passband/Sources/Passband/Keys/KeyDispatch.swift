@@ -16,6 +16,10 @@
 //   * A binding marked `exactCase` sits the fold out: it answers only its own
 //     spelling, for a verb whose shifted twin must NOT mean the same thing
 //     (the Sent page's `s` / `x`, the clock's ⌘⇧L against a bare ⌘L).
+//   * A binding with `onRelease` is a HOLD: the key it fired on is remembered
+//     until it comes back up, its own autorepeats are swallowed rather than
+//     re-firing it, and the release is handed to it wherever the context stack
+//     has moved in the meantime.
 
 import SwiftUI
 
@@ -45,17 +49,23 @@ struct KeyBinding: Identifiable {
     /// Match this spelling only, never through the case-folded pass.
     var exactCase: Bool = false
     var handler: () -> Bool
+    /// Makes this a HOLD binding: called once when the key comes back up, or
+    /// with `cancelled` true when the app lost the keyboard before it did (the
+    /// key-up then goes to some other app and is never ours to see).
+    var onRelease: ((_ cancelled: Bool) -> Void)?
 
     let id = UUID()
 
     init(
         _ key: String, _ description: String, meta: Bool = false, allowInInput: Bool = false,
+        onRelease: ((_ cancelled: Bool) -> Void)? = nil,
         handler: @escaping () -> Void
     ) {
         self.key = key
         self.description = description
         self.meta = meta
         self.allowInInput = allowInInput
+        self.onRelease = onRelease
         self.handler = {
             handler()
             return true
@@ -83,6 +93,8 @@ struct KeyEventLike {
     var option = false
     var command = false
     var shift = false
+    /// An autorepeat of a key already down.
+    var isRepeat = false
 }
 
 struct DispatchOutcome {
@@ -123,6 +135,9 @@ final class KeyRegistry {
         (UUID(), .list)
     ]
     private var seq = 0
+    /// The HOLD in progress: the key (case-folded, so letting go of shift first
+    /// does not strand it) and who to tell when it comes up.
+    private var held: (key: String, release: (Bool) -> Void)?
 
     private init() {}
 
@@ -172,6 +187,12 @@ final class KeyRegistry {
     /// non-input-suppressed binding.
     func dispatch(_ event: KeyEventLike, editing: Bool) -> DispatchOutcome {
         let eventStr = Self.normalize(event)
+        // A held key's autorepeats belong to the hold. Firing the binding again
+        // would restart it, and falling through would hand the key to whatever
+        // sits underneath, twenty times a second.
+        if let held, event.isRepeat, held.key == eventStr.lowercased() {
+            return DispatchOutcome(handled: true, firedKey: nil, firedContext: nil)
+        }
         let metaHeld = event.command
         let ctx = currentContext
         let order: [KeyContext] = ctx == .global ? [.global] : [ctx, .global]
@@ -193,6 +214,12 @@ final class KeyRegistry {
                         // focuses a text field must not become a trap.
                         if editing && !b.allowInInput && b.key != "Escape" { continue }
                         if b.handler() {
+                            if let release = b.onRelease {
+                                // A second hold starting ends the first as a
+                                // cancel: only one key-up can be waited on.
+                                self.held?.release(true)
+                                self.held = (eventStr.lowercased(), release)
+                            }
                             return DispatchOutcome(
                                 handled: true, firedKey: b.key, firedContext: context)
                         }
@@ -201,6 +228,22 @@ final class KeyRegistry {
             }
         }
         return .unhandled
+    }
+
+    /// A key came up. Ends the hold on it, if there is one; true when it did.
+    @discardableResult
+    func release(_ event: KeyEventLike) -> Bool {
+        guard let held, held.key == Self.normalize(event).lowercased() else { return false }
+        self.held = nil
+        held.release(false)
+        return true
+    }
+
+    /// The keyboard went elsewhere mid-hold, so no key-up is coming.
+    func cancelHold() {
+        guard let held else { return }
+        self.held = nil
+        held.release(true)
     }
 
     /// Build the normalized key string. meta (⌘) is intentionally NOT baked in:
@@ -274,7 +317,8 @@ final class KeyRegistry {
                 control: f.contains(.control),
                 option: f.contains(.option),
                 command: f.contains(.command),
-                shift: f.contains(.shift))
+                shift: f.contains(.shift),
+                isRepeat: event.type == .keyDown && event.isARepeat)
         }
     }
 
@@ -284,6 +328,7 @@ final class KeyRegistry {
     final class KeyMonitor {
         static let shared = KeyMonitor()
         private var monitor: Any?
+        private var resignObserver: Any?
         /// What ⌘+ does. Handed in by the app (App/Zoom.swift) rather than
         /// named here, so this file still compiles alone for its test suite.
         var onZoomIn: () -> Void = {}
@@ -292,7 +337,16 @@ final class KeyRegistry {
 
         func install() {
             guard monitor == nil else { return }
-            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            // Losing the app mid-hold sends the key-up to whoever has focus
+            // now, so the hold is ended here instead of left running.
+            resignObserver = NotificationCenter.default.addObserver(
+                forName: NSApplication.didResignActiveNotification, object: nil, queue: .main
+            ) { _ in MainActor.assumeIsolated { KeyRegistry.shared.cancelHold() } }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { event in
+                if event.type == .keyUp {
+                    guard let like = KeyNames.eventLike(event) else { return event }
+                    return KeyRegistry.shared.release(like) ? nil : event
+                }
                 // Quick Look's panel is one of OUR windows, so a LOCAL monitor
                 // sees its keys first. Stand down for it entirely: Escape,
                 // Space and the arrows are the panel's while it is up, and a
@@ -360,11 +414,29 @@ private struct KeyContextModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         content
+            .environment(\.keyContext, context)
             .onAppear { if token == nil { token = KeyRegistry.shared.pushContext(context) } }
             .onDisappear {
                 if let token { KeyRegistry.shared.popContext(token) }
                 token = nil
             }
+    }
+}
+
+private struct KeyContextKey: EnvironmentKey {
+    static let defaultValue: KeyContext = .modal
+}
+
+extension EnvironmentValues {
+    /// The layer this view sits in: whatever the nearest `.keyContext(…)` above
+    /// it pushed. For a REUSED view that carries bindings of its own (the
+    /// recipient field) and so cannot name its host's context: a set registered
+    /// into any other layer is never consulted, and its keys silently fall
+    /// through to whatever is underneath. `.modal` where nothing above pushed
+    /// one, which is where such views lived before this existed.
+    var keyContext: KeyContext {
+        get { self[KeyContextKey.self] }
+        set { self[KeyContextKey.self] = newValue }
     }
 }
 

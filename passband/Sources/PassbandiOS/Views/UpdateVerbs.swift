@@ -6,9 +6,8 @@
 //
 // Read them against Views/EmailsView.swift's `bindings` (e/d/r/v/f/Enter) and
 // Views/ActionLayer.swift's list bindings (t). The one place a verb is more than
-// a single call — done, which resolves AND drops the row from the cached mail
-// pages so the next poll cannot hand it back — is copied from `resolveSelected`
-// rather than re-derived, and says so.
+// a single call — done, which must not act on mail that is already finished —
+// is copied from `resolveSelected` rather than re-derived, and says so.
 //
 // A phone has no cursor, so there is no `actionable` guard to port: the row a
 // gesture starts on IS the selection, and it is passed in.
@@ -27,6 +26,9 @@ struct UpdateVerbs {
     /// Which page these verbs act on, for the analytics origin. The list is
     /// the default; the dashboard's zones say so.
     var surface: Actions.Surface = .emails
+    /// The row is already finished (all mail shows these dimmed). Done is withheld from it: a second resolve would push a fresh
+    /// undo, and that undo reopens mail finished long ago.
+    var finished = false
 
     private var store: AppStore { AppStore.shared }
 
@@ -36,12 +38,13 @@ struct UpdateVerbs {
             update.thread_id, queue: queue, from: surface == .sitrep ? .sitrep : .emails)
     }
 
-    /// `e` / `d`. Both halves of EmailsView.resolveSelected: the action, then the
-    /// cached-page eviction that keeps the next poll from re-serving the row.
-    /// A rail swipe unless the long-press menu says otherwise.
+    /// `e` / `d`, as EmailsView.resolveSelected: the action only. The row is
+    /// NOT evicted from the cached pages; `resolvedIds` dims it, and an undo
+    /// brings it straight back. A rail swipe unless the long-press menu says
+    /// otherwise.
     func done(via: Actions.Via = .swipe) {
+        guard !finished else { return }
         Task { await Actions.done(update, via: via, on: surface) }
-        store.removeFromMail(update.id)
     }
 
     /// `e` in process mode — a DIFFERENT verb from done (status stays open, the
@@ -111,18 +114,17 @@ extension UpdateVerbs {
     /// Trailing edge (drag LEFT): the resolve. Done leads because it is the one
     /// verb a triage run repeats, and it is what a full swipe commits.
     var trailingVerbs: [SwipeVerb] {
-        if isSpamPage {
-            return [
+        let done =
+            finished
+            ? []
+            : [
                 SwipeVerb(
-                    title: "Done", symbol: "checkmark", tint: Palette.positive, destructive: true,
-                    run: { done(via: .swipe) })
+                    title: "Done", symbol: "checkmark", tint: Palette.positive,
+                    destructive: true, run: { self.done(via: .swipe) })
             ]
-        }
-        return [
-            SwipeVerb(
-                title: "Done", symbol: "checkmark", tint: Palette.positive, destructive: true,
-                run: { done(via: .swipe) }),
-            SwipeVerb(title: "Tune", symbol: "slider.horizontal.3", tint: Palette.accent, run: tune),
+        if isSpamPage { return done }
+        return done + [
+            SwipeVerb(title: "Tune", symbol: "slider.horizontal.3", tint: Palette.accent, run: tune)
         ]
     }
 
@@ -181,13 +183,15 @@ struct UpdateContextMenu: ViewModifier {
                     Label("Archive", systemImage: "archivebox")
                 }
             }
-            Divider()
             // Destructive ROLE, not a destructive act: done is undoable for five
             // seconds like every other resolve. The role is what puts it last and
             // in red, which is where a thumb expects the one verb that empties
-            // the row.
-            Button(role: .destructive) { verbs.done(via: .click) } label: {
-                Label("Done", systemImage: "checkmark")
+            // the row. Absent on a row that is already done.
+            if !verbs.finished {
+                Divider()
+                Button(role: .destructive) { verbs.done(via: .click) } label: {
+                    Label("Done", systemImage: "checkmark")
+                }
             }
         }
     }
@@ -220,7 +224,9 @@ extension View {
     /// worse mistake than one that resolves it — done is the edge with a
     /// five-second undo behind it.
     func swipeVerbs(_ verbs: UpdateVerbs) -> some View {
-        swipeActions(edge: .trailing, allowsFullSwipe: true) {
+        // No full swipe on a FINISHED row: with Done withheld, the leading
+        // verb there is Tune, and a habitual flick would open it.
+        swipeActions(edge: .trailing, allowsFullSwipe: !verbs.finished) {
             ForEach(verbs.trailingVerbs) { verb in
                 Button {
                     Haptics.commit()

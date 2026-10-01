@@ -12,6 +12,42 @@ updates itself, the phone comes through TestFlight, and the daemon is
 rolled onto hosted accounts or pulled as an image on a self-host box,
 so every note says which one it landed in.
 
+## 0.0.11 (2026-09-29)
+
+Ethan's Update
+
+### Mac
+
+- Schedule an email for later
+- Better draft email UI
+- Forwards are kept as drafts too
+- Click a sender to see their contact card
+- To, Cc and Bcc show in the reader
+- Opening an email is instant
+- Click a rule to edit it. A half-written rule survives Esc
+- Drag a recipient from To to Cc or Bcc
+- Space opens the first thing that needs you
+- e while hovering a package clears it until its next update
+- Wide emails fit the window
+- UI improvements
+- Bug fixes
+
+### iPhone
+
+- Schedule an email for later
+- Keep as many drafts as you want
+- Wide emails fit the screen
+- One chip for autopay bills
+
+### Daemon
+
+- Scheduled emails wait in the daemon and send on time
+- Triage runs on Opus 5.5
+- New accounts get triaged while the first sync is still running
+- Suggests a rule for a sender from how you treat their mail
+- Contact details for the contact card
+- Bug fixes
+
 ## 0.0.10 (2026-09-27)
 
 The iPhone catches up.

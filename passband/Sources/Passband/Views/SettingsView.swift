@@ -1224,8 +1224,7 @@ struct AccountSection: View {
             }
             // SHARING, and it renders only when this daemon can actually do it.
             // A self-hosted daemon has no control plane to mint a code at, so
-            // the button would be a control whose only outcome is a refusal —
-            // the same reasoning that keeps Add Account off the phone.
+            // the button would be a control whose only outcome is a refusal.
             //
             // THE PERMANENT DOOR. The two-week nudge asks once and never again;
             // anybody who changes their mind comes here.
@@ -1241,6 +1240,27 @@ struct AccountSection: View {
                     }
                 }
             }
+            // THE IPHONE APP, the permanent door behind the two-day ask. Shown
+            // until a phone has connected to this mailbox, and only on the Mac:
+            // on the phone it would be an ad for the app you are holding.
+            #if os(macOS)
+                if store.iosConnected == false {
+                    SectionCard(label: "iPhone app") {
+                        HStack(spacing: 12) {
+                            Button("Copy TestFlight Link") {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(
+                                    TestFlightNudge.joinURL.absoluteString, forType: .string)
+                            }
+                            .buttonStyle(.glassProminent)
+                            .tint(Palette.accent)
+                            Text("Passband for iPhone is in alpha on TestFlight")
+                                .font(Typo.micro)
+                                .foregroundStyle(Palette.inkFaintest)
+                        }
+                    }
+                }
+            #endif
         }
     }
 }

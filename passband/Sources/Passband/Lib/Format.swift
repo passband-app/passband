@@ -29,7 +29,10 @@ enum Fmt {
         f.dateFormat = "MMM d"
         return f
     }()
-    private static let dateCacheCap = 4000
+    /// Room for every stamp an all-mail scroll can hold several pages deep:
+    /// each poll re-sorts what is loaded, and a cache smaller than that
+    /// re-parses every row through the formatter on every pass.
+    private static let dateCacheCap = 20_000
 
     static func date(_ iso: String?) -> Date? {
         guard let iso, !iso.isEmpty else { return nil }

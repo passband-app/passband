@@ -19,7 +19,7 @@ You need:
 - A NAS or always-on machine that runs Docker, reachable from your Mac.
 - A Mac for the client.
 - The Gmail account you want triaged.
-- The container image: `ghcr.io/braelyn-ai/squelchd` is public, so a plain
+- The container image: `ghcr.io/passband-app/squelchd` is public, so a plain
   `docker pull` works with no registry login. Prefer building it yourself? From
   a checkout of this repo: `docker build -f squelchd/Dockerfile -t squelchd .`
   — note the `-f`: the Dockerfile at the repo *root* builds the APNs relay,
@@ -63,7 +63,7 @@ Create a directory on the NAS with a `docker-compose.yml`:
 ```yaml
 services:
   squelchd:
-    image: ghcr.io/braelyn-ai/squelchd:latest
+    image: ghcr.io/passband-app/squelchd:latest
     restart: unless-stopped
     ports:
       # LAN reachable, so the Mac client can connect. See the note below.
@@ -125,7 +125,7 @@ umask 077
 docker run --rm -p 8847:8847 \
   -e SQUELCH_CLIENT_ID=<client id> \
   -e SQUELCH_CLIENT_SECRET=<client secret> \
-  ghcr.io/braelyn-ai/squelchd:latest \
+  ghcr.io/passband-app/squelchd:latest \
   auth --export --expose-consent-listener > cred.txt
 ```
 
@@ -214,7 +214,7 @@ Install the Mac app. The released build is signed, notarized, and updates itself
 which a local build is not and does not:
 
 ```sh
-brew install --cask braelyn-ai/tap/passband
+brew install --cask passband-app/tap/passband
 # or download the zip from https://passband.app
 ```
 
@@ -294,7 +294,7 @@ runs two consent screens and carries both credentials in one blob (again no
 umask 077
 docker run --rm -p 8847:8847 \
   -e SQUELCH_CLIENT_ID=<client id> -e SQUELCH_CLIENT_SECRET=<client secret> \
-  ghcr.io/braelyn-ai/squelchd:latest \
+  ghcr.io/passband-app/squelchd:latest \
   auth --export --write --expose-consent-listener > cred.txt
 ```
 
@@ -329,5 +329,5 @@ no such restriction, which is why the client works without this.
 - Mail database and credentials: the `squelch-data` volume at `/data`.
 - Back up that volume, not the container.
 - Upgrades: `docker compose pull && docker compose up -d`. Pin a version tag
-  (`ghcr.io/braelyn-ai/squelchd:daemon-0.0.2`) instead of `latest` if you would
+  (`ghcr.io/passband-app/squelchd:daemon-0.0.2`) instead of `latest` if you would
   rather upgrades be deliberate — released tags carry the `daemon-` prefix.

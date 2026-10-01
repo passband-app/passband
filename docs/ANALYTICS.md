@@ -23,6 +23,11 @@ Values that arrive through `.rawValue` are the enum's business; when you add an
 enum case that reaches analytics, add its raw value to `allowedStrings` in the
 same change.
 
+Only release builds report. The PostHog key is compiled in under
+`PASSBAND_RELEASE`; a dev build sends nothing unless `PASSBAND_POSTHOG_KEY` is
+set in its environment, which is also how to test a change here (point
+`PASSBAND_POSTHOG_HOST` at a local listener and read the batches).
+
 ## Levels
 
 Settings > Privacy. Read from UserDefaults on every event, so a change applies
@@ -108,7 +113,7 @@ named.
 |---|---|---|
 | `triage_digest` (M, daily) | `total`, `sealed`, `band_standing`, `band_new`, `band_open`, `tier_past_due`, `tier_deadline`, `tier_signal`, `tier_noise` | Volume: the denominator for the correction rate and the surfaced-vs-squelched split. |
 | `triage_corrected` (M) | `axis`, `to`: the daemon's TriageAxis vocabulary | What triage gets wrong, by axis. |
-| `thread_opened` (M) | `via_reply`, `from_noise`, `source` | `from_noise` is the false-negative signal: someone digging below the squelch line. `source` is which surface earned the open (below). |
+| `thread_opened` (M) | `via_reply`, `from_noise`, `source` | `from_noise` is the false-negative signal: the opened row's own placement was noise, so someone dug below the squelch line. `source` is which surface earned the open (below). |
 | `email_done` / `email_archived` / `email_not_spam` (M) | `via`, `surface` | The verbs, and how and where they were input (below). |
 | `email_remind` (M) | | Reminder set from the palette. No origin yet: the palette is opened by key and chosen by key or click, and the choice is what fires. |
 | `email_reopened`, `email_labeled` | | In the vocabulary and in `Actions`, but nothing in the app calls `Actions.reopen` or `Actions.label`. Dead until a surface does. |
@@ -163,6 +168,7 @@ PR: `search_settled { turns, hits, opened, lane }` and
 | `group_created` / `group_updated` / `group_deleted` (M) | `mode`: `to` `bcc` `individual`; `members` | Audience shape and size. Never who. |
 | `invite_sent` (M) | `count`, `failed`; `source`: `rail` `settings` `nudge` | Which surface drives shares. |
 | `invite_nudge_accepted` / `invite_nudge_dismissed` (M) | | The two-week ask. |
+| `ios_nudge_closed` (M) | `copied` | The TestFlight ask closing, and whether the link was copied. A QR scan leaves no trace, so this is a floor on uptake. |
 
 ## Dashboards to build
 

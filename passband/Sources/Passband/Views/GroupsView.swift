@@ -252,8 +252,10 @@ struct GroupsView: View {
 
     private var bindings: [KeyBinding] {
         [
-            KeyBinding("j", "next") { index = min(groups.count - 1, index + 1) },
-            KeyBinding("k", "prev") { index = max(0, index - 1) },
+            KeyBinding("j", "next") { step(+1) },
+            KeyBinding("k", "prev") { step(-1) },
+            KeyBinding("ArrowDown", "next") { step(+1) },
+            KeyBinding("ArrowUp", "prev") { step(-1) },
             KeyBinding("n", "new group") { create() },
             KeyBinding("e", "edit group") { if let g = selected { edit(g) } },
             KeyBinding("Enter", "edit group") { if let g = selected { edit(g) } },
@@ -264,6 +266,12 @@ struct GroupsView: View {
     }
 
     // MARK: - actions
+
+    /// Clamped to the groups, and never below 0: an empty list used to park
+    /// the cursor at -1.
+    private func step(_ delta: Int) {
+        index = max(0, min(groups.count - 1, index + delta))
+    }
 
     private func create() {
         store.openGroupEditor(GroupEditorRequest(group: nil, onSaved: { Task { await load() } }))

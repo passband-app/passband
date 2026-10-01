@@ -20,6 +20,10 @@ settings:
     CODE_SIGN_IDENTITY[config=Release]: "Developer ID Application"
     ENABLE_HARDENED_RUNTIME: NO
     ENABLE_HARDENED_RUNTIME[config=Release]: YES
+    # Release is what ships (TestFlight archives, Developer ID Mac builds), and
+    # only a shipped build reports analytics; build.sh sets the same flag under
+    # HARDENED=1. See Analytics.client.
+    SWIFT_ACTIVE_COMPILATION_CONDITIONS[config=Release]: PASSBAND_RELEASE
     DEAD_CODE_STRIPPING: YES
     ALWAYS_SEARCH_USER_PATHS: NO
     CLANG_ENABLE_MODULES: YES
@@ -52,7 +56,7 @@ targets:
         # keys to Info.plist, not here.
         INFOPLIST_FILE: Sources/Passband/Info.plist
         # Mirror of ./VERSION, which build.sh reads as the source of truth.
-        MARKETING_VERSION: "0.0.10"
+        MARKETING_VERSION: "0.0.11"
         CURRENT_PROJECT_VERSION: "1"
         COMBINE_HIDPI_IMAGES: YES
         ASSETCATALOG_COMPILER_APPICON_NAME: Passband
@@ -103,6 +107,8 @@ targets:
           # Its card, for the same reason: it reads Updater's phase, and the
           # phone has no relaunch to offer.
           - "Views/UpdateAlert.swift"
+          # The iPhone ask is a Mac card about the iPhone app.
+          - "Views/TestFlightNudgeModal.swift"
           # The AppKit HALF of the reader, and only that: an NSViewRepresentable
           # plus the WKWebView subclass that hands the scroll wheel back to the
           # column. Everything the reader is made of — the body-preparation
@@ -184,7 +190,7 @@ targets:
         APS_ENVIRONMENT[config=Release]: production
         # The passband-ios-* tag overrides this in CI; it exists so an untagged local
         # build never claims a version ahead of what TestFlight actually has.
-        MARKETING_VERSION: "0.0.5"
+        MARKETING_VERSION: "0.0.6"
         CURRENT_PROJECT_VERSION: "1"
         # iPhone only. The iPad layout is a different design, not a stretch.
         TARGETED_DEVICE_FAMILY: "1"
@@ -254,7 +260,7 @@ targets:
         CODE_SIGN_ENTITLEMENTS: Sources/PassbandiOSNotify/PassbandiOSNotify.entitlements
         # Version-locked to the app: iOS refuses to install a bundle whose
         # embedded extension disagrees about either number.
-        MARKETING_VERSION: "0.0.5"
+        MARKETING_VERSION: "0.0.6"
         CURRENT_PROJECT_VERSION: "1"
         TARGETED_DEVICE_FAMILY: "1"
         # The same signing posture as the app target above, for the same

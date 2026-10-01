@@ -13,7 +13,7 @@ struct ReadingSender: Identifiable, Hashable, Sendable {
     var count: Int
     /// Latest one_line in the window (the summary line).
     var summary: String
-    /// Latest message date — cards sort newest-first.
+    /// Latest message date. Cards sort content first, then newest-first.
     var latest: Double
     /// The latest message's thread — clicking the card opens this email.
     var latestThreadId: String
@@ -22,11 +22,30 @@ struct ReadingSender: Identifiable, Hashable, Sendable {
     var items: [AttentionUpdate]
     /// The rule governing this sender, if any (drives the chip).
     var rule: SenderRule?
+    /// The items triage judged something to read (article, essay, post)
+    /// rather than a promotion.
+    var contentIds: Set<Int> = []
+    /// Content older than this (epoch seconds) has had its turn at the top and
+    /// files back in by date like everything else. Stamped by `derive` so the
+    /// answer is fixed for one derivation, and `prune` keeps it.
+    var contentFreshSince: Double = 0
+
+    /// Content cards sort ahead of the rest and get their own tint, for
+    /// `Reading.contentWindow` after they arrive. Taken from the newest message,
+    /// like `summary`, so the card's placement and the summary it shows always
+    /// agree, and `prune` stays right for free.
+    var isContent: Bool {
+        guard let newest = items.first, contentIds.contains(newest.id) else { return false }
+        return latest >= contentFreshSince
+    }
 
     var id: String { address }
 }
 
 enum Reading {
+    /// How long content keeps its place at the top of the board.
+    static let contentWindow: TimeInterval = 7 * 24 * 3600
+
     /// The adapter carries the server's real received timestamp here.
     private static func dateOf(_ update: AttentionUpdate) -> Double {
         Fmt.date(update.surfaced_at)?.timeIntervalSince1970 ?? 0
@@ -68,9 +87,21 @@ enum Reading {
 
     /// Group messages already selected for Reading by the agent. Grouping is
     /// presentation only: no sender shape, category, score or repetition test.
+    ///
+    /// `content` holds the ids triage judged to be content rather than
+    /// promotion; those senders sort first, newest-first within each half, and
+    /// any cap applies after, so a busy week of promotions never pushes the
+    /// reading off the board. Only for `contentWindow`: an unread essay from
+    /// last month should not sit above today's mail forever.
+    ///
+    /// UNCAPPED BY DEFAULT. This used to stop at 24 senders, which made the
+    /// zone's count top out at 24 and dropped the rest with no way to reach
+    /// them. The zone folds instead (`ReadingZone.collapsed`).
     static func derive(
-        updates: [AttentionUpdate], rules: [SenderRule], limit: Int = 24
+        updates: [AttentionUpdate], rules: [SenderRule], content: Set<Int> = [],
+        now: Date = Date(), limit: Int = .max
     ) -> [ReadingSender] {
+        let freshSince = now.timeIntervalSince1970 - contentWindow
         let groups = Dictionary(grouping: updates) { SenderID.address($0.sender) }
         return groups.compactMap { address, messages -> ReadingSender? in
             let ordered = messages.sorted {
@@ -82,10 +113,18 @@ enum Reading {
                 address: address, sender: latest.senderString, count: ordered.count,
                 summary: latest.one_line, latest: dateOf(latest),
                 latestThreadId: latest.thread_id, items: ordered,
-                rule: rule(for: address, in: rules))
+                rule: rule(for: address, in: rules),
+                contentIds: content.intersection(ordered.map(\.id)),
+                contentFreshSince: freshSince)
         }
-        .sorted { $0.latest == $1.latest ? $0.address < $1.address : $0.latest > $1.latest }
+        .sorted(by: boardOrder)
         .prefix(limit).map { $0 }
+    }
+
+    /// Content before promotions, newest first within each half.
+    private static func boardOrder(_ lhs: ReadingSender, _ rhs: ReadingSender) -> Bool {
+        if lhs.isContent != rhs.isContent { return lhs.isContent }
+        return lhs.latest == rhs.latest ? lhs.address < rhs.address : lhs.latest > rhs.latest
     }
 
     /// The `*@domain` pattern a newsletter CTA prefills into the rule editor.
@@ -99,9 +138,12 @@ enum Reading {
     /// in which marking mail done looked like it had not worked. `resolvedIds`
     /// is already the app's record of "resolved, poll has not caught up", and
     /// undo clears it, so a restored message brings its card straight back.
+    ///
+    /// Re-sorted after: a sender placed by a promotion that is now done may
+    /// have an essay underneath, and that card belongs with the content.
     static func prune(_ senders: [ReadingSender], resolved: Set<Int>) -> [ReadingSender] {
         guard !resolved.isEmpty else { return senders }
-        return senders.compactMap { nl in
+        return senders.compactMap { nl -> ReadingSender? in
             let live = nl.items.filter { !resolved.contains($0.id) }
             if live.count == nl.items.count { return nl }
             // Nothing left in the window: the card goes, rather than sitting
@@ -117,6 +159,7 @@ enum Reading {
             if !newest.one_line.isEmpty { out.summary = newest.one_line }
             return out
         }
+        .sorted(by: boardOrder)
     }
 
     static func domainPattern(_ address: String) -> String {

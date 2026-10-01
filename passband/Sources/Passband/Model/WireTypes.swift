@@ -182,11 +182,10 @@ struct AttentionUpdate: Codable, Sendable, Identifiable, Hashable {
     /// on the agent door, which is why every read goes through `senderString`
     /// rather than this directly.
     var from_name: String?
-    /// The mail's own `Subject` and the opening of its body. PRESENT ONLY ON
-    /// THE SPAM PAGE, and absent everywhere else by design rather than by
-    /// accident: a spam row was never triaged, so `one_line` is empty on every
-    /// one of them and these are what the row says instead. Every other page
-    /// has a summary and the daemon does not pay to send these beside it.
+    /// The mail's own `Subject` and the opening of its body. The inventory the
+    /// mail pages read serves both on every row; the legacy band listing serves
+    /// them on the spam page only, where `one_line` is empty and these are what
+    /// the row says instead. So: present on the mail pages, absent on the bands.
     ///
     /// UNTRUSTED, and more pointedly than `from_name`: this is text out of the
     /// corpus written to talk readers into things. It renders as words on a
@@ -194,6 +193,12 @@ struct AttentionUpdate: Codable, Sendable, Identifiable, Hashable {
     var subject: String?
     var preview: String?
     var status: AttentionStatus
+    /// When the mail arrived. ABSENT from an older daemon, which is why every
+    /// read goes through `arrivedAt` and falls back to `surfaced_at`.
+    var received_at: String? = nil
+    /// The sitrep zone this mail lands in (`SitrepZone`). Absent from an older
+    /// daemon and from rows triage has not decided yet.
+    var placement: String? = nil
     var surfaced_at: String?
     var resolved_at: String?
     /// A PENDING reminder: when the daemon will pull this back into the bands.
@@ -208,6 +213,10 @@ struct AttentionUpdate: Codable, Sendable, Identifiable, Hashable {
     var reminded_at: String?
 
     var hasAttachments: Bool { has_attachments ?? false }
+
+    /// The stamp a mail list dates and sorts this row by: arrival, or first
+    /// listing when the daemon is too old to say when it arrived.
+    var arrivedAt: String? { received_at ?? surfaced_at }
 
     /// Whether a reminder is waiting to fire on this row.
     var hasPendingReminder: Bool { !(remind_at ?? "").isEmpty }
@@ -780,6 +789,16 @@ struct RuleSuggestion: Codable, Sendable {
     var suggestion: String?
 }
 
+/// GET /client/v2/fye/headline. Null when the daemon has no model, the band is
+/// empty, or the model had nothing to say.
+struct FyeHeadline: Codable, Sendable {
+    var headline: String?
+    /// False when the daemon's call FAILED (timeout, provider error) rather
+    /// than the model answering: worth asking again. Absent on the first
+    /// daemons to serve the route, which read as settled.
+    var settled: Bool?
+}
+
 /// POST /client/rules and PUT /client/rules/{id}.
 struct CreatedRule: Codable, Sendable {
     var rule_id: Int
@@ -796,7 +815,22 @@ enum UnsubscribeMethod: String, LenientRawEnum {
     case browser
     case oneClick = "one_click"
     case mailto
+    /// An automatic unsubscribe the daemon is still working on, or one that
+    /// ended up needing the user.
+    case auto
+    /// Done by reading the sender's page and, at most, pressing its one button.
+    case page
     static var unknownFallback: UnsubscribeMethod { .browser }
+}
+
+/// Where an automatic unsubscribe stands. Absent on a legacy row, where the
+/// client opened the link itself and there was never a job.
+enum UnsubStatus: String, LenientRawEnum {
+    case running, done, opened
+    case needsYou = "needs_you"
+    /// A status this client does not know is shown as nothing at all, which is
+    /// what `opened` is: settled, and the user's.
+    static var unknownFallback: UnsubStatus { .opened }
 }
 
 enum UnsubResolution: String, LenientRawEnum {
@@ -807,7 +841,19 @@ enum UnsubResolution: String, LenientRawEnum {
 struct UnsubscribeResult: Codable, Sendable {
     var method: String
     var sender: String
-    var url: String
+    /// The link to open: present on the browser path, absent when the daemon
+    /// took the job (`method == "auto"`).
+    var url: String?
+    var status: UnsubStatus? = nil
+    /// Why an automatic request fell back to the browser: `spam` or
+    /// `unverified`. Absent otherwise.
+    var auto_refused: String? = nil
+}
+
+/// `POST /client/unsubscribes/opened`.
+struct UnsubscribeRecordAck: Codable, Sendable {
+    var sender: String
+    var status: UnsubStatus?
 }
 
 struct UnsubscribeRecord: Codable, Sendable, Hashable, Identifiable {
@@ -817,6 +863,13 @@ struct UnsubscribeRecord: Codable, Sendable, Hashable, Identifiable {
     var violation_count: Int
     var last_violation_at: String?
     var resolution: UnsubResolution?
+    // Optional for older daemons, which have no automatic unsubscribe.
+    var status: UnsubStatus? = nil
+    /// The ORIGINAL link, for `needs_you`.
+    var status_url: String? = nil
+    /// choose_topics | needs_browser | link_error | unclear, for `needs_you`.
+    var status_reason: String? = nil
+    var status_at: String? = nil
 
     var id: String { sender }
 }
@@ -964,6 +1017,11 @@ struct StoreStats: Codable, Sendable, Hashable {
     /// ABSENT on a daemon too old to say, and on every self-host, and nil reads
     /// exactly like false: no button, no nudge, nothing offered.
     var invite_sharing: Bool?
+    /// Whether an iPhone app has EVER connected to this mailbox. ABSENT on a
+    /// daemon too old to say, and nil reads as "do not know": the TestFlight
+    /// ask never fires on a guess, because telling somebody about the app they
+    /// are already using is worse than not telling them.
+    var ios_connected: Bool?
     /// Whether `forward_of_message_id` on /client/actions/send MEANS anything
     /// here. ABSENT on a daemon too old to say, and nil must read as false for a
     /// reason no other capability flag has: serde ignores unknown fields, so an
@@ -1880,6 +1938,10 @@ struct UpdatesParams: Sendable {
     var band: Band?
     var limit: Int?
     var cursor: String?
+    /// Keyset paging: rows that arrived before this stamp (and, at that
+    /// instant, below `beforeId`). Exclusive with `cursor`.
+    var before: String? = nil
+    var beforeId: Int? = nil
     /// Narrow to rows with a PENDING reminder, soonest first. Named for the
     /// flag rather than the query value (`reminders=pending`) because unlike
     /// every field above it, it is a filter with its own ORDER: the server
@@ -1943,6 +2005,11 @@ struct AgentFeedItem: Codable, Sendable {
     var message_id: Int
     var thread_id: String
     var from_addr: String
+    /// The `From:` display name. ABSENT from a daemon older than the feed's
+    /// own `from_name`, and then the card names the sender from the address,
+    /// which is how a mailer with a hashed local-part came to be titled with
+    /// 32 hex characters.
+    var from_name: String?
     var subject: String
     var received_at: String
     var decision: AgentMessageDecision
@@ -1959,6 +2026,7 @@ struct AgentFeedItem: Codable, Sendable {
             one_line: attention.summary.isEmpty ? decision.summary : attention.summary,
             reason: decision.reason,
             deadline: attention.factors.attention_at?.value,
+            from_name: from_name,
             subject: subject, status: .new, surfaced_at: received_at)
     }
 
@@ -1967,11 +2035,23 @@ struct AgentFeedItem: Codable, Sendable {
         result.one_line = decision.summary
         return result
     }
+
+    /// A Reading piece meant to be read for its own sake (article, essay, post)
+    /// rather than a promotion. Decisions stored before `reading_kind` existed
+    /// fall back to the kinds triage already gave them: editorial and not
+    /// promotional.
+    var isReadingContent: Bool {
+        if let kind = decision.reading_kind { return kind == "content" }
+        return decision.kinds.contains("editorial") && !decision.kinds.contains("promotional")
+    }
 }
 
 struct AgentMessageDecision: Codable, Sendable {
     var kinds: [String]
     var destinations: [String]
+    /// "content" or "promotion" on Reading mail. ABSENT from an older daemon
+    /// and from decisions stored before it existed.
+    var reading_kind: String?
     var summary: String
     var reason: String
     var records: [AgentRecordProposal]?

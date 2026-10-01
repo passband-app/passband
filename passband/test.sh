@@ -72,6 +72,7 @@ run_suite credential-probe \
   Sources/Passband/Model/WireTypes.swift \
   Sources/Passband/Model/APIError.swift \
   Sources/Passband/Model/APIClient.swift \
+  Sources/Passband/Lib/ClientIdentity.swift \
   Sources/Passband/Lib/TriageTargets.swift \
   Sources/Passband/Assistant/JSONValue.swift \
   Tests/CredentialProbeTests.swift
@@ -80,6 +81,16 @@ run_suite anthropic-stream \
   Sources/Passband/Assistant/JSONValue.swift \
   Sources/Passband/Assistant/AnthropicStream.swift \
   Tests/AnthropicStreamTests.swift
+
+# What the app tells its daemon it is. The daemon drops anything that is not
+# <platform>/<dotted digits>, so the client must never build anything else.
+# The plist is linked in as the binary's Info.plist so the suite can read a
+# bundle version the way the app does; a bare test binary has none.
+run_suite client-identity \
+  Sources/Passband/Lib/ClientIdentity.swift \
+  Tests/ClientIdentityTests.swift \
+  -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist \
+  -Xlinker Tests/ClientIdentityTests.plist
 
 # Pairing pulls in Sessions.swift only because it builds its own URLSession
 # there; nothing in this suite makes a request. Same payoff as above: the code
@@ -227,6 +238,14 @@ run_suite share-nudge \
   Sources/Passband/Lib/Platform.swift \
   Sources/Passband/Lib/ShareNudge.swift \
   Tests/ShareNudgeTests.swift
+
+# When the iPhone ask fires: two days in, never to somebody whose mailbox has
+# seen the phone app, never on a daemon that has not said, and once.
+run_suite testflight-nudge \
+  Sources/Passband/Lib/Platform.swift \
+  Sources/Passband/Lib/ShareNudge.swift \
+  Sources/Passband/Lib/TestFlightNudge.swift \
+  Tests/TestFlightNudgeTests.swift
 
 # What "remind me…" resolves to. Foundation only, and every date computed
 # through an injected now/calendar — which is the whole reason it is testable:
@@ -454,3 +473,24 @@ run_suite reading \
   Sources/Passband/Lib/SenderIdentity.swift \
   Sources/Passband/Lib/Reading.swift \
   Tests/ReadingTests.swift
+
+# The all-mail list: lenses and the category picker, day headings and the
+# ranking inside them, the poll's head merging into the scrolled pages, and
+# the arrival stamp an older daemon does not send.
+run_suite mail-list \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Format.swift \
+  Sources/Passband/Lib/AsyncMemo.swift \
+  Sources/Passband/Lib/SenderIdentity.swift \
+  Sources/Passband/Lib/MailList.swift \
+  Tests/MailListTests.swift
+
+# The Reading card's logo extraction: which heroes are a mark on a flat field,
+# where the mark is, and which images must be left whole. CoreGraphics only,
+# over banners built pixel by pixel. ImageFill rides along for the colour type
+# the background is reported in.
+run_suite image-trim \
+  Sources/Passband/Lib/ImageFill.swift \
+  Sources/Passband/Lib/ImageTrim.swift \
+  Tests/ImageTrimTests.swift

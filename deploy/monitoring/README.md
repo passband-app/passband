@@ -148,7 +148,16 @@ kubectl -n monitoring top pod -l app.kubernetes.io/name=prometheus-agent
   shows here first), Traefik request/5xx/latency. The p95 is one line per
   backend service, so a slow tenant cannot hide inside a fleet-wide blend; a
   line pinned flat at the top bucket means "worse than this", not "this".
-- **Tenants** — pod count vs the 100-user cap, per-tenant CPU/memory/PVC/restarts.
+- **Tenants** — who is still using it (**Tenant activity**: time since each
+  tenant's last write on the client door and since its app was last seen at
+  all, from the daemon's per-route request counters, so it reaches back only
+  as far as Prometheus's 30 days; plus the newest Mac and iOS app version to
+  have connected and when, from `squelchd_client_last_seen_timestamp_seconds`,
+  which the daemon keeps in its own store; those columns do not appear until
+  some daemon exports the metric, and read `-` where no app of that platform
+  has named itself: the daemon or app predates the `X-Passband-Client`
+  header, or the tenant has no such device), pod count vs the 100-user cap,
+  per-tenant CPU/memory/PVC/restarts.
 - **Daemon rollout** — which image version each tenant pod runs, and the
   switchover as it happens, plus the roller's own two vital signs: a casualty
   (a roll that exited 4, the fleet frozen, the one thing worth a page) and how
@@ -165,7 +174,7 @@ for a while the fleet runs two versions at once. The **Daemon rollout** row is
 that window, told twice over.
 
 The version a panel means is the image tag with its `daemon-` prefix stripped,
-so `ghcr.io/braelyn-ai/squelchd:daemon-0.4.0` reads as `0.4.0` — the same
+so `ghcr.io/passband-app/squelchd:daemon-0.4.0` reads as `0.4.0` — the same
 spelling `squelchd_build_info` uses, which is what lets the two sides be
 compared. A digest-pinned image has no tag to strip and reads as its digest.
 

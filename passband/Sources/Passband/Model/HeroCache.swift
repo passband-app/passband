@@ -16,11 +16,22 @@ final class HeroCache {
     struct Hero {
         let image: PlatformImage
         let fill: Color?
+        /// The art is a logo CUT OUT of a larger flat banner (`ImageTrim`), not
+        /// the image the email sent. The card draws it whole and inset, on
+        /// `fill`, which for a mark is the banner's own background.
+        let isMark: Bool
     }
 
     /// The rendered size in PIXELS: the 54pt square at 2x, retina being the only
     /// display class this app ships on. `nonisolated` for the detached render task.
     private nonisolated static let maxPixel = 108
+
+    /// The size a hero is decoded at to LOOK for a mark in it. Far above
+    /// `maxPixel` on purpose: at 108px a logo that is a twentieth of a masthead
+    /// is five pixels, and there is nothing left to cut out. 1024 holds a 2x
+    /// 600pt email banner nearly whole, so the crop still has a tile's worth
+    /// of pixels in it.
+    private nonisolated static let analysisPixel = 1024
 
     /// How many heroes resolve at once during a preload. Each item is network-bound
     /// but ends in a decode, so a wide fan-out queues CPU behind the scroll it is
@@ -98,13 +109,14 @@ final class HeroCache {
         }.value
 
         guard let rendered, let image = PlatformImage(data: rendered.thumbnail) else { return nil }
-        return Hero(image: image, fill: rendered.rgb.map(\.color))
+        return Hero(image: image, fill: rendered.rgb.map(\.color), isMark: rendered.isMark)
     }
 
     /// What crosses back from the detached task — Sendable by construction.
     private struct Rendered: Sendable {
         let thumbnail: Data
         let rgb: ImageFill.RGB?
+        let isMark: Bool
     }
 
     /// Sampled BEFORE the encode, off the thumbnail we are about to keep: the
@@ -112,9 +124,34 @@ final class HeroCache {
     /// preserves the alpha that lets that fill show through behind the mark.
     private nonisolated static func render(_ bytes: Data, maxPixel: Int) -> Rendered? {
         guard let thumb = Raster.thumbnail(bytes, maxPixel: maxPixel) else { return nil }
+        if let mark = mark(bytes, thumb: thumb, maxPixel: maxPixel) { return mark }
         let rgb = ImageFill.dominantRGB(thumb)
         guard let png = Raster.png(thumb) else { return nil }
-        return Rendered(thumbnail: png, rgb: rgb)
+        return Rendered(thumbnail: png, rgb: rgb, isMark: false)
+    }
+
+    /// The logo cut out of a banner that is mostly its own background, or nil
+    /// for anything else — which then draws whole, exactly as before.
+    ///
+    /// The mark is found at `analysisPixel` and the CROP is what gets
+    /// downsampled, so the logo spends the square's pixels rather than the
+    /// banner around it. That second, larger decode is only paid when the small
+    /// thumbnail already looks like a flat field: a photo says no there.
+    ///
+    /// Its fill is the banner's background, not a sampled dominant: a mark's
+    /// dominant colour is the mark, and a blue logo on a blue square is no
+    /// logo. On transparency there is no background to continue, so it gets
+    /// the neutral stage it contrasts with.
+    private nonisolated static func mark(_ bytes: Data, thumb: CGImage, maxPixel: Int) -> Rendered? {
+        guard ImageTrim.hasFlatField(thumb),
+            let wide = Raster.thumbnail(bytes, maxPixel: analysisPixel),
+            let mark = ImageTrim.mark(in: wide),
+            let cut = wide.cropping(to: mark.rect),
+            let fitted = Raster.fitted(cut, maxPixel: maxPixel),
+            let png = Raster.png(fitted)
+        else { return nil }
+        return Rendered(
+            thumbnail: png, rgb: mark.background ?? ImageFill.stageRGB(fitted), isMark: true)
     }
 }
 

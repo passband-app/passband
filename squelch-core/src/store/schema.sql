@@ -588,8 +588,9 @@ CREATE INDEX IF NOT EXISTS idx_marketing_received ON marketing(account_id, recei
 -- UNSUBSCRIBES. One row per (account, sender_addr): the human-door record that
 -- the user asked a sender to stop, plus the "did they honor it?" violation
 -- ledger. A fresh request RESETS violation_count/last_violation_at/resolution,
--- restarting the 72h grace clock. `method` is always 'browser' — the client
--- opens the link; the server never delivers anything itself.
+-- restarting the 72h grace clock. `method` is how it went out: 'browser' (the
+-- client opened the link), 'one_click' or 'page' (the daemon's automatic job,
+-- docs/SECURITY.md §7), or 'auto' while that job is running or needs the user.
 -- `source_message_id` is nullable (the message may later be deleted).
 -- `resolution` is blocked|dismissed|NULL, NULL meaning the request is still
 -- outstanding and the violation detector armed.
@@ -597,6 +598,15 @@ CREATE INDEX IF NOT EXISTS idx_marketing_received ON marketing(account_id, recei
 -- VIOLATION SEMANTICS, applied in the ingest transaction: storing a NON-SENT
 -- inbound message whose sender has an unresolved row, more than 72h after
 -- requested_at, increments violation_count and stamps last_violation_at.
+--
+-- AUTOMATIC UNSUBSCRIBES (`method` auto | one_click | page) carry a `status`:
+-- running -> done | needs_you, and needs_you -> opened once the user follows
+-- `status_url` to finish it themselves. The violation detector is armed only
+-- for a request that actually went out: status NULL (legacy browser rows),
+-- done, or opened. A job still running, or one waiting on the user, has not
+-- asked the sender for anything yet, so their next email is not a violation.
+-- `requested_at` moves to the moment it went out, so the 72h grace runs from
+-- there rather than from the click.
 CREATE TABLE IF NOT EXISTS unsubscribes (
     id                INTEGER PRIMARY KEY,
     account_id        INTEGER NOT NULL,
@@ -607,6 +617,10 @@ CREATE TABLE IF NOT EXISTS unsubscribes (
     violation_count   INTEGER NOT NULL DEFAULT 0,
     last_violation_at TEXT,
     resolution        TEXT,
+    status            TEXT,
+    status_url        TEXT,
+    status_reason     TEXT,
+    status_at         TEXT,
     UNIQUE(account_id, sender_addr)
 );
 
@@ -1257,6 +1271,16 @@ CREATE INDEX IF NOT EXISTS idx_message_opens_token ON message_opens(token);
 -- `last_used_at` is liveness only, written at most once a minute per token (see
 -- `verify_device_token`) so an SSE-driven client cannot turn every request into
 -- a write.
+--
+-- `client_*` is WHICH APP last presented this token: a platform from a closed
+-- set, a dotted numeric version, and when. All three are NULL until a client
+-- that names itself (`X-Passband-Client`) uses the token, and they move
+-- TOGETHER or not at all. `client_seen_at` is NOT `last_used_at`: the iOS
+-- notification extension presents the same token every time a push lands and
+-- names nothing, so `last_used_at` moves with no app open and this does not.
+-- A CHANGED platform or version only replaces the stored one after it has been
+-- quiet for an hour (`CLIENT_CHANGE_THROTTLE_SECS`), which is what stops a
+-- token holder minting a metric series per request.
 CREATE TABLE IF NOT EXISTS device_tokens (
     id           INTEGER PRIMARY KEY,
     account_id   INTEGER NOT NULL,   -- -> accounts.id
@@ -1266,7 +1290,10 @@ CREATE TABLE IF NOT EXISTS device_tokens (
     name         TEXT NOT NULL,
     created_at   TEXT NOT NULL,
     last_used_at TEXT,
-    revoked_at   TEXT
+    revoked_at   TEXT,
+    client_platform TEXT,
+    client_version  TEXT,
+    client_seen_at  TEXT
 );
 
 -- `token list` reads exactly "every token for my account".

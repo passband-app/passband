@@ -780,6 +780,35 @@ impl ControlStore {
             .is_some())
     }
 
+    /// The address an invite was minted for, when it was minted for one.
+    ///
+    /// Only to SUGGEST a username on the form the emailed link opens: the
+    /// address is never rendered, though the username made from it is most of
+    /// one (see `handlers::suggested_label`). A shared invite (no `users` row
+    /// points at it) answers `None`, and so does a code that is spent, expired,
+    /// or held, by the same rule [`Self::find_available_invite`] keeps.
+    pub async fn email_for_available_invite(
+        &self,
+        code_hash: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<String>> {
+        let row = self
+            .client()
+            .await?
+            .query_opt(
+                "SELECT u.email FROM invite_codes i JOIN users u ON u.invite_id = i.id
+                  WHERE i.code_hash = $1
+                    AND i.used_at IS NULL
+                    AND (i.expires_at IS NULL OR i.expires_at > $2)
+                    AND (i.reserved_until IS NULL OR i.reserved_until <= $2)
+                  ORDER BY u.id
+                  LIMIT 1",
+                &[&code_hash, &stamp(now)],
+            )
+            .await?;
+        row.map(|r| Ok(r.try_get(0)?)).transpose()
+    }
+
     // ---- tenants ---------------------------------------------------------
 
     /// Whether this control plane has already recorded a tenant with `label`.

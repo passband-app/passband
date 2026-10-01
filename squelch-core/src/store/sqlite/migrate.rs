@@ -80,6 +80,11 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // backfilled: NULL is the safe reading (no tracking-pixel bypass), and a
     // re-sync refills it through the message upsert.
     add_column_if_missing(conn, "messages", "auth_pass", "INTEGER")?;
+    // Automatic-unsubscribe job state. NULL on every pre-existing row, which is
+    // exactly a legacy browser unsubscribe: no job, and the detector armed.
+    for col in ["status", "status_url", "status_reason", "status_at"] {
+        add_column_if_missing(conn, "unsubscribes", col, "TEXT")?;
+    }
     // Display recipients, one column per header. NULL on every pre-existing row,
     // which is exactly the recipients-backfill queue predicate (`cc_addrs IS
     // NULL`); the backfill runs from the sync engine, over the network, so it
@@ -192,6 +197,13 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // nothing here can know which account a device filed itself under, and the
     // client re-registers (tag included) on its next foreground.
     add_column_if_missing(conn, "devices", "tag", "TEXT")?;
+    // Which app last presented each device token. NULL on every pre-existing
+    // row and NOT backfilled: a client that predates `X-Passband-Client` never
+    // said what it was, and the columns fill in on its first request after it
+    // updates.
+    add_column_if_missing(conn, "device_tokens", "client_platform", "TEXT")?;
+    add_column_if_missing(conn, "device_tokens", "client_version", "TEXT")?;
+    add_column_if_missing(conn, "device_tokens", "client_seen_at", "TEXT")?;
     // Per-property triage reasons (JSON object). NULL on pre-existing rows.
     add_column_if_missing(conn, "triage", "field_reasons", "TEXT")?;
 

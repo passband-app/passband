@@ -161,35 +161,20 @@ struct MobileSitrepView: View {
                 .foregroundStyle(Palette.ink)
                 .lineSpacing(-1)
                 .fixedSize(horizontal: false, vertical: true)
+                .contentTransition(.opacity)
+                .animation(.easeInOut(duration: 0.35), value: headline)
         }
+        .task(id: store.headlineKey) { await store.refreshFyeHeadline() }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.top, 4)
     }
 
-    private static let smallWords = [
-        "Zero", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine",
-    ]
-
-    /// Spell small counts — a numeral in a display serif headline reads like a
-    /// dashboard metric, which is the opposite of the intent.
-    private static func spell(_ n: Int) -> String {
-        (0..<smallWords.count).contains(n) ? smallWords[n] : String(n)
-    }
-
     private var headline: String {
-        let today = NeedToday.count(store.sitrep.standing)
-        let total = store.sitrep.standing.count
-        if today > 0 {
-            return "\(Self.spell(today)) item\(today == 1 ? "" : "s") "
-                + "for your eyes."
-        }
-        if total > 0 {
-            return "\(Self.spell(total)) item\(total == 1 ? "" : "s") on your plate."
-        }
         // Only "all clear" when triage has actually run; the footnote says why.
-        return store.syncStatus.emptyHero(
-            queued: store.triageWaiting, lastSync: store.daemonLastSync)?.title
-            ?? "You're all clear."
+        HeroLine.title(
+            headline: store.fyeHeadline, count: store.sitrep.standing.count,
+            empty: store.syncStatus.emptyHero(
+                queued: store.triageWaiting, lastSync: store.daemonLastSync)?.title)
     }
 
     // MARK: - for your eyes

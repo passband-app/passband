@@ -534,6 +534,15 @@ final class AppStore {
             Badge.refresh(sitrep.standing)
         }
     }
+    /// The hero's sentence about what For-your-eyes is ABOUT, written by the
+    /// daemon's small model (`/client/v2/fye/headline`). nil until it answers,
+    /// and on a daemon with no model, where the hero keeps its own line.
+    var fyeHeadline: String?
+    /// The board `fyeHeadline` was written for (see `headlineKey`). The hero
+    /// keeps showing the last sentence while a newer board's is on its way:
+    /// a line a few seconds stale reads better than one that flips to the
+    /// fallback and back every time a row is cleared.
+    var fyeHeadlineKey: String?
     /// The daemon's stats, apart from the bands (see SitrepData): the sync
     /// clock, the queues, the capabilities. Assigned by the poller only on
     /// change, and it changes often — so only its readers pay for that.
@@ -810,6 +819,57 @@ final class AppStore {
     /// Whether `e` is still the live epoch — the post-await check every
     /// account-scoped writer outside this file makes.
     func isCurrent(_ e: Int) -> Bool { epoch == e }
+
+    // MARK: - fye headline
+
+    /// The owner's local date as the headline prompt reads it.
+    private static func headlineToday(_ now: Date = Date()) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd (EEEE)"
+        return f.string(from: now)
+    }
+
+    /// What a headline is ABOUT: the rows in the band and what triage said of
+    /// each, plus the day. Any change here is a board the old sentence may no
+    /// longer describe.
+    var headlineKey: String {
+        Self.headlineToday() + "|"
+            + sitrep.standing.map { "\($0.thread_id):\($0.one_line)" }.joined(separator: "|")
+    }
+
+    private static let headlineDefaultsKey = "fyeHeadline.last"
+
+    /// Ask the daemon for the hero's sentence, once the board has held still.
+    /// Called from the hero's `.task(id: headlineKey)`, so it only runs while
+    /// the sitrep is ON SCREEN (a reader walked with E/S never pays for the
+    /// boards it passes through) and a newer board cancels it mid-wait.
+    func refreshFyeHeadline() async {
+        let key = headlineKey
+        guard !sitrep.standing.isEmpty else { return }
+        if fyeHeadlineKey == key { return }
+        // Last launch's sentence, if it was about this exact board: shown at
+        // once instead of the fallback, and the daemon is not asked.
+        if let saved = UserDefaults.standard.stringArray(forKey: Self.headlineDefaultsKey),
+            saved.count == 2, saved[0] == key
+        {
+            fyeHeadline = saved[1]
+            fyeHeadlineKey = key
+            return
+        }
+        // Settle first. The poller reassigns the band as rows are cleared from
+        // the list or arrive in a burst; one call for the board that stuck.
+        try? await Task.sleep(for: .milliseconds(1200))
+        let e = epoch
+        guard !Task.isCancelled, connStatus == .connected else { return }
+        let headline = try? await APIClient.shared.fyeHeadline(today: Self.headlineToday())
+        guard !Task.isCancelled, isCurrent(e), headlineKey == key else { return }
+        fyeHeadline = headline
+        fyeHeadlineKey = key
+        if let headline {
+            UserDefaults.standard.set([key, headline], forKey: Self.headlineDefaultsKey)
+        }
+    }
 
     private init() {}
 
@@ -1548,6 +1608,8 @@ final class AppStore {
     /// mode being prevented here: A's row 412 is B's row 412.
     private func wipeAccountState() {
         sitrep = SitrepData()
+        fyeHeadline = nil
+        fyeHeadlineKey = nil
         zones = SitrepZoneCache()
         // The parked refresh tasks go too, not just their results: a joiner
         // arriving after the switch would otherwise wait on — and adopt the

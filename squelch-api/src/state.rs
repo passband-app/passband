@@ -7,6 +7,10 @@ use squelch_core::credentials::{
     CredentialKind, CredentialStore, FileCredentialStore, KeyringCredentialStore,
 };
 use squelch_core::store::SqliteStore;
+use squelch_core::triage::fye_headline::HeadlineClient;
+
+/// A board hash and the headline written for it (`None`: nothing to say).
+pub(crate) type HeadlineCacheEntry = (u64, Option<String>);
 use squelch_core::triage::rule_infer::RuleInferClient;
 use squelch_core::triage::rule_suggest::RuleSuggestClient;
 use squelch_core::types::AccountId;
@@ -172,6 +176,16 @@ pub struct ApiState {
     /// never saved on its own. `None` (no key, every test harness) means no
     /// suggestions. See [`squelch_core::triage::rule_suggest`].
     pub(crate) rule_suggest: Option<RuleSuggestClient>,
+    /// The small model behind the sitrep's headline. `None` (no key, every
+    /// test harness) means `/client/v2/fye/headline` answers null and the
+    /// client keeps its own line. See [`squelch_core::triage::fye_headline`].
+    pub(crate) fye_headline: Option<HeadlineClient>,
+    /// The last headline and the board it was written for, by hash. The route
+    /// is asked every time the sitrep settles, and the band is usually the
+    /// one it already described; a miss is the only thing that spends. A
+    /// `None` headline is cached too, so a board the model had nothing to say
+    /// about is not asked again.
+    pub(crate) fye_headline_cache: Arc<std::sync::Mutex<Option<HeadlineCacheEntry>>>,
     /// The hosted assistant relay: forwards the Passband app's Anthropic-shaped
     /// streaming request to the gateway with a daemon-held credential. `None`
     /// (no gateway + assistant key configured, and every test harness) means
@@ -399,6 +413,8 @@ impl ApiState {
             )),
             rule_infer: None,
             rule_suggest: None,
+            fye_headline: None,
+            fye_headline_cache: Arc::new(std::sync::Mutex::new(None)),
             assistant: None,
             sharing: None,
             shipment_poll: None,
@@ -631,6 +647,13 @@ impl ApiState {
     /// null.
     pub fn with_rule_suggestion(mut self, client: Option<RuleSuggestClient>) -> Self {
         self.rule_suggest = client;
+        self
+    }
+
+    /// Attach the sitrep headline writer. `None` keeps
+    /// `/client/v2/fye/headline` answering null.
+    pub fn with_fye_headline(mut self, client: Option<HeadlineClient>) -> Self {
+        self.fye_headline = client;
         self
     }
 
@@ -895,6 +918,8 @@ impl ApiState {
             // The rule card's suggestion rides the same key and the NOTIFY
             // model, the one small model the daemon already runs and prices.
             .with_rule_suggestion(RuleSuggestClient::from_config(cfg))
+            // The sitrep headline: same key, same notify model.
+            .with_fye_headline(HeadlineClient::from_config(cfg))
             // The assistant relay resolves only when BOTH the gateway base URL
             // and the assistant key are present; anything less is `None` and
             // the route 404s (see `Stage2Config::resolve_assistant`).

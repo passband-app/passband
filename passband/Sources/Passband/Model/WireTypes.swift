@@ -780,6 +780,12 @@ struct RuleSuggestion: Codable, Sendable {
     var suggestion: String?
 }
 
+/// GET /client/v2/fye/headline. Null when the daemon has no model, the band is
+/// empty, or the model had nothing to say.
+struct FyeHeadline: Codable, Sendable {
+    var headline: String?
+}
+
 /// POST /client/rules and PUT /client/rules/{id}.
 struct CreatedRule: Codable, Sendable {
     var rule_id: Int

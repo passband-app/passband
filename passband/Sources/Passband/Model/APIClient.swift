@@ -609,6 +609,15 @@ actor APIClient {
         return answer.suggestion
     }
 
+    /// The sitrep's headline: one sentence about what the For-your-eyes band is
+    /// about. `today` is the owner's local date, because "due tomorrow" is a
+    /// question about THEIR calendar and the daemon runs in UTC. A daemon too
+    /// old for the route 404s, which the caller reads as none.
+    func fyeHeadline(today: String) async throws -> String? {
+        let answer: FyeHeadline = try await get("/client/v2/fye/headline", query: ["today": today])
+        return answer.headline
+    }
+
     @discardableResult
     func createRule(_ body: CreateRuleBody) async throws -> CreatedRule {
         try await post("/client/rules", body: body)

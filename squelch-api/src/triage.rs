@@ -59,6 +59,116 @@ pub async fn feed(
     ))
 }
 
+#[derive(Deserialize)]
+pub struct HeadlineQuery {
+    /// The owner's local date as the client sees it, e.g. "2026-10-01
+    /// (Thursday)". The daemon runs in UTC and may be a continent away, so
+    /// "due tomorrow" is the client's call. Free text, folded into the
+    /// trusted context line and capped there.
+    pub today: Option<String>,
+}
+
+/// GET /client/v2/fye/headline: one sentence about what the For-your-eyes band
+/// is ABOUT, for the sitrep's hero. Always 200; `headline` is null when there
+/// is no model, the band is empty, the day's cap is spent, or the model had
+/// nothing to say. Cached by board state, so asking again about the same band
+/// spends nothing. See [`squelch_core::triage::fye_headline`].
+pub async fn fye_headline(
+    State(state): State<ApiState>,
+    Query(query): Query<HeadlineQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    use squelch_core::triage::fye_headline::{self as fh, HeadlineItem};
+    use std::hash::{Hash, Hasher};
+
+    let none = || {
+        (
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(json!({ "headline": null })),
+        )
+    };
+    let Some(client) = state.fye_headline.clone() else {
+        return Ok(none());
+    };
+    let today = query
+        .today
+        .unwrap_or_else(|| Utc::now().format("%Y-%m-%d (%A)").to_string())
+        .chars()
+        .take(40)
+        .collect::<String>();
+    let ranking = state.triage_config.ranking.clone();
+    let now = Utc::now();
+    let read = store_call(&state, move |store, account| {
+        let items: Vec<HeadlineItem> = store
+            .agent_fye(account, usize::MAX, &ranking, now)?
+            .iter()
+            .filter_map(HeadlineItem::from_list_item)
+            .take(fh::ITEM_LIMIT)
+            .collect();
+        // The runaway guard, read from the same ledger the calls bill into.
+        let day = now.format("%Y-%m-%d").to_string();
+        let spent: u64 = store
+            .list_usage_by_category(account, 1)?
+            .into_iter()
+            .filter(|(c, _)| c == squelch_core::metrics::FYE_HEADLINE_USAGE_CATEGORY)
+            .flat_map(|(_, days)| days)
+            .filter(|d| d.day == day)
+            .map(|d| d.calls)
+            .sum();
+        Ok((items, spent))
+    })
+    .await?;
+    let (items, spent) = read;
+    if items.is_empty() {
+        return Ok(none());
+    }
+    // The board as the model would see it. The date is part of it: "due
+    // tomorrow" stops being true at midnight even if no row changed.
+    let key = {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        today.hash(&mut h);
+        items.hash(&mut h);
+        h.finish()
+    };
+    let cached = state
+        .fye_headline_cache
+        .lock()
+        .ok()
+        .and_then(|c| c.clone())
+        .filter(|(k, _)| *k == key);
+    if let Some((_, headline)) = cached {
+        return Ok((
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(json!({ "headline": headline })),
+        ));
+    }
+    if spent >= u64::from(fh::DAILY_CAP) {
+        return Ok(none());
+    }
+    let (headline, usage) = fh::write_headline(&client, &today, &items).await;
+    if let Ok(mut c) = state.fye_headline_cache.lock() {
+        *c = Some((key, headline.clone()));
+    }
+    if let Some(u) = usage {
+        let _ = store_call(&state, move |store, account| {
+            let day = Utc::now().format("%Y-%m-%d").to_string();
+            if let Err(e) = store.extract_bump_usage(
+                account,
+                &day,
+                squelch_core::metrics::FYE_HEADLINE_USAGE_CATEGORY,
+                u.into(),
+            ) {
+                eprintln!("squelch: fye headline usage ledger bump failed ({e})");
+            }
+            Ok(())
+        })
+        .await;
+    }
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(json!({ "headline": headline })),
+    ))
+}
+
 pub async fn message(
     State(state): State<ApiState>,
     Path(message_id): Path<i64>,

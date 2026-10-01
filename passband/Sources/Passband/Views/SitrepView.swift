@@ -150,7 +150,9 @@ struct SitrepView: View {
             // padding inside each scroll view's content.
             DashHero(
                 standing: store.sitrep.standing,
+                headline: store.fyeHeadline,
                 empty: emptyHero)
+                .task(id: store.headlineKey) { await store.refreshFyeHeadline() }
                 .padding(.horizontal, 28)
                 .padding(.bottom, 18)
 
@@ -768,37 +770,20 @@ struct GreetingLine: View {
 
 // MARK: - DASH HERO
 
-/// A greeting label plus one serif headline stating what needs the reader today.
+/// A greeting label plus one serif headline saying what the reader's
+/// For-your-eyes band is about (see `HeroLine`).
 /// The ONE place the display serif appears — held to a single line per screen so
 /// it reads as voice rather than decoration.
 private struct DashHero: View {
     let standing: [AttentionUpdate]
+    /// The daemon's sentence about the band, when it has written one.
+    var headline: String? = nil
     /// What to say over an empty board when it is empty because triage has
     /// not run (see `SyncStatus.emptyHero`). Nil lets "You're all clear." stand.
     var empty: (title: String, note: String)? = nil
 
-    private static let smallWords = [
-        "Zero", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine",
-    ]
-
-    /// Spell small counts — a numeral in a display serif headline reads like a
-    /// dashboard metric, which is the opposite of the intent.
-    private static func spell(_ n: Int) -> String {
-        (0..<smallWords.count).contains(n) ? smallWords[n] : String(n)
-    }
-
     private var title: String {
-        let today = NeedToday.count(standing)
-        let total = standing.count
-        if today > 0 {
-            return "\(Self.spell(today)) item\(today == 1 ? "" : "s") "
-                + "for your eyes."
-        }
-        if total > 0 {
-            return "\(Self.spell(total)) item\(total == 1 ? "" : "s") on your plate."
-        }
-        // An empty board is only "all clear" when triage has actually run.
-        return empty?.title ?? "You're all clear."
+        HeroLine.title(headline: headline, count: standing.count, empty: empty?.title)
     }
 
     /// The reason under an empty-board headline, only when there is one.
@@ -812,6 +797,10 @@ private struct DashHero: View {
                 .foregroundStyle(Palette.ink)
                 .lineSpacing(-2)
                 .fixedSize(horizontal: false, vertical: true)
+                // The model's sentence lands a beat after the board does; let
+                // it fade in over the fallback instead of snapping.
+                .contentTransition(.opacity)
+                .animation(.easeInOut(duration: 0.35), value: title)
             if let note {
                 Text(note)
                     .font(Typo.rowSub)

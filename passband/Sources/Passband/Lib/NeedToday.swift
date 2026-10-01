@@ -10,6 +10,21 @@ enum NeedToday {
     }
 }
 
+/// THE HERO'S ONE SERIF LINE, Mac and phone alike. A sentence about what the
+/// band is ABOUT when the daemon's model wrote one (`/client/v2/fye/headline`),
+/// and otherwise a line that names no count: a number set at 38pt reads as a
+/// backlog, which is the feeling this screen exists to take away.
+enum HeroLine {
+    static func title(headline: String?, count: Int, empty: String?) -> String {
+        guard count > 0 else {
+            // An empty board is only "all clear" when triage has actually run.
+            return empty ?? "You're all clear."
+        }
+        if let headline, !headline.isEmpty { return headline }
+        return count == 1 ? "One thing for your eyes." : "A few things for your eyes."
+    }
+}
+
 /// Process snapshots server order, but consumes current row content and state.
 enum ProcessQueue {
     static func pending(snapshot: [AttentionUpdate], live: [AttentionUpdate], handled: Set<Int>) -> [AttentionUpdate] {

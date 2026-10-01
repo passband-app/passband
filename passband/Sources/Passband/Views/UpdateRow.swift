@@ -110,12 +110,12 @@ struct UpdateRow: View {
                 RoundedRectangle(cornerRadius: 1)
                     .fill(Palette.warn)
                     .frame(width: 3 + weight * 3)
-                    .padding(.vertical, 4)
+                    .padding(.vertical, Space.s4)
             } else if selected {
                 RoundedRectangle(cornerRadius: 1)
                     .fill(Palette.accent)
                     .frame(width: 2)
-                    .padding(.vertical, 4)
+                    .padding(.vertical, Space.s4)
             }
         }
     }
@@ -131,22 +131,22 @@ struct UpdateRow: View {
     #if !os(macOS)
         @ViewBuilder
         private func phoneGuts(chip: Fmt.DeadlineChip?) -> some View {
-            HStack(alignment: .top, spacing: 10) {
+            HStack(alignment: .top, spacing: Space.s10) {
                 Avatar(sender: update.senderString, size: 26)
 
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 7) {
+                VStack(alignment: .leading, spacing: Space.scaled(3)) {
+                    HStack(spacing: Space.scaled(7)) {
                         Text(SenderCache.resolved(update.senderString).displayName)
-                            .font(.system(size: 14, weight: .medium))
+                            .font(Typo.ui(14, weight: .medium))
                             .foregroundStyle(Palette.ink)
                             .lineLimit(1)
                         if update.hasAttachments {
                             Image(systemName: "paperclip")
-                                .font(.system(size: 10))
+                                .font(Typo.ui(10))
                                 .foregroundStyle(Palette.inkFaintest)
                                 .accessibilityLabel("has attachments")
                         }
-                        Spacer(minLength: 4)
+                        Spacer(minLength: Space.s4)
                         Text(Fmt.importanceMeter(update.importance))
                             .font(Typo.mono(10))
                             .foregroundStyle(Palette.importanceColor(update.importance))
@@ -167,7 +167,7 @@ struct UpdateRow: View {
                     if chip != nil || update.matched_rule != nil || showAgeBadge
                         || update.hasPendingReminder
                     {
-                        HStack(spacing: 7) {
+                        HStack(spacing: Space.scaled(7)) {
                             if update.hasPendingReminder {
                                 Chip(
                                     text: Fmt.remindChip(update.remind_at), tone: Palette.accent,
@@ -202,7 +202,7 @@ struct UpdateRow: View {
     #if os(macOS)
         @ViewBuilder
         private func desktopGuts(chip: Fmt.DeadlineChip?, selected: Bool) -> some View {
-            HStack(spacing: 9) {
+            HStack(spacing: Space.scaled(9)) {
                 Text(Fmt.importanceMeter(update.importance))
                     .font(Typo.mono(10))
                     .foregroundStyle(Palette.importanceColor(update.importance))
@@ -212,15 +212,17 @@ struct UpdateRow: View {
                 Avatar(sender: update.senderString, size: 20)
 
                 Text(SenderCache.resolved(update.senderString).displayName)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(Typo.ui(12, weight: .medium))
                     .foregroundStyle(Palette.ink)
                     .lineLimit(1)
-                    .frame(minWidth: 96, idealWidth: 150, maxWidth: 190, alignment: .leading)
+                    .frame(
+                        minWidth: Space.scaled(96), idealWidth: Space.scaled(150),
+                        maxWidth: Space.scaled(190), alignment: .leading)
                     .layoutPriority(2)
 
                 if update.hasAttachments {
                     Image(systemName: "paperclip")
-                        .font(.system(size: 10))
+                        .font(Typo.ui(10))
                         .foregroundStyle(Palette.inkFaintest)
                         .accessibilityLabel("has attachments")
                 }
@@ -230,7 +232,7 @@ struct UpdateRow: View {
                     .truncationMode(.tail)
                     .frame(maxWidth: .infinity, alignment: .leading)
 
-                HStack(spacing: 7) {
+                HStack(spacing: Space.scaled(7)) {
                     if update.matched_rule != nil {
                         Text("·rule")
                             .font(Typo.micro)
@@ -259,7 +261,7 @@ struct UpdateRow: View {
                         Text(Fmt.relAge(update.surfaced_at))
                             .font(Typo.num(10))
                             .foregroundStyle(Palette.inkFaintest)
-                            .frame(width: 30, alignment: .trailing)
+                            .frame(width: Typo.size(10) * 3, alignment: .trailing)
                     }
                     if selected {
                         Text(verbHint)

@@ -69,8 +69,8 @@ struct ProcessMode: View {
     #if os(macOS)
         private var desktopSurface: some View {
             OverlayScrim(onDismiss: onClose) {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 4) {
+                VStack(alignment: .leading, spacing: Space.s10) {
+                    HStack(spacing: Space.s4) {
                         Text("process mode")
                             .font(Typo.sectionLabel)
                             .foregroundStyle(Palette.inkFaint)
@@ -117,7 +117,7 @@ struct ProcessMode: View {
                 // The card floats between the header and the verbs rather than
                 // hanging off the top: it is the only thing on this screen, and a
                 // deck you are meant to throw should sit where the thumb is.
-                Spacer(minLength: 8)
+                Spacer(minLength: Space.s8)
                 if let current {
                     // `.id` so the outgoing card and the one that replaces it are
                     // separate views: the replacement starts centred instead of
@@ -128,13 +128,13 @@ struct ProcessMode: View {
                         .rotationEffect(.degrees(Double(drag.width / 24)), anchor: .bottom)
                         .overlay(alignment: .top) { verdictStamp }
                         .gesture(fling)
-                        .padding(.horizontal, 16)
+                        .padding(.horizontal, Space.s16)
                         .transition(.opacity)
-                    Spacer(minLength: 12)
+                    Spacer(minLength: Space.s12)
                     phoneButtons(current)
                 } else {
                     Spacer(minLength: 0)
-                    emptyState.padding(.horizontal, 16)
+                    emptyState.padding(.horizontal, Space.s16)
                     Spacer(minLength: 0)
                 }
             }
@@ -143,19 +143,19 @@ struct ProcessMode: View {
         }
 
         private var phoneHeader: some View {
-            HStack(spacing: 8) {
+            HStack(spacing: Space.s8) {
                 Text("process mode")
                     .font(Typo.sectionLabel)
                     .foregroundStyle(Palette.inkFaint)
                     .textCase(.uppercase)
-                Spacer(minLength: 8)
+                Spacer(minLength: Space.s8)
                 Text(progressLine)
                     .font(Typo.num(11))
                     .foregroundStyle(Palette.inkFaint)
                 Button(action: onClose) {
                     Image(systemName: "xmark")
-                        .font(.system(size: 13, weight: .semibold))
-                        .padding(7)
+                        .font(Typo.ui(13, weight: .semibold))
+                        .padding(Space.scaled(7))
                         .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
@@ -163,9 +163,9 @@ struct ProcessMode: View {
                 .glassCapsule()
                 .accessibilityLabel("exit process mode")
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 14)
-            .padding(.bottom, 12)
+            .padding(.horizontal, Space.s16)
+            .padding(.top, Space.s14)
+            .padding(.bottom, Space.s12)
         }
 
         /// What letting go RIGHT NOW would do, stamped over the card as it moves.
@@ -210,15 +210,15 @@ struct ProcessMode: View {
         }
 
         private func phoneButtons(_ u: AttentionUpdate) -> some View {
-            HStack(spacing: 10) {
+            HStack(spacing: Space.s10) {
                 deckButton("arrowshape.turn.up.left", "reply", Palette.accent) { reply(u) }
                 deckButton("archivebox", "archive", Palette.warn) { archive(u) }
                 deckButton("slider.horizontal.3", "tune", Palette.accent) { tune(u) }
                 deckButton("forward", "skip", Palette.inkFaint) { skip() }
                 deckButton("checkmark", "done", Palette.positive) { done(u) }
             }
-            .padding(.horizontal, 16)
-            .padding(.bottom, 22)
+            .padding(.horizontal, Space.s16)
+            .padding(.bottom, Space.scaled(22))
         }
 
         private func deckButton(
@@ -228,13 +228,13 @@ struct ProcessMode: View {
                 Haptics.commit()
                 action()
             } label: {
-                VStack(spacing: 4) {
-                    Image(systemName: symbol).font(.system(size: 16, weight: .medium))
+                VStack(spacing: Space.s4) {
+                    Image(systemName: symbol).font(Typo.ui(16, weight: .medium))
                     Text(title).font(Typo.micro)
                 }
                 .foregroundStyle(tint)
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 11)
+                .padding(.vertical, Space.scaled(11))
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -291,11 +291,11 @@ struct ProcessMode: View {
     }
 
     private func card(_ u: AttentionUpdate) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
+        VStack(alignment: .leading, spacing: Space.s12) {
+            HStack(spacing: Space.s10) {
                 Avatar(sender: u.senderString, size: 28)
                 Text(SenderID.displayName(u.sender))
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(Typo.ui(15, weight: .semibold))
                     .foregroundStyle(Palette.ink)
                     // A sender with no display name IS its address, and a long
                     // one wraps this header into two ragged lines at phone width.
@@ -304,14 +304,14 @@ struct ProcessMode: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                     #endif
-                Spacer(minLength: 8)
+                Spacer(minLength: Space.s8)
                 Text("importance \(u.importance) · \(u.tier.label)")
                     .font(Typo.num(11))
                     .foregroundStyle(Palette.inkFaint)
             }
 
             Text(u.one_line)
-                .font(.system(size: 16))
+                .font(Typo.ui(16))
                 .foregroundStyle(Palette.ink)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -329,7 +329,7 @@ struct ProcessMode: View {
             // The keycaps are the Mac's affordance and the phone's would be a lie;
             // there, the buttons under the deck say the same thing in thumbs.
             #if os(macOS)
-                HStack(spacing: 12) {
+                HStack(spacing: Space.s12) {
                     KeyHint("r", "reply in reader")
                     KeyHint("e", "archive")
                     KeyHint("d", "done")
@@ -337,22 +337,22 @@ struct ProcessMode: View {
                     KeyHint("space", "skip")
                     Spacer()
                 }
-                .padding(.top, 4)
+                .padding(.top, Space.s4)
             #else
                 Text("swipe right to finish · left to skip · up to tune")
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaintest)
-                    .padding(.top, 2)
+                    .padding(.top, Space.s2)
             #endif
         }
-        .padding(22)
+        .padding(Space.scaled(22))
         .frame(maxWidth: .infinity, alignment: .leading)
         .passbandGlass(.pane, cornerRadius: 20, tint: Palette.glassTint)
         .shadow(color: .black.opacity(0.3), radius: 44, y: 18)
     }
 
     private var emptyState: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: Space.s8) {
             Text(queue.isEmpty ? "nothing to process" : "queue cleared")
                 .font(Typo.serif(24, weight: .medium))
                 .foregroundStyle(Palette.positive)
@@ -365,10 +365,10 @@ struct ProcessMode: View {
             .foregroundStyle(Palette.inkFaint)
             Button(exitLabel, action: onClose)
                 .buttonStyle(.glass)
-                .padding(.top, 6)
+                .padding(.top, Space.s6)
         }
         .frame(maxWidth: .infinity)
-        .padding(36)
+        .padding(Space.scaled(36))
         .passbandGlass(.pane, cornerRadius: 20, tint: Palette.positiveSoft)
         .shadow(color: .black.opacity(0.3), radius: 44, y: 18)
     }

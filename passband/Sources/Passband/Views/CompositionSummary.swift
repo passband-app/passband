@@ -67,15 +67,19 @@ struct CompositionSummary<Trailing: View>: View {
     }
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 9) {
+        HStack(alignment: .firstTextBaseline, spacing: Space.scaled(9)) {
             Text(slot)
                 .font(Typo.micro)
                 .foregroundStyle(Palette.inkFaintest)
                 .textCase(.uppercase)
-                .frame(width: slotWidth, alignment: .trailing)
+                // `slotWidth` is a compact width for 10pt type, and grows with
+                // that type rather than with the spacing ladder: SentRow sizes
+                // its own `to` slot the same way, which is what keeps the
+                // outbox's `to` on the sent rows' line in either density.
+                .frame(width: slotWidth * Typo.size(10) / 10, alignment: .trailing)
 
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
+            VStack(alignment: .leading, spacing: Space.s2) {
+                HStack(alignment: .firstTextBaseline, spacing: Space.s6) {
                     who
                         .frame(maxWidth: .infinity, alignment: .leading)
                     trailingCell
@@ -91,14 +95,14 @@ struct CompositionSummary<Trailing: View>: View {
         switch kind {
         case .new:
             Text(names.isEmpty ? emptyTo : names)
-                .font(.system(size: 12, weight: .medium))
+                .font(Typo.ui(12, weight: .medium))
                 .foregroundStyle(names.isEmpty ? Palette.inkFaintest : Palette.ink)
                 .lineLimit(1)
                 .truncationMode(.middle)
         case .reply, .forward:
-            HStack(alignment: .firstTextBaseline, spacing: 5) {
+            HStack(alignment: .firstTextBaseline, spacing: Space.scaled(5)) {
                 Text(parentSubjectText)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(Typo.ui(12, weight: .medium))
                     .foregroundStyle(Palette.ink)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -128,7 +132,7 @@ struct CompositionSummary<Trailing: View>: View {
         let showSubject = !own.isEmpty || kind == .new
         let tail = notice ?? snippet
         if showSubject || !tail.isEmpty {
-            HStack(spacing: 6) {
+            HStack(spacing: Space.s6) {
                 if showSubject {
                     Text(own.isEmpty ? "(no subject)" : own)
                         .font(Typo.rowSub)
@@ -151,11 +155,11 @@ struct CompositionSummary<Trailing: View>: View {
 
     /// Files, then the caller's cell, right-aligned on line one.
     private var trailingCell: some View {
-        HStack(spacing: 7) {
+        HStack(spacing: Space.scaled(7)) {
             if fileCount > 0 {
-                HStack(spacing: 2) {
+                HStack(spacing: Space.s2) {
                     Image(systemName: "paperclip")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(Typo.ui(9, weight: .semibold))
                     Text("\(fileCount)")
                         .font(Typo.num(10))
                 }

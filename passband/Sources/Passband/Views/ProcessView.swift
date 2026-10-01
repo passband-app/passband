@@ -8,9 +8,9 @@ import SwiftUI
 
 struct ProcessView: View {
     var body: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: Space.s10) {
             Image(systemName: "checkmark.seal")
-                .font(.system(size: 26, weight: .light))
+                .font(Typo.ui(26, weight: .light))
                 .foregroundStyle(Palette.inkFaintest)
             Text("Peer review")
                 .font(Typo.serif(17, weight: .medium))
@@ -21,7 +21,7 @@ struct ProcessView: View {
             .font(Typo.rowSub)
             .foregroundStyle(Palette.inkFaintest)
             .multilineTextAlignment(.center)
-            .frame(maxWidth: 340)
+            .frame(maxWidth: Space.scaled(340))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

@@ -1547,6 +1547,10 @@ final class AppStore {
     /// per-daemon SQLite ints, so "looks plausible" is precisely the failure
     /// mode being prevented here: A's row 412 is B's row 412.
     private func wipeAccountState() {
+        // The unsubscribe tray's rows and buttons belong to the old account:
+        // "Finish on their site" would tell the NEW daemon about a job it has
+        // never heard of.
+        UnsubscribeJobs.shared.reset()
         sitrep = SitrepData()
         zones = SitrepZoneCache()
         // The parked refresh tasks go too, not just their results: a joiner
@@ -5264,6 +5268,43 @@ final class AppStore {
         sitrep.standing.removeAll { $0.id == messageId }
         sitrep.new.removeAll { $0.id == messageId }
         sitrep.open.removeAll { $0.id == messageId }
+    }
+
+    /// Done on a whole Reading sender at once: the tile's `e`, and the reader's
+    /// held `e` on that sender's stack. The tile leaves now and every message
+    /// is marked in PARALLEL, so a stack of twenty lands in one round trip's
+    /// time rather than twenty. One toast, and no undo on this path.
+    func markReadingDone(_ items: [AttentionUpdate], sender: String) async {
+        let ids = Set(items.map(\.id))
+        zones.reading.removeAll { $0.items.contains { ids.contains($0.id) } }
+        let landed = await withTaskGroup(of: Int?.self) { group in
+            for item in items {
+                group.addTask {
+                    do {
+                        try await APIClient.shared.setStatus(item.id, .done)
+                        // No undo, so nothing re-pins: unpin as each one lands.
+                        await ImageStore.shared.release(messageId: item.id)
+                        return item.id
+                    } catch {
+                        return nil
+                    }
+                }
+            }
+            var landed: [Int] = []
+            for await id in group { if let id { landed.append(id) } }
+            return landed
+        }
+        // Record each as resolved, not just gone from the zone: the same
+        // message can be sitting in a band or on the mail page, and this path
+        // never went through removeFromBands. Only the ones that LANDED — a
+        // resolved id is hidden for the rest of the session.
+        for id in landed { noteResolved(id) }
+        let failed = items.count - landed.count
+        if failed > 0 {
+            pushToast("some marks failed; refresh to re-sync", .error)
+        } else {
+            pushToast("done: \(SenderCache.resolved(sender).displayName) (\(items.count))", .info)
+        }
     }
 
     /// The same, for every message from one sender: the client half of the

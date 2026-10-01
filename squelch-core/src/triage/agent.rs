@@ -170,8 +170,15 @@ async fn run_bounded(
                     .and_then(|()| observed.validate(&decision, &context.thread_id))
                 {
                     Ok(()) => {
+                        let mut decision = *decision;
+                        // reading_kind only means something on Reading mail; a
+                        // stale one would colour the card if Reading is added
+                        // by a correction later.
+                        if !decision.destinations.contains(&MessageDestination::Reading) {
+                            decision.reading_kind = None;
+                        }
                         return Ok(AgentRun {
-                            decision: *decision,
+                            decision,
                             source_message_ids: sources.into_iter().collect(),
                             thread_revisions: revisions,
                             usage: usage.clone(),
@@ -853,6 +860,10 @@ fn decision_schema_body() -> Value {
             ])),
         ),
         ("destinations", array(enumeration(&["reading"]))),
+        (
+            "reading_kind",
+            nullable(enumeration(&["content", "promotion"])),
+        ),
         ("summary", text()),
         ("reason", text()),
         (
@@ -975,14 +986,17 @@ mod tests {
     /// The step schema is part of the cached prefix of EVERY triage call, so
     /// its encoded size is a cost line item. The bound is the `$defs` version's
     /// size with headroom; inlining the shared sub-schemas again roughly
-    /// doubles it, and this is what notices.
+    /// doubles it, and this is what notices. Raised from 9,000 when the
+    /// calendar event fields (about 860 bytes) and `reading_kind` landed
+    /// together at 9,027: a new field should fit under it, a second copy of
+    /// the shared definitions should not.
     #[test]
     fn step_schema_stays_compact_and_its_refs_resolve() {
         let schema = step_schema();
         let encoded = serde_json::to_string(&schema).unwrap();
         eprintln!("step schema: {} bytes", encoded.len());
         assert!(
-            encoded.len() < 9_000,
+            encoded.len() < 9_500,
             "step schema grew to {} bytes",
             encoded.len()
         );
@@ -1262,6 +1276,26 @@ mod tests {
                 "schema status must be pollable or explicitly unknown: {value}"
             );
         }
+    }
+    #[test]
+    fn reading_kind_is_offered_and_defaults_on_stored_rows() {
+        // Product updates read like articles; the prompt must say they are not.
+        assert!(SYSTEM.contains("A company writing about its own product is promotion"));
+        let schema = decision_schema();
+        assert_eq!(
+            schema["properties"]["reading_kind"],
+            nullable(enumeration(&["content", "promotion"]))
+        );
+        let mut decision = serde_json::to_value(valid()).unwrap();
+        decision.as_object_mut().unwrap().remove("reading_kind");
+        let stored: MessageDecision = serde_json::from_value(decision.clone()).unwrap();
+        assert_eq!(stored.reading_kind, None);
+        decision["reading_kind"] = json!("content");
+        let fresh: MessageDecision = serde_json::from_value(decision).unwrap();
+        assert_eq!(
+            fresh.reading_kind,
+            Some(crate::triage::decision::ReadingKind::Content)
+        );
     }
     #[test]
     fn strict_schema_requires_all_object_fields() {

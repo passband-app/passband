@@ -1077,6 +1077,18 @@ pub struct UnsubscribeRecord {
     /// User's resolution of a repeat offender: "blocked" | "dismissed", or
     /// `None` while the request is still outstanding.
     pub resolution: Option<String>,
+    /// Where an AUTOMATIC unsubscribe stands: running | done | needs_you |
+    /// opened. `None` on a legacy row, where the client opened the link itself
+    /// and there was never a job to report on.
+    pub status: Option<String>,
+    /// The page to send the user to when `status` is `needs_you`: the ORIGINAL
+    /// link, never a post-redirect hop (see `unsub_job`). `None` otherwise.
+    pub status_url: Option<String>,
+    /// Why a job needs the user: choose_topics | needs_browser | unclear |
+    /// link_error. `None` unless `status` is `needs_you`.
+    pub status_reason: Option<String>,
+    /// When `status` last changed.
+    pub status_at: Option<DateTime<Utc>>,
 }
 
 str_enum! {

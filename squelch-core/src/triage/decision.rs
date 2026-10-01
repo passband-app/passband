@@ -24,6 +24,10 @@ decision_enum!(EmailKind {
     AuthenticationSecurity
 });
 decision_enum!(MessageDestination { Reading });
+// What a Reading message is for the person reading it: a piece meant to be
+// read like an article or post, or a promotion. Only meaningful when
+// `destinations` holds Reading.
+decision_enum!(ReadingKind { Content, Promotion });
 decision_enum!(AttentionState {
     Informational,
     NeedsUser,
@@ -255,6 +259,11 @@ impl RecordProposal {
 pub struct MessageDecision {
     pub kinds: Vec<EmailKind>,
     pub destinations: Vec<MessageDestination>,
+    /// Arrived after decisions were already stored, so it defaults (see the
+    /// note on `RecordProposal::Delivery`); older rows read as None and the
+    /// client falls back to `kinds`.
+    #[serde(default)]
+    pub reading_kind: Option<ReadingKind>,
     pub summary: String,
     pub reason: String,
     pub auth: AuthAssessment,

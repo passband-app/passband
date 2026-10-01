@@ -52,6 +52,7 @@ fn feed_item(item: AgentListItem) -> Value {
         "from_addr": item.from_addr, "subject": item.subject,
         "received_at": item.received_at, "score": item.score,
         "decision": {"kinds": item.decision.kinds, "destinations": item.decision.destinations,
+            "reading_kind": item.decision.reading_kind,
             "summary": item.decision.summary, "reason": item.decision.reason},
         "attention": item.attention})
 }
@@ -164,7 +165,7 @@ pub async fn decision(
     .await?;
     Ok(no_store(
         json!({"decision": {"kinds": decision.kinds, "destinations": decision.destinations,
-        "summary": decision.summary, "reason": decision.reason, "attention": decision.attention,
+        "reading_kind": decision.reading_kind, "summary": decision.summary, "reason": decision.reason, "attention": decision.attention,
         "rule_exceptions": decision.rule_exceptions}}),
     ))
 }

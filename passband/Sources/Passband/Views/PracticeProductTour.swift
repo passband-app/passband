@@ -83,7 +83,7 @@ struct PracticeProductTour: View {
     }
 
     private var guideCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: Space.s12) {
             HStack {
                 Label("PASSBAND GUIDE", systemImage: "sparkles")
                     .font(Typo.sectionLabel)
@@ -99,7 +99,7 @@ struct PracticeProductTour: View {
                 .foregroundStyle(Palette.ink)
                 .fixedSize(horizontal: false, vertical: true)
             explanationText(guideExplanation)
-                .font(.system(size: 15))
+                .font(Typo.ui(15))
                 .lineSpacing(3)
                 .foregroundStyle(Palette.inkDim)
                 .fixedSize(horizontal: false, vertical: true)
@@ -110,7 +110,7 @@ struct PracticeProductTour: View {
                     .foregroundStyle(Palette.positive)
             }
             primaryAction
-            HStack(spacing: 5) {
+            HStack(spacing: Space.scaled(5)) {
                 ForEach(PracticeTourStep.allCases, id: \.rawValue) { item in
                     Capsule()
                         .fill(item.rawValue <= step.rawValue ? Palette.accent : Palette.ink.opacity(0.1))
@@ -118,7 +118,7 @@ struct PracticeProductTour: View {
                 }
             }
             .accessibilityHidden(true)
-            HStack(spacing: 14) {
+            HStack(spacing: Space.s14) {
                 Button("Back") { tour.back() }
                     .disabled(step == .welcome)
                     .help("Previous step · ⌘←")
@@ -136,7 +136,7 @@ struct PracticeProductTour: View {
                         Button("Next") { next() }
                             .buttonStyle(.borderedProminent)
                             .tint(Palette.accent)
-                            .font(.system(size: 14, weight: .semibold))
+                            .font(Typo.ui(14, weight: .semibold))
                             .controlSize(.large)
                             .help("Next step · ⌘→")
                             .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(tourSpace)) } action: {
@@ -148,7 +148,7 @@ struct PracticeProductTour: View {
             .buttonStyle(.textAction)
             .font(Typo.micro)
         }
-        .padding(20)
+        .padding(Space.s20)
         .background(Color(light: 0xF7FAFD, dark: 0x293747), in: RoundedRectangle(cornerRadius: 20))
         .overlay {
             RoundedRectangle(cornerRadius: 20).strokeBorder(Palette.accent.opacity(0.24))
@@ -168,9 +168,9 @@ struct PracticeProductTour: View {
     private func actionButton(_ title: String, symbol: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Label(title, systemImage: symbol)
-                .font(.system(size: 13, weight: .semibold))
+                .font(Typo.ui(13, weight: .semibold))
                 .frame(maxWidth: .infinity, alignment: .center)
-                .padding(.vertical, 4)
+                .padding(.vertical, Space.s4)
         }
         .buttonStyle(.borderedProminent)
         .tint(Palette.accent)
@@ -244,9 +244,9 @@ struct PracticeProductTour: View {
     }
 
     private func guideKeyHint(_ key: String, _ label: String) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: Space.s8) {
             Kbd(key).scaleEffect(1.15)
-            Text(label).font(.system(size: 13)).foregroundStyle(Palette.inkDim)
+            Text(label).font(Typo.ui(13)).foregroundStyle(Palette.inkDim)
         }
     }
 
@@ -328,7 +328,9 @@ struct PracticeProductTour: View {
         let margin: CGFloat = 18
         let maxX = max(margin, size.width - width - margin)
         let maxY = max(margin, size.height - cardHeight - margin)
-        let toastClearance: CGFloat = store.undos.isEmpty ? 0 : 64
+        // The toast follows density, so it is taller in comfortable; the
+        // room left for it has to grow on the same curve.
+        let toastClearance: CGFloat = store.undos.isEmpty ? 0 : Space.scaled(64)
         let x = min(maxX, max(margin, SidebarRail.railWidth + margin - frame.minX))
         let y = max(margin, maxY - toastClearance)
         return CGRect(x: x, y: y, width: width, height: cardHeight)
@@ -417,7 +419,7 @@ struct PracticeProductTour: View {
         // A real queue is essential: the reader resolves through Actions.done
         // with an undo only when the opened thread has its AttentionUpdate.
         let queue = store.update(id: id).map { [$0] } ?? []
-        store.openThread(thread, queue: queue)
+        store.openThread(thread, queue: queue, from: .tour)
     }
 
     private var undoWasRestored: Bool {

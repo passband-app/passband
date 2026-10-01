@@ -20,9 +20,9 @@ struct MailFilterBar: View {
     private var reminders: Bool { store.reminderFilter }
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: Space.s6) {
             pillScroller {
-                HStack(spacing: 6) {
+                HStack(spacing: Space.s6) {
                     ForEach(MailFilter.allCases, id: \.self) { f in
                         FilterPill(
                             text: f.label,
@@ -51,12 +51,12 @@ struct MailFilterBar: View {
                 .opacity(reminders ? 0.4 : 1)
         }
         #if os(macOS)
-            .padding(.horizontal, 24)
+            .padding(.horizontal, Space.s24)
         #else
-            .padding(.horizontal, 16)
+            .padding(.horizontal, Space.s16)
         #endif
-        .padding(.top, 10)
-        .padding(.bottom, 2)
+        .padding(.top, Space.s10)
+        .padding(.bottom, Space.s2)
     }
 }
 
@@ -111,17 +111,17 @@ private struct CategoryPicker: View {
                 Button("Show all categories") { prefs.mailHiddenZones = [] }
             }
         } label: {
-            HStack(spacing: 5) {
+            HStack(spacing: Space.scaled(5)) {
                 Image(systemName: "line.3.horizontal.decrease")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(Typo.ui(10, weight: .semibold))
                 Text(label)
                     .font(Typo.chip)
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .semibold))
+                    .font(Typo.ui(8, weight: .semibold))
             }
             .foregroundStyle(hidden.isEmpty ? Palette.inkDim : Palette.accent)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 4)
+            .padding(.horizontal, Space.s10)
+            .padding(.vertical, Space.s4)
             .background(Capsule().fill(hidden.isEmpty ? Color.clear : Palette.accentSoft))
             .overlay(
                 Capsule().strokeBorder(
@@ -151,10 +151,10 @@ private struct FilterPill: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 5) {
+            HStack(spacing: Space.scaled(5)) {
                 if let icon {
                     Image(systemName: active ? "\(icon).fill" : icon)
-                        .font(.system(size: 10))
+                        .font(Typo.ui(10))
                 }
                 Text(text).font(Typo.chip)
                 if let count {
@@ -164,8 +164,8 @@ private struct FilterPill: View {
                 }
             }
             .foregroundStyle(active ? Palette.accent : Palette.inkDim)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 4)
+            .padding(.horizontal, Space.s10)
+            .padding(.vertical, Space.s4)
             .background(Capsule().fill(active ? Palette.accentSoft : Color.clear))
             .overlay(
                 Capsule().strokeBorder(
@@ -194,9 +194,9 @@ struct DayHeading: View {
             .foregroundStyle(Palette.inkFaint)
             .textCase(.uppercase)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 11)
+            .padding(.horizontal, Space.scaled(11))
             .padding(.top, first ? 4 : 16)
-            .padding(.bottom, 5)
+            .padding(.bottom, Space.scaled(5))
             #if !os(macOS)
                 // A plain List pins section headers; without a ground the
                 // rows would scroll visibly under the words.

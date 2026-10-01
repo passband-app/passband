@@ -14,6 +14,12 @@ cd "$(dirname "$0")"
 BUILD=build/tests
 mkdir -p "$BUILD"
 
+# The analytics vocabulary is closed at RUNTIME (an unlisted event asserts in
+# a debug build and is dropped in release), and nothing else at build time
+# knows that. This is the check; see the script's header for the history.
+echo "==> analytics-lint"
+python3 ./analytics-lint.py
+
 run_suite() {
   local name="$1"
   shift
@@ -418,6 +424,13 @@ run_suite search-intent \
 run_suite settings-search \
   Sources/Passband/Lib/SettingsSearch.swift \
   Tests/SettingsSearchTests.swift
+
+# The density curves: compact is the identity (which is what makes moving a
+# literal onto a token safe), comfortable never shrinks anything, and neither
+# curve folds two steps of the ladder onto one size.
+run_suite density \
+  Sources/Passband/Lib/Density.swift \
+  Tests/DensityTests.swift
 
 # The search field's `from:` operator: when the sender menu is open and what
 # accepting a sender does to the text. Pure string work, Foundation only.

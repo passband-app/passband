@@ -40,6 +40,21 @@ enum MinimapGeometry {
     /// whole rail.
     static let longestGuess: CGFloat = 2400
 
+    /// HOW FAR THE READER HAS GROWN FROM THE COMPACT NUMBERS BELOW. Every
+    /// constant in this file was measured off the compact reader; at another
+    /// density the same words are bigger letters in the same column, so fewer
+    /// fit on a line and each line is taller, and a card spends more on its
+    /// padding. Passed in rather than read, which is what keeps this file
+    /// free of the app: the reader hands over the two ratios its tokens give.
+    struct Scale: Equatable, Sendable {
+        /// The body type's size over its compact size.
+        var type: CGFloat = 1
+        /// A card's chrome (header, padding, attachment strip) over compact.
+        var chrome: CGFloat = 1
+
+        static let compact = Scale()
+    }
+
     /// Rendered text metrics for the reader's column, near enough for a drawing.
     /// A chat bubble is the same text through a narrower measure — 620 points
     /// against the column's 900 — so the same message is more lines of fewer
@@ -75,12 +90,13 @@ enum MinimapGeometry {
     /// which is a conversation, which is text. A newsletter is one message in a
     /// thread of its own and has no rail to be wrong about.
     static func estimate(
-        text: String, html: String? = nil, attachments: Int = 0, style: ThreadStyle = .classic
+        text: String, html: String? = nil, attachments: Int = 0, style: ThreadStyle = .classic,
+        scale: Scale = .compact
     ) -> CGFloat {
         min(
             card(
-                bodyHeight: textHeight(text: text, html: html, style: style),
-                attachments: attachments, style: style),
+                bodyHeight: textHeight(text: text, html: html, style: style, scale: scale),
+                attachments: attachments, style: style, scale: scale),
             longestGuess)
     }
 
@@ -94,9 +110,11 @@ enum MinimapGeometry {
     /// screenfuls has to be drawn as ten screenfuls or the rail is lying about
     /// the shape of the thread — which is the whole thing it is for.
     static func card(
-        bodyHeight: CGFloat, attachments: Int = 0, style: ThreadStyle = .classic
+        bodyHeight: CGFloat, attachments: Int = 0, style: ThreadStyle = .classic,
+        scale: Scale = .compact
     ) -> CGFloat {
-        max(cardChrome(style) + bodyHeight + (attachments > 0 ? attachmentStrip : 0), minimumCard)
+        let chrome = cardChrome(style) + (attachments > 0 ? attachmentStrip : 0)
+        return max(chrome * scale.chrome + bodyHeight, minimumCard)
     }
 
     /// HOW TALL THIS BODY'S TEXT DRAWS, with no card around it. Split out of
@@ -116,9 +134,12 @@ enum MinimapGeometry {
     /// Counted in UTF-8 bytes rather than characters because a long thread runs
     /// this per message and byte count is free where grapheme count is a walk.
     static func textHeight(
-        text: String, html: String? = nil, style: ThreadStyle = .classic
+        text: String, html: String? = nil, style: ThreadStyle = .classic,
+        scale: Scale = .compact
     ) -> CGFloat {
-        let charsPerLine = charsPerLine(style)
+        // The column is the same width at every density, so bigger type is
+        // fewer characters to the line as well as a taller line.
+        let charsPerLine = charsPerLine(style) / scale.type
         var lines: CGFloat = 0
         var run: CGFloat = 0
         var ink = false
@@ -142,7 +163,7 @@ enum MinimapGeometry {
             lines = max(1, (visible / charsPerLine).rounded(.up))
         }
 
-        return lines * lineHeight
+        return lines * lineHeight * scale.type
     }
 
     /// `estimates` carries one entry per message and IS the map. Nothing measured

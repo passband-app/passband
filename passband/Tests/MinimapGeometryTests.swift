@@ -91,6 +91,21 @@ struct MinimapGeometryTests {
             MinimapGeometry.estimate(text: "hi", attachments: 2)
                 > MinimapGeometry.estimate(text: "hi"), true, "attachments add a strip")
 
+        // AT A ROOMIER DENSITY the same words are fewer to the line and taller
+        // lines, and the card spends more on its chrome. Compact is the
+        // numbers this file was measured at, so it changes nothing.
+        let body = String(repeating: "word ", count: 400)
+        let roomy = MinimapGeometry.Scale(type: 15.0 / 14, chrome: 1.19)
+        equal(
+            MinimapGeometry.estimate(text: body, scale: .compact),
+            MinimapGeometry.estimate(text: body), "compact is the identity")
+        equal(
+            MinimapGeometry.textHeight(text: body, scale: roomy)
+                > MinimapGeometry.textHeight(text: body), true, "bigger type is a taller body")
+        equal(
+            MinimapGeometry.card(bodyHeight: 400, scale: roomy)
+                > MinimapGeometry.card(bodyHeight: 400), true, "and more chrome around it")
+
         // IMAGES ARE WORTH NOTHING, on purpose: a picture and a paragraph of the
         // same markup length are the same guess, because the alternative is
         // guessing what a picture is going to measure.

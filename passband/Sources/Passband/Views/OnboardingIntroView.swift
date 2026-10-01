@@ -181,7 +181,7 @@ struct OnboardingIntroView: View {
             Text(organized
                  ? "Passband brings the important things forward, so you can give them your attention and get on with your day."
                  : "Your attention is valuable. You deserve an inbox that treats it that way.")
-                .font(.system(size: 15))
+                .font(Typo.ui(15))
                 .foregroundStyle(Palette.inkDim)
                 .lineSpacing(5)
                 .fixedSize(horizontal: false, vertical: true)
@@ -263,21 +263,21 @@ struct OnboardingIntroView: View {
             #else
             Button("Skip intro", action: onContinue)
                 .buttonStyle(.plain)
-                .font(.system(size: 11))
+                .font(Typo.ui(11))
                 .foregroundStyle(Palette.inkFaintest)
-                .padding(.vertical, 8)
+                .padding(.vertical, Space.s8)
                 .accessibilityHint(continueHint)
             Button {
                 if page == 1 { onContinue() }
                 else { page += 1 }
             } label: {
-                HStack(spacing: 9) {
+                HStack(spacing: Space.scaled(9)) {
                     Text(organized ? continueTitle : "Find a little breathing room")
                     Image(systemName: "arrow.right")
                 }
-                .font(.system(size: 13, weight: .semibold))
-                .padding(.vertical, 7)
-                .padding(.horizontal, 8)
+                .font(Typo.ui(13, weight: .semibold))
+                .padding(.vertical, Space.scaled(7))
+                .padding(.horizontal, Space.s8)
             }
             .buttonStyle(.borderedProminent)
             .tint(Palette.accent)
@@ -297,16 +297,16 @@ struct OnboardingIntroView: View {
         @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
         var body: some View {
-            HStack(spacing: 8) {
+            HStack(spacing: Space.s8) {
                 Text(text)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(Typo.ui(13, weight: .medium))
                     .foregroundStyle(Palette.ink.opacity(0.8))
                 TimelineView(.animation(paused: reduceMotion)) { context in
                     let t = context.date.timeIntervalSinceReferenceDate
                     HStack(spacing: -1) {
                         ForEach(0..<3) { i in
                             Image(systemName: "chevron.right")
-                                .font(.system(size: 14, weight: .bold))
+                                .font(Typo.ui(14, weight: .bold))
                                 .opacity(reduceMotion ? 0.8 : Self.pulse(t, index: i))
                         }
                     }
@@ -315,7 +315,7 @@ struct OnboardingIntroView: View {
                     .foregroundStyle(Palette.ink)
                 }
             }
-            .padding(.vertical, 10)
+            .padding(.vertical, Space.s10)
         }
 
         /// A crest that travels left to right across the three chevrons,
@@ -388,7 +388,7 @@ struct IntroWordmark: View {
                     .accessibilityHidden(true)
             }
             Text("passband")
-                .font(Typo.serif(24, weight: .medium))
+                .font(Typo.serif(24, weight: .medium, fixed: true))
         }
         .foregroundStyle(Palette.ink)
     }

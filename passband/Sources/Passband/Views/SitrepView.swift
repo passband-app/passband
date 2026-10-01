@@ -95,7 +95,23 @@ struct SitrepView: View {
     /// squeezed side-by-side starves the left column first, and that column is
     /// the work surface. At the window's minimum the page measures ~920, so
     /// the smallest windows always stack.
-    private static let railBreakpoint: CGFloat = 960
+    ///
+    /// Stated as the narrowest work column worth pinning a rail beside (654,
+    /// a measure, since it is one-liners that have to fit) plus the rail, so
+    /// the comfortable rail's extra width moves the breakpoint with it.
+    private static var railBreakpoint: CGFloat { Typo.measure(654) + railWidth }
+
+    /// The page's side margin for everything above the two columns: the
+    /// column's own 24 plus the 4 a ClearNote is inset by, as a sum of two
+    /// steps so the hero and the banners stay on that inset line in either
+    /// density (a scaled 28 lands two points off it in comfortable).
+    private static var gutter: CGFloat { Space.s24 + Space.s4 }
+
+    /// The records rail. On the spacing curve rather than the type's: a rail
+    /// row is a name beside two chips and an amount, and it is the chips'
+    /// padding that grows. Held at 306, comfortable left the name no room at
+    /// all ("Hertz P…", then a bare "…").
+    private static var railWidth: CGFloat { Space.scaled(306) }
 
     /// Measured page width the breakpoint is judged against. Starts infinite
     /// so the first pass lays out side-by-side rather than flashing stacked.
@@ -130,14 +146,14 @@ struct SitrepView: View {
             // arrived actually looks.
             if store.gmailDisconnected {
                 GmailDisconnectedBanner()
-                    .padding(.horizontal, 28)
-                    .padding(.top, 14)
+                    .padding(.horizontal, Self.gutter)
+                    .padding(.top, Space.s14)
             } else if case let status = store.syncStatus, status.showsBanner {
                 // Throttled, erroring, catching up, or triage held: the same
                 // slot, because it answers the same question.
                 SyncStatusBanner(status: status)
-                    .padding(.horizontal, 28)
-                    .padding(.top, 14)
+                    .padding(.horizontal, Self.gutter)
+                    .padding(.top, Space.s14)
             }
             // THE HERO STAYS PUT. It sits above BOTH columns, so it cannot scroll
             // with one of them and hold still for the other; and "one item needs
@@ -155,8 +171,8 @@ struct SitrepView: View {
                 regenerate: { Task { await store.regenerateFyeHeadline() } },
                 empty: emptyHero)
                 .task(id: store.headlineKey) { await store.refreshFyeHeadline() }
-                .padding(.horizontal, 28)
-                .padding(.bottom, 18)
+                .padding(.horizontal, Self.gutter)
+                .padding(.bottom, Space.scaled(18))
 
             if pageWidth < Self.railBreakpoint {
                 // NARROW: one scroll, records under the work surface. The rail
@@ -164,7 +180,7 @@ struct SitrepView: View {
                 // items that need acting on — but the status strip stays the
                 // page's last line either way.
                 ScrollView(.vertical) {
-                    VStack(spacing: 16) {
+                    VStack(spacing: Space.s16) {
                         leftZones(visible: visible, overflow: overflow)
                         // Same key as the pinned rail below: whichever layout is
                         // on screen is the one the tour's ring finds.
@@ -172,27 +188,27 @@ struct SitrepView: View {
                             railCards.tourTarget(.records)
                         }
                     }
-                    .padding(.top, 14)
-                    .padding(.bottom, 28)
+                    .padding(.top, Space.s14)
+                    .padding(.bottom, Space.scaled(28))
                 }
                 .scrollIndicators(.hidden)
-                .scrollShadowRoom()
-                .padding(.horizontal, 24)
+                .scrollShadowRoom(topFade: Space.s14)
+                .padding(.horizontal, Space.s24)
             } else {
-                HStack(alignment: .top, spacing: 18) {
+                HStack(alignment: .top, spacing: Space.scaled(18)) {
                     // THE ONLY THING THAT SCROLLS WITH THE PAGE.
                     ScrollView(.vertical) {
-                        VStack(spacing: 16) {
+                        VStack(spacing: Space.s16) {
                             leftZones(visible: visible, overflow: overflow)
                         }
-                        .padding(.top, 14)
-                        .padding(.bottom, 28)
+                        .padding(.top, Space.s14)
+                        .padding(.bottom, Space.scaled(28))
                     }
                     // No bar on either column. Two of them side by side read as a
                     // split pane rather than one page, and the left one rides the
                     // column boundary instead of the window edge.
                     .scrollIndicators(.hidden)
-                    .scrollShadowRoom()
+                    .scrollShadowRoom(topFade: Space.s14)
                     .frame(maxWidth: .infinity, alignment: .top)
 
                     // THE RECORDS RAIL IS PINNED. These are reference columns you
@@ -203,22 +219,22 @@ struct SitrepView: View {
                     // instead of rubber-banding against nothing.
                     if !recordsEmpty {
                     ScrollView(.vertical) {
-                        VStack(spacing: 14) {
+                        VStack(spacing: Space.s14) {
                             railZones
                         }
-                        .padding(.top, 14)
-                        .padding(.bottom, 28)
+                        .padding(.top, Space.s14)
+                        .padding(.bottom, Space.scaled(28))
                     }
                     .scrollBounceBehavior(.basedOnSize)
                     .scrollIndicators(.hidden)
-                    .scrollShadowRoom()
-                    .frame(width: 306)
+                    .scrollShadowRoom(topFade: Space.s14)
+                    .frame(width: Self.railWidth)
                     // The COLUMN, not its content: a rail taller than the window
                     // would put the ring's bottom edge off screen.
                     .tourTarget(.records)
                     }
                 }
-                .padding(.horizontal, 24)
+                .padding(.horizontal, Space.s24)
             }
         }
         // The window shell draws the scene (it runs under the rail and the
@@ -227,16 +243,15 @@ struct SitrepView: View {
         .onDisappear { QuietBoard.shared.isQuiet = false }
         #if os(macOS)
             // The end of a Space walk: the bottom of the list, celebrated.
-            .overlay(alignment: .top) {
+            .overlay {
                 if let summary = store.walkFinished {
                     // Clears only ITS OWN summary: a celebration replaced by a
                     // newer one has its task cancelled, and its cleanup must
                     // not wipe the one that took its place.
-                    WalkComplete(summary: summary) {
+                    WalkComplete(summary: summary, boardCleared: store.sitrep.standing.isEmpty) {
                         if store.walkFinished?.id == summary.id { store.walkFinished = nil }
                     }
-                        .id(summary.id)
-                        .padding(.top, TopBar.height + 36)
+                    .id(summary.id)
                 }
             }
         #endif
@@ -322,7 +337,7 @@ struct SitrepView: View {
                 .tourTarget(.eyes)
         } else if isClear {
             ClearNote()
-                .padding(.horizontal, 4)
+                .padding(.horizontal, Space.s4)
                 .transition(.opacity)
         }
         // Empty reading still stands beside a live For-your-eyes (a zone that
@@ -349,13 +364,13 @@ struct SitrepView: View {
     /// height, and these cards are never the same height, so a grid opens
     /// gaps that independent columns simply pack.
     private var railCards: some View {
-        HStack(alignment: .top, spacing: 16) {
-            VStack(spacing: 16) {
+        HStack(alignment: .top, spacing: Space.s16) {
+            VStack(spacing: Space.s16) {
                 CalendarZone().tourTarget(.calendar)
                 BankingZone().tourTarget(.banking)
             }
             .frame(maxWidth: .infinity)
-            VStack(spacing: 16) {
+            VStack(spacing: Space.s16) {
                 ShipmentsZone(cursor: cursor).tourTarget(.shipments)
                 ReceiptsZone().tourTarget(.receipts)
             }
@@ -374,8 +389,8 @@ struct SitrepView: View {
     }()
 
     private var masthead: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            HStack(alignment: .firstTextBaseline, spacing: 7) {
+        HStack(alignment: .firstTextBaseline, spacing: Space.s10) {
+            HStack(alignment: .firstTextBaseline, spacing: Space.scaled(7)) {
                 Text("passband")
                     .font(Typo.serif(19, weight: .medium))
                     .foregroundStyle(Palette.ink)
@@ -392,14 +407,14 @@ struct SitrepView: View {
                     Text(branch)
                         .font(Typo.mono(10, weight: .medium))
                         .foregroundStyle(Palette.warn)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
+                        .padding(.horizontal, Space.s6)
+                        .padding(.vertical, Space.s2)
                         .background(Palette.warnSoft, in: Capsule())
                         .help("Built from branch \(branch)")
                         .accessibilityLabel("Development build from branch \(branch)")
                 }
             }
-            Spacer(minLength: 12)
+            Spacer(minLength: Space.s12)
             IngestIndicator()
             // Only the practice board gets the rehearsal appearance control.
             // The launch flag stays true after returning to the real inbox.
@@ -416,7 +431,7 @@ struct SitrepView: View {
                 }
             #endif
         }
-        .padding(.horizontal, 24)
+        .padding(.horizontal, Space.s24)
         // THE TOP BAR. The wordmark sits on the traffic lights' line rather than
         // under it, which is why this is a fixed height and not padding: the
         // rail beside it starts at the same line, and the two only read as one
@@ -484,12 +499,12 @@ struct SitrepView: View {
             Text(cursor.expanded ? "show less" : "\(overflow) more")
                 .font(Typo.micro)
                 .foregroundStyle(Palette.inkFaint)
-                .padding(.horizontal, 11)
-                .padding(.vertical, 4)
+                .padding(.horizontal, Space.scaled(11))
+                .padding(.vertical, Space.s4)
         }
         .buttonStyle(.glass)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.top, 6)
+        .padding(.top, Space.s6)
     }
 
 
@@ -508,7 +523,7 @@ struct SitrepView: View {
             KeyBinding("ArrowUp", "prev item") { moveEyes(-1) },
             KeyBinding("d", "mark done") {
                 guard eyesActionable, let u = reachable[safe: cursor.index] else { return }
-                Task { await Actions.done(u) }
+                Task { await Actions.done(u, via: .key, on: .sitrep) }
             },
             // `e` first tries the hovered shipment, then the hovered reading
             // card; with nothing hovered it falls to the for-your-eyes row.
@@ -530,12 +545,12 @@ struct SitrepView: View {
                     return true
                 }
                 guard eyesActionable, let u = reachable[safe: cursor.index] else { return false }
-                Task { await Actions.done(u) }
+                Task { await Actions.done(u, via: .key, on: .sitrep) }
                 return true
             },
             KeyBinding("Enter", "open email") {
                 guard eyesActionable, let u = reachable[safe: cursor.index] else { return }
-                store.openThread(u.thread_id, queue: eyesWalk(store))
+                store.openThread(u.thread_id, queue: eyesWalk(store), from: .sitrep)
             },
             // Space STARTS the walk: no highlight needed, so it is the one key
             // that works the moment the page opens. A row the cursor is on still
@@ -625,16 +640,16 @@ private struct IngestIndicator: View {
     var body: some View {
         let count = store.sitrep.new.count
         if count > 0 {
-            HStack(spacing: 5) {
+            HStack(spacing: Space.scaled(5)) {
                 Image(systemName: "arrow.triangle.2.circlepath")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(Typo.ui(10, weight: .semibold))
                     .symbolEffect(.rotate, isActive: true)
                 Text(count == 1 ? "ingesting" : "ingesting \(count)")
             }
             .font(Typo.chip)
             .foregroundStyle(Palette.accent)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 3)
+            .padding(.horizontal, Space.scaled(9))
+            .padding(.vertical, Space.scaled(3))
             .glassCapsule(tint: Palette.accent.opacity(0.18), interactive: false)
             .help(
                 count == 1
@@ -676,7 +691,7 @@ struct GreetingLine: View {
     @FocusState private var focused: Bool
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: Space.s6) {
             if editing {
                 label(Self.greeting() + ",")
                 field
@@ -716,7 +731,7 @@ struct GreetingLine: View {
             .font(Typo.micro)
             .foregroundStyle(Palette.accent)
             .tracking(0.6)
-            .frame(maxWidth: 160)
+            .frame(maxWidth: Typo.measure(160))
             // AN OVERLAY, not a border: it has to say "this is a field" without
             // costing a single point of height, or the serif headline under it
             // would hop down and back every time the editor opens and closes.
@@ -745,7 +760,7 @@ struct GreetingLine: View {
             editing = true
         } label: {
             Image(systemName: "pencil")
-                .font(.system(size: 10, weight: .semibold))
+                .font(Typo.ui(10, weight: .semibold))
                 .foregroundStyle(Palette.accent.opacity(0.8))
                 // Clickable past the glyph, but NOT past the line: a target
                 // taller than the label it sits beside would push the serif
@@ -848,8 +863,8 @@ private struct DashHero: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(.top, 4)
-        .padding(.bottom, 2)
+        .padding(.top, Space.s4)
+        .padding(.bottom, Space.s2)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
@@ -864,7 +879,7 @@ private struct DashHero: View {
         @Environment(AppStore.self) private var store
 
         var body: some View {
-            HStack(spacing: 2) {
+            HStack(spacing: Space.s2) {
                 MastheadShortcut(symbol: "square.and.pencil", label: "new message", key: "c") {
                     store.openComposeNew()
                 }
@@ -890,7 +905,7 @@ private struct DashHero: View {
         var body: some View {
             Button(action: action) {
                 Image(systemName: symbol)
-                    .font(.system(size: 17, weight: .regular))
+                    .font(Typo.ui(17, weight: .regular))
                     .foregroundStyle(hovering ? Palette.ink : Palette.inkFaint)
                     .frame(width: 30, height: 30)
                     .contentShape(Rectangle())
@@ -905,14 +920,14 @@ private struct DashHero: View {
             // Trailing-anchored: these sit on the window's right edge, and a
             // centered hint under the last icon would run off it.
             .overlay(alignment: .topTrailing) {
-                HStack(spacing: 5) {
+                HStack(spacing: Space.scaled(5)) {
                     Text(label)
                         .font(Typo.micro)
                         .foregroundStyle(Palette.inkDim)
                     Kbd(key)
                 }
-                .padding(.horizontal, 7)
-                .padding(.vertical, 4)
+                .padding(.horizontal, Space.scaled(7))
+                .padding(.vertical, Space.s4)
                 .background(
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
                         .fill(Palette.canvas)
@@ -989,18 +1004,18 @@ private struct ObligationRow: View {
         // not decide whether `E` inside it has anywhere to go.
         Button {
             cursor.index = index
-            store.openThread(update.thread_id, queue: eyesWalk(store))
+            store.openThread(update.thread_id, queue: eyesWalk(store), from: .sitrep)
         } label: {
-            HStack(spacing: 9) {
+            HStack(spacing: Space.scaled(9)) {
                 Avatar(sender: update.senderString, size: 22)
                 Text(SenderCache.resolved(update.senderString).displayName)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(Typo.ui(12, weight: .medium))
                     .foregroundStyle(Palette.ink)
                     .lineLimit(1)
                     .layoutPriority(2)
                 if update.hasAttachments {
                     Image(systemName: "paperclip")
-                        .font(.system(size: 10))
+                        .font(Typo.ui(10))
                         .foregroundStyle(Palette.inkFaintest)
                 }
                 // The abstracted one-liner carries the meaning; it truncates first.
@@ -1035,8 +1050,8 @@ private struct ObligationRow: View {
                         .layoutPriority(3)
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
+            .padding(.horizontal, Space.s10)
+            .padding(.vertical, Space.scaled(7))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -1052,7 +1067,7 @@ private struct ObligationRow: View {
                 RoundedRectangle(cornerRadius: 1)
                     .fill(Palette.danger)
                     .frame(width: 2)
-                    .padding(.vertical, 5)
+                    .padding(.vertical, Space.scaled(5))
             }
         }
         .onHover { over in
@@ -1149,8 +1164,8 @@ struct RetriageButton: View {
                 Label("re-triage 7d", systemImage: "arrow.trianglehead.2.clockwise")
                     .font(Typo.micro)
                     .symbolEffect(.rotate, isActive: busy)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
+                    .padding(.horizontal, Space.s8)
+                    .padding(.vertical, Space.scaled(3))
             }
             // Text-only: an outlined pill would put the loudest shape on the
             // page around a dev control most readers never use.
@@ -1217,21 +1232,33 @@ struct FlowLayout: Layout {
     // MARK: - the end of a Space walk
 
     /// THE BOTTOM OF THE LIST. A Space walk that stepped past its last email
-    /// lands back here, and this is the small reward for it: a ring that draws
-    /// itself closed, a check that follows, two soft pulses, and what the run
-    /// came to. Then it gets out of the way on its own.
+    /// lands back here, and this is its reward, in the brand's own light: the
+    /// P7 squelch running in a strip across the top of a card, a lock beam
+    /// sweeping it once, and a ring and check snapping shut over the trace.
+    /// Under it, what the run came to, counting up. Then it leaves on its own
+    /// (or on a click).
     ///
     /// Only good news, like the headline above it: what was done, what was
     /// set aside, how quick it was. Never what is left.
     struct WalkComplete: View {
         let summary: AppStore.WalkSummary
+        /// The walk emptied the board: the quiet board plays the chime for
+        /// that, so this one stays silent rather than doubling it.
+        let boardCleared: Bool
         let dismiss: () -> Void
 
         @Environment(\.accessibilityReduceMotion) private var reduceMotion
+        @State private var shown = false
+        @State private var beam: CGFloat = -0.3
         @State private var ring: CGFloat = 0
         @State private var check: CGFloat = 0
         @State private var pulse = false
-        @State private var shown = false
+        @State private var counted = false
+        @State private var leaving = false
+
+        /// The brand's phosphor blue, the P7 trace's own colour.
+        private static let phosphor = Color(hex: 0x82BAF5)
+        private static let width: CGFloat = 360
 
         private var tally: String {
             var parts: [String] = []
@@ -1248,83 +1275,177 @@ struct FlowLayout: Layout {
         }
 
         var body: some View {
-            VStack(spacing: 14) {
+            ZStack {
+                Color.black.opacity(shown && !leaving ? 0.45 : 0)
+                    .ignoresSafeArea()
+                    .onTapGesture { leave() }
+                card
+                    .scaleEffect(shown && !leaving ? 1 : (reduceMotion ? 1 : 0.88))
+                    .opacity(shown && !leaving ? 1 : 0)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Through the list. \(tally)")
+            .task { await run() }
+        }
+
+        private var card: some View {
+            VStack(spacing: 0) {
+                hero
+                VStack(spacing: Space.s14) {
+                    Text("Through the list.")
+                        .font(Typo.hero(30))
+                        .foregroundStyle(Palette.ink)
+                    HStack(spacing: 0) {
+                        stat(counted ? summary.done : 0, "done")
+                        divider
+                        stat(counted ? summary.skipped : 0, "set aside")
+                        divider
+                        VStack(spacing: Space.s2) {
+                            Text(Self.duration(summary.duration))
+                                .font(Typo.serif(22, weight: .medium))
+                                .foregroundStyle(Palette.ink)
+                                .monospacedDigit()
+                            label("time")
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                }
+                .padding(.horizontal, Space.scaled(22))
+                .padding(.top, Space.scaled(18))
+                .padding(.bottom, Space.scaled(22))
+            }
+            .frame(width: Self.width)
+            // The strong tint: the stats sit over a busy board, and the
+            // board's rows bled through the lighter one.
+            .passbandGlass(.pane, cornerRadius: 22, tint: Palette.glassTintStrong)
+            .shadow(color: .black.opacity(0.32), radius: 40, y: 18)
+        }
+
+        /// The phosphor strip, the lock beam, and the ring and check over it.
+        private var hero: some View {
+            ZStack {
+                Group {
+                    if PhosphorScene.walkDone.isUnavailable {
+                        IntroSceneBackdrop(engaged: true, wide: true, paused: false)
+                    } else {
+                        PhosphorBackdrop(scene: .walkDone)
+                    }
+                }
+                .accessibilityHidden(true)
+                // The floor fades into the glass rather than ending at a seam.
+                LinearGradient(
+                    colors: [.clear, .black.opacity(0.3)], startPoint: .center, endPoint: .bottom)
+                // THE LOCK: one bright band swept across the trace, the moment
+                // the receiver catches the signal.
+                GeometryReader { geo in
+                    LinearGradient(
+                        colors: [.clear, Self.phosphor.opacity(0.55), .white.opacity(0.85),
+                                 Self.phosphor.opacity(0.55), .clear],
+                        startPoint: .leading, endPoint: .trailing
+                    )
+                    .frame(width: geo.size.width * 0.28)
+                    .blur(radius: 6)
+                    .offset(x: beam * geo.size.width)
+                    .blendMode(.plusLighter)
+                }
+                .allowsHitTesting(false)
                 ZStack {
                     if !reduceMotion {
-                        ForEach(0..<2) { i in
+                        ForEach(0..<3) { i in
                             Circle()
-                                .stroke(Palette.accent.opacity(0.5), lineWidth: 1.5)
-                                .frame(width: 56, height: 56)
-                                .scaleEffect(pulse ? 2.6 : 1)
+                                .stroke(Self.phosphor.opacity(0.7), lineWidth: 1.5)
+                                .frame(width: 58, height: 58)
+                                .scaleEffect(pulse ? 2.8 : 1)
                                 .opacity(pulse ? 0 : 0.9)
                                 .animation(
-                                    .easeOut(duration: 1.1).delay(0.35 + Double(i) * 0.22),
-                                    value: pulse)
+                                    .easeOut(duration: 1.2).delay(Double(i) * 0.2), value: pulse)
                         }
                     }
                     Circle()
-                        .fill(Palette.accentSoft)
-                        .frame(width: 56, height: 56)
+                        .fill(.black.opacity(0.35))
+                        .frame(width: 58, height: 58)
                     Circle()
                         .trim(from: 0, to: ring)
-                        .stroke(Palette.accent, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                        .stroke(Self.phosphor, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
                         .rotationEffect(.degrees(-90))
-                        .frame(width: 56, height: 56)
+                        .frame(width: 58, height: 58)
+                        .shadow(color: Self.phosphor.opacity(0.9), radius: 6)
                     CheckShape()
                         .trim(from: 0, to: check)
                         .stroke(
-                            Palette.accent,
+                            .white,
                             style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round)
                         )
                         .frame(width: 22, height: 16)
-                }
-                VStack(spacing: 4) {
-                    Text("Through the list.")
-                        .font(Typo.serif(24, weight: .medium))
-                        .foregroundStyle(Palette.ink)
-                    Text(tally)
-                        .font(Typo.chip)
-                        .foregroundStyle(Palette.inkDim)
-                        .monospacedDigit()
+                        .shadow(color: Self.phosphor, radius: 5)
                 }
             }
-            .padding(.horizontal, 36)
-            .padding(.vertical, 26)
-            .background {
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .fill(.clear)
-                    .glassEffect(.regular, in: .rect(cornerRadius: 22))
+            .frame(height: 140)
+            .frame(maxWidth: .infinity)
+            .clipShape(UnevenRoundedRectangle(topLeadingRadius: 22, topTrailingRadius: 22))
+        }
+
+        private func stat(_ n: Int, _ name: String) -> some View {
+            VStack(spacing: Space.s2) {
+                Text("\(n)")
+                    .font(Typo.serif(22, weight: .medium))
+                    .foregroundStyle(Palette.ink)
+                    .monospacedDigit()
+                    .contentTransition(.numericText(value: Double(n)))
+                label(name)
             }
-            .scaleEffect(shown || reduceMotion ? 1 : 0.86)
-            .opacity(shown ? 1 : 0)
-            .allowsHitTesting(false)
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel("Through the list. \(tally)")
-            .task {
+            .frame(maxWidth: .infinity)
+        }
+
+        private func label(_ text: String) -> some View {
+            Text(text)
+                .font(Typo.micro)
+                .foregroundStyle(Palette.inkFaint)
+                .textCase(.uppercase)
+                .tracking(0.5)
+        }
+
+        private var divider: some View {
+            Rectangle().fill(Palette.hairline).frame(width: 1, height: 28)
+        }
+
+        private func run() async {
+            if boardCleared {
                 NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now)
-                // Said aloud too: the ring is no reward to someone who cannot
-                // see it.
-                AccessibilityNotification.Announcement("Through the list. \(tally)").post()
-                withAnimation(
-                    reduceMotion
-                        ? .easeOut(duration: 0.2) : .spring(response: 0.38, dampingFraction: 0.62)
-                ) { shown = true }
-                if reduceMotion {
-                    ring = 1
-                    check = 1
-                } else {
-                    withAnimation(.easeInOut(duration: 0.45)) { ring = 1 }
-                    pulse = true
-                    try? await Task.sleep(for: .milliseconds(330))
-                    withAnimation(.easeOut(duration: 0.28)) { check = 1 }
-                }
-                try? await Task.sleep(for: .milliseconds(2400))
-                // A cancelled task (this card replaced or unmounted) wakes from
-                // every sleep at once; it has nothing left to dismiss.
-                guard !Task.isCancelled else { return }
-                withAnimation(.easeIn(duration: 0.3)) { shown = false }
+            } else {
+                ClearChime.play()
+            }
+            // Said aloud too: the ring is no reward to someone who cannot see it.
+            AccessibilityNotification.Announcement("Through the list. \(tally)").post()
+            withAnimation(
+                reduceMotion ? .easeOut(duration: 0.2) : .spring(response: 0.42, dampingFraction: 0.66)
+            ) { shown = true }
+            if reduceMotion {
+                ring = 1
+                check = 1
+                counted = true
+            } else {
+                try? await Task.sleep(for: .milliseconds(160))
+                withAnimation(.easeInOut(duration: 0.55)) { beam = 1.1 }
                 try? await Task.sleep(for: .milliseconds(320))
-                guard !Task.isCancelled else { return }
+                withAnimation(.easeInOut(duration: 0.4)) { ring = 1 }
+                pulse = true
+                try? await Task.sleep(for: .milliseconds(300))
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.55)) { check = 1 }
+                withAnimation(.easeOut(duration: 0.7)) { counted = true }
+            }
+            try? await Task.sleep(for: .milliseconds(2800))
+            // A cancelled task (this card replaced or unmounted) wakes from
+            // every sleep at once; it has nothing left to dismiss.
+            guard !Task.isCancelled else { return }
+            leave()
+        }
+
+        private func leave() {
+            guard !leaving else { return }
+            withAnimation(.easeIn(duration: 0.28)) { leaving = true }
+            Task {
+                try? await Task.sleep(for: .milliseconds(300))
                 dismiss()
             }
         }
@@ -1353,23 +1474,48 @@ private struct FlowModeButton: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 6) {
-                Kbd("space")
+            HStack(spacing: Space.scaled(5)) {
+                // THE KEY ONLY ON HOVER. At rest the corner says what the
+                // button is; reaching for it is when the shortcut is worth
+                // teaching, so the spacebar slides in then and the pill grows
+                // out to the left (it is pinned to the card's right edge).
+                if hovering {
+                    Text("space")
+                        .font(Typo.mono(9.5, weight: .semibold))
+                        .foregroundStyle(Palette.accent)
+                        .padding(.horizontal, Space.scaled(9))
+                        .padding(.vertical, Space.s2)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(Palette.accentSoft)
+                        )
+                        .overlay(
+                            Capsule(style: .continuous)
+                                .strokeBorder(Palette.accent.opacity(0.5), lineWidth: 0.75)
+                        )
+                        // Fades in while the pill widens: the only motion is
+                        // the left edge moving out.
+                        .transition(.opacity)
+                }
+                Image(systemName: "wind")
+                    .font(Typo.ui(9.5, weight: .semibold))
+                    .foregroundStyle(Palette.accent)
                 Text("flow mode")
                     .font(Typo.micro)
-                    .foregroundStyle(hovering ? Palette.ink : Palette.inkFaint)
+                    .foregroundStyle(hovering ? Palette.ink : Palette.inkDim)
             }
-            .padding(.horizontal, 7)
-            .padding(.vertical, 3)
+            .padding(.leading, hovering ? 3 : 8)
+            .padding(.trailing, Space.scaled(9))
+            .padding(.vertical, Space.scaled(3))
             .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Palette.hairline.opacity(hovering ? 0.7 : 0))
+                Capsule(style: .continuous)
+                    .fill(Palette.accentSoft.opacity(hovering ? 0.9 : 0.35))
             )
-            .contentShape(Rectangle())
+            .contentShape(Capsule())
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.12), value: hovering)
+        .animation(.easeOut(duration: 0.18), value: hovering)
         .help("Walk through For your eyes one email at a time (Space)")
         .accessibilityLabel("Flow mode")
     }

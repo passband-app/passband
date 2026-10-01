@@ -55,7 +55,7 @@ struct WhatsNewCard: View {
     private static let artHeight: CGFloat = (width * VignetteClock.canvas.height / VignetteClock.canvas.width).rounded()
     /// Every page of a walk is this tall, so Next changes what the card says
     /// and never where its buttons are.
-    private static let pageHeight: CGFloat = artHeight + 128
+    private static var pageHeight: CGFloat { artHeight + Space.scaled(128) }
 
     var body: some View {
         OverlayScrim(onDismiss: dismiss) {
@@ -84,7 +84,7 @@ struct WhatsNewCard: View {
                 .frame(width: Self.width)
             #else
                 .frame(maxWidth: Self.width)
-                .padding(.horizontal, 12)
+                .padding(.horizontal, Space.s12)
             #endif
             .passbandGlass(.pane, cornerRadius: Self.radius, tint: Palette.glassTint)
             .shadow(color: .black.opacity(0.28), radius: 40, y: 18)
@@ -166,11 +166,11 @@ struct WhatsNewCard: View {
 
     private func words(_ headliner: ReleaseDigest.Headliner, in note: ReleaseNote) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: Space.s8) {
                 // The release's own name rides every page, so the walk
                 // reads as one update rather than as four announcements.
                 Text("\(note.headline) · \(note.version)")
-                    .font(.system(size: 9, weight: .bold).width(.expanded))
+                    .font(Typo.ui(9, weight: .bold).width(.expanded))
                     .tracking(0.8)
                     .textCase(.uppercase)
                     .foregroundStyle(Palette.accent)
@@ -184,14 +184,14 @@ struct WhatsNewCard: View {
                 .font(Typo.hero(30))
                 .foregroundStyle(Palette.ink)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.top, 9)
+                .padding(.top, Space.scaled(9))
             if let detail = headliner.detail {
                 KeyedLine(line: detail)
-                    .padding(.top, 8)
+                    .padding(.top, Space.s8)
             }
         }
-        .padding(.horizontal, 28)
-        .padding(.top, 20)
+        .padding(.horizontal, Space.scaled(28))
+        .padding(.top, Space.s20)
         .frame(width: Self.width, alignment: .leading)
         .accessibilityElement(children: .combine)
     }
@@ -218,7 +218,7 @@ struct WhatsNewCard: View {
     @ViewBuilder
     private func record(_ newest: ReleaseNote, walked: Bool) -> some View {
         let lists = ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
+            VStack(alignment: .leading, spacing: Space.scaled(22)) {
                 title(newest)
                 // The headliners were just walked through; here they would be
                 // the same thing said twice.
@@ -227,9 +227,9 @@ struct WhatsNewCard: View {
                     earlier(Array(notes.dropFirst()))
                 }
             }
-            .padding(.horizontal, 28)
-            .padding(.top, 20)
-            .padding(.bottom, 28)
+            .padding(.horizontal, Space.scaled(28))
+            .padding(.top, Space.s20)
+            .padding(.bottom, Space.scaled(28))
         }
         // The list's foot dissolves into the glass rather than being sliced
         // by the footer's rule, which says "there is more below" without a
@@ -277,14 +277,14 @@ struct WhatsNewCard: View {
                 .allowsHitTesting(false)
 
             Text("NEW IN PASSBAND \(note.version)")
-                .font(.system(size: 9, weight: .bold).width(.expanded))
+                .font(Typo.ui(9, weight: .bold).width(.expanded))
                 .tracking(0.6)
                 .foregroundStyle(.white.opacity(0.92))
-                .padding(.horizontal, 9)
-                .padding(.vertical, 5)
+                .padding(.horizontal, Space.scaled(9))
+                .padding(.vertical, Space.scaled(5))
                 .background(.black.opacity(0.32), in: Capsule())
                 .overlay(Capsule().strokeBorder(Color(hex: 0x82BAF5).opacity(0.45), lineWidth: 0.5))
-                .padding(14)
+                .padding(Space.s14)
         }
         .frame(height: 112)
         .frame(maxWidth: .infinity)
@@ -292,7 +292,7 @@ struct WhatsNewCard: View {
     }
 
     private func title(_ note: ReleaseNote) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
+        VStack(alignment: .leading, spacing: Space.scaled(5)) {
             Text(Self.longDate(note.date))
                 .font(Typo.micro)
                 .foregroundStyle(Palette.inkFaint)
@@ -315,10 +315,10 @@ struct WhatsNewCard: View {
     }
 
     private func earlier(_ older: [ReleaseNote]) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: Space.s8) {
             SectionRule(symbol: "clock.arrow.circlepath", label: "Earlier")
             ForEach(older) { note in
-                VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: Space.s14) {
                     Button {
                         withAnimation(Motion.disclose) {
                             if opened.contains(note.version) {
@@ -328,12 +328,12 @@ struct WhatsNewCard: View {
                             }
                         }
                     } label: {
-                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        HStack(alignment: .firstTextBaseline, spacing: Space.s10) {
                             Text(note.version)
                                 .font(Typo.num(12, weight: .semibold))
                                 .foregroundStyle(Palette.accent)
                             Text(note.headline)
-                                .font(.system(size: 13, weight: .semibold))
+                                .font(Typo.ui(13, weight: .semibold))
                                 .foregroundStyle(Palette.ink)
                                 .lineLimit(1)
                             Spacer(minLength: 8)
@@ -341,7 +341,7 @@ struct WhatsNewCard: View {
                                 .font(Typo.micro)
                                 .foregroundStyle(Palette.inkFaintest)
                             Image(systemName: "chevron.right")
-                                .font(.system(size: 10, weight: .semibold))
+                                .font(Typo.ui(10, weight: .semibold))
                                 .foregroundStyle(Palette.inkFaint)
                                 .rotationEffect(.degrees(opened.contains(note.version) ? 90 : 0))
                         }
@@ -354,7 +354,7 @@ struct WhatsNewCard: View {
                             .transition(.opacity)
                     }
                 }
-                .padding(12)
+                .padding(Space.s12)
                 .background(Palette.ink.opacity(0.035), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -364,7 +364,7 @@ struct WhatsNewCard: View {
     }
 
     private var footer: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: Space.s12) {
             if pageCount > 1 { dots }
             // WHERE THE REST LIVES. The card carries only what is unread; the
             // full history is a document, and Settings is where somebody goes
@@ -378,7 +378,7 @@ struct WhatsNewCard: View {
             if page > 0 {
                 Button("Back") { go(to: page - 1) }
                     .buttonStyle(.plain)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(Typo.ui(12, weight: .medium))
                     .foregroundStyle(Palette.inkFaint)
             }
             // Enter is the modal context's binding above, not a default-action
@@ -386,10 +386,10 @@ struct WhatsNewCard: View {
             // page nobody saw.
             Button(onLast ? "Got it" : "Next") { advance() }
                 .buttonStyle(.glassProminent)
-                .font(.system(size: 12, weight: .semibold))
+                .font(Typo.ui(12, weight: .semibold))
         }
-        .padding(.horizontal, 28)
-        .padding(.vertical, 14)
+        .padding(.horizontal, Space.scaled(28))
+        .padding(.vertical, Space.s14)
         .overlay(alignment: .top) {
             Rectangle().fill(Palette.hairline).frame(height: 1)
         }
@@ -398,7 +398,7 @@ struct WhatsNewCard: View {
     /// Where the walk is, and a way to jump: one dot per page, the current one
     /// drawn out. No "2 of 5": a count is a chore, a row of dots is a place.
     private var dots: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: Space.scaled(5)) {
             ForEach(0..<pageCount, id: \.self) { index in
                 Button {
                     go(to: index)
@@ -406,7 +406,7 @@ struct WhatsNewCard: View {
                     Capsule()
                         .fill(index == page ? Palette.accent : Palette.ink.opacity(0.16))
                         .frame(width: index == page ? 18 : 6, height: 6)
-                        .padding(.vertical, 6)
+                        .padding(.vertical, Space.s6)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -441,12 +441,12 @@ private struct ReleaseDigestView: View {
     var tiles = true
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: Space.s20) {
             if tiles, !digest.headliners.isEmpty {
                 tileGrid
             }
             ForEach(digest.sections) { section in
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: Space.s8) {
                     SectionRule(symbol: section.surface.symbol, label: section.surface.label)
                     ForEach(section.items.indices, id: \.self) { index in
                         bullet(section.items[index])
@@ -455,7 +455,7 @@ private struct ReleaseDigestView: View {
                         Text(footnote)
                             .font(Typo.rowSub)
                             .foregroundStyle(Palette.inkFaint)
-                            .padding(.top, section.items.isEmpty ? 0 : 2)
+                            .padding(.top, section.items.isEmpty ? 0 : Space.s2)
                     }
                 }
             }
@@ -482,15 +482,15 @@ private struct ReleaseDigestView: View {
     }
 
     private func tile(_ headliner: ReleaseDigest.Headliner) -> some View {
-        HStack(alignment: .top, spacing: 11) {
+        HStack(alignment: .top, spacing: Space.scaled(11)) {
             Image(systemName: headliner.symbol)
-                .font(.system(size: 14, weight: .semibold))
+                .font(Typo.ui(14, weight: .semibold))
                 .foregroundStyle(Palette.accent)
                 .frame(width: 30, height: 30)
                 .background(Palette.accentSoft, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: Space.scaled(3)) {
                 Text(headliner.text)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(Typo.ui(13, weight: .semibold))
                     .foregroundStyle(Palette.ink)
                     .fixedSize(horizontal: false, vertical: true)
                 // Which surface it landed on, said once for all of them:
@@ -501,7 +501,7 @@ private struct ReleaseDigestView: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(11)
+        .padding(Space.scaled(11))
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Palette.ink.opacity(0.035), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
@@ -511,13 +511,13 @@ private struct ReleaseDigestView: View {
     }
 
     private func bullet(_ text: String) -> some View {
-        HStack(alignment: .top, spacing: 9) {
+        HStack(alignment: .top, spacing: Space.scaled(9)) {
             // Aligned to the first LINE of the text, not its centre, so a
             // two-line item still reads as one bullet.
             Circle()
                 .fill(Palette.accent.opacity(0.7))
                 .frame(width: 4, height: 4)
-                .padding(.top, 6.5)
+                .padding(.top, Typo.size(13) / 2)
             Text(text)
                 .font(Typo.row)
                 .foregroundStyle(Palette.inkDim)
@@ -534,9 +534,9 @@ private struct SectionRule: View {
     let label: String
 
     var body: some View {
-        HStack(spacing: 7) {
+        HStack(spacing: Space.scaled(7)) {
             Image(systemName: symbol)
-                .font(.system(size: 10, weight: .semibold))
+                .font(Typo.ui(10, weight: .semibold))
             Text(label)
                 .font(Typo.sectionLabel)
                 .textCase(.uppercase)
@@ -590,18 +590,18 @@ private struct KeyedLine: View {
     }
 
     var body: some View {
-        WordFlow(spacing: 4.5, lineSpacing: 5) {
+        WordFlow(spacing: Space.scaled(4.5), lineSpacing: Space.scaled(5)) {
             ForEach(Array(pieces.enumerated()), id: \.offset) { _, piece in
                 switch piece {
                 case .word(let word):
                     Text(word)
-                        .font(.system(size: 15))
+                        .font(Typo.ui(15))
                         .foregroundStyle(Palette.inkDim)
                 case .key(let key):
                     Text(key)
                         .font(Typo.mono(12.5, weight: .semibold))
                         .foregroundStyle(Palette.ink)
-                        .padding(.horizontal, 6)
+                        .padding(.horizontal, Space.s6)
                         .frame(minWidth: 21, minHeight: 21)
                         .background(
                             RoundedRectangle(cornerRadius: 5, style: .continuous)

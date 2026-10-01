@@ -522,11 +522,20 @@ Rules:
   what goes out: "recipient sees 10a ET". On send the chip becomes plain text
   in the recipient's zone. The user thinks in their own time and never
   converts; the recipient reads theirs.
-- **Which zone goes out.** In a reply to offered times, the zone the sender
-  offered them in. Otherwise the recipient's inferred zone when it is known
-  with confidence, and the pane says what it inferred ("Sam is usually on
-  Eastern time"). With no confident zone, the user's own zone is sent and the
-  hover says so. Recipients in several zones are an open question (§14).
+- **Every recipient gets a time in their own zone** (DECIDED, 2026-10-01),
+  and the zone is ALWAYS written out, never implied. A mail has one body that
+  every recipient reads, so the chip sends each distinct recipient zone once,
+  labelled: "10a ET / 7a PT". A zone comes from the times the sender offered,
+  else from that recipient's inferred zone when it is known with confidence. A
+  recipient with no known zone is covered by the user's own zone, which is
+  then included.
+- **Clicking the chip lists each person with the time they will see**
+  ("Taiki: 10a ET", "Jesse: 10a ET", "Dana: 7a PT", "Sam: zone unknown, sees
+  7a PT"). This is also where the user sees what was inferred about each
+  person and can correct it.
+- Not built: a separate copy of the mail for each recipient, each showing
+  only their own time. It would break reply-all, because every recipient
+  would be answering a different message.
 - **How the zone is inferred** (DECIDED: use every signal, and save the result
   on the sender's profile). Strongest first:
   1. A zone the user set by hand on the contact card. It always wins.
@@ -714,7 +723,8 @@ Each wave is useful on its own and is committed when verified.
   composer are written too, or stay holds inside Passband.
 - The default acceptance line, and whether its wording and time format ("10a"
   or "10am") should follow the user's own past replies.
-- What a time chip sends when the recipients are in several zones.
+- How a time chip reads when the recipients span many zones (four or more
+  labels in one sentence).
 - Which calendar inside an account receives writes when there are several.
   Leaning primary.
 - How much an expired, unanswered ghost counts as a "no".

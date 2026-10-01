@@ -1798,6 +1798,189 @@ pub async fn get_calendar(
     .await
 }
 
+// --- GET /client/timeline, PATCH /client/timeline/ghosts/{id} ---------------
+
+/// The default window around now, and the widest one a caller may ask for.
+/// A wider range clamps (its end moves in), like every other out-of-range
+/// knob on this door; it is not a 400.
+const TIMELINE_DEFAULT_BEHIND: chrono::Duration = chrono::Duration::days(1);
+const TIMELINE_DEFAULT_AHEAD: chrono::Duration = chrono::Duration::days(90);
+const TIMELINE_MAX_SPAN: chrono::Duration = chrono::Duration::days(400);
+
+#[derive(Debug, Deserialize)]
+pub struct TimelineQuery {
+    /// RFC3339, with any `+` in the offset percent-encoded (a bare `+` in a
+    /// query string decodes to a space). Taken as text so a bad value is this
+    /// door's own 400 rather than the extractor's.
+    from: Option<String>,
+    to: Option<String>,
+}
+
+fn timeline_bound(raw: Option<&str>) -> Result<Option<DateTime<chrono::FixedOffset>>, ApiError> {
+    raw.map(|raw| {
+        DateTime::parse_from_rfc3339(raw.trim())
+            .map_err(|_| ApiError::bad_request("from and to must be RFC3339 timestamps"))
+    })
+    .transpose()
+}
+
+/// One ghost as served. SERIALIZED SHAPE IS A WIRE CONTRACT for the timeline
+/// client.
+///
+/// AN ESTIMATE IS NEVER SERVED AS A FACT: `end` is the resolved end and
+/// `end_source` / `end_estimated` say which tier produced it, while `estimate`
+/// is the model's own guess as stored, served even when a stronger tier wins
+/// so the client can say what it was overruled by. A date-only ghost with no
+/// stated or corrected end has no end at all (`end`, `end_source` null).
+fn ghost_view(
+    ghost: &squelch_core::types::GhostEvent,
+    now: DateTime<chrono::FixedOffset>,
+) -> serde_json::Value {
+    let end = ghost.effective_end();
+    json!({
+        "id": ghost.id,
+        "kind": ghost.kind,
+        "title": ghost.title,
+        "start": ghost.start.to_string(),
+        "start_timezone": ghost.start_timezone,
+        "all_day": ghost.all_day(),
+        "end": end.as_ref().map(|e| e.end.to_string()),
+        "end_estimated": end.as_ref().is_some_and(|e| e.estimated),
+        "end_source": end.as_ref().map(|e| e.source),
+        "estimate": ghost.estimate.as_ref().map(|e| json!({ "minutes": e.minutes, "basis": e.basis })),
+        "location": ghost.location,
+        "commitment": ghost.commitment,
+        "state": ghost.state(now),
+        "likelihood": ghost.served_likelihood(),
+        "sources": ghost.sources.iter().map(|s| json!({
+            "message_id": s.message_id,
+            "thread_id": s.thread_id,
+            "role": s.role,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// `GET /client/timeline?from=&to=`: the calendar ghosts whose start falls in
+/// `[from, to)`, by start. HUMAN DOOR ONLY: the agent door has no timeline
+/// route (docs/CALENDAR.md §10 leaves that open, and until it is decided the
+/// answer is no).
+///
+/// Defaults: `from` is a day ago and `to` is `from` plus the default window
+/// (so with neither, now-1d to now+90d). `state` is judged at the server's
+/// clock read in `from`'s offset, so a date-only ghost expires at the end of
+/// the CALLER's day when the caller sends its own offset.
+pub async fn get_timeline(
+    State(state): State<ApiState>,
+    Query(q): Query<TimelineQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let now = Utc::now();
+    let from = timeline_bound(q.from.as_deref())?
+        .unwrap_or_else(|| (now - TIMELINE_DEFAULT_BEHIND).fixed_offset());
+    // Checked: `+` panics past chrono's year range, and `from` is the caller's.
+    let later = |span| {
+        from.checked_add_signed(span)
+            .ok_or_else(|| ApiError::bad_request("from is out of range"))
+    };
+    let to = match timeline_bound(q.to.as_deref())? {
+        Some(to) => to,
+        None => later(TIMELINE_DEFAULT_BEHIND + TIMELINE_DEFAULT_AHEAD)?,
+    };
+    let to = to.min(later(TIMELINE_MAX_SPAN)?);
+    let ghosts = store_call(&state, move |store, account_id| {
+        store.list_ghost_events(account_id, from, to)
+    })
+    .await?;
+    let now = now.with_timezone(from.offset());
+    let ghosts: Vec<_> = ghosts.iter().map(|g| ghost_view(g, now)).collect();
+    Ok((no_store(), Json(json!({ "ghosts": ghosts }))))
+}
+
+/// A field that tells ABSENT from an explicit `null`: absent stays `None`,
+/// while `null` arrives as `Some(Value::Null)` (plain `Option` would fold it
+/// into `None`). Raw values, so a wrong type is this door's own 400.
+fn present<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde_json::Value::deserialize(deserializer).map(Some)
+}
+
+/// `PATCH /client/timeline/ghosts/{id}` body. Each field: absent leaves it
+/// alone, `null` clears it.
+#[derive(Debug, Deserialize)]
+pub struct GhostPatchBody {
+    /// `"dismissed"`, `"going"` or `null`.
+    #[serde(default, deserialize_with = "present")]
+    state: Option<serde_json::Value>,
+    /// The user's corrected end: RFC3339 for a timed ghost, `YYYY-MM-DD` for a
+    /// date-only one, or `null` to fall back to the estimate.
+    #[serde(default, deserialize_with = "present")]
+    end: Option<serde_json::Value>,
+}
+
+/// `PATCH /client/timeline/ghosts/{id}`: the user's word on a ghost. HUMAN DOOR
+/// ONLY, like every write. Both fields are user-owned columns the projection
+/// never overwrites, so a later mail cannot undo a dismissal or a correction.
+///
+/// Everything is validated before anything is written, and the end (the one
+/// write the store can refuse) is applied before the state, so a 400 leaves
+/// the ghost untouched. An unknown id and another account's are the same 404.
+pub async fn patch_ghost(
+    State(state): State<ApiState>,
+    Path(ghost_id): Path<i64>,
+    Json(body): Json<GhostPatchBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    use serde_json::Value;
+    use squelch_core::triage::ghost::EventTime;
+    use squelch_core::types::GhostUserState;
+
+    let user_state = match body.state {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(Value::String(raw)) => Some(Some(GhostUserState::parse(&raw).ok_or_else(|| {
+            ApiError::bad_request("state must be \"dismissed\", \"going\" or null")
+        })?)),
+        Some(_) => {
+            return Err(ApiError::bad_request(
+                "state must be \"dismissed\", \"going\" or null",
+            ));
+        }
+    };
+    let bad_end =
+        || ApiError::bad_request("end must be an RFC3339 timestamp, a YYYY-MM-DD date, or null");
+    let user_end = match body.end {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(Value::String(raw)) => Some(Some(EventTime::parse(&raw).ok_or_else(bad_end)?)),
+        Some(_) => return Err(bad_end()),
+    };
+    if user_state.is_none() && user_end.is_none() {
+        return Err(ApiError::bad_request(
+            "nothing to change: send state, end, or both",
+        ));
+    }
+
+    let at = Utc::now();
+    let found = store_call(&state, move |store, account_id| {
+        if let Some(end) = user_end
+            && !store.set_ghost_user_end(account_id, ghost_id, end, at)?
+        {
+            return Ok(false);
+        }
+        if let Some(user_state) = user_state
+            && !store.set_ghost_user_state(account_id, ghost_id, user_state, at)?
+        {
+            return Ok(false);
+        }
+        Ok(true)
+    })
+    .await?;
+    if !found {
+        return Err(ApiError::not_found());
+    }
+    Ok((no_store(), Json(json!({ "updated": true, "id": ghost_id }))))
+}
+
 // --- GET/POST/DELETE /client/rules ------------------------------------------
 
 pub async fn list_rules(State(state): State<ApiState>) -> Result<impl IntoResponse, ApiError> {
@@ -3010,6 +3193,10 @@ pub async fn get_stats(State(state): State<ApiState>) -> Result<impl IntoRespons
     // click would read as a broken app. The client hides every schedule door
     // (the clock, the Sent group) without this flag.
     body["scheduled_send"] = json!(true);
+    // And for the calendar timeline: whether GET /client/timeline and PATCH
+    // /client/timeline/ghosts/{id} exist. A LOUD failure like scheduled send
+    // (an old daemon 404s them), so the client shows no timeline without it.
+    body["timeline"] = json!(true);
     Ok(Json(body))
 }
 

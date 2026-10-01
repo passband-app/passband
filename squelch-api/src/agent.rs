@@ -191,6 +191,25 @@ fn record_matches(record: &RecordProposal, kind: &str, include_delivered: bool) 
     }
 }
 
+/// What this route serves for one record. An event is cut back to the fields
+/// it had before the calendar work: the rest (identity refs such as booking
+/// numbers, the duration guess, commitment, likelihood) is ghost data, and
+/// ghosts are served on `/client/timeline` only. Every other record is served
+/// whole, as before.
+fn record_view(record: &RecordProposal) -> serde_json::Value {
+    match record {
+        RecordProposal::Event {
+            title,
+            start,
+            location,
+            evidence,
+            ..
+        } => json!({"kind": "event", "title": title, "start": start,
+            "location": location, "evidence": evidence}),
+        other => json!(other),
+    }
+}
+
 pub async fn records(
     State(state): State<ApiState>,
     Query(query): Query<RecordsQuery>,
@@ -233,7 +252,7 @@ pub async fn records(
             if record_matches(record, &query.kind, query.include_delivered) {
                 rows.push(
                     json!({"message_id": item.message_id, "thread_id": item.thread_id,
-                    "received_at": item.received_at, "record": record}),
+                    "received_at": item.received_at, "record": record_view(record)}),
                 );
             }
         }

@@ -45,7 +45,7 @@ pub use state::{ApiState, StateError, attach_event_channel};
 
 use axum::{
     Router, middleware,
-    routing::{delete, get, post, put},
+    routing::{delete, get, patch, post, put},
 };
 
 /// Build this crate's router: the bearer-authed `/client/*` tree, plus the TWO
@@ -161,6 +161,11 @@ fn client_router(state: ApiState) -> Router {
         .route("/client/receipts", get(handlers::get_receipts))
         .route("/client/banking", get(handlers::get_banking))
         .route("/client/calendar", get(handlers::get_calendar))
+        // Calendar ghosts: the timeline read and the user's word on one ghost
+        // (dismissed, going, a corrected end). HUMAN DOOR ONLY in both
+        // directions: the agent door has no timeline route.
+        .route("/client/timeline", get(handlers::get_timeline))
+        .route("/client/timeline/ghosts/{id}", patch(handlers::patch_ghost))
         .route("/client/search", get(handlers::search))
         // The user's own sent mail. Human door only — this is the one listing
         // that reads `is_sent = 1`, and the agent door gets no such route: what

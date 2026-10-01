@@ -6,7 +6,8 @@ it. This feature turns that reading into a calendar the user rarely has to
 manage, and gives mail the one thing it has never known: what the user's time
 looks like.
 
-DRAFT, 2026-09-30. Nothing here is built. Sections marked DECIDED carry a
+DRAFT, 2026-09-30. Only wave 1 (the ghost engine, §3.6) is built; nothing
+else here is. Sections marked DECIDED carry a
 product decision made that day; everything else is a proposal. §14 lists what
 is still open.
 
@@ -38,12 +39,12 @@ Standing rules (DECIDED):
 ## 2. What exists today
 
 - **Calendar records.** Triage emits `RecordProposal::Event { title, start,
-  location, evidence }` (`squelch-core/src/triage/decision.rs`, schema in
-  `triage/agent.rs`). The structural detector in `triage/calendar.rs` covers
+  location, evidence }`, plus the wave 1 fields in §3.6
+  (`squelch-core/src/triage/decision.rs`, schema in `triage/agent.rs`). The structural detector in `triage/calendar.rs` covers
   invites, updates, cancellations, RSVPs and reservations.
-- **A record is per message.** There is no end time and nothing linking a
-  confirmation to its later modification or cancellation, so one dinner can be
-  three rows.
+- **A record is per message.** One dinner can be three records. Wave 1's
+  ghosts (§3.6) link a confirmation to its later modification or cancellation,
+  but the Calendar zone below still lists the per-message records.
 - **The Calendar zone** in the sitrep right rail (`SitrepZones.swift`, reused
   by `MobileRecordsView.swift` on iOS) lists those records. `CalendarVisibility`
   retires each one 24 hours after its first viewing, because a record has
@@ -81,9 +82,9 @@ A ghost is one thing across many messages, the way a shipment is. A
 confirmation, a "your reservation was modified" and a cancellation feed the
 same row.
 
-- **Identity key**, in order of preference: the iCalendar UID from an `.ics`
-  part, a confirmation or booking number, the event page URL, and failing all
-  of those the thread plus a normalized title.
+- **Identity keys:** every iCalendar UID, confirmation or booking number and
+  event page URL the mail carries (matching any one of them is the same
+  ghost), and failing all of those the thread plus a normalized title.
 - **States:** `ghost`, `held`, `materialized` (written to the real calendar),
   `cancelled`, `dismissed`, `expired` (its time passed).
 - **Self-healing.** A later message about the same identity moves, renames or
@@ -129,9 +130,9 @@ reasonable guess.
 
 **Rules:**
 
-- The estimate is stored as a duration with its basis and its source tier,
-  separate from `start` and from any stated `end`. No consumer can mistake it
-  for a fact.
+- The estimate is stored as a duration with its basis, separate from `start`
+  and from any stated `end`, and every resolved end is served with the tier it
+  came from. No consumer can mistake it for a fact.
 - The timeline draws the known start solid and the guessed tail visibly
   softer. The label reads "ends ~11pm". The tilde means estimate everywhere.
 - The estimated tail counts as busy when suggesting times.
@@ -188,42 +189,84 @@ and shown in the UI. Committed ghosts have no likelihood; they are certain.
   ghosts. A maybe or unlikely ghost never blocks a suggested time.
 - Outcomes stay in the account's own database.
 
-### 3.6 Data sketch
+### 3.6 Data sketch (BUILT in wave 1)
 
-**Triage record.** The `event` record gains fields. Each needs
-`#[serde(default)]`, because reconcile re-reads every stored `decision_json`
-and one that fails to deserialize fails the pass.
+What wave 1 actually built, daemon only. Everything here is human-door only:
+the agent door and `/mcp` gained no ghost route.
 
-| Field | Notes |
-|---|---|
-| `end` | stated end, only when the mail says so |
-| `duration_estimate` | `{ minutes, basis, source }`, only when `end` is absent |
-| `event_kind` | the kinds in §3.1 |
-| `commitment` | `committed` / `invited` / `proposed`, with evidence |
-| `likelihood` | prior band plus reason, for non-committed events |
-| `identity_refs` | iCalendar UID, confirmation numbers, event URL |
-| `candidates` | the offered slots, for a `proposal` |
-| `change` | `created` / `updated` / `cancelled` / `agreed` |
+**Triage record.** `RecordProposal::Event` gained these fields, each
+`#[serde(default)]` because reconcile re-reads stored `decision_json` and one
+row that fails to deserialize must not fail a pass:
 
-This is a prompt version bump (currently `agent-triage-v4`, with v5 in flight
-in PR #342). Rollout is forward-only: history is not re-triaged. A bounded
-pass may redo only messages whose existing event record starts in the future.
+| Field | Type | Notes |
+|---|---|---|
+| `end` | `Option<SupportedTime>` | the stated end, only when the mail says so |
+| `duration_estimate` | `Option<DurationEstimate { minutes, basis }>` | the model's guess, only with no stated end and a clock start |
+| `event_kind` | `EventRecordKind` | `ticket` / `travel` / `reservation` / `invite` / `proposal` / `other` |
+| `commitment` | `EventCommitment` | `committed` / `invited` / `proposed` / `unknown` |
+| `change` | `EventChange` | `created` / `updated` / `cancelled` / `agreed`: what this message does |
+| `identity_refs` | `Vec<String>` | iCalendar UID, confirmation numbers, event URL |
+| `likelihood` | `Option<EventLikelihood { band, reason }>` | the triage prior; stored, not yet learned from |
 
-**Daemon tables**, all human-door only:
+The prompt is `agent-triage-v6`. Rollout is forward-only: the version is
+recorded on new decisions and nothing is re-triaged. `candidates` (offered
+slots for a proposal) is deferred to the scheduling wave (§12, wave 5), and
+`hold` is not a kind yet.
 
-- `ghost_events`: identity key, kind, title, start and zone, stated end,
-  estimate (minutes, basis, source), location, commitment, state, likelihood
-  and reason, the real event id once materialized, and whether Passband
-  created that event.
-- `ghost_event_sources`: ghost, message, role. The evidence trail.
-- `ghost_outcomes`: the ledger behind likelihood (organizer, platform, kind,
-  outcome, when).
-- `event_duration_priors`: venue key and kind to observed durations.
-- Proposals with several candidate slots are several ghosts sharing a group
-  key, which collapse to one when the thread settles.
+Bad model output is laundered in the projection (`triage/ghost.rs`), never
+rejected: a title is trimmed and capped, an empty one drops the record, a time
+that is neither RFC3339 nor `YYYY-MM-DD` is dropped, an end not after the start
+is dropped, and the estimate is clamped to 15 minutes to 3 days and dropped
+when an end is stated or the start is date-only.
 
-Ghosts are a projection reconciled from stored decisions, the same shape as
-`agent_delivery_projections` for shipments.
+**Daemon tables:**
+
+- `ghost_events`: kind, title, `starts_at` (as given) and `start_timezone`,
+  `ends_at` (stated only), `est_minutes` and `est_basis` (the model's only),
+  location, commitment, `mail_state` (`live` / `cancelled`), likelihood band
+  and reason, `last_message_id`. Two derived columns: `start_sort` (the start
+  as UTC text, for range queries) and `venue_key` (the normalized location the
+  priors are keyed by). Three columns only the user writes, which no rebuild
+  touches: `user_state` (`dismissed` / `going`), `user_state_at`,
+  `user_ends_at`.
+- `ghost_event_keys`: identity keys, unique per account. One `ref:` key per
+  usable identity ref, or with none a single `thread:` key of thread plus
+  title slug.
+- `ghost_event_sources`: ghost, message, role (its `change`). The evidence
+  trail, deleted with its ghost or its message.
+- `event_duration_priors`: venue key and kind to minutes, written when the
+  user corrects a timed end at a known venue. Tier 2 of §3.4.
+
+`ghost_outcomes`, the real event id and the Passband-created flag are not
+built; they arrive with likelihood (wave 3) and calendar access (wave 4).
+
+**Reconcile** runs inside the triage commit, under a savepoint: an error rolls
+back the ghosts alone, logs ids and an error kind, and the decision commits.
+Sent, spam and restricted mail feeds nothing. A message is detached from its
+ghosts, then each of its event records attaches to the ghost holding any of
+its keys (a new one if none; several merge into the lowest id). Each affected
+ghost is rebuilt from its remaining sources' stored decisions: the newest
+non-cancelling proposal supplies the fields, the newest proposal decides
+`cancelled`, and any committed or `agreed` source makes it committed. A ghost
+with no sources left is deleted. The listing also checks eligibility in SQL,
+so a source that turned spam or restricted since the last rebuild cannot
+surface a ghost.
+
+**Endpoints:**
+
+- `GET /client/timeline?from=&to=` (RFC3339, `[from, to)`, default a day ago
+  to 90 days ahead, a span over 400 days clamped) returns `{ "ghosts": [...] }`
+  by start. Each ghost: `id`, `kind`, `title`, `start`, `start_timezone`,
+  `all_day`, `end` (resolved), `end_estimated`, `end_source` (`stated` /
+  `user` / `history` / `model` / `default`), `estimate` (the model's
+  `{minutes, basis}` as stored), `location`, `commitment`, `state`
+  (`dismissed` / `going` / `cancelled` / `expired` / `ghost`), `likelihood`
+  (null when committed) and `sources` (`message_id`, `thread_id`, `role`). A
+  date-only ghost with no stated or corrected end has no end.
+- `PATCH /client/timeline/ghosts/{id}` with `state` and or `end`. An absent
+  field is left alone and `null` clears it. An end not after the start, or a
+  timed end on a date-only ghost, is a 400.
+- `/client/stats` carries `"timeline": true`.
 
 ## 4. One timeline, per-account ownership (DECIDED)
 
@@ -431,7 +474,8 @@ Each wave is useful on its own and is committed when verified.
 
 1. **Ghost engine (daemon, no new scope).** Record fields, prompt bump,
    `ghost_events` reconcile with identity and lifecycle, commitment, estimated
-   end with the kind table and model tier, a `/client/timeline` endpoint.
+   end with the kind table, model tier and the user's corrections as history,
+   `/client/timeline` and the ghost PATCH. BUILT (§3.6).
 2. **Timeline (client, no new scope).** Opus 5.5 visual pass first. Merged
    timeline model, day column, sitrep agenda replacing the Calendar zone,
    event detail with its mail, month. Ghost actions before the grant: dismiss,
@@ -440,8 +484,8 @@ Each wave is useful on its own and is committed when verified.
    one-line reason.
 4. **Real calendar.** Scope and optional grant, the reconnect variant and
    `login_hint`, Google sync, real events on the timeline, automatic adds with
-   undo, RSVP, self-healing of events Passband created, history tier for
-   estimates.
+   undo, RSVP, self-healing of events Passband created, real calendar
+   entries feeding the history tier for estimates.
 5. **Scheduling.** Candidate slots in triage, availability on the card, the
    compose trigger and time pane, click to insert, holds, settle.
 6. **Mail and time together.** Calendar context in triage, folding calendar

@@ -1457,6 +1457,47 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
         policy: crate::config::ShipmentListPolicy,
     ) -> Result<bool>;
 
+    /// CALENDAR GHOSTS whose start falls in `[from, to)`, ordered by start,
+    /// HUMAN-DOOR ONLY. A timed start compares as an instant; a date-only one
+    /// is listed when its date overlaps the range read in `from`'s offset.
+    /// Each carries its eligible sources and the duration prior for its venue
+    /// and kind. A ghost with no start, or with no source that is still
+    /// eligible (not sent, not spam, not restricted), is never listed: that
+    /// test is in the SQL, so it holds even when no rebuild has run since a
+    /// message's status changed.
+    fn list_ghost_events(
+        &self,
+        account_id: AccountId,
+        from: DateTime<chrono::FixedOffset>,
+        to: DateTime<chrono::FixedOffset>,
+    ) -> Result<Vec<crate::types::GhostEvent>>;
+
+    /// The user's word on a ghost (`None` clears it and its stamp). Returns
+    /// `false` for an unknown id or another account's. The projection never
+    /// overwrites it.
+    fn set_ghost_user_state(
+        &self,
+        account_id: AccountId,
+        ghost_id: i64,
+        state: Option<crate::types::GhostUserState>,
+        at: DateTime<Utc>,
+    ) -> Result<bool>;
+
+    /// The user's correction of a ghost's end (`None` clears it). Returns
+    /// `false` for an unknown id or another account's, and
+    /// [`CoreError::InvalidInput`](crate::error::CoreError::InvalidInput) for
+    /// an end that is not after the start at the same precision, or a ghost
+    /// with no start. A timed end on a timed ghost with a venue also records
+    /// the duration as the prior for that venue and kind; clearing the end
+    /// keeps what was learned.
+    fn set_ghost_user_end(
+        &self,
+        account_id: AccountId,
+        ghost_id: i64,
+        end: Option<crate::triage::ghost::EventTime>,
+        at: DateTime<Utc>,
+    ) -> Result<bool>;
+
     /// ONE-SHOT REPAIR: re-run shipment detection over every shipment row's
     /// feeder message and delete the rows the current detector no longer yields
     /// that number from, returning how many were deleted.

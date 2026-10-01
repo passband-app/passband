@@ -1635,6 +1635,19 @@ impl AgentTriageStore for SqliteStore {
             current.previous_decision.as_ref(),
             decision,
         )?;
+        // Ghosts never block triage: the projection runs under its own
+        // savepoint and a failure costs only the ghosts. The decision row
+        // written above is what its rebuild reads for this message.
+        super::ghosts::reconcile_guarded(
+            &tx,
+            job.account_id,
+            job.message_id,
+            &current.message.thread_id,
+            !current.message.is_sent
+                && !current.message.is_spam
+                && !decision.external_access.restricted,
+            decision,
+        );
         finish(&tx, job, "applied", &original.run_metadata)?;
         tx.commit()?;
         Ok(AgentCommitOutcome::Applied)

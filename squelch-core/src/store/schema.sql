@@ -1555,6 +1555,97 @@ CREATE TABLE IF NOT EXISTS agent_delivery_projections (
 -- migrate.rs, NOT here: its creation triggers a one-shot backfill, which only
 -- works if this file cannot have created it first.
 
+-- CALENDAR GHOSTS: placeholders for what mail says will or might happen, a
+-- projection of the agent's `event` records (sqlite/ghosts.rs). HUMAN-DOOR
+-- ONLY. New tables with no backfill, so they live here and need no migrate
+-- seam: an older DB gets them on its next open.
+--
+-- Columns are projection-owned and rebuilt from the source messages' stored
+-- decisions on every reconcile, EXCEPT the three user_* columns, which only
+-- the user writes. `ends_at` is a STATED end and `est_minutes`/`est_basis`
+-- the MODEL's guess: an estimate is never stored as a fact.
+--
+-- `start_sort` is `starts_at` as a sortable UTC string (`YYYY-MM-DDTHH:MM:SSZ`,
+-- a date-only start at 00:00Z of its date): `starts_at` keeps the mail's own
+-- offset, so it cannot be compared as text. `venue_key` is
+-- `triage::ghost::venue_key(location)`, so the duration prior joins in SQL.
+--
+-- No CHECK on kind, commitment or user_state: those vocabularies are expected
+-- to grow (held, materialized), and SQLite cannot alter a CHECK.
+CREATE TABLE IF NOT EXISTS ghost_events (
+    id                INTEGER PRIMARY KEY,
+    account_id        INTEGER NOT NULL,
+    kind              TEXT NOT NULL,
+    title             TEXT NOT NULL,
+    starts_at         TEXT,
+    start_sort        TEXT,
+    start_timezone    TEXT,
+    ends_at           TEXT,
+    est_minutes       INTEGER,
+    est_basis         TEXT,
+    location          TEXT,
+    venue_key         TEXT,
+    commitment        TEXT NOT NULL,
+    mail_state        TEXT NOT NULL DEFAULT 'live' CHECK(mail_state IN ('live','cancelled')),
+    likelihood_band   TEXT,
+    likelihood_reason TEXT,
+    last_message_id   INTEGER,
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL,
+    user_state        TEXT,
+    user_state_at     TEXT,
+    user_ends_at      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ghost_events_start ON ghost_events(account_id, start_sort);
+-- What makes many messages one ghost (`triage::ghost::identity_keys`). A key
+-- belongs to one ghost per account; a message whose keys reach two merges them.
+CREATE TABLE IF NOT EXISTS ghost_event_keys (
+    account_id INTEGER NOT NULL,
+    ghost_id   INTEGER NOT NULL,
+    key        TEXT NOT NULL,
+    UNIQUE(account_id, key)
+);
+CREATE INDEX IF NOT EXISTS idx_ghost_event_keys_ghost ON ghost_event_keys(account_id, ghost_id);
+-- The evidence trail. `role` is the source's `change` (created, updated,
+-- cancelled, agreed).
+CREATE TABLE IF NOT EXISTS ghost_event_sources (
+    account_id INTEGER NOT NULL,
+    ghost_id   INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    role       TEXT NOT NULL,
+    PRIMARY KEY(account_id, ghost_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ghost_event_sources_message ON ghost_event_sources(account_id, message_id);
+-- The user's own corrections of how long things at a venue run, by kind:
+-- tier 2 of the estimated end.
+CREATE TABLE IF NOT EXISTS event_duration_priors (
+    account_id INTEGER NOT NULL,
+    venue_key  TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    minutes    INTEGER NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(account_id, venue_key, kind)
+);
+-- Keys and sources go with their ghost, and a source row with its message,
+-- whoever deletes it, as `shipment_order_links` follows `shipments`. A ghost
+-- the deleted message alone fed goes too: nothing is left to say it exists.
+CREATE TRIGGER IF NOT EXISTS ghost_event_rows_follow_ghost
+AFTER DELETE ON ghost_events BEGIN
+    DELETE FROM ghost_event_keys WHERE account_id = OLD.account_id AND ghost_id = OLD.id;
+    DELETE FROM ghost_event_sources WHERE account_id = OLD.account_id AND ghost_id = OLD.id;
+END;
+CREATE TRIGGER IF NOT EXISTS ghost_event_sources_follow_message
+AFTER DELETE ON messages BEGIN
+    DELETE FROM ghost_events
+    WHERE account_id = OLD.account_id
+      AND id IN (SELECT ghost_id FROM ghost_event_sources
+                 WHERE account_id = OLD.account_id AND message_id = OLD.id)
+      AND NOT EXISTS (SELECT 1 FROM ghost_event_sources s
+                      WHERE s.account_id = OLD.account_id AND s.ghost_id = ghost_events.id
+                        AND s.message_id <> OLD.id);
+    DELETE FROM ghost_event_sources WHERE account_id = OLD.account_id AND message_id = OLD.id;
+END;
+
 -- Independent model assessments for human notification diagnostics. Multiple
 -- attempts remain inspectable; the notification ledger still records delivery.
 CREATE TABLE IF NOT EXISTS notification_assessments (

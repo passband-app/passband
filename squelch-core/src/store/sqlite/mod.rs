@@ -18,6 +18,7 @@ pub mod device_tokens;
 mod drafts;
 mod events;
 mod feedback;
+mod ghosts;
 pub mod groups;
 mod messages;
 mod migrate;
@@ -594,6 +595,35 @@ impl Store for SqliteStore {
         policy: crate::config::ShipmentListPolicy,
     ) -> Result<bool> {
         self.clear_shipment(account_id, shipment_id, at, policy)
+    }
+
+    fn list_ghost_events(
+        &self,
+        account_id: AccountId,
+        from: DateTime<chrono::FixedOffset>,
+        to: DateTime<chrono::FixedOffset>,
+    ) -> Result<Vec<crate::types::GhostEvent>> {
+        self.list_ghost_events(account_id, from, to)
+    }
+
+    fn set_ghost_user_state(
+        &self,
+        account_id: AccountId,
+        ghost_id: i64,
+        state: Option<crate::types::GhostUserState>,
+        at: DateTime<Utc>,
+    ) -> Result<bool> {
+        self.set_ghost_user_state(account_id, ghost_id, state, at)
+    }
+
+    fn set_ghost_user_end(
+        &self,
+        account_id: AccountId,
+        ghost_id: i64,
+        end: Option<crate::triage::ghost::EventTime>,
+        at: DateTime<Utc>,
+    ) -> Result<bool> {
+        self.set_ghost_user_end(account_id, ghost_id, end, at)
     }
 
     fn shipments_redetect_cleanup(&self, account_id: AccountId) -> Result<u64> {

@@ -1975,3 +1975,119 @@ fn migrate_retires_queued_rule_change_retriage() {
         ]
     );
 }
+
+/// The calendar ghost tables are new and need no backfill, so `schema.sql`
+/// alone brings them: on a fresh store, and on an existing mailbox from
+/// before they existed (simulated by dropping them), whose mail survives.
+/// A second open of a DB that already has them is a no-op.
+#[test]
+fn init_creates_the_ghost_tables_on_fresh_and_existing_dbs() {
+    const TABLES: [&str; 4] = [
+        "ghost_events",
+        "ghost_event_keys",
+        "ghost_event_sources",
+        "event_duration_priors",
+    ];
+    const TRIGGERS: [&str; 2] = [
+        "ghost_event_rows_follow_ghost",
+        "ghost_event_sources_follow_message",
+    ];
+    fn present(conn: &Connection) -> (usize, usize, Vec<String>) {
+        let named = |kind: &str, names: &[&str]| -> usize {
+            names
+                .iter()
+                .filter(|name| {
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE type=?1 AND name=?2",
+                        params![kind, name],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .unwrap()
+                        == 1
+                })
+                .count()
+        };
+        let mut stmt = conn.prepare("PRAGMA table_info(ghost_events)").unwrap();
+        let cols: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        (named("table", &TABLES), named("trigger", &TRIGGERS), cols)
+    }
+    let (fresh, _) = store();
+    let (tables, triggers, cols) = present(&fresh.lock().unwrap());
+    assert_eq!((tables, triggers), (4, 2));
+    for expected in [
+        "id",
+        "account_id",
+        "kind",
+        "title",
+        "starts_at",
+        "start_sort",
+        "start_timezone",
+        "ends_at",
+        "est_minutes",
+        "est_basis",
+        "location",
+        "venue_key",
+        "commitment",
+        "mail_state",
+        "likelihood_band",
+        "likelihood_reason",
+        "last_message_id",
+        "created_at",
+        "updated_at",
+        "user_state",
+        "user_state_at",
+        "user_ends_at",
+    ] {
+        assert!(cols.iter().any(|c| c == expected), "missing {expected}");
+    }
+
+    let dir = std::env::temp_dir().join(format!("squelch-ghost-tables-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("mail.db");
+    let _ = std::fs::remove_file(&path);
+    let acct;
+    {
+        let old = SqliteStore::open(&path).unwrap();
+        acct = old.ensure_account("me@example.com").unwrap();
+        triaged_row(acct, "g-1", "t-1", None, false, Sensitivity::Normal).ingest(&old);
+        old.lock()
+            .unwrap()
+            .execute_batch(
+                "DROP TRIGGER ghost_event_rows_follow_ghost;
+                 DROP TRIGGER ghost_event_sources_follow_message;
+                 DROP TABLE ghost_events; DROP TABLE ghost_event_keys;
+                 DROP TABLE ghost_event_sources; DROP TABLE event_duration_priors;",
+            )
+            .unwrap();
+        assert_eq!(present(&old.lock().unwrap()).0, 0);
+    }
+    {
+        let upgraded = SqliteStore::open(&path).unwrap();
+        let conn = upgraded.lock().unwrap();
+        assert_eq!(present(&conn).0, 4);
+        assert_eq!(present(&conn).1, 2);
+        let mail: i64 = conn
+            .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mail, 1, "the mailbox survives the upgrade");
+        conn.execute(
+            "INSERT INTO ghost_events(account_id,kind,title,commitment,created_at,updated_at)
+             VALUES(?1,'ticket','Show','committed','2026-09-30T00:00:00Z','2026-09-30T00:00:00Z')",
+            [acct],
+        )
+        .unwrap();
+    }
+    let reopened = SqliteStore::open(&path).unwrap();
+    let ghosts: i64 = reopened
+        .lock()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM ghost_events", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(ghosts, 1, "a later open keeps what is there");
+    drop(reopened);
+    let _ = std::fs::remove_dir_all(&dir);
+}

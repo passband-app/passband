@@ -261,7 +261,7 @@ pub fn launder_events(records: &[RecordProposal]) -> Vec<GhostProposal> {
 
 /// Who a record speaks for: the sender's [`organisation_domain`], or the full
 /// lowercased address where the domain is shared by strangers (freemail, a
-/// shared tenant). None when the message is not AUTHENTICATED (`auth_pass` is
+/// consumer ISP, a relay host, a shared tenant). None when the message is not AUTHENTICATED (`auth_pass` is
 /// anything but `Some(true)`, unknown included) or the address has no
 /// registrable domain: such a record speaks for nobody, so it never matches
 /// another ghost and never commits one.
@@ -321,18 +321,24 @@ fn psl_registrable_domain(address: &str) -> Option<String> {
 /// tenants of `onmicrosoft.com`), lowercased.
 ///
 /// None for an address whose domain is FREEMAIL (`gmail.com`, `hotmail.co.uk`,
-/// `gmx.de`: see `receipt_match::is_freemail_domain`) or a SHARED TENANT host
-/// (`googlegroups.com`), where the domain says nothing about who sent the mail
-/// and only the full address identifies a sender. None too when there is no
-/// registrable domain at all (an empty or one-label domain, or a domain that
-/// is itself a public suffix). Takes an address or a bare domain. Two
-/// addresses are the same organisation only when this is Some and equal for
-/// both.
+/// `gmx.de`, `comcast.net`: see `receipt_match::is_freemail_domain`), whose
+/// host is a freemail host under an organisation's domain
+/// (`privaterelay.appleid.com`: `receipt_match::is_freemail_host`), or a
+/// SHARED TENANT host (`googlegroups.com`), where the domain says nothing
+/// about who sent the mail and only the full address identifies a sender.
+/// None too when there is no registrable domain at all (an empty or
+/// one-label domain, or a domain that is itself a public suffix). Takes an
+/// address or a bare domain. Two addresses are the same organisation only
+/// when this is Some and equal for both.
 ///
-/// Shared by everything that asks "same sender organisation?" on
-/// authenticated mail (the ghost scope here, the invitation binding in the
-/// correspondent-timezone code), so they cannot drift apart.
-pub(crate) fn organisation_domain(address: &str) -> Option<String> {
+/// No list of shared domains is ever complete, so only the REF rule leans on
+/// this: a ref is something the sender must know. Matching by thread and the
+/// invitation binding (`zones::invitation_is_bound`) require the identical
+/// address instead.
+fn organisation_domain(address: &str) -> Option<String> {
+    if super::receipt_match::is_freemail_host(address) {
+        return None;
+    }
     psl_registrable_domain(address).filter(|d| !is_shared_domain(d))
 }
 
@@ -372,69 +378,129 @@ pub fn normalize_ref(raw: &str) -> Option<String> {
     REF_LEN.contains(&key.chars().count()).then_some(key)
 }
 
-/// A ref written as text, as the key two mails worded differently agree on.
+/// How a kept token of a text ref meets the kept token before it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Join {
+    /// Nothing, or exactly one `-`, `/` or `.`: the same code ("ABC-1234-XYZ").
+    Tight,
+    /// Whitespace only: two words, joined only by the carrier-code allowance.
+    Space,
+    /// Any other separator, or a dropped clock time or position between.
+    Broken,
+}
+
+/// A ref written as text, as the key two mails worded differently agree on:
+/// ONE code run.
 ///
-/// Split into tokens on anything not alphanumeric. Label words go wherever
-/// they stand (a brand before the label stays out of the key too, as the
-/// digit rule below leaves it behind), and so does a position in a venue
-/// ("Seat 12A", "gate4") with its number. Then:
+/// Tokens are the alphanumeric runs. Label words go wherever they stand
+/// (their separators merge, so "UA flight 123" is "UA 123"); a clock time
+/// ("8pm", "10:30am", "19:00") and a position in a venue with its number
+/// ("Seat 12A", "gate4") go too and break any run across them. A CODE token
+/// has a digit or is all capitals of at most 6 letters. A run is a maximal
+/// sequence of code tokens joined by `-`, `/`, `.` or nothing, never by
+/// whitespace, except that a 1 to 3 letter all-capitals token joins a digit
+/// token one space after it ("UA 123", "AB 12345"). Then:
 ///
-/// - With a token carrying a digit, the key is the digit-bearing tokens
-///   joined: "OpenTable confirmation 123456789" and "123456789" agree. A key
-///   that short (under 5) takes the 1 to 3 letter token just before its
-///   first digit-bearing token, so "UA 123" and "Flight UA123" are both
-///   `ua123`.
-/// - With none, only a single all-capitals token that is not a status word
-///   is a record locator ("QXJZKM"); anything else made of letters is prose.
+/// - The key is the first run that has a digit, joined and lowercased:
+///   "ABC-1234-XYZ" and "ABC-1234-QRS" differ, "Booking ABC-1234-XYZ" and
+///   "ABC-1234-XYZ" agree, and "OpenTable confirmation 123456789" is
+///   `123456789` (the brand is not a code). Only one run, so a count printed
+///   after a booking number ("(2 tickets)") is not part of it.
+/// - With no digit anywhere, only a single all-capitals token that is not a
+///   status word is a record locator ("QXJZKM"); anything else made of
+///   letters is prose.
 ///
 /// Dropped as identifying nothing: an all-digit key under 6 digits (an order
 /// line, a year) and an 8-digit key that is a valid `YYYYMMDD` date.
 fn text_ref(raw: &str) -> Option<String> {
     let has_digit = |t: &str| t.chars().any(char::is_numeric);
-    let mut tokens: Vec<&str> = Vec::new();
+    let capitals = |t: &str, most: usize| {
+        t.chars().count() <= most && t.chars().all(|c| c.is_alphabetic() && c.is_uppercase())
+    };
+    let words: Vec<&str> = raw.split_whitespace().collect();
+    let mut tokens: Vec<(&str, Join)> = Vec::new();
+    // Separator characters since the last kept token, and whether a dropped
+    // clock time or position stands between.
+    let mut separator = String::new();
+    let mut broken = false;
     let mut after_position = false;
-    for token in raw
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|t| !t.is_empty())
-    {
-        let lower = token.to_lowercase();
-        if LABEL_WORDS.contains(&lower.as_str()) {
+    for (w, word) in words.iter().enumerate() {
+        if w > 0 {
+            separator.push(' ');
+        }
+        let clock = clock_time(word)
+            || (meridiem(word) && w > 0 && hour(words[w - 1]))
+            || (hour(word) && words.get(w + 1).is_some_and(|next| meridiem(next)));
+        if clock {
+            broken = true;
             continue;
         }
-        if POSITION_WORDS.contains(&lower.as_str()) {
-            after_position = true;
-            continue;
-        }
-        if std::mem::take(&mut after_position) && has_digit(token) {
-            continue;
-        }
-        let glued_position = POSITION_WORDS.iter().any(|w| {
-            lower
-                .strip_prefix(w)
-                .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
-        });
-        if !glued_position {
-            tokens.push(token);
+        for piece in alphanumeric_pieces(word) {
+            let token = match piece {
+                Err(punctuation) => {
+                    separator.push_str(punctuation);
+                    continue;
+                }
+                Ok(token) => token,
+            };
+            let lower = token.to_lowercase();
+            if LABEL_WORDS.contains(&lower.as_str()) {
+                continue;
+            }
+            if POSITION_WORDS.contains(&lower.as_str()) {
+                after_position = true;
+                broken = true;
+                continue;
+            }
+            let glued_position = POSITION_WORDS.iter().any(|w| {
+                lower
+                    .strip_prefix(w)
+                    .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+            });
+            if (std::mem::take(&mut after_position) && has_digit(token)) || glued_position {
+                broken = true;
+                continue;
+            }
+            let join = if broken || tokens.is_empty() {
+                Join::Broken
+            } else if matches!(separator.as_str(), "" | "-" | "/" | ".") {
+                Join::Tight
+            } else if separator.chars().all(char::is_whitespace) {
+                Join::Space
+            } else {
+                Join::Broken
+            };
+            tokens.push((token, join));
+            separator.clear();
+            broken = false;
         }
     }
-    let key = match tokens.iter().position(|t| has_digit(t)) {
-        Some(first) => {
-            let mut key: String = tokens
-                .iter()
-                .filter(|t| has_digit(t))
-                .map(|t| t.to_lowercase())
-                .collect();
-            if key.chars().count() < *REF_LEN.start()
-                && let Some(before) = first.checked_sub(1).map(|i| tokens[i])
-                && (1..=3).contains(&before.chars().count())
-                && before.chars().all(char::is_alphabetic)
-            {
-                key = format!("{}{key}", before.to_lowercase());
-            }
-            key
+    let is_code = |t: &str| has_digit(t) || capitals(t, 6);
+    let mut runs: Vec<Vec<&str>> = Vec::new();
+    let mut run: Vec<&str> = Vec::new();
+    for &(token, join) in &tokens {
+        let joins = run.last().is_some_and(|last| {
+            is_code(token)
+                && match join {
+                    Join::Tight => true,
+                    Join::Space => capitals(last, 3) && has_digit(token),
+                    Join::Broken => false,
+                }
+        });
+        if !joins && !run.is_empty() {
+            runs.push(std::mem::take(&mut run));
         }
+        if is_code(token) {
+            run.push(token);
+        }
+    }
+    if !run.is_empty() {
+        runs.push(run);
+    }
+    let key = match runs.iter().find(|r| r.iter().any(|t| has_digit(t))) {
+        Some(run) => run.iter().map(|t| t.to_lowercase()).collect(),
         None => {
-            let [only] = tokens.as_slice() else {
+            let [(only, _)] = tokens.as_slice() else {
                 return None;
             };
             let lower = only.to_lowercase();
@@ -455,8 +521,79 @@ fn text_ref(raw: &str) -> Option<String> {
     Some(key)
 }
 
-/// A URL ref as lowercase host and path, kept only when the path itself
-/// names one event. The query and fragment are gone (that is where tokens
+/// A word's alphanumeric runs (`Ok`) and the punctuation between them
+/// (`Err`), in order.
+fn alphanumeric_pieces(word: &str) -> Vec<Result<&str, &str>> {
+    let mut pieces = Vec::new();
+    let mut start = 0;
+    let mut alphanumeric = None;
+    for (i, c) in word.char_indices() {
+        let now = c.is_alphanumeric();
+        if alphanumeric.is_some_and(|was| was != now) {
+            let piece = &word[start..i];
+            pieces.push(if now { Err(piece) } else { Ok(piece) });
+            start = i;
+        }
+        alphanumeric = Some(now);
+    }
+    if let Some(was) = alphanumeric {
+        let piece = &word[start..];
+        pieces.push(if was { Ok(piece) } else { Err(piece) });
+    }
+    pieces
+}
+
+/// A word without the punctuation prose puts around it, ASCII-lowercased.
+fn bare_word(word: &str) -> String {
+    word.trim_matches(|c: char| !c.is_alphanumeric())
+        .to_ascii_lowercase()
+}
+
+/// "am" or "pm", with or without the dots.
+fn meridiem(word: &str) -> bool {
+    matches!(bare_word(word).as_str(), "am" | "pm" | "a.m" | "p.m")
+}
+
+/// An hour of a 12-hour clock: "8", "12", "8:30".
+fn hour(word: &str) -> bool {
+    twelve_hour(&bare_word(word))
+}
+
+fn twelve_hour(text: &str) -> bool {
+    let (h, m) = text.split_once(':').unwrap_or((text, "00"));
+    let digits = |s: &str, n: std::ops::RangeInclusive<usize>| {
+        n.contains(&s.len()) && s.chars().all(|c| c.is_ascii_digit())
+    };
+    digits(h, 1..=2)
+        && digits(m, 2..=2)
+        && (1..=12).contains(&h.parse::<u32>().unwrap_or(0))
+        && m.parse::<u32>().unwrap_or(60) < 60
+}
+
+/// A clock time in one word: "8pm", "10:30am", "8p.m.", "19:00". A time
+/// names an hour every event at a venue shares, never one booking.
+fn clock_time(word: &str) -> bool {
+    let word = bare_word(word);
+    if let Some(rest) = ["am", "pm", "a.m", "p.m"]
+        .iter()
+        .find_map(|m| word.strip_suffix(m))
+    {
+        return twelve_hour(rest);
+    }
+    let Some((h, m)) = word.split_once(':') else {
+        return false;
+    };
+    (1..=2).contains(&h.len())
+        && m.len() == 2
+        && h.parse::<u32>().is_ok_and(|h| h < 24)
+        && m.parse::<u32>().is_ok_and(|m| m < 60)
+        && word.chars().all(|c| c.is_ascii_digit() || c == ':')
+}
+
+/// A URL ref as lowercase host and the path AS WRITTEN (an event id in a path
+/// is case-sensitive: `partiful.com/e/AbCdEf1` and `.../aBcDeF1` are two
+/// events), kept only when the path itself names one event. The query,
+/// fragment and `;` path parameters are gone (that is where tokens
 /// live), so a route whose id lived in the query (Google Calendar's
 /// `event?eid=`, OpenTable's `book/view?rid=`, OWA's `?itemid=`) is left a
 /// generic route every event on that platform shares, and is dropped like a
@@ -473,7 +610,7 @@ fn url_ref(url: &str) -> Option<String> {
     }
     let names_one = last.chars().any(|c| c.is_ascii_digit())
         || (segments.len() >= 2 && last.chars().count() >= 6);
-    names_one.then(|| format!("{host}{path}").to_lowercase())
+    names_one.then(|| format!("{host}{path}"))
 }
 
 /// A path segment that looks like a secret: one unbroken run longer than
@@ -504,9 +641,10 @@ fn has_uuid(segment: &str) -> bool {
 /// around it ("(see https://x/e/1)."), or None when the token is not a URL.
 /// A scheme or `www.` is enough, ANYWHERE in the token: a URL glued to its
 /// label ("Zoom:https://...", "Meeting<https://...>") is still a URL, and
-/// missing it kept its query, passcode and all. A bare `host/path` must start
-/// the token and needs an alphabetic top-level label, so "St./Elm" and
-/// "2.5/3h" stay text.
+/// missing it kept its query, passcode and all. A bare host must start the
+/// token, needs an alphabetic top-level label (so "St./Elm" and "2.5/3h" stay
+/// text), and ends at the first `/`, `?` or `#`, so "zoom.us?pwd=abc" is a
+/// URL as much as "zoom.us/j/1?pwd=abc" is.
 fn url_core(token: &str) -> Option<&str> {
     const TRAILING: [char; 11] = ['.', ',', ';', ':', '!', '?', ')', '>', ']', '"', '\''];
     // ASCII lowercasing keeps every byte offset, so `at` indexes `token`.
@@ -528,11 +666,16 @@ fn url_core(token: &str) -> Option<&str> {
     let core = token
         .trim_start_matches(['(', '<', '[', '"', '\''])
         .trim_end_matches(TRAILING);
-    let tld_ok = core
-        .split_once('/')
-        .and_then(|(host, _)| host.rsplit('.').next())
+    let tld_ok = bare_host(core)
+        .and_then(|host| host.rsplit('.').next())
         .is_some_and(|tld| tld.len() >= 2 && tld.chars().all(|c| c.is_ascii_alphabetic()));
     (tld_ok && looks_like_url(core)).then_some(core)
+}
+
+/// The host of a bare `host/path`, `host?query` or `host#fragment`: what
+/// comes before the first `/`, `?` or `#`. None when there is none of them.
+fn bare_host(raw: &str) -> Option<&str> {
+    raw.find(['/', '?', '#']).map(|at| &raw[..at])
 }
 
 /// Every URL in `text` passed through `rewrite` (None removes it), the rest
@@ -559,16 +702,17 @@ fn looks_like_url(raw: &str) -> bool {
     if lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("www.") {
         return true;
     }
-    // "lu.ma/abc": a dotted host then a path. An iCalendar UID has an '@'.
+    // "lu.ma/abc", "zoom.us?pwd=x": a dotted host then a path, query or
+    // fragment. An iCalendar UID has an '@'.
     !raw.contains(char::is_whitespace)
         && !raw.contains('@')
-        && raw
-            .split_once('/')
-            .is_some_and(|(host, _)| host.contains('.') && !host.starts_with('.'))
+        && bare_host(raw).is_some_and(|host| host.contains('.') && !host.starts_with('.'))
 }
 
-/// Host without `www.`, and path without its trailing slash. Query, fragment
-/// and credentials in the authority are never returned.
+/// Host without `www.`, and path without its trailing slash or any `;`
+/// parameters on its segments ("/j/1;pwd=x" is "/j/1": a passcode can ride
+/// there as well as in the query). Query, fragment and credentials in the
+/// authority are never returned.
 fn url_host_path(raw: &str) -> Option<(String, String)> {
     let lower = raw.to_ascii_lowercase();
     let with_scheme = if lower.starts_with("http://") || lower.starts_with("https://") {
@@ -579,8 +723,13 @@ fn url_host_path(raw: &str) -> Option<(String, String)> {
     let url = url::Url::parse(&with_scheme).ok()?;
     let host = url.host_str()?.to_lowercase();
     let host = host.strip_prefix("www.").unwrap_or(&host).to_string();
-    let path = url.path().trim_end_matches('/').to_string();
-    Some((host, path))
+    let path = url
+        .path()
+        .split('/')
+        .map(|segment| segment.split(';').next().unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("/");
+    Some((host, path.trim_end_matches('/').to_string()))
 }
 
 fn clean_text(raw: &str) -> Option<String> {
@@ -831,11 +980,12 @@ mod tests {
             ],
         ))
         .unwrap();
+        // The host is lowercased; the path keeps its case (round 3, N6).
         assert_eq!(
             identity_keys(&ghost, Some("eventbrite.com")),
             vec![
                 "ref:eventbrite.com:eventbrite.com/e/12345",
-                "ref:eventbrite.com:lu.ma/abcd7"
+                "ref:eventbrite.com:lu.ma/AbCd7"
             ]
         );
     }
@@ -1559,9 +1709,11 @@ mod tests {
     // ---- Laundering, round 2 (1.5): the reviewer's table ----
 
     /// F8: a brand or noun around the label stays out of the key, so two
-    /// mails wording one booking number differently agree.
+    /// mails wording one booking number differently agree. (Round 3 renamed
+    /// this from `..._keys_on_its_digit_bearing_tokens_...`: the key is now
+    /// one code run; every expectation here is unchanged.)
     #[test]
-    fn a_ref_keys_on_its_digit_bearing_tokens_wherever_the_labels_stand() {
+    fn a_ref_keys_on_its_code_run_wherever_the_labels_stand() {
         for (raw, key) in [
             ("OpenTable confirmation 123456789", "123456789"),
             ("123456789", "123456789"),
@@ -1581,13 +1733,18 @@ mod tests {
         }
     }
 
-    /// F8: a short number takes the 1 to 3 letter carrier code before it, so
-    /// the flight is one key however it is printed; a longer word does not.
+    /// F8: a number takes the 1 to 3 capital carrier code one space before
+    /// it, so the flight is one key however it is printed; a longer word
+    /// does not. Round 3 (N6) changed two expectations here: "flight ua 123"
+    /// is no longer `ua123` (a lowercase "ua" is not a code, so the run is
+    /// "123", a fragment), and "Booking ABC-1234-XYZ" is `abc1234xyz` (the
+    /// letters around the digits are part of the code).
     #[test]
     fn a_short_number_takes_the_carrier_code_before_it() {
-        for raw in ["UA 123", "Flight UA123", "UA123", "flight ua 123"] {
+        for raw in ["UA 123", "Flight UA123", "UA123"] {
             assert_eq!(normalize_ref(raw).as_deref(), Some("ua123"), "{raw:?}");
         }
+        assert_eq!(normalize_ref("flight ua 123"), None);
         assert_eq!(normalize_ref("DL 1234").as_deref(), Some("dl1234"));
         // A label BETWEEN the carrier code and the number goes too, and a
         // label after a locator leaves the locator alone.
@@ -1598,10 +1755,73 @@ mod tests {
         );
         assert_eq!(
             normalize_ref("Booking ABC-1234-XYZ").as_deref(),
-            Some("abc1234")
+            Some("abc1234xyz")
         );
         // "United" is no carrier code, and "123" alone is a fragment.
         assert_eq!(normalize_ref("United 123"), None);
+    }
+
+    /// Round 3 (N6): the key is ONE code run. The reviewer's collisions
+    /// ("ABC-1234-XYZ" and "ABC-1234-QRS") are two keys, and the splits
+    /// ("Order #1234567890 (2 tickets)", "Conf #: AB 12345") are one.
+    #[test]
+    fn a_ref_is_one_code_run() {
+        for (raw, key) in [
+            ("ABC-1234-XYZ", Some("abc1234xyz")),
+            ("ABC-1234-QRS", Some("abc1234qrs")),
+            ("QXJ-ZKM-123", Some("qxjzkm123")),
+            ("ABC-ZKM-123", Some("abczkm123")),
+            ("OpenTable confirmation 123456789", Some("123456789")),
+            ("Airbnb reservation HMABCD1234", Some("hmabcd1234")),
+            ("Order #1234567890 (2 tickets)", Some("1234567890")),
+            ("Order #1234567890", Some("1234567890")),
+            ("Conf #: AB 12345", Some("ab12345")),
+            ("Conf AB12345", Some("ab12345")),
+            ("UA 123", Some("ua123")),
+            ("Flight UA123", Some("ua123")),
+            ("Table 7 at 8pm", None),
+            ("Booking ABC-1234-XYZ", Some("abc1234xyz")),
+            // A shouted brand before a number is not a carrier code.
+            ("AIRBNB HMABCD1234", Some("hmabcd1234")),
+            // "E-ticket" leaves an "E" that is not joined across the space.
+            ("E-ticket 0162345678901", Some("0162345678901")),
+            ("Ticket number 016-2345678901", Some("0162345678901")),
+            // The Google and Outlook UIDs, and the CJK label.
+            (
+                "7kukuqrfedlm2f9t0vr0aa8b9k@google.com",
+                Some("7kukuqrfedlm2f9t0vr0aa8b9k"),
+            ),
+            (
+                "040000008200E00074C5B7101A82E0080000000050C1",
+                Some("040000008200e00074c5b7101a82e0080000000050c1"),
+            ),
+            ("预订号 AB12CD", Some("ab12cd")),
+            ("予約番号: 1234567", Some("1234567")),
+        ] {
+            assert_eq!(normalize_ref(raw).as_deref(), key, "{raw:?}");
+        }
+    }
+
+    /// Round 3 (N6): a clock time is never a ref or part of one, whichever
+    /// way it is written.
+    #[test]
+    fn clock_times_are_no_ref() {
+        for raw in [
+            "8pm",
+            "Table 7 at 8pm",
+            "10:30am",
+            "19:00",
+            "Dinner at 8 PM",
+            "8p.m.",
+            "Doors 7:30 p.m.",
+        ] {
+            assert_eq!(normalize_ref(raw), None, "{raw:?}");
+        }
+        // A time beside a booking number leaves the number alone.
+        assert_eq!(normalize_ref("ABC123 19:00").as_deref(), Some("abc123"));
+        assert_eq!(normalize_ref("19:00 ABC-1234").as_deref(), Some("abc1234"));
+        // A four-digit number is no time without a colon or am/pm.
+        assert_eq!(normalize_ref("Order 1900123").as_deref(), Some("1900123"));
     }
 
     /// F8 and F9: what is left is too short, a bare small number, a date, or
@@ -1672,6 +1892,101 @@ mod tests {
         );
         // `www.` inside a word is not a URL.
         assert_eq!(location("Awww.cafe").as_deref(), Some("Awww.cafe"));
+    }
+
+    /// Round 3 (N6): an event id in a URL path is case-sensitive, so two ids
+    /// differing only in case are two keys. The host is still lowercased.
+    #[test]
+    fn a_url_ref_keeps_the_case_of_its_path() {
+        assert_eq!(
+            normalize_ref("https://partiful.com/e/AbCdEf1234567").as_deref(),
+            Some("partiful.com/e/AbCdEf1234567")
+        );
+        assert_ne!(
+            normalize_ref("https://partiful.com/e/AbCdEf1234567"),
+            normalize_ref("https://partiful.com/e/aBcDeF1234567")
+        );
+        assert_eq!(
+            normalize_ref("HTTPS://WWW.Lu.Ma/event/evt-AbCdEf123").as_deref(),
+            Some("lu.ma/event/evt-AbCdEf123")
+        );
+    }
+
+    /// Round 3 (N7): a bare host followed straight by a query or fragment is
+    /// a URL too, so the query never survives, with or without a path; and
+    /// `;` parameters on a path segment go like a query.
+    #[test]
+    fn a_bare_host_with_a_query_loses_the_query() {
+        let location = |raw: &str| {
+            launder_with(|r| {
+                if let RecordProposal::Event { location, .. } = r {
+                    *location = Some(raw.into());
+                }
+            })
+            .location
+        };
+        for (raw, laundered) in [
+            ("Zoom: zoom.us?pwd=abc", "Zoom: zoom.us"),
+            ("zoom.us?pwd=abc", "zoom.us"),
+            ("Join: example.com?token=SECRET", "Join: example.com"),
+            ("zoom.us#pwd=abc", "zoom.us"),
+            ("zoom.us/j/1#pwd=x", "zoom.us/j/1"),
+            ("https://zoom.us/j/1;pwd=x", "zoom.us/j/1"),
+            ("Room: zoom.us/j/1;pwd=x?a=b", "Room: zoom.us/j/1"),
+            // Prose keeps its punctuation.
+            ("Is it at the Elm St. venue?", "Is it at the Elm St. venue?"),
+            ("Corner of Main St./Elm Ave", "Corner of Main St./Elm Ave"),
+        ] {
+            assert_eq!(location(raw).as_deref(), Some(laundered), "{raw:?}");
+        }
+        // As a ref the bare host names no event, so it drops; a path
+        // parameter never reaches a key.
+        assert_eq!(normalize_ref("Join: example.com?token=SECRET"), None);
+        assert_eq!(
+            normalize_ref("https://x.example/e/12345;jsessionid=SECRET").as_deref(),
+            Some("x.example/e/12345")
+        );
+    }
+
+    /// Round 3 (N4): consumer ISPs, the mail.com family, duck.com and
+    /// Apple's relay give strangers one domain, so each address is its own
+    /// scope. The relay is matched by host: `appleid.com`, its registrable
+    /// domain, is still Apple's organisation.
+    #[test]
+    fn isps_relays_and_the_mail_com_family_scope_by_address() {
+        for domain in [
+            "comcast.net",
+            "verizon.net",
+            "att.net",
+            "sbcglobal.net",
+            "btinternet.com",
+            "orange.fr",
+            "t-online.de",
+            "libero.it",
+            "optusnet.com.au",
+            "aol.com",
+            "aim.com",
+            "mail.com",
+            "email.com",
+            "usa.com",
+            "post.com",
+            "engineer.com",
+            "duck.com",
+            "privaterelay.appleid.com",
+        ] {
+            let alice = sender_scope(&format!("alice@{domain}"), Some(true));
+            let bob = sender_scope(&format!("bob@{domain}"), Some(true));
+            assert_eq!(alice, Some(format!("alice@{domain}")), "{domain}");
+            assert_ne!(alice, bob, "{domain}");
+        }
+        assert_eq!(
+            sender_scope("x@PrivateRelay.AppleID.com", Some(true)).as_deref(),
+            Some("x@privaterelay.appleid.com")
+        );
+        assert_eq!(
+            sender_scope("no_reply@email.appleid.com", Some(true)).as_deref(),
+            Some("appleid.com")
+        );
     }
 
     /// The note filter counts digits across the separators a phone number

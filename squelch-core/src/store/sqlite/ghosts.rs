@@ -11,16 +11,22 @@
 //! assigned to one and the rest are left alone. A duplicate ghost is an
 //! acceptable outcome; losing or rewriting one is not.
 //!
-//! A GHOST BELONGS TO ONE SENDER SCOPE, FOR GOOD. The record that creates a
-//! ghost sets its `owner_scope` (`triage::ghost::sender_scope`: the
-//! authenticated sender's organisation domain, or the full address on a
-//! domain strangers share), and only a record of that same scope is ever
-//! assigned to it, by ref, by thread or as the ghost its message fed before.
-//! So another sender quoting the user's booking number, or replying "let's do
-//! 8 instead" in the same thread, makes a ghost of its own rather than an
+//! A GHOST BELONGS TO ONE SENDER. The record that creates a ghost sets its
+//! `owner_scope` (`triage::ghost::sender_scope`: the authenticated sender's
+//! organisation domain, or the full address on a domain strangers share) and
+//! its `owner_addr` (that record's From address). A record joins a ghost by
+//! ref only from the owner's scope (a merchant confirms from one address and
+//! cancels from another, and a ref is something the sender must know), and
+//! by thread only from the owner's identical address: no list of domains
+//! strangers share is ever complete, and a thread is open to whoever replies.
+//! So another sender quoting the user's booking number, or replying "let's
+//! do 8 instead" in the same thread, makes a ghost of its own rather than an
 //! edit of this one. A record from mail that did not pass authentication has
 //! no scope: its ghost has a NULL owner, takes nothing from any other
-//! message, and is never committed.
+//! message, and is never committed. The owner changes in ONE case: the one
+//! message that alone feeds a ghost is re-decided under another scope or
+//! address (its authentication result arrived or went on a re-sync), and
+//! then the ghost follows it, since no other mail is affected.
 //!
 //! The user_* columns are the user's. The one projection write to them: a
 //! rebuild that changes a start's precision clears the end span stored at the
@@ -34,8 +40,8 @@
 //! would have with no ghosts at all.
 //!
 //! SENT, SPAM AND RESTRICTED MAIL NEVER FEEDS A GHOST. Its assigned records
-//! keep their rows (so un-spamming brings the ghost back with the user's
-//! state) but contribute nothing to a rebuild, and
+//! keep their rows and their keys (so un-spamming finds the same ghost again,
+//! with the user's state) but contribute no facts to a rebuild, and
 //! [`SqliteStore::list_ghost_events`] serves a ghost only while the message
 //! that supplied its facts is eligible, judged in SQL, so a status that changed
 //! after the last rebuild cannot serve facts from it.
@@ -263,6 +269,8 @@ struct Matching<'a> {
     message: i64,
     /// Its sender scope; None when it did not pass authentication.
     scope: Option<&'a str>,
+    /// Its From address, lowercased; None exactly when `scope` is.
+    addr: Option<&'a str>,
     thread: &'a str,
     received: DateTime<Utc>,
     /// The ghosts it fed before this decision.
@@ -274,20 +282,26 @@ struct Candidate {
     id: i64,
     start: Option<EventTime>,
     live: bool,
-    /// The sender scope the ghost belongs to, for good.
+    /// The sender scope the ghost belongs to.
     owner: Option<String>,
+    /// The From address of the record that created it (or last re-owned it).
+    owner_addr: Option<String>,
     /// Some source row belongs to another message.
     other_sources: bool,
     /// The message being decided fed it before this decision.
     fed_by_this: bool,
 }
 impl Candidate {
-    /// THE OWNERSHIP RULE: a record joins a ghost only from the ghost's own
-    /// sender scope. An unauthenticated record (no scope) joins only a
-    /// NULL-owner ghost, which the previous-ghost rule further limits to one
-    /// its own message alone feeds.
+    /// THE OWNERSHIP RULE for refs: a record joins a ghost by ref only from
+    /// the ghost's own sender scope.
     fn owned_by(&self, scope: Option<&str>) -> bool {
         self.owner.as_deref() == scope
+    }
+    /// THE OWNERSHIP RULE for threads: the identical address as well. A scope
+    /// is a domain whenever the domain is on no list of shared ones, and two
+    /// strangers at an unlisted ISP share it; anyone can reply in a thread.
+    fn sent_by(&self, scope: Option<&str>, addr: Option<&str>) -> bool {
+        self.owned_by(scope) && addr.is_some() && self.owner_addr.as_deref() == addr
     }
 }
 
@@ -297,9 +311,9 @@ fn candidate(
     id: i64,
     m: &Matching,
 ) -> Result<Option<Candidate>> {
-    let Some((starts_at, mail_state, owner, other_sources)) = conn
+    let Some((starts_at, mail_state, owner, owner_addr, other_sources)) = conn
         .query_row(
-            "SELECT g.starts_at,g.mail_state,g.owner_scope,
+            "SELECT g.starts_at,g.mail_state,g.owner_scope,g.owner_addr,
                     EXISTS(SELECT 1 FROM ghost_event_sources s
                            WHERE s.account_id=g.account_id AND s.ghost_id=g.id AND s.message_id<>?3)
              FROM ghost_events g WHERE g.account_id=?1 AND g.id=?2",
@@ -309,7 +323,8 @@ fn candidate(
                     r.get::<_, Option<String>>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, Option<String>>(2)?,
-                    r.get::<_, bool>(3)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, bool>(4)?,
                 ))
             },
         )
@@ -322,6 +337,7 @@ fn candidate(
         start: starts_at.as_deref().and_then(EventTime::parse),
         live: mail_state != "cancelled",
         owner,
+        owner_addr,
         other_sources,
         fed_by_this: m.fed_before.contains(&id),
     }))
@@ -407,8 +423,11 @@ fn match_by_ref(
     Ok(best.map(|(_, (_, _, _, id))| id))
 }
 
-/// (b) By thread, for a record with no usable refs: a ghost of this sender
-/// fed from the same Gmail thread. The one starting on the record's date
+/// (b) By thread, for a record with no usable refs: a ghost created from
+/// this sender's identical address ([`Candidate::sent_by`]) fed from the
+/// same Gmail thread (by any of its source rows, eligible or not, so a ghost
+/// hidden by a seal is still found when the seal lifts). The one starting on
+/// the record's date
 /// wins; failing that, a record that is not `created` takes the thread's only
 /// live candidate (a ref-less "moved to 9pm" follow-up). With several live
 /// candidates and none on its date, it matches nothing: a ref-less
@@ -436,7 +455,7 @@ fn match_by_thread(
             continue;
         }
         if let Some(c) = candidate(conn, account, id, m)?
-            && c.owned_by(m.scope)
+            && c.sent_by(m.scope, m.addr)
         {
             candidates.push(c);
         }
@@ -462,12 +481,17 @@ fn match_by_thread(
 
 /// (c) The ghost this message fed before: what keeps a ghost's id and the
 /// user's mark when a re-triage rewords a title or a ref. Only a ghost this
-/// message ALONE feeds, of its own scope, within a day of the record's start
-/// (or with either start missing): a ghost other mail still describes is
-/// that mail's, and a record now about another date is another event. The
-/// ghost at the record's own position first; when that one does not qualify
-/// (claimed by another record of this message, as after a reorder), the
-/// nearest-starting other one that does.
+/// message ALONE feeds (no source row of any other message, eligible or
+/// not), within a day of the record's start (or with either start missing):
+/// a ghost other mail still describes is that mail's, and a record now about
+/// another date is another event. The ghost at the record's own position
+/// first; when that one does not qualify (claimed by another record of this
+/// message, as after a reorder), the nearest-starting other one that does.
+///
+/// Whatever its owner: no other message feeds it, so it is this message's
+/// own ghost whoever the message now speaks for, and the caller re-owns it
+/// ([`reown`]). Refusing it lost the user's mark whenever a re-sync filled
+/// or cleared the message's authentication result.
 fn match_previous(
     conn: &Connection,
     account: AccountId,
@@ -476,12 +500,8 @@ fn match_previous(
     at_position: Option<i64>,
     claimed: &BTreeSet<i64>,
 ) -> Result<Option<i64>> {
-    let usable = |c: &Candidate| {
-        !claimed.contains(&c.id)
-            && !c.other_sources
-            && c.owned_by(m.scope)
-            && !dates_apart(record, c)
-    };
+    let usable =
+        |c: &Candidate| !claimed.contains(&c.id) && !c.other_sources && !dates_apart(record, c);
     if let Some(id) = at_position
         && let Some(c) = candidate(conn, account, id, m)?
         && usable(&c)
@@ -506,6 +526,24 @@ fn match_previous(
     Ok(best.map(|(_, id)| id))
 }
 
+/// THE ONE PLACE A GHOST'S OWNER CHANGES: a ghost [`match_previous`] gave
+/// back, which only the message being decided feeds, takes that message's
+/// current scope and address. Nothing else can be affected (the ghost has
+/// no other source), and keeping the old owner would make the rebuild
+/// ignore the ghost's only record ([`rebuild`] reads each source's current
+/// scope), or keep a commitment the message no longer has authority for.
+fn reown(conn: &Connection, account: AccountId, id: i64, m: &Matching, now: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE ghost_events SET owner_scope=?3,owner_addr=?4,updated_at=?5
+         WHERE account_id=?1 AND id=?2
+           AND (owner_scope IS NOT ?3 OR owner_addr IS NOT ?4)
+           AND NOT EXISTS(SELECT 1 FROM ghost_event_sources s
+                          WHERE s.account_id=?1 AND s.ghost_id=?2 AND s.message_id<>?6)",
+        params![account, id, m.scope, m.addr, now, m.message],
+    )?;
+    Ok(())
+}
+
 /// Project one message's current decision. See the module doc for the rules;
 /// in order:
 ///
@@ -514,12 +552,14 @@ fn match_previous(
 ///    without it.
 /// 2. Each laundered event record is matched against the state BEFORE this
 ///    message's old assignment is removed, so a re-decision finds the ghosts
-///    it fed, and ONLY among ghosts owned by its own sender scope: (a) by
-///    scoped ref, else (b) with no refs, by thread, else (c) a ghost this
-///    message alone fed before, else (d) a new ghost owned by its scope. An
-///    unauthenticated record skips (a) and (b). A `cancelled` record that
-///    matched nothing creates nothing: there is no event to cancel. No two
-///    records of one message share a ghost.
+///    it fed: (a) by scoped ref, among ghosts of its scope, else (b) with no
+///    refs, by thread, among ghosts created from its identical address, else
+///    (c) a ghost this message alone fed before, whatever its owner (which
+///    then becomes this record's scope and address), else (d) a new ghost
+///    owned by its scope and address. An unauthenticated record skips (a)
+///    and (b). A `cancelled` record that matched nothing creates nothing:
+///    there is no event to cancel. No two records of one message share a
+///    ghost.
 /// 3. The old assignment is replaced by the new one, and every ghost the
 ///    message fed before or feeds now is rebuilt. A ghost is deleted only when
 ///    no source row is left at all.
@@ -561,9 +601,11 @@ pub(super) fn reconcile(
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )?;
     let scope = ghost::sender_scope(&from_addr, auth_pass);
+    let addr = scope.as_ref().map(|_| from_addr.trim().to_lowercase());
     let m = Matching {
         message,
         scope: scope.as_deref(),
+        addr: addr.as_deref(),
         thread: &thread,
         received: DateTime::parse_from_rfc3339(&received)
             .map(|d| d.with_timezone(&Utc))
@@ -586,17 +628,20 @@ pub(super) fn reconcile(
         if target.is_none() {
             let at_position = previous.get(&position).copied();
             target = match_previous(conn, account, &m, record, at_position, &claimed)?;
+            if let Some(id) = target {
+                reown(conn, account, id, &m, &now)?;
+            }
         }
         let id = match target {
             Some(id) => id,
             None if record.change == EventChange::Cancelled => continue,
             None => {
                 // A placeholder the rebuild below fills in. Its owner is
-                // set here, once, and never changed.
+                // set here, and changes only through `reown`.
                 conn.execute(
-                    "INSERT INTO ghost_events(account_id,kind,title,commitment,owner_scope,created_at,updated_at)
-                     VALUES(?1,?2,?3,'unknown',?4,?5,?5)",
-                    params![account, label(&record.kind), record.title, m.scope, now],
+                    "INSERT INTO ghost_events(account_id,kind,title,commitment,owner_scope,owner_addr,created_at,updated_at)
+                     VALUES(?1,?2,?3,'unknown',?4,?5,?6,?6)",
+                    params![account, label(&record.kind), record.title, m.scope, m.addr, now],
                 )?;
                 conn.last_insert_rowid()
             }
@@ -650,13 +695,25 @@ struct Fed {
     proposal: GhostProposal,
 }
 
-/// What a source message's stored decision yields for a rebuild.
+/// What a source message yields for a rebuild.
 enum Stored {
-    /// Its laundered event records, in position order.
-    Events(Vec<GhostProposal>),
-    /// It may not feed a ghost right now: spam, sent, restricted (by its
-    /// access state or by the decision itself) or sealed.
-    Ineligible,
+    /// Its laundered event records, in position order, and whether they may
+    /// supply facts right now: false for a message that is spam, sent,
+    /// restricted (by its access state or by the decision itself) or sealed.
+    ///
+    /// `in_scope` is false when its message's CURRENT sender scope (read
+    /// now, from its `from_addr` and `auth_pass`) is not the ghost's owner:
+    /// it was assigned under a scope it no longer has, so its rows stay and
+    /// contribute nothing (no facts, no keys, no commitment) until the
+    /// message is decided again.
+    Events {
+        events: Vec<GhostProposal>,
+        eligible: bool,
+        in_scope: bool,
+    },
+    /// It has no decision row. Eligible, its rows are stale; ineligible, they
+    /// wait like any other ineligible row.
+    Undecided { eligible: bool },
     /// Its decision does not deserialize. Not known to have stopped feeding
     /// the ghost, so its rows stay and one bad row rewrites nothing.
     Unreadable,
@@ -665,18 +722,23 @@ enum Stored {
 /// Rebuild one ghost from exactly its assigned records, loading only those
 /// messages' decisions.
 ///
-/// - A row whose message is ineligible or unreadable stays and contributes
-///   nothing. A row whose message's decision no longer has a record at that
-///   position (or has no decision) is stale and goes.
+/// - A row whose message is unreadable, or whose message's current scope is
+///   not the owner's, stays and contributes nothing: no facts, no keys, no
+///   commitment. A row whose eligible message's decision no longer has a
+///   record at that position (or has no decision) is stale and goes; an
+///   ineligible message's rows wait for its next reconcile.
+/// - Keys are the union of the in-scope readable records' refs under the
+///   owner scope, ELIGIBLE OR NOT: keys are never served, and a record that
+///   comes back from a seal or a restriction must find its own ghost by ref
+///   even when every other source is still sealed.
 /// - No rows left: the ghost is deleted. Rows but no eligible record: the
-///   facts stay, `supplier_message_id` is cleared and the keys go, so the
-///   listing hides the ghost until a source is eligible again.
+///   facts stay and `supplier_message_id` is cleared, so the listing hides
+///   the ghost until a source is eligible again.
 /// - Otherwise facts come from the newest eligible record that does not
 ///   cancel (or the newest, when all do), `mail_state` from the newest.
-///   Every record has the ghost's owner scope, so commitment is `committed`
-///   when any record is committed or agreed and the owner is authenticated
-///   (a NULL-owner ghost is `unknown` whatever its mail claims). Keys are the
-///   union of the eligible records' refs under the owner scope.
+///   Every such record has the owner's scope now, so commitment is
+///   `committed` when any is committed or agreed and the owner is
+///   authenticated (a NULL-owner ghost is `unknown` whatever its mail claims).
 pub(super) fn rebuild(conn: &Connection, account: AccountId, id: i64, now: &str) -> Result<()> {
     let Some(owner) = conn
         .query_row(
@@ -688,10 +750,11 @@ pub(super) fn rebuild(conn: &Connection, account: AccountId, id: i64, now: &str)
     else {
         return Ok(());
     };
-    type SourceRow = (i64, i64, String, bool, Option<String>);
+    type SourceRow = (i64, i64, String, bool, Option<String>, String, Option<bool>);
     let rows: Vec<SourceRow> = {
         let mut statement = conn.prepare_cached(&format!(
-            "SELECT s.message_id,s.position,m.received_at,{ELIGIBLE},d.decision_json
+            "SELECT s.message_id,s.position,m.received_at,{ELIGIBLE},d.decision_json,
+                    m.from_addr,m.auth_pass
              FROM ghost_event_sources s
              JOIN messages m ON m.account_id=s.account_id AND m.id=s.message_id
              {ELIGIBLE_JOINS}
@@ -700,25 +763,34 @@ pub(super) fn rebuild(conn: &Connection, account: AccountId, id: i64, now: &str)
         ))?;
         statement
             .query_map(params![account, id], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
             })?
             .collect::<std::result::Result<_, _>>()?
     };
     let mut stored: BTreeMap<i64, Stored> = BTreeMap::new();
     let mut feds: Vec<Fed> = Vec::new();
+    let mut keyed: Vec<GhostProposal> = Vec::new();
     let mut stale: Vec<(i64, i64)> = Vec::new();
     let total = rows.len();
-    for (message, position, received, eligible, encoded) in rows {
+    for (message, position, received, eligible, encoded, from_addr, auth_pass) in rows {
         let entry = stored.entry(message).or_insert_with(|| {
-            if !eligible {
-                return Stored::Ineligible;
-            }
             let Some(encoded) = encoded else {
-                return Stored::Events(Vec::new());
+                return Stored::Undecided { eligible };
             };
             match serde_json::from_str::<MessageDecision>(&encoded) {
-                Ok(decision) if decision.external_access.restricted => Stored::Ineligible,
-                Ok(decision) => Stored::Events(ghost::launder_events(&decision.records)),
+                Ok(decision) => Stored::Events {
+                    events: ghost::launder_events(&decision.records),
+                    eligible: eligible && !decision.external_access.restricted,
+                    in_scope: ghost::sender_scope(&from_addr, auth_pass) == owner,
+                },
                 Err(_) => {
                     eprintln!(
                         "squelch: ghost rebuild skipped an unreadable decision (account {account} message {message})"
@@ -727,21 +799,35 @@ pub(super) fn rebuild(conn: &Connection, account: AccountId, id: i64, now: &str)
                 }
             }
         });
-        let Stored::Events(events) = entry else {
-            continue;
+        let (events, eligible, in_scope) = match entry {
+            Stored::Events {
+                events,
+                eligible,
+                in_scope,
+            } => (events.as_slice(), *eligible, *in_scope),
+            Stored::Undecided { eligible: true } => (&[][..], true, false),
+            Stored::Undecided { eligible: false } | Stored::Unreadable => continue,
         };
         let Some(proposal) = usize::try_from(position).ok().and_then(|p| events.get(p)) else {
-            stale.push((message, position));
+            if eligible {
+                stale.push((message, position));
+            }
             continue;
         };
-        feds.push(Fed {
-            message,
-            received: DateTime::parse_from_rfc3339(&received)
-                .map(|d| d.with_timezone(&Utc))
-                .unwrap_or(DateTime::<Utc>::MIN_UTC),
-            position: position as usize,
-            proposal: proposal.clone(),
-        });
+        if !in_scope {
+            continue;
+        }
+        keyed.push(proposal.clone());
+        if eligible {
+            feds.push(Fed {
+                message,
+                received: DateTime::parse_from_rfc3339(&received)
+                    .map(|d| d.with_timezone(&Utc))
+                    .unwrap_or(DateTime::<Utc>::MIN_UTC),
+                position: position as usize,
+                proposal: proposal.clone(),
+            });
+        }
     }
     for (message, position) in &stale {
         conn.execute(
@@ -760,6 +846,16 @@ pub(super) fn rebuild(conn: &Connection, account: AccountId, id: i64, now: &str)
         "DELETE FROM ghost_event_keys WHERE account_id=?1 AND ghost_id=?2",
         params![account, id],
     )?;
+    let keys: BTreeSet<String> = keyed
+        .iter()
+        .flat_map(|p| ghost::identity_keys(p, owner.as_deref()))
+        .collect();
+    for key in keys {
+        conn.execute(
+            "INSERT INTO ghost_event_keys(account_id,ghost_id,key) VALUES(?1,?2,?3)",
+            params![account, id, key],
+        )?;
+    }
     if feds.is_empty() {
         conn.execute(
             "UPDATE ghost_events SET supplier_message_id=NULL,updated_at=?3
@@ -838,16 +934,6 @@ pub(super) fn rebuild(conn: &Connection, account: AccountId, id: i64, now: &str)
             timed,
         ],
     )?;
-    let keys: BTreeSet<String> = feds
-        .iter()
-        .flat_map(|f| ghost::identity_keys(&f.proposal, owner.as_deref()))
-        .collect();
-    for key in keys {
-        conn.execute(
-            "INSERT INTO ghost_event_keys(account_id,ghost_id,key) VALUES(?1,?2,?3)",
-            params![account, id, key],
-        )?;
-    }
     for f in &feds {
         conn.execute(
             "UPDATE ghost_event_sources SET role=?4 WHERE account_id=?1 AND message_id=?2 AND position=?3",
@@ -1698,12 +1784,13 @@ mod tests {
         commit(&store, 4, "arrival", &ticket);
         assert_eq!(listed(&store, 1).len(), 1);
         // A re-decision that restricts its only source hides it. The record
-        // keeps its assignment (lifting the restriction brings the ghost back
-        // with the user's state) but supplies nothing.
+        // keeps its assignment and its key (lifting the restriction finds the
+        // ghost again, with the user's state) but supplies nothing. Round 3
+        // (N1) changed the key count here from 0: keys are never served.
         commit(&store, 4, "record_retraction", &restricted);
         assert!(listed(&store, 1).is_empty());
         assert_eq!(count(&store, "ghost_event_sources"), 1);
-        assert_eq!(count(&store, "ghost_event_keys"), 0, "its keys went");
+        assert_eq!(count(&store, "ghost_event_keys"), 1, "its key stays");
         let supplier: Option<i64> = store
             .lock()
             .unwrap()
@@ -4106,5 +4193,549 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(listed(&store, 1).is_empty());
+    }
+
+    // ---- Round 3 ----
+
+    /// A ghost's row as stored, listed or not: owner scope, owner address,
+    /// user state, commitment, title.
+    type Stored3 = (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+        String,
+    );
+    fn stored(store: &SqliteStore, id: i64) -> Option<Stored3> {
+        store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT owner_scope,owner_addr,user_state,commitment,title FROM ghost_events WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .optional()
+            .unwrap()
+    }
+
+    /// The invariants every reconcile keeps: no ghost without a source row,
+    /// no record (message and position) on two ghosts, and a user mark only
+    /// ever on the ghost it was set on (`marked`, when given).
+    fn invariants(store: &SqliteStore, marked: Option<i64>) {
+        let conn = store.lock().unwrap();
+        let orphans: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM ghost_events g WHERE NOT EXISTS(
+                     SELECT 1 FROM ghost_event_sources s WHERE s.ghost_id=g.id)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphans, 0, "a ghost with no source row");
+        let doubled: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM (SELECT 1 FROM ghost_event_sources
+                 GROUP BY account_id,message_id,position HAVING COUNT(DISTINCT ghost_id)>1)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(doubled, 0, "a record on two ghosts");
+        if let Some(marked) = marked {
+            let elsewhere: Vec<i64> = conn
+                .prepare("SELECT id FROM ghost_events WHERE user_state IS NOT NULL AND id<>?1")
+                .unwrap()
+                .query_map([marked], |r| r.get(0))
+                .unwrap()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap();
+            assert!(elsewhere.is_empty(), "the mark moved to {elsewhere:?}");
+        }
+    }
+
+    /// N1. Two sources of one Going ghost, both restricted, then lifted one
+    /// at a time: the first to come back finds the ghost by the keys the
+    /// still-restricted source keeps for it, so the ghost, its id and its
+    /// mark survive (the reviewer's probe made a new, unmarked ghost and
+    /// deleted this one).
+    #[test]
+    fn two_restricted_sources_lifted_one_at_a_time_keep_the_ghost_and_its_mark() {
+        use crate::store::agent_triage::AgentTriageStore;
+        let store = fixture();
+        mail(&store, 1, 1, "t1", 60);
+        mail(&store, 1, 2, "t2", 30);
+        decide(&store, 1, 1, &Ev::default().decision());
+        decide(
+            &store,
+            1,
+            2,
+            &Ev {
+                title: "Show reminder",
+                change: EventChange::Updated,
+                ..Default::default()
+            }
+            .decision(),
+        );
+        let g = listed(&store, 1)[0].id;
+        store
+            .set_ghost_user_state(1, g, Some(GhostUserState::Going), Utc::now())
+            .unwrap();
+        let access = |id: i64, restricted: bool| {
+            store
+                .correct_agent_triage(
+                    1,
+                    id,
+                    "external_access",
+                    &serde_json::json!(restricted),
+                    Utc::now(),
+                )
+                .unwrap();
+        };
+        access(1, true);
+        access(2, true);
+        assert!(listed(&store, 1).is_empty());
+        assert_eq!(
+            keys(&store, g),
+            vec!["ref:venue.example:abc123"],
+            "an ineligible source keeps its keys"
+        );
+        invariants(&store, Some(g));
+        access(1, false);
+        invariants(&store, Some(g));
+        assert_eq!(count(&store, "ghost_events"), 1);
+        let after = ghost_by(&store, g);
+        assert_eq!(after.user_state, Some(GhostUserState::Going));
+        assert_eq!(after.title, "Show");
+        access(2, false);
+        invariants(&store, Some(g));
+        let ghosts = listed(&store, 1);
+        assert_eq!(ghosts.len(), 1);
+        assert_eq!(
+            (ghosts[0].id, ghosts[0].user_state, ghosts[0].title.as_str()),
+            (g, Some(GhostUserState::Going), "Show reminder")
+        );
+        assert_eq!(
+            roles(&ghosts[0]),
+            vec![(1, EventChange::Created), (2, EventChange::Updated)]
+        );
+    }
+
+    /// N1, ref-less: the same through sealing, where only the thread finds
+    /// the ghost, which it does through the sealed sources' kept rows.
+    #[test]
+    fn two_sealed_refless_sources_unsealed_one_at_a_time_keep_the_ghost() {
+        use crate::types::TriageAxis;
+        let store = fixture();
+        mail(&store, 1, 1, "t1", 60);
+        mail(&store, 1, 2, "t1", 30);
+        decide(
+            &store,
+            1,
+            1,
+            &Ev {
+                refs: &[],
+                ..Default::default()
+            }
+            .decision(),
+        );
+        decide(
+            &store,
+            1,
+            2,
+            &Ev {
+                refs: &[],
+                title: "Show reminder",
+                change: EventChange::Updated,
+                ..Default::default()
+            }
+            .decision(),
+        );
+        let g = listed(&store, 1)[0].id;
+        store
+            .set_ghost_user_state(1, g, Some(GhostUserState::Dismissed), Utc::now())
+            .unwrap();
+        for (id, level) in [(1, "sealed"), (2, "sealed"), (2, "normal"), (1, "normal")] {
+            store
+                .correct_triage(1, id, TriageAxis::Sensitivity, level, None, Utc::now())
+                .unwrap()
+                .unwrap();
+            invariants(&store, Some(g));
+            assert_eq!(count(&store, "ghost_events"), 1, "after {id} {level}");
+        }
+        let ghosts = listed(&store, 1);
+        assert_eq!(
+            (ghosts[0].id, ghosts[0].user_state),
+            (g, Some(GhostUserState::Dismissed))
+        );
+        assert_eq!(source_rows(&store, g), vec![(1, 0), (2, 0)]);
+    }
+
+    /// N2. A re-sync fills in the message's authentication result: its own
+    /// ghost (which it alone feeds) is re-owned to its scope and address,
+    /// keeps its id and the user's Going mark, and is now committed and keyed.
+    #[test]
+    fn an_authentication_result_that_arrives_later_keeps_the_ghost_and_its_mark() {
+        let store = fixture();
+        mail_from(&store, 1, 1, "t1", 60, "Tickets@Venue.example", None);
+        decide(&store, 1, 1, &Ev::default().decision());
+        let g = listed(&store, 1)[0].id;
+        assert_eq!(
+            stored(&store, g).unwrap(),
+            (None, None, None, "unknown".into(), "Show".into())
+        );
+        assert!(keys(&store, g).is_empty());
+        store
+            .set_ghost_user_state(1, g, Some(GhostUserState::Going), Utc::now())
+            .unwrap();
+        set_flag(&store, "UPDATE messages SET auth_pass=1 WHERE id=1");
+        decide(&store, 1, 1, &Ev::default().decision());
+        invariants(&store, Some(g));
+        assert_eq!(count(&store, "ghost_events"), 1);
+        assert_eq!(
+            stored(&store, g).unwrap(),
+            (
+                Some("venue.example".into()),
+                Some("tickets@venue.example".into()),
+                Some("going".into()),
+                "committed".into(),
+                "Show".into()
+            )
+        );
+        assert_eq!(keys(&store, g), vec!["ref:venue.example:abc123"]);
+        assert!(ghost_by(&store, g).verified());
+    }
+
+    /// N2, the reverse: the result is lost. The ghost keeps its id and the
+    /// dismissal, and loses what only authenticated mail may claim: its
+    /// owner, its keys and its committed state.
+    #[test]
+    fn an_authentication_result_that_is_lost_keeps_the_ghost_and_its_dismissal() {
+        let store = fixture();
+        mail(&store, 1, 1, "t1", 60);
+        decide(&store, 1, 1, &Ev::default().decision());
+        let g = listed(&store, 1)[0].id;
+        store
+            .set_ghost_user_state(1, g, Some(GhostUserState::Dismissed), Utc::now())
+            .unwrap();
+        set_flag(&store, "UPDATE messages SET auth_pass=NULL WHERE id=1");
+        decide(&store, 1, 1, &Ev::default().decision());
+        invariants(&store, Some(g));
+        assert_eq!(count(&store, "ghost_events"), 1);
+        assert_eq!(
+            stored(&store, g).unwrap(),
+            (
+                None,
+                None,
+                Some("dismissed".into()),
+                "unknown".into(),
+                "Show".into()
+            )
+        );
+        assert!(keys(&store, g).is_empty());
+        assert!(!ghost_by(&store, g).verified());
+    }
+
+    /// N2's limit: a ghost another message also feeds is never re-owned. The
+    /// message whose authentication went makes a ghost of its own; the
+    /// owner's ghost keeps its owner, its mark and its other source.
+    #[test]
+    fn a_ghost_another_message_feeds_is_never_reowned() {
+        let store = fixture();
+        mail(&store, 1, 1, "t1", 60);
+        mail(&store, 1, 2, "t2", 30);
+        decide(&store, 1, 1, &Ev::default().decision());
+        decide(
+            &store,
+            1,
+            2,
+            &Ev {
+                title: "Show reminder",
+                change: EventChange::Updated,
+                ..Default::default()
+            }
+            .decision(),
+        );
+        let g = listed(&store, 1)[0].id;
+        store
+            .set_ghost_user_state(1, g, Some(GhostUserState::Going), Utc::now())
+            .unwrap();
+        set_flag(&store, "UPDATE messages SET auth_pass=NULL WHERE id=2");
+        decide(
+            &store,
+            1,
+            2,
+            &Ev {
+                title: "Show reminder",
+                change: EventChange::Updated,
+                ..Default::default()
+            }
+            .decision(),
+        );
+        invariants(&store, Some(g));
+        let (owner, owner_addr, mark, commitment, title) = stored(&store, g).unwrap();
+        assert_eq!(
+            (owner.as_deref(), owner_addr.as_deref(), mark.as_deref()),
+            (
+                Some("venue.example"),
+                Some("tickets@venue.example"),
+                Some("going")
+            )
+        );
+        assert_eq!((commitment.as_str(), title.as_str()), ("committed", "Show"));
+        assert_eq!(source_rows(&store, g), vec![(1, 0)]);
+        let other = listed(&store, 1).into_iter().find(|x| x.id != g).unwrap();
+        assert_eq!(other.owner_scope, None);
+        assert_eq!(roles(&other), vec![(2, EventChange::Updated)]);
+    }
+
+    /// N3. A source whose message lost its authentication after it was
+    /// assigned contributes nothing to a rebuild another message triggers:
+    /// not its commitment, not its keys, not its facts.
+    #[test]
+    fn a_source_that_lost_its_scope_contributes_nothing_to_a_rebuild() {
+        let store = fixture();
+        mail(&store, 1, 1, "t1", 60);
+        mail(&store, 1, 2, "t2", 30);
+        decide(
+            &store,
+            1,
+            1,
+            &Ev {
+                refs: &["ABC123", "XYZ789"],
+                ..Default::default()
+            }
+            .decision(),
+        );
+        let g = listed(&store, 1)[0].id;
+        set_flag(&store, "UPDATE messages SET auth_pass=0 WHERE id=1");
+        decide(
+            &store,
+            1,
+            2,
+            &Ev {
+                title: "Show reminder",
+                change: EventChange::Updated,
+                commitment: EventCommitment::Unknown,
+                ..Default::default()
+            }
+            .decision(),
+        );
+        invariants(&store, None);
+        let after = ghost_by(&store, g);
+        assert_eq!(after.commitment, EventCommitment::Unknown);
+        assert_eq!(after.supplier_message_id, Some(2));
+        assert_eq!(keys(&store, g), vec!["ref:venue.example:abc123"]);
+        // Its row stays, like an ineligible source's.
+        assert_eq!(source_rows(&store, g), vec![(1, 0), (2, 0)]);
+        // With message 2 gone too, nothing in scope is eligible: hidden.
+        set_flag(&store, "UPDATE messages SET is_spam=1 WHERE id=2");
+        decide(&store, 1, 2, &MessageDecision::default());
+        assert!(listed(&store, 1).is_empty());
+        assert_eq!(count(&store, "ghost_events"), 1);
+    }
+
+    /// N4. Two strangers at a shared domain no list knows (`isp.example`)
+    /// have one scope, so only the identical-address test keeps the second
+    /// from renaming, moving or cancelling the first's ref-less ghost in a
+    /// thread they share. Each address owns its own ghost.
+    #[test]
+    fn a_stranger_on_an_unlisted_shared_domain_cannot_join_a_refless_ghost() {
+        let store = fixture();
+        mail_from(&store, 1, 1, "t1", 90, "Alice@ISP.example", Some(true));
+        mail_from(&store, 1, 2, "t1", 60, "mallory@isp.example", Some(true));
+        mail_from(&store, 1, 3, "t1", 30, "mallory@isp.example", Some(true));
+        let dinner = |title, change, start| Ev {
+            title,
+            refs: &[],
+            change,
+            start: Some(start),
+            commitment: EventCommitment::Invited,
+            kind: EventRecordKind::Invite,
+            location: None,
+        };
+        decide(
+            &store,
+            1,
+            1,
+            &dinner("Dinner", EventChange::Created, "2026-10-03T19:00:00-04:00").decision(),
+        );
+        let alice = listed(&store, 1)[0].id;
+        assert_eq!(
+            stored(&store, alice).unwrap().0.as_deref(),
+            Some("isp.example"),
+            "one scope for both: the list does not know this domain"
+        );
+        assert_eq!(
+            stored(&store, alice).unwrap().1.as_deref(),
+            Some("alice@isp.example")
+        );
+        decide(
+            &store,
+            1,
+            2,
+            &dinner(
+                "Dinner at 8",
+                EventChange::Updated,
+                "2026-10-03T20:00:00-04:00",
+            )
+            .decision(),
+        );
+        decide(
+            &store,
+            1,
+            3,
+            &dinner(
+                "Dinner off",
+                EventChange::Cancelled,
+                "2026-10-03T19:00:00-04:00",
+            )
+            .decision(),
+        );
+        invariants(&store, None);
+        let after = ghost_by(&store, alice);
+        assert_eq!(
+            (after.title.as_str(), after.mail_state),
+            ("Dinner", GhostMailState::Live)
+        );
+        assert_eq!(roles(&after), vec![(1, EventChange::Created)]);
+        let ghosts = listed(&store, 1);
+        assert_eq!(ghosts.len(), 2);
+        let other = ghosts.iter().find(|g| g.id != alice).unwrap();
+        assert_eq!(
+            stored(&store, other.id).unwrap().1.as_deref(),
+            Some("mallory@isp.example")
+        );
+        // Mallory's own cancellation found Mallory's own ghost.
+        assert_eq!(other.mail_state, GhostMailState::Cancelled);
+        // Alice herself still moves her ghost by thread.
+        mail_from(&store, 1, 4, "t1", 10, "alice@isp.example", Some(true));
+        decide(
+            &store,
+            1,
+            4,
+            &dinner(
+                "Dinner at 7:30",
+                EventChange::Updated,
+                "2026-10-03T19:30:00-04:00",
+            )
+            .decision(),
+        );
+        assert_eq!(ghost_by(&store, alice).title, "Dinner at 7:30");
+    }
+
+    /// N4: the ref rule still takes the scope, not the address: a merchant
+    /// confirms from one mailbox and cancels from another.
+    #[test]
+    fn one_organisation_still_matches_by_ref_across_its_addresses() {
+        let store = fixture();
+        mail_from(
+            &store,
+            1,
+            1,
+            "t1",
+            60,
+            "reservations@hotel.example",
+            Some(true),
+        );
+        mail_from(
+            &store,
+            1,
+            2,
+            "t2",
+            30,
+            "noreply@mail.hotel.example",
+            Some(true),
+        );
+        decide(&store, 1, 1, &Ev::default().decision());
+        let g = listed(&store, 1)[0].id;
+        decide(
+            &store,
+            1,
+            2,
+            &Ev {
+                change: EventChange::Cancelled,
+                ..Default::default()
+            }
+            .decision(),
+        );
+        let after = ghost_by(&store, g);
+        assert_eq!(after.mail_state, GhostMailState::Cancelled);
+        assert_eq!(
+            roles(&after),
+            vec![(1, EventChange::Created), (2, EventChange::Cancelled)]
+        );
+        assert_eq!(count(&store, "ghost_events"), 1);
+    }
+
+    /// The four invariants through a long run of the round's changes on one
+    /// marked ghost: restrictions, an authentication flip on one source, a
+    /// re-triage, a stranger's reply, spam and rescue.
+    #[test]
+    fn a_marked_ghost_keeps_its_invariants_through_every_change() {
+        use crate::store::agent_triage::AgentTriageStore;
+        let store = fixture();
+        mail(&store, 1, 1, "t1", 90);
+        mail(&store, 1, 2, "t1", 60);
+        mail_from(&store, 1, 3, "t1", 30, "mallory@venue.example", Some(true));
+        decide(&store, 1, 1, &Ev::default().decision());
+        let update = Ev {
+            title: "Show (late set)",
+            change: EventChange::Updated,
+            ..Default::default()
+        };
+        decide(&store, 1, 2, &update.decision());
+        let g = listed(&store, 1)[0].id;
+        store
+            .set_ghost_user_state(1, g, Some(GhostUserState::Going), Utc::now())
+            .unwrap();
+        let owner = || stored(&store, g).map(|s| (s.0, s.1));
+        let first_owner = owner();
+        let step = |label: &str| {
+            invariants(&store, Some(g));
+            assert_eq!(
+                stored(&store, g).and_then(|s| s.2).as_deref(),
+                Some("going"),
+                "{label}"
+            );
+        };
+        for (id, restricted) in [(2, true), (1, true), (2, false), (1, false)] {
+            store
+                .correct_agent_triage(
+                    1,
+                    id,
+                    "external_access",
+                    &serde_json::json!(restricted),
+                    Utc::now(),
+                )
+                .unwrap();
+            step(&format!("access {id} {restricted}"));
+            assert_eq!(owner(), first_owner, "another source feeds it");
+        }
+        set_flag(&store, "UPDATE messages SET auth_pass=NULL WHERE id=2");
+        decide(&store, 1, 2, &update.decision());
+        step("message 2 lost its authentication");
+        assert_eq!(owner(), first_owner);
+        decide(
+            &store,
+            1,
+            3,
+            &Ev {
+                refs: &[],
+                title: "Show cancelled",
+                change: EventChange::Cancelled,
+                ..Default::default()
+            }
+            .decision(),
+        );
+        step("a stranger at the same domain cancels by thread");
+        assert_eq!(ghost_by(&store, g).mail_state, GhostMailState::Live);
+        set_flag(&store, "UPDATE messages SET is_spam=1 WHERE id=1");
+        decide(&store, 1, 1, &Ev::default().decision());
+        step("spam");
+        assert!(store.clear_spam(1, 1).unwrap());
+        step("rescued");
+        assert_eq!(owner(), first_owner);
+        assert_eq!(ghost_by(&store, g).title, "Show");
     }
 }

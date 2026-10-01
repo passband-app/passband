@@ -28,7 +28,6 @@ use crate::timezone::{
     FUTURE_TOLERANCE_DAYS, InferredZone, InviteZone, MAX_OFFSET_OBSERVATIONS, MAX_ORGANIZER_BYTES,
     OFFSET_WINDOW_DAYS, OffsetObservation, ZoneConfidence, ZoneSource, canonical_zone, infer_zone,
 };
-use crate::triage::ghost::organisation_domain;
 
 /// One sender's offset observations, newest first: authenticated, inbound,
 /// not spam, inside the twelve-month window and not dated more than
@@ -57,28 +56,43 @@ pub(super) const OFFSETS_SQL: &str = "SELECT received_at, date_offset_minutes FR
      ORDER BY received_at DESC
      LIMIT ?5";
 
+/// One organizer's invitation zones, newest first: the newest
+/// [`crate::timezone::INVITE_WINDOW`] rows not dated past the future bound,
+/// of which those whose message is inbound and not spam count (a spam or sent
+/// message's invitation stays on file, unread, until a rescue makes it
+/// count).
+///
+/// This read is a seek on `idx_sender_zone_invites_recent` (the address, then
+/// the future bound as a range) that walks the index in this order and stops
+/// at the window, so its cost does not grow with how many invitations the
+/// person has ever sent and nothing is sorted. Only the window's rows are then
+/// checked against `messages` ([`INVITE_COUNTS_SQL`], by primary key), whose
+/// flags sit after the body. `tests/zones.rs` pins both plans.
+pub(super) const INVITES_SQL: &str = "SELECT zone, message_id FROM sender_zone_invites
+     WHERE account_id = ?1 AND addr = ?2 AND observed_at <= ?3
+     ORDER BY observed_at DESC, message_id DESC
+     LIMIT ?4";
+
+/// Whether one invitation in the window counts: its message is inbound and
+/// not spam.
+pub(super) const INVITE_COUNTS_SQL: &str = "SELECT EXISTS(SELECT 1 FROM messages
+     WHERE id = ?2 AND account_id = ?1 AND is_sent = 0 AND is_spam = 0)";
+
 /// THE INVITATION BINDING. An `.ics` names its own organizer, and anyone can
 /// write one: a forged invitation naming a real person as organizer would set
 /// that person's zone at high confidence, above any number of their real
 /// offsets. So an invitation is credited only when the message is
-/// AUTHENTICATED and its From is the organizer (compared case-insensitively,
-/// as the addresses are stored) or belongs to the same organisation
-/// ([`organisation_domain`]: Some and equal for both, so a freemail or
-/// shared-tenant domain never vouches for another address on it). That keeps
-/// what the signal is for: a person's own invitation, or one their assistant
-/// or their company's calendar address sent for them.
+/// AUTHENTICATED and its From IS the organizer (compared case-insensitively,
+/// as the addresses are stored).
+///
+/// Not "someone at the organizer's organisation": authentication vouches for
+/// a domain, and telling an organisation's domain from one that strangers
+/// share (a consumer ISP, a mail provider's hundred sign-up domains) takes a
+/// list that is never complete. An invitation a delegate or a calendar
+/// address sends is no observation; the organizer's own mail still teaches
+/// their zone through its offsets.
 fn invitation_is_bound(from_addr: &str, auth_pass: Option<i64>, organizer: &str) -> bool {
-    if auth_pass != Some(1) {
-        return false;
-    }
-    let (from, organizer) = (from_addr.trim(), organizer.trim());
-    if from.eq_ignore_ascii_case(organizer) {
-        return true;
-    }
-    matches!(
-        (organisation_domain(from), organisation_domain(organizer)),
-        (Some(a), Some(b)) if a == b
-    )
+    auth_pass == Some(1) && from_addr.trim().eq_ignore_ascii_case(organizer.trim())
 }
 
 /// Is `addr` the account's own address? Its owner's zone is the device's,
@@ -114,30 +128,26 @@ pub(super) fn refresh_sender_zone_conn(
     // starts counting next week, as the ordinary mail it will then be.
     let until = (now + chrono::Duration::days(FUTURE_TOLERANCE_DAYS)).to_rfc3339();
 
-    // Newest first, and only from mail that counts: a spam or sent message's
-    // invitation stays on file, unread, until a rescue makes it count. The
-    // rows were bound to their sender when written (`observe`). A probe on
-    // the primary key's (account_id, addr) prefix; the date bound filters it.
-    let mut stmt = conn.prepare_cached(
-        "SELECT i.zone FROM sender_zone_invites i
-         JOIN messages m ON m.account_id = i.account_id AND m.id = i.message_id
-         WHERE i.account_id = ?1 AND i.addr = ?2
-           AND m.is_sent = 0 AND m.is_spam = 0
-           AND i.observed_at <= ?4
-         ORDER BY i.observed_at DESC, i.message_id DESC
-         LIMIT ?3",
-    )?;
-    let invites = stmt
+    // The rows were bound to their sender when written (`observe`).
+    let mut stmt = conn.prepare_cached(INVITES_SQL)?;
+    let window = stmt
         .query_map(
             params![
                 account_id,
                 addr,
-                crate::timezone::INVITE_WINDOW as i64,
-                until
+                until,
+                crate::timezone::INVITE_WINDOW as i64
             ],
-            |r| r.get::<_, String>(0),
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
         )?
         .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut counts = conn.prepare_cached(INVITE_COUNTS_SQL)?;
+    let mut invites = Vec::with_capacity(window.len());
+    for (zone, message_id) in window {
+        if counts.query_row(params![account_id, message_id], |r| r.get::<_, bool>(0))? {
+            invites.push(zone);
+        }
+    }
 
     let since = (now - chrono::Duration::days(OFFSET_WINDOW_DAYS)).to_rfc3339();
     let mut stmt = conn.prepare_cached(OFFSETS_SQL)?;

@@ -1618,10 +1618,16 @@ CREATE TABLE IF NOT EXISTS agent_delivery_projections (
 -- `triage::ghost::venue_key(location)`, so the duration prior joins in SQL.
 --
 -- `owner_scope` is the sender scope (`triage::ghost::sender_scope`) of the
--- record that created the ghost, set once and never changed; NULL for a ghost
--- made from unauthenticated mail. Only a record of that same scope is ever
--- assigned to the ghost, so another sender replying in its thread makes a
--- ghost of its own, and a NULL-owner ghost takes nothing from other mail.
+-- record that created the ghost; NULL for a ghost made from unauthenticated
+-- mail. `owner_addr` is that record's From address, lowercased (NULL when
+-- `owner_scope` is): matching by thread needs the identical address, because
+-- no list of domains strangers share is ever complete; matching by ref needs
+-- only the scope. Only a record of the owner's scope is ever assigned to the
+-- ghost, so another sender replying in its thread makes a ghost of its own,
+-- and a NULL-owner ghost takes nothing from other mail. The two are set at
+-- creation and change in one case only: a re-decision of the one message
+-- that alone feeds the ghost re-owns it to that message's current scope and
+-- address (its authentication result can arrive or go on a re-sync).
 --
 -- `supplier_message_id` is the message whose record supplied the served facts.
 -- The listing serves a ghost only while THAT message is eligible (not sent,
@@ -1653,7 +1659,8 @@ CREATE TABLE IF NOT EXISTS ghost_events (
     venue_key           TEXT,
     commitment          TEXT NOT NULL,
     owner_scope         TEXT,
-    mail_state          TEXT NOT NULL DEFAULT 'live' CHECK(mail_state IN ('live','cancelled')),
+    owner_addr          TEXT,
+    mail_state         TEXT NOT NULL DEFAULT 'live' CHECK(mail_state IN ('live','cancelled')),
     likelihood_band     TEXT,
     likelihood_reason   TEXT,
     supplier_message_id INTEGER,
@@ -1667,9 +1674,12 @@ CREATE TABLE IF NOT EXISTS ghost_events (
 );
 CREATE INDEX IF NOT EXISTS idx_ghost_events_start ON ghost_events(account_id, start_sort);
 -- How later mail finds a ghost: `ref:<sender scope>:<ref>` for every identity
--- ref of the ghost's currently assigned eligible records, recomputed on each
--- rebuild, so a key leaves with its record. NOT unique: two ghosts may hold
--- one key (a flight number on two dates), and matching picks between them.
+-- ref of the ghost's currently assigned records whose decision is readable and
+-- whose message is still of the owner's scope, eligible or not (keys are never
+-- served, and a record coming back from a seal must find its own ghost),
+-- recomputed on each rebuild, so a key leaves with its record. NOT unique: two
+-- ghosts may hold one key (a flight number on two dates), and matching picks
+-- between them.
 CREATE TABLE IF NOT EXISTS ghost_event_keys (
     account_id INTEGER NOT NULL,
     ghost_id   INTEGER NOT NULL,
@@ -1680,8 +1690,9 @@ CREATE INDEX IF NOT EXISTS idx_ghost_event_keys_ghost ON ghost_event_keys(accoun
 -- The ASSIGNMENT of one record to one ghost: record `position` (its index
 -- among the message's laundered event records, `triage::ghost::launder_events`)
 -- of `message_id`. A record belongs to exactly one ghost; ghosts are never
--- merged. `role` is the record's `change`. Every assigned record has the
--- ghost's `owner_scope`, so the scope is not repeated here.
+-- merged. `role` is the record's `change`. Every record had the ghost's
+-- `owner_scope` when it was assigned; a rebuild re-reads its message's scope
+-- and a record whose message no longer has it contributes nothing.
 CREATE TABLE IF NOT EXISTS ghost_event_sources (
     account_id INTEGER NOT NULL,
     ghost_id   INTEGER NOT NULL,
@@ -1739,13 +1750,14 @@ END;
 -- One row per invitation that named a zone: the iCalendar ORGANIZER, credited
 -- with the TZID of the first DTSTART under its canonical name
 -- (`timezone::canonical_zone`). Written ONLY for authenticated mail whose From
--- is the organizer or the organizer's organisation (`zones::invitation_is_bound`),
--- so a forged invitation leaves no row. Keyed by message, so a re-ingest
+-- is the organizer's own address (`zones::invitation_is_bound`), so a forged
+-- invitation leaves no row. Keyed by message, so a re-ingest
 -- replaces its own row instead of adding one, and the row goes with its
 -- message (trigger below). Rows are written for spam and sent mail too (never
--- for an invitation the account itself organized); the inference reads only
--- those whose message is inbound, not spam and not dated more than a day
--- ahead, so a message rescued from spam starts counting without a rewrite.
+-- for an invitation the account itself organized); the inference takes the
+-- newest 20 not dated more than a day ahead and counts those whose message is
+-- inbound and not spam, so a message rescued from spam starts counting
+-- without a rewrite.
 CREATE TABLE IF NOT EXISTS sender_zone_invites (
     account_id  INTEGER NOT NULL,
     addr        TEXT NOT NULL COLLATE NOCASE,
@@ -1757,6 +1769,11 @@ CREATE TABLE IF NOT EXISTS sender_zone_invites (
 );
 CREATE INDEX IF NOT EXISTS idx_sender_zone_invites_message
     ON sender_zone_invites(account_id, message_id);
+-- The recompute's read: one person's newest invitations up to the future
+-- bound, straight off this index in order (`message_id` is the tie-break),
+-- so only the newest few are ever looked up in `messages`.
+CREATE INDEX IF NOT EXISTS idx_sender_zone_invites_recent
+    ON sender_zone_invites(account_id, addr, observed_at, message_id);
 CREATE TRIGGER IF NOT EXISTS sender_zone_invites_follow_message
 AFTER DELETE ON messages BEGIN
     DELETE FROM sender_zone_invites

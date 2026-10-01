@@ -706,8 +706,9 @@ pub struct GhostEvent {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     /// The sender scope the ghost belongs to (`triage::ghost::sender_scope`),
-    /// set when it was created and never changed. None for a ghost made from
-    /// mail that did not pass authentication.
+    /// set when it was created; it changes only when the one message that
+    /// alone feeds the ghost is re-decided under another scope. None for a
+    /// ghost made from mail that did not pass authentication.
     pub owner_scope: Option<String>,
     /// Oldest first.
     pub sources: Vec<GhostSource>,

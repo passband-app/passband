@@ -261,15 +261,19 @@ pub fn place_zone(name: &str) -> Option<Tz> {
 /// Asia/Kolkata, and (by the curated list's one-zone-per-rule-set design)
 /// "Europe/Paris" as Europe/Berlin. Without this, two invitations from one
 /// person split their vote across two names for one clock. Where several
-/// curated zones agree at every sample (Athens and Jerusalem change their
-/// clocks two days apart, which a fortnight can step over), the first that
-/// also agrees on every day of the year wins, else the first in priority
-/// order. Curated zones that keep the same clock all year cannot be told
-/// apart this way, so an alias of the later one counts as the earlier:
-/// "America/Buenos_Aires" as America/Sao_Paulo (both UTC-3 since Brazil
-/// dropped daylight saving), "Asia/Hong_Kong" as Asia/Shanghai. The offsets
-/// inference names the same zone for the same mail. A place that agrees with
-/// no curated zone keeps its own name.
+/// curated zones agree at every sample, the one whose last path component is
+/// the alias's own wins first: "America/Buenos_Aires" (the old name) is
+/// America/Argentina/Buenos_Aires, not America/Sao_Paulo, which has kept the
+/// same UTC-3 since Brazil dropped daylight saving. Failing that, among those
+/// that also agree on every day of the year (Athens and Jerusalem change
+/// their clocks two days apart, which a fortnight can step over; all of them
+/// when none does), the first in priority order in the alias's own region
+/// ("Australia/West", Perth's old name, is Australia/Perth, not
+/// Asia/Shanghai; "Asia/Kuwait" is Asia/Riyadh), else the first in priority
+/// order. Two names in one region with one clock still fall to the earlier
+/// zone: "Asia/Kuala_Lumpur", which tzdata now makes Singapore's other name,
+/// counts as Asia/Shanghai, so those two names can split a vote. A place
+/// that agrees with no curated zone keeps its own name.
 ///
 /// `at` is the observation's instant: zones change their rules over the
 /// years, and the year an invitation was sent is the one it speaks for.
@@ -290,14 +294,28 @@ pub fn canonical_zone(name: &str, at: DateTime<Utc>) -> Option<String> {
         .filter_map(|name| name.parse::<Tz>().ok())
         .filter(|curated| same_clock(*curated, 14, CANONICAL_SAMPLES))
         .collect();
+    // The city a name ends in ("Buenos_Aires" for both "America/Buenos_Aires"
+    // and "America/Argentina/Buenos_Aires") and the region it starts with.
+    let city = |zone: Tz| zone.name().rsplit('/').next().unwrap_or_default();
+    let region = |zone: Tz| zone.name().split('/').next().unwrap_or_default();
     let chosen = match agreeing.as_slice() {
         [] => tz,
         [only] => *only,
-        several => several
-            .iter()
-            .copied()
-            .find(|curated| same_clock(*curated, 1, 365))
-            .unwrap_or(several[0]),
+        several => match several.iter().find(|curated| city(**curated) == city(tz)) {
+            Some(same_city) => *same_city,
+            None => {
+                let daily: Vec<Tz> = several
+                    .iter()
+                    .copied()
+                    .filter(|curated| same_clock(*curated, 1, 365))
+                    .collect();
+                let pool = if daily.is_empty() { several } else { &daily };
+                pool.iter()
+                    .copied()
+                    .find(|curated| region(*curated) == region(tz))
+                    .unwrap_or(pool[0])
+            }
+        },
     };
     Some(chosen.name().to_string())
 }
@@ -978,9 +996,10 @@ mod tests {
             ("America/Toronto", "America/New_York"),
             ("Asia/Calcutta", "Asia/Kolkata"),
             ("Asia/Katmandu", "Asia/Kathmandu"),
-            // Same clock all year as Sao Paulo, which is listed first: the
-            // name is lost, the clock is not (see `canonical_zone`).
-            ("America/Buenos_Aires", "America/Sao_Paulo"),
+            // Same clock all year as Sao Paulo, which is listed first, but
+            // the city in the name decides (round 3, N5: this expectation
+            // was America/Sao_Paulo, which split one person's vote).
+            ("America/Buenos_Aires", "America/Argentina/Buenos_Aires"),
             (
                 "America/Argentina/Buenos_Aires",
                 "America/Argentina/Buenos_Aires",
@@ -1003,6 +1022,63 @@ mod tests {
         assert_eq!(
             canonical_zone("Pacific/Chatham", now()).as_deref(),
             Some("Pacific/Chatham")
+        );
+    }
+
+    /// Round 3 (N5): the old and new spellings of one place count as the
+    /// same curated zone, so a person whose calendar moved to the new name
+    /// does not split their own vote. Pinned for the common backward links
+    /// whose target is curated, in the years either side of a rule change.
+    #[test]
+    fn backward_links_count_as_the_zone_they_name() {
+        for (link, target) in [
+            ("America/Buenos_Aires", "America/Argentina/Buenos_Aires"),
+            ("Asia/Calcutta", "Asia/Kolkata"),
+            ("Asia/Katmandu", "Asia/Kathmandu"),
+            ("Asia/Rangoon", "Asia/Yangon"),
+            ("Asia/Dacca", "Asia/Dhaka"),
+            ("Asia/Istanbul", "Europe/Istanbul"),
+            ("Asia/Tel_Aviv", "Asia/Jerusalem"),
+            ("Asia/Chongqing", "Asia/Shanghai"),
+            ("Asia/Harbin", "Asia/Shanghai"),
+            ("Europe/Belfast", "Europe/London"),
+            ("US/Eastern", "America/New_York"),
+            ("US/Central", "America/Chicago"),
+            ("US/Mountain", "America/Denver"),
+            ("US/Arizona", "America/Phoenix"),
+            ("US/Pacific", "America/Los_Angeles"),
+            ("US/Alaska", "America/Anchorage"),
+            ("US/Hawaii", "Pacific/Honolulu"),
+            ("Canada/Atlantic", "America/Halifax"),
+            ("Canada/Newfoundland", "America/St_Johns"),
+            ("Mexico/General", "America/Mexico_City"),
+            ("Brazil/East", "America/Sao_Paulo"),
+            ("Chile/Continental", "America/Santiago"),
+            ("Australia/NSW", "Australia/Sydney"),
+            ("Australia/ACT", "Australia/Sydney"),
+            ("Australia/Canberra", "Australia/Sydney"),
+            ("Australia/Queensland", "Australia/Brisbane"),
+            ("Australia/North", "Australia/Darwin"),
+            ("Australia/South", "Australia/Adelaide"),
+            ("Australia/West", "Australia/Perth"),
+            // One clock, several listed zones: the alias's own region.
+            ("Asia/Kuwait", "Asia/Riyadh"),
+            ("Africa/Addis_Ababa", "Africa/Nairobi"),
+        ] {
+            for year in [2021, 2026] {
+                let at = Utc.with_ymd_and_hms(year, 6, 1, 0, 0, 0).unwrap();
+                assert_eq!(
+                    canonical_zone(link, at).as_deref(),
+                    Some(target),
+                    "{link} in {year}"
+                );
+            }
+        }
+        // Two names in one region with one clock fall to the earlier listed
+        // zone, whichever tzdata calls the other's alias.
+        assert_eq!(
+            canonical_zone("Asia/Kuala_Lumpur", now()).as_deref(),
+            Some("Asia/Shanghai")
         );
     }
 

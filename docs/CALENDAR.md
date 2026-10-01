@@ -88,27 +88,40 @@ same sender feed the same row.
   a scope from its message, and only when the message passed authentication:
   the sender's registrable domain under the Public Suffix List (so
   `hotel.com.mx` and `evil.com.mx` are two senders), or the full address on a
-  freemail domain or a shared tenant (`*.onmicrosoft.com`,
-  `googlegroups.com`), where a domain says nothing about who wrote. Its
-  identity refs (an iCalendar UID, a confirmation or booking number, an event
-  page URL) are keyed under that scope. A stranger quoting the user's booking
-  number from another domain gets a ghost of their own and cannot move,
-  rename or cancel the user's.
-- **A ghost belongs to the sender that made it, for good.** Its owner scope
-  is set when it is created and never changes, and only records of that
-  scope are ever assigned to it. Another person's "let's do 8 instead" in the
-  same thread is a second ghost, not an edit of the first; the scheduling
-  wave handles negotiation properly.
+  domain strangers share, where a domain says nothing about who wrote:
+  freemail, the large consumer ISPs (`comcast.net`, `btinternet.com`,
+  `orange.fr`), the mail.com family, `duck.com`, Apple's relay host
+  `privaterelay.appleid.com` (matched as a host: `appleid.com` itself is
+  still Apple), and shared tenants (`*.onmicrosoft.com`, `googlegroups.com`).
+  Its identity refs (an iCalendar UID, a confirmation or booking number, an
+  event page URL) are keyed under that scope. A stranger quoting the user's
+  booking number from another domain gets a ghost of their own and cannot
+  move, rename or cancel the user's.
+- **A ghost belongs to the sender that made it.** It records the creating
+  record's scope (`owner_scope`) and its From address (`owner_addr`). A
+  record joins it by ref only from that scope, since a merchant confirms from
+  one mailbox and cancels from another, and a ref is something the sender
+  must know. A record joins it by thread only from that identical address:
+  the list of shared domains will never be complete, and two strangers at a
+  domain it misses share a scope. Another person's "let's do 8 instead" in
+  the same thread is a second ghost, not an edit of the first; the
+  scheduling wave handles negotiation properly.
+- **The owner changes in one case only.** When the one message that alone
+  feeds a ghost is decided again under another scope or address (a re-sync
+  filled in or cleared its authentication result), the ghost is re-owned to
+  what the message is now, and keeps its id and the user's marks. A ghost
+  any other message feeds is never re-owned.
 - **Unauthenticated mail speaks for nobody.** Its records match no other
   ghost, never join a ghost other mail feeds, and never commit one.
-- **Matching, in order:** a ghost of the same sender holding one of the
+- **Matching, in order:** a ghost of the same scope holding one of the
   record's scoped refs and starting within a day of it (only an update may
-  move a date); with no usable ref, a ghost of the same sender from the same
-  thread on the same date (or, for a ref-less update or cancellation, the
-  thread's only live ghost); the ghost this message alone fed before, within a
-  day, which is what keeps a ghost's id and the user's dismissal when a
-  re-triage rewords a title; otherwise a new ghost. A cancellation that
-  matches nothing creates nothing: there is no event to cancel.
+  move a date); with no usable ref, a ghost created from the same address in
+  the same thread on the same date (or, for a ref-less update or
+  cancellation, that address's only live ghost in the thread); the ghost
+  this message alone fed before, within a day, which is what keeps a ghost's
+  id and the user's dismissal when a re-triage rewords a title; otherwise a
+  new ghost. A cancellation that matches nothing creates nothing: there is no
+  event to cancel.
 - **Ghosts never merge.** Each record is assigned to exactly one ghost and the
   assignment is remembered. A record that could match several is given to one
   and the others are left alone. A duplicate ghost is an acceptable outcome;
@@ -125,13 +138,14 @@ same sender feed the same row.
 - **Expiry replaces the 24-hour hide.** A ghost lives at its time and leaves
   when that time passes. `CalendarVisibility` is deleted.
 - **Sealed, spam, sent and restricted mail feeds nothing.** Its records keep
-  their place on a ghost but supply nothing. A ghost whose facts came from
-  such a message is hidden until another source supplies them, and
-  un-sealing or un-spamming the message matches its stored records again,
-  which brings the ghost back with the user's marks intact unless the
-  message now describes something else. Deleting the message a ghost's facts
-  came from hides the ghost too, until another of its messages is decided
-  again.
+  their place on a ghost, and their refs keep the ghost findable, but they
+  supply no facts. A ghost whose facts came from such a message is hidden
+  until another source supplies them. Un-sealing or un-spamming the message
+  matches its stored records again and finds the same ghost (by its refs, or
+  by its thread), even while the ghost's other sources are still sealed, so
+  the ghost comes back with the user's marks intact unless the message now
+  describes something else. Deleting the message a ghost's facts came from
+  hides the ghost too, until another of its messages is decided again.
 
 ### 3.3 What goes on the real calendar (DECIDED)
 
@@ -269,28 +283,39 @@ never rejected:
   and the band stay) when they carry a URL, an `@` or a run of 6 or more
   digits, counted across the separators a number is printed with ("call
   555-1234" is a run).
-- At most 5 refs per record. A URL ref loses its query and fragment and is
-  kept only when the path names one event: a last segment with a digit, or a
-  last segment of 6 or more characters under another one. A bare site, a
+- At most 5 refs per record. A URL ref loses its query, its fragment and
+  any `;` parameters on its path; its host is lowercased and its path keeps
+  its case (an event id there is case-sensitive). It is kept only when the
+  path names one event: a last segment with a digit, or a last segment of 6
+  or more characters under another one. A bare site, a
   route whose id lived in the query (Google Calendar's `event?eid=`,
   OpenTable's `book/view?rid=`) and any path with a secret-shaped segment are
   dropped: an unbroken run of more than 24 characters mixing letters and
   digits (a magic link), or a UUID (a cancellation link). A hyphenated slug is
   not a secret, however long. A ref with a URL anywhere in it, glued to a
   label or not ("Event page:https://..."), is that URL alone.
-- Any other ref is split into words. Label words ("confirmation", "order",
-  "booking", "ref", "flight" and the like) go wherever they stand, and so do
-  a position word and its number ("Seat 12A", "Gate 4"). If a word with a
-  digit is left, the key is those words joined: "OpenTable confirmation
-  123456789" and "123456789" agree. A key under 5 characters takes the 1 to 3
-  letter word just before it, so "UA 123" and "Flight UA123" are both
-  `ua123`. With no digit, only a single all-capitals word that is not a
+- Any other ref is keyed on ONE code run. Label words ("confirmation",
+  "order", "booking", "ref", "flight" and the like) go wherever they stand;
+  a clock time ("8pm", "10:30am", "19:00") and a position word with its
+  number ("Seat 12A", "Gate 4") go too, and break any run across them. A
+  code word has a digit or is all capitals of at most 6 letters. A run is
+  code words joined by `-`, `/`, `.` or nothing, never by a space, except
+  that a 1 to 3 letter capitals word joins a number one space after it
+  ("UA 123", "AB 12345"). The key is the first run with a digit:
+  "ABC-1234-XYZ" and "ABC-1234-QRS" are two keys, "Booking ABC-1234-XYZ" is
+  the first of them, "OpenTable confirmation 123456789" and "123456789"
+  agree, "Order #1234567890 (2 tickets)" is `1234567890`, "Conf #: AB 12345"
+  and "Conf AB12345" are both `ab12345`, and "UA 123" and "Flight UA123" are
+  both `ua123`. With no digit, only a single all-capitals word that is not a
   status word is kept (a record locator, "QXJZKM"). Dropped: a key under 5
   characters, an all-digit key under 6 digits, and an 8-digit key that is a
-  date.
+  date, so "Table 7 at 8pm" is no ref at all.
 - Every URL in a location, glued to a label or not, keeps host and path only
-  ("Zoom:https://zoom.us/j/123?pwd=abc" becomes "Zoom:zoom.us/j/123"); a
-  path with a credential-shaped segment is cut back to the host.
+  ("Zoom:https://zoom.us/j/123?pwd=abc" becomes "Zoom:zoom.us/j/123"),
+  without `;` parameters on the path. A bare host followed straight by a
+  query or fragment is a URL too ("Zoom: zoom.us?pwd=abc" becomes "Zoom:
+  zoom.us"). A path with a credential-shaped segment is cut back to the
+  host.
 - All text, titles included, loses control, bidi and invisible characters
   (zero-width, word joiner, BOM, tag characters). A title with nothing else in
   it is empty, and its record is dropped. That rule fixes each record's
@@ -300,27 +325,35 @@ never rejected:
 **Identity.** Scope is `triage::ghost::sender_scope`, for authenticated mail
 only: the sender's registrable domain under the Public Suffix List (the `psl`
 crate, private section included), or the full lowercased address on a
-freemail domain or a shared tenant (`onmicrosoft.com`, `googlegroups.com`);
-none otherwise. A ghost's `owner_scope` is the scope of the record that
-created it (NULL from unauthenticated mail), set once, and every rule below
-considers only ghosts with the record's own scope. Keys are
+domain strangers share (the freemail list in `triage/receipt_match.rs`,
+which also names the large consumer ISPs, the mail.com family and
+`duck.com`; the relay host `privaterelay.appleid.com`; the shared tenants
+`onmicrosoft.com` and `googlegroups.com`); none otherwise. A ghost's
+`owner_scope` and `owner_addr` are the scope and lowercased From address of
+the record that created it (both NULL from unauthenticated mail). Keys are
 `ref:<scope>:<ref>` and nothing else: there is no thread key and no title
 key. Each laundered record of a message (by its `position`) is matched once,
 against the state before the message's old assignment is removed:
 
-1. By ref: ghosts holding any of its keys. Any record but an `updated` one
-   skips a ghost whose start is more than a day from its own. Most shared
-   keys win, then the rank below.
-2. By thread, only with no usable ref: ghosts fed from the same thread. Same
-   date wins; failing that, a record that is not `created` takes the
-   thread's only live ghost. With several live ghosts and none on its date it
-   matches nothing, so an ambiguous ref-less cancellation cancels nothing.
-3. A ghost this message alone fed before, within a day of the record's start
-   (or with either start missing): the one at the record's position, or,
-   when that one is claimed or does not qualify, the nearest-starting other
-   one that does.
-4. A new ghost, owned by the record's scope. Not for a `cancelled` record:
-   one that matched nothing is dropped.
+1. By ref: ghosts of the record's scope holding any of its keys. Any record
+   but an `updated` one skips a ghost whose start is more than a day from its
+   own. Most shared keys win, then the rank below.
+2. By thread, only with no usable ref: ghosts fed from the same thread (by
+   any source row, eligible or not) whose `owner_addr` is the record's own
+   From address, not merely its scope: no list of shared domains is
+   complete, and anyone can reply in a thread. Same date wins; failing that,
+   a record that is not `created` takes the only live one. With several live
+   ones and none on its date it matches nothing, so an ambiguous ref-less
+   cancellation cancels nothing.
+3. A ghost this message alone fed before (no source row of any other
+   message, eligible or not), within a day of the record's start (or with
+   either start missing): the one at the record's position, or, when that
+   one is claimed or does not qualify, the nearest-starting other one that
+   does. Whatever its owner: if the message's scope or address has changed
+   since (its authentication result arrived or went on a re-sync), the ghost
+   is re-owned to the current ones. This is the only place an owner changes.
+4. A new ghost, owned by the record's scope and address. Not for a
+   `cancelled` record: one that matched nothing is dropped.
 
 The rank among equals: a ghost the message already fed, then the nearest
 start, then the lowest id. A record with no start prefers the ghost next to
@@ -332,7 +365,8 @@ are never merged.
 
 - `ghost_events`: kind, title, `starts_at` (as given) and `start_timezone`,
   `ends_at` (stated only), `est_minutes` and `est_basis` (the model's only),
-  location, commitment, `owner_scope`, `mail_state` (`live` / `cancelled`),
+  location, commitment, `owner_scope` and `owner_addr`, `mail_state` (`live`
+  / `cancelled`),
   likelihood band and reason, `supplier_message_id` (the message whose record
   supplied the facts), `last_message_id`. Derived: `start_sort` (UTC text,
   for the coarse range query) and `venue_key` (what the priors are keyed by).
@@ -351,8 +385,10 @@ are never merged.
   message also clears `supplier_message_id` on the ghost it supplied, which
   hides that ghost until the next reconcile of a message that feeds it.
 - `ghost_event_keys`: the scoped ref keys of a ghost's currently assigned
-  eligible records, recomputed on every rebuild. Not unique: a flight number
-  can name two ghosts on two dates.
+  records whose decision is readable and whose message still has the
+  owner's scope, eligible or not (keys are never served, and a record coming
+  back from a seal must find its own ghost), recomputed on every rebuild.
+  Not unique: a flight number can name two ghosts on two dates.
 - `event_duration_priors`: venue key and kind to minutes, written when the
   user corrects a timed end at a known venue, with the ghost that taught it.
   Never written or read for travel, which has no default: one long flight
@@ -367,14 +403,18 @@ built; they arrive with likelihood (wave 3) and calendar access (wave 4).
 stored decisions. Facts come from the newest eligible record that does not
 cancel (the newest eligible one if all do), and that message is recorded as
 the supplier. `mail_state` is `cancelled` when the newest eligible record
-cancels. The ghost is `committed` only when it has an owner and one of its
-records is committed or `agreed`; every record already has the owner's
-scope, and a ghost made from unauthenticated mail is `unknown` whatever its
-mail claims. A source that is sent, spam, restricted or sealed, or whose
-decision does not deserialize, keeps its row and contributes nothing. A
-row whose message no longer carries a record at that position goes. No rows
-left deletes the ghost; rows but no eligible record keeps its facts, clears
-the supplier and its keys, and hides it.
+cancels. Each source's message is checked for its CURRENT scope (from its
+`from_addr` and `auth_pass` now): one whose scope is no longer the owner's
+was assigned under authority it has lost, so it keeps its row and
+contributes nothing, no facts, no keys and no commitment, until it is
+decided again. The ghost is `committed` only when it has an owner and one of
+its eligible, in-scope records is committed or `agreed`; a ghost made from
+unauthenticated mail is `unknown` whatever its mail claims. A source that is
+sent, spam, restricted or sealed keeps its row and its keys and supplies no
+facts; one whose decision does not deserialize keeps its row and contributes
+nothing. An eligible message's row whose decision no longer carries a record
+at that position goes. No rows left deletes the ghost; rows but no eligible
+record keeps its facts and keys, clears the supplier, and hides it.
 
 **When it runs.** Inside the triage commit, under a savepoint: an error rolls
 back the ghosts alone, logs ids and an error kind, and the decision commits.
@@ -599,16 +639,26 @@ Rules:
   2. The zone in a calendar invitation that person organized: the IANA `TZID`
      of the first event's start, credited to the invitation's `ORGANIZER`.
      Anyone can write an invitation naming anyone as organizer, so one counts
-     only when the mail passed authentication and its From is the organizer
-     or someone at the organizer's own organisation (the same registrable
-     domain, which a freemail or shared-tenant domain never is for two
-     addresses). A forged invitation records nothing. A zone is counted under
-     its canonical name: an alias with the same clock as a listed zone all
-     year becomes that zone ("US/Pacific" counts as America/Los_Angeles), so
-     two names never split one person's vote. When at least half of their
-     newest 20 invitations agree, that zone wins. Windows zone names, names
-     without a `/` ("EST", "UTC"), UTC starts and the zone in the subject line
-     (Google writes the recipient's) are ignored.
+     only when the mail passed authentication and its From IS the organizer's
+     address. Authentication vouches for a domain, and some domains are
+     shared by strangers that no list will ever fully name, so an invitation
+     a delegate or a calendar address sends for someone records nothing;
+     their own mail still teaches their zone through its offsets. A forged
+     invitation records nothing. A zone is counted under its canonical name:
+     an alias with the same clock as a listed zone all year becomes that zone
+     ("US/Pacific" counts as America/Los_Angeles). Where several listed zones
+     share that clock, the one named for the same city wins
+     ("America/Buenos_Aires" is America/Argentina/Buenos_Aires, not Sao
+     Paulo), then the one in the same region ("Australia/West" is Perth),
+     then the first listed. So an old and a new spelling of one place count
+     as one zone; two names in one region for one clock can still split a
+     vote ("Asia/Kuala_Lumpur" counts as Shanghai while "Asia/Singapore" is
+     itself). Of their newest 20 invitations not dated ahead, those whose
+     mail counts vote (one in spam or sent mail among the 20 does not, and
+     no older invitation takes its place), and a zone holding at least half
+     of those votes wins. Windows zone names, names without a `/` ("EST",
+     "UTC"), UTC starts and the zone in the subject line (Google writes the
+     recipient's) are ignored.
   3. The UTC offset in the `Date` header of their own authenticated mail (not
      sent, not spam): at least three non-UTC offsets from the last year,
      newest 500 at most. Mail stamped UTC is ignored, which also discards most

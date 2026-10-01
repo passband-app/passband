@@ -204,7 +204,7 @@ struct ConnectView: View {
             // sheet's — no filling the screen, and no getting-started pane: an
             // install adding a SECOND daemon plainly knows what the first one
             // was.
-            case .addAccount: connectCard.padding(24)
+            case .addAccount: connectCard.padding(Space.s24)
             }
         }
         // A link can arrive before this view mounts (the app was launched by
@@ -320,7 +320,7 @@ struct ConnectView: View {
                 }
             #else
                 SetupThemeToggle()
-                    .padding(20)
+                    .padding(Space.s20)
             #endif
         }
     }
@@ -415,12 +415,12 @@ struct ConnectView: View {
     /// glass card over the working app rather than set on the intro's stage.
     private var connectCard: some View {
         formColumn(wide: false)
-            .padding(30)
+            .padding(Space.scaled(30))
             // A window can always be 440pt wide; a phone cannot. Same intended
             // measure either way — the Mac states it, the phone treats it as a
             // ceiling and takes whatever the screen leaves (see body's margin).
             #if os(macOS)
-                .frame(width: 440)
+                .frame(width: Space.scaled(440))
             #else
                 .frame(maxWidth: 440)
             #endif
@@ -437,10 +437,10 @@ struct ConnectView: View {
 
                 if let errorText {
                     Label(errorText, systemImage: "exclamationmark.triangle.fill")
-                        .font(.system(size: 12))
+                        .font(Typo.ui(12))
                         .foregroundStyle(Palette.danger)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.top, 12)
+                        .padding(.top, Space.s12)
                 }
 
                 if purpose == .gate, savedConnectionFailed {
@@ -448,42 +448,42 @@ struct ConnectView: View {
                         retrySavedConnection()
                     }
                     .disabled(busy || store.accountActionsBlocked)
-                    .padding(.top, 12)
+                    .padding(.top, Space.s12)
                 }
 
-                bottomActions.padding(.top, 20)
+                bottomActions.padding(.top, Space.s20)
             }
     }
 
     @ViewBuilder private func header(wide: Bool) -> some View {
         if purpose == .gate {
             // The intro's voice: a hero line and a readable paragraph under it.
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: Space.s16) {
                 Text(headerTitle)
                     .font(Typo.hero(wide ? 40 : 32))
                     .foregroundStyle(Palette.ink)
                     .accessibilityAddTraits(.isHeader)
                 Text(headerSubtitle)
-                    .font(.system(size: 15))
+                    .font(Typo.ui(15))
                     .foregroundStyle(Palette.inkDim)
                     .lineSpacing(5)
             }
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.bottom, 28)
+            .padding(.bottom, Space.scaled(28))
             .modifier(IntroEntrance(delay: 0.04))
         } else {
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: Space.s4) {
                 Text(headerTitle)
                     .font(Typo.serif(30, weight: .medium))
                     .foregroundStyle(Palette.ink)
                 Text("one daemon per mailbox. this one joins the accounts you already have.")
-                    .font(.system(size: 13))
+                    .font(Typo.ui(13))
                     .foregroundStyle(Palette.inkFaint)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.bottom, 22)
+            .padding(.bottom, Space.scaled(22))
         }
     }
 
@@ -544,12 +544,12 @@ struct ConnectView: View {
                 options: [(ConnectMode.pair, "pair with code"), (.token, "api token")],
                 selection: modeBinding)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.bottom, 16)
+                .padding(.bottom, Space.s16)
             switch mode {
             case .pair: pairForm
             case .token: tokenForm
             }
-            nameField.padding(.top, 14)
+            nameField.padding(.top, Space.s14)
         }
     }
 
@@ -561,17 +561,17 @@ struct ConnectView: View {
     /// up, see `PairLink.admits`), and fills the form below the way a typed
     /// code would: ringed, a press away from adding, never added on its own.
     private var sheetSignIn: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: Space.s8) {
             Button { openHostedSignIn() } label: {
-                HStack(spacing: 9) {
+                HStack(spacing: Space.scaled(9)) {
                     Image(systemName: "envelope.fill")
                     Text(signInOpened ? "open sign in again" : "sign in with Gmail")
                     Spacer(minLength: 0)
                     Image(systemName: "arrow.up.right")
                 }
-                .font(.system(size: 14, weight: .semibold))
-                .padding(.vertical, 9)
-                .padding(.horizontal, 8)
+                .font(Typo.ui(14, weight: .semibold))
+                .padding(.vertical, Space.scaled(9))
+                .padding(.horizontal, Space.s8)
                 .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
@@ -581,19 +581,19 @@ struct ConnectView: View {
             Text(signInOpened
                 ? "finish signing in in your browser. keep this sheet open: it fills in when passband comes back."
                 : "pick the Google account whose mail you want to add.")
-                .font(.system(size: 12))
+                .font(Typo.ui(12))
                 .foregroundStyle(Palette.inkFaint)
                 .fixedSize(horizontal: false, vertical: true)
 
-            HStack(spacing: 10) {
+            HStack(spacing: Space.s10) {
                 Hairline()
                 Text("or connect a server by hand")
-                    .font(.system(size: 11))
+                    .font(Typo.ui(11))
                     .foregroundStyle(Palette.inkFaint)
                     .fixedSize()
                 Hairline()
             }
-            .padding(.vertical, 10)
+            .padding(.vertical, Space.s10)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -612,7 +612,7 @@ struct ConnectView: View {
                 GlassSegmented(
                     options: [(ConnectMode.pair, "pair with code"), (.token, "api token")],
                     selection: modeBinding)
-                    .padding(.bottom, 14)
+                    .padding(.bottom, Space.s14)
             }
             ConnectRig(lit: rigHasFocus(linked: linked)) {
                 if linked {
@@ -634,7 +634,7 @@ struct ConnectView: View {
                     switch mode {
                     case .pair:
                         RigSlot(label: "pairing code", focused: focus == .code) {
-                            HStack(spacing: 6) {
+                            HStack(spacing: Space.s6) {
                                 TextField("XXXX-XXXX", text: codeBinding)
                                     // Monospaced so a code read off a terminal
                                     // lines up with it character for character.
@@ -662,13 +662,13 @@ struct ConnectView: View {
                 }
                 RigDivider()
                 accountNameChooser(inRig: true)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 13)
+                    .padding(.horizontal, Space.s16)
+                    .padding(.vertical, Space.scaled(13))
                 RigDivider()
                 rigSubmit
             }
             if linked {
-                pairingDetails.padding(.top, 14)
+                pairingDetails.padding(.top, Space.s14)
             }
         }
     }
@@ -688,14 +688,14 @@ struct ConnectView: View {
     /// divided off by one hairline, lit in the accent when it can be pressed.
     private var rigSubmit: some View {
         Button { submit() } label: {
-            HStack(spacing: 8) {
+            HStack(spacing: Space.s8) {
                 Text(buttonLabel)
                 Image(systemName: "arrow.right")
             }
-            .font(.system(size: 13, weight: .semibold))
+            .font(Typo.ui(13, weight: .semibold))
             .foregroundStyle(canSubmit ? Palette.accent : Palette.inkFaint)
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 13)
+            .padding(.vertical, Space.scaled(13))
             .background(Palette.accent.opacity(canSubmit ? 0.12 : 0.04))
             .contentShape(Rectangle())
         }
@@ -719,22 +719,22 @@ struct ConnectView: View {
     private var pairingHelpButton: some View {
         Button { pairingHelp = true } label: {
             Image(systemName: "questionmark.circle")
-                .font(.system(size: 12))
+                .font(Typo.ui(12))
         }
         .buttonStyle(.plain)
         .foregroundStyle(Palette.inkFaint)
         .help("Where the pairing code comes from")
         .popover(isPresented: $pairingHelp) {
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: Space.s10) {
                 Text("Run this on the machine hosting squelchd:")
-                    .font(.system(size: 12))
+                    .font(Typo.ui(12))
                 Text("squelchd pair")
                     .font(Typo.mono(13))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
+                    .padding(.horizontal, Space.s10)
+                    .padding(.vertical, Space.scaled(7))
                     .background(RoundedRectangle(cornerRadius: 8).fill(Palette.canvas))
             }
-            .padding(16)
+            .padding(Space.s16)
         }
     }
 
@@ -745,19 +745,19 @@ struct ConnectView: View {
                 openHostedSignIn()
             }
                 .buttonStyle(.plain)
-                .font(.system(size: 12))
+                .font(Typo.ui(12))
                 .foregroundStyle(Palette.inkDim)
         } else if hostingChoice == .selfHosted {
             Button("Need help setting up a server?") { gateStep = .selfHostGuide }
                 .buttonStyle(.plain)
-                .font(.system(size: 12))
+                .font(Typo.ui(12))
                 .foregroundStyle(Palette.inkDim)
         }
     }
 
     @ViewBuilder private var bottomActions: some View {
         if purpose == .gate {
-            HStack(spacing: 12) {
+            HStack(spacing: Space.s12) {
                 Button("Back") { goBack() }
                     .buttonStyle(.plain)
                     .foregroundStyle(Palette.inkDim)
@@ -771,7 +771,7 @@ struct ConnectView: View {
     }
 
     private var sheetActions: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: Space.s12) {
             Button("cancel") { goBack() }
                 .disabled(busy)
             Spacer()
@@ -822,7 +822,7 @@ struct ConnectView: View {
     /// being named and that it is not final, because "account" alone next to a
     /// pairing code read as one more credential to find.
     @ViewBuilder private func accountNameChooser(inRig: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: Space.s10) {
             // The caption on the trailing edge, like every other slot in the
             // rig, so the chips and their name share one line.
             HStack(alignment: .center) {
@@ -835,8 +835,8 @@ struct ConnectView: View {
                             nameTouched = true
                             if $0 == .other { focus = .name }
                         }))
-                Spacer(minLength: 8)
-                VStack(alignment: .trailing, spacing: 2) {
+                Spacer(minLength: Space.s8)
+                VStack(alignment: .trailing, spacing: Space.s2) {
                     FieldLabel("name this account")
                     Text("rename any time in settings")
                         .font(Typo.micro)
@@ -850,7 +850,7 @@ struct ConnectView: View {
                 // The placeholder is what a blank field is saved as.
                 let field = TextField("Other", text: typed)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 14))
+                    .font(Typo.ui(14))
                     .foregroundStyle(Palette.ink)
                     .autocorrectionDisabled()
                     .focused($focus, equals: .name)
@@ -891,11 +891,11 @@ struct ConnectView: View {
     // MARK: - forms
 
     private var linkedPairForm: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: Space.scaled(18)) {
             Field(label: "Device name") {
                 TextField("This Mac", text: $deviceName)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 16, weight: .medium))
+                    .font(Typo.ui(16, weight: .medium))
                     .autocorrectionDisabled()
                     .focused($focus, equals: .device)
                     .onSubmit { afterCredentials() }
@@ -909,14 +909,14 @@ struct ConnectView: View {
     /// The server a pair link named, with its URL and code folded away for
     /// the one case that needs them: a rejected code, corrected by hand.
     private var pairingDetails: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: Space.s10) {
             Label(URL(string: url)?.host ?? url, systemImage: "link")
-                .font(.system(size: 12))
+                .font(Typo.ui(12))
                 .foregroundStyle(Palette.inkDim)
                 .lineLimit(2)
                 .textSelection(.enabled)
             DisclosureGroup("Pairing details", isExpanded: $showingPairingDetails) {
-                VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: Space.s12) {
                     Field(label: "Server URL") {
                         TextField("Server URL", text: urlBinding)
                             .textFieldStyle(.plain)
@@ -932,23 +932,23 @@ struct ConnectView: View {
                             .onSubmit { submit() }
                     }
                 }
-                .padding(.top, 10)
+                .padding(.top, Space.s10)
                 // A rejected code is corrected HERE, so the fields it
                 // lives in open the moment there is something to correct.
                 .onChange(of: pairError) { _, error in
                     if error != nil { showingPairingDetails = true }
                 }
             }
-            .font(.system(size: 11))
+            .font(Typo.ui(11))
             .foregroundStyle(Palette.inkFaint)
         }
-        .padding(14)
+        .padding(Space.s14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 12).fill(Palette.canvas.opacity(0.3)))
     }
 
     private var pairForm: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: Space.s14) {
             Field(label: "server url") {
                 TextField(serverPlaceholder, text: urlBinding)
                     .textFieldStyle(.plain)
@@ -957,7 +957,7 @@ struct ConnectView: View {
                     .focused($focus, equals: .url)
                     .onSubmit { focus = .code }
             }
-            VStack(alignment: .leading, spacing: 5) {
+            VStack(alignment: .leading, spacing: Space.scaled(5)) {
                 FieldLabel("pairing code")
                 TextField("XXXX-XXXX", text: codeBinding)
                     .textFieldStyle(.plain)
@@ -986,7 +986,7 @@ struct ConnectView: View {
     }
 
     private var tokenForm: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: Space.s14) {
             Field(label: "server url") {
                 TextField("http://127.0.0.1:8848", text: urlBinding)
                     .textFieldStyle(.plain)
@@ -1229,7 +1229,7 @@ private struct WelcomeGate: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: Space.scaled(18)) {
                 Text("One last step.")
                     .font(Typo.serif(wide ? 33 : 27))
                     .foregroundStyle(Palette.inkDim)
@@ -1244,11 +1244,11 @@ private struct WelcomeGate: View {
             .accessibilityAddTraits(.isHeader)
 
             Text("Sign in with the Google account whose mail you want Passband to sort. New here? The same button gets you set up.")
-                .font(.system(size: 15))
+                .font(Typo.ui(15))
                 .foregroundStyle(Palette.inkDim)
                 .lineSpacing(5)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.top, 22)
+                .padding(.top, Space.scaled(22))
                 .modifier(IntroEntrance(delay: 0.24))
 
             // Inline in a window; on a phone they are the stage's footer,
@@ -1257,7 +1257,7 @@ private struct WelcomeGate: View {
                 WelcomeActions(
                     retrySaved: retrySaved, retrying: retrying,
                     login: login, selfHostedLogin: selfHostedLogin)
-                    .padding(.top, 32)
+                    .padding(.top, Space.s32)
                     .modifier(IntroEntrance(delay: 0.32))
             }
         }
@@ -1275,17 +1275,17 @@ private struct WelcomeActions: View {
     var maxWidth: CGFloat = 340
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: Space.s12) {
             Button(action: login) {
-                HStack(spacing: 9) {
+                HStack(spacing: Space.scaled(9)) {
                     Image(systemName: "envelope.fill")
                     Text("Sign in with Gmail")
                     Spacer(minLength: 0)
                     Image(systemName: "arrow.right")
                 }
-                .font(.system(size: 14, weight: .semibold))
-                .padding(.vertical, 9)
-                .padding(.horizontal, 8)
+                .font(Typo.ui(14, weight: .semibold))
+                .padding(.vertical, Space.scaled(9))
+                .padding(.horizontal, Space.s8)
                 .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
@@ -1293,15 +1293,15 @@ private struct WelcomeActions: View {
             .keyboardShortcut(.defaultAction)
 
             Button(action: selfHostedLogin) {
-                HStack(spacing: 9) {
+                HStack(spacing: Space.scaled(9)) {
                     Image(systemName: "server.rack")
                     Text("Use a self-hosted server")
                     Spacer(minLength: 0)
                 }
-                .font(.system(size: 13, weight: .medium))
+                .font(Typo.ui(13, weight: .medium))
                 .foregroundStyle(Palette.inkDim)
-                .padding(.vertical, 10)
-                .padding(.horizontal, 16)
+                .padding(.vertical, Space.s10)
+                .padding(.horizontal, Space.s16)
                 .frame(maxWidth: .infinity)
                 .contentShape(Rectangle())
             }
@@ -1312,10 +1312,10 @@ private struct WelcomeActions: View {
             if let retrySaved {
                 Button(retrying ? "Trying saved connection…" : "Try saved connection again", action: retrySaved)
                     .buttonStyle(.plain)
-                    .font(.system(size: 12))
+                    .font(Typo.ui(12))
                     .foregroundStyle(Palette.inkDim)
                     .disabled(retrying)
-                    .padding(.top, 6)
+                    .padding(.top, Space.s6)
             }
         }
         .frame(maxWidth: maxWidth, alignment: .leading)
@@ -1332,20 +1332,20 @@ private struct SelfHostGuide: View {
 
     var body: some View {
             VStack(alignment: .leading, spacing: 0) {
-                VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: Space.s16) {
                     Text("Set up your server.")
                         .font(Typo.hero(wide ? 44 : 34))
                         .foregroundStyle(Palette.ink)
                         .accessibilityAddTraits(.isHeader)
                     Text("Run squelchd on this Mac, a NAS, or a server you control. Three commands and you’re in.")
-                        .font(.system(size: 15))
+                        .font(Typo.ui(15))
                         .foregroundStyle(Palette.inkDim)
                         .lineSpacing(5)
                 }
                 .fixedSize(horizontal: false, vertical: true)
                 .modifier(IntroEntrance(delay: 0.04))
 
-                VStack(spacing: 16) {
+                VStack(spacing: Space.s16) {
                     SetupStep(
                         number: 1,
                         title: "Install squelchd",
@@ -1362,7 +1362,7 @@ private struct SelfHostGuide: View {
                         detail: "Mint the short code the next screen accepts.",
                         command: "squelchd pair")
                 }
-                .padding(.top, 28)
+                .padding(.top, Space.scaled(28))
                 .modifier(IntroEntrance(delay: 0.16))
 
                 Button("View detailed instructions on GitHub") {
@@ -1370,27 +1370,27 @@ private struct SelfHostGuide: View {
                         "https://github.com/passband-app/passband/blob/main/docs/GETTING-STARTED.md")
                 }
                 .buttonStyle(.textAction)
-                .padding(.top, 18)
+                .padding(.top, Space.scaled(18))
 
-                HStack(spacing: 12) {
+                HStack(spacing: Space.s12) {
                     Button("Back", action: back)
                         .buttonStyle(.plain)
                         .foregroundStyle(Palette.inkDim)
                     Spacer()
                     Button(action: continueToForm) {
-                        HStack(spacing: 9) {
+                        HStack(spacing: Space.scaled(9)) {
                             Text("My server is running")
                             Image(systemName: "arrow.right")
                         }
-                        .font(.system(size: 13, weight: .semibold))
-                        .padding(.vertical, 7)
-                        .padding(.horizontal, 8)
+                        .font(Typo.ui(13, weight: .semibold))
+                        .padding(.vertical, Space.scaled(7))
+                        .padding(.horizontal, Space.s8)
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(Palette.accent)
                     .keyboardShortcut(.defaultAction)
                 }
-                .padding(.top, 28)
+                .padding(.top, Space.scaled(28))
             }
     }
 }
@@ -1403,25 +1403,25 @@ private struct SetupStep: View {
     @State private var copied = false
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
+        HStack(alignment: .top, spacing: Space.s12) {
             Text("\(number)")
-                .font(.system(size: 12, weight: .semibold))
+                .font(Typo.ui(12, weight: .semibold))
                 .foregroundStyle(Palette.accentInk)
-                .frame(width: 23, height: 23)
+                .frame(width: Space.scaled(23), height: Space.scaled(23))
                 .background(Circle().fill(Palette.accent))
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: Space.s4) {
                 Text(title)
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(Typo.ui(14, weight: .semibold))
                     .foregroundStyle(Palette.ink)
                 Text(detail)
-                    .font(.system(size: 12))
+                    .font(Typo.ui(12))
                     .foregroundStyle(Palette.inkDim)
-                HStack(spacing: 8) {
+                HStack(spacing: Space.s8) {
                     Text(command)
                         .font(Typo.mono(11))
                         .lineLimit(1)
                         .truncationMode(.middle)
-                    Spacer(minLength: 4)
+                    Spacer(minLength: Space.s4)
                     Button {
                         Clip.copy(command, flashing: $copied)
                     } label: {
@@ -1429,11 +1429,11 @@ private struct SetupStep: View {
                     }
                     .buttonStyle(.plain)
                 }
-                .padding(.horizontal, 9)
-                .padding(.vertical, 6)
+                .padding(.horizontal, Space.scaled(9))
+                .padding(.vertical, Space.s6)
                 .background(RoundedRectangle(cornerRadius: 8).fill(Palette.canvas.opacity(0.9)))
                 .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Palette.hairline, lineWidth: 0.75))
-                .padding(.top, 2)
+                .padding(.top, Space.s2)
             }
         }
     }
@@ -1456,9 +1456,9 @@ private struct SetupThemeToggle: View {
     var body: some View {
         Button { prefs.flipTheme() } label: {
             Image(systemName: isDark ? "sun.max.fill" : "moon.fill")
-                .font(.system(size: 13, weight: .semibold))
+                .font(Typo.ui(13, weight: .semibold))
                 .foregroundStyle(Palette.ink)
-                .frame(width: 30, height: 30)
+                .frame(width: Space.scaled(30), height: Space.scaled(30))
         }
         .buttonStyle(.plain)
         .glassCapsule(tint: Palette.glassTint.opacity(0.35))
@@ -1509,10 +1509,10 @@ private struct RigSlot<Field: View>: View {
     @ViewBuilder var field: Field
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: Space.s10) {
             field
                 .textFieldStyle(.plain)
-                .font(.system(size: 14))
+                .font(Typo.ui(14))
                 .foregroundStyle(Palette.ink)
             Text(label)
                 .font(Typo.micro)
@@ -1520,8 +1520,8 @@ private struct RigSlot<Field: View>: View {
                 .textCase(.lowercase)
                 .accessibilityHidden(true)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 13)
+        .padding(.horizontal, Space.s16)
+        .padding(.vertical, Space.scaled(13))
         .overlay(alignment: .leading) {
             Rectangle()
                 .fill(Palette.accent.opacity(focused ? 0.7 : 0))
@@ -1540,7 +1540,7 @@ struct Field<Content: View>: View {
     @ViewBuilder var content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
+        VStack(alignment: .leading, spacing: Space.scaled(5)) {
             FieldLabel(label)
             content.fieldWell()
         }
@@ -1564,10 +1564,10 @@ struct FieldLabel: View {
 extension View {
     func fieldWell() -> some View {
         self
-            .font(.system(size: 13))
+            .font(Typo.ui(13))
             .foregroundStyle(Palette.ink)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
+            .padding(.horizontal, Space.s10)
+            .padding(.vertical, Space.s8)
             .background(
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
                     .fill(Palette.canvas.opacity(0.9))

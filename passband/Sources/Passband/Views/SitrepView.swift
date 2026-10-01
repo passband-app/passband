@@ -582,7 +582,10 @@ struct SitrepView: View {
             cursor.index = rows.count
             return
         }
-        cursor.index = max(0, min(rows.count - 1, next))
+        guard !rows.isEmpty else { return }
+        // Off either end of the list as drawn WRAPS: down from the last row
+        // goes back to the top, up from the first goes to the bottom.
+        cursor.index = (next % rows.count + rows.count) % rows.count
     }
 
     private func markReadingDone(_ rs: ReadingSender) async {

@@ -177,6 +177,8 @@ private struct TestFlightAdCard: View {
     // MARK: - verbs
 
     private func dismiss() {
+        // A double click lands inside the fade: one close, one event.
+        guard !leaving else { return }
         withAnimation(.easeIn(duration: 0.2)) { leaving = true }
         Task {
             try? await Task.sleep(for: .milliseconds(200))

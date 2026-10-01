@@ -119,6 +119,13 @@ struct RootView: View {
             TestFlightNudge.shared.askIfEarned(
                 iosConnected: connected, othersShowing: ShareNudge.shared.showingNudge)
         }
+        // And on every return to the app, because the answer above changes
+        // once per launch at most: a Mac left open across the two-day mark
+        // would otherwise never hear the rule again until it was quit.
+        .onReceive(NotificationCenter.default.publisher(for: Platform.didBecomeActiveNotification)) { _ in
+            TestFlightNudge.shared.askIfEarned(
+                iosConnected: store.iosConnected, othersShowing: ShareNudge.shared.showingNudge)
+        }
         .task {
             // Pay WebKit's process-launch cost at boot rather than on the first
             // email the reader opens.

@@ -108,7 +108,9 @@ enum MailMode: String, Sendable, Hashable, CaseIterable {
     /// a control that grew an option — you need to see where you are and how to
     /// get back.
     static func segments(showingSpam: Bool) -> [MailMode] {
-        showingSpam ? [.inbox, .noise, .sent, .spam] : [.inbox, .noise, .sent]
+        // No noise segment: all mail shows every message, noise labelled as
+        // such, so a page of only noise is a page nobody needs.
+        showingSpam ? [.inbox, .sent, .spam] : [.inbox, .sent]
     }
 
     /// The page's name — the header title and the segmented control both.
@@ -137,10 +139,6 @@ enum MailMode: String, Sendable, Hashable, CaseIterable {
     /// (`spam=only`) instead of the ordinary mailbox.
     var spamOnly: Bool { self == .spam }
 
-    /// What `n` flips to, so the key is one binding rather than two. It stays
-    /// the inbox/noise flip from every page: from `sent` or `spam`, `n` dips
-    /// into noise exactly as it would from the inbox.
-    var flipped: MailMode { self == .noise ? .inbox : .noise }
 }
 
 // MARK: - side views
@@ -1725,11 +1723,14 @@ final class AppStore {
         zoneRefresh = nil
         mailPages = [:]
         mailLoadedAt = [:]
+        mailPagingState = [:]
+        mailKeyset = false
         mailRefreshes = [:]
         reminderRows = .loading
         remindersLoadedAt = nil
         remindersRefresh = nil
         reminderFilter = false
+        mailFilter = .all
         // The panel's state AND the conversation beside it. A lane left running
         // here would finish a search of the old mailbox into the new one's
         // panel, cards and all — it holds thread ids that mean something else
@@ -2027,7 +2028,7 @@ final class AppStore {
             "thread_opened",
             [
                 "via_reply": replyTo != nil,
-                "from_noise": activeView == .emails && mailMode == .noise,
+                "from_noise": queue.first { $0.thread_id == threadId }?.placement == "noise",
             ])
         // Opening is acknowledged by the reader once the exact message is
         // displayed. Fetching or prefetching a sibling is not a read.
@@ -2457,8 +2458,9 @@ final class AppStore {
 
     // MARK: - the flat mail pages
 
-    /// One generous page — the read model is local, so this is cheap.
-    private static let mailLimit = 500
+    /// The page size, for the head the poll refreshes and for every older
+    /// page the infinite scroll asks for.
+    private static let mailLimit = 100
     /// How many rows get their thread warmed ahead of any click. A bounded
     /// prefix: warming all 500 would stampede the daemon for mail nobody scrolls
     /// to, and hover warming picks up anything past it.
@@ -2480,6 +2482,103 @@ final class AppStore {
     /// inbox's TTL swallow the noise page's first fetch. Kept out of the
     /// `Loadable`s, which the list reads: these are bookkeeping, not rows.
     private var mailLoadedAt: [MailMode: Date] = [:]
+
+    /// Where each page's infinite scroll stands.
+    struct MailPaging: Equatable {
+        /// The offset cursor for a daemon that cannot page by arrival.
+        var nextCursor: String?
+        /// Nothing older to fetch.
+        var exhausted = false
+        var loadingMore = false
+        /// When the last older-page fetch failed. The scroll does not retry
+        /// on its own for a while after, or a sentinel left on screen would
+        /// re-request in a tight loop against a daemon that is down.
+        var failedAt: Date?
+    }
+    private static let mailRetryAfter: TimeInterval = 15
+
+    /// Whether this daemon pages by arrival (`before`) and so can be asked for
+    /// a mailbox-bounded head. Learned from the first rows that carry
+    /// `received_at`; until then the head asks for the default window.
+    private var mailKeyset = false
+    private var mailPagingState: [MailMode: MailPaging] = [:]
+    func mailPaging(_ mode: MailMode) -> MailPaging { mailPagingState[mode] ?? MailPaging() }
+
+    /// THE INFINITE SCROLL: fetch the page older than the last row loaded and
+    /// append it. By arrival (`before`) on a daemon that sends `received_at`,
+    /// which does not shift as new mail lands and reaches past the 30-day
+    /// window; by the offset cursor on one that does not, inside that window.
+    /// One in flight per page, and none once the mailbox has run out.
+    func loadMoreMail(_ mode: MailMode) async {
+        var paging = mailPaging(mode)
+        if let failed = paging.failedAt, Date().timeIntervalSince(failed) < Self.mailRetryAfter {
+            return
+        }
+        guard !paging.exhausted, !paging.loadingMore,
+            let last = mailPages[mode]?.value?.last
+        else { return }
+        var params = UpdatesParams(tier: mode.tier, limit: Self.mailLimit, spamOnly: mode.spamOnly)
+        if let at = last.received_at {
+            params.before = at
+            params.beforeId = last.id
+        } else if let cursor = paging.nextCursor {
+            params.cursor = cursor
+        } else {
+            paging.exhausted = true
+            mailPagingState[mode] = paging
+            return
+        }
+        paging.loadingMore = true
+        mailPagingState[mode] = paging
+        let e = epoch
+        do {
+            // PEEK: an older page is fetched AHEAD of the eye (and through rows
+            // a lens or the category picker hides), so listing it is not the
+            // user seeing it. A row is stamped when it is actually opened.
+            let fetched = try await APIClient.shared.getUpdates(params, peek: true)
+            guard e == epoch else { return }
+            var added = 0
+            withMailPage(mode) { page in
+                guard var rows = page.value else { return }
+                let have = Set(rows.map(\.id))
+                let fresh = fetched.items.filter { !have.contains($0.id) }
+                added = fresh.count
+                rows.append(contentsOf: MailList.sortedByArrival(fresh))
+                page.value = rows
+            }
+            paging = mailPaging(mode)
+            paging.nextCursor = fetched.next_cursor
+            // Short page, or a page of nothing new (an older daemon that
+            // ignored `before` and answered the head again): the end.
+            paging.exhausted = fetched.items.count < Self.mailLimit || added == 0
+            paging.failedAt = nil
+        } catch {
+            guard e == epoch else { return }
+            paging = mailPaging(mode)
+            paging.failedAt = Date()
+        }
+        paging.loadingMore = false
+        mailPagingState[mode] = paging
+    }
+
+    /// Clear a failed older-page fetch so the next scroll (or the footer's
+    /// Try again) asks straight away.
+    func retryOlderMail(_ mode: MailMode) {
+        mailPagingState[mode, default: MailPaging()].failedAt = nil
+        Task { await loadMoreMail(mode) }
+    }
+
+    /// Back to the head on page re-entry, when the daemon can page by arrival:
+    /// rows deep in the scroll are only refreshed by being fetched again, and
+    /// re-entry is where a stale status or a missing pill would be noticed.
+    /// The scroll refills them as you go.
+    func trimMailToHead(_ mode: MailMode) {
+        guard mailKeyset, let rows = mailPages[mode]?.value, rows.count > Self.mailLimit else {
+            return
+        }
+        withMailPage(mode) { $0.value = Array(rows.prefix(Self.mailLimit)) }
+        mailPagingState[mode] = MailPaging()
+    }
     private var mailRefreshes: [MailMode: Task<Void, Never>] = [:]
 
     /// One page's rows. Never fetched reads as LOADING, so the first paint of a
@@ -2510,9 +2609,24 @@ final class AppStore {
         if mailRefreshes[mode] == refresh { mailRefreshes[mode] = nil }
     }
 
-    /// Drop a message from the cached pages outright. For a resolve that must not
-    /// come back on the next poll's slower truth. EVERY page, not just the one on
-    /// screen: the inbox filters no tier, so a noise row sits in both.
+    /// Mark a cached `done` row open again on every mail page: the local half
+    /// of an undone resolve, until the next poll says the same.
+    func reopenInMail(_ messageId: Int) {
+        for mode in MailMode.allCases {
+            withMailPage(mode) { page in
+                guard var rows = page.value,
+                    let i = rows.firstIndex(where: { $0.id == messageId && $0.status == .done })
+                else { return }
+                rows[i].status = .open
+                rows[i].resolved_at = nil
+                page.value = rows
+            }
+        }
+    }
+
+    /// Drop a message from the cached pages outright, for mail that has LEFT
+    /// the listing (rescued out of spam), not mail that is merely finished:
+    /// finished mail stays, dimmed. Every page, not just the one on screen.
     func removeFromMail(_ messageId: Int) {
         for mode in MailMode.allCases {
             mailPages[mode]?.value?.removeAll { $0.id == messageId }
@@ -2525,36 +2639,67 @@ final class AppStore {
         // already showing has nothing to spin, and flipping the flag twice a
         // tick re-rendered the list twice a tick.
         withMailPage(mode) { if $0.value == nil { $0.isLoading = true } }
+        let fetchedAt = Date()
         do {
+            // A MAILBOX-BOUNDED head once the daemon is known to page by
+            // arrival: the newest `mailLimit` rows of all time, so the head's
+            // last row is a true floor for the merge and the keyset. The
+            // default 30-day window would end the scroll for anyone with less
+            // than a page of recent mail, and its out-of-window reminder rows
+            // would pose as the floor.
+            let bounded = mailKeyset
             let fetched = try await APIClient.shared.getUpdates(
                 UpdatesParams(
+                    since: bounded ? "1970-01-01T00:00:00Z" : nil,
                     tier: mode.tier, limit: Self.mailLimit, spamOnly: mode.spamOnly))
             // The rows belong to the account that asked for them. Both exits
             // below return rather than fall through, so the `isLoading` write
             // at the bottom is only ever reached by the live epoch.
             guard e == epoch else { return }
-            // Done/archived mail leaves the inbox (gmail semantics), which also
-            // keeps auto-resolved receipts out — they're rail records, not rows.
-            // The sort key is a date parse, taken ONCE per row rather than
-            // twice per comparison: five hundred rows is nine thousand
-            // comparisons, each of which took the date cache's lock twice.
-            let next =
-                fetched.items
-                .filter { $0.status != .done }
-                .map { ($0, Self.receivedTS($0)) }
-                .sorted { a, b in a.1 != b.1 ? a.1 > b.1 : a.0.id > b.0.id }
-                .map(\.0)
+            releaseReopened(fetched.items, fetchedAt: fetchedAt)
+            // DONE MAIL STAYS IN THE CACHE; the page shows it dimmed.
+            //
+            let keyset = mailKeyset || fetched.items.contains { $0.received_at != nil }
+            mailKeyset = keyset
+            var headRows = fetched.items
+            if keyset && !bounded {
+                // A window-bounded head (the first, before the daemon was
+                // known): drop the old reminder rows the window's OR clause
+                // lets in, or the oldest of them would pose as the floor and
+                // the scroll would page from months back.
+                let cutoff = Date().addingTimeInterval(-29 * 86_400).timeIntervalSince1970
+                headRows.removeAll { u in
+                    (u.remind_at != nil || u.reminded_at != nil) && MailList.arrivalTS(u) < cutoff
+                }
+            }
+            let head = MailList.sortedByArrival(headRows)
+            let full = fetched.items.count >= Self.mailLimit
+            let merge = MailList.mergeHead(
+                loaded: mailPages[mode]?.value, head: head, headIsFull: full)
             withMailPage(mode) { page in
                 // Only touch the value when the list actually CHANGED: the poll
-                // re-runs this, and an identical assignment re-renders 500 rows.
-                if next != page.value { page.value = next }
+                // re-runs this, and an identical assignment re-renders the list.
+                if merge.rows != page.value { page.value = merge.rows }
                 page.error = nil
+            }
+            if merge.reset {
+                // Exhausted only when a MAILBOX-bounded head came back short
+                // (that is the whole mailbox), or on a daemon that cannot page
+                // by arrival and has nothing past its window.
+                mailPagingState[mode] = MailPaging(
+                    nextCursor: fetched.next_cursor,
+                    exhausted: !full && (bounded || !keyset))
+            } else if full, mailPaging(mode).exhausted, keyset {
+                // The mailbox grew past one head: there is more again.
+                mailPagingState[mode, default: MailPaging()].exhausted = false
             }
             mailLoadedAt[mode] = Date()
             // Pull the head rows' threads before any click, so an open renders
             // from cache. Runs on the launch warm too, not just on a visit.
+            // Mail still to do first: it is what gets opened.
             ThreadPrefetch.shared.warm(
-                next.prefix(Self.mailWarmRows).map(\.thread_id), immediate: 5)
+                merge.rows.lazy.filter { $0.status != .done }
+                    .prefix(Self.mailWarmRows).map(\.thread_id), immediate: 5)
         } catch {
             guard e == epoch else { return }
             withMailPage(mode) { $0.error = errText(error, "load failed") }
@@ -2575,14 +2720,6 @@ final class AppStore {
         // comes through here three times a tick, and an identical write is a
         // re-render of every row.
         if page != before { mailPages[mode] = page }
-    }
-
-    /// Epoch for "order received": surfaced_at approximates arrival, and items
-    /// the triage loop hasn't surfaced yet are the newest mail, so they sort to
-    /// the top. Ties (and the nil bucket) break on id, which is ingest order.
-    private static func receivedTS(_ u: AttentionUpdate) -> Double {
-        guard let s = u.surfaced_at else { return .greatestFiniteMagnitude }
-        return Fmt.date(s)?.timeIntervalSince1970 ?? 0
     }
 
     // MARK: - the sent page
@@ -2656,6 +2793,12 @@ final class AppStore {
     /// A FILTER, not a fourth MailMode: the segments are three pages of mail,
     /// and this is a lens over one of them that the Escape ladder sheds first.
     var reminderFilter = false
+
+    /// The all-mail page's other lenses (important / deadlines / attachments).
+    /// Separate from `reminderFilter` because that one swaps the DATA SOURCE
+    /// and these only narrow the rows already on screen; the filter bar keeps
+    /// the two mutually exclusive.
+    var mailFilter: MailFilter = .all
 
     // MARK: - the provider's spam folder
 
@@ -5347,7 +5490,13 @@ final class AppStore {
             // it did nothing until the next poll. Harmless for undo kinds that
             // never resolved anything: the id simply is not in the set.
             // Only for a kind that resolved something: see `touchesSitrep`.
-            if entry.kind.touchesSitrep { resolvedIds.remove(entry.messageId) }
+            if entry.kind.touchesSitrep {
+                resolvedIds.remove(entry.messageId)
+                // The mail page may already hold the server's `done` row (a
+                // poll landed inside the undo window), and the next fetch is
+                // up to a TTL away; reopen it there too so the undo shows now.
+                reopenInMail(entry.messageId)
+            }
             pushToast("undone: \(entry.label)", .info)
             Analytics.capture("undo_fired", ["kind": String(describing: entry.kind)])
             // The bands dropped the row optimistically and the next poll is up
@@ -5412,7 +5561,26 @@ final class AppStore {
     /// `lastRefresh`) would keep showing a resolved row for up to a full poll —
     /// which reads as the action not working. This is the shared record such a
     /// list filters against; the poll still supplies the truth.
-    private(set) var resolvedIds: Set<Int> = []
+    private(set) var resolvedIds: Set<Int> = [] {
+        didSet {
+            for id in resolvedIds.subtracting(oldValue) { resolvedAt[id] = Date() }
+            for id in oldValue.subtracting(resolvedIds) { resolvedAt[id] = nil }
+        }
+    }
+    /// When each id joined `resolvedIds`, so a later poll can tell "the server
+    /// has not caught up yet" from "the server reopened it since".
+    private var resolvedAt: [Int: Date] = [:]
+
+    /// Let the server's word win over a resolve made this session, for the one
+    /// case where it reopens mail on its own: a reminder that fired. Only for a
+    /// fetch that STARTED well after the resolve, so a poll racing the resolve's
+    /// own write cannot hand the row back.
+    fileprivate func releaseReopened(_ rows: [AttentionUpdate], fetchedAt: Date) {
+        for u in rows where u.status != .done && u.reminded_at != nil {
+            guard let at = resolvedAt[u.id], fetchedAt.timeIntervalSince(at) > 30 else { continue }
+            resolvedIds.remove(u.id)
+        }
+    }
 
     /// Optimistically pull a message id out of whatever band holds it and keep
     /// the selection valid (advance to the next row, else the previous).
@@ -5512,9 +5680,13 @@ final class AppStore {
         for u in sitrep.standing + sitrep.new + sitrep.open where matches(u) {
             resolvedIds.insert(u.id)
         }
+        // ONE union, not an insert per row: the scroll can hold thousands of
+        // rows, and every insert fires `resolvedIds`' observers.
+        var ids = Set<Int>()
         for mode in MailMode.allCases {
-            for u in mailPage(mode).value ?? [] where matches(u) { resolvedIds.insert(u.id) }
+            for u in mailPage(mode).value ?? [] where matches(u) { ids.insert(u.id) }
         }
+        resolvedIds.formUnion(ids)
         sitrep.standing.removeAll(where: matches)
         sitrep.new.removeAll(where: matches)
         sitrep.open.removeAll(where: matches)

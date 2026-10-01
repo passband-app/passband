@@ -297,6 +297,8 @@ actor APIClient {
                 "band": params.band?.rawValue,
                 "limit": params.limit.map(String.init),
                 "cursor": params.cursor,
+                "before": params.before,
+                "before_id": params.beforeId.map(String.init),
                 "peek": peek ? "true" : nil,
                 "reminders": params.remindersPending ? "pending" : nil,
                 "spam": params.spamOnly ? "only" : nil,

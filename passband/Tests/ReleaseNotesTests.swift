@@ -187,11 +187,11 @@ struct ReleaseNotesTests {
             // section bullet, or the footnote. Folding must never drop a line.
             let d = note.digest
             let said = Set(
-                d.headliners.map { $0.text.lowercased() }
-                    + d.sections.flatMap { $0.items + $0.extras }.map { $0.lowercased() })
+                (d.headliners.map(\.text) + d.sections.flatMap { $0.items + $0.extras })
+                    .map(ReleaseDigest.key))
             for item in note.items {
                 expect(
-                    said.contains(item.text.lowercased()),
+                    said.contains(ReleaseDigest.key(item.text)),
                     "\(note.version) card still says: \(item.text.prefix(40))")
             }
             // A wall of tiles is the wall of bullets again, with icons.

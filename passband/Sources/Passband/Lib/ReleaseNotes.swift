@@ -20,6 +20,8 @@
 //     daemon is rolled (hosted) or pulled as an image (self-host), and a note
 //     nobody can locate is a note nobody trusts
 
+import Foundation
+
 /// A dotted release version, ordered by component. Failable rather than
 /// lenient: a stamp that does not parse is not a version this code should
 /// silently rank, and every caller already has an honest answer for nil.
@@ -187,7 +189,9 @@ struct ReleaseDigest: Sendable {
         return "Plus \(joined)."
     }
 
-    private static func key(_ text: String) -> String {
+    /// What makes two lines "the same words": case, edge whitespace and
+    /// trailing punctuation do not count.
+    static func key(_ text: String) -> String {
         text.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters)).lowercased()
     }
 }

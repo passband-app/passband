@@ -221,7 +221,7 @@ private struct ContactCard: View {
             Text(label)
                 .font(Typo.rowSub)
                 .foregroundStyle(Palette.inkFaint)
-                .frame(width: Space.scaled(66), alignment: .leading)
+                .frame(width: Typo.measure(66), alignment: .leading)
             VStack(alignment: .leading, spacing: 1) {
                 Text(value)
                     .font(Typo.rowSub)
@@ -244,7 +244,7 @@ private struct ContactCard: View {
             Text("Rule")
                 .font(Typo.rowSub)
                 .foregroundStyle(Palette.inkFaint)
-                .frame(width: Space.scaled(66), alignment: .leading)
+                .frame(width: Typo.measure(66), alignment: .leading)
             VStack(alignment: .leading, spacing: Space.s2) {
                 HStack(spacing: Space.scaled(5)) {
                     Chip(text: rule.disposition.label, tone: tone(rule.disposition))

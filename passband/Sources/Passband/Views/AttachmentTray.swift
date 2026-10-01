@@ -100,7 +100,7 @@ private struct AttachmentRow: View {
                     }
                 }
             }
-            .frame(maxWidth: Space.scaled(170), alignment: .leading)
+            .frame(maxWidth: Typo.measure(170), alignment: .leading)
 
             if editable {
                 Button {

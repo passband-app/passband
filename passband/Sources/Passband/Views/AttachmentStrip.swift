@@ -277,7 +277,7 @@ private struct AttachmentCard: View {
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaintest)
             }
-            .frame(maxWidth: Space.scaled(150), alignment: .leading)
+            .frame(maxWidth: Typo.measure(150), alignment: .leading)
 
             if stored {
                 Button(action: onDownload) {

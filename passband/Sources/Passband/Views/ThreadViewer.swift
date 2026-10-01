@@ -1340,7 +1340,7 @@ struct ThreadViewer: View {
             .font(Typo.ui(13))
             .foregroundStyle(Palette.inkFaint)
             .multilineTextAlignment(.center)
-            .frame(maxWidth: Space.scaled(380))
+            .frame(maxWidth: Typo.measure(380))
 
             HStack(spacing: Space.s10) {
                 Button {
@@ -3150,7 +3150,7 @@ private struct TriageDebugOverlay: View {
                                 Text(key)
                                     .font(Typo.mono(10))
                                     .foregroundStyle(Palette.inkFaintest)
-                                    .frame(width: Space.scaled(150), alignment: .leading)
+                                    .frame(width: Typo.measure(150), alignment: .leading)
                                 Text(value)
                                     .font(Typo.mono(10))
                                     .foregroundStyle(Palette.inkDim)

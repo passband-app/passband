@@ -1926,7 +1926,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "(0 * (increase((sum by (tenant) (squelchd_http_request_duration_seconds_count{route=~\"/client.*\", route!~\"/client/(devices.*|pair)\", method!=\"GET\", status=\"2xx\"}))[12m:1m]) > 0)) or (time() - max_over_time((timestamp(increase((sum by (tenant) (squelchd_http_request_duration_seconds_count{route=~\"/client.*\", route!~\"/client/(devices.*|pair)\", method!=\"GET\", status=\"2xx\"}))[12m:1m]) > 0))[30d:10m])) or on (tenant) (0 * max by (tenant) (squelchd_build_info) + 2592000)",
+     "expr": "(0 * ((sum by (tenant) (increase(squelchd_http_request_duration_seconds_count{route=~\"/client.*\", route!~\"/client/(devices.*|pair)\", method!=\"GET\", status=\"2xx\"}[12m])) > 0) or (sum by (tenant) (squelchd_http_request_duration_seconds_count{route=~\"/client.*\", route!~\"/client/(devices.*|pair)\", method!=\"GET\", status=\"2xx\"} unless squelchd_http_request_duration_seconds_count{route=~\"/client.*\", route!~\"/client/(devices.*|pair)\", method!=\"GET\", status=\"2xx\"} offset 12m) > 0))) or (time() - max_over_time((timestamp((sum by (tenant) (increase(squelchd_http_request_duration_seconds_count{route=~\"/client.*\", route!~\"/client/(devices.*|pair)\", method!=\"GET\", status=\"2xx\"}[12m])) > 0) or (sum by (tenant) (squelchd_http_request_duration_seconds_count{route=~\"/client.*\", route!~\"/client/(devices.*|pair)\", method!=\"GET\", status=\"2xx\"} unless squelchd_http_request_duration_seconds_count{route=~\"/client.*\", route!~\"/client/(devices.*|pair)\", method!=\"GET\", status=\"2xx\"} offset 12m) > 0)))[30d:10m])) or on (tenant) (0 * max by (tenant) (squelchd_build_info) + 2592000)",
      "refId": "A",
      "range": false,
      "instant": true,
@@ -1937,7 +1937,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "(0 * (increase((sum by (tenant) (squelchd_http_request_duration_seconds_count{route=~\"/client.*\", status=\"2xx\"}))[12m:1m]) > 0)) or (time() - max_over_time((timestamp(increase((sum by (tenant) (squelchd_http_request_duration_seconds_count{route=~\"/client.*\", status=\"2xx\"}))[12m:1m]) > 0))[30d:10m])) or on (tenant) (0 * max by (tenant) (squelchd_build_info) + 2592000)",
+     "expr": "(0 * ((sum by (tenant) (increase(squelchd_http_request_duration_seconds_count{route=~\"/client.*\", status=\"2xx\"}[12m])) > 0) or (sum by (tenant) (squelchd_http_request_duration_seconds_count{route=~\"/client.*\", status=\"2xx\"} unless squelchd_http_request_duration_seconds_count{route=~\"/client.*\", status=\"2xx\"} offset 12m) > 0))) or (time() - max_over_time((timestamp((sum by (tenant) (increase(squelchd_http_request_duration_seconds_count{route=~\"/client.*\", status=\"2xx\"}[12m])) > 0) or (sum by (tenant) (squelchd_http_request_duration_seconds_count{route=~\"/client.*\", status=\"2xx\"} unless squelchd_http_request_duration_seconds_count{route=~\"/client.*\", status=\"2xx\"} offset 12m) > 0)))[30d:10m])) or on (tenant) (0 * max by (tenant) (squelchd_build_info) + 2592000)",
      "refId": "B",
      "range": false,
      "instant": true,

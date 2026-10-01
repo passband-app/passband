@@ -485,3 +485,37 @@ async fn fye_headline_is_null_without_a_model_or_on_an_empty_board() {
     assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
     assert!(store.list_usage_by_category(acct, 30).unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn a_fresh_headline_skips_the_cache_and_becomes_the_cached_one() {
+    let (url, hits) = headline_mock("Two packages are on their way.").await;
+    let (state, store, acct) = state_with(|_, _| {});
+    let id = store
+        .upsert_message(&msg(acct, "offer", "offers", "A sale", "An offer"))
+        .unwrap();
+    assess(&store, acct, id, false);
+    let app = with_headline(state, url);
+    let get = |uri: &'static str| {
+        let app = app.clone();
+        async move { body_json(app.oneshot(authed("GET", uri)).await.unwrap()).await }
+    };
+    assert_eq!(
+        get(HEADLINE_URI).await["headline"],
+        "Two packages are on their way."
+    );
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    // Asked for another: a second call even though the board is unchanged.
+    // The mock can only say the line on screen, which is refused, so the
+    // answer is null and the cached line survives for the next poll.
+    let fresh = get(
+        "/client/v2/fye/headline?today=2026-10-01%20(Thursday)&fresh=true&previous=Two%20packages%20are%20on%20their%20way.",
+    )
+    .await;
+    assert_eq!(fresh["headline"], serde_json::Value::Null);
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(
+        get(HEADLINE_URI).await["headline"],
+        "Two packages are on their way."
+    );
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+}

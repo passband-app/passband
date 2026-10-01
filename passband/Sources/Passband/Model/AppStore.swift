@@ -543,6 +543,8 @@ final class AppStore {
     /// a line a few seconds stale reads better than one that flips to the
     /// fallback and back every time a row is cleared.
     var fyeHeadlineKey: String?
+    /// True while a clicked-for headline is being written; the hero dims.
+    var fyeHeadlineRegenerating = false
     /// The daemon's stats, apart from the bands (see SitrepData): the sync
     /// clock, the queues, the capabilities. Assigned by the poller only on
     /// change, and it changes often — so only its readers pay for that.
@@ -821,6 +823,24 @@ final class AppStore {
     func isCurrent(_ e: Int) -> Bool { epoch == e }
 
     // MARK: - fye headline
+
+    /// The owner clicked the headline: ask for a different one. An empty
+    /// answer keeps the line on screen (nothing flips to the fallback), and a
+    /// click while one is already being written is ignored.
+    func regenerateFyeHeadline() async {
+        guard !sitrep.standing.isEmpty, !fyeHeadlineRegenerating, connStatus == .connected
+        else { return }
+        let key = headlineKey
+        let e = epoch
+        fyeHeadlineRegenerating = true
+        defer { fyeHeadlineRegenerating = false }
+        let headline = try? await APIClient.shared.fyeHeadline(
+            today: Self.headlineToday(), fresh: true, previous: fyeHeadline)
+        guard isCurrent(e), headlineKey == key, let headline else { return }
+        fyeHeadline = headline
+        fyeHeadlineKey = key
+        UserDefaults.standard.set([key, headline], forKey: Self.headlineDefaultsKey)
+    }
 
     /// The owner's local date as the headline prompt reads it.
     private static func headlineToday(_ now: Date = Date()) -> String {

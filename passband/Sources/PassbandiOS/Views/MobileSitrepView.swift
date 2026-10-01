@@ -163,6 +163,14 @@ struct MobileSitrepView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .contentTransition(.opacity)
                 .animation(.easeInOut(duration: 0.35), value: headline)
+                // Tap for another line, as on the Mac.
+                .opacity(store.fyeHeadlineRegenerating ? 0.45 : 1)
+                .animation(.easeInOut(duration: 0.2), value: store.fyeHeadlineRegenerating)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    guard !store.sitrep.standing.isEmpty else { return }
+                    Task { await store.regenerateFyeHeadline() }
+                }
         }
         .task(id: store.headlineKey) { await store.refreshFyeHeadline() }
         .frame(maxWidth: .infinity, alignment: .leading)

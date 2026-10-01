@@ -66,6 +66,11 @@ pub struct HeadlineQuery {
     /// "due tomorrow" is the client's call. Free text, folded into the
     /// trusted context line and capped there.
     pub today: Option<String>,
+    /// The owner asked for ANOTHER line (clicked the headline): skip the cache
+    /// and write a new one. Still counted against the daily cap.
+    pub fresh: Option<bool>,
+    /// The line on screen when they clicked, so the new one is different.
+    pub previous: Option<String>,
 }
 
 /// GET /client/v2/fye/headline: one sentence of GOOD NEWS about the owner's
@@ -169,7 +174,12 @@ pub async fn fye_headline(
         .ok()
         .and_then(|c| c.clone())
         .filter(|(k, _)| *k == key);
-    if let Some((_, headline)) = cached {
+    let fresh = query.fresh == Some(true);
+    let previous = query
+        .previous
+        .filter(|p| !p.trim().is_empty())
+        .map(|p| p.chars().take(200).collect::<String>());
+    if let Some((_, headline)) = cached.filter(|_| !fresh) {
         return Ok((
             [(header::CACHE_CONTROL, "no-store")],
             Json(json!({ "headline": headline })),
@@ -178,8 +188,14 @@ pub async fn fye_headline(
     if spent >= u64::from(fh::DAILY_CAP) {
         return Ok(none());
     }
-    let (headline, usage) = fh::write_headline(&client, &today, &items, &good).await;
-    if let Ok(mut c) = state.fye_headline_cache.lock() {
+    let (headline, usage) =
+        fh::write_headline(&client, &today, &items, &good, previous.as_deref()).await;
+    // A fresh ask that came back empty leaves the cache alone: the line the
+    // owner is looking at is still a good one, and the next poll should keep
+    // agreeing with it rather than blank it.
+    if (!fresh || headline.is_some())
+        && let Ok(mut c) = state.fye_headline_cache.lock()
+    {
         *c = Some((key, headline.clone()));
     }
     if let Some(u) = usage {

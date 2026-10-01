@@ -613,8 +613,16 @@ actor APIClient {
     /// about. `today` is the owner's local date, because "due tomorrow" is a
     /// question about THEIR calendar and the daemon runs in UTC. A daemon too
     /// old for the route 404s, which the caller reads as none.
-    func fyeHeadline(today: String) async throws -> String? {
-        let answer: FyeHeadline = try await get("/client/v2/fye/headline", query: ["today": today])
+    /// `fresh` asks for ANOTHER line (the owner clicked the headline), skipping
+    /// the daemon's cache; `previous` is the line on screen, so it is not the
+    /// one that comes back.
+    func fyeHeadline(today: String, fresh: Bool = false, previous: String? = nil) async throws
+        -> String?
+    {
+        var query = ["today": today]
+        if fresh { query["fresh"] = "true" }
+        if let previous { query["previous"] = previous }
+        let answer: FyeHeadline = try await get("/client/v2/fye/headline", query: query)
         return answer.headline
     }
 

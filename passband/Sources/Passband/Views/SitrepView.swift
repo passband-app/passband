@@ -151,6 +151,8 @@ struct SitrepView: View {
             DashHero(
                 standing: store.sitrep.standing,
                 headline: store.fyeHeadline,
+                regenerating: store.fyeHeadlineRegenerating,
+                regenerate: { Task { await store.regenerateFyeHeadline() } },
                 empty: emptyHero)
                 .task(id: store.headlineKey) { await store.refreshFyeHeadline() }
                 .padding(.horizontal, 28)
@@ -778,6 +780,9 @@ private struct DashHero: View {
     let standing: [AttentionUpdate]
     /// The daemon's sentence about the band, when it has written one.
     var headline: String? = nil
+    var regenerating = false
+    /// Clicking the line asks for another one.
+    var regenerate: () -> Void = {}
     /// What to say over an empty board when it is empty because triage has
     /// not run (see `SyncStatus.emptyHero`). Nil lets "You're all clear." stand.
     var empty: (title: String, note: String)? = nil
@@ -801,6 +806,16 @@ private struct DashHero: View {
                 // it fade in over the fallback instead of snapping.
                 .contentTransition(.opacity)
                 .animation(.easeInOut(duration: 0.35), value: title)
+                // Click for another line. Only over a board with mail on it:
+                // the empty-board lines are not the model's to rewrite.
+                .opacity(regenerating ? 0.45 : 1)
+                .animation(.easeInOut(duration: 0.2), value: regenerating)
+                .contentShape(Rectangle())
+                .onTapGesture { if !standing.isEmpty { regenerate() } }
+                .help(standing.isEmpty ? "" : "Click for another")
+                #if os(macOS)
+                    .pointerStyle(standing.isEmpty ? nil : .link)
+                #endif
             if let note {
                 Text(note)
                     .font(Typo.rowSub)

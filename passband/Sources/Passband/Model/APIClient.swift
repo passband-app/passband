@@ -619,13 +619,12 @@ actor APIClient {
     /// the daemon's cache; `previous` is the line on screen, so it is not the
     /// one that comes back.
     func fyeHeadline(today: String, fresh: Bool = false, previous: String? = nil) async throws
-        -> String?
+        -> FyeHeadline
     {
         var query = ["today": today]
         if fresh { query["fresh"] = "true" }
         if let previous { query["previous"] = previous }
-        let answer: FyeHeadline = try await get("/client/v2/fye/headline", query: query)
-        return answer.headline
+        return try await get("/client/v2/fye/headline", query: query)
     }
 
     @discardableResult

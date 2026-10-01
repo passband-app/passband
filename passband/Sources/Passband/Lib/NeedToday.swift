@@ -1,5 +1,6 @@
-// Shared badge/headline count. Membership comes from the server's FYE list;
-// the client never filters it again using deadlines or importance.
+// The phone badge's count (Mac dock and sitrep headline show none). Membership
+// comes from the server's FYE list; the client never filters it again using
+// deadlines or importance.
 import Foundation
 
 enum NeedToday {

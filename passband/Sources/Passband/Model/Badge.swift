@@ -2,8 +2,8 @@
 // For-your-eyes, said to someone who is not in the app. The Mac's dock shows
 // none (see `set`).
 //
-// It is the same `NeedToday.count` the sitrep's band is counted with, off the
-// same `store.sitrep.standing`, because a badge is read WITHOUT the sentence
+// It is `NeedToday.count` (the number of rows in the band) off the same
+// `store.sitrep.standing` the app shows, because a badge is read WITHOUT the sentence
 // that would correct it. Two counts would eventually differ and the badge is the
 // one nobody can check.
 //
@@ -46,8 +46,8 @@ import Foundation
 
 @MainActor
 enum Badge {
-    /// The whole contract: given the standing band, put its due-today count on
-    /// the app icon. Zero clears the badge rather than drawing a "0" — an icon
+    /// The whole contract: given the standing band, put its row count on the
+    /// app icon (the phone's; the Mac dock gets none). Zero clears the badge rather than drawing a "0" — an icon
     /// wearing a zero is a notification that nothing happened.
     /// What the icon was last told. nil = never told this session, so the
     /// first confirmation always goes through (the notification extension

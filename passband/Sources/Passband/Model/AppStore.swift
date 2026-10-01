@@ -834,9 +834,9 @@ final class AppStore {
         let e = epoch
         fyeHeadlineRegenerating = true
         defer { fyeHeadlineRegenerating = false }
-        let headline = try? await APIClient.shared.fyeHeadline(
+        let answer = try? await APIClient.shared.fyeHeadline(
             today: Self.headlineToday(), fresh: true, previous: fyeHeadline)
-        guard isCurrent(e), headlineKey == key, let headline else { return }
+        guard isCurrent(e), headlineKey == key, let headline = answer?.headline else { return }
         fyeHeadline = headline
         fyeHeadlineKey = key
         UserDefaults.standard.set([key, headline], forKey: Self.headlineDefaultsKey)
@@ -880,14 +880,28 @@ final class AppStore {
         // Settle first. The poller reassigns the band as rows are cleared from
         // the list or arrive in a burst; one call for the board that stuck.
         try? await Task.sleep(for: .milliseconds(1200))
-        let e = epoch
-        guard !Task.isCancelled, connStatus == .connected else { return }
-        let headline = try? await APIClient.shared.fyeHeadline(today: Self.headlineToday())
-        guard !Task.isCancelled, isCurrent(e), headlineKey == key else { return }
-        fyeHeadline = headline
-        fyeHeadlineKey = key
-        if let headline {
-            UserDefaults.standard.set([key, headline], forKey: Self.headlineDefaultsKey)
+        // A FAILED call (the daemon says `settled: false`) is asked again a
+        // couple of times, spaced out; it is not "nothing good to say", and
+        // remembering it as that would leave the fallback up all day.
+        for attempt in 0..<3 {
+            if attempt > 0 { try? await Task.sleep(for: .seconds(30)) }
+            let e = epoch
+            guard !Task.isCancelled, connStatus == .connected else { return }
+            let answer = try? await APIClient.shared.fyeHeadline(today: Self.headlineToday())
+            // A click for a new line wins over this background ask: whichever
+            // answered last would otherwise replace the line they asked for.
+            guard !Task.isCancelled, isCurrent(e), headlineKey == key, !fyeHeadlineRegenerating
+            else { return }
+            // No answer at all is an old daemon or a dropped connection: keep
+            // the fallback and do not retry against a route that is not there.
+            guard let answer else { return }
+            if answer.settled == false { continue }
+            fyeHeadline = answer.headline
+            fyeHeadlineKey = key
+            if let headline = answer.headline {
+                UserDefaults.standard.set([key, headline], forKey: Self.headlineDefaultsKey)
+            }
+            return
         }
     }
 
@@ -1433,6 +1447,10 @@ final class AppStore {
             SitrepPoller.shared.stop()
         }
         await AccountManager.shared.remove(id)
+        // The saved headline can name people and plans from the mailbox just
+        // forgotten. It is keyed by board, so it could never show for another
+        // account, but it should not outlive the account either.
+        UserDefaults.standard.removeObject(forKey: Self.headlineDefaultsKey)
         guard wasActive else { return }
 
         guard let survivor = AccountManager.shared.active else {

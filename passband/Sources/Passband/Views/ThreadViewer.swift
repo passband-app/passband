@@ -1438,7 +1438,11 @@ struct ThreadViewer: View {
             // two-key pass through everything Space opened. exactCase because
             // a bare `s` falling through the fold to this would turn a typo
             // into a jump to another email.
+            // DECLINES WITH NO QUEUE (a reader opened from search, a
+            // notification, a contact card): there is nothing to skip to, and
+            // a skip that quietly closed the reader would read as Esc.
             KeyBinding(declining: "S", "skip to next", exactCase: true) {
+                guard store.threadQueue.count > 1 else { return false }
                 Task { await skipToNext() }
                 return true
             },

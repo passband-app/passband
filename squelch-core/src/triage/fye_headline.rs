@@ -17,8 +17,11 @@
 //! WHAT GOES IN is deliberately narrow. Each FYE row contributes the summary
 //! the triage model ALREADY wrote about it and the sender's address: no
 //! subject, no body, and no action list (a to-do list is exactly what this
-//! line may not be). A row with no summary (a fired reminder on mail no model
-//! ever saw, which is where sealed mail would come from) contributes nothing.
+//! line may not be). Rows that contribute nothing: one with no summary (a
+//! fired reminder on mail no model ever saw), restricted mail, and auth mail
+//! pinned to the board (see [`HeadlineItem::from_list_item`]). Every summary
+//! that does go in was written by the same provider from mail it already
+//! read during triage, so this widens nothing.
 //! The good-news block adds packages in motion or just delivered (their item
 //! names were read out of mail, so they ride inside the fence too) and two
 //! counts the daemon owns: mail that arrived in the last day, and how much of
@@ -116,13 +119,17 @@ pub struct HeadlineOutput {
 /// forbids all of this, and a small model reading summaries full of "failed"
 /// and "past due" echoes them anyway, so a candidate carrying one is dropped
 /// here rather than trusted. Matched as whole words, case-insensitively.
+///
+/// Only words that are bad news in nearly every sentence belong here. One
+/// that is just as often good ("today", "now", "review", "update", "sign")
+/// would kill "The boots arrive today." as surely as it kills a chore, so
+/// those are caught as the to-do PHRASES in [`ALARM_PHRASES`] instead.
 const ALARM_WORDS: &[&str] = &[
     // alarm
     "urgent",
     "urgently",
     "asap",
     "overdue",
-    "late",
     "failed",
     "failure",
     "failures",
@@ -130,29 +137,22 @@ const ALARM_WORDS: &[&str] = &[
     "must",
     "attention",
     "immediately",
-    "now",
-    "today",
     "lapse",
     "lapses",
+    "lapsed",
     "pause",
     "paused",
     "suspended",
     "restore",
     "avoid",
     "lose",
-    "lost",
     "penalty",
-    "fees",
     "warning",
-    "behind",
-    "forget",
     "missed",
     "deadline",
     "deadlines",
     "insufficient",
-    "returned",
     "declined",
-    "before",
     "problem",
     "problems",
     "issue",
@@ -166,56 +166,123 @@ const ALARM_WORDS: &[&str] = &[
     "owe",
     "owed",
     "due",
+    "expire",
+    "expires",
+    "expiring",
+    "expired",
+    "cancel",
+    "cancelled",
+    "canceled",
+    "cancellation",
+    "delayed",
+    "delay",
+    "delays",
+    "fraud",
+    "fraudulent",
+    "suspicious",
+    "locked",
+    "denied",
+    "rejected",
+    "unable",
+    "alert",
+    "alerts",
+    "reminder",
+    "password",
+    "breach",
+    "violation",
+    "collections",
     // money that reads as a chore
+    "pay",
     "payment",
     "payments",
     "bill",
     "bills",
     "invoice",
     "invoices",
+    "fee",
+    "fees",
     "charge",
+    "charges",
     "charged",
+    "balance",
+    "statement",
     "renewal",
     "renew",
     "autopay",
+    "debt",
     // to-do
     "need",
     "needs",
     "needed",
     "todo",
-    "review",
-    "sign",
     "confirm",
     "approve",
     "approval",
-    "reply",
-    "respond",
-    "update",
-    "updating",
     "fix",
     "fixes",
     "fixing",
-    "sort",
     "untangle",
-    "handle",
     "verify",
     "verification",
-    "action",
-    "actions",
     "pending",
 ];
 
+/// To-do and alarm PHRASES, for words that are only bad news in this shape:
+/// "a contract to review" is a chore, "a glowing review" is not.
+const ALARM_PHRASES: &[&str] = &[
+    "past due",
+    "to do",
+    "clear up",
+    "sort out",
+    "sort through",
+    "to sort",
+    "to review",
+    "to sign",
+    "to update",
+    "to reply",
+    "to respond",
+    "to handle",
+    "to complete",
+    "to submit",
+    "to finish",
+    "waiting on you",
+    "waiting for you to",
+    "don t forget",
+    "do not forget",
+    "running late",
+    "running out",
+    // requests: someone wanting something FROM the owner is a chore too
+    "a reply",
+    "your reply",
+    "your answer",
+    "your pick",
+    "your input",
+    "your approval",
+    "your signature",
+    "your decision",
+    "hear back",
+    "asks you",
+    "asked you",
+    "wants you",
+    "waiting on",
+    "get back to",
+];
+
 fn has_alarm(line: &str) -> bool {
-    // Hyphens fold to spaces first, so "past-due" is caught as "past due".
-    let lower = line
+    // Every non-alphanumeric character folds to a space, apostrophes and
+    // hyphens included: "past-due" is caught as "past due", and "The bill's
+    // ready" as "bill s" rather than slipping past as "bill's".
+    let words: Vec<String> = line
         .to_lowercase()
-        .replace(['-', '\u{2010}', '\u{2011}'], " ");
-    lower.contains("past due")
-        || lower.contains("to do")
-        || lower.contains("clear up")
-        || lower
-            .split(|c: char| !c.is_alphanumeric() && c != '\'')
-            .any(|w| ALARM_WORDS.contains(&w))
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_string)
+        .collect();
+    let joined = format!(" {} ", words.join(" "));
+    words.iter().any(|w| ALARM_WORDS.contains(&w.as_str()))
+        || ALARM_PHRASES
+            .iter()
+            .any(|p| joined.contains(&format!(" {p} ")))
 }
 
 /// The first candidate that survives cleaning AND reads calm, or `None` (the
@@ -254,8 +321,15 @@ pub struct GoodNews {
 
 impl HeadlineItem {
     /// Off a ranked FYE row. `None` when there is no summary to say anything
-    /// with; see the module docs for why that is also the sealed-mail guard.
+    /// with, or when the row is restricted or auth mail.
     pub fn from_list_item(item: &crate::store::agent_triage::AgentListItem) -> Option<Self> {
+        // Restricted mail (what the agent door may not see) and auth mail
+        // pinned onto the board stay out: login codes and the like are not
+        // good news, and the line should never be built from mail the
+        // owner has marked as kept close.
+        if item.decision.external_access.restricted || item.decision.auth.is_auth() {
+            return None;
+        }
         let summary = [&item.attention.summary, &item.decision.summary]
             .into_iter()
             .map(|s| s.trim())
@@ -441,6 +515,19 @@ pub async fn headline_at(
     .await
 }
 
+/// What one headline attempt came to.
+#[derive(Debug, Clone)]
+pub struct HeadlineResult {
+    pub headline: Option<String>,
+    /// What the provider reported spending, on every outcome it reported it
+    /// for (a refusal or a garbled answer included).
+    pub usage: Option<Usage>,
+    /// The model actually ANSWERED (a line, or deliberately nothing). False
+    /// for a timeout, an error or an unusable reply: worth asking again,
+    /// so the caller must not remember it as "nothing good to say".
+    pub settled: bool,
+}
+
 /// Write the headline, with the usage the call spent. INFALLIBLE and BOUNDED:
 /// every non-answer is `None` within [`HEADLINE_BUDGET`], and an empty band
 /// makes no call. Usage rides back on every outcome the provider reported it
@@ -451,9 +538,19 @@ pub async fn write_headline(
     items: &[HeadlineItem],
     good: &GoodNews,
     avoid: Option<&str>,
-) -> (Option<String>, Option<Usage>) {
+) -> HeadlineResult {
+    let done = |headline, usage| HeadlineResult {
+        headline,
+        usage,
+        settled: true,
+    };
+    let unsettled = |usage| HeadlineResult {
+        headline: None,
+        usage,
+        settled: false,
+    };
     if items.is_empty() {
-        return (None, None);
+        return done(None, None);
     }
     match tokio::time::timeout(
         HEADLINE_BUDGET,
@@ -461,20 +558,20 @@ pub async fn write_headline(
     )
     .await
     {
-        Ok(Ok(LlmOutcome::Ok(headline, usage))) => (headline, usage),
-        Ok(Ok(LlmOutcome::Refused(usage))) => (None, usage),
+        Ok(Ok(LlmOutcome::Ok(headline, usage))) => done(headline, usage),
+        Ok(Ok(LlmOutcome::Refused(usage))) => done(None, usage),
         Ok(Ok(LlmOutcome::Failed(kind, usage))) => {
             eprintln!("squelch: fye headline failed ({kind})");
-            (None, usage)
+            unsettled(usage)
         }
         Ok(Err(e)) => {
             eprintln!("squelch: fye headline errored ({e})");
-            (None, None)
+            unsettled(None)
         }
         Err(_) => {
             let secs = HEADLINE_BUDGET.as_secs();
             eprintln!("squelch: fye headline exceeded its {secs}s budget");
-            (None, None)
+            unsettled(None)
         }
     }
 }
@@ -587,6 +684,31 @@ mod tests {
             .as_deref(),
             Some("Two packages are on their way.")
         );
+        // Bad news the first list let through, possessives included.
+        for bad in [
+            "Your Chase card expires soon.",
+            "A small fee from Amex.",
+            "Your Netflix plan was cancelled.",
+            "Time to pay the electric company.",
+            "Your package is delayed.",
+            "The bill's ready.",
+            "A contract to review and a lease to sign.",
+        ] {
+            assert!(has_alarm(bad), "{bad}");
+        }
+        // Good news the first list killed.
+        for good in [
+            "The new boots arrive today.",
+            "The boots are now on their way.",
+            "A glowing review of your talk.",
+            "A sweet update from Sam.",
+            "Sam returned from Lisbon with stories.",
+            "The team behind the launch says thanks.",
+            "Your booking is confirmed.",
+            "A lovely reply from Sam.",
+        ] {
+            assert!(!has_alarm(good), "{good}");
+        }
         // Whole words only: "nowhere" is not "now", "needle" is not "need".
         assert!(!has_alarm("A needle in nowhere, calmly found."));
     }
@@ -613,8 +735,11 @@ mod tests {
             "claude-haiku-4-5",
             None,
         );
-        let (h, u) = write_headline(&client, "2026-10-01", &[], &GoodNews::default(), None).await;
-        assert_eq!((h, u.is_none()), (None, true));
+        let r = write_headline(&client, "2026-10-01", &[], &GoodNews::default(), None).await;
+        assert_eq!(
+            (r.headline, r.usage.is_none(), r.settled),
+            (None, true, true)
+        );
         tokio::task::yield_now().await;
         assert!(
             !hit.load(std::sync::atomic::Ordering::SeqCst),

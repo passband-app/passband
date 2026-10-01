@@ -187,6 +187,10 @@ pub struct ApiState {
     /// `None` headline is cached too, so a board the model had nothing to say
     /// about is not asked again.
     pub(crate) fye_headline_cache: Arc<std::sync::Mutex<Option<HeadlineCacheEntry>>>,
+    /// Headline calls ATTEMPTED today, as (UTC day, count): the half of the
+    /// daily cap the usage ledger cannot see (timeouts report no usage) and
+    /// cannot see in time (two calls racing the same ledger read).
+    pub(crate) fye_headline_attempts: Arc<std::sync::Mutex<(String, u32)>>,
     /// The hosted assistant relay: forwards the Passband app's Anthropic-shaped
     /// streaming request to the gateway with a daemon-held credential. `None`
     /// (no gateway + assistant key configured, and every test harness) means
@@ -420,6 +424,7 @@ impl ApiState {
             rule_suggest: None,
             fye_headline: None,
             fye_headline_cache: Arc::new(std::sync::Mutex::new(None)),
+            fye_headline_attempts: Arc::new(std::sync::Mutex::new((String::new(), 0))),
             assistant: None,
             sharing: None,
             shipment_poll: None,

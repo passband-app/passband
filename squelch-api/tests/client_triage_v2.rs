@@ -610,3 +610,65 @@ async fn feed_omits_a_blank_sender_name() {
     assert_eq!(body["items"][0]["message_id"], id);
     assert!(body["items"][0].get("from_name").is_none());
 }
+
+/// A model that FAILS the first request (a 500) and answers after that.
+async fn flaky_headline_mock(
+    headline: &'static str,
+) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = hits.clone();
+    let ok = format!(
+        r#"{{"content":[{{"type":"text","text":"{{\"candidates\":[\"{headline}\"]}}"}}],"stop_reason":"end_turn","usage":{{"input_tokens":300,"output_tokens":12}}}}"#
+    );
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let n = seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let ok = ok.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 65536];
+                let _ = sock.read(&mut buf).await;
+                let (status, body) = if n == 0 {
+                    ("500 X", r#"{"error":"boom"}"#.to_string())
+                } else {
+                    ("200 OK", ok)
+                };
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    (format!("http://{addr}"), hits)
+}
+
+#[tokio::test]
+async fn a_failed_headline_call_is_not_remembered_as_nothing_to_say() {
+    let (url, hits) = flaky_headline_mock("Two packages are on their way.").await;
+    let (state, store, acct) = state_with(|_, _| {});
+    let id = store
+        .upsert_message(&msg(acct, "offer", "offers", "A sale", "An offer"))
+        .unwrap();
+    assess(&store, acct, id, false);
+    let app = with_headline(state, url);
+
+    let first = body_json(
+        app.clone()
+            .oneshot(authed("GET", HEADLINE_URI))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(first["headline"], serde_json::Value::Null);
+    assert_eq!(first["settled"], false, "a 500 is a failure, not a verdict");
+    // Same board: the failure was not cached, so this asks again and answers.
+    let second = body_json(app.oneshot(authed("GET", HEADLINE_URI)).await.unwrap()).await;
+    assert_eq!(second["headline"], "Two packages are on their way.");
+    assert_eq!(second["settled"], true);
+    assert!(hits.load(std::sync::atomic::Ordering::SeqCst) >= 2);
+}

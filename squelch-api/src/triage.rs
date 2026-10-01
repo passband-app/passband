@@ -185,19 +185,39 @@ pub async fn fye_headline(
             Json(json!({ "headline": headline })),
         ));
     }
-    if spent >= u64::from(fh::DAILY_CAP) {
+    // RESERVE before calling, not after. The ledger only learns of calls the
+    // provider reported usage for, so a run of timeouts would never count
+    // against it, and two cache misses at once (the Mac and the phone, or a
+    // click racing a poll) would both read the same total. The in-memory
+    // tally counts every ATTEMPT, atomically; the ledger keeps the cap across
+    // restarts. Whichever is higher is what has been spent.
+    let day = now.format("%Y-%m-%d").to_string();
+    let reserved = state.fye_headline_attempts.lock().is_ok_and(|mut t| {
+        if t.0 != day {
+            *t = (day.clone(), 0);
+        }
+        if u64::from(t.1).max(spent) >= u64::from(fh::DAILY_CAP) {
+            return false;
+        }
+        t.1 += 1;
+        true
+    });
+    if !reserved {
         return Ok(none());
     }
-    let (headline, usage) =
-        fh::write_headline(&client, &today, &items, &good, previous.as_deref()).await;
-    // A fresh ask that came back empty leaves the cache alone: the line the
-    // owner is looking at is still a good one, and the next poll should keep
-    // agreeing with it rather than blank it.
-    if (!fresh || headline.is_some())
+    let result = fh::write_headline(&client, &today, &items, &good, previous.as_deref()).await;
+    let headline = result.headline.clone();
+    // Only an ANSWER is remembered. A timeout or an error is not "nothing
+    // good to say", and caching it as one would hide the line until the
+    // board changed. A fresh ask that came back empty leaves the cache alone
+    // too: the line the owner is looking at is still a good one.
+    if result.settled
+        && (!fresh || headline.is_some())
         && let Ok(mut c) = state.fye_headline_cache.lock()
     {
         *c = Some((key, headline.clone()));
     }
+    let usage = result.usage;
     if let Some(u) = usage {
         let _ = store_call(&state, move |store, account| {
             let day = Utc::now().format("%Y-%m-%d").to_string();
@@ -213,9 +233,11 @@ pub async fn fye_headline(
         })
         .await;
     }
+    // `settled: false` tells the client this was a failure, not a verdict,
+    // so it may ask again later.
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
-        Json(json!({ "headline": headline })),
+        Json(json!({ "headline": headline, "settled": result.settled })),
     ))
 }
 

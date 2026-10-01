@@ -784,6 +784,10 @@ struct RuleSuggestion: Codable, Sendable {
 /// empty, or the model had nothing to say.
 struct FyeHeadline: Codable, Sendable {
     var headline: String?
+    /// False when the daemon's call FAILED (timeout, provider error) rather
+    /// than the model answering: worth asking again. Absent on the first
+    /// daemons to serve the route, which read as settled.
+    var settled: Bool?
 }
 
 /// POST /client/rules and PUT /client/rules/{id}.

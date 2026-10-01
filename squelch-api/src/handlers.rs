@@ -168,6 +168,12 @@ pub struct UpdatesQuery {
     spam: Option<String>,
     limit: Option<u32>,
     cursor: Option<String>,
+    /// KEYSET PAGING, the mail list's infinite scroll: rows that arrived
+    /// strictly before this `received_at` (and, at the same instant, with a
+    /// smaller id than `before_id`). Exclusive with `cursor`. With no `since`
+    /// it reaches past the default window, back to the start of the mailbox.
+    before: Option<DateTime<Utc>>,
+    before_id: Option<i64>,
     /// READ WITHOUT SURFACING. Default false, so every existing client keeps the
     /// stamping fetch it has always had. `true` is for a reader acting on the
     /// user's behalf (the embedded agent answering "anything important today?"):
@@ -219,9 +225,19 @@ pub async fn get_updates(
             SpamScope::parse(s).ok_or_else(|| ApiError::bad_request("spam must be: only"))?
         }
     };
-    let since = q
-        .since
-        .unwrap_or_else(|| Utc::now() - chrono::Duration::days(DEFAULT_UPDATES_WINDOW_DAYS));
+    if q.before.is_some() && q.cursor.is_some() {
+        return Err(ApiError::bad_request("before and cursor are exclusive"));
+    }
+    let before = q.before.map(|at| (at, q.before_id.unwrap_or(i64::MAX)));
+    let since = q.since.unwrap_or_else(|| {
+        if before.is_some() {
+            DateTime::<Utc>::UNIX_EPOCH
+        } else {
+            Utc::now() - chrono::Duration::days(DEFAULT_UPDATES_WINDOW_DAYS)
+        }
+    });
+    // The store can stop at the page when nothing here narrows it further.
+    let store_limit = (tier_filter.is_none()).then_some((offset + limit) as usize);
     let min_importance = q.min_importance;
     // A pending-reminder listing NEVER stamps, whatever `peek` says. Its rows are
     // deferred mail the user is reviewing the schedule of; stamping them surfaced
@@ -234,6 +250,8 @@ pub async fn get_updates(
         let mut all = store.human_agent_updates(
             account_id,
             &AgentInventoryQuery {
+                before,
+                limit: store_limit,
                 since,
                 min_importance,
                 status: status_filter,

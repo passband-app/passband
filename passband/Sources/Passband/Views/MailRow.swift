@@ -124,8 +124,13 @@ struct MailRow: View {
                             .foregroundStyle(Palette.inkFaint)
                             .accessibilityLabel("has attachments")
                     }
-                    PlacementLabel(zone: SitrepZone(update.placement))
-                        .frame(width: 112, alignment: .leading)
+                    // A FIXED COLUMN when there is a zone, so the labels line up
+                    // down the list; NOTHING when there is not (an older
+                    // daemon sends none), rather than a blank column.
+                    if let zone = SitrepZone(update.placement) {
+                        PlacementLabel(zone: zone)
+                            .frame(width: 112, alignment: .leading)
+                    }
                     if selected {
                         Text(verbHint)
                             .font(Typo.mono(9))
@@ -134,11 +139,14 @@ struct MailRow: View {
                     // ARRIVAL ONLY. A daemon that does not send `received_at`
                     // has no arrival to print, and its listing time (every
                     // backfilled row reading "11:41 AM") is worse than none.
-                    Text(MailList.stamp(update.received_at))
-                        .font(.system(size: 11.5, weight: emphasized ? .semibold : .regular))
-                        .monospacedDigit()
-                        .foregroundStyle(emphasized ? Palette.inkDim : Palette.inkFaint)
-                        .frame(minWidth: 52, alignment: .trailing)
+                    let stamp = MailList.stamp(update.received_at)
+                    if !stamp.isEmpty {
+                        Text(stamp)
+                            .font(.system(size: 11.5, weight: emphasized ? .semibold : .regular))
+                            .monospacedDigit()
+                            .foregroundStyle(emphasized ? Palette.inkDim : Palette.inkFaint)
+                            .frame(minWidth: 52, alignment: .trailing)
+                    }
                 }
                 .layoutPriority(3)
             }

@@ -3081,6 +3081,8 @@ mod tests {
                 .human_agent_updates(
                     1,
                     &AgentInventoryQuery {
+                        before: None,
+                        limit: None,
                         since: Utc::now() - chrono::Duration::days(30),
                         min_importance: None,
                         status: None,
@@ -3102,6 +3104,8 @@ mod tests {
             .human_agent_updates(
                 1,
                 &AgentInventoryQuery {
+                    before: None,
+                    limit: None,
                     since: Utc::now() - chrono::Duration::days(30),
                     min_importance: None,
                     status: None,
@@ -4764,6 +4768,8 @@ fn human_inventory(
          LEFT JOIN agent_thread_attention a ON a.account_id=m.account_id AND a.thread_id=m.thread_id
          WHERE m.account_id=?1 AND m.is_sent=0 AND m.is_spam=?2
            AND (m.received_at>=?3 OR t.remind_at IS NOT NULL OR t.reminded_at IS NOT NULL)
+           AND (?4 IS NULL OR julianday(m.received_at)<julianday(?4)
+                OR (julianday(m.received_at)=julianday(?4) AND m.id<?5))
          ORDER BY m.received_at DESC,m.id DESC"
     )?;
     let rows = statement
@@ -4771,7 +4777,9 @@ fn human_inventory(
             params![
                 account,
                 query.spam == SpamScope::Only,
-                query.since.to_rfc3339()
+                query.since.to_rfc3339(),
+                query.before.map(|(at, _)| at.to_rfc3339()),
+                query.before.map(|(_, id)| id).unwrap_or(i64::MAX)
             ],
             |row| {
                 Ok(InventoryRow {
@@ -4802,7 +4810,15 @@ fn human_inventory(
         rank_items(&mut ranked, &query.ranking, Utc::now());
         scores.extend(ranked.iter().map(|item| (item.message_id, item.score)));
     }
+    // Only when nothing below re-sorts: then the rows come out in SQL order
+    // and the first `limit` produced are the page.
+    let early_limit = query
+        .limit
+        .filter(|_| !query.pending_reminders && query.band != Some(SitrepBand::Standing));
     for row in rows {
+        if early_limit.is_some_and(|limit| output.len() >= limit) {
+            break;
+        }
         let decision: Option<MessageDecision> = row.decision.as_deref().map(decode).transpose()?;
         let attention: Option<ThreadAttentionDecision> =
             row.attention.as_deref().map(decode).transpose()?;
@@ -4937,6 +4953,8 @@ mod inventory_tests {
     use super::*;
     fn query() -> AgentInventoryQuery {
         AgentInventoryQuery {
+            before: None,
+            limit: None,
             since: Utc::now() - Duration::days(30),
             min_importance: None,
             status: None,
@@ -4970,6 +4988,37 @@ mod inventory_tests {
         assert!(items.iter().any(|item| item.update.id == 1));
         assert!(store.external_agent_reading(1, 10).unwrap().is_empty());
     }
+    #[test]
+    fn human_inventory_pages_by_keyset_without_gaps_or_repeats() {
+        let store = tests::fixture();
+        let all = store.human_agent_updates(1, &query()).unwrap();
+        assert!(all.len() >= 2, "fixture has at least two messages");
+        // One row per page, walking back by (received_at, id).
+        let mut walked = Vec::new();
+        let mut before = None;
+        loop {
+            let page = store
+                .human_agent_updates(
+                    1,
+                    &AgentInventoryQuery {
+                        before,
+                        limit: Some(1),
+                        since: DateTime::<Utc>::UNIX_EPOCH,
+                        ..query()
+                    },
+                )
+                .unwrap();
+            assert!(page.len() <= 1, "the limit caps the page");
+            let Some(row) = page.into_iter().next() else {
+                break;
+            };
+            before = Some((row.received_at.unwrap(), row.update.id));
+            walked.push(row.update.id);
+            assert!(walked.len() <= all.len(), "paging never repeats");
+        }
+        assert_eq!(walked, all.iter().map(|u| u.update.id).collect::<Vec<_>>());
+    }
+
     #[test]
     fn human_inventory_keeps_date_only_deadline_precision() {
         let store = tests::fixture();

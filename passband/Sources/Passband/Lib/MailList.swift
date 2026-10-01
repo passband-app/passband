@@ -49,6 +49,10 @@ enum MailFilter: String, CaseIterable, Sendable {
 }
 
 enum MailList {
+    /// How many rows from the end of what is loaded the infinite scroll asks
+    /// for the next page: far enough ahead that it lands before you get there.
+    static let loadAhead = 40
+
     /// Whether a row reads as finished: done on the server, or resolved in
     /// this session ahead of the poll that will say so. The overlay is what
     /// lets `u` bring a row straight back instead of one poll later.

@@ -108,7 +108,9 @@ enum MailMode: String, Sendable, Hashable, CaseIterable {
     /// a control that grew an option — you need to see where you are and how to
     /// get back.
     static func segments(showingSpam: Bool) -> [MailMode] {
-        showingSpam ? [.inbox, .noise, .sent, .spam] : [.inbox, .noise, .sent]
+        // No noise segment: all mail shows every message, noise labelled as
+        // such, so a page of only noise is a page nobody needs.
+        showingSpam ? [.inbox, .sent, .spam] : [.inbox, .sent]
     }
 
     /// The page's name — the header title and the segmented control both.
@@ -1559,6 +1561,7 @@ final class AppStore {
         zoneRefresh = nil
         mailPages = [:]
         mailLoadedAt = [:]
+        mailPagingState = [:]
         mailRefreshes = [:]
         reminderRows = .loading
         remindersLoadedAt = nil
@@ -2274,8 +2277,9 @@ final class AppStore {
 
     // MARK: - the flat mail pages
 
-    /// One generous page — the read model is local, so this is cheap.
-    private static let mailLimit = 500
+    /// The page size, for the head the poll refreshes and for every older
+    /// page the infinite scroll asks for.
+    private static let mailLimit = 100
     /// How many rows get their thread warmed ahead of any click. A bounded
     /// prefix: warming all 500 would stampede the daemon for mail nobody scrolls
     /// to, and hover warming picks up anything past it.
@@ -2297,6 +2301,74 @@ final class AppStore {
     /// inbox's TTL swallow the noise page's first fetch. Kept out of the
     /// `Loadable`s, which the list reads: these are bookkeeping, not rows.
     private var mailLoadedAt: [MailMode: Date] = [:]
+
+    /// Where each page's infinite scroll stands.
+    struct MailPaging: Equatable {
+        /// The offset cursor for a daemon that cannot page by arrival.
+        var nextCursor: String?
+        /// Nothing older to fetch.
+        var exhausted = false
+        var loadingMore = false
+    }
+    private var mailPagingState: [MailMode: MailPaging] = [:]
+    func mailPaging(_ mode: MailMode) -> MailPaging { mailPagingState[mode] ?? MailPaging() }
+
+    /// THE INFINITE SCROLL: fetch the page older than the last row loaded and
+    /// append it. By arrival (`before`) on a daemon that sends `received_at`,
+    /// which does not shift as new mail lands and reaches past the 30-day
+    /// window; by the offset cursor on one that does not, inside that window.
+    /// One in flight per page, and none once the mailbox has run out.
+    func loadMoreMail(_ mode: MailMode) async {
+        var paging = mailPaging(mode)
+        guard !paging.exhausted, !paging.loadingMore,
+            let last = mailPages[mode]?.value?.last
+        else { return }
+        var params = UpdatesParams(tier: mode.tier, limit: Self.mailLimit, spamOnly: mode.spamOnly)
+        if let at = last.received_at {
+            params.before = at
+            params.beforeId = last.id
+        } else if let cursor = paging.nextCursor {
+            params.cursor = cursor
+        } else {
+            paging.exhausted = true
+            mailPagingState[mode] = paging
+            return
+        }
+        paging.loadingMore = true
+        mailPagingState[mode] = paging
+        let e = epoch
+        do {
+            let fetched = try await APIClient.shared.getUpdates(params)
+            guard e == epoch else { return }
+            var added = 0
+            withMailPage(mode) { page in
+                guard var rows = page.value else { return }
+                let have = Set(rows.map(\.id))
+                let fresh = fetched.items.filter { !have.contains($0.id) }
+                added = fresh.count
+                rows.append(contentsOf: Self.sortedByArrival(fresh))
+                page.value = rows
+            }
+            paging = mailPaging(mode)
+            paging.nextCursor = fetched.next_cursor
+            // Short page, or a page of nothing new (an older daemon that
+            // ignored `before` and answered the head again): the end.
+            paging.exhausted = fetched.items.count < Self.mailLimit || added == 0
+        } catch {
+            guard e == epoch else { return }
+            paging = mailPaging(mode)
+        }
+        paging.loadingMore = false
+        mailPagingState[mode] = paging
+    }
+
+    /// Newest first by arrival, ties on id. The key is a date parse, taken
+    /// ONCE per row rather than twice per comparison.
+    private static func sortedByArrival(_ rows: [AttentionUpdate]) -> [AttentionUpdate] {
+        rows.map { ($0, receivedTS($0)) }
+            .sorted { a, b in a.1 != b.1 ? a.1 > b.1 : a.0.id > b.0.id }
+            .map(\.0)
+    }
     private var mailRefreshes: [MailMode: Task<Void, Never>] = [:]
 
     /// One page's rows. Never fetched reads as LOADING, so the first paint of a
@@ -2367,32 +2439,45 @@ final class AppStore {
             // at the bottom is only ever reached by the live epoch.
             guard e == epoch else { return }
             releaseReopened(fetched.items, fetchedAt: fetchedAt)
-            // DONE MAIL STAYS IN THE CACHE. The page hides it on "to do" and
-            // shows it dimmed on "everything" (`MailList.visible`), and that is
-            // a view decision made per render, not a fetch decision made here.
-            // The sort key is a date parse, taken ONCE per row rather than
-            // twice per comparison: five hundred rows is nine thousand
-            // comparisons, each of which took the date cache's lock twice.
-            let next =
-                fetched.items
-                .map { ($0, Self.receivedTS($0)) }
-                .sorted { a, b in a.1 != b.1 ? a.1 > b.1 : a.0.id > b.0.id }
-                .map(\.0)
+            // DONE MAIL STAYS IN THE CACHE; the page shows it dimmed.
+            //
+            // THE HEAD MERGES INTO WHAT IS LOADED rather than replacing it, or
+            // every poll would throw away the pages the scroll fetched. Rows
+            // the head returns replace their old copies; older loaded rows
+            // stay; a loaded row INSIDE the head's span that the head no longer
+            // returns has left the listing (moved to spam, deleted) and goes.
+            let head = Self.sortedByArrival(fetched.items)
+            let firstLoad = mailPages[mode]?.value == nil
             withMailPage(mode) { page in
+                let next: [AttentionUpdate]
+                if let loaded = page.value, let floor = head.last {
+                    let headIds = Set(head.map(\.id))
+                    let floorTS = Self.receivedTS(floor)
+                    let tail = loaded.filter { u in
+                        !headIds.contains(u.id)
+                            && (Self.receivedTS(u) < floorTS
+                                || (Self.receivedTS(u) == floorTS && u.id < floor.id))
+                    }
+                    next = head + tail
+                } else {
+                    next = head
+                }
                 // Only touch the value when the list actually CHANGED: the poll
-                // re-runs this, and an identical assignment re-renders 500 rows.
+                // re-runs this, and an identical assignment re-renders the list.
                 if next != page.value { page.value = next }
                 page.error = nil
+            }
+            if firstLoad {
+                mailPagingState[mode] = MailPaging(
+                    nextCursor: fetched.next_cursor,
+                    exhausted: fetched.items.count < Self.mailLimit)
             }
             mailLoadedAt[mode] = Date()
             // Pull the head rows' threads before any click, so an open renders
             // from cache. Runs on the launch warm too, not just on a visit.
-            // The head of what the page SHOWS: on To do (the default) the
-            // done rows in the cache are never on screen, and warming them
-            // would leave the rows that are cold.
-            let showDone = Prefs.shared.mailShowsDone
+            // Mail still to do first: it is what gets opened.
             ThreadPrefetch.shared.warm(
-                next.lazy.filter { showDone || $0.status != .done }
+                head.lazy.filter { $0.status != .done }
                     .prefix(Self.mailWarmRows).map(\.thread_id), immediate: 5)
         } catch {
             guard e == epoch else { return }

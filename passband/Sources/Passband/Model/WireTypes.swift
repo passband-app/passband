@@ -1923,6 +1923,10 @@ struct UpdatesParams: Sendable {
     var band: Band?
     var limit: Int?
     var cursor: String?
+    /// Keyset paging: rows that arrived before this stamp (and, at that
+    /// instant, below `beforeId`). Exclusive with `cursor`.
+    var before: String? = nil
+    var beforeId: Int? = nil
     /// Narrow to rows with a PENDING reminder, soonest first. Named for the
     /// flag rather than the query value (`reminders=pending`) because unlike
     /// every field above it, it is a filter with its own ORDER: the server

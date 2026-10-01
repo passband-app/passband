@@ -233,6 +233,7 @@
 		8584D208439539843BAE4481 /* AgentTools.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1E7DFB379AF677D44E393FF /* AgentTools.swift */; };
 		85A1CC563396C7890FB07C1F /* HTMLImg.swift in Sources */ = {isa = PBXBuildFile; fileRef = 579ABC2B7707848B4AED6F18 /* HTMLImg.swift */; };
 		85A261179BDC0C4F5BEB9F4A /* MailCSP.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10C0C8780CCB9C6BAB2709C /* MailCSP.swift */; };
+		865AD21BDE6B66D287E33641 /* MailListCursor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FB62F2478B613F47FF918B0 /* MailListCursor.swift */; };
 		88A8F0598E0AD01532B11B24 /* EventStream.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE462B9CE6C195F53B48B801 /* EventStream.swift */; };
 		88DA0B8D32AA1FE0E82DA026 /* AnthropicStream.swift in Sources */ = {isa = PBXBuildFile; fileRef = E949BF41848E8F43B63C7AB7 /* AnthropicStream.swift */; };
 		8A9F649DE9EC1BEEEA1242B8 /* AuthLabels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40EDDA2423A09A989C77CAED /* AuthLabels.swift */; };
@@ -334,6 +335,7 @@
 		C8FCFA76D21B9E6DC3093D18 /* SwipeRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = C465B24E00D0436CD5704294 /* SwipeRow.swift */; };
 		C955E0DC78DCABE9CE211463 /* SquelchSceneView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C3BB3E8C5DCB0B058D3D5E2 /* SquelchSceneView.swift */; };
 		CB68A75D6FF8CCDEDDFB3D77 /* RecentSearches.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79260771784529100D58EE3E /* RecentSearches.swift */; };
+		CBE4D470D5B20719C4BB6364 /* MailListCursor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FB62F2478B613F47FF918B0 /* MailListCursor.swift */; };
 		CDD154C0CEFB4D530E29DD34 /* Format.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5883BA424612265657845246 /* Format.swift */; };
 		CDE77DF3DD16A78A9192624E /* EventBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D952F37AD4DF7C050902B19 /* EventBanner.swift */; };
 		CE36E3CB614F3B5BADFCEEC2 /* ImageTrim.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17A72FA204008ACE31765EA1 /* ImageTrim.swift */; };
@@ -551,6 +553,7 @@
 		5CF902E0C098D276114BC5A2 /* ScheduledSend.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScheduledSend.swift; sourceTree = "<group>"; };
 		5DAC2EA79665D763DD36958D /* SyncStatus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncStatus.swift; sourceTree = "<group>"; };
 		5F62561CEB4911BA0E72FEDD /* ThreadPrefetch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadPrefetch.swift; sourceTree = "<group>"; };
+		5FB62F2478B613F47FF918B0 /* MailListCursor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MailListCursor.swift; sourceTree = "<group>"; };
 		5FCD987D800267801D7B4DFE /* ConnectionHealth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionHealth.swift; sourceTree = "<group>"; };
 		613B9741AD84024778FA8204 /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClient.swift; sourceTree = "<group>"; };
 		627B000AA2D3694B771F50B0 /* TourOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TourOverlay.swift; sourceTree = "<group>"; };
@@ -754,6 +757,7 @@
 				4A52E20474A0D6F31073DA61 /* ListRow.swift */,
 				72CBF9D9D70A4E7B3BEC601D /* LiveInboxSummary.swift */,
 				D2ED74225D223B07573FEE0C /* MailFilterBar.swift */,
+				5FB62F2478B613F47FF918B0 /* MailListCursor.swift */,
 				6459ED81B57054050F2B7F21 /* MailRow.swift */,
 				A77BC580144CC1AF7B5B8AEF /* MarkdownStyle.swift */,
 				FF2D98A36AEF64366DD338AB /* MarkdownTextView.swift */,
@@ -1320,6 +1324,7 @@
 				C44797D33062B1E2B2A342FE /* MailCSP.swift in Sources */,
 				12FA01A347B0C6F768928A55 /* MailFilterBar.swift in Sources */,
 				46D44A7303D12ED7AD0C0852 /* MailList.swift in Sources */,
+				865AD21BDE6B66D287E33641 /* MailListCursor.swift in Sources */,
 				90229A34F9C4E9629C862665 /* MailRow.swift in Sources */,
 				7212E886802DBD6F6E869BD0 /* MainWindow.swift in Sources */,
 				C14EABCB7D1F6C3C4B800311 /* Markdown.swift in Sources */,
@@ -1517,6 +1522,7 @@
 				85A261179BDC0C4F5BEB9F4A /* MailCSP.swift in Sources */,
 				F20F889E8EACBA347A96080A /* MailFilterBar.swift in Sources */,
 				39106BE6F52C41CBE345A57E /* MailList.swift in Sources */,
+				CBE4D470D5B20719C4BB6364 /* MailListCursor.swift in Sources */,
 				C002CBB0D207E2B3863EAC7A /* MailRow.swift in Sources */,
 				063C1CF09D6E7CE57C547486 /* Markdown.swift in Sources */,
 				84F6860CDCC32C143703EF41 /* MarkdownStyle.swift in Sources */,

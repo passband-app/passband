@@ -7,15 +7,12 @@
 // them, and choosing any one turns the others off. Inbox only: noise has no
 // important mail by definition, and nothing here means anything on spam.
 //
-// Right: "To do" / "Everything". To do is the old page — finished mail leaves.
-// Everything keeps it, dimmed and checked, which is how a list reader expects
-// a mailbox to behave: archived is not the same as gone.
+// Finished mail always shows, dimmed and checked: archived is not gone.
 
 import SwiftUI
 
 struct MailFilterBar: View {
     @Environment(AppStore.self) private var store
-    let mode: MailMode
     /// Rows per lens under the current to-do switch (`MailList.Counts`), so a
     /// chip says what clicking it gets you before you click.
     let counts: [MailFilter: Int]
@@ -23,39 +20,30 @@ struct MailFilterBar: View {
     private var reminders: Bool { store.reminderFilter }
 
     var body: some View {
-        @Bindable var prefs = Prefs.shared
         HStack(spacing: 6) {
-            if mode == .inbox {
-                pillScroller {
-                    HStack(spacing: 6) {
-                        ForEach(MailFilter.allCases, id: \.self) { f in
-                            FilterPill(
-                                text: f.label,
-                                count: f == .all ? nil : counts[f, default: 0],
-                                active: !reminders && store.mailFilter == f,
-                                help: f.help
-                            ) {
-                                store.reminderFilter = false
-                                store.mailFilter = f
-                            }
-                        }
+            pillScroller {
+                HStack(spacing: 6) {
+                    ForEach(MailFilter.allCases, id: \.self) { f in
                         FilterPill(
-                            text: "Reminders", icon: "bell", active: reminders,
-                            help: "mail you parked with a reminder (h sets one)"
+                            text: f.label,
+                            count: f == .all ? nil : counts[f, default: 0],
+                            active: !reminders && store.mailFilter == f,
+                            help: f.help
                         ) {
-                            store.mailFilter = .all
-                            store.reminderFilter.toggle()
+                            store.reminderFilter = false
+                            store.mailFilter = f
                         }
+                    }
+                    FilterPill(
+                        text: "Reminders", icon: "bell", active: reminders,
+                        help: "mail you parked with a reminder (h sets one)"
+                    ) {
+                        store.mailFilter = .all
+                        store.reminderFilter.toggle()
                     }
                 }
             }
-            Spacer(minLength: 8)
-            if !reminders {
-                GlassSegmented(
-                    options: [(false, "To do"), (true, "Everything")],
-                    selection: $prefs.mailShowsDone)
-                .help("To do hides mail you have finished. Everything shows it, dimmed.")
-            }
+            Spacer(minLength: 0)
         }
         #if os(macOS)
             .padding(.horizontal, 24)

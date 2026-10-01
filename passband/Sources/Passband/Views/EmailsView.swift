@@ -33,11 +33,29 @@ import SwiftUI
 struct EmailsView: View {
     @Environment(AppStore.self) private var store
 
-    @State private var index = 0
+    /// THE CURSOR, in an object of its own rather than three `@State`s. A
+    /// `@State` read in this body makes the body depend on it, and the cursor
+    /// moves on every hover: each move re-ran this body and re-diffed every
+    /// loaded row, which is why scrolling got slower as more mail loaded. Now
+    /// only the rows (`MailRowSlot`) and two zero-size leaves read it, so a
+    /// hover redraws the rows on screen and nothing else. The forwarding
+    /// accessors below keep every key binding reading it as before; they run
+    /// when a key fires, not while the body is built.
+    @State private var cursor = ListCursor()
+    private var index: Int {
+        get { cursor.index }
+        nonmutating set { cursor.index = newValue }
+    }
     /// True only while the keyboard is driving the cursor.
-    @State private var kbActive = false
+    private var kbActive: Bool {
+        get { cursor.kbActive }
+        nonmutating set { cursor.kbActive = newValue }
+    }
     /// True only while the cursor is actually over a row.
-    @State private var hovering = false
+    private var hovering: Bool {
+        get { cursor.hovering }
+        nonmutating set { cursor.hovering = newValue }
+    }
 
     private var mode: MailMode { store.mailMode }
     /// The reminder lens, which only the inbox page has. Read through here so
@@ -69,15 +87,14 @@ struct EmailsView: View {
     /// this is asked a dozen times per body, and the body runs on every hover.
     private var listing: MailList.Listing.Output {
         MailList.Listing.shared.of(
-            // The reminder lens is ALL done rows (parking resolves), so it
-            // never runs through the to-do switch.
-            page.value ?? [], showDone: reminders || showDone, filter: filter,
+            page.value ?? [], showDone: true, filter: filter,
             resolved: reminders ? [] : store.resolvedIds, grouped: !reminders)
     }
     private var rows: [AttentionUpdate] { listing.rows }
-    /// The "to do / everything" switch, on the two pages that have one.
-    private var hasDoneSwitch: Bool { !reminders && (mode == .inbox || mode == .noise) }
-    private var showDone: Bool { hasDoneSwitch && Prefs.shared.mailShowsDone }
+    /// FINISHED MAIL ALWAYS SHOWS, dimmed and checked: a mail list where
+    /// archived is not the same as gone. Kept as a name because the queue and
+    /// the `e` walk both ask it.
+    private let showDone = true
     private var filter: MailFilter { mode == .inbox && !reminders ? store.mailFilter : .all }
     /// Finished, as this page draws it. Never on the reminder lens, whose rows
     /// are all resolved by construction and are the point of the lens.
@@ -116,14 +133,14 @@ struct EmailsView: View {
     /// message id (a `.task` key, and the scroll target) and the thread to warm.
     /// An outbox row answers only when it has a thread (a reply's), which is
     /// the thread the preview's `edit` opens.
-    private var cursorRow: (id: Int, threadId: String)? {
+    private func cursorRow(at i: Int) -> (id: Int, threadId: String)? {
         if mode == .sent {
-            if let row = selectedScheduled {
+            if let row = scheduled[safe: i] {
                 return row.thread_id.map { (row.id, $0) }
             }
-            return selectedSent.map { ($0.id, $0.thread_id) }
+            return sent[safe: i - scheduled.count].map { ($0.id, $0.thread_id) }
         }
-        return selected.map { ($0.id, $0.thread_id) }
+        return rows[safe: i].map { ($0.id, $0.thread_id) }
     }
     /// The outbox row the keys may act on: under the keyboard cursor or the
     /// pointer, the same `actionable` rule every verb here keeps.
@@ -157,13 +174,12 @@ struct EmailsView: View {
                     .padding(.horizontal, 18)
                     .padding(.top, 10)
             }
-            if mode == .inbox || mode == .noise {
+            if mode == .inbox {
                 // The page's OWN rows for the counts, never the parked list the
                 // reminder lens swaps in.
                 MailFilterBar(
-                    mode: mode,
                     counts: MailList.Counts.shared.of(
-                        store.mailPage(mode).value ?? [], showDone: showDone,
+                        store.mailPage(mode).value ?? [], showDone: true,
                         resolved: store.resolvedIds))
             }
             #if os(macOS)
@@ -193,12 +209,8 @@ struct EmailsView: View {
         // Pull the thread for the row the cursor rests on, DEBOUNCED so sweeping
         // a 500-row list fires one request for the row you stop on rather than
         // one per row you pass. Covers everything past the bounded head-warm.
-        .task(id: cursorRow?.id) {
-            guard let row = cursorRow else { return }
-            try? await Task.sleep(for: .milliseconds(120))
-            guard !Task.isCancelled else { return }
-            ThreadPrefetch.shared.prefetch(row.threadId)
-        }
+        // In a LEAF so that only it, not this body, depends on the cursor.
+        .background { CursorPrefetch(cursor: cursor, rowAt: { cursorRow(at: $0) }) }
         // ONE HANDLER for the cursor's bound and the outbox's shifts, in that
         // order: re-anchor to the row it was on (a poll that adds or drops an
         // outbox row shifts every position under it, and the next Enter / `s`
@@ -223,7 +235,6 @@ struct EmailsView: View {
         }
         .onChange(of: reminders) { _, _ in resetCursor() }
         .onChange(of: store.mailFilter) { _, _ in resetCursor() }
-        .onChange(of: Prefs.shared.mailShowsDone) { _, _ in resetCursor() }
         // Jump to (and highlight) a hand-off target from the sitrep rails.
         .onChange(of: store.selectedId) { _, id in
             guard let id, let i = rows.firstIndex(where: { $0.id == id }) else { return }
@@ -263,21 +274,11 @@ struct EmailsView: View {
                 reminders
                     ? "No pending reminders."
                     : filter != .all
-                        ? (hiddenDoneMatches
-                            ? "Everything here that matches \(filter.label) is done. Choose Everything to see it."
-                            : "Nothing in the last 30 days matches \(filter.label).")
-                        : !showDone && hasDoneSwitch && !(page.value ?? []).isEmpty
-                            ? "All caught up. Choose Everything to see mail you have finished."
-                            : mode == .noise
+                        ? "Nothing loaded matches \(filter.label)."
+                        : mode == .noise
                                 ? "No noise in the last 30 days."
                                 : mode == .spam ? spamEmptyNote : "No mail.")
         }
-    }
-
-    /// Whether To do is hiding finished mail that the current lens matches, so
-    /// an empty lens can say where its rows went instead of "nothing matches".
-    private var hiddenDoneMatches: Bool {
-        !showDone && (page.value ?? []).contains { isDone($0) && filter.matches($0) }
     }
 
     /// Which of the spam page's three empty states this is. Only the last one
@@ -426,16 +427,17 @@ struct EmailsView: View {
                                     mailRow(u, at: section.start + j)
                                 }
                             }
+                            olderMailFooter
                         }
                     }
                     .padding(.horizontal, 18)
                     .padding(.vertical, 10)
                 }
-                .onChange(of: index) { _, i in
-                    // Follow the KEYBOARD selection only. Both pages key their
-                    // rows on the message id, so one scroll target serves both.
-                    guard kbActive, let id = rowId(at: i) else { return }
-                    withAnimation(Motion.scrollFollow) { proxy.scrollTo(id, anchor: .center) }
+                // Follow the KEYBOARD selection only. Both pages key their rows
+                // on the message id, so one scroll target serves both. A leaf,
+                // like the prefetch, so the cursor stays out of this body.
+                .background {
+                    CursorScrollFollower(cursor: cursor, proxy: proxy, idAt: { rowId(at: $0) })
                 }
             }
             .onContinuousHover { phase in
@@ -447,21 +449,32 @@ struct EmailsView: View {
     #if os(macOS)
         /// One row of the inbox / noise / spam list at flat position `i`.
         private func mailRow(_ u: AttentionUpdate, at i: Int) -> some View {
-            MailRow(
+            let count = rows.count
+            let mode = mode
+            let reminders = reminders
+            return MailRowSlot(
+                cursor: cursor,
+                position: i,
                 update: u,
-                selected: kbActive && i == index,
                 done: isDone(u),
                 verbHint: mode == .spam ? "[i][e][d]" : "[r][e][d]",
-                onHover: {
-                    // A hover must NOT follow-scroll: a row near the viewport
-                    // edge would jump the list out from under the cursor.
-                    hovering = true
-                    kbActive = false
-                    index = i
-                },
-                onOpen: { store.openThread(u.thread_id, queue: queue(opening: u)) }
+                onOpen: { store.openThread(u.thread_id, queue: queue(opening: u)) },
+                // INFINITE SCROLL: a row this close to the end of what is
+                // loaded asks for the next page, well before the bottom shows.
+                onAppear: {
+                    guard !reminders, i >= count - MailList.loadAhead else { return }
+                    Task { await store.loadMoreMail(mode) }
+                }
             )
             .id(u.id)
+        }
+
+        /// Under the last row: a quiet note while an older page is on its way,
+        /// and nothing once the mailbox has run out.
+        @ViewBuilder private var olderMailFooter: some View {
+            if store.mailPaging(mode).loadingMore {
+                BandNote("Loading older mail…")
+            }
         }
     #endif
 
@@ -496,6 +509,11 @@ struct EmailsView: View {
                             DayHeading(section.title, first: section.start == 0)
                         }
                     }
+                    // The end of what is loaded: the next older page.
+                    Color.clear
+                        .frame(height: 1)
+                        .plainRow()
+                        .onAppear { Task { await store.loadMoreMail(mode) } }
                 }
             }
             .listStyle(.plain)
@@ -538,14 +556,10 @@ struct EmailsView: View {
     }
 
     #if !os(macOS)
-        /// The spam count when the phone bar should offer the spam door, nil
-        /// otherwise: on the noise page always, and on the inbox only when there
-        /// is no noise count occupying the slot. See the chip's own note.
-        private var showSpamDoor: Bool {
-            guard store.spamDoorVisible else { return false }
-            let noise = store.stats?.tier_counts["noise"] ?? 0
-            return mode == .noise || (mode == .inbox && noise == 0)
-        }
+        /// Whether the phone bar offers the spam door: on the inbox, whenever
+        /// the folder has something in it. The noise door that used to share
+        /// this slot is gone with the noise page.
+        private var showSpamDoor: Bool { store.spamDoorVisible && mode == .inbox }
         /// The count beside it, when there is one to show.
         private var spamDoorCount: Int? {
             store.stats?.spam.flatMap { $0 > 0 ? $0 : nil }
@@ -553,7 +567,6 @@ struct EmailsView: View {
 
         private var phoneHeader: some View {
             @Bindable var store = store
-            let noise = store.stats?.tier_counts["noise"] ?? 0
 
             return HStack(spacing: 10) {
                 GlassSegmented(
@@ -565,15 +578,8 @@ struct EmailsView: View {
                         .font(Typo.micro).foregroundStyle(Palette.warn)
                         .help(err.message)
                 } else if showSpamDoor {
-                    // THE PHONE'S SPAM DOOR, and it is a DRILL-DOWN rather than
-                    // a second number beside the noise one: this bar has the
-                    // segmented control plus room for one count, and two
-                    // competing numbers on a narrow iPhone is how both become
-                    // unreadable. So the path is inbox -> noise -> spam, in
-                    // increasing order of "mail I did not want", and the chip
-                    // shows on the noise page always. It also shows on the
-                    // inbox when there is no noise count to displace, so an
-                    // empty noise bin does not hide the folder behind it.
+                    // THE PHONE'S SPAM DOOR: this bar has the segmented
+                    // control plus room for one count, and this is it.
                     Button { store.mailMode = .spam } label: {
                         HStack(spacing: 6) {
                             if let spam = spamDoorCount {
@@ -582,20 +588,6 @@ struct EmailsView: View {
                                     .foregroundStyle(Palette.inkFaintest)
                             }
                             Text("spam").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
-                        }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                } else if mode == .inbox, noise > 0 {
-                    // The count is the door to the page it counts, same as on the
-                    // Mac — just without the word "signal" beside it, because the
-                    // list underneath is already the signal.
-                    Button { store.mailMode = .noise } label: {
-                        HStack(spacing: 6) {
-                            Text("\(noise)")
-                                .font(Typo.num(12, weight: .bold))
-                                .foregroundStyle(Palette.inkFaint)
-                            Text("noise").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
                         }
                         .contentShape(Rectangle())
                     }
@@ -611,7 +603,6 @@ struct EmailsView: View {
     private var desktopHeader: some View {
         @Bindable var store = store
         let signal = store.sitrep.standing.count + store.sitrep.new.count + store.sitrep.open.count
-        let noise = store.stats?.tier_counts["noise"] ?? 0
 
         return HStack(spacing: 10) {
             // NO MODE LABEL BESIDE THE WORDMARK. It said what the segmented
@@ -630,21 +621,9 @@ struct EmailsView: View {
             HStack(spacing: 8) {
                 Text("\(signal)").font(Typo.num(12, weight: .bold)).foregroundStyle(Palette.accent)
                 Text("signal").font(Typo.micro).foregroundStyle(Palette.inkFaint)
-                // The count is the door to the page it counts. A jump, not a
-                // toggle: `n` and the segments are the way back.
-                Button { store.mailMode = .noise } label: {
-                    HStack(spacing: 8) {
-                        Text("\(noise)")
-                            .font(Typo.num(12, weight: .bold))
-                            .foregroundStyle(mode == .noise ? Palette.accent : Palette.inkFaint)
-                        Text("noise").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
-                    }
-                    // The number and the word are one target, gap included.
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("the noise page — everything triage filed as noise (n)")
-                // THE SPAM DOOR, in the same shape as the noise count beside it
+                // No noise door: all mail shows every message, noise included,
+                // each labelled with where the sitrep filed it.
+                // THE SPAM DOOR, in the same shape as the old noise count
                 // and one step quieter at rest (inkFaintest against its
                 // inkFaint), absent entirely when the folder is empty or the
                 // daemon is too old to answer. It still takes the accent while
@@ -721,10 +700,6 @@ struct EmailsView: View {
                     store.setView(.sitrep)
                 }
             },
-            // One key both ways — noise is a page you dip into, not a mode you
-            // have to remember you are in. It stays the inbox/noise flip from
-            // the sent page too; `sent` is reached by the segments.
-            KeyBinding("n", "noise / back") { store.mailMode = mode.flipped },
             KeyBinding("Enter", "drill in") {
                 guard actionable else { return }
                 if mode == .sent {

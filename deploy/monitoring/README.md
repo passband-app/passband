@@ -148,7 +148,11 @@ kubectl -n monitoring top pod -l app.kubernetes.io/name=prometheus-agent
   shows here first), Traefik request/5xx/latency. The p95 is one line per
   backend service, so a slow tenant cannot hide inside a fleet-wide blend; a
   line pinned flat at the top bucket means "worse than this", not "this".
-- **Tenants** — pod count vs the 100-user cap, per-tenant CPU/memory/PVC/restarts.
+- **Tenants** — who is still using it (**Tenant activity**: time since each
+  tenant's last write on the client door and since its app was last seen at
+  all, from the daemon's per-route request counters, so it reaches back only
+  as far as Prometheus's 30 days), pod count vs the 100-user cap, per-tenant
+  CPU/memory/PVC/restarts.
 - **Daemon rollout** — which image version each tenant pod runs, and the
   switchover as it happens, plus the roller's own two vital signs: a casualty
   (a roll that exited 4, the fleet frozen, the one thing worth a page) and how

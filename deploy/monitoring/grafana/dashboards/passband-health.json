@@ -1906,6 +1906,361 @@
    "panels": []
   },
   {
+   "type": "table",
+   "title": "Tenant activity",
+   "id": 54,
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "description": "Who is still using the thing, read off the daemon's own request counters (2xx only, so a scanner or a revoked token cannot make a dead tenant look alive). Last action is the newest successful WRITE on the client door: opening a message, dismissing a card, drafting, sending, a rule. Push registration and pairing are left out because the app does those by itself. App last seen is ANY client request, which includes the background polling an open app does on its own, so it means 'the app is running somewhere', not 'a person is looking at it'. A tenant whose app is seen but whose last action is a week old has it open in a corner and is not reading mail in it. 'now' means inside the last ten minutes, which is also the resolution of every other value in those two columns, and the horizon is Prometheus's 30 days of retention: older than that reads as 'none in 30d', and so does a tenant that has never done the thing at all.",
+   "gridPos": {
+    "h": 9,
+    "w": 24,
+    "x": 0,
+    "y": 53
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "(0 * (increase((sum by (tenant) (squelchd_http_request_duration_seconds_count{route=~\"/client.*\", route!~\"/client/(devices.*|pair)\", method!=\"GET\", status=\"2xx\"}))[12m:1m]) > 0)) or (time() - max_over_time((timestamp(increase((sum by (tenant) (squelchd_http_request_duration_seconds_count{route=~\"/client.*\", route!~\"/client/(devices.*|pair)\", method!=\"GET\", status=\"2xx\"}))[12m:1m]) > 0))[30d:10m])) or on (tenant) (0 * max by (tenant) (squelchd_build_info) + 2592000)",
+     "refId": "A",
+     "range": false,
+     "instant": true,
+     "format": "table"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "(0 * (increase((sum by (tenant) (squelchd_http_request_duration_seconds_count{route=~\"/client.*\", status=\"2xx\"}))[12m:1m]) > 0)) or (time() - max_over_time((timestamp(increase((sum by (tenant) (squelchd_http_request_duration_seconds_count{route=~\"/client.*\", status=\"2xx\"}))[12m:1m]) > 0))[30d:10m])) or on (tenant) (0 * max by (tenant) (squelchd_build_info) + 2592000)",
+     "refId": "B",
+     "range": false,
+     "instant": true,
+     "format": "table"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "round(increase((sum by (tenant) (squelchd_http_request_duration_seconds_count{route=~\"/client.*\", route!~\"/client/(devices.*|pair)\", method!=\"GET\", status=\"2xx\"}))[24h:1m]))",
+     "refId": "C",
+     "range": false,
+     "instant": true,
+     "format": "table"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "round(increase((sum by (tenant) (squelchd_http_request_duration_seconds_count{route=~\"/client.*\", route!~\"/client/(devices.*|pair)\", method!=\"GET\", status=\"2xx\"}))[7d:1m]))",
+     "refId": "D",
+     "range": false,
+     "instant": true,
+     "format": "table"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max by (tenant) (squelchd_devices_paired)",
+     "refId": "E",
+     "range": false,
+     "instant": true,
+     "format": "table"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "joinByField",
+     "options": {
+      "byField": "tenant",
+      "mode": "outer"
+     }
+    },
+    {
+     "id": "organize",
+     "options": {
+      "excludeByName": {
+       "Time": true,
+       "Time 1": true,
+       "Time 2": true,
+       "Time 3": true,
+       "Time 4": true,
+       "Time 5": true
+      },
+      "renameByName": {
+       "tenant": "Tenant",
+       "Value #A": "Last action (ago)",
+       "Value #B": "App seen (ago)",
+       "Value #C": "Actions (24h)",
+       "Value #D": "Actions (7d)",
+       "Value #E": "Devices paired"
+      },
+      "indexByName": {
+       "tenant": 0,
+       "Value #A": 1,
+       "Value #B": 2,
+       "Value #C": 3,
+       "Value #D": 4,
+       "Value #E": 5
+      }
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "align": "auto",
+      "cellOptions": {
+       "type": "auto"
+      },
+      "inspect": false,
+      "filterable": true
+     },
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "text",
+        "value": null
+       }
+      ]
+     },
+     "noValue": "NO DATA"
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Tenant"
+      },
+      "properties": [
+       {
+        "id": "custom.width",
+        "value": 180
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Last action (ago)"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "s"
+       },
+       {
+        "id": "decimals",
+        "value": 1
+       },
+       {
+        "id": "thresholds",
+        "value": {
+         "mode": "absolute",
+         "steps": [
+          {
+           "color": "green",
+           "value": null
+          },
+          {
+           "color": "yellow",
+           "value": 259200
+          },
+          {
+           "color": "orange",
+           "value": 604800
+          },
+          {
+           "color": "red",
+           "value": 1209600
+          }
+         ]
+        }
+       },
+       {
+        "id": "mappings",
+        "value": [
+         {
+          "type": "value",
+          "options": {
+           "0": {
+            "text": "now",
+            "color": "green",
+            "index": 0
+           },
+           "2592000": {
+            "text": "none in 30d",
+            "color": "red",
+            "index": 1
+           }
+          }
+         }
+        ]
+       },
+       {
+        "id": "custom.cellOptions",
+        "value": {
+         "type": "color-background",
+         "mode": "basic"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "App seen (ago)"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "s"
+       },
+       {
+        "id": "decimals",
+        "value": 1
+       },
+       {
+        "id": "thresholds",
+        "value": {
+         "mode": "absolute",
+         "steps": [
+          {
+           "color": "green",
+           "value": null
+          },
+          {
+           "color": "yellow",
+           "value": 259200
+          },
+          {
+           "color": "orange",
+           "value": 604800
+          },
+          {
+           "color": "red",
+           "value": 1209600
+          }
+         ]
+        }
+       },
+       {
+        "id": "mappings",
+        "value": [
+         {
+          "type": "value",
+          "options": {
+           "0": {
+            "text": "now",
+            "color": "green",
+            "index": 0
+           },
+           "2592000": {
+            "text": "none in 30d",
+            "color": "red",
+            "index": 1
+           }
+          }
+         }
+        ]
+       },
+       {
+        "id": "custom.cellOptions",
+        "value": {
+         "type": "color-text"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Actions (24h)"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "short"
+       },
+       {
+        "id": "decimals",
+        "value": 0
+       },
+       {
+        "id": "noValue",
+        "value": "0"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Actions (7d)"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "short"
+       },
+       {
+        "id": "decimals",
+        "value": 0
+       },
+       {
+        "id": "noValue",
+        "value": "0"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Devices paired"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "short"
+       },
+       {
+        "id": "decimals",
+        "value": 0
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "showHeader": true,
+    "cellHeight": "sm",
+    "footer": {
+     "show": false,
+     "reducer": [
+      "sum"
+     ],
+     "countRows": false,
+     "fields": ""
+    },
+    "sortBy": [
+     {
+      "displayName": "Last action (ago)",
+      "desc": false
+     }
+    ]
+   }
+  },
+  {
    "type": "stat",
    "title": "Tenant pods running",
    "id": 25,
@@ -1918,7 +2273,7 @@
     "h": 8,
     "w": 4,
     "x": 0,
-    "y": 53
+    "y": 62
    },
    "targets": [
     {
@@ -1977,7 +2332,7 @@
     "h": 8,
     "w": 10,
     "x": 4,
-    "y": 53
+    "y": 62
    },
    "targets": [
     {
@@ -2051,7 +2406,7 @@
     "h": 8,
     "w": 10,
     "x": 14,
-    "y": 53
+    "y": 62
    },
    "targets": [
     {
@@ -2125,7 +2480,7 @@
     "h": 8,
     "w": 8,
     "x": 0,
-    "y": 61
+    "y": 70
    },
    "targets": [
     {
@@ -2220,7 +2575,7 @@
     "h": 8,
     "w": 8,
     "x": 8,
-    "y": 61
+    "y": 70
    },
    "targets": [
     {
@@ -2289,7 +2644,7 @@
     "h": 8,
     "w": 8,
     "x": 16,
-    "y": 61
+    "y": 70
    },
    "targets": [
     {
@@ -2359,7 +2714,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 69
+    "y": 78
    },
    "panels": []
   },
@@ -2376,7 +2731,7 @@
     "h": 5,
     "w": 4,
     "x": 0,
-    "y": 70
+    "y": 79
    },
    "targets": [
     {
@@ -2443,7 +2798,7 @@
     "h": 5,
     "w": 4,
     "x": 4,
-    "y": 70
+    "y": 79
    },
    "targets": [
     {
@@ -2506,7 +2861,7 @@
     "h": 5,
     "w": 4,
     "x": 8,
-    "y": 70
+    "y": 79
    },
    "targets": [
     {
@@ -2569,7 +2924,7 @@
     "h": 5,
     "w": 4,
     "x": 12,
-    "y": 70
+    "y": 79
    },
    "targets": [
     {
@@ -2632,7 +2987,7 @@
     "h": 5,
     "w": 8,
     "x": 16,
-    "y": 70
+    "y": 79
    },
    "targets": [
     {
@@ -2708,7 +3063,7 @@
     "h": 5,
     "w": 6,
     "x": 0,
-    "y": 75
+    "y": 84
    },
    "targets": [
     {
@@ -2771,7 +3126,7 @@
     "h": 5,
     "w": 6,
     "x": 6,
-    "y": 75
+    "y": 84
    },
    "targets": [
     {
@@ -2838,7 +3193,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 80
+    "y": 89
    },
    "targets": [
     {
@@ -2915,7 +3270,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 80
+    "y": 89
    },
    "targets": [
     {
@@ -2992,7 +3347,7 @@
     "h": 10,
     "w": 24,
     "x": 0,
-    "y": 88
+    "y": 97
    },
    "targets": [
     {
@@ -3070,7 +3425,7 @@
     "h": 8,
     "w": 24,
     "x": 0,
-    "y": 98
+    "y": 107
    },
    "targets": [
     {
@@ -3280,7 +3635,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 106
+    "y": 115
    },
    "panels": []
   },
@@ -3297,7 +3652,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 107
+    "y": 116
    },
    "targets": [
     {
@@ -3382,7 +3737,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 107
+    "y": 116
    },
    "targets": [
     {
@@ -3463,7 +3818,7 @@
     "h": 8,
     "w": 8,
     "x": 0,
-    "y": 115
+    "y": 124
    },
    "targets": [
     {
@@ -3532,7 +3887,7 @@
     "h": 8,
     "w": 8,
     "x": 8,
-    "y": 115
+    "y": 124
    },
    "targets": [
     {
@@ -3606,7 +3961,7 @@
     "h": 8,
     "w": 8,
     "x": 16,
-    "y": 115
+    "y": 124
    },
    "targets": [
     {
@@ -3680,7 +4035,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 123
+    "y": 132
    },
    "targets": [
     {
@@ -3765,7 +4120,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 123
+    "y": 132
    },
    "targets": [
     {
@@ -3846,7 +4201,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 131
+    "y": 140
    },
    "targets": [
     {
@@ -3922,7 +4277,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 131
+    "y": 140
    },
    "targets": [
     {

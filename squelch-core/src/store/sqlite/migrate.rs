@@ -723,7 +723,10 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
         }
     }
 
-    heal_own_mail_read_as_inbound(conn)?;
+    // A repair, never a reason not to start: it fails as one transaction.
+    if let Err(error) = heal_own_mail_read_as_inbound(conn) {
+        eprintln!("squelch: own-mail re-read skipped: {error}");
+    }
 
     Ok(())
 }

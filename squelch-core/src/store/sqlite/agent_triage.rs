@@ -780,13 +780,25 @@ fn retire_inbound_verdict(conn: &Connection, account: AccountId, message: i64) -
     )?;
     // Shipments are derived from the decisions still standing. One that no
     // longer decodes proposed nothing a current reader could have used.
+    //
+    // BEST EFFORT, behind a savepoint. The rebuild re-reads every decision in
+    // the account and fails on the first it cannot decode, and this runs inside
+    // whatever carried the enqueue: an ingest transaction, or the store's own
+    // open. A package card left standing is a far smaller cost than mail that
+    // will not ingest or a daemon that will not start.
     if let Ok(previous) = decode::<MessageDecision>(&previous) {
-        super::agent_deliveries::reconcile(
+        conn.execute_batch("SAVEPOINT retire_shipments")?;
+        let rebuilt = super::agent_deliveries::reconcile(
             conn,
             account,
             Some(&previous),
             &MessageDecision::default(),
-        )?;
+        );
+        if let Err(error) = &rebuilt {
+            conn.execute_batch("ROLLBACK TO retire_shipments")?;
+            eprintln!("squelch: shipments not rebuilt after retiring a verdict: {error}");
+        }
+        conn.execute_batch("RELEASE retire_shipments")?;
     }
     Ok(())
 }
@@ -6064,5 +6076,132 @@ mod own_mail_tests {
         own_inbox_copy(&store, 4, "mine");
         assert_eq!(store.retriage_reset(1, Some(4), 7).unwrap(), 1);
         assert_eq!(jobs(&store, 4)[0].0, "access");
+    }
+
+    /// Message 4 arrives in thread "one" as `sender@test`, is triaged as
+    /// inbound with `verdict`, and then turns out to be the user's.
+    fn triaged_as_inbound_then_own(store: &SqliteStore, verdict: &MessageDecision) {
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO messages(id,account_id,gmail_msg_id,thread_id,from_addr,subject,received_at,snippet,body)
+                 VALUES(4,1,'4','one','sender@test','subject',?1,'snippet','body')",
+                [(Utc::now() + Duration::seconds(5)).to_rfc3339()],
+            )
+            .unwrap();
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO triage(account_id,message_id,created_at) VALUES(1,4,?1)",
+                [Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+        commit(store, 4, verdict);
+        store
+            .lock()
+            .unwrap()
+            .execute("UPDATE messages SET from_addr='a@test' WHERE id=4", [])
+            .unwrap();
+    }
+
+    #[test]
+    fn the_upgrade_reread_leaves_resolved_threads_alone() {
+        let store = fixture();
+        triaged_as_inbound_then_own(&store, &decision(4));
+        let heal = |store: &SqliteStore| {
+            let conn = store.lock().unwrap();
+            super::super::migrate::heal_own_mail_read_as_inbound(&conn).unwrap();
+        };
+        // Done is thread-wide and nothing done is on screen: a model call
+        // here buys nothing.
+        store
+            .lock()
+            .unwrap()
+            .execute("UPDATE triage SET status='done' WHERE message_id=4", [])
+            .unwrap();
+        heal(&store);
+        assert_eq!(
+            jobs(&store, 4),
+            vec![("triage".to_string(), "arrival".to_string())]
+        );
+        assert!(jobs(&store, 1).is_empty());
+        store
+            .lock()
+            .unwrap()
+            .execute("UPDATE triage SET status='open' WHERE message_id=4", [])
+            .unwrap();
+        heal(&store);
+        assert_eq!(jobs(&store, 4).len(), 2);
+        assert_eq!(jobs(&store, 1).len(), 1);
+    }
+
+    #[test]
+    fn own_mail_with_no_thread_answers_nothing() {
+        let store = fixture();
+        // A blank thread id is no thread: every unthreaded message shares it.
+        own_inbox_copy(&store, 4, "");
+        store
+            .lock()
+            .unwrap()
+            .execute("UPDATE messages SET thread_id='' WHERE id=2", [])
+            .unwrap();
+        store.enqueue_agent_triage(1, 4, "arrival", true).unwrap();
+        assert_eq!(
+            jobs(&store, 4),
+            vec![("access".to_string(), "arrival".to_string())]
+        );
+        assert!(jobs(&store, 2).is_empty());
+    }
+
+    #[test]
+    fn retiring_a_verdict_takes_its_package_and_survives_one_it_cannot_read() {
+        use crate::triage::decision::RecordProposal;
+        for unreadable_neighbour in [false, true] {
+            let store = fixture();
+            let mut shipped = decision(4);
+            shipped.records.push(RecordProposal::Delivery {
+                carrier: Some("ups".into()),
+                tracking_number: Some("1Z999AA10123456784".into()),
+                status: "shipped".into(),
+                item_name: None,
+                merchant: None,
+                order_refs: vec![],
+                evidence: vec![],
+            });
+            triaged_as_inbound_then_own(&store, &shipped);
+            let packages = |store: &SqliteStore| {
+                count(
+                    store,
+                    "SELECT count(*) FROM shipments WHERE account_id=?1",
+                    1,
+                )
+            };
+            assert_eq!(packages(&store), 1);
+            if unreadable_neighbour {
+                // The rebuild decodes every decision in the account.
+                store
+                    .lock()
+                    .unwrap()
+                    .execute(
+                        "INSERT INTO agent_message_decisions VALUES(1,1,1,'{\"kinds\":[\"no such kind\"]}',?1)",
+                        [Utc::now().to_rfc3339()],
+                    )
+                    .unwrap();
+            }
+            // The enqueue is an ingest transaction or the store's open, and
+            // must come through either way.
+            store.enqueue_agent_triage(1, 4, "backfill", false).unwrap();
+            assert_eq!(
+                count(
+                    &store,
+                    "SELECT count(*) FROM agent_message_decisions WHERE message_id=?1",
+                    4
+                ),
+                0
+            );
+            assert_eq!(packages(&store), i64::from(unreadable_neighbour));
+        }
     }
 }

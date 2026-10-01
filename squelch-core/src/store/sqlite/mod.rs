@@ -31,9 +31,13 @@
 /// A PASS is excluded with the failures on purpose. Mail that really was sent
 /// on the domain's authority and then DELIVERED is a contact form or a scanner
 /// using the owner's address, and that is inbound mail with someone else's
-/// words in it. The gate inherits that parser's documented residue, and on a
-/// provider it cannot read (every verdict NULL) this is the bare address
-/// match the reader's `authored_by_account` (`messages.rs`) has always been.
+/// words in it. The gate inherits that parser's documented residue, in the
+/// OPPOSITE direction: NULL is that parser's cautious answer for its own
+/// consumer and the trusting one here, so every case it declines to judge
+/// (POP-fetched or imported mail, rows older than the column) reads as own.
+/// On a provider it cannot read at all (every verdict NULL) this is the bare
+/// address match the reader's `authored_by_account` (`messages.rs`) has
+/// always been.
 ///
 /// The COALESCE matters: a missing account row makes the comparison NULL,
 /// which a `NOT` would read as "exclude" and a `bool` column read would reject.

@@ -704,7 +704,7 @@ struct GreetingLine: View {
             .font(Typo.micro)
             .foregroundStyle(Palette.accent)
             .tracking(0.6)
-            .frame(maxWidth: Space.scaled(160))
+            .frame(maxWidth: Typo.measure(160))
             // AN OVERLAY, not a border: it has to say "this is a field" without
             // costing a single point of height, or the serif headline under it
             // would hop down and back every time the editor opens and closes.

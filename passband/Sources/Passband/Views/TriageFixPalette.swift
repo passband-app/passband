@@ -241,11 +241,11 @@ private struct TargetRow: View {
         ) { _, _ in
             HStack(spacing: Space.s10) {
                 Chip(text: target.axis.chipLabel, tone: axisTone, filled: true)
-                    .frame(width: Space.scaled(68), alignment: .leading)
+                    .frame(width: Typo.measure(68), alignment: .leading)
                 Text(target.label)
                     .font(Typo.ui(13, weight: .medium))
                     .foregroundStyle(Palette.ink)
-                    .frame(width: Space.scaled(130), alignment: .leading)
+                    .frame(width: Typo.measure(130), alignment: .leading)
                 Text(target.hint)
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaint)

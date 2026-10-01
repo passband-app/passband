@@ -420,7 +420,7 @@ struct ConnectView: View {
             // measure either way — the Mac states it, the phone treats it as a
             // ceiling and takes whatever the screen leaves (see body's margin).
             #if os(macOS)
-                .frame(width: Space.scaled(440))
+                .frame(width: Typo.measure(440))
             #else
                 .frame(maxWidth: 440)
             #endif

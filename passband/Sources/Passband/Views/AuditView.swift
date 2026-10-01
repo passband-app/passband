@@ -141,7 +141,7 @@ struct AuditSection: View {
                 // reach it.
                 ScrollView { sidebar }
                     .scrollIndicators(.hidden)
-                    .frame(width: Space.scaled(200))
+                    .frame(width: Typo.measure(200))
             }
             .frame(maxHeight: .infinity, alignment: .top)
             .task { await load(Self.pageSize) }
@@ -711,7 +711,7 @@ private struct AuditRow: View {
 
     var body: some View {
         ListRow(
-            selected: open, cornerRadius: 8, hPadding: 11, vPadding: 7, action: onToggle
+            selected: open, cornerRadius: 8, hPadding: Space.scaled(11), vPadding: Space.scaled(7), action: onToggle
         ) { _, _ in
             HStack(alignment: .top, spacing: Space.s10) {
                 // The gutter. Fixed width and leading-aligned so the times make

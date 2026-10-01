@@ -65,7 +65,7 @@ struct SharePanel: View {
             Divider().overlay(Palette.hairline)
             content
         }
-        .frame(width: Space.scaled(560))
+        .frame(width: Typo.measure(560))
         .frame(maxHeight: 720)
         .background(Palette.canvas)
         .task { await load() }

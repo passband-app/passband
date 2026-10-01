@@ -222,7 +222,7 @@ struct SearchView: View {
                             .padding(.top, Space.s14)
                             .padding(.bottom, Space.s14)
                     }
-                    .frame(minWidth: Space.scaled(320), idealWidth: Space.scaled(380), maxWidth: Space.scaled(440))
+                    .frame(minWidth: Typo.measure(320), idealWidth: Typo.measure(380), maxWidth: Typo.measure(440))
                 }
                 results(expanded: expanded)
             }
@@ -823,13 +823,13 @@ struct BrowseView: View {
                 Text("Noise filter: \(Int(squelch))")
                     .font(Typo.num(11))
                     .foregroundStyle(Palette.inkDim)
-                    .frame(width: Space.scaled(104), alignment: .leading)
+                    .frame(width: Typo.measure(104), alignment: .leading)
                 Slider(value: $squelch, in: 0...100, step: 5)
                     .tint(Palette.accent)
                 Text("\(all.count - visible.count) below line")
                     .font(Typo.num(10))
                     .foregroundStyle(Palette.inkFaintest)
-                    .frame(width: Space.scaled(92), alignment: .trailing)
+                    .frame(width: Typo.measure(92), alignment: .trailing)
             }
             .padding(.horizontal, Space.s16)
             .padding(.vertical, Space.scaled(11))
@@ -905,7 +905,7 @@ private struct BrowseRow: View {
         // tracking area is not the place to start.
         ListRow(
             selected: selected, cornerRadius: 7, tint: Palette.tierColor(update.tier),
-            hPadding: 9, vPadding: 5, hoverFill: false, action: onSelect
+            hPadding: Space.scaled(9), vPadding: Space.scaled(5), hoverFill: false, action: onSelect
         ) { _, _ in
             HStack(spacing: Space.s8) {
                 Circle()

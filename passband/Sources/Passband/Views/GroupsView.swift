@@ -86,7 +86,7 @@ struct GroupsView: View {
             .font(Typo.micro)
             .foregroundStyle(Palette.inkFaintest)
             .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: Space.scaled(420), alignment: .leading)
+            .frame(maxWidth: Typo.measure(420), alignment: .leading)
         }
         .foregroundStyle(Palette.inkFaintest)
         .padding(.horizontal, Space.scaled(22))
@@ -133,7 +133,7 @@ struct GroupsView: View {
                 withAnimation(Motion.scrollFollow) { proxy.scrollTo(group.id, anchor: .center) }
             }
         }
-        .frame(width: Space.scaled(250))
+        .frame(width: Typo.measure(250))
     }
 
     // MARK: - right column
@@ -228,7 +228,7 @@ struct GroupsView: View {
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaintest)
                     .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: Space.scaled(420), alignment: .leading)
+                    .frame(maxWidth: Typo.measure(420), alignment: .leading)
             } else {
                 VStack(spacing: 1) {
                     ForEach(history.value ?? []) { entry in
@@ -386,7 +386,7 @@ private struct GroupRow: View {
     let onEdit: () -> Void
 
     var body: some View {
-        ListRow(selected: selected, cornerRadius: 8, hPadding: 10, vPadding: 7, action: onSelect) {
+        ListRow(selected: selected, cornerRadius: 8, hPadding: Space.s10, vPadding: Space.scaled(7), action: onSelect) {
             _, _ in
             VStack(alignment: .leading, spacing: Space.scaled(3)) {
                 HStack(spacing: Space.s6) {
@@ -459,7 +459,7 @@ private struct GroupHistoryRow: View {
 
 
     var body: some View {
-        ListRow(selected: false, cornerRadius: 8, hPadding: 10, vPadding: 7, action: onOpen) {
+        ListRow(selected: false, cornerRadius: 8, hPadding: Space.s10, vPadding: Space.scaled(7), action: onOpen) {
             _, _ in
             HStack(spacing: Space.s10) {
                 VStack(alignment: .leading, spacing: Space.s2) {
@@ -507,7 +507,7 @@ private struct GroupHistoryRow: View {
                 Text(Fmt.relAge(entry.sent_at))
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaintest)
-                    .frame(width: Space.scaled(56), alignment: .trailing)
+                    .frame(width: Typo.measure(56), alignment: .trailing)
             }
         }
     }

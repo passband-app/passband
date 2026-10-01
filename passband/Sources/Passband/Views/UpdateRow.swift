@@ -73,12 +73,12 @@ struct UpdateRow: View {
     /// Phone rows are taller: a tap target, and two lines instead of one, so the
     /// same padding would crowd them.
     #if os(macOS)
-        private static let hPadding: CGFloat = 11
-        private static let vPadding: CGFloat = 6
+        private static var hPadding: CGFloat { Space.scaled(11) }
+        private static var vPadding: CGFloat { Space.s6 }
         private static let radius: CGFloat = 8
     #else
-        private static let hPadding: CGFloat = 12
-        private static let vPadding: CGFloat = 9
+        private static var hPadding: CGFloat { Space.s12 }
+        private static var vPadding: CGFloat { Space.scaled(9) }
         private static let radius: CGFloat = 10
     #endif
 
@@ -216,8 +216,8 @@ struct UpdateRow: View {
                     .foregroundStyle(Palette.ink)
                     .lineLimit(1)
                     .frame(
-                        minWidth: Space.scaled(96), idealWidth: Space.scaled(150),
-                        maxWidth: Space.scaled(190), alignment: .leading)
+                        minWidth: Typo.measure(96), idealWidth: Typo.measure(150),
+                        maxWidth: Typo.measure(190), alignment: .leading)
                     .layoutPriority(2)
 
                 if update.hasAttachments {

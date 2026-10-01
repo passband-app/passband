@@ -61,7 +61,7 @@ struct ShareNudgeModal: View {
             }
         }
         .padding(Space.scaled(18))
-        .frame(maxWidth: Space.scaled(380))
+        .frame(maxWidth: Typo.measure(380))
         .passbandGlass(.pane, cornerRadius: 14, tint: Palette.glassTintStrong)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Share Passband with friends")

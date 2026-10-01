@@ -75,7 +75,7 @@ struct SettingsView: View {
                         // column of labelled switches stops being scannable
                         // long before it stops fitting, so every pane is capped
                         // at one.
-                        .frame(maxWidth: Space.scaled(720), alignment: .leading)
+                        .frame(maxWidth: Typo.measure(720), alignment: .leading)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
@@ -229,7 +229,7 @@ struct SettingsView: View {
             }
             Spacer()
         }
-        .frame(width: Space.scaled(158))
+        .frame(width: Typo.measure(158))
         .padding(.horizontal, Space.s12)
         .padding(.vertical, Space.scaled(18))
     }
@@ -592,7 +592,7 @@ struct YouSection: View {
                     .autocorrectionDisabled()
                     .fieldWell()
                     #if os(macOS)
-                        .frame(width: Space.scaled(220))
+                        .frame(width: Typo.measure(220))
                     #endif
             }
         }
@@ -1507,7 +1507,7 @@ struct AccountRow: View {
         // A window can spare a fixed column; a phone line takes what the host
         // beside it leaves.
         #if os(macOS)
-            .frame(width: Space.scaled(150))
+            .frame(width: Typo.measure(150))
         #else
             .frame(maxWidth: .infinity)
         #endif

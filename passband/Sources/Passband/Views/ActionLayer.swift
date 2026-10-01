@@ -221,7 +221,7 @@ struct ActionLayer: View {
             .font(Typo.rowSub)
             .foregroundStyle(Palette.ink)
             .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: Space.scaled(360), alignment: .leading)
+            .frame(maxWidth: Typo.measure(360), alignment: .leading)
 
             HStack(spacing: Space.s8) {
                 Button("Block sender") { Task { await block(record) } }

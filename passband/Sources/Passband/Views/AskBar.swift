@@ -118,7 +118,7 @@ struct AskBar: View {
                     .foregroundStyle(Palette.inkDim)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                    .frame(maxWidth: Space.scaled(230), alignment: .leading)
+                    .frame(maxWidth: Typo.measure(230), alignment: .leading)
                     .padding(.horizontal, Space.scaled(7)).padding(.vertical, Space.s2)
                     .background(Capsule().fill(Palette.hairline))
                     .help(

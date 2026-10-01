@@ -87,7 +87,7 @@ struct UsageView: View {
                 spendCard(series)
                 HStack(alignment: .top, spacing: Space.s14) {
                     categoryCard(series)
-                    assistantCard.frame(width: Space.scaled(280))
+                    assistantCard.frame(width: Typo.measure(280))
                 }
             }
             // A refetch keeps the frame: the last render dims rather than

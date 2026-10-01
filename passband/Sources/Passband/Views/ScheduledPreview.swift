@@ -321,7 +321,7 @@ private struct ScheduledFileChip: View {
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaintest)
             }
-            .frame(maxWidth: Space.scaled(170), alignment: .leading)
+            .frame(maxWidth: Typo.measure(170), alignment: .leading)
         }
         .padding(Space.s6)
         .padding(.trailing, Space.s4)

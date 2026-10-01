@@ -21,12 +21,12 @@ struct UnsubscribeTray: View {
         let shown = Array(items.suffix(Self.maxShown))
         let more = items.count - shown.count
         GlassEffectContainer(spacing: 8) {
-            VStack(alignment: .trailing, spacing: 7) {
+            VStack(alignment: .trailing, spacing: Space.scaled(7)) {
                 if more > 0 {
                     Text("+\(more) more")
                         .font(Typo.micro)
                         .foregroundStyle(Palette.inkFaint)
-                        .padding(.trailing, 6)
+                        .padding(.trailing, Space.s6)
                         .transition(.opacity)
                 }
                 ForEach(shown) { item in
@@ -45,9 +45,9 @@ private struct UnsubscribeCard: View {
     private var name: String { SenderCache.resolved(item.sender).displayName }
 
     var body: some View {
-        HStack(alignment: .center, spacing: 10) {
+        HStack(alignment: .center, spacing: Space.s10) {
             Avatar(sender: item.sender, size: 26)
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: Space.scaled(3)) {
                 headline
                 if case .needsYou(let reason, _) = item.phase {
                     Text(Self.why(reason))
@@ -56,12 +56,12 @@ private struct UnsubscribeCard: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .frame(maxWidth: 230, alignment: .leading)
+            .frame(maxWidth: Typo.measure(230), alignment: .leading)
             trailing
         }
-        .padding(.vertical, 9)
-        .padding(.leading, 10)
-        .padding(.trailing, 12)
+        .padding(.vertical, Space.scaled(9))
+        .padding(.leading, Space.s10)
+        .padding(.trailing, Space.s12)
         .passbandGlass(.pane, cornerRadius: 14, tint: tint)
         .accessibilityElement(children: .combine)
     }
@@ -96,11 +96,11 @@ private struct UnsubscribeCard: View {
                 .accessibilityLabel("in progress")
         case .done:
             Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 15))
+                .font(Typo.ui(15))
                 .foregroundStyle(Palette.positive)
                 .accessibilityLabel("done")
         case .needsYou(_, let url):
-            HStack(spacing: 6) {
+            HStack(spacing: Space.s6) {
                 if url != nil {
                     Button {
                         UnsubscribeJobs.shared.finish(item)
@@ -116,9 +116,9 @@ private struct UnsubscribeCard: View {
                     UnsubscribeJobs.shared.dismiss(item)
                 } label: {
                     Image(systemName: "xmark")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(Typo.ui(10, weight: .semibold))
                         .foregroundStyle(Palette.inkFaint)
-                        .frame(width: 18, height: 18)
+                        .frame(width: Space.scaled(18), height: Space.scaled(18))
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)

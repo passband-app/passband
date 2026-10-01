@@ -21,7 +21,7 @@ point, and it lifts the smallest type the most. The two compose.
 |---|---|
 | `Lib/Density.swift` | The setting (`DensityChoice`) and the two curves. Pure, tested by `Tests/DensityTests.swift`. |
 | `Design/Space.swift` | The spacing ladder, `Space.s2` … `Space.s32`, and `Space.scaled(_:)`. |
-| `Design/Typography.swift` | `Typo.ui(_:weight:design:)`, the named roles, `Typo.size(_:)`. |
+| `Design/Typography.swift` | `Typo.ui(_:weight:design:)`, the named roles, `Typo.size(_:)`, `Typo.measure(_:)`. |
 
 **Every number is written in compact.** `Space.s8` is 8pt in compact and 11pt in
 comfortable; `Typo.ui(13)` is 13pt and 14pt. In compact both curves are the
@@ -55,6 +55,17 @@ that need the number take `Typo.size(13)`.
 - `Space.scaled(5)` when the value is tuned: a row's or chip's vertical padding,
   a control's height, anything aligned to something else, anything with a
   comment explaining the number. Exact in compact, same curve in comfortable.
+
+**Widths that hold text.** A name column, a sheet, a field's width: the same
+words have to fit, so it grows by what the type grows by (about 8%) and no
+faster. `.frame(width: Typo.measure(160))`. `Space.scaled(160)` would give it
+the gap curve's 19%, taken from the flexible column beside it. `ModalCard`
+resolves its own `width:` this way, so callers pass the compact number.
+
+**Component parameters.** A padding or spacing a component takes as an argument
+(`ListRow(hPadding:vPadding:)`, `FlowLine(spacing:)`) is passed ALREADY
+RESOLVED, as a token, the way `.padding` takes one. The component never scales
+what it is given.
 
 **Fixed frames.** A `.frame(height: 26)` around text will clip in comfortable.
 Either drop the fixed height and let padding size it, or

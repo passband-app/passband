@@ -234,7 +234,7 @@ struct AuthView: View {
 
             ShredderCard()
         }
-        .frame(width: Space.scaled(306))
+        .frame(width: Typo.measure(306))
     }
 
     // MARK: - keymap
@@ -481,7 +481,7 @@ private struct AuthRow: View {
     var body: some View {
         ListRow(
             selected: selected, cornerRadius: 8, tint: Palette.lock,
-            hPadding: 10, vPadding: 6, action: onSelect
+            hPadding: Space.s10, vPadding: Space.s6, action: onSelect
         ) { _, _ in
             HStack(spacing: Space.scaled(9)) {
                 Avatar(sender: meta.sender, size: 20)
@@ -489,7 +489,7 @@ private struct AuthRow: View {
                     .font(Typo.ui(12, weight: .medium))
                     .foregroundStyle(Palette.ink)
                     .lineLimit(1)
-                    .frame(width: Space.scaled(150), alignment: .leading)
+                    .frame(width: Typo.measure(150), alignment: .leading)
                     .help(meta.sender)
                 Text(meta.subject)
                     .font(Typo.rowSub)

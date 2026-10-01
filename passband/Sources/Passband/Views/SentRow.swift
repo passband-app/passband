@@ -30,7 +30,7 @@ struct SentRow: View {
         // the cursor to this row first, so the keyboard picks up where the
         // pointer left it.
         ListRow(
-            selected: selected, cornerRadius: 8, hPadding: 11, vPadding: 6,
+            selected: selected, cornerRadius: 8, hPadding: Space.scaled(11), vPadding: Space.s6,
             onHoverChange: { if $0 { onHover() } },
             action: {
                 onHover()
@@ -70,8 +70,8 @@ struct SentRow: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .frame(
-                        minWidth: Space.scaled(96), idealWidth: Space.scaled(150),
-                        maxWidth: Space.scaled(190), alignment: .leading)
+                        minWidth: Typo.measure(96), idealWidth: Typo.measure(150),
+                        maxWidth: Typo.measure(190), alignment: .leading)
                     .layoutPriority(2)
 
                 // Subject first and at priority, snippet in whatever is left:

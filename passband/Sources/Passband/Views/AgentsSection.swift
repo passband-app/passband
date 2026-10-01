@@ -123,7 +123,7 @@ struct AgentsSection: View {
 
     private func setupCard(_ endpoint: String) -> some View {
         SectionCard(label: "Set it up", note: agent.name) {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: Space.scaled(142)), spacing: Space.s8)], spacing: Space.s8) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: Typo.measure(142)), spacing: Space.s8)], spacing: Space.s8) {
                 ForEach(AgentKind.allCases) { kind in
                     agentChip(kind)
                 }

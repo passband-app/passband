@@ -75,9 +75,9 @@ struct AuthCodeModal: View {
                 // A ceiling on the phone, not a measure: 420 is wider than the
                 // screen it would have to fit on. See ModalCard's note.
                 #if os(macOS)
-                    .frame(width: Space.scaled(420))
+                    .frame(width: Typo.measure(420))
                 #else
-                    .frame(maxWidth: Space.scaled(420))
+                    .frame(maxWidth: Typo.measure(420))
                     .padding(.horizontal, Space.s14)
                 #endif
                 .passbandGlass(.pane, cornerRadius: 22, tint: Palette.lockSoft.opacity(0.9))

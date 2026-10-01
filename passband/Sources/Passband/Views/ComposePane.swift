@@ -890,7 +890,7 @@ struct ComposeSummaryRow: View {
                 .font(Typo.micro)
                 .foregroundStyle(Palette.inkFaintest)
                 .textCase(.uppercase)
-                .frame(width: Space.scaled(60), alignment: .leading)
+                .frame(width: Typo.measure(60), alignment: .leading)
             Text(value)
                 .font(Typo.mono(12))
                 .foregroundStyle(Palette.ink)

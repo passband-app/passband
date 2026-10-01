@@ -21,7 +21,7 @@ struct ProcessView: View {
             .font(Typo.rowSub)
             .foregroundStyle(Palette.inkFaintest)
             .multilineTextAlignment(.center)
-            .frame(maxWidth: Space.scaled(340))
+            .frame(maxWidth: Typo.measure(340))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

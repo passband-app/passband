@@ -306,10 +306,15 @@ struct ModalCard<Content: View>: View {
             // wider than a phone — so on iOS the number becomes the most it may
             // take rather than what it takes, and the screen decides the rest.
             // Same treatment ConnectView's 440 got when the phone target landed.
+            //
+            // `width` is a COMPACT measure and is resolved here, so the dozen
+            // callers keep saying the number they always did: the card widens
+            // with its type, which is what stops a comfortable modal wrapping
+            // lines its compact twin fits.
             #if os(macOS)
-                .frame(width: width)
+                .frame(width: Typo.measure(width))
             #else
-                .frame(maxWidth: width)
+                .frame(maxWidth: Typo.measure(width))
                 .padding(.horizontal, Space.s12)
             #endif
             .passbandGlass(.pane, cornerRadius: 20, tint: tint)

@@ -313,7 +313,7 @@ private struct RuleRow: View {
 
     var body: some View {
         ListRow(
-            selected: selected, cornerRadius: 8, hPadding: 11, vPadding: 7, action: onOpen
+            selected: selected, cornerRadius: 8, hPadding: Space.scaled(11), vPadding: Space.scaled(7), action: onOpen
         ) { selected, _ in
             HStack(spacing: Space.scaled(9)) {
                 if row.nested {
@@ -849,7 +849,7 @@ struct RuleEditor: View {
             ForEach(Array(rules.enumerated()), id: \.element.id) { i, rule in
                 if i > 0 { Hairline() }
                 ListRow(
-                    selected: false, cornerRadius: 8, hPadding: 10, vPadding: 7,
+                    selected: false, cornerRadius: 8, hPadding: Space.s10, vPadding: Space.scaled(7),
                     action: { openExisting(rule) }
                 ) { _, _ in
                     HStack(alignment: .firstTextBaseline, spacing: Space.s8) {

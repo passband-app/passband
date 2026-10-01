@@ -47,7 +47,7 @@ struct ShareWaitlistPanel: View {
         // `maxWidth` rather than `width`, because this one sheet is presented
         // on a phone as well as in a Mac window and a hard 560 has nowhere to
         // go on the narrow one.
-        .frame(maxWidth: Space.scaled(560))
+        .frame(maxWidth: Typo.measure(560))
         .background(Palette.canvas)
     }
 

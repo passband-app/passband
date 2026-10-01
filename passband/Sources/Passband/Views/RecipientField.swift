@@ -1264,7 +1264,7 @@ enum InlineFieldMetrics {
     static var inset: CGFloat { Space.s12 }
     /// The label column: holds the widest label ("subject") in the micro
     /// voice, so it widens with the type.
-    static var label: CGFloat { Space.scaled(58) }
+    static var label: CGFloat { Typo.measure(58) }
     /// Drops the micro label onto the 13pt value's text line. Derived from
     /// the two type sizes rather than scaled as spacing: it is the gap between
     /// their first lines, and the type curve is what moves that.

@@ -29,7 +29,7 @@ struct DaemonDownPane: View {
                 .font(Typo.ui(13))
                 .foregroundStyle(Palette.inkFaint)
                 .multilineTextAlignment(.center)
-                .frame(maxWidth: Space.scaled(380))
+                .frame(maxWidth: Typo.measure(380))
 
                 HStack(spacing: Space.s10) {
                     if !auth { RetryButton() }

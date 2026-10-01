@@ -1,11 +1,12 @@
 // THE ALL-MAIL LIST'S SHAPE, kept out of the view so it can be asserted: which
-// rows a page shows (to do / everything, and the filter bar's lens), the day
-// sections they fall into, and the time a row prints. Everything here is a pure
-// function of the rows and a clock.
+// rows a page shows (the filter bar's lens and the category picker), the day
+// sections they fall into and their order inside each, how a poll's head merges
+// into what the scroll loaded, and the time a row prints. Everything here is a
+// pure function of the rows and a clock.
 //
 // The page exists for people who read mail as a list, and three things make a
 // list readable to them that the old flat one lacked: finished mail that is
-// still findable, a date heading over the rows, and a way to cut five hundred
+// still findable, a date heading over the rows, and a way to cut hundreds of
 // rows to the twelve they came for.
 
 import Foundation
@@ -28,20 +29,22 @@ enum MailFilter: String, CaseIterable, Sendable {
 
     var help: String {
         switch self {
-        case .all: "every message"
-        case .important: "mail triage picked for your attention"
-        case .deadlines: "mail with a date it needs you by"
-        case .attachments: "mail with files attached"
+        case .all: "Every message"
+        case .important: "Mail triage picked for your attention"
+        case .deadlines: "Mail with a date it needs you by"
+        case .attachments: "Mail with files attached"
         }
     }
 
-    /// IMPORTANT IS THE SITREP'S OWN PICK: tier `signal` is exactly the set the
-    /// model chose to show you, so this lens is the sitrep's judgement laid
-    /// over the list instead of a second, client-side guess at it.
+    /// IMPORTANT IS THE SITREP'S OWN PICK: the For your eyes zone, so this lens
+    /// is the sitrep's judgement laid over the list instead of a second,
+    /// client-side guess at it.
     func matches(_ u: AttentionUpdate) -> Bool {
         switch self {
         case .all: true
-        case .important: u.tier != .noise
+        // The sitrep's own placement where the daemon sends one (a pin or a
+        // fired reminder counts), the tier where it does not.
+        case .important: u.placement.map { $0 == "eyes" } ?? (u.tier != .noise)
         case .deadlines: u.displayDeadline != nil
         case .attachments: u.hasAttachments
         }
@@ -81,35 +84,81 @@ enum MailList {
         var title: String
         var start: Int
         var rows: [AttentionUpdate]
-        /// Stable across a row leaving above it, unlike `start`: the heading
-        /// and its first mail, so SwiftUI keeps the section's identity.
-        var id: String { "\(title)|\(rows.first?.id ?? -1)" }
+        /// The heading, plus which time it appears (a stray undated row can
+        /// open a second "Today" run). Stable across rows leaving or being
+        /// re-ranked inside it, so SwiftUI keeps the section's identity.
+        var occurrence = 0
+        var id: String { "\(title)#\(occurrence)" }
     }
 
-    /// Within each day, the mail that matters most first: importance, then
-    /// arrival. Rows come in newest first, so days are contiguous runs; each
-    /// run is re-sorted on its own and the days keep their order.
-    static func ordered(
-        _ rows: [AttentionUpdate], calendar: Calendar = .current
-    ) -> [AttentionUpdate] {
-        var out: [AttentionUpdate] = []
-        out.reserveCapacity(rows.count)
-        var run: [(Int, AttentionUpdate)] = []
-        var runDay: Date?? = nil
-        func flush() {
-            run.sort { a, b in
-                a.1.importance != b.1.importance ? a.1.importance > b.1.importance : a.0 < b.0
-            }
-            out.append(contentsOf: run.map(\.1))
-            run.removeAll(keepingCapacity: true)
+    /// Epoch for "order received": the arrival stamp, or on an older daemon
+    /// `surfaced_at`. Undated rows (nothing has surfaced them yet: the newest
+    /// mail) and unreadable ones sort to the top together.
+    static func arrivalTS(_ u: AttentionUpdate) -> Double {
+        guard let s = u.arrivedAt, let d = Fmt.date(s) else { return .greatestFiniteMagnitude }
+        return d.timeIntervalSince1970
+    }
+
+    /// Newest first by arrival, ties on id. The key is parsed ONCE per row
+    /// rather than twice per comparison.
+    static func sortedByArrival(_ rows: [AttentionUpdate]) -> [AttentionUpdate] {
+        rows.map { ($0, arrivalTS($0)) }
+            .sorted { a, b in a.1 != b.1 ? a.1 > b.1 : a.0.id > b.0.id }
+            .map(\.0)
+    }
+
+    /// THE POLL'S HEAD, MERGED INTO WHAT THE SCROLL HAS LOADED. Rows the head
+    /// returns replace their old copies; loaded rows older than the head's
+    /// last row stay; a loaded row inside the head's span that the head no
+    /// longer returns has left the listing (spam, deleted) and goes.
+    ///
+    /// `reset` is true when the loaded rows cannot be trusted to continue the
+    /// head: a FULL head that shares no row with them means more mail arrived
+    /// than one head holds, and whatever came between the two is in neither.
+    /// The caller then starts over from the head and lets the scroll refill.
+    struct HeadMerge: Equatable {
+        var rows: [AttentionUpdate]
+        var reset: Bool
+    }
+
+    static func mergeHead(
+        loaded: [AttentionUpdate]?, head: [AttentionUpdate], headIsFull: Bool
+    ) -> HeadMerge {
+        guard let loaded, !loaded.isEmpty, let floor = head.last else {
+            return HeadMerge(rows: head, reset: true)
         }
-        for (i, u) in rows.enumerated() {
-            let day = Fmt.date(u.arrivedAt).map { calendar.startOfDay(for: $0) }
-            if runDay != nil, runDay! != day { flush() }
-            runDay = .some(day)
-            run.append((i, u))
+        let headIds = Set(head.map(\.id))
+        if headIsFull, !loaded.contains(where: { headIds.contains($0.id) }) {
+            return HeadMerge(rows: head, reset: true)
         }
-        flush()
+        let floorTS = arrivalTS(floor)
+        let tail = loaded.filter { u in
+            guard !headIds.contains(u.id) else { return false }
+            let ts = arrivalTS(u)
+            return ts < floorTS || (ts == floorTS && u.id < floor.id)
+        }
+        return HeadMerge(rows: head + tail, reset: false)
+    }
+
+    /// Day sections with the mail that matters most first IN EACH SECTION:
+    /// importance, then arrival. Per section rather than per calendar day, so
+    /// a heading that spans days ("Last week") is one ranking, not a sawtooth
+    /// that restarts every midnight. `rows` come in newest first.
+    static func rankedSections(
+        _ rows: [AttentionUpdate], now: Date = Date(), calendar: Calendar = .current
+    ) -> [Section] {
+        var out = sections(rows, now: now, calendar: calendar)
+        var start = 0
+        for s in out.indices {
+            out[s].rows = out[s].rows.enumerated()
+                .sorted { a, b in
+                    a.element.importance != b.element.importance
+                        ? a.element.importance > b.element.importance : a.offset < b.offset
+                }
+                .map(\.element)
+            out[s].start = start
+            start += out[s].rows.count
+        }
         return out
     }
 
@@ -131,7 +180,7 @@ enum MailList {
     /// EVERYTHING THE PAGE DRAWS, computed once per change rather than once
     /// per read. The page's body runs on every cursor move and every hover,
     /// and reads its rows a dozen times each run; filtering, ordering and
-    /// heading five hundred rows that often is what made the list stutter.
+    /// heading every loaded row that often is what made the list stutter.
     /// The key compares cheaply: arrays and sets that share storage compare by
     /// identity first, and the cached page is the same storage until a poll
     /// actually changes it.
@@ -170,8 +219,8 @@ enum MailList {
                 source, showDone: showDone, filter: filter, resolved: resolved,
                 hiddenZones: hiddenZones)
             if grouped {
-                let rows = MailList.ordered(shown)
-                output = Output(rows: rows, sections: MailList.sections(rows, now: now))
+                let sections = MailList.rankedSections(shown, now: now)
+                output = Output(rows: sections.flatMap(\.rows), sections: sections)
             } else {
                 output = Output(rows: shown, sections: [])
             }
@@ -230,7 +279,8 @@ enum MailList {
             if out.last?.title == title {
                 out[out.count - 1].rows.append(u)
             } else {
-                out.append(Section(title: title, start: i, rows: [u]))
+                let seen = out.filter { $0.title == title }.count
+                out.append(Section(title: title, start: i, rows: [u], occurrence: seen))
             }
         }
         return out

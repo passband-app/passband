@@ -29,7 +29,7 @@ struct MailRowSlot: View {
     let position: Int
     let update: AttentionUpdate
     let done: Bool
-    let verbHint: String
+    let verbHint: String?
     let onOpen: () -> Void
     let onAppear: () -> Void
 

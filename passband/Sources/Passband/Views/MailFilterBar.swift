@@ -4,8 +4,8 @@
 // Reminders. The first four narrow the rows on screen (`AppStore.mailFilter`);
 // Reminders swaps the page for the parked list (`AppStore.reminderFilter`).
 // They sit in one row as peers because that is what they are to somebody using
-// them, and choosing any one turns the others off. Inbox only: noise has no
-// important mail by definition, and nothing here means anything on spam.
+// them, and choosing any one turns the others off. Right: the category picker,
+// which hides whole sitrep zones and composes with the lens. Inbox only.
 //
 // Finished mail always shows, dimmed and checked: archived is not gone.
 
@@ -13,8 +13,8 @@ import SwiftUI
 
 struct MailFilterBar: View {
     @Environment(AppStore.self) private var store
-    /// Rows per lens under the current to-do switch (`MailList.Counts`), so a
-    /// chip says what clicking it gets you before you click.
+    /// Mail still to do per lens (`MailList.Counts`), so a chip says what
+    /// clicking it gets you before you click. Over what is loaded so far.
     let counts: [MailFilter: Int]
 
     private var reminders: Bool { store.reminderFilter }
@@ -36,7 +36,7 @@ struct MailFilterBar: View {
                     }
                     FilterPill(
                         text: "Reminders", icon: "bell", active: reminders,
-                        help: "mail you parked with a reminder (h sets one)"
+                        help: "Mail you parked with a reminder (h sets one)"
                     ) {
                         store.mailFilter = .all
                         store.reminderFilter.toggle()
@@ -44,7 +44,11 @@ struct MailFilterBar: View {
                 }
             }
             Spacer(minLength: 8)
+            // The reminder lens is your own parked list, which the picker does
+            // not narrow; a lit control there would claim it did.
             CategoryPicker()
+                .disabled(reminders)
+                .opacity(reminders ? 0.4 : 1)
         }
         #if os(macOS)
             .padding(.horizontal, 24)
@@ -78,6 +82,15 @@ private struct CategoryPicker: View {
 
     private var hidden: Set<String> { prefs.mailHiddenZones }
 
+    /// Says WHICH when it is one, so the narrowing is never a mystery.
+    private var label: String {
+        switch hidden.count {
+        case 0: "Categories"
+        case 1: "Hiding \(SitrepZone(hidden.first)?.title ?? "1")"
+        default: "Hiding \(hidden.count)"
+        }
+    }
+
     var body: some View {
         Menu {
             ForEach(SitrepZone.allCases, id: \.self) { zone in
@@ -95,14 +108,16 @@ private struct CategoryPicker: View {
             }
             if !hidden.isEmpty {
                 Divider()
-                Button("Show every category") { prefs.mailHiddenZones = [] }
+                Button("Show all categories") { prefs.mailHiddenZones = [] }
             }
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: "line.3.horizontal.decrease")
                     .font(.system(size: 10, weight: .semibold))
-                Text(hidden.isEmpty ? "All categories" : "\(hidden.count) hidden")
+                Text(label)
                     .font(Typo.chip)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
             }
             .foregroundStyle(hidden.isEmpty ? Palette.inkDim : Palette.accent)
             .padding(.horizontal, 10)
@@ -118,7 +133,9 @@ private struct CategoryPicker: View {
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help("choose which sitrep categories all mail shows")
+        .help("Hide categories of mail from this list")
+        .accessibilityLabel("Categories")
+        .accessibilityValue(hidden.isEmpty ? "all shown" : "\(hidden.count) hidden")
     }
 }
 
@@ -180,6 +197,11 @@ struct DayHeading: View {
             .padding(.horizontal, 11)
             .padding(.top, first ? 4 : 16)
             .padding(.bottom, 5)
+            #if !os(macOS)
+                // A plain List pins section headers; without a ground the
+                // rows would scroll visibly under the words.
+                .background(Palette.canvas)
+            #endif
             .accessibilityAddTraits(.isHeader)
     }
 }

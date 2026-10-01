@@ -170,7 +170,9 @@ pub struct UpdatesQuery {
     cursor: Option<String>,
     /// KEYSET PAGING, the mail list's infinite scroll: rows that arrived
     /// strictly before this `received_at` (and, at the same instant, with a
-    /// smaller id than `before_id`). Exclusive with `cursor`. With no `since`
+    /// smaller id than `before_id`; without one, nothing at that instant).
+    /// Exclusive with `cursor`, and with `band` / `reminders`, whose listings
+    /// are not in arrival order. With no `since`
     /// it reaches past the default window, back to the start of the mailbox.
     before: Option<DateTime<Utc>>,
     before_id: Option<i64>,
@@ -228,7 +230,14 @@ pub async fn get_updates(
     if q.before.is_some() && q.cursor.is_some() {
         return Err(ApiError::bad_request("before and cursor are exclusive"));
     }
-    let before = q.before.map(|at| (at, q.before_id.unwrap_or(i64::MAX)));
+    // An arrival keyset means nothing on a listing ordered by something else.
+    if q.before.is_some() && (band.is_some() || pending_reminders) {
+        return Err(ApiError::bad_request(
+            "before pages the arrival-ordered listing only (no band, no reminders)",
+        ));
+    }
+    // No `before_id`: strictly before the instant, so nothing AT it.
+    let before = q.before.map(|at| (at, q.before_id.unwrap_or(i64::MIN)));
     let since = q.since.unwrap_or_else(|| {
         if before.is_some() {
             DateTime::<Utc>::UNIX_EPOCH
@@ -281,7 +290,12 @@ pub async fn get_updates(
     })
     .await?;
 
-    let next = next_cursor(items.len(), limit, offset);
+    // A keyset page's continuation is its last row, not an offset.
+    let next = if before.is_some() {
+        None
+    } else {
+        next_cursor(items.len(), limit, offset)
+    };
     Ok(Json(Page {
         items,
         next_cursor: next,

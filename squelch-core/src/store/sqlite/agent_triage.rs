@@ -4768,41 +4768,43 @@ fn human_inventory(
          LEFT JOIN agent_thread_attention a ON a.account_id=m.account_id AND a.thread_id=m.thread_id
          WHERE m.account_id=?1 AND m.is_sent=0 AND m.is_spam=?2
            AND (m.received_at>=?3 OR t.remind_at IS NOT NULL OR t.reminded_at IS NOT NULL)
-           AND (?4 IS NULL OR julianday(m.received_at)<julianday(?4)
-                OR (julianday(m.received_at)=julianday(?4) AND m.id<?5))
+           AND (?4 IS NULL OR m.received_at<?4 OR (m.received_at=?4 AND m.id<?5))
          ORDER BY m.received_at DESC,m.id DESC"
     )?;
-    let rows = statement
-        .query_map(
-            params![
-                account,
-                query.spam == SpamScope::Only,
-                query.since.to_rfc3339(),
-                query.before.map(|(at, _)| at.to_rfc3339()),
-                query.before.map(|(_, id)| id).unwrap_or(i64::MAX)
-            ],
-            |row| {
-                Ok(InventoryRow {
-                    id: row.get(0)?,
-                    thread: row.get(1)?,
-                    sender: row.get(2)?,
-                    name: row.get(3)?,
-                    subject: row.get(4)?,
-                    snippet: row.get(5)?,
-                    received: super::dt(row, 6)?,
-                    status: row.get(7)?,
-                    surfaced: super::dt_opt(row, 8)?,
-                    resolved: super::dt_opt(row, 9)?,
-                    reminder: super::dt_opt(row, 10)?,
-                    reminded: super::dt_opt(row, 11)?,
-                    attachments: row.get(12)?,
-                    decision: row.get(13)?,
-                    attention: row.get(14)?,
-                    representative: row.get(15)?,
-                })
-            },
-        )?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let rows = statement.query_map(
+        params![
+            account,
+            query.spam == SpamScope::Only,
+            query.since.to_rfc3339(),
+            // The SAME text form ingest stores (`to_rfc3339`), so the
+            // keyset compares exactly as the ORDER BY sorts, and the
+            // received_at index serves both.
+            query.before.map(|(at, _)| at.to_rfc3339()),
+            query.before.map(|(_, id)| id).unwrap_or(i64::MIN)
+        ],
+        |row| {
+            Ok(InventoryRow {
+                id: row.get(0)?,
+                thread: row.get(1)?,
+                sender: row.get(2)?,
+                name: row.get(3)?,
+                subject: row.get(4)?,
+                snippet: row.get(5)?,
+                received: super::dt(row, 6)?,
+                status: row.get(7)?,
+                surfaced: super::dt_opt(row, 8)?,
+                resolved: super::dt_opt(row, 9)?,
+                reminder: super::dt_opt(row, 10)?,
+                reminded: super::dt_opt(row, 11)?,
+                attachments: row.get(12)?,
+                decision: row.get(13)?,
+                attention: row.get(14)?,
+                representative: row.get(15)?,
+            })
+        },
+    )?;
+    // ITERATED, not collected: with an early limit the statement stops
+    // stepping at the page, instead of decoding the whole window first.
     let mut output = Vec::new();
     let mut scores = std::collections::HashMap::new();
     if query.band == Some(SitrepBand::Standing) {
@@ -4819,6 +4821,7 @@ fn human_inventory(
         if early_limit.is_some_and(|limit| output.len() >= limit) {
             break;
         }
+        let row = row?;
         let decision: Option<MessageDecision> = row.decision.as_deref().map(decode).transpose()?;
         let attention: Option<ThreadAttentionDecision> =
             row.attention.as_deref().map(decode).transpose()?;
@@ -4834,11 +4837,16 @@ fn human_inventory(
         // it unless the human pinned the thread.
         let wants_fye = attention.as_ref().is_some_and(|a| a.show_in_fye);
         let is_auth = decision.as_ref().is_some_and(|d| d.auth.is_auth());
-        let selected = wants_fye
-            && (!is_auth || thread_fye_override(conn, account, &row.thread)? == Some(true));
+        let pinned = thread_fye_override(conn, account, &row.thread)?;
+        let selected = wants_fye && (!is_auth || pinned == Some(true));
         let is_standing = ((selected && row.representative == Some(row.id))
             || row.reminded.is_some())
-            && thread_fye_override(conn, account, &row.thread)? != Some(false);
+            && pinned != Some(false);
+        // The sitrep's own FYE membership, for the placement label: the
+        // human's pin either way wins, then the model's pick (auth mail
+        // excepted), then a fired reminder.
+        let in_fye = pinned != Some(false)
+            && (pinned == Some(true) || (wants_fye && !is_auth) || row.reminded.is_some());
         if let Some(band) = query.band {
             let visible = match band {
                 SitrepBand::Standing => is_standing && status != AttentionStatus::Done,
@@ -4899,7 +4907,7 @@ fn human_inventory(
             },
             status,
             received_at: Some(row.received),
-            placement: placement(decision.as_ref(), is_standing || selected, is_auth),
+            placement: placement(decision.as_ref(), in_fye, is_auth),
             surfaced_at: row.surfaced,
             resolved_at: row.resolved,
             remind_at: row.reminder,
@@ -4989,6 +4997,67 @@ mod inventory_tests {
         assert!(store.external_agent_reading(1, 10).unwrap().is_empty());
     }
     #[test]
+    fn placement_follows_the_sitreps_zones() {
+        use crate::triage::decision::RecordProposal;
+        let record = |kind: &str| -> RecordProposal {
+            let fields = match kind {
+                "event" => serde_json::json!({"kind": "event", "title": "t", "evidence": []}),
+                "delivery" => {
+                    serde_json::json!({"kind": "delivery", "status": "shipped", "evidence": []})
+                }
+                "financial_update" => serde_json::json!({
+                    "kind": "financial_update", "institution": "i", "description": "d", "evidence": []
+                }),
+                other => serde_json::json!({"kind": other, "merchant": "m", "evidence": []}),
+            };
+            serde_json::from_value(fields).unwrap()
+        };
+        let with = |records: Vec<RecordProposal>, reading: bool| MessageDecision {
+            records,
+            destinations: if reading {
+                vec![MessageDestination::Reading]
+            } else {
+                vec![]
+            },
+            ..Default::default()
+        };
+        let plain = with(vec![], false);
+        assert_eq!(placement(None, false, false), None, "untriaged has no zone");
+        assert_eq!(placement(None, true, false).as_deref(), Some("eyes"));
+        assert_eq!(
+            placement(Some(&plain), true, true).as_deref(),
+            Some("eyes"),
+            "a pin beats auth"
+        );
+        assert_eq!(
+            placement(Some(&plain), false, true).as_deref(),
+            Some("auth")
+        );
+        for (kind, zone) in [
+            ("event", "calendar"),
+            ("delivery", "shipments"),
+            ("receipt", "receipts"),
+            ("bill", "billing"),
+            ("financial_update", "billing"),
+        ] {
+            let d = with(vec![record(kind)], true);
+            assert_eq!(
+                placement(Some(&d), false, false).as_deref(),
+                Some(zone),
+                "{kind}"
+            );
+        }
+        assert_eq!(
+            placement(Some(&with(vec![], true)), false, false).as_deref(),
+            Some("reading")
+        );
+        assert_eq!(
+            placement(Some(&plain), false, false).as_deref(),
+            Some("noise")
+        );
+    }
+
+    #[test]
     fn human_inventory_pages_by_keyset_without_gaps_or_repeats() {
         let store = tests::fixture();
         let all = store.human_agent_updates(1, &query()).unwrap();
@@ -5047,8 +5116,9 @@ mod inventory_tests {
         assert_eq!(item.deadline_date.as_deref(), Some("2026-10-05"));
         // The mail list dates rows by arrival, so every inventory row carries it.
         assert!(item.received_at.is_some());
-        // And names the sitrep zone a triaged row lands in.
-        assert!(item.placement.is_some());
+        // And names the sitrep zone it lands in: this fixture's verdict picks
+        // it for attention.
+        assert_eq!(item.placement.as_deref(), Some("eyes"));
     }
 
     #[test]

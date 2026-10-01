@@ -165,9 +165,15 @@ struct UpdateRow: View {
                     // A third line only when there is something to put on it —
                     // most rows are two lines and stay two lines.
                     if chip != nil || update.matched_rule != nil || showAgeBadge
-                        || update.hasPendingReminder
+                        || update.hasPendingReminder || update.placement != nil
                     {
                         HStack(spacing: 7) {
+                            // The all-mail list's sitrep zone (the bands never
+                            // carry one), so the phone's category picker hides
+                            // something the rows actually show.
+                            if let zone = SitrepZone(update.placement) {
+                                PlacementPill(zone: zone)
+                            }
                             if update.hasPendingReminder {
                                 Chip(
                                     text: Fmt.remindChip(update.remind_at), tone: Palette.accent,

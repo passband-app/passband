@@ -7,8 +7,8 @@
 // The sitrep's judgement rides along rather than being left behind: mail triage
 // picked for you sets its sender and subject in the heavier weight a list
 // reader already knows as "look at this one", the importance meter stays in the
-// gutter, deadline / reminder / rule chips sit by the time, and hovering the
-// summary shows why triage filed it where it did.
+// gutter, deadline / reminder / rule marks sit by the time, and a tinted pill
+// names the sitrep zone the mail was filed under.
 //
 // `UpdateRow` stays the row for the sitrep's bands and for the phone, where the
 // two-line summary-first layout is the right one.
@@ -18,16 +18,23 @@ import SwiftUI
 struct MailRow: View {
     let update: AttentionUpdate
     let selected: Bool
-    /// Finished mail, shown on "everything": dimmed and checked rather than
-    /// hidden, so it reads as handled instead of as missing.
+    /// Finished mail: dimmed and checked rather than hidden, so it reads as
+    /// handled instead of as missing.
     var done = false
-    var verbHint: String = "[r][e][d]"
+    /// The selected row's key hint, or nil for none. Only the spam page
+    /// passes one (its `i` has no other affordance on the Mac).
+    var verbHint: String? = nil
     let onHover: () -> Void
     let onOpen: () -> Void
 
+    /// Done and NOT parked. Parking resolves the thread too, but a parked row
+    /// is coming back, and its reminder chip says when; drawing it finished
+    /// (dimmed, checked) would say the opposite.
+    private var finished: Bool { done && !update.hasPendingReminder }
+
     /// Picked for attention and not yet finished: the rows a list reader's eye
-    /// should land on first.
-    private var emphasized: Bool { update.tier != .noise && !done }
+    /// should land on first. The same test as the Important lens.
+    private var emphasized: Bool { MailFilter.important.matches(update) && !finished }
 
     /// The mail's own subject, when the daemon sent one that says something
     /// the one-liner does not. A summary that IS the subject (an untriaged
@@ -54,17 +61,17 @@ struct MailRow: View {
         let weight: Font.Weight = emphasized ? .semibold : .regular
         let gistText = Text(verbatim: gist)
             .font(Typo.rowSub)
-            .foregroundStyle(done ? Palette.inkFaintest : Palette.inkFaint)
+            .foregroundStyle(Palette.inkFaint)
         guard let subject else {
             // No subject on the wire (an older daemon, a rehearsal row): the
             // one-liner takes the subject's place and its ink.
             return Text(verbatim: gist)
                 .font(.system(size: 12.5, weight: weight))
-                .foregroundStyle(done ? Palette.inkFaint : Palette.ink)
+                .foregroundStyle(finished ? Palette.inkFaint : Palette.ink)
         }
         let head = Text(verbatim: subject)
             .font(.system(size: 12.5, weight: weight))
-            .foregroundStyle(done ? Palette.inkFaint : Palette.ink)
+            .foregroundStyle(finished ? Palette.inkFaint : Palette.ink)
         guard !gist.isEmpty else { return head }
         // Three spaces and a drop in ink, no glyph: the weight and colour change
         // already say where the subject ends.
@@ -92,31 +99,41 @@ struct MailRow: View {
 
                 Text(SenderCache.resolved(update.senderString).displayName)
                     .font(.system(size: 12.5, weight: emphasized ? .semibold : .regular))
-                    .foregroundStyle(done ? Palette.inkFaint : Palette.ink)
+                    .foregroundStyle(finished ? Palette.inkFaint : Palette.ink)
                     .lineLimit(1)
                     .frame(width: 168, alignment: .leading)
 
+                // THE COLUMN THAT CARRIES THE ROW, so it is the last to give
+                // way: a floor and a priority over the chips beside it, which
+                // otherwise ate it whole in a narrow window.
                 middle
                     .lineLimit(1)
                     .truncationMode(.tail)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(minWidth: 140, maxWidth: .infinity, alignment: .leading)
+                    .layoutPriority(1)
 
                 HStack(spacing: 7) {
                     if update.matched_rule != nil {
-                        Text("·rule")
-                            .font(Typo.micro)
-                            .foregroundStyle(Palette.accent.opacity(0.8))
+                        Image(systemName: "wand.and.stars")
+                            .font(.system(size: 10))
+                            .foregroundStyle(Palette.inkFaint)
                             .help("matched a sender rule")
+                            .accessibilityLabel("matched a sender rule")
                     }
                     if update.hasPendingReminder {
                         Chip(
                             text: Fmt.remindChip(update.remind_at), tone: Palette.accent,
                             symbol: "bell.fill")
                     }
-                    if let chip, !done {
+                    // Kept on finished mail too, quietly: the Deadlines lens
+                    // lists it, and a row that matches with no visible reason
+                    // reads as a mistake.
+                    if let chip {
                         Chip(
-                            text: chip.text, tone: chip.overdue ? Palette.danger : Palette.warn,
-                            filled: chip.overdue)
+                            text: chip.text,
+                            tone: finished
+                                ? Palette.inkFaintest : chip.overdue ? Palette.danger : Palette.warn,
+                            filled: chip.overdue && !finished)
                     }
                     if update.hasAttachments {
                         Image(systemName: "paperclip")
@@ -126,7 +143,7 @@ struct MailRow: View {
                     }
                     // Left of the pill, so a selected row's hint never pushes
                     // the pill out of line with the rows around it.
-                    if selected {
+                    if selected, let verbHint {
                         Text(verbHint)
                             .font(Typo.mono(9))
                             .foregroundStyle(Palette.inkFaintest)
@@ -136,42 +153,33 @@ struct MailRow: View {
                     // right edges line up down the list and every point a
                     // short name does not use goes to the summary instead.
                     if let zone = SitrepZone(update.placement) {
-                        PlacementPill(zone: zone)
+                        PlacementPill(zone: zone, muted: finished)
                     }
                     // ARRIVAL ONLY. A daemon that does not send `received_at`
                     // has no arrival to print, and its listing time (every
                     // backfilled row reading "11:41 AM") is worse than none.
-                    let stamp = MailList.stamp(update.received_at)
-                    if !stamp.isEmpty {
-                        Text(stamp)
-                            .font(.system(size: 11.5, weight: emphasized ? .semibold : .regular))
-                            .monospacedDigit()
-                            .foregroundStyle(emphasized ? Palette.inkDim : Palette.inkFaint)
-                            // FIXED, not a minimum: it is the edge the pills
-                            // line up against ("Sep 28, 2025" is the widest).
-                            .frame(width: 76, alignment: .trailing)
-                    }
+                    // ALWAYS the fixed column, even empty: it is the edge the
+                    // pills line up against ("Sep 28, 2025" is the widest).
+                    // Never bold: the sender and subject already carry it.
+                    Text(MailList.stamp(update.received_at))
+                        .font(.system(size: 11.5))
+                        .monospacedDigit()
+                        .foregroundStyle(emphasized ? Palette.inkDim : Palette.inkFaint)
+                        .frame(width: 78, alignment: .trailing)
                 }
                 .layoutPriority(3)
             }
         }
         // No edge bar on the selected row: ListRow's fill already marks it,
-        // and a one-sided stripe on a rounded row bends into an arc.
-        // Dimmed mostly by INK rather than opacity: the words step down and
-        // the avatar keeps its colour, which reads as handled, not disabled.
-        .opacity(done ? 0.8 : 1)
+        // and a one-sided stripe on a rounded row bends into an arc. Finished
+        // rows are dimmed by INK alone, never opacity, which took their faint
+        // text under a readable contrast.
     }
 
     /// The left gutter: a check on finished mail, the importance meter on the
     /// rest. One slot, so the sender column never moves.
     @ViewBuilder private var gutter: some View {
-        if update.hasPendingReminder {
-            // Parked, not finished: it is coming back.
-            Image(systemName: "bell")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(Palette.accent)
-                .accessibilityLabel("reminder set")
-        } else if done {
+        if finished {
             Image(systemName: "checkmark")
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(Palette.positive)
@@ -180,7 +188,9 @@ struct MailRow: View {
             Text(Fmt.importanceMeter(update.importance))
                 .font(Typo.mono(10))
                 .foregroundStyle(Palette.importanceColor(update.importance))
-                .accessibilityLabel("importance \(update.importance)")
+                .accessibilityLabel(
+                    update.importance >= 70
+                        ? "high importance" : update.importance >= 40 ? "medium importance" : "low importance")
         }
     }
 }
@@ -213,7 +223,7 @@ enum SitrepZone: String, CaseIterable {
     var symbol: String {
         switch self {
         case .eyes: "eye"
-        case .auth: "lock"
+        case .auth: "key"
         case .calendar: "calendar"
         case .shipments: "shippingbox"
         case .billing: "building.columns"
@@ -223,26 +233,43 @@ enum SitrepZone: String, CaseIterable {
         }
     }
 
+    /// The sitrep header's colour for the zone: the pill's wash.
     var tint: Color {
         switch self {
         case .eyes, .calendar: Palette.accent
         case .auth: Palette.lock
         case .shipments: Palette.warn
-        case .billing, .receipts: Palette.positive
-        case .reading: Palette.inkDim
-        case .noise: Palette.inkFaintest
+        case .billing: Palette.accentInk
+        case .receipts: Palette.positive
+        case .reading: Color(light: Color(hex: 0xC9A15A), dark: Color(hex: 0xE8CF9E))
+        case .noise: Palette.inkFaint
+        }
+    }
+
+    /// The pill's TEXT colour: the tint, deepened in light mode, where 10pt
+    /// text in the raw tint on its own 15% wash falls under 4.5:1.
+    var ink: Color {
+        switch self {
+        case .eyes, .calendar: Color(light: Color(hex: 0x1C5FA8), dark: Color(hex: 0x6FB2F2))
+        case .auth: Color(light: Color(hex: 0x4A3BB5), dark: Color(hex: 0x9B8CF5))
+        case .shipments: Color(light: Color(hex: 0x8A5A12), dark: Color(hex: 0xE8AC4C))
+        case .billing: Palette.accentInk
+        case .receipts: Color(light: Color(hex: 0x1A6642), dark: Color(hex: 0x4FC08A))
+        case .reading: Color(light: Color(hex: 0x7A5A1E), dark: Color(hex: 0xE8CF9E))
+        case .noise: Palette.inkFaint
         }
     }
 }
 
 /// The zone as a tinted pill: its icon and name on a wash of its colour, the
-/// whole capsule filled evenly (never one lit edge). Noise is a neutral grey,
-/// the one zone that should not catch the eye.
+/// whole capsule filled evenly (never one lit edge). Noise and finished rows
+/// are grey: a done row's loudest mark should not be its category.
 struct PlacementPill: View {
     let zone: SitrepZone
+    var muted = false
 
     var body: some View {
-        let tint = zone == .noise ? Palette.inkFaint : zone.tint
+        let grey = muted || zone == .noise
         HStack(spacing: 4) {
             Image(systemName: zone.symbol)
                 .font(.system(size: 9, weight: .semibold))
@@ -251,10 +278,10 @@ struct PlacementPill: View {
                 .lineLimit(1)
                 .fixedSize()
         }
-        .foregroundStyle(tint)
+        .foregroundStyle(grey ? Palette.inkFaint : zone.ink)
         .padding(.horizontal, 7)
         .padding(.vertical, 2.5)
-        .background(Capsule().fill(tint.opacity(zone == .noise ? 0.10 : 0.15)))
+        .background(Capsule().fill((grey ? Palette.inkFaint : zone.tint).opacity(grey ? 0.10 : 0.15)))
         .accessibilityElement(children: .combine)
         .accessibilityLabel("filed under \(zone.title)")
     }

@@ -120,13 +120,56 @@ struct MailListTests {
         func ranked(_ id: Int, _ importance: Int, _ at: String) -> AttentionUpdate {
             var u = row(id, received: at); u.importance = importance; return u
         }
-        let byDay = MailList.ordered([
+        let rankedDays = MailList.rankedSections([
             ranked(30, 10, "2026-09-30T12:00:00Z"),
             ranked(31, 90, "2026-09-30T08:00:00Z"),
             ranked(32, 90, "2026-09-30T07:00:00Z"),
             ranked(33, 99, "2026-09-29T12:00:00Z"),
-        ], calendar: cal)
+        ], now: now, calendar: cal)
+        let byDay = rankedDays.flatMap(\.rows)
         precondition(byDay.map(\.id) == [31, 32, 30, 33], "got \(byDay.map(\.id))")
+        precondition(rankedDays.map(\.start) == [0, 3], "starts follow the ranked order")
+
+        // A heading spanning days ranks as ONE list, not a per-day sawtooth.
+        let lastWeek = MailList.rankedSections([
+            ranked(50, 10, "2026-09-21T12:00:00Z"),
+            ranked(51, 90, "2026-09-20T12:00:00Z"),
+        ], now: now, calendar: cal)
+        precondition(lastWeek.count == 1 && lastWeek[0].title == "Last week")
+        precondition(lastWeek[0].rows.map(\.id) == [51, 50])
+
+        // THE POLL'S HEAD MERGING INTO THE SCROLLED PAGES.
+        let page1 = (60...63).reversed().map { id in
+            ranked(id, 50, "2026-09-30T1\(id - 60):00:00Z")
+        }  // 63 newest
+        let older = [ranked(55, 50, "2026-09-20T10:00:00Z")]
+        // Overlap: the head's rows replace their copies, older rows stay.
+        var refreshed = page1
+        refreshed[0].status = .done
+        let merged = MailList.mergeHead(
+            loaded: page1 + older, head: refreshed, headIsFull: true)
+        precondition(!merged.reset && merged.rows.map(\.id) == [63, 62, 61, 60, 55])
+        precondition(merged.rows[0].status == .done, "the head's copy wins")
+        // A row inside the head's span the head no longer returns has left.
+        let gone = MailList.mergeHead(
+            loaded: page1 + older, head: page1.filter { $0.id != 61 }, headIsFull: false)
+        precondition(gone.rows.map(\.id) == [63, 62, 60, 55], "got \(gone.rows.map(\.id))")
+        // A FULL head sharing nothing with what is loaded: a gap between them.
+        let newer = (70...73).reversed().map { id in
+            ranked(id, 50, "2026-10-01T0\(id - 70):00:00Z")
+        }
+        let gap = MailList.mergeHead(loaded: page1 + older, head: newer, headIsFull: true)
+        precondition(gap.reset && gap.rows.map(\.id) == [73, 72, 71, 70], "a gap starts over")
+        // ...but a short head is the whole mailbox's newest, so no gap.
+        let noGap = MailList.mergeHead(loaded: page1, head: newer, headIsFull: false)
+        precondition(!noGap.reset && noGap.rows.count == 8)
+        // First load.
+        precondition(MailList.mergeHead(loaded: nil, head: newer, headIsFull: true).reset)
+
+        // Important is the sitrep's placement when there is one.
+        var pinnedNoise = row(80, tier: .noise); pinnedNoise.placement = "eyes"
+        var demoted = row(81, tier: .signal); demoted.placement = "reading"
+        precondition(MailFilter.important.matches(pinnedNoise) && !MailFilter.important.matches(demoted))
 
         // The listing memo answers again for the same inputs and changes
         // when the rows do (a status flip included).

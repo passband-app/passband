@@ -1,32 +1,33 @@
-// EMAILS VIEW — the traditional flat inbox: ALL updates, every tier, newest
-// first, one dense list that hides nothing. Owns the "list" KeyContext; e/d drop
-// the row optimistically here because the action layer only removes it from the
-// sitrep bands. No persistent selection — the highlight renders only while the
-// keyboard drives, and action keys are inert without kbActive or a live hover.
+// EMAILS VIEW — the all-mail list: every message, newest day first, each day's
+// mail ranked by importance, finished mail kept (dimmed and checked) rather than
+// dropped. Rows (`MailRow`) read like a mail client's — sender, subject, the
+// triage one-liner, the sitrep zone it was filed under, the arrival time — and
+// the list pages back through the whole mailbox as you scroll
+// (`AppStore.loadMoreMail`). Owns the "list" KeyContext. No persistent
+// selection: the highlight renders only while the keyboard drives, and action
+// keys are inert without kbActive or a live hover. The cursor lives in
+// `ListCursor`, out of this body; see `cursor` for why.
 //
-// TWO PAGES, one list: the inbox and the noise bin (`n`, or the header's noise
-// count). Only the DATA SOURCE differs — every verb, the queue handed to the
-// reader and the cursor behave identically on noise rows.
+// Above the list, the filter bar: lenses (All / Important / Deadlines /
+// Attachments, which narrow the rows) and Reminders (which swaps them for the
+// parked list), plus the category picker that hides whole sitrep zones.
 //
-// A THIRD PAGE, `sent`, shares the chrome and the cursor but not the verbs: it
+// A SECOND PAGE, `sent`, shares the chrome and the cursor but not the verbs: it
 // holds outbound mail, which nothing triaged and no verb here can resolve. So
 // the rows are SentRows, j/k/Enter work exactly as they do everywhere else, and
 // r/e/d/v/f are inert rather than acting on a row they have no meaning for.
 //
-// AND A FOURTH, `spam`, which is the mail PROVIDER's folder and not ours. It is
+// AND A THIRD, `spam`, which is the mail PROVIDER's folder and not ours. It is
 // the only page reached from a chip rather than a segment (the segment appears
 // once you are on it — see `MailMode.segments`), it carries a standing notice
 // saying who filtered its rows, and it subtracts the three verbs that need a
 // triage verdict to mean anything while adding the one verb that only means
-// something here: `i`, back to the inbox. Everything else — the cursor, the
-// reader, the queue — is the ordinary list.
+// something here: `i`, back to the inbox.
 //
-// AND A LENS OVER THE INBOX: the reminder filter, which swaps the rows for mail
-// that is parked (`h`) and waiting to come back. A lens rather than a fourth
-// page because it is not a place you navigate to — the first Escape sheds it and
-// you are back on the mail you were reading. Its rows come from their own cache
-// for one reason worth stating: every one of them is `done`, so the ordinary
-// page — which filters through `resolvedIds` — would hide them all.
+// THE REMINDER LENS swaps the rows for mail that is parked (`h`) and waiting to
+// come back. A lens rather than a page because it is not a place you navigate
+// to — the first Escape after any filter sheds it. Its rows come from their own
+// cache, sorted by when each comes back, so they draw with no day headings.
 
 import SwiftUI
 
@@ -77,12 +78,11 @@ struct EmailsView: View {
     /// the thread, so every id on that list is in `resolvedIds` by construction
     /// and the filter would empty the page it just filled.
     ///
-    /// Done mail is in the cache (see `performMailRefresh`): "to do" drops it,
-    /// "everything" keeps it and the row dims. The filter bar's lens narrows
-    /// the inbox only — noise has no important mail by definition, and spam
-    /// has no verdict for any lens to read.
+    /// Done mail is in the cache (see `performMailRefresh`) and the row dims.
+    /// The filter bar's lens narrows the inbox only: spam has no verdict for
+    /// any lens to read.
     ///
-    /// Each day is ordered by importance (`MailList.ordered`), so the flat
+    /// Each section is ordered by importance (`MailList.rankedSections`), so the flat
     /// cursor walks rows in the order they are drawn. Read through the memo:
     /// this is asked a dozen times per body, and the body runs on every hover.
     private var listing: MailList.Listing.Output {
@@ -92,10 +92,7 @@ struct EmailsView: View {
             hiddenZones: hiddenZones, grouped: !reminders)
     }
     private var rows: [AttentionUpdate] { listing.rows }
-    /// FINISHED MAIL ALWAYS SHOWS, dimmed and checked: a mail list where
-    /// archived is not the same as gone. Kept as a name because the queue and
-    /// the `e` walk both ask it.
-    private let showDone = true
+    // FINISHED MAIL ALWAYS SHOWS, dimmed and checked: archived is not gone.
     private var filter: MailFilter { mode == .inbox && !reminders ? store.mailFilter : .all }
     /// The category picker's choice, on the inbox only (the reminder lens is
     /// the user's own parked list and shows whatever they parked).
@@ -111,7 +108,7 @@ struct EmailsView: View {
     /// still to do, plus `u` itself even when it is a dimmed one, so the
     /// reader can find where it is and walk on to the next live row.
     private func queue(opening u: AttentionUpdate) -> [AttentionUpdate] {
-        showDone ? rows.filter { !isDone($0) || $0.id == u.id } : rows
+        rows.filter { !isDone($0) || $0.id == u.id }
     }
     /// Sent rows are NOT filtered against `resolvedIds`: a resolve is an inbox
     /// verdict, and it must never delete a record of something you sent.
@@ -134,6 +131,11 @@ struct EmailsView: View {
     private struct CursorShape: Equatable {
         var outbox: [Int]
         var count: Int
+        /// The mail rows' ids in drawn order (none on Sent), so a poll or an
+        /// older page that inserts rows ABOVE the cursor (importance ranks a
+        /// new arrival mid-day) moves the cursor with its row instead of
+        /// leaving it on a stranger's mail.
+        var ids: [Int]
     }
     /// The row under the cursor as the two things every page can answer: the
     /// message id (a `.task` key, and the scroll target) and the thread to warm.
@@ -185,7 +187,9 @@ struct EmailsView: View {
                 // reminder lens swaps in.
                 MailFilterBar(
                     counts: MailList.Counts.shared.of(
-                        store.mailPage(mode).value ?? [], showDone: true,
+                        // Counts are of mail STILL TO DO: "Important 12" is
+                        // twelve things to look at, not twelve ever received.
+                        store.mailPage(mode).value ?? [], showDone: false,
                         resolved: store.resolvedIds,
                         hiddenZones: Prefs.shared.mailHiddenZones))
             }
@@ -197,12 +201,12 @@ struct EmailsView: View {
         }
         .keyBindings(.list, bindings)
         // Fires on mount, on each 10s poll AND on a mode switch — only the page
-        // being shown is refreshed, so the noise page costs nothing until you go
+        // being shown is refreshed, so the spam page costs nothing until you go
         // there. The store's short TTL is what makes the mount half free when a
         // tick just landed; the tick half always outruns it and refreshes for real.
         // IN A LEAF, not on this body: the tick is a new Date every ten
         // seconds, and a body that reads it re-evaluates every ten seconds —
-        // five hundred rows' worth of view values, for a fetch that usually
+        // every loaded row's worth of view values, for a fetch that usually
         // finds nothing new. The leaf's body is a zero-size rectangle.
         .background { MailRefreshKeeper(mode: mode, reminders: reminders) }
         // ASK FOR THE SPAM FOLDER ON ENTRY, and only on entry. Keyed on the mode
@@ -214,7 +218,7 @@ struct EmailsView: View {
             await store.refreshSpamFolder()
         }
         // Pull the thread for the row the cursor rests on, DEBOUNCED so sweeping
-        // a 500-row list fires one request for the row you stop on rather than
+        // a long list fires one request for the row you stop on rather than
         // one per row you pass. Covers everything past the bounded head-warm.
         // In a LEAF so that only it, not this body, depends on the cursor.
         .background { CursorPrefetch(cursor: cursor, rowAt: { cursorRow(at: $0) }) }
@@ -226,10 +230,21 @@ struct EmailsView: View {
         // first moved the cursor one row too high (`ScheduledCursor.follow`).
         // Off Sent the outbox is `[]` on both sides, so this is the plain
         // clamp, and reads nothing of the store's outbox.
-        .onChange(of: CursorShape(outbox: scheduled.map(\.id), count: rowCount)) { old, new in
+        .onChange(
+            of: CursorShape(
+                outbox: scheduled.map(\.id), count: rowCount,
+                ids: mode == .sent ? [] : rows.map(\.id))
+        ) { old, new in
+            if let id = old.ids[safe: index], let moved = new.ids.firstIndex(of: id) {
+                if moved != index { index = moved }
+                return
+            }
             index = ScheduledCursor.follow(
                 index, old: old.outbox, new: new.outbox, count: new.count)
         }
+        // Back to the head on re-entry, so rows deep in the scroll are not
+        // served from an afternoon ago (`trimMailToHead`).
+        .onAppear { store.trimMailToHead(mode) }
         // A mode switch replaces every row, so the cursor cannot keep its index —
         // it would land on an unrelated email, and the verbs act on the highlight.
         // Flipping the lens replaces them just as completely.
@@ -253,7 +268,7 @@ struct EmailsView: View {
 
     // MARK: - the lists
 
-    /// The three inline notes for the mail / noise pages, shared by both
+    /// The inline notes for the mail and spam pages, shared by both
     /// layouts. Each is gated on having NO rows at all: a reload keeps the last
     /// page on screen, so a revisit — or a failure while offline — updates
     /// underneath what you are already reading instead of replacing it with a
@@ -265,13 +280,11 @@ struct EmailsView: View {
         } else if page.value == nil {
             BandNote(
                 reminders
-                    ? "loading reminders…"
-                    : mode == .noise
-                        ? "loading noise…" : mode == .spam ? "loading spam…" : "loading mail…"
-            )
+                    ? "Loading reminders…" : mode == .spam ? "Loading spam…" : "Loading mail…")
         } else if rows.isEmpty {
-            // The window the daemon answers with is 30 days, so an empty noise
-            // or spam page says so rather than implying "ever".
+            // A narrowed list that is empty may only be empty SO FAR: the
+            // footer under this note keeps paging back, and the copy says so
+            // until the mailbox runs out.
             //
             // THE SPAM PAGE HAS THREE EMPTY STATES, not one, and they are the
             // same empty list on the wire. The daemon does not track that
@@ -282,12 +295,14 @@ struct EmailsView: View {
                 reminders
                     ? "No pending reminders."
                     : filter != .all
-                        ? "Nothing loaded matches \(filter.label)."
+                        ? (store.mailPaging(mode).exhausted
+                            ? "No mail matches \(filter.label)."
+                            : "Nothing matches \(filter.label) yet. Looking further back.")
                         : !hiddenZones.isEmpty
-                            ? "Nothing loaded in the categories you picked."
-                        : mode == .noise
-                                ? "No noise in the last 30 days."
-                                : mode == .spam ? spamEmptyNote : "No mail.")
+                            ? (store.mailPaging(mode).exhausted
+                                ? "No mail in the categories you picked."
+                                : "Nothing in the categories you picked yet. Looking further back.")
+                            : mode == .spam ? spamEmptyNote : "No mail.")
         }
     }
 
@@ -409,7 +424,7 @@ struct EmailsView: View {
 
     /// The day sections, cached on the rows they were built from: the body
     /// re-evaluates on every cursor move and hover, and rebuilding the
-    /// headings each time is a measurable stutter on five hundred rows.
+    /// headings each time is a measurable stutter on a long list.
     private var sections: [MailList.Section] { listing.sections }
 
     private var hasRows: Bool { page.value != nil && page.error == nil && !rows.isEmpty }
@@ -423,6 +438,8 @@ struct EmailsView: View {
                             sentList
                         } else if !hasRows {
                             note
+                            // An empty LENS keeps paging back for a match.
+                            if page.value != nil, page.error == nil { olderMailFooter }
                         } else if reminders {
                             // Sorted by when each comes BACK, so a heading of
                             // when each arrived would scatter the list.
@@ -467,7 +484,10 @@ struct EmailsView: View {
                 position: i,
                 update: u,
                 done: isDone(u),
-                verbHint: mode == .spam ? "[i][e][d]" : "[r][e][d]",
+                // Only the spam page's hint: its `i` has no other affordance on
+                // the Mac. Elsewhere the hint cost the selected row's subject
+                // fifty points and reflowed it on every j/k.
+                verbHint: mode == .spam ? "[i][e][d]" : nil,
                 onOpen: { store.openThread(u.thread_id, queue: queue(opening: u)) },
                 // INFINITE SCROLL: a row this close to the end of what is
                 // loaded asks for the next page, well before the bottom shows.
@@ -479,25 +499,42 @@ struct EmailsView: View {
             .id(u.id)
         }
 
-        /// Under the last row: a quiet note while an older page is on its way,
-        /// and nothing once the mailbox has run out.
-        @ViewBuilder private var olderMailFooter: some View {
-            let paging = store.mailPaging(mode)
-            if paging.loadingMore {
-                BandNote("Loading older mail…")
-            } else if !paging.exhausted, !reminders {
-                // A SENTINEL as well as the rows' own trigger: when a lens or
-                // the category picker hides most of a page, the rows that
-                // would have asked for the next one never appear. Keyed on how
-                // much is loaded, so it appears again after every page.
-                let mode = mode
-                Color.clear
-                    .frame(height: 1)
-                    .id("older-\(store.mailPage(mode).value?.count ?? 0)")
-                    .onAppear { Task { await store.loadMoreMail(mode) } }
-            }
-        }
     #endif
+
+    /// Under the last row: a quiet note while an older page is on its way, a
+    /// way to try again when one failed, and nothing once the mailbox has run
+    /// out. Both layouts.
+    @ViewBuilder private var olderMailFooter: some View {
+        let paging = store.mailPaging(mode)
+        let mode = mode
+        if reminders || mode == .sent || paging.exhausted {
+            EmptyView()
+        } else if paging.loadingMore {
+            BandNote("Loading older mail…")
+        } else if paging.failedAt != nil {
+            HStack(spacing: 10) {
+                Text("Couldn't load older mail.")
+                    .font(Typo.rowSub)
+                    .foregroundStyle(Palette.inkFaintest)
+                Button("Try again") { store.retryOlderMail(mode) }
+                    .buttonStyle(.plain)
+                    .font(Typo.chip)
+                    .foregroundStyle(Palette.accent)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 18)
+        } else {
+            // A SENTINEL as well as the rows' own trigger: when a lens or the
+            // category picker hides most of a page, the rows that would have
+            // asked for the next one never appear. Keyed on how much is
+            // loaded, so it appears again after every page.
+            Color.clear
+                .frame(height: 1)
+                .id("older-\(store.mailPage(mode).value?.count ?? 0)")
+                .onAppear { Task { await store.loadMoreMail(mode) } }
+        }
+    }
 
     #if !os(macOS)
         /// A REAL `List` on the phone, and only on the phone. Everything else in
@@ -520,6 +557,7 @@ struct EmailsView: View {
                     sentList.plainRow()
                 } else if !hasRows {
                     note.plainRow()
+                    if page.value != nil, page.error == nil { olderMailFooter.plainRow() }
                 } else if reminders {
                     ForEach(rows) { u in phoneRow(u) }
                 } else {
@@ -530,11 +568,7 @@ struct EmailsView: View {
                             DayHeading(section.title, first: section.start == 0)
                         }
                     }
-                    // The end of what is loaded: the next older page.
-                    Color.clear
-                        .frame(height: 1)
-                        .plainRow()
-                        .onAppear { Task { await store.loadMoreMail(mode) } }
+                    olderMailFooter.plainRow()
                 }
             }
             .listStyle(.plain)
@@ -550,7 +584,7 @@ struct EmailsView: View {
                 onHover: {},
                 onOpen: verbs.open
             )
-            .opacity(isDone(u) ? 0.55 : 1)
+            .opacity(isDone(u) ? 0.6 : 1)
             .plainRow()
             .swipeVerbs(verbs)
             .updateContextMenu(verbs)
@@ -677,7 +711,7 @@ struct EmailsView: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .help("mail your email provider filtered out — opening this fetches it")
+                    .help("mail your email provider filtered out. Opening this fetches it")
                 }
                 // Offline still says so. The "last checked" stamp is gone:
                 // the list's own times say how fresh it is.
@@ -845,17 +879,17 @@ struct EmailsView: View {
     private func resolveSelected() {
         guard triageable, let u = selected, !isDone(u) else { return }
         Task { await Actions.done(u) }
-        // On Everything the row stays put (dimmed), so nothing slides under the
-        // cursor the way it does on To do: step to the next row still to do,
+        // The row stays put (dimmed), so nothing slides under the cursor: step
+        // to the next row still to do,
         // or "e e e" stalls on the first one.
-        if showDone, kbActive,
+        if kbActive,
             let next = rows.indices.first(where: { $0 > index && !isDone(rows[$0]) && rows[$0].id != u.id })
         {
             index = next
         }
         // NOT evicted from the cached page: `Actions.done` records the id in
-        // `resolvedIds`, which is all `rows` needs to drop the row on "to do"
-        // or dim it on "everything" on the next frame. A poll that lands before
+        // `resolvedIds`, which is all `rows` needs to dim the row on the next
+        // frame. A poll that lands before
         // the server agrees still cannot hand it back for the same reason, and
         // an undo, which clears the id, brings it back at once.
     }
@@ -900,7 +934,7 @@ struct BandNote: View {
 
 
 /// Refreshes the page being shown on mount, on every poll tick, and on a mode
-/// switch. Only the page being shown, so the noise page costs nothing until
+/// switch. Only the page being shown, so the spam page costs nothing until
 /// you go there. The store's short TTL is what makes the mount half free when
 /// a tick just landed; the tick half always outruns it and refreshes for
 /// real. A view of its own so that reading the tick invalidates nothing but

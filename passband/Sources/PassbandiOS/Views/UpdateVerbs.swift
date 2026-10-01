@@ -23,8 +23,7 @@ struct UpdateVerbs {
     /// open. The dashboard zones pass their ranked list; a zone with no walk of
     /// its own passes nothing, exactly as the Mac's zone rows do.
     var queue: [AttentionUpdate] = []
-    /// The row is already finished (all mail's Everything view shows these
-    /// dimmed). Done is withheld from it: a second resolve would push a fresh
+    /// The row is already finished (all mail shows these dimmed). Done is withheld from it: a second resolve would push a fresh
     /// undo, and that undo reopens mail finished long ago.
     var finished = false
 
@@ -36,8 +35,8 @@ struct UpdateVerbs {
     }
 
     /// `e` / `d`, as EmailsView.resolveSelected: the action only. The row is
-    /// NOT evicted from the cached pages; `resolvedIds` hides it on To do and
-    /// dims it on Everything, and an undo brings it straight back.
+    /// NOT evicted from the cached pages; `resolvedIds` dims it, and an undo
+    /// brings it straight back.
     func done() {
         guard !finished else { return }
         Task { await Actions.done(update) }
@@ -216,7 +215,9 @@ extension View {
     /// worse mistake than one that resolves it — done is the edge with a
     /// five-second undo behind it.
     func swipeVerbs(_ verbs: UpdateVerbs) -> some View {
-        swipeActions(edge: .trailing, allowsFullSwipe: true) {
+        // No full swipe on a FINISHED row: with Done withheld, the leading
+        // verb there is Tune, and a habitual flick would open it.
+        swipeActions(edge: .trailing, allowsFullSwipe: !verbs.finished) {
             ForEach(verbs.trailingVerbs) { verb in
                 Button {
                     Haptics.commit()

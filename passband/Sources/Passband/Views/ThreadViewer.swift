@@ -678,10 +678,19 @@ struct ThreadViewer: View {
             .tourTarget(.readerRule)
 
             Button {
-                confirmMode = .ask
+                // A job waiting on the user finishes from here too; anything
+                // else asks again, which is how a re-request has always worked.
+                if let unsub, unsub.status == .needsYou {
+                    UnsubscribeJobs.shared.finish(.init(
+                        sender: unsub.sender,
+                        phase: .needsYou(reason: unsub.status_reason, url: unsub.status_url)))
+                    self.unsub?.status = .opened
+                } else {
+                    confirmMode = .ask
+                }
             } label: {
                 if let unsub {
-                    Text("unsubscribe requested \(Fmt.relAge(unsub.requested_at)) ago")
+                    Text(Self.unsubHint(unsub))
                         .font(Typo.micro)
                 } else {
                     HStack(spacing: 4) {
@@ -2150,22 +2159,29 @@ struct ThreadViewer: View {
         unsub = rows.first { $0.sender == newestSender }
     }
 
-    /// Confirmed unsubscribe. 200 -> open the url, then LEAVE: the server
-    /// resolved this SENDER's open mail alongside the request (unsubscribing is
-    /// a verdict on them, not on one thread), so the reader departs the way e/d
-    /// does — an email that stays on screen after being dealt with reads as the
-    /// action not having taken. 422 -> swap the card to the "no link — block
-    /// instead?" fallback.
+    /// Confirmed unsubscribe, then LEAVE: the server resolved this SENDER's
+    /// open mail alongside the request (unsubscribing is a verdict on them, not
+    /// on one thread), so the reader departs the way e/d does — an email that
+    /// stays on screen after being dealt with reads as the action not having
+    /// taken. The daemon usually does the unsubscribe itself (`auto`), and the
+    /// sitrep's tray reports it; for spam, unverified mail, or an older daemon
+    /// it hands back a link to open instead. 422 -> swap the card to the "no
+    /// link — block instead?" fallback.
     private func runUnsubscribe() async {
         guard let newest, !confirmBusy else { return }
         confirmBusy = true
         defer { confirmBusy = false }
         do {
+            let gen = UnsubscribeJobs.shared.generation
             let result = try await APIClient.shared.unsubscribe(messageId: newest.id)
-            Opener.open(result.url)
+            if result.method == "auto" {
+                UnsubscribeJobs.shared.started(sender: result.sender, generation: gen)
+            } else {
+                Opener.open(result.url)
+                store.pushToast(Self.browserToast(result), .success)
+            }
             // Drop the resolved rows NOW rather than one poll later.
             store.noteSenderResolved(result.sender)
-            store.pushToast("opened unsubscribe page — \(result.sender)", .success)
             confirmMode = nil
             await departAndClose()
         } catch let apiError as APIError where apiError.status == 422 {
@@ -2174,6 +2190,28 @@ struct ThreadViewer: View {
         } catch {
             store.pushToast(errText(error, "unsubscribe failed"), .error)
             confirmMode = nil
+        }
+    }
+
+    /// The header's record of an earlier unsubscribe, in the words of where it
+    /// stands. "Requested" only once something actually went out.
+    static func unsubHint(_ unsub: UnsubscribeRecord) -> String {
+        switch unsub.status {
+        case .running: "unsubscribing"
+        case .needsYou: "finish unsubscribing on their site"
+        case .done: "unsubscribed \(Fmt.relAge(unsub.requested_at)) ago"
+        case .opened, nil: "unsubscribe requested \(Fmt.relAge(unsub.requested_at)) ago"
+        }
+    }
+
+    /// Why the link opened in the browser instead of the tray handling it.
+    static func browserToast(_ result: UnsubscribeResult) -> String {
+        switch result.auto_refused {
+        case "spam": "opened unsubscribe page for \(result.sender) (it's spam, so check the address bar)"
+        case "unverified": "opened unsubscribe page for \(result.sender) (sender unverified)"
+        case "unchecked": "opened unsubscribe page for \(result.sender)"
+        case "footer_link": "opened their unsubscribe page so you can check it's really theirs"
+        default: "opened unsubscribe page for \(result.sender)"
         }
     }
 

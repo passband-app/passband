@@ -1627,6 +1627,10 @@ final class AppStore {
     /// per-daemon SQLite ints, so "looks plausible" is precisely the failure
     /// mode being prevented here: A's row 412 is B's row 412.
     private func wipeAccountState() {
+        // The unsubscribe tray's rows and buttons belong to the old account:
+        // "Finish on their site" would tell the NEW daemon about a job it has
+        // never heard of.
+        UnsubscribeJobs.shared.reset()
         sitrep = SitrepData()
         fyeHeadline = nil
         fyeHeadlineKey = nil
@@ -5092,6 +5096,11 @@ final class AppStore {
     /// false means the button is never offered and the two-week nudge never
     /// fires.
     var shareAvailable: Bool { stats?.invite_sharing == true }
+
+    /// The daemon's answer to "has an iPhone app ever talked to this mailbox",
+    /// or nil when it has not given one yet (or is too old to). Drives the
+    /// TestFlight ask; see `TestFlightNudge`.
+    var iosConnected: Bool? { stats?.ios_connected }
 
     // MARK: - forwarding
 

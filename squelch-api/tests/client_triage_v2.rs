@@ -519,3 +519,94 @@ async fn a_fresh_headline_skips_the_cache_and_becomes_the_cached_one() {
     );
     assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
+
+/// A feed card names its sender from the `From:` display name, which the feed
+/// did not carry: every Reading card was titled from the bare address, and a
+/// mailer whose local-part is a hash got the hash.
+///
+/// The name is the HUMAN door's alone. It is untrusted header text, so the same
+/// items listed for an agent must not have it — asserted at the store, where
+/// the strip happens, and again at the agent door's own response.
+#[tokio::test]
+async fn feed_names_the_sender_on_the_human_door_only() {
+    let h = harness(|_, _| {});
+    let mut named = msg(h.acct, "named", "named-thread", "A sale", "An offer");
+    named.from_addr = "21ebc25a5920@emails.example.com".into();
+    named.from_name = Some("Mopar.com National eStore".into());
+    let id = h.store.upsert_message(&named).unwrap();
+    assess(&h.store, h.acct, id, false);
+
+    for destination in ["fye", "reading", "records"] {
+        let human = h
+            .app
+            .clone()
+            .oneshot(authed(
+                "GET",
+                &format!("/client/v2/feed?destination={destination}"),
+            ))
+            .await
+            .unwrap();
+        let body = body_json(human).await;
+        assert_eq!(body["items"][0]["message_id"], id, "{destination}");
+        assert_eq!(
+            body["items"][0]["from_name"], "Mopar.com National eStore",
+            "{destination}"
+        );
+
+        let agent = h
+            .app
+            .clone()
+            .oneshot(authed(
+                "GET",
+                &format!("/client/agent/feed?destination={destination}"),
+            ))
+            .await
+            .unwrap();
+        let body = body_json(agent).await;
+        assert_eq!(body["items"][0]["message_id"], id, "{destination}");
+        assert!(
+            body["items"][0].get("from_name").is_none(),
+            "{destination}: the agent door must not serve a display name"
+        );
+    }
+
+    let ranking = Default::default();
+    let internal = h.store.agent_reading(h.acct, 10).unwrap();
+    assert_eq!(
+        internal[0].from_name.as_deref(),
+        Some("Mopar.com National eStore")
+    );
+    for external in [
+        h.store.external_agent_reading(h.acct, 10).unwrap(),
+        h.store.external_agent_records(h.acct, 10).unwrap(),
+        h.store
+            .external_agent_fye(h.acct, 10, &ranking, Utc::now())
+            .unwrap(),
+    ] {
+        assert_eq!(external.len(), 1);
+        assert_eq!(external[0].message_id, id);
+        assert!(
+            external[0].from_name.is_none(),
+            "external listings leave the store without a display name"
+        );
+    }
+}
+
+/// A blank display name is ABSENT, not an empty string: the client reads the
+/// key's absence as "name it from the address", and "" would print nothing.
+#[tokio::test]
+async fn feed_omits_a_blank_sender_name() {
+    let h = harness(|_, _| {});
+    let mut blank = msg(h.acct, "blank", "blank-thread", "A sale", "An offer");
+    blank.from_name = Some("   ".into());
+    let id = h.store.upsert_message(&blank).unwrap();
+    assess(&h.store, h.acct, id, false);
+    let response = h
+        .app
+        .oneshot(authed("GET", "/client/v2/feed?destination=reading"))
+        .await
+        .unwrap();
+    let body = body_json(response).await;
+    assert_eq!(body["items"][0]["message_id"], id);
+    assert!(body["items"][0].get("from_name").is_none());
+}

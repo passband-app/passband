@@ -802,7 +802,22 @@ enum UnsubscribeMethod: String, LenientRawEnum {
     case browser
     case oneClick = "one_click"
     case mailto
+    /// An automatic unsubscribe the daemon is still working on, or one that
+    /// ended up needing the user.
+    case auto
+    /// Done by reading the sender's page and, at most, pressing its one button.
+    case page
     static var unknownFallback: UnsubscribeMethod { .browser }
+}
+
+/// Where an automatic unsubscribe stands. Absent on a legacy row, where the
+/// client opened the link itself and there was never a job.
+enum UnsubStatus: String, LenientRawEnum {
+    case running, done, opened
+    case needsYou = "needs_you"
+    /// A status this client does not know is shown as nothing at all, which is
+    /// what `opened` is: settled, and the user's.
+    static var unknownFallback: UnsubStatus { .opened }
 }
 
 enum UnsubResolution: String, LenientRawEnum {
@@ -813,7 +828,19 @@ enum UnsubResolution: String, LenientRawEnum {
 struct UnsubscribeResult: Codable, Sendable {
     var method: String
     var sender: String
-    var url: String
+    /// The link to open: present on the browser path, absent when the daemon
+    /// took the job (`method == "auto"`).
+    var url: String?
+    var status: UnsubStatus? = nil
+    /// Why an automatic request fell back to the browser: `spam` or
+    /// `unverified`. Absent otherwise.
+    var auto_refused: String? = nil
+}
+
+/// `POST /client/unsubscribes/opened`.
+struct UnsubscribeRecordAck: Codable, Sendable {
+    var sender: String
+    var status: UnsubStatus?
 }
 
 struct UnsubscribeRecord: Codable, Sendable, Hashable, Identifiable {
@@ -823,6 +850,13 @@ struct UnsubscribeRecord: Codable, Sendable, Hashable, Identifiable {
     var violation_count: Int
     var last_violation_at: String?
     var resolution: UnsubResolution?
+    // Optional for older daemons, which have no automatic unsubscribe.
+    var status: UnsubStatus? = nil
+    /// The ORIGINAL link, for `needs_you`.
+    var status_url: String? = nil
+    /// choose_topics | needs_browser | link_error | unclear, for `needs_you`.
+    var status_reason: String? = nil
+    var status_at: String? = nil
 
     var id: String { sender }
 }
@@ -970,6 +1004,11 @@ struct StoreStats: Codable, Sendable, Hashable {
     /// ABSENT on a daemon too old to say, and on every self-host, and nil reads
     /// exactly like false: no button, no nudge, nothing offered.
     var invite_sharing: Bool?
+    /// Whether an iPhone app has EVER connected to this mailbox. ABSENT on a
+    /// daemon too old to say, and nil reads as "do not know": the TestFlight
+    /// ask never fires on a guess, because telling somebody about the app they
+    /// are already using is worse than not telling them.
+    var ios_connected: Bool?
     /// Whether `forward_of_message_id` on /client/actions/send MEANS anything
     /// here. ABSENT on a daemon too old to say, and nil must read as false for a
     /// reason no other capability flag has: serde ignores unknown fields, so an
@@ -1949,6 +1988,11 @@ struct AgentFeedItem: Codable, Sendable {
     var message_id: Int
     var thread_id: String
     var from_addr: String
+    /// The `From:` display name. ABSENT from a daemon older than the feed's
+    /// own `from_name`, and then the card names the sender from the address,
+    /// which is how a mailer with a hashed local-part came to be titled with
+    /// 32 hex characters.
+    var from_name: String?
     var subject: String
     var received_at: String
     var decision: AgentMessageDecision
@@ -1965,6 +2009,7 @@ struct AgentFeedItem: Codable, Sendable {
             one_line: attention.summary.isEmpty ? decision.summary : attention.summary,
             reason: decision.reason,
             deadline: attention.factors.attention_at?.value,
+            from_name: from_name,
             subject: subject, status: .new, surfaced_at: received_at)
     }
 

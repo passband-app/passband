@@ -306,3 +306,39 @@ async fn a_token_the_relay_would_reject_is_refused_here() {
 
     assert!(h.store.list_devices(h.acct).unwrap().is_empty());
 }
+
+/// `/client/stats` says whether an iPhone app has ever connected, so the Mac
+/// knows whether to point at the TestFlight. Either witness is enough: a push
+/// registration (every iOS build leaves one) or a device token that named
+/// itself `ios/...`.
+#[tokio::test]
+async fn stats_says_whether_the_iphone_app_ever_connected() {
+    let stats = |h: &common::Harness| {
+        let app = h.app.clone();
+        async move {
+            body_json(app.oneshot(authed("GET", "/client/stats")).await.unwrap()).await
+                ["ios_connected"]
+                .clone()
+        }
+    };
+
+    let h = harness(|_, _| {});
+    assert_eq!(stats(&h).await, json!(false));
+    let resp = h
+        .app
+        .clone()
+        .oneshot(post("/client/devices", json!({ "token": DEV_A }), true))
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    assert_eq!(stats(&h).await, json!(true));
+
+    let h = harness(|_, _| {});
+    let phone = h.store.issue_device_token(h.acct, "phone").unwrap();
+    let ios = squelch_core::store::ClientTag::parse("ios/0.0.6").unwrap();
+    h.store
+        .verify_device_token_from(&phone.token, Some(&ios))
+        .unwrap()
+        .unwrap();
+    assert_eq!(stats(&h).await, json!(true));
+}

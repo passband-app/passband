@@ -26,6 +26,9 @@ mod sharing;
 mod state;
 pub mod tracking;
 mod triage;
+mod unsub_fetch;
+mod unsub_html;
+mod unsub_job;
 pub mod unsubscribe;
 
 pub use assistant::AssistantRelay;
@@ -279,6 +282,10 @@ fn client_router(state: ApiState) -> Router {
         // Unsubscribe: human-door only (never exposed on the agent door).
         .route("/client/unsubscribe", post(handlers::unsubscribe))
         .route("/client/unsubscribes", get(handlers::list_unsubscribes))
+        .route(
+            "/client/unsubscribes/opened",
+            post(handlers::unsubscribe_opened),
+        )
         .route(
             "/client/unsubscribes/resolution",
             post(handlers::unsubscribe_resolution),

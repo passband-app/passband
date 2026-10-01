@@ -8,12 +8,13 @@ use squelch_core::credentials::{
 };
 use squelch_core::store::SqliteStore;
 use squelch_core::triage::fye_headline::HeadlineClient;
+use squelch_core::triage::rule_infer::RuleInferClient;
+use squelch_core::triage::rule_suggest::RuleSuggestClient;
+use squelch_core::triage::unsub_page::UnsubPageClient;
+use squelch_core::types::AccountId;
 
 /// A board hash and the headline written for it (`None`: nothing to say).
 pub(crate) type HeadlineCacheEntry = (u64, Option<String>);
-use squelch_core::triage::rule_infer::RuleInferClient;
-use squelch_core::triage::rule_suggest::RuleSuggestClient;
-use squelch_core::types::AccountId;
 
 /// State threaded through every `/client/*` handler and the auth middleware.
 /// Cheap to clone: `Arc`s plus small copies.
@@ -212,6 +213,10 @@ pub struct ApiState {
     /// packages exist. Defaults to the config default so a hand-built state
     /// still filters sensibly.
     pub(crate) shipment_policy: squelch_core::config::ShipmentListPolicy,
+    /// Automatic unsubscribes: the jobs running in this process, their slots,
+    /// and the small model that reads an unsubscribe page. See
+    /// [`crate::unsub_job`]. HUMAN DOOR ONLY.
+    pub(crate) unsub: crate::unsub_job::UnsubJobs,
 }
 
 /// What the human door needs to force a carrier pass: the poller's
@@ -419,6 +424,7 @@ impl ApiState {
             sharing: None,
             shipment_poll: None,
             shipment_policy: squelch_core::config::ShipmentListPolicy::default(),
+            unsub: crate::unsub_job::UnsubJobs::default(),
         }
     }
 
@@ -654,6 +660,22 @@ impl ApiState {
     /// `/client/v2/fye/headline` answering null.
     pub fn with_fye_headline(mut self, client: Option<HeadlineClient>) -> Self {
         self.fye_headline = client;
+        self
+    }
+
+    /// The small model that reads an unsubscribe page when a job needs one.
+    /// `None` (no key, every test harness) leaves the no-model rule: done only
+    /// when the page says so, and one action only when it is the obvious one.
+    pub fn with_unsub_page_reader(mut self, client: Option<UnsubPageClient>) -> Self {
+        self.unsub.page_reader = client.map(Arc::new);
+        self
+    }
+
+    /// TEST HOOK: let the automatic unsubscribe's fetcher reach loopback and
+    /// any port, so a test can serve the sender's pages itself. Production
+    /// never calls this; the SSRF guard in `unsub_fetch` is otherwise absolute.
+    pub fn with_unsub_fetch_allow_local(mut self, allow: bool) -> Self {
+        self.unsub.allow_local = allow;
         self
     }
 
@@ -920,6 +942,9 @@ impl ApiState {
             .with_rule_suggestion(RuleSuggestClient::from_config(cfg))
             // The sitrep headline: same key, same notify model.
             .with_fye_headline(HeadlineClient::from_config(cfg))
+            // The unsubscribe page reader rides the same key and the notify
+            // model, billed under its own ledger category.
+            .with_unsub_page_reader(UnsubPageClient::from_config(cfg))
             // The assistant relay resolves only when BOTH the gateway base URL
             // and the assistant key are present; anything less is `None` and
             // the route 404s (see `Stage2Config::resolve_assistant`).

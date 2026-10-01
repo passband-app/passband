@@ -12,6 +12,10 @@
 // Mac lands on a page that says to open it on a phone. Pointing the camera at
 // the screen is the shortest way there; "Copy link" is the fallback.
 //
+// A FIXED COMPOSITION, so none of its type follows the density setting: the
+// card, the hero and the phone drawn in it are set sizes, and the headline is
+// cut to that width. Every font here is a literal or `fixed:` on purpose.
+//
 // NOT MODAL. A corner card, closed by its ✕, that leaves the inbox usable
 // underneath. Bottom-RIGHT on the main window: the toast stack owns
 // bottom-left and the update card owns bottom-centre. NO `.defaultAction`
@@ -130,10 +134,10 @@ private struct TestFlightAdCard: View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Passband, in your pocket.")
-                    .font(Typo.hero(25))
+                    .font(Typo.hero(25, fixed: true))
                     .foregroundStyle(Palette.ink)
                 Text("Your phone buzzes for the mail that needs you and stays quiet for everything else.")
-                    .font(Typo.rowSub)
+                    .font(.system(size: 12))
                     .foregroundStyle(Palette.inkDim)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -155,7 +159,7 @@ private struct TestFlightAdCard: View {
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(Palette.ink)
                     Text("Join the alpha on TestFlight.")
-                        .font(Typo.micro)
+                        .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(Palette.inkFaint)
                         .fixedSize(horizontal: false, vertical: true)
                     Button(action: copyLink) {
@@ -266,7 +270,7 @@ private struct PhoneMock: View {
                     .font(.system(size: 5, weight: .semibold).width(.expanded))
                     .foregroundStyle(Self.accent)
                 Text("2 items for\nyour eyes.")
-                    .font(Typo.hero(13))
+                    .font(Typo.hero(13, fixed: true))
                     .foregroundStyle(Self.screenInk)
                     .lineSpacing(-2)
                     .fixedSize(horizontal: false, vertical: true)

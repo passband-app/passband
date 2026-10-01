@@ -72,11 +72,10 @@ struct CompositionSummary<Trailing: View>: View {
                 .font(Typo.micro)
                 .foregroundStyle(Palette.inkFaintest)
                 .textCase(.uppercase)
-                // `slotWidth` is a compact width for 10pt type, and grows with
-                // that type rather than with the spacing ladder: SentRow sizes
-                // its own `to` slot the same way, which is what keeps the
-                // outbox's `to` on the sent rows' line in either density.
-                .frame(width: slotWidth * Typo.size(10) / 10, alignment: .trailing)
+                // `slotWidth` is a compact width, resolved the way SentRow's
+                // `to` slot is: that is what keeps the outbox's `to` on the
+                // sent rows' line in either density.
+                .frame(width: MeterSlot.width(slotWidth), alignment: .trailing)
 
             VStack(alignment: .leading, spacing: Space.s2) {
                 HStack(alignment: .firstTextBaseline, spacing: Space.s6) {

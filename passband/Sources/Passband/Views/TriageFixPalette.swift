@@ -37,7 +37,7 @@ struct TriageFixPalette: View {
             OverlayScrim(alignment: .top, topInset: 110, onDismiss: onClose) {
                 GlassEffectContainer(spacing: 8) {
                     palette
-                        .frame(width: 560)
+                        .frame(width: Typo.measure(560))
                         .passbandGlass(
                             .pane, cornerRadius: 20, tint: Palette.glassTintStrong,
                             id: "palette", in: paletteGlass)

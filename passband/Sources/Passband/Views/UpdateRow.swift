@@ -261,7 +261,7 @@ struct UpdateRow: View {
                         Text(Fmt.relAge(update.surfaced_at))
                             .font(Typo.num(10))
                             .foregroundStyle(Palette.inkFaintest)
-                            .frame(width: Typo.size(10) * 3, alignment: .trailing)
+                            .frame(width: MeterSlot.width(), alignment: .trailing)
                     }
                     if selected {
                         Text(verbHint)

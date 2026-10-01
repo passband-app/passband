@@ -49,7 +49,7 @@ struct GroupPicker: View {
                 .frame(maxHeight: Space.scaled(260))
             }
         }
-        .frame(width: 320)
+        .frame(width: Typo.measure(320))
         .task { await $groups.load("groups failed") { try await APIClient.shared.listGroups() } }
     }
 

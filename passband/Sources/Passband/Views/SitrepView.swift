@@ -101,6 +101,12 @@ struct SitrepView: View {
     /// the comfortable rail's extra width moves the breakpoint with it.
     private static var railBreakpoint: CGFloat { Typo.measure(654) + railWidth }
 
+    /// The page's side margin for everything above the two columns: the
+    /// column's own 24 plus the 4 a ClearNote is inset by, as a sum of two
+    /// steps so the hero and the banners stay on that inset line in either
+    /// density (a scaled 28 lands two points off it in comfortable).
+    private static var gutter: CGFloat { Space.s24 + Space.s4 }
+
     /// The records rail. On the spacing curve rather than the type's: a rail
     /// row is a name beside two chips and an amount, and it is the chips'
     /// padding that grows. Held at 306, comfortable left the name no room at
@@ -140,13 +146,13 @@ struct SitrepView: View {
             // arrived actually looks.
             if store.gmailDisconnected {
                 GmailDisconnectedBanner()
-                    .padding(.horizontal, Space.s24 + Space.s4)
+                    .padding(.horizontal, Self.gutter)
                     .padding(.top, Space.s14)
             } else if case let status = store.syncStatus, status.showsBanner {
                 // Throttled, erroring, catching up, or triage held: the same
                 // slot, because it answers the same question.
                 SyncStatusBanner(status: status)
-                    .padding(.horizontal, Space.s24 + Space.s4)
+                    .padding(.horizontal, Self.gutter)
                     .padding(.top, Space.s14)
             }
             // THE HERO STAYS PUT. It sits above BOTH columns, so it cannot scroll
@@ -161,7 +167,7 @@ struct SitrepView: View {
             DashHero(
                 standing: store.sitrep.standing,
                 empty: emptyHero)
-                .padding(.horizontal, Space.s24 + Space.s4)
+                .padding(.horizontal, Self.gutter)
                 .padding(.bottom, Space.scaled(18))
 
             if pageWidth < Self.railBreakpoint {

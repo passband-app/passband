@@ -33,8 +33,13 @@ enum Typo {
     }
 
     /// The editorial headline. Newsreader when available, New York otherwise.
-    static func hero(_ size: CGFloat = 40) -> Font {
-        let size = Typo.size(size)
+    ///
+    /// `fixed` is for type that is part of a COMPOSITION rather than a layout:
+    /// a wordmark locked up beside a mark of a set size, a line drawn inside a
+    /// picture of a phone. The box around it does not follow the density, so
+    /// the type in it must not either.
+    static func hero(_ size: CGFloat = 40, fixed: Bool = false) -> Font {
+        let size = fixed ? size : Typo.size(size)
         if PlatformFont(name: serifFamily, size: size) != nil {
             return .custom(serifFamily, size: size).weight(.medium)
         }
@@ -42,8 +47,8 @@ enum Typo {
     }
 
     /// A smaller serif moment (empty states, the connect card's wordmark).
-    static func serif(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
-        let size = Typo.size(size)
+    static func serif(_ size: CGFloat, weight: Font.Weight = .regular, fixed: Bool = false) -> Font {
+        let size = fixed ? size : Typo.size(size)
         if PlatformFont(name: serifFamily, size: size) != nil {
             return .custom(serifFamily, size: size).weight(weight)
         }

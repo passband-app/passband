@@ -80,6 +80,13 @@ indicator diameters, shadow radii and offsets, opacity, animation distances,
 renderers (`Views/Phosphor`, `Views/Squelch`) and choreographed scenes. They
 describe the ink, not the room around it.
 
+**Type inside a composition.** A wordmark locked up beside a mark of a set
+size, or a line drawn inside a picture (the TestFlight card's phone), sits in a
+box that does not follow the density, so its type must not either:
+`Typo.serif(24, fixed: true)`, `Typo.hero(13, fixed: true)`, or a plain
+`.system(size:)`. A `Typo` role in a fixed box is a bug that only shows in
+comfortable.
+
 ## Traps
 
 - **Never cache a token.** `static let rowHeight = Space.s8 * 3` freezes at

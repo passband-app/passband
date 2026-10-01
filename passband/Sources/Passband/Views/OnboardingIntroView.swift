@@ -388,7 +388,7 @@ struct IntroWordmark: View {
                     .accessibilityHidden(true)
             }
             Text("passband")
-                .font(Typo.serif(24, weight: .medium))
+                .font(Typo.serif(24, weight: .medium, fixed: true))
         }
         .foregroundStyle(Palette.ink)
     }

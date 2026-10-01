@@ -1187,14 +1187,14 @@ struct ThreadViewer: View {
             // answering.
             return MinimapGeometry.card(
                 bodyHeight: MessageCard.guessedBody(m, style: style),
-                attachments: m.attachmentList.count, style: style)
+                attachments: m.attachmentList.count, style: style, scale: .current)
         }
         // Under the STYLE's own key: the same message has one measurement per
         // measure it was laid out at, and a card's height on a bubble rail is
         // the wrong length of nub.
         guard let body = FrameHeights.shared.get(style.frameKey(m.id)) else { return nil }
         return MinimapGeometry.card(
-            bodyHeight: body, attachments: m.attachmentList.count, style: style)
+            bodyHeight: body, attachments: m.attachmentList.count, style: style, scale: .current)
     }
 
     /// WHAT THIS MESSAGE IS WORTH ON THE RAIL, from its own text and nothing
@@ -1206,7 +1206,8 @@ struct ThreadViewer: View {
     /// holding still is the whole job.
     private static func mapEstimate(_ m: ClientMessage, style: ThreadStyle) -> CGFloat {
         MinimapGeometry.estimate(
-            text: m.content, html: m.html, attachments: m.attachmentList.count, style: style)
+            text: m.content, html: m.html, attachments: m.attachmentList.count, style: style,
+            scale: .current)
     }
 
     /// THE WIDTH A BODY IS ACTUALLY LAID OUT AT, which is not the column's: a
@@ -2540,7 +2541,8 @@ private struct MessageCard: View, Equatable {
     static func guessedBody(_ message: ClientMessage, style: ThreadStyle) -> CGFloat {
         FrameHeights.shared.guess(style.frameKey(message.id)) {
             MinimapGeometry.textHeight(
-                text: Quotes.splitText(message.content).visible, html: message.html, style: style)
+                text: Quotes.splitText(message.content).visible, html: message.html, style: style,
+                scale: .current)
         }
     }
 
@@ -3202,5 +3204,15 @@ private final class WheelYield {
             if let monitor { NSEvent.removeMonitor(monitor) }
         #endif
         monitor = nil
+    }
+}
+
+extension MinimapGeometry.Scale {
+    /// The reader at the density in force: the web body's type (ReaderMetrics
+    /// sets it at 14 compact) and a card's chrome, which is padding and gaps
+    /// and so grows on the spacing curve. The 132 is the classic card's own
+    /// compact chrome, so the ratio is the one that card actually grew by.
+    @MainActor static var current: Self {
+        Self(type: Typo.size(14) / 14, chrome: Space.scaled(132) / 132)
     }
 }

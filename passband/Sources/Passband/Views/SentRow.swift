@@ -50,7 +50,7 @@ struct SentRow: View {
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaintest)
                     .textCase(.uppercase)
-                    .frame(width: Typo.size(10) * 3, alignment: .trailing)
+                    .frame(width: MeterSlot.width(), alignment: .trailing)
                     .layoutPriority(2)
 
                 // The slot is held even when the header carried nothing usable,
@@ -115,7 +115,7 @@ struct SentRow: View {
                     Text(Fmt.relAge(item.sent_at))
                         .font(Typo.num(10))
                         .foregroundStyle(Palette.inkFaintest)
-                        .frame(width: Typo.size(10) * 3, alignment: .trailing)
+                        .frame(width: MeterSlot.width(), alignment: .trailing)
                 }
                 .layoutPriority(3)
             }

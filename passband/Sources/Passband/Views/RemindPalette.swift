@@ -58,7 +58,7 @@ struct RemindPalette: View {
             OverlayScrim(alignment: .top, topInset: 210, onDismiss: onClose) {
                 GlassEffectContainer(spacing: 8) {
                     palette
-                        .frame(width: 560)
+                        .frame(width: Typo.measure(560))
                         .passbandGlass(
                             .pane, cornerRadius: 20, tint: Palette.glassTintStrong,
                             id: "remind", in: paletteGlass)

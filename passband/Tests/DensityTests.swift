@@ -34,6 +34,7 @@ struct DensityTests {
         whatIsNotSpacingIsLeftAlone()
         everythingLandsOnTheHalfPoint()
         aMeasureGrowsWithTheTypeAndNoFaster()
+        theCurveHasNoCliffAtItsFirstAnchor()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -125,6 +126,20 @@ struct DensityTests {
             expect(abs(measure / w - type) < 0.01, "measure \(w) left the type's ratio")
         }
         expect(Density.measure(440, in: .comfortable) == 474, "the sheet")
+    }
+
+    /// A value sitting exactly on the first anchor used to come back unscaled
+    /// while the half point above it jumped two points.
+    static func theCurveHasNoCliffAtItsFirstAnchor() {
+        expect(Density.typeSize(6, in: .comfortable) == 7.5, "the first type anchor itself")
+        var previous = Density.typeSize(3, in: .comfortable)
+        for v in stride(from: CGFloat(3.5), through: 12, by: 0.5) {
+            let now = Density.typeSize(v, in: .comfortable)
+            expect(now >= previous && now - previous <= 1, "a step of \(now - previous) at \(v)")
+            previous = now
+        }
+        expect(Density.space(1, in: .comfortable) == 1, "the first spacing anchor itself")
+        expect(Density.space(0.75, in: .comfortable) == 0.75, "a sub-point rule is not snapped")
     }
 
     static func expect(_ ok: Bool, _ message: String) {

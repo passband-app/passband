@@ -71,7 +71,7 @@ struct AskBar: View {
                     }
                     inputRow
                 }
-                .frame(width: 620)
+                .frame(width: Typo.measure(620))
                 .passbandGlass(
                     .pane, cornerRadius: 20, tint: Palette.glassTintStrong,
                     id: "askbar", in: askGlass)

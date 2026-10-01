@@ -103,6 +103,22 @@ struct WaitDots: View {
     }
 }
 
+// MARK: - the meter slot
+
+/// THE NARROW LEADING SLOT of a mail row: the importance meter on an arrival,
+/// the word "to" on a sent row, the clock on a scheduled one. Different things
+/// in the same column, so one formula or the lists stop lining up with each
+/// other.
+///
+/// It holds 10pt type and nothing else, so it grows by exactly what that type
+/// grows by: wider than `Typo.measure` would make it, narrower than the
+/// spacing curve would.
+enum MeterSlot {
+    @MainActor static func width(_ compact: CGFloat = 30) -> CGFloat {
+        compact * Typo.size(10) / 10
+    }
+}
+
 // MARK: - rules
 
 /// The 0.5pt rule dividing a header from what it heads. Ink-side (see

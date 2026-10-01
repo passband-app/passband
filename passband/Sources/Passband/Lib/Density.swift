@@ -75,17 +75,24 @@ enum Density {
         return snap(compact * typeSize(readingSize, in: density) / readingSize)
     }
 
-    /// Piecewise-linear through the anchors, snapped to the half point. Below
-    /// the first anchor the value is returned as it came (a 0.5pt hairline is
-    /// not spacing); past the last, the last anchor's ratio carries on.
+    /// Piecewise-linear through the anchors, snapped to the half point. Past
+    /// either end, that end's ratio carries on (which leaves a 0.5pt hairline
+    /// alone: the spacing curve starts at 1 to 1).
     /// Negative values (an offset pulling something back) mirror the curve.
     private static func resolve(
         _ compact: CGFloat, on anchors: [Anchor], in density: DensityChoice
     ) -> CGFloat {
         guard density == .comfortable else { return compact }
         if compact < 0 { return -resolve(-compact, on: anchors, in: density) }
-        guard let first = anchors.first, let last = anchors.last, compact > first.compact else {
-            return compact
+        guard let first = anchors.first, let last = anchors.last else { return compact }
+        // Under the first anchor its ratio carries on downward, the way the
+        // last one's carries on upward. For spacing that ratio is 1 (the first
+        // anchor is a 1pt rule), so a hairline is returned exactly as it came
+        // and never snapped; for type it keeps the curve from falling off a
+        // cliff just below its smallest anchor.
+        if compact < first.compact {
+            let ratio = first.comfortable / first.compact
+            return ratio == 1 ? compact : snap(compact * ratio)
         }
         if compact >= last.compact {
             return snap(compact * last.comfortable / last.compact)

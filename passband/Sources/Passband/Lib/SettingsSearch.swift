@@ -133,7 +133,29 @@ enum SettingsSearch {
     static let entries: [SettingsEntry] = generalEntries + mailEntries
         + assistantEntries + agentEntries + privacyEntries + auditEntries + accountEntries
 
-    private static let generalEntries: [SettingsEntry] = [
+    /// The General pane's settings. Density is MAC ONLY, like the row itself
+    /// (AppearanceSection): the phone is pinned to compact, and a phone search
+    /// for "bigger text" must not land on a card with no such control.
+    private static let generalEntries: [SettingsEntry] = {
+        var entries = baseGeneralEntries
+        #if os(macOS)
+            entries.append(densityEntry)
+        #endif
+        return entries
+    }()
+
+    private static let densityEntry = SettingsEntry(
+        card: .appearance,
+        title: "Density",
+        blurb: "How much room the interface gives each thing: comfortable or compact.",
+        keywords: [
+            "density", "dense", "compact", "comfortable", "comfort", "cozy", "spacing",
+            "space", "spacious", "roomy", "padding", "cramped", "crowded", "tight",
+            "text size", "font size", "bigger text", "larger text", "small text",
+            "row height", "whitespace",
+        ])
+
+    private static let baseGeneralEntries: [SettingsEntry] = [
         SettingsEntry(
             card: .appearance,
             title: "Theme",
@@ -142,16 +164,6 @@ enum SettingsSearch {
                 "theme", "appearance", "dark", "dark mode", "light", "light mode", "night",
                 "night mode", "color", "colour", "colors", "scheme", "auto", "system",
                 "contrast", "brightness", "look",
-            ]),
-        SettingsEntry(
-            card: .appearance,
-            title: "Density",
-            blurb: "How much room the interface gives each thing: comfortable or compact.",
-            keywords: [
-                "density", "dense", "compact", "comfortable", "comfort", "cozy", "spacing",
-                "space", "spacious", "roomy", "padding", "cramped", "crowded", "tight",
-                "text size", "font size", "bigger text", "larger text", "small text",
-                "row height", "whitespace",
             ]),
         SettingsEntry(
             card: .notifications,

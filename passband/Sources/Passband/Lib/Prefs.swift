@@ -337,6 +337,13 @@ final class Prefs {
     var density: DensityChoice {
         get { _density }
         set {
+            guard newValue != _density else { return }
+            // BEFORE the value moves, so before any body can run against it:
+            // every measured email height on file was taken at the old padding
+            // and type, and a frame's body reads that file directly. Wiped
+            // from a view's `onChange` instead, the first layout after the
+            // flip had already painted at the stale heights.
+            FrameHeights.shared.wipeAll()
             _density = newValue
             defaults.set(newValue.rawValue, forKey: Key.density)
         }

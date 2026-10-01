@@ -626,14 +626,25 @@ actor APIClient {
 
     // MARK: - unsubscribe
 
-    struct UnsubBody: Codable, Sendable { var message_id: Int }
+    struct UnsubBody: Codable, Sendable {
+        var message_id: Int
+        /// Ask the daemon to do it (it may still answer with a link to open).
+        var auto: Bool
+    }
+    struct UnsubSenderBody: Codable, Sendable { var sender: String }
     struct UnsubResolutionBody: Codable, Sendable {
         var sender: String
         var resolution: String
     }
 
     func unsubscribe(messageId: Int) async throws -> UnsubscribeResult {
-        try await post("/client/unsubscribe", body: UnsubBody(message_id: messageId))
+        try await post("/client/unsubscribe", body: UnsubBody(message_id: messageId, auto: true))
+    }
+
+    /// The user followed a `needs_you` link to finish on the sender's site.
+    func markUnsubOpened(sender: String) async throws {
+        let _: UnsubscribeRecordAck = try await post(
+            "/client/unsubscribes/opened", body: UnsubSenderBody(sender: sender))
     }
 
     func getUnsubscribes() async throws -> [UnsubscribeRecord] {

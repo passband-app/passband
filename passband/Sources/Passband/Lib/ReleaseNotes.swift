@@ -230,12 +230,12 @@ enum ReleaseNotes {
             headline: "Philipp's Update",
             items: [
                 ReleaseItem(
-                    .app, "All mail is a real mail list",
+                    .app, "\"All Mail\" overhaul",
                     detail: "Subjects, dates, day headings, filters",
                     symbol: "list.bullet.rectangle", vignette: .mailList),
                 ReleaseItem(
                     .app, "Flow mode",
-                    detail: "Press Space and walk For Your Eyes one email at a time",
+                    detail: "Press `space` and clear your inbox faster",
                     symbol: "wind", vignette: .flow),
                 ReleaseItem(
                     .app, "Zero-effort Unsubscribe",

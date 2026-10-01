@@ -18,8 +18,8 @@ Philipp's Update
 
 ### Mac
 
-- **All mail is a real mail list.** Subjects, dates, day headings, filters
-- **Flow mode.** Press Space and walk For Your Eyes one email at a time
+- **"All Mail" overhaul.** Subjects, dates, day headings, filters
+- **Flow mode.** Press `space` and clear your inbox faster
 - **Zero-effort Unsubscribe.** Pressing `u` handles 98% of unsubscribing
 - **Clear a stack.** Hold `e` to clear every email in a Reading stack
 - Reading puts articles above promotions

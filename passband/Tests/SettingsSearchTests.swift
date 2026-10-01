@@ -45,6 +45,7 @@ struct SettingsSearchTests {
     static func theWordsOnTheControl() {
         first("signature", is: .signature)
         first("theme", is: .appearance)
+        first("density", is: .appearance)
         first("telemetry", is: .privacy)
         first("server url", is: .account)
         first("read tracking", is: .readTracking)
@@ -58,6 +59,8 @@ struct SettingsSearchTests {
     static func theWordsPeopleActuallyUse() {
         first("dark mode", is: .appearance)
         first("night", is: .appearance)
+        first("cramped", is: .appearance)
+        first("bigger text", is: .appearance)
         first("pictures", is: .mail)
         first("blocked images", is: .mail)
         first("bubbles", is: .mail)

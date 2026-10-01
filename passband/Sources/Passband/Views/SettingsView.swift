@@ -56,26 +56,26 @@ struct SettingsView: View {
                 // height instead, and does its own scrolling inside it.
                 if fullHeightPane {
                     pane(prefs.settingsSection)
-                        .padding(.horizontal, 22)
-                        .padding(.vertical, 18)
+                        .padding(.horizontal, Space.scaled(22))
+                        .padding(.vertical, Space.scaled(18))
                         .frame(
                             maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 } else {
                     ScrollView {
-                        VStack(alignment: .leading, spacing: 16) {
+                        VStack(alignment: .leading, spacing: Space.s16) {
                             if searching {
                                 results
                             } else {
                                 pane(prefs.settingsSection)
                             }
                         }
-                        .padding(.horizontal, 22)
-                        .padding(.vertical, 18)
+                        .padding(.horizontal, Space.scaled(22))
+                        .padding(.vertical, Space.scaled(18))
                         // 720 IS A READING MEASURE, not a layout habit: a
                         // column of labelled switches stops being scannable
                         // long before it stops fitting, so every pane is capped
                         // at one.
-                        .frame(maxWidth: 720, alignment: .leading)
+                        .frame(maxWidth: Space.scaled(720), alignment: .leading)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
@@ -163,7 +163,7 @@ struct SettingsView: View {
             }
         } else {
             ForEach(cards, id: \.self) { card in
-                VStack(alignment: .leading, spacing: 5) {
+                VStack(alignment: .leading, spacing: Space.s4) {
                     // Where it lives, so a result also teaches the shape of the
                     // panes: find the theme switch twice by search and you know
                     // it is under General next time.
@@ -188,19 +188,19 @@ struct SettingsView: View {
         let version = info["CFBundleShortVersionString"] as? String ?? "?"
         let build = info["CFBundleVersion"] as? String ?? "?"
         return Text("Passband \(version) (\(build))")
-            .font(.system(size: 10))
+            .font(Typo.ui(10))
             .foregroundStyle(Palette.inkFaintest)
             .textSelection(.enabled)
-            .padding(.trailing, 14)
-            .padding(.bottom, 10)
+            .padding(.trailing, Space.s14)
+            .padding(.bottom, Space.s10)
             .accessibilityLabel("Passband version \(version), build \(build)")
     }
 
     private var nav: some View {
         @Bindable var prefs = prefs
-        return VStack(alignment: .leading, spacing: 2) {
+        return VStack(alignment: .leading, spacing: Space.s2) {
             search
-                .padding(.bottom, 10)
+                .padding(.bottom, Space.s10)
             ForEach(SettingsSection.allCases, id: \.self) { section in
                 // Nothing is selected while a search is up, because nothing IS:
                 // the pane on the right is the query's, not this section's, and
@@ -214,11 +214,11 @@ struct SettingsView: View {
                     prefs.settingsSection = section
                 } label: {
                     Text(section.label)
-                        .font(.system(size: 12, weight: .medium))
+                        .font(Typo.ui(12, weight: .medium))
                         .foregroundStyle(active ? Palette.accent : Palette.inkFaint)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 11)
-                        .padding(.vertical, 6)
+                        .padding(.horizontal, Space.scaled(11))
+                        .padding(.vertical, Space.s6)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -229,9 +229,9 @@ struct SettingsView: View {
             }
             Spacer()
         }
-        .frame(width: 158)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 18)
+        .frame(width: Space.scaled(158))
+        .padding(.horizontal, Space.s12)
+        .padding(.vertical, Space.scaled(18))
     }
 
     /// The field above the categories. It sits HERE, in the column that lists
@@ -239,13 +239,13 @@ struct SettingsView: View {
     /// and answers it better: the panes are a filing system somebody else
     /// chose, and this one takes the word you already had.
     private var search: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: Space.s6) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 11, weight: .medium))
+                .font(Typo.ui(11, weight: .medium))
                 .foregroundStyle(Palette.inkFaintest)
             TextField("search settings", text: $query)
                 .textFieldStyle(.plain)
-                .font(.system(size: 12))
+                .font(Typo.ui(12))
                 .foregroundStyle(Palette.ink)
                 .autocorrectionDisabled()
                 .focused($searchFocused)
@@ -261,7 +261,7 @@ struct SettingsView: View {
                     searchFocused = true
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 11))
+                        .font(Typo.ui(11))
                         .foregroundStyle(Palette.inkFaintest)
                         .contentShape(Rectangle())
                 }
@@ -269,8 +269,8 @@ struct SettingsView: View {
                 .help("Clear")
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
+        .padding(.horizontal, Space.s8)
+        .padding(.vertical, Space.s6)
         .background(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(Palette.canvas.opacity(0.65))
@@ -361,9 +361,9 @@ struct SecretField: View {
     private var inputMode: Bool { editing || !hasStored }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
+        VStack(alignment: .leading, spacing: Space.scaled(5)) {
             FieldLabel(label)
-            HStack(spacing: 6) {
+            HStack(spacing: Space.s6) {
                 well
                 controls
             }
@@ -388,7 +388,7 @@ struct SecretField: View {
                 .fieldWell()
         } else {
             Text(resting)
-                .font(revealed ? Typo.mono(12) : Font.system(size: 13))
+                .font(revealed ? Typo.mono(12) : Typo.ui(13))
                 .foregroundStyle(Palette.inkDim)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -446,8 +446,8 @@ struct SecretField: View {
     private func icon(_ symbol: String, help: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.system(size: 12, weight: .medium))
-                .frame(width: 26, height: 26)
+                .font(Typo.ui(12, weight: .medium))
+                .frame(width: Space.scaled(26), height: Space.scaled(26))
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -531,12 +531,12 @@ struct SettingsRow<Control: View>: View {
 
     var body: some View {
         #if os(iOS)
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: Space.s8) {
                 label
                 control
             }
         #else
-            HStack(alignment: .center, spacing: 18) {
+            HStack(alignment: .center, spacing: Space.scaled(18)) {
                 label
                 control
             }
@@ -544,13 +544,13 @@ struct SettingsRow<Control: View>: View {
     }
 
     private var label: some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: Space.scaled(3)) {
             Text(title)
                 .font(Typo.row)
                 .foregroundStyle(Palette.ink)
             if let detail {
                 Text(detail)
-                    .font(.system(size: 11))
+                    .font(Typo.ui(11))
                     .foregroundStyle(Palette.inkFaint)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -592,7 +592,7 @@ struct YouSection: View {
                     .autocorrectionDisabled()
                     .fieldWell()
                     #if os(macOS)
-                        .frame(width: 220)
+                        .frame(width: Space.scaled(220))
                     #endif
             }
         }
@@ -824,12 +824,12 @@ struct SignatureSection: View {
         SectionCard(label: "Signature") {
             // Same two panes, same debounce, same renderer — only the axis moves.
             #if os(iOS)
-                VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: Space.s14) {
                     editorColumn
                     previewColumn
                 }
             #else
-                HStack(alignment: .top, spacing: 14) {
+                HStack(alignment: .top, spacing: Space.s14) {
                     editorColumn
                     previewColumn
                 }
@@ -843,8 +843,8 @@ struct SignatureSection: View {
 
     private var editorColumn: some View {
         @Bindable var prefs = prefs
-        return VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 6) {
+        return VStack(alignment: .leading, spacing: Space.s4) {
+            HStack(spacing: Space.s6) {
                 Text("markdown, like the composer:")
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaint)
@@ -853,8 +853,8 @@ struct SignatureSection: View {
                     .foregroundStyle(Palette.inkFaintest)
             }
             MarkdownTextView(text: $prefs.signature)
-                .frame(height: 140)
-                .padding(8)
+                .frame(height: Space.scaled(140))
+                .padding(Space.s8)
                 .background(
                     RoundedRectangle(cornerRadius: 9, style: .continuous)
                         .fill(Palette.canvas.opacity(0.65))
@@ -867,7 +867,7 @@ struct SignatureSection: View {
     }
 
     private var previewColumn: some View {
-        VStack(alignment: .leading, spacing: 5) {
+        VStack(alignment: .leading, spacing: Space.s4) {
             Text("as the recipient sees it")
                 .font(Typo.micro)
                 .foregroundStyle(Palette.inkFaint)
@@ -881,12 +881,12 @@ struct SignatureSection: View {
             Text("nothing to preview yet")
                 .font(Typo.micro)
                 .foregroundStyle(Palette.inkFaintest)
-                .padding(.top, 4)
+                .padding(.top, Space.s4)
         } else if previewFailed {
             Text("preview unavailable — is the daemon up to date and reachable?")
                 .font(Typo.micro)
                 .foregroundStyle(Palette.inkFaintest)
-                .padding(.top, 4)
+                .padding(.top, Space.s4)
         } else if !previewHTML.isEmpty {
             EmailWebView(html: previewHTML)
         }
@@ -1018,7 +1018,7 @@ struct AssistantSection: View {
 
     var body: some View {
         @Bindable var prefs = prefs
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: Space.s16) {
             chatCard
             // THE SEARCH LANE'S OWN CARD, beside the chat's because it is the
             // same key and the same bill, and separate from it because it is a
@@ -1097,7 +1097,7 @@ struct AssistantSection: View {
             text: $keyInput, editing: $editingKey
         )
         .onChange(of: keyInput) { _, _ in note = nil }
-        HStack(spacing: 10) {
+        HStack(spacing: Space.s10) {
             if busy {
                 Text("saving…").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
             }
@@ -1198,7 +1198,7 @@ struct AccountSection: View {
     private var accounts: [AccountRecord] { AccountManager.shared.accounts }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: Space.s16) {
             SectionCard(label: "Accounts") {
                 ForEach(Array(accounts.enumerated()), id: \.element.id) { index, account in
                     AccountRow(
@@ -1213,7 +1213,7 @@ struct AccountSection: View {
                 // set a flag into the void was worse than no button. Every other
                 // verb on this pane (rename, make active, remove) was already
                 // AccountManager and worked identically on both.
-                HStack(spacing: 12) {
+                HStack(spacing: Space.s12) {
                     Button("Add Account…") { store.addAccountSheetOpen = true }
                         .buttonStyle(.glassProminent)
                         .tint(Palette.accent)
@@ -1221,7 +1221,7 @@ struct AccountSection: View {
                         .font(Typo.micro)
                         .foregroundStyle(Palette.inkFaintest)
                 }
-                .padding(.top, 4)
+                .padding(.top, Space.s4)
                 // WHAT SWITCHES THEM differs, so the hint does. The Mac has nine
                 // chords; the phone has the selector this pane sits under.
                 #if os(macOS)
@@ -1242,7 +1242,7 @@ struct AccountSection: View {
             // anybody who changes their mind comes here.
             if store.shareAvailable {
                 SectionCard(label: "Invites") {
-                    HStack(spacing: 12) {
+                    HStack(spacing: Space.s12) {
                         Button("Share Passband…") { store.openShareSheet(from: .settings) }
                             .buttonStyle(.glassProminent)
                             .tint(Palette.accent)
@@ -1258,7 +1258,7 @@ struct AccountSection: View {
             #if os(macOS)
                 if store.iosConnected == false {
                     SectionCard(label: "iPhone app") {
-                        HStack(spacing: 12) {
+                        HStack(spacing: Space.s12) {
                             Button("Copy TestFlight Link") {
                                 NSPasteboard.general.clearContents()
                                 NSPasteboard.general.setString(
@@ -1302,7 +1302,7 @@ struct CredentialsEditor: View {
     private enum Result<T, E> { case ok, err(E) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: Space.s12) {
             Field(label: "server url") {
                 TextField("http://127.0.0.1:8848", text: $url)
                     .textFieldStyle(.plain)
@@ -1322,7 +1322,7 @@ struct CredentialsEditor: View {
                 text: $token, editing: $editingToken
             )
             .onChange(of: token) { _, _ in result = nil }
-            HStack(spacing: 10) {
+            HStack(spacing: Space.s10) {
                 // Not "Save" — clicking away already did that. This re-checks a
                 // connection that worked yesterday.
                 Button(busy ? "testing…" : "Test") { Task { await testSave() } }
@@ -1353,7 +1353,7 @@ struct CredentialsEditor: View {
                 "Saved when you leave a field, once the daemon accepts it. The token lives in your keychain and is sent only as a bearer header, never logged."
             )
         }
-        .padding(12)
+        .padding(Space.s12)
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(Palette.canvas.opacity(0.5))
@@ -1413,11 +1413,11 @@ struct AccountRow: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: Space.s10) {
             layout
             if editingCredentials && isActive {
                 CredentialsEditor { editingCredentials = false }
-                    .padding(.bottom, 6)
+                    .padding(.bottom, Space.s6)
             }
         }
             // Seeded per account id, so a removal that re-uses this row's slot in
@@ -1458,24 +1458,24 @@ struct AccountRow: View {
     /// the phone gives identity its own line and puts the verbs under it.
     @ViewBuilder private var layout: some View {
         #if os(iOS)
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: Space.s8) {
+                HStack(spacing: Space.s10) {
                     liveDot
                     nameField
                     host
                 }
-                HStack(spacing: 16) {
+                HStack(spacing: Space.s16) {
                     verbs
                     Spacer(minLength: 0)
                 }
             }
-            .padding(.vertical, 6)
+            .padding(.vertical, Space.s6)
         #else
-            HStack(spacing: 10) {
+            HStack(spacing: Space.s10) {
                 liveDot
                 nameField
                 host
-                Spacer(minLength: 8)
+                Spacer(minLength: Space.s8)
                 if number <= 9 {
                     Text("⌘\(number)")
                         .font(Typo.mono(10))
@@ -1483,7 +1483,7 @@ struct AccountRow: View {
                 }
                 verbs
             }
-            .padding(.vertical, 4)
+            .padding(.vertical, Space.s4)
         #endif
     }
 
@@ -1507,7 +1507,7 @@ struct AccountRow: View {
         // A window can spare a fixed column; a phone line takes what the host
         // beside it leaves.
         #if os(macOS)
-            .frame(width: 150)
+            .frame(width: Space.scaled(150))
         #else
             .frame(maxWidth: .infinity)
         #endif

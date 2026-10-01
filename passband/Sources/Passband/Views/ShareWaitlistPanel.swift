@@ -47,7 +47,7 @@ struct ShareWaitlistPanel: View {
         // `maxWidth` rather than `width`, because this one sheet is presented
         // on a phone as well as in a Mac window and a hard 560 has nowhere to
         // go on the narrow one.
-        .frame(maxWidth: 560)
+        .frame(maxWidth: Space.scaled(560))
         .background(Palette.canvas)
     }
 
@@ -59,14 +59,14 @@ struct ShareWaitlistPanel: View {
             Spacer()
             Button("Done") { dismiss() }
                 .buttonStyle(.glass)
-                .font(.system(size: 12, weight: .medium))
+                .font(Typo.ui(12, weight: .medium))
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 16)
+        .padding(.horizontal, Space.s20)
+        .padding(.vertical, Space.s16)
     }
 
     private var content: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: Space.s14) {
             Text("Passband is invite-only right now.")
                 .font(Typo.row)
                 .foregroundStyle(Palette.ink)
@@ -86,19 +86,19 @@ struct ShareWaitlistPanel: View {
                 .font(Typo.rowSub.monospaced())
                 .foregroundStyle(Palette.ink)
                 .textSelection(.enabled)
-                .padding(.vertical, 2)
+                .padding(.vertical, Space.s2)
 
-            HStack(spacing: 10) {
+            HStack(spacing: Space.s10) {
                 Button(copied ? "Copied" : "Copy link") { copy() }
                     .buttonStyle(.glass)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(Typo.ui(12, weight: .medium))
                 Button("Open the waitlist") { openWaitlist() }
                     .buttonStyle(.glassProminent)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(Typo.ui(12, weight: .semibold))
                 Spacer()
             }
         }
-        .padding(20)
+        .padding(Space.s20)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 

@@ -36,9 +36,9 @@ struct ShareNudgeModal: View {
     }
 
     private var card: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: Space.s14) {
             Text("You've been using Passband for 2 weeks!")
-                .font(.system(size: 14, weight: .semibold))
+                .font(Typo.ui(14, weight: .semibold))
                 .foregroundStyle(Palette.ink)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -50,18 +50,18 @@ struct ShareNudgeModal: View {
             .foregroundStyle(Palette.inkDim)
             .fixedSize(horizontal: false, vertical: true)
 
-            HStack(spacing: 10) {
+            HStack(spacing: Space.s10) {
                 Spacer()
                 Button("Not now") { dismiss() }
                     .buttonStyle(.glass)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(Typo.ui(12, weight: .medium))
                 Button("Share Passband") { share() }
                     .buttonStyle(.glassProminent)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(Typo.ui(12, weight: .semibold))
             }
         }
-        .padding(18)
-        .frame(maxWidth: 380)
+        .padding(Space.scaled(18))
+        .frame(maxWidth: Space.scaled(380))
         .passbandGlass(.pane, cornerRadius: 14, tint: Palette.glassTintStrong)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Share Passband with friends")

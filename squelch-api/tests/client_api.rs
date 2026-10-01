@@ -1732,6 +1732,66 @@ async fn pagination_cursor_round_trip() {
 }
 
 #[tokio::test]
+async fn keyset_pages_by_arrival_and_refuses_mixed_paging() {
+    let Harness { app, .. } = harness(|store, acct| {
+        for i in 0..3 {
+            let g = format!("k{i}");
+            let t = format!("kt{i}");
+            let m = store
+                .upsert_message(&msg(acct, &g, &t, "update", "body"))
+                .unwrap();
+            store
+                .set_triage(
+                    m,
+                    acct,
+                    80,
+                    Tier::Signal,
+                    Sensitivity::Normal,
+                    None,
+                    "",
+                    "",
+                    None,
+                )
+                .unwrap();
+        }
+    });
+    // Walk the listing one row at a time by (received_at, id): every row
+    // once, newest first, and a keyset page never carries an offset cursor.
+    let mut seen = Vec::new();
+    let mut before: Option<(String, i64)> = None;
+    loop {
+        let uri = match &before {
+            None => "/client/updates?limit=1&peek=true".to_string(),
+            Some((at, id)) => format!(
+                "/client/updates?limit=1&peek=true&before={}&before_id={id}",
+                at.replace('+', "%2B")
+            ),
+        };
+        let json = body_json(app.clone().oneshot(authed("GET", &uri)).await.unwrap()).await;
+        if before.is_some() {
+            assert!(json.get("next_cursor").is_none() || json["next_cursor"].is_null());
+        }
+        let items = json["items"].as_array().unwrap();
+        let Some(row) = items.first() else { break };
+        let id = row["id"].as_i64().unwrap();
+        assert!(!seen.contains(&id), "keyset paging repeated {id}");
+        seen.push(id);
+        before = Some((row["received_at"].as_str().unwrap().to_string(), id));
+        assert!(seen.len() <= 3);
+    }
+    assert_eq!(seen.len(), 3);
+
+    for bad in [
+        "/client/updates?before=2026-01-01T00:00:00Z&cursor=abc",
+        "/client/updates?before=2026-01-01T00:00:00Z&band=standing",
+        "/client/updates?before=2026-01-01T00:00:00Z&reminders=pending",
+    ] {
+        let resp = app.clone().oneshot(authed("GET", bad)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{bad}");
+    }
+}
+
+#[tokio::test]
 async fn bad_cursor_is_400() {
     let Harness { app, .. } = harness(|_, _| {});
     let resp = app

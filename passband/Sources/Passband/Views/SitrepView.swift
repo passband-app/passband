@@ -150,7 +150,11 @@ struct SitrepView: View {
             // padding inside each scroll view's content.
             DashHero(
                 standing: store.sitrep.standing,
+                headline: store.fyeHeadline,
+                regenerating: store.fyeHeadlineRegenerating,
+                regenerate: { Task { await store.regenerateFyeHeadline() } },
                 empty: emptyHero)
+                .task(id: store.headlineKey) { await store.refreshFyeHeadline() }
                 .padding(.horizontal, 28)
                 .padding(.bottom, 18)
 
@@ -221,6 +225,20 @@ struct SitrepView: View {
         // traffic lights), so the sitrep only says whether it should.
         .onChange(of: quiet, initial: true) { _, q in QuietBoard.shared.isQuiet = q }
         .onDisappear { QuietBoard.shared.isQuiet = false }
+        #if os(macOS)
+            // The end of a Space walk: the bottom of the list, celebrated.
+            .overlay {
+                if let summary = store.walkFinished {
+                    // Clears only ITS OWN summary: a celebration replaced by a
+                    // newer one has its task cancelled, and its cleanup must
+                    // not wipe the one that took its place.
+                    WalkComplete(summary: summary, boardCleared: store.sitrep.standing.isEmpty) {
+                        if store.walkFinished?.id == summary.id { store.walkFinished = nil }
+                    }
+                    .id(summary.id)
+                }
+            }
+        #endif
         .animation(.easeInOut(duration: 0.3), value: recordsEmpty)
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { pageWidth = $0 }
         .keyContext(.sitrep)
@@ -388,17 +406,6 @@ struct SitrepView: View {
                 DemoAppearancePicker()
             }
             RetriageButton()
-            if needNow > 0 {
-                HStack(spacing: 5) {
-                    Circle().fill(Palette.danger).frame(width: 5, height: 5)
-                    Text("\(needNow) need you now")
-                }
-                .font(Typo.chip)
-                .foregroundStyle(Palette.danger)
-                .padding(.horizontal, 9)
-                .padding(.vertical, 3)
-                .glassCapsule(tint: Palette.danger.opacity(0.18), interactive: false)
-            }
             #if os(macOS)
                 // The practice board has no `/` (the global set is cut down to
                 // undo + theme there), so an icon for it would be a button
@@ -416,12 +423,6 @@ struct SitrepView: View {
         .frame(height: TopBar.height)
     }
 
-    /// Obligations that are overdue or due by end of today — the "need you" set.
-    /// The count itself lives in `Lib/NeedToday.swift`: the app icon's badge says
-    /// this same number, and the badge is read without the sentence beside it
-    /// that would correct a disagreement.
-    private var needNow: Int { NeedToday.count(store.sitrep.standing) }
-
     // MARK: - (a) for your eyes
 
     /// The standing band, ranked: dated obligations AND live correspondence
@@ -430,7 +431,17 @@ struct SitrepView: View {
     /// row at urgency 0, which is what keeps the real dates at the top.
     private func forYourEyes(visible: [AttentionUpdate], overflow: Int) -> some View {
         ZoneCard(
-            symbol: "eye", title: "For your eyes", count: store.sitrep.standing.count
+            symbol: "eye", title: "For your eyes", count: store.sitrep.standing.count,
+            trailing: store.sitrep.standing.isEmpty
+                ? nil
+                : AnyView(
+                    FlowModeButton {
+                        // Exactly what Space does from a board with no row
+                        // highlighted: the first row, the whole band as the walk.
+                        let walk = eyesWalk(store)
+                        guard let first = walk.first else { return }
+                        store.startWalk(first.thread_id, queue: walk)
+                    })
         ) {
             VStack(spacing: 1) {
                 ForEach(Array(visible.enumerated()), id: \.element.id) { i, u in
@@ -496,7 +507,7 @@ struct SitrepView: View {
             KeyBinding("ArrowUp", "prev item") { moveEyes(-1) },
             KeyBinding("d", "mark done") {
                 guard eyesActionable, let u = reachable[safe: cursor.index] else { return }
-                Task { await Actions.done(u) }
+                Task { await Actions.done(u, via: .key, on: .sitrep) }
             },
             // `e` first tries the hovered shipment, then the hovered reading
             // card; with nothing hovered it falls to the for-your-eyes row.
@@ -518,12 +529,12 @@ struct SitrepView: View {
                     return true
                 }
                 guard eyesActionable, let u = reachable[safe: cursor.index] else { return false }
-                Task { await Actions.done(u) }
+                Task { await Actions.done(u, via: .key, on: .sitrep) }
                 return true
             },
             KeyBinding("Enter", "open email") {
                 guard eyesActionable, let u = reachable[safe: cursor.index] else { return }
-                store.openThread(u.thread_id, queue: eyesWalk(store))
+                store.openThread(u.thread_id, queue: eyesWalk(store), from: .sitrep)
             },
             // Space STARTS the walk: no highlight needed, so it is the one key
             // that works the moment the page opens. A row the cursor is on still
@@ -533,7 +544,7 @@ struct SitrepView: View {
                 let walk = eyesWalk(store)
                 let u = eyesActionable ? reachable[safe: cursor.index] : walk.first
                 guard let u else { return false }
-                store.openThread(u.thread_id, queue: walk)
+                store.startWalk(u.thread_id, queue: walk)
                 return true
             },
             // Same guard as every other verb here — inert unless a row is
@@ -785,37 +796,23 @@ struct GreetingLine: View {
 
 // MARK: - DASH HERO
 
-/// A greeting label plus one serif headline stating what needs the reader today.
+/// A greeting label plus one serif headline saying what the reader's
+/// For-your-eyes band is about (see `HeroLine`).
 /// The ONE place the display serif appears — held to a single line per screen so
 /// it reads as voice rather than decoration.
 private struct DashHero: View {
     let standing: [AttentionUpdate]
+    /// The daemon's sentence about the band, when it has written one.
+    var headline: String? = nil
+    var regenerating = false
+    /// Clicking the line asks for another one.
+    var regenerate: () -> Void = {}
     /// What to say over an empty board when it is empty because triage has
     /// not run (see `SyncStatus.emptyHero`). Nil lets "You're all clear." stand.
     var empty: (title: String, note: String)? = nil
 
-    private static let smallWords = [
-        "Zero", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine",
-    ]
-
-    /// Spell small counts — a numeral in a display serif headline reads like a
-    /// dashboard metric, which is the opposite of the intent.
-    private static func spell(_ n: Int) -> String {
-        (0..<smallWords.count).contains(n) ? smallWords[n] : String(n)
-    }
-
     private var title: String {
-        let today = NeedToday.count(standing)
-        let total = standing.count
-        if today > 0 {
-            return "\(Self.spell(today)) item\(today == 1 ? "" : "s") "
-                + "for your eyes."
-        }
-        if total > 0 {
-            return "\(Self.spell(total)) item\(total == 1 ? "" : "s") on your plate."
-        }
-        // An empty board is only "all clear" when triage has actually run.
-        return empty?.title ?? "You're all clear."
+        HeroLine.title(headline: headline, count: standing.count, empty: empty?.title)
     }
 
     /// The reason under an empty-board headline, only when there is one.
@@ -829,6 +826,20 @@ private struct DashHero: View {
                 .foregroundStyle(Palette.ink)
                 .lineSpacing(-2)
                 .fixedSize(horizontal: false, vertical: true)
+                // The model's sentence lands a beat after the board does; let
+                // it fade in over the fallback instead of snapping.
+                .contentTransition(.opacity)
+                .animation(.easeInOut(duration: 0.35), value: title)
+                // Click for another line. Only over a board with mail on it:
+                // the empty-board lines are not the model's to rewrite.
+                .opacity(regenerating ? 0.45 : 1)
+                .animation(.easeInOut(duration: 0.2), value: regenerating)
+                .contentShape(Rectangle())
+                .onTapGesture { if !standing.isEmpty { regenerate() } }
+                .help(standing.isEmpty ? "" : "Click for another")
+                #if os(macOS)
+                    .pointerStyle(standing.isEmpty ? nil : .link)
+                #endif
             if let note {
                 Text(note)
                     .font(Typo.rowSub)
@@ -977,7 +988,7 @@ private struct ObligationRow: View {
         // not decide whether `E` inside it has anywhere to go.
         Button {
             cursor.index = index
-            store.openThread(update.thread_id, queue: eyesWalk(store))
+            store.openThread(update.thread_id, queue: eyesWalk(store), from: .sitrep)
         } label: {
             HStack(spacing: 9) {
                 Avatar(sender: update.senderString, size: 22)
@@ -1198,5 +1209,298 @@ struct FlowLayout: Layout {
             x += size.width + spacing
             rowHeight = max(rowHeight, size.height)
         }
+    }
+}
+
+#if os(macOS)
+    // MARK: - the end of a Space walk
+
+    /// THE BOTTOM OF THE LIST. A Space walk that stepped past its last email
+    /// lands back here, and this is its reward, in the brand's own light: the
+    /// P7 squelch running in a strip across the top of a card, a lock beam
+    /// sweeping it once, and a ring and check snapping shut over the trace.
+    /// Under it, what the run came to, counting up. Then it leaves on its own
+    /// (or on a click).
+    ///
+    /// Only good news, like the headline above it: what was done, what was
+    /// set aside, how quick it was. Never what is left.
+    struct WalkComplete: View {
+        let summary: AppStore.WalkSummary
+        /// The walk emptied the board: the quiet board plays the chime for
+        /// that, so this one stays silent rather than doubling it.
+        let boardCleared: Bool
+        let dismiss: () -> Void
+
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
+        @State private var shown = false
+        @State private var beam: CGFloat = -0.3
+        @State private var ring: CGFloat = 0
+        @State private var check: CGFloat = 0
+        @State private var pulse = false
+        @State private var counted = false
+        @State private var leaving = false
+
+        /// The brand's phosphor blue, the P7 trace's own colour.
+        private static let phosphor = Color(hex: 0x82BAF5)
+        private static let width: CGFloat = 360
+
+        private var tally: String {
+            var parts: [String] = []
+            if summary.done > 0 { parts.append("\(summary.done) done") }
+            if summary.skipped > 0 { parts.append("\(summary.skipped) set aside") }
+            parts.append(Self.duration(summary.duration))
+            return parts.joined(separator: " · ")
+        }
+
+        static func duration(_ t: TimeInterval) -> String {
+            let s = max(1, Int(t.rounded()))
+            if s < 60 { return "\(s)s" }
+            return "\(s / 60)m \(s % 60)s"
+        }
+
+        var body: some View {
+            ZStack {
+                Color.black.opacity(shown && !leaving ? 0.45 : 0)
+                    .ignoresSafeArea()
+                    .onTapGesture { leave() }
+                card
+                    .scaleEffect(shown && !leaving ? 1 : (reduceMotion ? 1 : 0.88))
+                    .opacity(shown && !leaving ? 1 : 0)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Through the list. \(tally)")
+            .task { await run() }
+        }
+
+        private var card: some View {
+            VStack(spacing: 0) {
+                hero
+                VStack(spacing: 14) {
+                    Text("Through the list.")
+                        .font(Typo.hero(30))
+                        .foregroundStyle(Palette.ink)
+                    HStack(spacing: 0) {
+                        stat(counted ? summary.done : 0, "done")
+                        divider
+                        stat(counted ? summary.skipped : 0, "set aside")
+                        divider
+                        VStack(spacing: 2) {
+                            Text(Self.duration(summary.duration))
+                                .font(Typo.serif(22, weight: .medium))
+                                .foregroundStyle(Palette.ink)
+                                .monospacedDigit()
+                            label("time")
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                }
+                .padding(.horizontal, 22)
+                .padding(.top, 18)
+                .padding(.bottom, 22)
+            }
+            .frame(width: Self.width)
+            // The strong tint: the stats sit over a busy board, and the
+            // board's rows bled through the lighter one.
+            .passbandGlass(.pane, cornerRadius: 22, tint: Palette.glassTintStrong)
+            .shadow(color: .black.opacity(0.32), radius: 40, y: 18)
+        }
+
+        /// The phosphor strip, the lock beam, and the ring and check over it.
+        private var hero: some View {
+            ZStack {
+                Group {
+                    if PhosphorScene.walkDone.isUnavailable {
+                        IntroSceneBackdrop(engaged: true, wide: true, paused: false)
+                    } else {
+                        PhosphorBackdrop(scene: .walkDone)
+                    }
+                }
+                .accessibilityHidden(true)
+                // The floor fades into the glass rather than ending at a seam.
+                LinearGradient(
+                    colors: [.clear, .black.opacity(0.3)], startPoint: .center, endPoint: .bottom)
+                // THE LOCK: one bright band swept across the trace, the moment
+                // the receiver catches the signal.
+                GeometryReader { geo in
+                    LinearGradient(
+                        colors: [.clear, Self.phosphor.opacity(0.55), .white.opacity(0.85),
+                                 Self.phosphor.opacity(0.55), .clear],
+                        startPoint: .leading, endPoint: .trailing
+                    )
+                    .frame(width: geo.size.width * 0.28)
+                    .blur(radius: 6)
+                    .offset(x: beam * geo.size.width)
+                    .blendMode(.plusLighter)
+                }
+                .allowsHitTesting(false)
+                ZStack {
+                    if !reduceMotion {
+                        ForEach(0..<3) { i in
+                            Circle()
+                                .stroke(Self.phosphor.opacity(0.7), lineWidth: 1.5)
+                                .frame(width: 58, height: 58)
+                                .scaleEffect(pulse ? 2.8 : 1)
+                                .opacity(pulse ? 0 : 0.9)
+                                .animation(
+                                    .easeOut(duration: 1.2).delay(Double(i) * 0.2), value: pulse)
+                        }
+                    }
+                    Circle()
+                        .fill(.black.opacity(0.35))
+                        .frame(width: 58, height: 58)
+                    Circle()
+                        .trim(from: 0, to: ring)
+                        .stroke(Self.phosphor, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                        .frame(width: 58, height: 58)
+                        .shadow(color: Self.phosphor.opacity(0.9), radius: 6)
+                    CheckShape()
+                        .trim(from: 0, to: check)
+                        .stroke(
+                            .white,
+                            style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round)
+                        )
+                        .frame(width: 22, height: 16)
+                        .shadow(color: Self.phosphor, radius: 5)
+                }
+            }
+            .frame(height: 140)
+            .frame(maxWidth: .infinity)
+            .clipShape(UnevenRoundedRectangle(topLeadingRadius: 22, topTrailingRadius: 22))
+        }
+
+        private func stat(_ n: Int, _ name: String) -> some View {
+            VStack(spacing: 2) {
+                Text("\(n)")
+                    .font(Typo.serif(22, weight: .medium))
+                    .foregroundStyle(Palette.ink)
+                    .monospacedDigit()
+                    .contentTransition(.numericText(value: Double(n)))
+                label(name)
+            }
+            .frame(maxWidth: .infinity)
+        }
+
+        private func label(_ text: String) -> some View {
+            Text(text)
+                .font(Typo.micro)
+                .foregroundStyle(Palette.inkFaint)
+                .textCase(.uppercase)
+                .tracking(0.5)
+        }
+
+        private var divider: some View {
+            Rectangle().fill(Palette.hairline).frame(width: 1, height: 28)
+        }
+
+        private func run() async {
+            if boardCleared {
+                NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now)
+            } else {
+                ClearChime.play()
+            }
+            // Said aloud too: the ring is no reward to someone who cannot see it.
+            AccessibilityNotification.Announcement("Through the list. \(tally)").post()
+            withAnimation(
+                reduceMotion ? .easeOut(duration: 0.2) : .spring(response: 0.42, dampingFraction: 0.66)
+            ) { shown = true }
+            if reduceMotion {
+                ring = 1
+                check = 1
+                counted = true
+            } else {
+                try? await Task.sleep(for: .milliseconds(160))
+                withAnimation(.easeInOut(duration: 0.55)) { beam = 1.1 }
+                try? await Task.sleep(for: .milliseconds(320))
+                withAnimation(.easeInOut(duration: 0.4)) { ring = 1 }
+                pulse = true
+                try? await Task.sleep(for: .milliseconds(300))
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.55)) { check = 1 }
+                withAnimation(.easeOut(duration: 0.7)) { counted = true }
+            }
+            try? await Task.sleep(for: .milliseconds(2800))
+            // A cancelled task (this card replaced or unmounted) wakes from
+            // every sleep at once; it has nothing left to dismiss.
+            guard !Task.isCancelled else { return }
+            leave()
+        }
+
+        private func leave() {
+            guard !leaving else { return }
+            withAnimation(.easeIn(duration: 0.28)) { leaving = true }
+            Task {
+                try? await Task.sleep(for: .milliseconds(300))
+                dismiss()
+            }
+        }
+    }
+
+    /// A check mark drawn as one stroke, so it can be trimmed on.
+    private struct CheckShape: Shape {
+        func path(in rect: CGRect) -> Path {
+            var p = Path()
+            p.move(to: CGPoint(x: rect.minX, y: rect.midY))
+            p.addLine(to: CGPoint(x: rect.minX + rect.width * 0.36, y: rect.maxY))
+            p.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+            return p
+        }
+    }
+#endif
+
+// MARK: - flow mode
+
+/// `space` flow mode: the Space walk, as a button in For-your-eyes' corner.
+/// It is how the key gets found: the reader who clicks it learns, from the
+/// keycap on the button they just pressed, that Space was the way all along.
+private struct FlowModeButton: View {
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                // THE KEY ONLY ON HOVER. At rest the corner says what the
+                // button is; reaching for it is when the shortcut is worth
+                // teaching, so the spacebar slides in then and the pill grows
+                // out to the left (it is pinned to the card's right edge).
+                if hovering {
+                    Text("space")
+                        .font(Typo.mono(9.5, weight: .semibold))
+                        .foregroundStyle(Palette.accent)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 2)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(Palette.accentSoft)
+                        )
+                        .overlay(
+                            Capsule(style: .continuous)
+                                .strokeBorder(Palette.accent.opacity(0.5), lineWidth: 0.75)
+                        )
+                        // Fades in while the pill widens: the only motion is
+                        // the left edge moving out.
+                        .transition(.opacity)
+                }
+                Image(systemName: "wind")
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundStyle(Palette.accent)
+                Text("flow mode")
+                    .font(Typo.micro)
+                    .foregroundStyle(hovering ? Palette.ink : Palette.inkDim)
+            }
+            .padding(.leading, hovering ? 3 : 8)
+            .padding(.trailing, 9)
+            .padding(.vertical, 3)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(Palette.accentSoft.opacity(hovering ? 0.9 : 0.35))
+            )
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.18), value: hovering)
+        .help("Walk through For your eyes one email at a time (Space)")
+        .accessibilityLabel("Flow mode")
     }
 }

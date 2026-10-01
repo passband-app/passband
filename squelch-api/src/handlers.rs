@@ -17,8 +17,9 @@ use serde_json::json;
 use squelch_core::CoreError;
 use squelch_core::config::{CACHE_READ_INPUT_MULT, CACHE_WRITE_INPUT_MULT};
 use squelch_core::store::{
-    ActionMessageRef, Draft, DraftKey, FtsQuery, NewAuditEntry, OutboundAttachmentMeta,
-    SearchDiagnostics, SearchFilter, SearchSort, SitrepBand, SpamScope, SqliteStore, Store,
+    ActionMessageRef, ClientPlatform, Draft, DraftKey, FtsQuery, NewAuditEntry,
+    OutboundAttachmentMeta, SearchDiagnostics, SearchFilter, SearchSort, SitrepBand, SpamScope,
+    SqliteStore, Store,
 };
 use squelch_core::sync::{LABEL_INBOX, LABEL_SPAM, decode_raw_b64url, parse_internal_date};
 use squelch_core::triage::llm::Usage;
@@ -168,6 +169,14 @@ pub struct UpdatesQuery {
     spam: Option<String>,
     limit: Option<u32>,
     cursor: Option<String>,
+    /// KEYSET PAGING, the mail list's infinite scroll: rows that arrived
+    /// strictly before this `received_at` (and, at the same instant, with a
+    /// smaller id than `before_id`; without one, nothing at that instant).
+    /// Exclusive with `cursor`, and with `band` / `reminders`, whose listings
+    /// are not in arrival order. With no `since`
+    /// it reaches past the default window, back to the start of the mailbox.
+    before: Option<DateTime<Utc>>,
+    before_id: Option<i64>,
     /// READ WITHOUT SURFACING. Default false, so every existing client keeps the
     /// stamping fetch it has always had. `true` is for a reader acting on the
     /// user's behalf (the embedded agent answering "anything important today?"):
@@ -219,9 +228,26 @@ pub async fn get_updates(
             SpamScope::parse(s).ok_or_else(|| ApiError::bad_request("spam must be: only"))?
         }
     };
-    let since = q
-        .since
-        .unwrap_or_else(|| Utc::now() - chrono::Duration::days(DEFAULT_UPDATES_WINDOW_DAYS));
+    if q.before.is_some() && q.cursor.is_some() {
+        return Err(ApiError::bad_request("before and cursor are exclusive"));
+    }
+    // An arrival keyset means nothing on a listing ordered by something else.
+    if q.before.is_some() && (band.is_some() || pending_reminders) {
+        return Err(ApiError::bad_request(
+            "before pages the arrival-ordered listing only (no band, no reminders)",
+        ));
+    }
+    // No `before_id`: strictly before the instant, so nothing AT it.
+    let before = q.before.map(|at| (at, q.before_id.unwrap_or(i64::MIN)));
+    let since = q.since.unwrap_or_else(|| {
+        if before.is_some() {
+            DateTime::<Utc>::UNIX_EPOCH
+        } else {
+            Utc::now() - chrono::Duration::days(DEFAULT_UPDATES_WINDOW_DAYS)
+        }
+    });
+    // The store can stop at the page when nothing here narrows it further.
+    let store_limit = (tier_filter.is_none()).then_some((offset + limit) as usize);
     let min_importance = q.min_importance;
     // A pending-reminder listing NEVER stamps, whatever `peek` says. Its rows are
     // deferred mail the user is reviewing the schedule of; stamping them surfaced
@@ -234,6 +260,8 @@ pub async fn get_updates(
         let mut all = store.human_agent_updates(
             account_id,
             &AgentInventoryQuery {
+                before,
+                limit: store_limit,
                 since,
                 min_importance,
                 status: status_filter,
@@ -263,7 +291,12 @@ pub async fn get_updates(
     })
     .await?;
 
-    let next = next_cursor(items.len(), limit, offset);
+    // A keyset page's continuation is its last row, not an offset.
+    let next = if before.is_some() {
+        None
+    } else {
+        next_cursor(items.len(), limit, offset)
+    };
     Ok(Json(Page {
         items,
         next_cursor: next,
@@ -3120,12 +3153,33 @@ pub async fn get_audit(
 
 // --- GET /client/stats -------------------------------------------------------
 
+/// Has an iPhone app ever connected to this mailbox? TWO WITNESSES, either one
+/// enough:
+///
+/// * a device token that named itself `ios/...` in `X-Passband-Client`
+///   (`client_platform_seen`, which counts revoked rows: a phone that paired
+///   and was later unpaired has still been tried), and
+/// * an iOS push registration in `devices`, which is the only trace an iOS
+///   build from BEFORE that header leaves.
+///
+/// "Ever", not "now": the question the Mac asks with it is "should we tell this
+/// person the iPhone app exists", and somebody who has installed it knows.
+fn ios_app_connected(store: &SqliteStore, account_id: AccountId) -> Result<bool, CoreError> {
+    if store.client_platform_seen(account_id, ClientPlatform::Ios)? {
+        return Ok(true);
+    }
+    Ok(store
+        .list_devices(account_id)?
+        .iter()
+        .any(|d| d.platform == "ios"))
+}
+
 pub async fn get_stats(State(state): State<ApiState>) -> Result<impl IntoResponse, ApiError> {
     // UTC day key for today's Stage-2 usage row.
     let day = Utc::now().format("%Y-%m-%d").to_string();
     // Band counts run under the same default window as the lists they head.
     let bands_since = Utc::now() - chrono::Duration::days(DEFAULT_UPDATES_WINDOW_DAYS);
-    let (stats, usage, unread, email, jobs, parked) =
+    let (stats, usage, unread, email, jobs, parked, ios_connected) =
         store_call(&state, move |store, account_id| {
             let stats = store.stats(account_id, bands_since)?;
             let usage = store.stage2_usage_today(account_id, &day)?;
@@ -3133,7 +3187,8 @@ pub async fn get_stats(State(state): State<ApiState>) -> Result<impl IntoRespons
             let email = store.account_email(account_id)?;
             let jobs = store.triage_waiting_counts(account_id, Utc::now())?;
             let parked = store.triage_budget_parked(account_id)?;
-            Ok((stats, usage, unread, email, jobs, parked))
+            let ios_connected = ios_app_connected(store, account_id)?;
+            Ok((stats, usage, unread, email, jobs, parked, ios_connected))
         })
         .await?;
 
@@ -3246,6 +3301,11 @@ pub async fn get_stats(State(state): State<ApiState>) -> Result<impl IntoRespons
     // tenant nobody has turned it on for). Always present, so a client reads an
     // answer rather than absence, and an OLD daemon's silence reads as "no".
     body["invite_sharing"] = json!(state.sharing().is_some());
+    // Whether the iPhone app has EVER talked to this mailbox. The Mac uses it
+    // to decide whether to point somebody at the TestFlight; see
+    // [`ios_app_connected`]. Always present, so an old daemon's silence is the
+    // only way to read "unknown", and the client treats that as "do not ask".
+    body["ios_connected"] = json!(ios_connected);
     // Capability flag for the app: whether this daemon understands
     // `forward_of_message_id` on POST /client/actions/send.
     //

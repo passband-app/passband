@@ -98,6 +98,7 @@ fn client_router(state: ApiState) -> Router {
         .route("/client/agent/triage/{message_id}", get(agent::decision))
         .route("/client/v2/capabilities", get(triage::capabilities))
         .route("/client/v2/feed", get(triage::feed))
+        .route("/client/v2/fye/headline", get(triage::fye_headline))
         .route("/client/v2/messages/{message_id}", get(triage::message))
         .route(
             "/client/v2/messages/{message_id}/opened",

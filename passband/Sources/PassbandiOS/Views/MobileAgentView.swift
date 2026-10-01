@@ -476,7 +476,7 @@ struct MobileAgentView: View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(cards) { card in
                 Button {
-                    store.openThread(card.threadId)
+                    store.openThread(card.threadId, from: .assistant)
                 } label: {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(spacing: 9) {
@@ -528,7 +528,7 @@ struct MobileAgentView: View {
                     .textCase(.uppercase)
                 ForEach(cites) { citation in
                     Button {
-                        store.openThread(citation.threadId)
+                        store.openThread(citation.threadId, from: .assistant)
                     } label: {
                         HStack(spacing: 9) {
                             Avatar(sender: citation.sender, size: 20)

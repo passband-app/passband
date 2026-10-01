@@ -19,10 +19,25 @@ import SwiftUI
 
 struct ThreadViewer: View {
     let threadId: String
+    /// This reader's part in an S page turn, nil the rest of the time. See
+    /// `AppStore.SkipTurn`; RootView works out the numbers for each side.
+    var turn: Turn? = nil
+
+    struct Turn: Equatable {
+        /// The mail card's horizontal offset, in widths of the reader.
+        var cardSlide: CGFloat
+        var cardOpacity: Double
+        /// The subject bar does not slide; it fades out and back in.
+        var headerOpacity: Double
+        /// The one arriving: it is the reader keys go to, and it draws its own
+        /// page under the card so it covers the one it slides over.
+        var incoming: Bool
+    }
 
     @Environment(AppStore.self) private var store
     @Environment(Prefs.self) private var prefs
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var acknowledgedMessages: Set<Int> = []
 
     /// Computed, not stored: a stored property here would drag the memberwise
@@ -131,8 +146,9 @@ struct ThreadViewer: View {
     /// seed is a plain, untracked value the store decided at `openThread`
     /// (see AppStore.ReaderSeed) for exactly that reason. A direct open has
     /// no seed and arrives through `focusedMessageView`, as before.
-    init(threadId: String) {
+    init(threadId: String, turn: Turn? = nil) {
         self.threadId = threadId
+        self.turn = turn
         let seed = MainActor.assumeIsolated { AppStore.shared.readerSeed }
         guard let seed, seed.threadId == threadId else { return }
         _thread = State(initialValue: seed.view)
@@ -223,8 +239,13 @@ struct ThreadViewer: View {
 
     var body: some View {
         ZStack {
-            ReaderBackdrop()
-                .ignoresSafeArea()
+            // Mid-turn the window's own ground (RootView) shows between the
+            // two cards; a full-window backdrop here would hide the one
+            // underneath.
+            if turn == nil {
+                ReaderBackdrop()
+                    .ignoresSafeArea()
+            }
 
             column
 
@@ -256,7 +277,9 @@ struct ThreadViewer: View {
             #endif
         }
         .keyContext(.thread)
-        .keyBindings(.thread, bindings)
+        // The outgoing side of a turn is on its way out: it must not answer a
+        // key meant for the email arriving over it.
+        .keyBindings(.thread, turn?.incoming == false ? [] : bindings)
         // THE PHONE'S `e`. Done is the verb this reader exists to end on, and
         // until now the only way to say it on a phone was to back out and swipe
         // the row you had just been reading — leave the thread, find it again,
@@ -395,7 +418,21 @@ struct ThreadViewer: View {
         #if os(macOS)
             VStack(spacing: 0) {
                 header
+                    .opacity(turn?.headerOpacity ?? 1)
                 deck
+                    // THE PAGE TURN. Offset and opacity only, plus a shadow on
+                    // the arriving card: a scale or a 3D tilt would
+                    // re-rasterise every web frame in the column per frame.
+                    .background {
+                        if turn?.incoming == true {
+                            ReaderBackdrop()
+                                .shadow(color: .black.opacity(0.28), radius: 24, x: -8)
+                        }
+                    }
+                    .opacity(turn?.cardOpacity ?? 1)
+                    .visualEffect { [slide = turn?.cardSlide ?? 0] content, proxy in
+                        content.offset(x: slide * proxy.size.width)
+                    }
             }
         #else
             VStack(spacing: 0) {
@@ -1433,6 +1470,19 @@ struct ThreadViewer: View {
             },
             KeyBinding("E", "done + next") { Task { await doneAndNext() } },
             KeyBinding("D", "done + next") { Task { await doneAndNext() } },
+            // `S` = SKIP: E's twin with the done left out. The email stays on
+            // the board and the walk moves on, so E and S together are a
+            // two-key pass through everything Space opened. exactCase because
+            // a bare `s` falling through the fold to this would turn a typo
+            // into a jump to another email.
+            // DECLINES WITH NO QUEUE (a reader opened from search, a
+            // notification, a contact card): there is nothing to skip to, and
+            // a skip that quietly closed the reader would read as Esc.
+            KeyBinding(declining: "S", "skip to next", exactCase: true) {
+                guard store.threadQueue.count > 1 else { return false }
+                Task { await skipToNext() }
+                return true
+            },
             // Plain `h`, the same key as every other surface — it took "prev
             // email"'s key (see the queue block above) rather than moving to
             // `H`, which would have made remind a verb you can ONLY reach
@@ -1727,7 +1777,7 @@ struct ThreadViewer: View {
             let cur = queue.firstIndex(where: { $0.thread_id == threadId }),
             let next = queue[safe: cur + delta]
         else { return }
-        store.openThread(next.thread_id, queue: queue, readingMail: store.readingMail)
+        store.openThread(next.thread_id, queue: queue, readingMail: store.readingMail, from: .reader)
     }
 
     /// Plain done walks a Reading sender's stack, or closes an ordinary reader.
@@ -1738,7 +1788,7 @@ struct ThreadViewer: View {
             return
         }
         let liftedAt = liftOff()
-        await resolveOpenThread()
+        await resolveOpenThread(via: .key)
         await flightOut(since: liftedAt)
         // Same outlived-its-reader guard as the walk: if this finished after the
         // reader moved to another thread, closing would close THAT one.
@@ -1769,6 +1819,7 @@ struct ThreadViewer: View {
     /// Key down. Nothing happens yet: the key coming up inside the grace is a
     /// tap, and a tap has to stay exactly the walk it always was.
     private func beginStackHold() {
+        store.settleSkipTurn()
         guard store.threadFlight == .settled, holdToken == nil else { return }
         let token = UUID()
         holdToken = token
@@ -1823,9 +1874,9 @@ struct ThreadViewer: View {
     /// notification) has no row, so it resolves the newest message directly.
     /// There is no undo chip on that path: undo restores a row to a band, and
     /// this one never came from one.
-    private func resolveOpenThread() async {
+    private func resolveOpenThread(via: Actions.Via) async {
         if let row = store.threadQueue.first(where: { $0.thread_id == threadId }) {
-            await Actions.done(row)
+            await Actions.done(row, via: via, on: .reader)
             return
         }
         guard let newest else { return }
@@ -1860,7 +1911,7 @@ struct ThreadViewer: View {
         /// swipe gets on a list row, which is the other way this app says done.
         private func doneFromBar() async {
             Haptics.commit()
-            await resolveOpenThread()
+            await resolveOpenThread(via: .click)
             // Same outlived-its-reader guard the other two verbs take: a resolve
             // that finished after the reader moved on must not close the thread
             // that moved in.
@@ -1888,6 +1939,9 @@ struct ThreadViewer: View {
     /// trip — the email is going either way — and only the leftover of its
     /// 220ms is ever waited on.
     private func doneAndNext() async {
+        // An S turn still settling is finished first, so the card it skipped
+        // never shows through under this email as it lifts off.
+        store.settleSkipTurn()
         guard store.threadFlight == .settled else { return }
         let queue = store.threadQueue
         let cur = queue.firstIndex(where: { $0.thread_id == threadId })
@@ -1906,9 +1960,15 @@ struct ThreadViewer: View {
         // not something to walk a reader onto.
         let next = store.nextQueuedThread
 
+        // Another email takes this one's place: the floor goes down under the
+        // flight so nothing behind the reader flashes through the gap.
+        store.flightContinues = next != nil
         let liftedAt = liftOff()
-        await resolveOpenThread()
+        await resolveOpenThread(via: .key)
         await flightOut(since: liftedAt)
+        // Counted once the email is truly gone from this reader, not for a
+        // done that was overtaken (Esc mid-flight).
+        if store.threadId == threadId { store.walk?.done += 1 }
 
         // The reader can be closed while the email is still leaving — Esc, or
         // another surface taking the screen. A done+next that outlived its own
@@ -1918,8 +1978,9 @@ struct ThreadViewer: View {
         guard let cur, let next else {
             // Nothing behind it — an empty queue, or the end of one: the reader
             // leaves with the email rather than snapping back to show an empty
-            // one.
-            store.closeThread()
+            // one. The end of a Space walk is the bottom of the list, which
+            // the sitrep celebrates.
+            leaveAtEnd()
             return
         }
         let edge: AppStore.ThreadEdge =
@@ -1928,10 +1989,72 @@ struct ThreadViewer: View {
         // sleep is the whole reason this works: an offset that is set and
         // cleared inside one update has never been drawn, so there is nothing
         // for the animation to move away from.
-        store.openThread(next.thread_id, queue: queue, entering: edge, readingMail: store.readingMail)
+        store.openThread(
+            next.thread_id, queue: queue, entering: edge, readingMail: store.readingMail,
+            from: .reader)
         try? await Task.sleep(for: .milliseconds(30))
         guard store.threadId == next.thread_id else { return }
         withAnimation(Motion.deckCard) { store.threadFlight = .settled }
+    }
+
+    /// Out of the reader at the end of a queue: the celebration when this was
+    /// a Space walk, a plain close otherwise.
+    private func leaveAtEnd() {
+        if store.walk != nil {
+            store.finishWalk()
+        } else {
+            store.closeThread()
+        }
+    }
+
+    /// S — the walk from `doneAndNext` without the done, as a PAGE TURN: this
+    /// email recedes to the left and dims while the next one slides in over it
+    /// from the right, both at once, and the subject bar fades across. See
+    /// `AppStore.SkipTurn`. `l` / → also step forward, but onto the very next
+    /// ROW and with no turn; this goes where E would, past siblings of this
+    /// thread and mail already dealt with.
+    private func skipToNext() async {
+        // A second S while the last turn is still settling is NOT dropped:
+        // that turn is finished at once and this one starts, so tapping S as
+        // fast as you can read is exactly as fast as it goes.
+        store.settleSkipTurn()
+        guard store.threadFlight == .settled else { return }
+        // Counted BEFORE the end check: skipping the last email is a skip
+        // too, and the tally it ends on has to include it.
+        store.walk?.skipped += 1
+        let queue = store.threadQueue
+        guard queue.contains(where: { $0.thread_id == threadId }),
+            let next = store.nextQueuedThread
+        else {
+            // Skipping the last one is leaving: the email is still on the
+            // board, the reader just has nothing left to show. It is still
+            // the bottom of the list, so a walk ends on its moment.
+            leaveAtEnd()
+            return
+        }
+        let outgoing = threadId
+        // The open FIRST (it settles any turn), then this turn: both land in
+        // the same render, so the new reader's first frame is at the edge.
+        store.openThread(
+            next.thread_id, queue: queue, readingMail: store.readingMail, from: .reader)
+        store.skipTurn = AppStore.SkipTurn(outgoing: outgoing)
+        // One frame with the new reader mounted at the right edge, so the
+        // animation has somewhere to move it FROM (see `doneAndNext`).
+        try? await Task.sleep(for: .milliseconds(30))
+        guard store.skipTurn?.outgoing == outgoing else { return }
+        // A little spring on the arrival: it lands, not just stops. With
+        // Reduce Motion the cards still move (the turn is how you see which
+        // way you went) but without the bounce.
+        withAnimation(
+            reduceMotion
+                ? .easeOut(duration: 0.22) : .spring(response: 0.42, dampingFraction: 0.78)
+        ) {
+            store.skipTurn?.progress = 1
+        }
+        withAnimation(.easeOut(duration: 0.14)) { store.skipTurn?.outgoingHeader = 0 }
+        withAnimation(.easeIn(duration: 0.18).delay(0.14)) { store.skipTurn?.incomingHeader = 1 }
+        try? await Task.sleep(for: .milliseconds(460))
+        if store.skipTurn?.outgoing == outgoing { store.skipTurn = nil }
     }
 
     /// The tail of `doneAndNext`, for `h`: the reminder is already set (the
@@ -1940,22 +2063,30 @@ struct ThreadViewer: View {
     /// is what says the reminder took, and a reader that just sat there would
     /// read as a key that did nothing.
     private func remindAndNext() async {
+        store.settleSkipTurn()
         let queue = store.threadQueue
+        if let cur = queue.firstIndex(where: { $0.thread_id == threadId }) {
+            store.flightContinues = queue[safe: cur + 1] != nil
+        }
         let liftedAt = liftOff()
         await flightOut(since: liftedAt)
         // Outlived its own reader (Esc, another surface): do not haul a thread
         // back onto a page nobody is on.
         guard store.threadId == threadId else { return }
+        // Parked for later is dealt with, as far as the walk's tally goes.
+        store.walk?.done += 1
 
         guard let cur = queue.firstIndex(where: { $0.thread_id == threadId }),
             let next = queue[safe: cur + 1]
         else {
-            store.closeThread()
+            leaveAtEnd()
             return
         }
         let edge: AppStore.ThreadEdge =
             (store.readingStack || sameSender(next, queue[cur])) ? .trailing : .bottom
-        store.openThread(next.thread_id, queue: queue, entering: edge, readingMail: store.readingMail)
+        store.openThread(
+            next.thread_id, queue: queue, entering: edge, readingMail: store.readingMail,
+            from: .reader)
         try? await Task.sleep(for: .milliseconds(30))
         guard store.threadId == next.thread_id else { return }
         withAnimation(Motion.deckCard) { store.threadFlight = .settled }
@@ -1965,6 +2096,8 @@ struct ThreadViewer: View {
     /// hand back when it started so the wait can be the REMAINDER of the flight
     /// rather than the whole of it on top of the round trip.
     private func liftOff() -> ContinuousClock.Instant {
+        // Every departure finishes an S turn first (see `settleSkipTurn`).
+        store.settleSkipTurn()
         withAnimation(Motion.depart) {
             store.threadFlight = store.readingStack ? .departingDown : .departing
         }
@@ -3180,3 +3313,82 @@ private final class WheelYield {
         monitor = nil
     }
 }
+
+#if os(macOS)
+    // MARK: - the Space walk's hint
+
+    /// The two keys that make a Space walk fast, pinned to the reader's bottom right
+    /// for as long as the walk lasts. Mounted by RootView ABOVE the reader's
+    /// flight, so it holds still while the emails move under it.
+    struct WalkHint: View {
+        /// False only when S has nothing to act on: a walk of one email. On
+        /// the walk's LAST email S still works (it sets that one aside and
+        /// ends the walk), so it stays listed there.
+        var canSkip = true
+
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(spacing: 5) {
+                    Image(systemName: "wind")
+                        .font(.system(size: 9, weight: .semibold))
+                    Text("FLOW MODE")
+                        .font(.system(size: 8.5, weight: .bold).width(.expanded))
+                        .tracking(0.6)
+                }
+                .foregroundStyle(Palette.accent.opacity(0.85))
+                VStack(alignment: .leading, spacing: 6) {
+                    row("⇧E", "done + next")
+                    if canSkip { row("⇧S", "skip") }
+                }
+            }
+            .padding(.horizontal, 11)
+            .padding(.vertical, 9)
+            .glassEffect(.regular, in: .rect(cornerRadius: 11))
+            .overlay { FlowBorder(radius: 11, moving: !reduceMotion) }
+            .allowsHitTesting(false)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(
+                canSkip ? "Flow mode. Shift E: done and next. Shift S: skip." : "Flow mode. Shift E: done and next.")
+        }
+
+        private func row(_ key: String, _ label: String) -> some View {
+            HStack(spacing: 6) {
+                Kbd(key, size: 11)
+                Text(label)
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.inkFaint)
+            }
+        }
+    }
+
+    /// The hint's border, with a soft glint of the accent drifting around it:
+    /// the only thing on screen that moves on its own while you read, slow
+    /// enough to sit in the corner of the eye. All the way round, never one
+    /// edge lit. Still under Reduce Motion.
+    private struct FlowBorder: View {
+        let radius: CGFloat
+        let moving: Bool
+
+        var body: some View {
+            TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !moving)) { context in
+                let angle = moving
+                    ? context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 6) / 6 * 360
+                    : 0
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .strokeBorder(
+                        AngularGradient(
+                            stops: [
+                                .init(color: Palette.hairline, location: 0),
+                                .init(color: Palette.accent.opacity(0.55), location: 0.12),
+                                .init(color: Palette.hairline, location: 0.28),
+                                .init(color: Palette.hairline, location: 1),
+                            ],
+                            center: .center,
+                            angle: .degrees(angle)),
+                        lineWidth: 1)
+            }
+        }
+    }
+#endif

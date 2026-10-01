@@ -3312,7 +3312,7 @@ private final class WheelYield {
 #if os(macOS)
     // MARK: - the Space walk's hint
 
-    /// The two keys that make a Space walk fast, pinned to the reader's top left
+    /// The two keys that make a Space walk fast, pinned to the reader's bottom right
     /// for as long as the walk lasts. Mounted by RootView ABOVE the reader's
     /// flight, so it holds still while the emails move under it.
     struct WalkHint: View {

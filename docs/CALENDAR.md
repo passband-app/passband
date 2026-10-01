@@ -433,6 +433,33 @@ answer without the mail being opened:
 - Availability on the card is the client joining the daemon's candidate slots
   with the merged timeline.
 
+### In the reader: availability beside the offered times
+
+When an open mail lists times ("Monday, October 19th: 10am to 3pm ET",
+"Thursday: 11am to 1pm, 2:45 to 4:30pm ET"), each offered time gets a hint
+beside it saying whether the user is free then. The founder's example is an
+assistant relaying a week of someone else's windows: five days, seven windows,
+all in another timezone.
+
+- **What a hint says.** The window in the user's own time, then one of: free;
+  free for part of it (the overlap is named); busy, with what blocks it. A
+  window outside the user's usual hours says so ("7 to 8:30am for you")
+  instead of calling it free.
+- **Windows, not just slots.** An offered time is a range, there can be
+  several per day, and they carry the sender's zone. The triage record's
+  `candidates` (deferred from wave 1) is a list of ranges with a zone, and the
+  meeting may be with someone other than the sender.
+- **Drawn in Passband's margin, never in the mail.** The hint sits beside the
+  line, in the app's own chrome, aligned to it. Nothing is injected into the
+  sender's HTML: a mail must not be able to draw something that looks like
+  Passband saying "free". When a line cannot be located reliably, the hints
+  fall back to a compact list under the message.
+- **Taking one.** Clicking a hint (or its key) holds that overlap and inserts
+  the time as text into the reply, as in §7. The user writes the reply.
+- **Before the calendar grant** the hint is the time conversion alone, which
+  needs no permission. Free and busy appear only once the real calendar is
+  connected: a ghost-only "free" would be a guess presented as a fact.
+
 ## 7. Scheduling from the composer
 
 - **Trigger.** Typing scheduling language ("we should meet at", "are you free",
@@ -611,7 +638,8 @@ Each wave is useful on its own and is committed when verified.
    `login_hint`, Google sync, real events on the timeline, automatic adds with
    undo, RSVP, self-healing of events Passband created, real calendar
    entries feeding the history tier for estimates.
-5. **Scheduling.** Candidate slots in triage, availability on the card, the
+5. **Scheduling.** Candidate windows in triage, availability on the card and
+   beside offered times in the reader, the
    compose trigger and time pane, click to insert, holds, settle.
 6. **Mail and time together.** Calendar context in triage, folding calendar
    mail into events, gaps and contradictions, EventKit union, iOS views,

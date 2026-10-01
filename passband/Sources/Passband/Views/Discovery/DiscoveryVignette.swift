@@ -26,7 +26,18 @@
 //   border holding an avatar dot (r 5), a title bar (h 3.5, `ink` 0.8) and a
 //   sub bar (h 3, `dim`). Bars, never letters: no text, no digits, no real
 //   names anywhere in a vignette. A stack behind it steps 7 then 6 units down
-//   at 0.93 and 0.86 scale.
+//   at 0.93 and 0.86 scale. Two smaller forms of the same card, for scenes
+//   that need many: a ROW (`VignetteParts.row`, the card at 0.56, 16.8 tall,
+//   for a board or a list, rows 19 units apart) and a MINI card
+//   (`VignetteParts.miniMail`, avatar and one bar, radius 3.5, for a field of
+//   many or a pile set aside). These are fixed sizes of the picture, not
+//   motion, so the 0.93...1.05 limit below does not apply to them; a card
+//   changes form by CROSSFADE (fade one out as the other fades in), never by
+//   scaling between sizes.
+//
+//   "THIS ONE". A card that came back or matched is lit by `VignetteParts.halo`:
+//   a 1 unit `phosphorHot` outline, glowing evenly, faded in and out. It is
+//   the only highlight; don't invent a second.
 //
 //   KEYCAPS. `VignetteKeycap`: 22 units tall, radius 5, `cap` fill, even `edge`
 //   border, label in SF Mono medium 10 at `ink` 0.85. Pressed, the cap fills
@@ -42,6 +53,11 @@
 //   at the seam, so the repeat is invisible. If a loop moves N cards through
 //   a deck, give the deck N distinct card designs so it comes back to itself.
 //   Write the vignette as a PURE function of `t` in 0..<loop; no @State.
+//   A scene that builds up (rather than cycling a deck) returns to its poster
+//   by fading what it made together, then resting: see `TeachVignette`.
+//   CAREFUL: the parts SET `GraphicsContext.opacity` on a copy, they do not
+//   multiply it, so a faded context passed into a part is ignored. Carry a
+//   fade as a factor in the `opacity:` argument instead.
 //
 //   MOTION. Translate, fade, a scale of at most 0.93...1.05, a stroke drawing
 //   on. Ease in-out (`VignetteMotion.ease`). No bounce past 1, no rotation, no
@@ -52,10 +68,16 @@
 //   window that is not key and a stage off screen all show it, and an off
 //   screen stage stops its timeline entirely.
 //
-// THE OTHER SEVEN are `PlaceholderVignette` until they are drawn: the set's
-// symbol breathing over a faint stack, on the same ground. Replace one by
-// adding a case to `DiscoveryVignette.scene` and a `VignetteScene` beside
-// `FlowVignette`.
+//   SIZE. The stage is shown from about 98pt (the found moment) to well over
+//   300pt. Check every vignette at both ends: at the small end the story must
+//   still read, at the large end nothing may look like a thumbnail blown up.
+//
+// DRAWN: `flow` (here, the reference), and `clear`, `later`, `teach`, `find`
+// in `Vignettes/`. The rest are `PlaceholderVignette` until they are drawn:
+// the set's symbol breathing over a faint stack, on the same ground. Replace
+// one by adding its own file under `Vignettes/` and a case to
+// `DiscoveryVignette.scene`. The shared parts (`mail`, `row`, `miniMail`,
+// `halo`, `check`, `keycap`) are in `VignetteParts` below.
 
 import SwiftUI
 
@@ -145,6 +167,10 @@ struct DiscoveryVignette: View {
     private var scene: any VignetteScene.Type {
         switch set {
         case .flow: FlowVignette.self
+        case .clear: ClearVignette.self
+        case .later: LaterVignette.self
+        case .teach: TeachVignette.self
+        case .find: FindVignette.self
         default: PlaceholderVignette.self
         }
     }
@@ -201,6 +227,69 @@ enum VignetteParts {
         layer.fill(
             Path(roundedRect: CGRect(x: x, y: rect.minY + 17 * scale, width: d.sub * scale, height: 3 * scale), cornerRadius: 1.5 * scale),
             with: .color(VignetteInk.dim))
+    }
+
+    /// A ROW: the same email card at list scale, for a vignette that shows a
+    /// board or a list rather than one card in front. `width` is the row's
+    /// drawn width; it is 30 x `scale` tall (16.8 at the default 0.56).
+    static func row(
+        _ ctx: inout GraphicsContext, origin: CGPoint, width: CGFloat = 100, design: Int,
+        opacity: Double, scale: CGFloat = 0.56
+    ) {
+        let full = width / scale
+        mail(
+            &ctx, origin: CGPoint(x: origin.x - (full - width) / 2, y: origin.y), width: full,
+            design: design, opacity: opacity, scale: scale)
+    }
+
+    /// A MINI card: an email reduced to a chip (avatar dot and one bar), for
+    /// a field of many or a pile set aside. Same fill, edge and avatar tints
+    /// as `mail`; radius 3.5.
+    static func miniMail(_ ctx: inout GraphicsContext, rect: CGRect, design: Int, opacity: Double) {
+        guard opacity > 0.001 else { return }
+        var layer = ctx
+        layer.opacity = opacity
+        let card = Path(roundedRect: rect, cornerRadius: 3.5, style: .continuous)
+        layer.fill(card, with: .color(Color(hex: 0x1B2638)))
+        layer.fill(card, with: .color(VignetteInk.faint))
+        layer.stroke(card, with: .color(VignetteInk.edge), lineWidth: 0.6)
+        let r = min(2.4, rect.height * 0.22)
+        let dot = CGRect(x: rect.minX + 4, y: rect.midY - r, width: 2 * r, height: 2 * r)
+        layer.fill(Path(ellipseIn: dot), with: .color(VignetteInk.avatar[design % 3].opacity(0.85)))
+        let barW = [0.5, 0.38, 0.56][design % 3] * (rect.width - 12)
+        layer.fill(
+            Path(roundedRect: CGRect(x: dot.maxX + 3, y: rect.midY - 1, width: barW, height: 2), cornerRadius: 1),
+            with: .color(VignetteInk.ink.opacity(0.6)))
+    }
+
+    /// A LIT OUTLINE around a card: `phosphorHot`, 1 unit, glowing evenly all
+    /// round. The vignettes' one way to say "this one" (it came back, it
+    /// matched). `amount` 0...1 fades it.
+    static func halo(_ ctx: inout GraphicsContext, rect: CGRect, cornerRadius: CGFloat, amount: Double) {
+        guard amount > 0.001 else { return }
+        var layer = ctx
+        layer.opacity = amount
+        layer.addFilter(.shadow(color: VignetteInk.phosphor.opacity(0.8), radius: 5))
+        layer.stroke(
+            Path(roundedRect: rect.insetBy(dx: -1, dy: -1), cornerRadius: cornerRadius + 1, style: .continuous),
+            with: .color(VignetteInk.phosphorHot.opacity(0.85)), lineWidth: 1)
+    }
+
+    /// The check `E` draws on a card, centred at `center`, drawn to `draw`.
+    static func check(_ ctx: inout GraphicsContext, center: CGPoint, draw: Double, opacity: Double, size: CGFloat = 1) {
+        guard draw > 0, opacity > 0.001 else { return }
+        var check = Path()
+        let cx = center.x, cy = center.y
+        check.move(to: CGPoint(x: cx - 5 * size, y: cy))
+        check.addLine(to: CGPoint(x: cx - 1.5 * size, y: cy + 3.5 * size))
+        check.addLine(to: CGPoint(x: cx + 5 * size, y: cy - 4 * size))
+        var layer = ctx
+        layer.opacity = opacity
+        layer.addFilter(.shadow(color: VignetteInk.phosphor.opacity(0.8), radius: 4))
+        layer.stroke(
+            check.trimmedPath(from: 0, to: draw),
+            with: .color(VignetteInk.phosphorHot),
+            style: StrokeStyle(lineWidth: 1.6, lineCap: .round, lineJoin: .round))
     }
 
     /// A keycap, top-left at `origin`.

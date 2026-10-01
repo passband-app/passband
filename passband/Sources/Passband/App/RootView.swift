@@ -479,7 +479,9 @@ struct MainShell: View {
                         if store.walk != nil, store.threadId != nil {
                             WalkHint(canSkip: store.nextQueuedThread != nil)
                                 .padding(.top, TopBar.height + 10)
-                                .padding(.leading, 20)
+                                // Clear of the thread's minimap, which runs
+                                // down the reader's left edge.
+                                .padding(.leading, 40)
                                 .transition(.opacity)
                         }
                     }

@@ -3323,17 +3323,40 @@ private final class WheelYield {
             // Two short rows rather than one long one: it lives in the gutter
             // left of the thread's timeline, where a single line would run
             // into the first sender's name.
-            VStack(alignment: .leading, spacing: 6) {
-                KeyHint("⇧E", "done + next")
-                if canSkip { KeyHint("⇧S", "skip") }
+            VStack(alignment: .leading, spacing: 8) {
+                // Says what you are in, in the same voice as the button that
+                // started it.
+                HStack(spacing: 5) {
+                    Image(systemName: "wind")
+                        .font(.system(size: 9.5, weight: .semibold))
+                    Text("FLOW MODE")
+                        .font(.system(size: 9, weight: .bold).width(.expanded))
+                        .tracking(0.6)
+                }
+                .foregroundStyle(Palette.accent)
+                VStack(alignment: .leading, spacing: 7) {
+                    row("⇧E", "done + next")
+                    if canSkip { row("⇧S", "skip") }
+                }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .glassEffect(.regular, in: .rect(cornerRadius: 10))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .glassEffect(.regular.tint(Palette.accent.opacity(0.10)), in: .rect(cornerRadius: 12))
             .allowsHitTesting(false)
             .accessibilityElement(children: .combine)
             .accessibilityLabel(
                 canSkip ? "Shift E: done and next. Shift S: skip." : "Shift E: done and next.")
+        }
+
+        /// One key and its verb, a size up from the list hints: this is the
+        /// whole keymap of the mode, so it can afford to be read at a glance.
+        private func row(_ key: String, _ label: String) -> some View {
+            HStack(spacing: 7) {
+                Kbd(key, size: 12)
+                Text(label)
+                    .font(Typo.chip)
+                    .foregroundStyle(Palette.inkDim)
+            }
         }
     }
 #endif

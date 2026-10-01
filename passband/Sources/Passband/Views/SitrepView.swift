@@ -1462,24 +1462,29 @@ private struct FlowModeButton: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 5) {
-                // A little spacebar: wider than a letter key, in the accent,
-                // and it presses down under the pointer the way the real
-                // one would under a thumb.
-                Text("space")
-                    .font(Typo.mono(9.5, weight: .semibold))
-                    .foregroundStyle(Palette.accent)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 2)
-                    .background(
-                        Capsule(style: .continuous)
-                            .fill(Palette.accentSoft)
-                    )
-                    .overlay(
-                        Capsule(style: .continuous)
-                            .strokeBorder(Palette.accent.opacity(hovering ? 0.55 : 0.3), lineWidth: 0.75)
-                    )
-                    .scaleEffect(hovering ? 0.94 : 1)
-                    .offset(y: hovering ? 0.75 : 0)
+                // THE KEY ONLY ON HOVER. At rest the corner says what the
+                // button is; reaching for it is when the shortcut is worth
+                // teaching, so the spacebar slides in then and the pill grows
+                // out to the left (it is pinned to the card's right edge).
+                if hovering {
+                    Text("space")
+                        .font(Typo.mono(9.5, weight: .semibold))
+                        .foregroundStyle(Palette.accent)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 2)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(Palette.accentSoft)
+                        )
+                        .overlay(
+                            Capsule(style: .continuous)
+                                .strokeBorder(Palette.accent.opacity(0.5), lineWidth: 0.75)
+                        )
+                        .transition(
+                            .move(edge: .trailing)
+                                .combined(with: .opacity)
+                                .combined(with: .scale(scale: 0.7, anchor: .trailing)))
+                }
                 Image(systemName: "wind")
                     .font(.system(size: 9.5, weight: .semibold))
                     .foregroundStyle(Palette.accent)
@@ -1489,7 +1494,7 @@ private struct FlowModeButton: View {
                     .font(Typo.micro)
                     .foregroundStyle(hovering ? Palette.ink : Palette.inkDim)
             }
-            .padding(.leading, 3)
+            .padding(.leading, hovering ? 3 : 8)
             .padding(.trailing, 9)
             .padding(.vertical, 3)
             .background(

@@ -179,8 +179,8 @@ struct EmailsView: View {
             // asked at row 40 as readily as at row 1.
             if mode == .spam {
                 SpamNotice()
-                    .padding(.horizontal, 18)
-                    .padding(.top, 10)
+                    .padding(.horizontal, Space.scaled(18))
+                    .padding(.top, Space.s10)
             }
             if mode == .inbox {
                 // The page's OWN rows for the counts, never the parked list the
@@ -331,7 +331,7 @@ struct EmailsView: View {
     /// under it, or the first sent mail would read as one more scheduled one.
     @ViewBuilder private var scheduledGroup: some View {
         if !scheduled.isEmpty {
-            SentSectionLabel("scheduled", top: 2)
+            SentSectionLabel("scheduled", top: Space.s2)
             ForEach(Array(scheduled.enumerated()), id: \.element.id) { i, row in
                 ScheduledRow(
                     row: row,
@@ -377,7 +377,7 @@ struct EmailsView: View {
                     }
                 #endif
             }
-            SentSectionLabel("sent", top: 14)
+            SentSectionLabel("sent", top: Space.s14)
         }
     }
 
@@ -457,8 +457,8 @@ struct EmailsView: View {
                             olderMailFooter
                         }
                     }
-                    .padding(.horizontal, 18)
-                    .padding(.vertical, 10)
+                    .padding(.horizontal, Space.scaled(18))
+                    .padding(.vertical, Space.s10)
                 }
                 // Follow the KEYBOARD selection only. Both pages key their rows
                 // on the message id, so one scroll target serves both. A leaf,
@@ -512,7 +512,7 @@ struct EmailsView: View {
         } else if paging.loadingMore {
             BandNote("Loading older mail…")
         } else if paging.failedAt != nil {
-            HStack(spacing: 10) {
+            HStack(spacing: Space.s10) {
                 Text("Couldn't load older mail.")
                     .font(Typo.rowSub)
                     .foregroundStyle(Palette.inkFaintest)
@@ -522,8 +522,8 @@ struct EmailsView: View {
                     .foregroundStyle(Palette.accent)
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 18)
+            .padding(.horizontal, Space.s12)
+            .padding(.vertical, Space.scaled(18))
         } else {
             // A SENTINEL as well as the rows' own trigger: when a lens or the
             // category picker hides most of a page, the rows that would have
@@ -623,11 +623,11 @@ struct EmailsView: View {
         private var phoneHeader: some View {
             @Bindable var store = store
 
-            return HStack(spacing: 10) {
+            return HStack(spacing: Space.s10) {
                 GlassSegmented(
                     options: MailMode.segments(showingSpam: mode == .spam).map { ($0, $0.label) },
                     selection: $store.mailMode)
-                Spacer(minLength: 8)
+                Spacer(minLength: Space.s8)
                 if let err = store.refreshError {
                     Text("offline")
                         .font(Typo.micro).foregroundStyle(Palette.warn)
@@ -636,7 +636,7 @@ struct EmailsView: View {
                     // THE PHONE'S SPAM DOOR: this bar has the segmented
                     // control plus room for one count, and this is it.
                     Button { store.mailMode = .spam } label: {
-                        HStack(spacing: 6) {
+                        HStack(spacing: Space.s6) {
                             if let spam = spamDoorCount {
                                 Text("\(spam)")
                                     .font(Typo.num(12, weight: .bold))
@@ -649,8 +649,8 @@ struct EmailsView: View {
                     .buttonStyle(.plain)
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.bottom, 10)
+            .padding(.horizontal, Space.s16)
+            .padding(.bottom, Space.s10)
         }
     #endif
 
@@ -659,7 +659,7 @@ struct EmailsView: View {
         @Bindable var store = store
         let signal = store.sitrep.standing.count + store.sitrep.new.count + store.sitrep.open.count
 
-        return HStack(spacing: 10) {
+        return HStack(spacing: Space.s10) {
             // NO MODE LABEL BESIDE THE WORDMARK. It said what the segmented
             // control an inch to its right already says, and it said it in a
             // string whose width changed with the answer — so every switch
@@ -672,8 +672,8 @@ struct EmailsView: View {
             GlassSegmented(
                 options: MailMode.segments(showingSpam: mode == .spam).map { ($0, $0.label) },
                 selection: $store.mailMode)
-            Spacer(minLength: 12)
-            HStack(spacing: 8) {
+            Spacer(minLength: Space.s12)
+            HStack(spacing: Space.s8) {
                 Text("\(signal)").font(Typo.num(12, weight: .bold)).foregroundStyle(Palette.accent)
                 Text("signal").font(Typo.micro).foregroundStyle(Palette.inkFaint)
                 // No noise door: all mail shows every message, noise included,
@@ -692,7 +692,7 @@ struct EmailsView: View {
                 // of the three lists you live in.
                 if store.spamDoorVisible {
                     Button { store.mailMode = .spam } label: {
-                        HStack(spacing: 8) {
+                        HStack(spacing: Space.s8) {
                             // THE NUMBER ONLY WHEN THERE IS ONE. The daemon does
                             // not track this folder, so before the first visit
                             // there is no count to show and a "0" would be a
@@ -726,7 +726,7 @@ struct EmailsView: View {
         }
         // These metrics must match the sitrep masthead's: every page's bar ends
         // on the line the rail's top edge is cut to.
-        .padding(.horizontal, 24)
+        .padding(.horizontal, Space.s24)
         .frame(height: TopBar.height)
         .overlay(alignment: .bottom) { Hairline() }
     }
@@ -911,9 +911,9 @@ private struct SentSectionLabel: View {
             .foregroundStyle(Palette.inkFaint)
             .textCase(.uppercase)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 11)
+            .padding(.horizontal, Space.scaled(11))
             .padding(.top, top)
-            .padding(.bottom, 5)
+            .padding(.bottom, Space.scaled(5))
     }
 }
 
@@ -927,8 +927,8 @@ struct BandNote: View {
             .font(Typo.rowSub)
             .foregroundStyle(Palette.inkFaintest)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 18)
+            .padding(.horizontal, Space.s12)
+            .padding(.vertical, Space.scaled(18))
     }
 }
 

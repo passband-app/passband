@@ -20,10 +20,10 @@ struct SidePanel: View {
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
                     Text(store.sideView.title)
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(Typo.ui(14, weight: .semibold))
                         .foregroundStyle(Palette.ink)
                     Spacer()
-                    HStack(spacing: 4) {
+                    HStack(spacing: Space.s4) {
                         Kbd("Esc")
                         Text("close").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
                     }
@@ -32,9 +32,9 @@ struct SidePanel: View {
                 // near the traffic lights. EXPANDED it spans the whole window
                 // and covers the rail, so its leading edge lands in the strip
                 // the buttons own and the title draws underneath them.
-                .padding(.leading, expanded ? TopBar.dotsClearance : 16)
-                .padding(.trailing, 16)
-                .padding(.vertical, 13)
+                .padding(.leading, expanded ? TopBar.dotsClearance : Space.s16)
+                .padding(.trailing, Space.s16)
+                .padding(.vertical, Space.scaled(13))
                 .overlay(alignment: .bottom) { Hairline() }
 
                 Group {
@@ -129,7 +129,7 @@ struct SearchView: View {
 
         VStack(alignment: .leading, spacing: 0) {
             Field(label: "") {
-                HStack(spacing: 8) {
+                HStack(spacing: Space.s8) {
                     TextField("search mail…", text: $store.search.query)
                         .textFieldStyle(.plain)
                         .focused($focused)
@@ -150,9 +150,9 @@ struct SearchView: View {
                     .animation(.easeInOut(duration: 0.16), value: loading)
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 12)
-            .padding(.bottom, 8)
+            .padding(.horizontal, Space.s16)
+            .padding(.top, Space.s12)
+            .padding(.bottom, Space.s8)
 
             // THE SENDER MENU, under the well, for exactly as long as the
             // trailing token is a `from:` operator being typed (see
@@ -164,22 +164,22 @@ struct SearchView: View {
             if focused, let fragment = FromOperator.fragment(in: store.search.query) {
                 SenderSuggestions(query: $store.search.query, fragment: fragment)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 8)
+                    .padding(.horizontal, Space.s16)
+                    .padding(.bottom, Space.s8)
             }
 
             HStack {
                 SearchSortPicker()
-                Spacer(minLength: 8)
+                Spacer(minLength: Space.s8)
                 if expanded { askAgentButton }
             }
-            .padding(.horizontal, 16)
-            .padding(.bottom, 10)
+            .padding(.horizontal, Space.s16)
+            .padding(.bottom, Space.s10)
 
             if !expanded {
                 HStack { Spacer(); askAgentButton }
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 10)
+                    .padding(.horizontal, Space.s16)
+                    .padding(.bottom, Space.s10)
             }
 
             if let error = store.search.error { BandNote(error) }
@@ -212,17 +212,17 @@ struct SearchView: View {
                     onRun: { run($0) }, onClear: { clearRecents() }
                 )
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 16)
+                .padding(.horizontal, Space.s16)
             }
             HStack(alignment: .top, spacing: 0) {
                 if bandMounted && expanded {
                     ScrollView {
                         DeeperSearchBand(expanded: true)
-                            .padding(.leading, 16)
-                            .padding(.top, 14)
-                            .padding(.bottom, 14)
+                            .padding(.leading, Space.s16)
+                            .padding(.top, Space.s14)
+                            .padding(.bottom, Space.s14)
                     }
-                    .frame(minWidth: 320, idealWidth: 380, maxWidth: 440)
+                    .frame(minWidth: Typo.measure(320), idealWidth: Typo.measure(380), maxWidth: Typo.measure(440))
                 }
                 results(expanded: expanded)
             }
@@ -282,13 +282,13 @@ struct SearchView: View {
     private var askAgentButton: some View {
         let opens = store.searchLaneHasConversation
         return Button { store.requestDeeperSearch() } label: {
-            HStack(spacing: 5) {
+            HStack(spacing: Space.scaled(5)) {
                 Image(systemName: opens ? "arrow.up.left.and.arrow.down.right" : "sparkles")
                 Text(opens ? "Open in chat"
                     : (store.searchLane.running || store.preparingSearchEvidence) ? "Searching…" : "Ask agent")
                 if store.search.expanded { Kbd("⌘↩") }
             }
-            .font(.system(size: 12, weight: .medium))
+            .font(Typo.ui(12, weight: .medium))
         }
         .buttonStyle(.plain)
         .foregroundStyle(Palette.accentInk)
@@ -314,14 +314,14 @@ struct SearchView: View {
                     ForEach(Array(store.search.hits.enumerated()), id: \.element.id) { i, hit in
                         if i == 0 || hit.is_done != store.search.hits[i - 1].is_done {
                             Text(hit.is_done.map { $0 ? "Done" : "Not done" } ?? "Results")
-                                .font(.system(size: 10, weight: .medium))
+                                .font(Typo.micro)
                                 .textCase(.uppercase)
                                 .tracking(1)
                                 .foregroundStyle(Palette.inkDim)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal, 14)
-                                .padding(.top, 14)
-                                .padding(.bottom, 6)
+                                .padding(.horizontal, Space.s14)
+                                .padding(.top, Space.s14)
+                                .padding(.bottom, Space.s6)
                         }
                         // One click opens: the reader sits beside this list,
                         // so opening a hit costs the results nothing.
@@ -347,9 +347,9 @@ struct SearchView: View {
                     if loadingMore { BandNote("loading more…") }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.leading, expanded && bandMounted ? 8 : 16)
-                .padding(.trailing, 16)
-                .padding(.bottom, 14)
+                .padding(.leading, expanded && bandMounted ? Space.s8 : Space.s16)
+                .padding(.trailing, Space.s16)
+                .padding(.bottom, Space.s14)
             }
             .onAppear {
                 if let hit = store.search.hits[safe: store.search.index] {
@@ -391,7 +391,7 @@ struct SearchView: View {
 
     /// The most of a 460pt strip the lane may occupy. Roughly four cards, which
     /// is enough to read an answer without the hits going away.
-    private static let stripBandCeiling: CGFloat = 320
+    private static var stripBandCeiling: CGFloat { Space.scaled(320) }
 
     /// Whether the deeper-search band is on screen at all. It appears once THIS
     /// panel session has judged a query deeper (or has already started a lane),
@@ -700,16 +700,16 @@ private struct HitRow: View {
 
     var body: some View {
         Button(action: onOpen) {
-            HStack(alignment: .top, spacing: 10) {
+            HStack(alignment: .top, spacing: Space.s10) {
                 Avatar(sender: hit.from_name.map { "\($0) <\(hit.from_addr)>" } ?? hit.from_addr,
                        size: 26)
                     .padding(.top, 1)
                     .accessibilityHidden(true)
                 columns
             }
-            .padding(.vertical, 11)
-            .padding(.leading, 16)
-            .padding(.trailing, 12)
+            .padding(.vertical, Space.scaled(11))
+            .padding(.leading, Space.s16)
+            .padding(.trailing, Space.s12)
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
         }
@@ -720,8 +720,8 @@ private struct HitRow: View {
                 RoundedRectangle(cornerRadius: 1)
                     .fill(Palette.accentInk)
                     .frame(width: 2)
-                    .padding(.vertical, 14)
-                    .padding(.leading, 4)
+                    .padding(.vertical, Space.s14)
+                    .padding(.leading, Space.s4)
             }
         }
         .overlay(alignment: .bottom) { Rectangle().fill(Palette.hairline).frame(height: 0.5) }
@@ -735,17 +735,17 @@ private struct HitRow: View {
 
     private var sender: some View {
         Text(hit.from_name ?? hit.from_addr)
-            .font(.system(size: 12, weight: .medium))
+            .font(Typo.ui(12, weight: .medium))
             .foregroundStyle(Palette.ink)
             .lineLimit(1)
     }
 
     private var date: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: Space.scaled(5)) {
             if hit.is_done == true {
-                Image(systemName: "checkmark").font(.system(size: 10))
+                Image(systemName: "checkmark").font(Typo.ui(10))
             }
-            Text(Fmt.shortDate(hit.received_at)).font(.system(size: 11))
+            Text(Fmt.shortDate(hit.received_at)).font(Typo.ui(11))
         }
         .foregroundStyle(Palette.inkDim)
         .fixedSize()
@@ -754,7 +754,7 @@ private struct HitRow: View {
 
     private var subject: some View {
         Text(highlight(hit.subject, matches: hit.subject_matches ?? terms))
-            .font(.system(size: 13))
+            .font(Typo.row)
             .foregroundStyle(Palette.ink)
             .lineLimit(1)
     }
@@ -762,7 +762,7 @@ private struct HitRow: View {
     private var preview: some View {
         Text(highlight(hit.displaySnippet ?? hit.snippet,
                        matches: hit.snippet_matches ?? terms))
-            .font(.system(size: 12))
+            .font(Typo.rowSub)
             .foregroundStyle(Palette.inkDim)
             .multilineTextAlignment(.leading)
     }
@@ -770,9 +770,9 @@ private struct HitRow: View {
     // Choose column widths from the panel mode, never from a row's text.
     // Long subjects truncate instead of switching that row to a stacked layout.
     private var columns: some View {
-        HStack(alignment: .firstTextBaseline, spacing: expanded ? 18 : 12) {
+        HStack(alignment: .firstTextBaseline, spacing: expanded ? Space.scaled(18) : Space.s12) {
             sender.frame(width: expanded ? 160 : 104, alignment: .leading)
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: Space.scaled(3)) {
                 subject
                 preview.lineLimit(expanded ? 1 : 2)
             }
@@ -819,20 +819,20 @@ struct BrowseView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 10) {
+            HStack(spacing: Space.s10) {
                 Text("Noise filter: \(Int(squelch))")
                     .font(Typo.num(11))
                     .foregroundStyle(Palette.inkDim)
-                    .frame(width: 104, alignment: .leading)
+                    .frame(width: Typo.measure(104), alignment: .leading)
                 Slider(value: $squelch, in: 0...100, step: 5)
                     .tint(Palette.accent)
                 Text("\(all.count - visible.count) below line")
                     .font(Typo.num(10))
                     .foregroundStyle(Palette.inkFaintest)
-                    .frame(width: 92, alignment: .trailing)
+                    .frame(width: Typo.measure(92), alignment: .trailing)
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 11)
+            .padding(.horizontal, Space.s16)
+            .padding(.vertical, Space.scaled(11))
 
             if browseState.isLoading {
                 BandNote("loading all mail…")
@@ -853,8 +853,8 @@ struct BrowseView: View {
                                 .id(u.id)
                             }
                         }
-                        .padding(.horizontal, 12)
-                        .padding(.bottom, 14)
+                        .padding(.horizontal, Space.s12)
+                        .padding(.bottom, Space.s14)
                     }
                     .onChange(of: index) { _, i in
                         guard let u = visible[safe: i] else { return }
@@ -905,18 +905,18 @@ private struct BrowseRow: View {
         // tracking area is not the place to start.
         ListRow(
             selected: selected, cornerRadius: 7, tint: Palette.tierColor(update.tier),
-            hPadding: 9, vPadding: 5, hoverFill: false, action: onSelect
+            hPadding: Space.scaled(9), vPadding: Space.scaled(5), hoverFill: false, action: onSelect
         ) { _, _ in
-            HStack(spacing: 8) {
+            HStack(spacing: Space.s8) {
                 Circle()
                     .fill(Palette.tierColor(update.tier))
                     .frame(width: 6, height: 6)
                 Text("\(update.importance)")
                     .font(Typo.num(11, weight: .semibold))
                     .foregroundStyle(Palette.importanceColor(update.importance))
-                    .frame(width: 24, alignment: .trailing)
+                    .frame(width: Space.scaled(24), alignment: .trailing)
                 Text(SenderCache.resolved(update.senderString).displayName)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(Typo.ui(11, weight: .medium))
                     .foregroundStyle(Palette.ink)
                     .lineLimit(1)
                     .frame(width: 116, alignment: .leading)
@@ -928,7 +928,7 @@ private struct BrowseRow: View {
                 Text(Fmt.relAge(update.surfaced_at))
                     .font(Typo.num(10))
                     .foregroundStyle(Palette.inkFaintest)
-                    .frame(width: 28, alignment: .trailing)
+                    .frame(width: Space.scaled(28), alignment: .trailing)
             }
         }
         .overlay(alignment: .leading) {

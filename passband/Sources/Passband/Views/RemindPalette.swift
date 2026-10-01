@@ -58,7 +58,7 @@ struct RemindPalette: View {
             OverlayScrim(alignment: .top, topInset: 210, onDismiss: onClose) {
                 GlassEffectContainer(spacing: 8) {
                     palette
-                        .frame(width: 560)
+                        .frame(width: Typo.measure(560))
                         .passbandGlass(
                             .pane, cornerRadius: 20, tint: Palette.glassTintStrong,
                             id: "remind", in: paletteGlass)
@@ -84,19 +84,19 @@ struct RemindPalette: View {
     }
 
     private var header: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: Space.s8) {
             Image(systemName: "bell.badge")
-                .font(.system(size: 12, weight: .semibold))
+                .font(Typo.ui(12, weight: .semibold))
                 .foregroundStyle(Palette.accent)
             Text(rescheduling ? "Move the reminder" : "Remind me")
-                .font(.system(size: 13, weight: .semibold))
+                .font(Typo.ui(13, weight: .semibold))
                 .foregroundStyle(Palette.ink)
             Text(target.subject)
                 .font(Typo.micro)
                 .foregroundStyle(Palette.inkFaintest)
                 .lineLimit(1)
                 .help("\(target.sender) · \(target.subject)")
-            Spacer(minLength: 4)
+            Spacer(minLength: Space.s4)
             // WHAT IT IS SET TO NOW, when there is one. A second `h` is a move,
             // not a first booking, and the row you are moving off is the one
             // fact the list itself cannot show.
@@ -107,9 +107,9 @@ struct RemindPalette: View {
                     .fixedSize()
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 14)
-        .padding(.bottom, 8)
+        .padding(.horizontal, Space.s16)
+        .padding(.top, Space.s14)
+        .padding(.bottom, Space.s8)
     }
 
     private var rescheduling: Bool { !(target.remindAt ?? "").isEmpty }
@@ -117,14 +117,14 @@ struct RemindPalette: View {
     private var input: some View {
         TextField("remind when...", text: $query)
             .textFieldStyle(.plain)
-            .font(.system(size: 15))
+            .font(Typo.ui(15))
             .foregroundStyle(Palette.ink)
             .focused($focused)
             .autocorrectionDisabled()
             .disabled(busy)
-            .padding(.horizontal, 16)
-            .padding(.top, 4)
-            .padding(.bottom, 12)
+            .padding(.horizontal, Space.s16)
+            .padding(.top, Space.s4)
+            .padding(.bottom, Space.s12)
             .onChange(of: query) { _, _ in
                 selection = 0
                 refreshHits()
@@ -143,7 +143,7 @@ struct RemindPalette: View {
                         .foregroundStyle(Palette.inkFaintest)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(14)
+                        .padding(Space.s14)
                     } else {
                         ForEach(Array(hits.enumerated()), id: \.element.id) { i, hit in
                             RemindRow(
@@ -155,10 +155,10 @@ struct RemindPalette: View {
                         }
                     }
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
+                .padding(.horizontal, Space.s8)
+                .padding(.vertical, Space.s6)
             }
-            .frame(maxHeight: 230)
+            .frame(maxHeight: Space.scaled(230))
             .onChange(of: selection) { _, i in
                 guard let hit = hits[safe: i] else { return }
                 withAnimation(.easeOut(duration: 0.1)) { proxy.scrollTo(hit.id, anchor: .center) }
@@ -167,7 +167,7 @@ struct RemindPalette: View {
     }
 
     private var footer: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: Space.s4) {
             #if os(macOS)
                 Kbd("↑"); Kbd("↓")
                 Text("pick").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
@@ -186,8 +186,8 @@ struct RemindPalette: View {
                 .font(Typo.micro)
                 .foregroundStyle(Palette.accent.opacity(0.8))
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.horizontal, Space.s16)
+        .padding(.vertical, Space.s10)
         .overlay(alignment: .top) { Hairline() }
     }
 
@@ -260,12 +260,12 @@ struct RemindRow: View {
         // the pointer MOVES the selection here, so the selection fill already
         // follows it and a hover wash under it would double up.
         ListRow(
-            selected: selected, tint: Palette.accent, hPadding: 10, vPadding: 7,
+            selected: selected, tint: Palette.accent, hPadding: Space.s10, vPadding: Space.scaled(7),
             hoverFill: false, onHoverChange: { if $0 { onHover() } }, action: onPick
         ) { _, _ in
-            HStack(spacing: 10) {
+            HStack(spacing: Space.s10) {
                 Text(hit.label)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(Typo.ui(13, weight: .medium))
                     .foregroundStyle(Palette.ink)
                     .lineLimit(1)
                     .frame(maxWidth: .infinity, alignment: .leading)

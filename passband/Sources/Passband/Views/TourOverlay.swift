@@ -62,7 +62,7 @@ private struct PracticeBoundaryModal: View {
     var body: some View {
         OverlayScrim(onDismiss: {}) {
             ModalCard(width: 580) {
-                VStack(alignment: .leading, spacing: 22) {
+                VStack(alignment: .leading, spacing: Space.scaled(22)) {
                     Label("PASSBAND GUIDE", systemImage: "sparkles")
                         .font(Typo.sectionLabel)
                         .tracking(1)
@@ -73,11 +73,11 @@ private struct PracticeBoundaryModal: View {
                     Text(closing
                          ? "You know your way around. Let’s open your inbox and see what needs your attention."
                          : "Passband is an entirely new way of reading email. With a little practice, you'll be an expert. Here's a quick guide!")
-                        .font(.system(size: 18))
+                        .font(Typo.ui(18))
                         .lineSpacing(5)
                         .foregroundStyle(Palette.inkDim)
                         .fixedSize(horizontal: false, vertical: true)
-                    HStack(spacing: 18) {
+                    HStack(spacing: Space.scaled(18)) {
                         if closing {
                             Button("Back") { store.tour.back() }
                                 .buttonStyle(.plain)
@@ -87,7 +87,7 @@ private struct PracticeBoundaryModal: View {
                             .buttonStyle(.borderedProminent)
                             .tint(Palette.accent)
                             .controlSize(.large)
-                            .font(.system(size: 15, weight: .semibold))
+                            .font(Typo.ui(15, weight: .semibold))
                         if !closing {
                             // The way out from the very first card: nobody
                             // should have to take one lesson to decline them.
@@ -99,7 +99,7 @@ private struct PracticeBoundaryModal: View {
                     }
                     .disabled(store.tour.veil != nil)
                 }
-                .padding(14)
+                .padding(Space.s14)
             }
         }
         .keyContext(.modal)

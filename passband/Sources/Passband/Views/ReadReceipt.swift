@@ -120,7 +120,7 @@ private struct OpensDetail: View {
     private var anyProxied: Bool { opens.contains(where: \.viaProxy) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
+        VStack(alignment: .leading, spacing: Space.scaled(9)) {
             Text(opens.count == 1 ? "1 open" : "\(opens.count) opens")
                 .font(Typo.sectionLabel)
                 .foregroundStyle(Palette.inkFaint)
@@ -130,7 +130,7 @@ private struct OpensDetail: View {
             // that got fetched thirty times must not grow a popover taller than
             // the window it hangs off.
             ScrollView {
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: Space.s8) {
                     // Indexed: two identical opens (same second, same agent) are
                     // a real possibility, and they are two facts, not one row.
                     ForEach(Array(newestFirst.enumerated()), id: \.offset) { _, open in
@@ -149,13 +149,13 @@ private struct OpensDetail: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(14)
+        .padding(Space.s14)
         .frame(width: 300, alignment: .leading)
     }
 
     private func row(_ open: MessageOpen) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: Space.s2) {
+            HStack(spacing: Space.s6) {
                 Text(Fmt.dateTime(open.date))
                     .font(Typo.num(11))
                     .foregroundStyle(Palette.ink)

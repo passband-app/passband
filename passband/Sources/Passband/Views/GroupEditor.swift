@@ -100,7 +100,7 @@ struct GroupEditor: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: Space.s4) {
             Text(editing ? "edit group" : "new group")
                 .font(Typo.sectionLabel)
                 .foregroundStyle(Palette.ink)
@@ -109,7 +109,7 @@ struct GroupEditor: View {
                 .font(Typo.micro)
                 .foregroundStyle(Palette.inkFaintest)
         }
-        .padding(.bottom, 2)
+        .padding(.bottom, Space.s2)
     }
 
     private var nameField: some View {
@@ -121,11 +121,11 @@ struct GroupEditor: View {
     }
 
     private var membersField: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: Space.s4) {
             RecipientField(
                 text: $membersText, focus: $focusedField, field: FocusTarget.members,
                 label: "people", placeholder: "name or email")
-            HStack(spacing: 5) {
+            HStack(spacing: Space.scaled(5)) {
                 Text("\(members.count) \(members.count == 1 ? "person" : "people")")
                     .font(Typo.micro)
                     .foregroundStyle(overCap ? Palette.danger : Palette.inkFaintest)
@@ -147,14 +147,14 @@ struct GroupEditor: View {
     /// Three options, each with the consequence written under it. The picker is
     /// the reason this card exists rather than a rename dialog.
     private var modePicker: some View {
-        VStack(alignment: .leading, spacing: 5) {
+        VStack(alignment: .leading, spacing: Space.scaled(5)) {
             FieldLabel("how mail goes out")
             GlassSegmented(
                 options: GroupMode.allCases.map { (value: $0, label: $0.label) },
                 selection: $mode)
-            HStack(spacing: 5) {
+            HStack(spacing: Space.scaled(5)) {
                 Image(systemName: mode.symbol)
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(Typo.ui(9, weight: .semibold))
                     .foregroundStyle(mode.tone)
                 Text(modeHint)
                     .font(Typo.micro)
@@ -188,23 +188,23 @@ struct GroupEditor: View {
     }
 
     private var footer: some View {
-        VStack(alignment: .leading, spacing: 9) {
+        VStack(alignment: .leading, spacing: Space.scaled(9)) {
             #if os(macOS)
-                HStack(spacing: 4) {
+                HStack(spacing: Space.s4) {
                     KeyHint("⌘↵", "save")
                     Text("·").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
                     KeyHint("esc", "cancel")
                     Spacer()
                 }
             #endif
-            HStack(spacing: 8) {
+            HStack(spacing: Space.s8) {
                 if let blocked {
                     Text(blocked)
                         .font(Typo.micro)
                         .foregroundStyle(Palette.warn)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                Spacer(minLength: 8)
+                Spacer(minLength: Space.s8)
                 Button(cancelLabel, action: onClose).buttonStyle(.glass)
                 Button(saving ? "saving…" : (editing ? "update group" : "save group")) {
                     Task { await save() }

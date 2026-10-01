@@ -36,7 +36,7 @@ struct AttachmentTray: View {
 
     var body: some View {
         if let compose, !compose.attachments.isEmpty {
-            FlowLayout(spacing: 6) {
+            FlowLayout(spacing: Space.s6) {
                 ForEach(compose.attachments) { attachment in
                     AttachmentRow(
                         attachment: attachment,
@@ -64,15 +64,15 @@ private struct AttachmentRow: View {
     }
 
     var body: some View {
-        HStack(spacing: 9) {
+        HStack(spacing: Space.scaled(9)) {
             tile
             VStack(alignment: .leading, spacing: 1) {
                 Text(attachment.filename)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(Typo.ui(11, weight: .medium))
                     .foregroundStyle(Palette.ink)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                HStack(spacing: 4) {
+                HStack(spacing: Space.s4) {
                     Text(status)
                         .font(Typo.micro)
                         .foregroundStyle(attachment.failed ? Palette.danger : Palette.inkFaintest)
@@ -100,15 +100,15 @@ private struct AttachmentRow: View {
                     }
                 }
             }
-            .frame(maxWidth: 170, alignment: .leading)
+            .frame(maxWidth: Space.scaled(170), alignment: .leading)
 
             if editable {
                 Button {
                     ComposeAttach.remove(attachment, from: slot)
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 12))
-                        .padding(3)
+                        .font(Typo.ui(12))
+                        .padding(Space.scaled(3))
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(hovering ? Palette.ink : Palette.inkFaintest)
@@ -117,8 +117,8 @@ private struct AttachmentRow: View {
                 .accessibilityLabel("remove \(attachment.filename)")
             }
         }
-        .padding(6)
-        .padding(.trailing, editable ? 0 : 4)
+        .padding(Space.s6)
+        .padding(.trailing, editable ? 0 : Space.s4)
         .background(
             RoundedRectangle(cornerRadius: 11, style: .continuous)
                 .fill(Palette.hairline.opacity(hovering ? 0.7 : 0.4))

@@ -99,7 +99,7 @@ struct MessageRecipients: View {
         if let head = digest.lines.first {
             let rest = Array(digest.lines.dropFirst())
             VStack(alignment: edge, spacing: 1) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                HStack(alignment: .firstTextBaseline, spacing: Space.s8) {
                     RecipientLineView(line: head, size: size)
                     // NOTHING TO DROP DOWN, no control: a caret beside a To line
                     // that is already the whole answer is furniture, and the
@@ -145,11 +145,11 @@ struct MessageRecipients: View {
         if digest.removed > 0 {
             text = text + Text("  −\(digest.removed)").foregroundColor(Palette.danger)
         }
-        return HStack(spacing: 3) {
+        return HStack(spacing: Space.scaled(3)) {
             Image(systemName: open ? "chevron.down" : "chevron.right")
-                .font(.system(size: size - 2, weight: .semibold))
+                .font(Typo.ui(size - 2, weight: .semibold))
                 .foregroundStyle(Palette.inkFaintest)
-            text.font(.system(size: size))
+            text.font(Typo.ui(size))
         }
         .lineLimit(1)
         .fixedSize()
@@ -204,7 +204,7 @@ private struct RecipientLineView: View {
     }
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 5) {
+        HStack(alignment: .firstTextBaseline, spacing: Space.scaled(5)) {
             // Same label grammar as the sent page's "to" column: micro, upper,
             // faintest — a header rather than a word in the sentence. The width
             // is a MINIMUM and the label refuses to wrap: "bcc" is a third wider
@@ -220,7 +220,7 @@ private struct RecipientLineView: View {
                 .layoutPriority(2)
 
             run
-                .font(.system(size: size))
+                .font(Typo.ui(size))
         }
     }
 }

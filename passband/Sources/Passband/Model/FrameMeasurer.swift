@@ -92,6 +92,10 @@ final class FrameMeasurer {
     /// documents are rendered at — a bubble is a narrower measure than a card,
     /// so the same message is two different heights and neither is the other's.
     private var style: ThreadStyle = .classic
+    /// THE DENSITY the documents are drawn at, taken once per pass: a card's
+    /// padding and its fallback type are part of its height, and a pass that
+    /// read the setting per message would file one thread under two answers.
+    private var metrics: ReaderMetrics = .compact
 
     // MARK: - the pass
 
@@ -105,6 +109,11 @@ final class FrameMeasurer {
     ) {
         reset()
         guard width > 0 else { return }
+        // Before the filter below asks what is already on file: a height taken
+        // at the other density is on file and wrong.
+        ReaderMetrics.sync()
+        let metrics = ReaderMetrics.current
+        self.metrics = metrics
         self.width = width
         // A window too short to be a reading surface is a window mid-animation;
         // a screenful is the better guess than a sliver.
@@ -137,6 +146,11 @@ final class FrameMeasurer {
                 guard let self else { return }
                 let height = await self.measure(message, allowRemote: allowRemote)
                 if Task.isCancelled { return }
+                // The setting moved while this document was being measured:
+                // the number is true of a drawing nobody will see, and filed as
+                // authoritative it would outrank the frame that is showing the
+                // real one. The reader starts a pass of its own for the flip.
+                guard ReaderMetrics.current == metrics else { return }
                 if height > 0 {
                     FrameHeights.shared.set(
                         style.frameKey(message.id), height, authoritative: true)
@@ -202,7 +216,8 @@ final class FrameMeasurer {
                 // taken from the wrong one is filed as authoritative under
                 // the key the right one reads.
                 EmailFrameCoordinator.document(
-                    html: prepared.html, allowRemote: allowRemote, bubble: style == .bubbles),
+                    html: prepared.html, allowRemote: allowRemote, bubble: style == .bubbles,
+                    metrics: metrics),
                 baseURL: nil)
         else {
             relay.forgetOwnLoad()

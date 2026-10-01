@@ -298,6 +298,7 @@
 		B6F86A1B7C9CECBF25C347FA /* SitrepZones.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22B6CF4EF83BEF15EB372184 /* SitrepZones.swift */; };
 		B91230E83D52E90A46495F77 /* WireTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C9F46E8DA615783DD2BEAF6 /* WireTypes.swift */; };
 		BBE3AD0E42A5038B4013E5BB /* Palette.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF7F148E013D8BCCE2BAA598 /* Palette.swift */; };
+		BBEE5699B3270D49E8BAF3C5 /* ImageTrim.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17A72FA204008ACE31765EA1 /* ImageTrim.swift */; };
 		BD58A1B90A390D639D6D0AEB /* Format.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5883BA424612265657845246 /* Format.swift */; };
 		BDE91DE1BD59B4CD5D50F21D /* Chrome.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F0E547B2A7CA1DA951D255C /* Chrome.swift */; };
 		BE9C340C64913DE9154BDCF0 /* MobileAgentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35C12A5AFBCED3C55DA7A5D8 /* MobileAgentView.swift */; };
@@ -325,6 +326,7 @@
 		CB68A75D6FF8CCDEDDFB3D77 /* RecentSearches.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79260771784529100D58EE3E /* RecentSearches.swift */; };
 		CDD154C0CEFB4D530E29DD34 /* Format.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5883BA424612265657845246 /* Format.swift */; };
 		CDE77DF3DD16A78A9192624E /* EventBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D952F37AD4DF7C050902B19 /* EventBanner.swift */; };
+		CE36E3CB614F3B5BADFCEEC2 /* ImageTrim.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17A72FA204008ACE31765EA1 /* ImageTrim.swift */; };
 		CF0065AF30C9FC626811FF50 /* RetriageModal.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA00E655EE0625FDF367DA22 /* RetriageModal.swift */; };
 		CF2D4E9603C4787015DA65C7 /* ComposeAttachments.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9ED32B3054A31D7933998E59 /* ComposeAttachments.swift */; };
 		CF34A69E15DFE9980A622162 /* WhatsNewCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0AFCAEC0D83E0E01D0074CE7 /* WhatsNewCard.swift */; };
@@ -462,6 +464,7 @@
 		15D14DE02E72E63FE53D5C8D /* AttachmentStrip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentStrip.swift; sourceTree = "<group>"; };
 		163BEF63DE1359294AD2ADD8 /* Prefs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Prefs.swift; sourceTree = "<group>"; };
 		168312D5219614E1F658480C /* Resources */ = {isa = PBXFileReference; lastKnownFileType = folder; name = Resources; path = Sources/Passband/Resources; sourceTree = SOURCE_ROOT; };
+		17A72FA204008ACE31765EA1 /* ImageTrim.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageTrim.swift; sourceTree = "<group>"; };
 		1964D381D25BBC803E490328 /* ReleaseNotes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReleaseNotes.swift; sourceTree = "<group>"; };
 		1A47FA6986F50A4E81628452 /* AuthCodeModal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthCodeModal.swift; sourceTree = "<group>"; };
 		1A74374DEAEE21CDF9A5067D /* Loadable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Loadable.swift; sourceTree = "<group>"; };
@@ -795,6 +798,7 @@
 				CE514B2862480E62EB8936A3 /* ImageFill.swift */,
 				39D5C019641DC37B55D7D922 /* ImageProxy.swift */,
 				EFF2F03B0D68F54C0DC28777 /* ImageRepeats.swift */,
+				17A72FA204008ACE31765EA1 /* ImageTrim.swift */,
 				1A74374DEAEE21CDF9A5067D /* Loadable.swift */,
 				C10C0C8780CCB9C6BAB2709C /* MailCSP.swift */,
 				BE74212A3CE62E8F28EC8D7E /* Markdown.swift */,
@@ -1279,6 +1283,7 @@
 				D4A4EA8324A57E2B01720266 /* ImageRepeats.swift in Sources */,
 				A59188FDC250262DEBA28AAE /* ImageSchemeHandler.swift in Sources */,
 				EC28A617F2EBC9CFCA992B82 /* ImageStore.swift in Sources */,
+				BBEE5699B3270D49E8BAF3C5 /* ImageTrim.swift in Sources */,
 				553D7088D2A4B65FCAA59E61 /* ImageWarmer.swift in Sources */,
 				937272D25047533E99FAFE3A /* InlineReply.swift in Sources */,
 				0819F995AB3EF176520A700A /* JSONValue.swift in Sources */,
@@ -1468,6 +1473,7 @@
 				007DD445499A552534B3CD28 /* ImageRepeats.swift in Sources */,
 				07461CBC4F5237E689A02449 /* ImageSchemeHandler.swift in Sources */,
 				837D6250A05319ED273F3C1F /* ImageStore.swift in Sources */,
+				CE36E3CB614F3B5BADFCEEC2 /* ImageTrim.swift in Sources */,
 				B2EE10EBD8C634AC7069FB8B /* ImageWarmer.swift in Sources */,
 				3F3CDF4B6911349A9481A225 /* InlineReply.swift in Sources */,
 				03D3C89A6C13B4790A876F6D /* IntroHaptics.swift in Sources */,

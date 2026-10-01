@@ -448,3 +448,12 @@ run_suite reading \
   Sources/Passband/Lib/SenderIdentity.swift \
   Sources/Passband/Lib/Reading.swift \
   Tests/ReadingTests.swift
+
+# The Reading card's logo extraction: which heroes are a mark on a flat field,
+# where the mark is, and which images must be left whole. CoreGraphics only,
+# over banners built pixel by pixel. ImageFill rides along for the colour type
+# the background is reported in.
+run_suite image-trim \
+  Sources/Passband/Lib/ImageFill.swift \
+  Sources/Passband/Lib/ImageTrim.swift \
+  Tests/ImageTrimTests.swift

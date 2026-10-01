@@ -809,6 +809,12 @@ private struct ReadingHero: View {
     /// masthead fitted into the square becomes an unreadable few-point strip.
     private static let maxAspect: CGFloat = 7
 
+    /// Breathing room around a mark cut out of its banner (`Hero.isMark`). The
+    /// crop is tight to the ink, and a logo touching the square's edges reads
+    /// as a cropped photo of a logo. A fraction of `side` so it holds on the
+    /// phone's smaller square.
+    private static let markInset: CGFloat = side * 0.08
+
     /// Falling back to the cache INSIDE the read keeps a recycled card from
     /// flashing empty: `@State` is gone the moment the card is dropped, the
     /// cached hero is not, so it repaints on the very first frame.
@@ -853,19 +859,26 @@ private struct ReadingHero: View {
     /// behind it belong to the caller.
     @ViewBuilder
     private func art(_ hero: HeroCache.Hero) -> some View {
+        let inset = hero.isMark ? Self.markInset : 0
         if ultraWide(hero.image) {
             // Past `maxAspect`, draw at the capped ratio and let the ENDS crop:
             // `.fill` overflows on the long axis and `.clipped` keeps the middle,
             // which is where the wordmark lives.
+            let width = Self.side - inset * 2
             Image(platformImage: hero.image)
                 .resizable()
+                .interpolation(.high)
                 .aspectRatio(contentMode: .fill)
-                .frame(width: Self.side, height: Self.side / Self.maxAspect)
+                .frame(width: width, height: width / Self.maxAspect)
                 .clipped()
         } else {
+            // A mark is always drawn WHOLE: it was cut to the ink, so there is
+            // no margin left for a fill-crop to spend.
             Image(platformImage: hero.image)
                 .resizable()
-                .aspectRatio(contentMode: fit(hero.image))
+                .interpolation(.high)
+                .aspectRatio(contentMode: hero.isMark ? .fit : fit(hero.image))
+                .padding(inset)
         }
     }
 

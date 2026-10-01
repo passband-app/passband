@@ -1455,9 +1455,6 @@ struct FlowLayout: Layout {
 private struct FlowModeButton: View {
     let action: () -> Void
     @State private var hovering = false
-    /// Bumped on each hover-in, so the wind glyph swooshes once per visit
-    /// rather than looping while the pointer rests there.
-    @State private var swooshes = 0
 
     var body: some View {
         Button(action: action) {
@@ -1480,16 +1477,13 @@ private struct FlowModeButton: View {
                             Capsule(style: .continuous)
                                 .strokeBorder(Palette.accent.opacity(0.5), lineWidth: 0.75)
                         )
-                        .transition(
-                            .move(edge: .trailing)
-                                .combined(with: .opacity)
-                                .combined(with: .scale(scale: 0.7, anchor: .trailing)))
+                        // Fades in while the pill widens: the only motion is
+                        // the left edge moving out.
+                        .transition(.opacity)
                 }
                 Image(systemName: "wind")
                     .font(.system(size: 9.5, weight: .semibold))
                     .foregroundStyle(Palette.accent)
-                    .symbolEffect(.bounce.byLayer, value: swooshes)
-                    .offset(x: hovering ? 1.5 : 0)
                 Text("flow mode")
                     .font(Typo.micro)
                     .foregroundStyle(hovering ? Palette.ink : Palette.inkDim)
@@ -1504,11 +1498,8 @@ private struct FlowModeButton: View {
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .onHover { inside in
-            hovering = inside
-            if inside { swooshes += 1 }
-        }
-        .animation(.spring(response: 0.22, dampingFraction: 0.6), value: hovering)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.18), value: hovering)
         .help("Walk through For your eyes one email at a time (Space)")
         .accessibilityLabel("Flow mode")
     }

@@ -104,6 +104,31 @@ struct ConnectView: View {
     @State private var nameChoice: AccountNameChoice = .personal
     @State private var otherName = ""
     private var accountLabel: String { nameChoice.name(typed: otherName) }
+    /// The person pressed a choice or typed a name. Until then the chooser is
+    /// only showing a default, and a default must never rename an account
+    /// that already has a name (see `labelToSubmit`).
+    @State private var nameTouched = false
+    /// The default has been chosen once; a remount must not choose again over
+    /// what the person picked.
+    @State private var nameSeeded = false
+
+    /// The name `finish` hands the store. A daemon the index already names is
+    /// a RECONNECT (the gate after a revoked token, a pair link back from
+    /// Gmail), and the store reads an empty label as "unchanged", so an
+    /// untouched default goes as empty there: otherwise every reconnect would
+    /// quietly rename the account to whatever the chooser was showing.
+    private func labelToSubmit(serverURL: String) -> String {
+        let host = AccountRecord.host(from: serverURL)
+        let known = AccountManager.shared.accounts.contains { $0.displayHost == host }
+        return known && !nameTouched ? "" : accountLabel.trimmed
+    }
+
+    /// Return in the field before the name: on to the name when there is a
+    /// field to type it in, otherwise straight to submit, since a preset
+    /// already answers it.
+    private func afterCredentials() {
+        if nameChoice == .other { focus = .name } else { submit() }
+    }
     /// An add-account attempt is in flight. The gate reads `store.connStatus`
     /// for this, but adding deliberately never moves it — the shell behind the
     /// sheet is standing on it.
@@ -602,7 +627,7 @@ struct ConnectView: View {
                         TextField("This Mac", text: $deviceName)
                             .autocorrectionDisabled()
                             .focused($focus, equals: .device)
-                            .onSubmit { focus = .name }
+                            .onSubmit { afterCredentials() }
                     }
                 } else {
                     RigSlot(label: "server", focused: focus == .url) {
@@ -632,13 +657,13 @@ struct ConnectView: View {
                             TextField("This Mac", text: $deviceName)
                                 .autocorrectionDisabled()
                                 .focused($focus, equals: .device)
-                                .onSubmit { focus = .name }
+                                .onSubmit { afterCredentials() }
                         }
                     case .token:
                         RigSlot(label: "api token", focused: focus == .token) {
                             SecureField("SQUELCH_API_TOKEN", text: $token)
                                 .focused($focus, equals: .token)
-                                .onSubmit { focus = .name }
+                                .onSubmit { afterCredentials() }
                         }
                     }
                 }
@@ -805,15 +830,25 @@ struct ConnectView: View {
             HStack(alignment: .firstTextBaseline) {
                 FieldLabel("name this account")
                 Spacer(minLength: 8)
-                Text("rename any time in Settings")
+                Text("rename any time in settings")
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaint.opacity(0.7))
             }
             GlassSegmented(
                 options: AccountNameChoice.allCases.map { ($0, $0.rawValue) },
-                selection: $nameChoice)
+                selection: Binding(
+                    get: { nameChoice },
+                    set: {
+                        nameChoice = $0
+                        nameTouched = true
+                        if $0 == .other { focus = .name }
+                    }))
             if nameChoice == .other {
-                let field = TextField("Name it", text: $otherName)
+                let typed = Binding(
+                    get: { otherName },
+                    set: { otherName = $0; nameTouched = true })
+                // The placeholder is what a blank field is saved as.
+                let field = TextField("Other", text: typed)
                     .textFieldStyle(.plain)
                     .font(.system(size: 14))
                     .foregroundStyle(Palette.ink)
@@ -823,19 +858,34 @@ struct ConnectView: View {
                 if inRig { field } else { field.fieldWell() }
             }
         }
-        .onChange(of: nameChoice) { _, now in
-            if now == .other { focus = .name }
-        }
-        // A second account starts on a name the switcher does not have yet.
-        .task {
-            let taken = Set(AccountManager.shared.accounts.map { $0.label.lowercased() })
-            if taken.contains(nameChoice.rawValue),
-               let free = AccountNameChoice.allCases.first(where: {
-                   $0 != .other && !taken.contains($0.rawValue)
-               }) {
-                nameChoice = free
+        .task { seedName() }
+    }
+
+    /// The chooser's starting point, chosen once. The gate in front of an
+    /// account that already exists shows THAT account's name, so a reconnect
+    /// reads true; anywhere else a new account starts on a preset the switcher
+    /// does not have yet, or on `other` once both are used.
+    private func seedName() {
+        guard !nameSeeded else { return }
+        nameSeeded = true
+        let manager = AccountManager.shared
+        if purpose == .gate, let saved = manager.active {
+            let label = saved.label.trimmed
+            if let preset = AccountNameChoice.allCases.first(where: {
+                $0 != .other && $0.rawValue == label.lowercased()
+            }) {
+                nameChoice = preset
+            } else if !label.isEmpty {
+                nameChoice = .other
+                otherName = label
             }
+            return
         }
+        let taken = Set(manager.accounts.map { $0.label.trimmed.lowercased() })
+        nameChoice =
+            AccountNameChoice.allCases.first {
+                $0 != .other && !taken.contains($0.rawValue)
+            } ?? .other
     }
 
     // MARK: - forms
@@ -848,7 +898,7 @@ struct ConnectView: View {
                     .font(.system(size: 16, weight: .medium))
                     .autocorrectionDisabled()
                     .focused($focus, equals: .device)
-                    .onSubmit { focus = .name }
+                    .onSubmit { afterCredentials() }
             }
             nameField
 
@@ -1038,7 +1088,8 @@ struct ConnectView: View {
         switch purpose {
         case .gate:
             return await store.connect(
-                serverURL: serverURL, apiToken: apiToken, label: accountLabel.trimmed)
+                serverURL: serverURL, apiToken: apiToken,
+                label: labelToSubmit(serverURL: serverURL))
         case .addAccount:
             adding = true
             let outcome = await store.addAccount(

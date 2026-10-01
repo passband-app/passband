@@ -81,6 +81,10 @@ actor RehearsalAPI {
                     from_addr: address(message), subject: message.subject, received_at: stamp(),
                     decision: AgentMessageDecision(kinds: [kinds[message.category]!],
                         destinations: message.lane == .reading ? ["reading"] : [],
+                        // The club night (id 6) is an event promotion, so the
+                        // practice board shows the content/promotion split.
+                        reading_kind: message.lane == .reading
+                            ? (message.id == 6 ? "promotion" : "content") : nil,
                         summary: message.explanation, reason: message.explanation, records: recordFacts(message)),
                     attention: AgentAttention(show_in_fye: row.status != .done && row.tier != .noise,
                         state: "informational", summary: message.explanation,

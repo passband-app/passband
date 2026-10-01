@@ -76,6 +76,7 @@ enum ActionKind { Reply, Pay, Decide, Attend, Review, Other }
 struct MessageDecision {
     kinds: Vec<EmailKind>,                 // nonempty, unique; mixed content allowed
     destinations: Vec<MessageDestination>, // unique; FYE belongs to thread attention
+    reading_kind: Option<ReadingKind>,     // content | promotion on Reading mail; Reading sorts content first
     summary: String,
     reason: String,
     auth: AuthAssessment,
@@ -303,7 +304,7 @@ Introduce a versioned human API and explicitly advertise its version/capabilitie
 
 Each request retains the existing human authentication/account boundary. A notification target carries account identity plus stable message ID and optionally thread ID. The client resolves the account, opens that exact message, and records only messages actually displayed. Retain HTML sanitization, attachment controls, and sensitive-content cache handling; remove the old auth-tap routing to a generic Auth page.
 
-`AttentionItem` contains item ID/revision, thread ID, representative message ID, kinds, combined destinations, summary, actions/state, relevant activity timestamp, rank total and explanation. `ReadingItem` contains message ID, thread ID, sender, summary and actual received timestamp. No required legacy `tier` field. All clients preserve server FYE order, including keyboard navigation and prefetched reading queues.
+`AttentionItem` contains item ID/revision, thread ID, representative message ID, kinds, combined destinations, summary, actions/state, relevant activity timestamp, rank total and explanation. `ReadingItem` contains message ID, thread ID, sender, summary, actual received timestamp and `reading_kind` (content or promotion; clients fall back to editorial-and-not-promotional kinds when it is null, and sort content first). No required legacy `tier` field. All clients preserve server FYE order, including keyboard navigation and prefetched reading queues.
 
 Every feed item on the human door also carries `from_name`, the `From:` display name, when the message has one; the key is absent rather than empty when it does not. It is what a card is titled with, since an address alone titles a mailer by its local-part. It is human-door only: the display name is untrusted header text, and every `external_*` listing clears it in the store before an agent-facing door sees the item.
 

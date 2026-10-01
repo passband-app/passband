@@ -1,9 +1,11 @@
 //! `List-Unsubscribe` parsing for the human door.
 //!
-//! The server NEVER performs the unsubscribe itself — the client confirms with
-//! the user and opens the URL — so this module is PURE (no network, no host
-//! resolution). Only `http`/`https` URLs are ever returned; the RFC 8058
-//! one-click flag is not part of the selection.
+//! This module is PURE (no network, no host resolution): it only picks the
+//! link. What happens to it is the caller's: the browser path hands it to the
+//! client to open, and the automatic path (`crate::unsub_job`, docs/SECURITY.md
+//! §7) fetches it through the guarded `crate::unsub_fetch`. Only `http`/`https`
+//! URLs are ever returned; whether RFC 8058 one-click applies is decided by the
+//! caller from the stored flag.
 
 /// The unsubscribe outcome for a message, derived purely from its stored
 /// `List-Unsubscribe` header value.
@@ -58,9 +60,10 @@ const MAX_URL_LEN: usize = 4096;
 /// THE TRUST STORY: this URL is attacker-chosen. So is the header's, which is
 /// why this does not widen the capability — the sender could always have named
 /// any URL. What it widens is OUR chance of picking the wrong one, and the
-/// anchor gate plus the http(s) filter are what hold that down. The server still
-/// never fetches it; the client confirms and the URL opens in the reader's own
-/// browser, where the address bar is the last check.
+/// anchor gate plus the http(s) filter are what hold that down. On the browser
+/// path the address bar is the last check; on the automatic path it is the
+/// guard in `crate::unsub_fetch`, and the page has to say "unsubscribed" before
+/// the job reports done.
 pub fn classify_unsubscribe_body(body_html: Option<&str>) -> UnsubPlan {
     let Some(html) = body_html else {
         return UnsubPlan::None;

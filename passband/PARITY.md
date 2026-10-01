@@ -104,6 +104,7 @@ backdrop bleeds through enough that light mode reads as a muddy dark one.
 | Shortcuts overlay | **done** | Grouped cheat-sheet |
 | Toast stack + undo | **done** | 5s undo, click or `u` |
 | Unsubscribe-violation prompt | **done** | One at a time, session-level suppression |
+| Automatic unsubscribe tray | **done** (Mac only) | `u` asks the daemon to unsubscribe (`auto: true`); bottom-right of the sitrep shows running / done / needs-you with "Finish on their site". iOS has no unsubscribe action yet, so no tray |
 | Rule editor | **done** | tune / create / edit (create-then-delete so a failure can't lose the rule) |
 | Process mode (`p`) | **done** | Card deck over live bands |
 | Reveal panel | **done** | One-time, view-state only, never persisted |
@@ -183,7 +184,7 @@ The `/client/*` surface is implemented in `Model/APIClient.swift`, with
 `Model/WireTypes.swift` mirroring the daemon's serde output exactly. Routes: `updates`, `thread/{id}`, `search`, `stats`, `usage`,
 `triage-config` (GET/POST), `audit`, `shipments`, `receipts`, `calendar`,
 `banking`, `marketing`, `triage-debug/{id}`, `attachments/{id}`, `rules`
-(GET/POST/DELETE), `unsubscribe`, `unsubscribes`, `unsubscribes/resolution`,
+(GET/POST/DELETE), `unsubscribe`, `unsubscribes`, `unsubscribes/opened`, `unsubscribes/resolution`,
 `sealed`, `sealed/{id}/reveal`, `updates/{id}/status`, `actions/{archive,label,send}`,
 `refresh`, `retriage`, `shredder` (GET/POST), `shredder/run`, `triage-feedback`
 (GET/POST), `messages/{id}/opens`, `tracking-config` (GET/POST).

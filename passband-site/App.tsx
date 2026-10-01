@@ -632,14 +632,17 @@ const CTA_CSS = `
   align-items: stretch;
 }
 /* The slot. No border and no ground of its own: it is an opening in the rig,
-   not a control sitting on one. Its padding matches the button's exactly, so
-   the address and the label sit on the same optical line. */
+   not a control sitting on one. Its padding matches the button's exactly
+   (the in-rig button is moved down to the caption's room), so the address
+   and the label sit on the same optical line. */
 .pb-rig-field {
   position: relative;
   z-index: 1;
   flex: 1 1 auto;
   min-width: 0;
-  padding: 0.9rem 1.1rem 1.3rem;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 1.25rem 1.1rem 1.3rem;
   border: 0;
   outline: none;
   background: none;
@@ -650,18 +653,49 @@ const CTA_CSS = `
 }
 .pb-rig-field::placeholder { color: #62707F; }
 .pb-rig-field:disabled { color: #808E9F; }
-/* WHICH SLOT IS LIVE. The rig lights as one instrument on :focus-within,
-   which said everything worth saying while there was one opening in it and
-   nothing at all once there were two: tabbing between them changed no pixel
-   but the caret. A lit edge down the active slot is the smallest thing that
-   answers it in the instrument's own language, and it is :focus rather than
-   :focus-visible because the question ("which one am I typing into") is the
-   same however the slot was reached.
-
-   outline: none above is why this is a shadow: the outline is the affordance
-   this design gave up, and an inset edge is the one that belongs on a slot cut
-   into a face. */
-.pb-rig-field:focus { box-shadow: inset 2px 0 0 rgba(${ACCENT}, 0.7); }
+/* THE SLOT NAMES ITSELF, and keeps naming itself once it is in use. The name
+   sits where the text will go while the slot is empty and nobody is in it,
+   then rides up into the slot's top edge, small caps in the accent, the
+   moment the slot is focused or holds anything, so a half-filled form still
+   says which opening is which. The placeholder is the example, shown only
+   while typing, because the cap is in its place the rest of the time. */
+.pb-field {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  cursor: text;
+}
+.pb-field-cap {
+  position: absolute;
+  left: 1.1rem;
+  top: 1.25rem;
+  z-index: 2;
+  pointer-events: none;
+  color: #62707F;
+  font-size: 0.95rem;
+  line-height: 1.2;
+  transition: top 0.25s cubic-bezier(0.2, 0.8, 0.2, 1), font-size 0.25s cubic-bezier(0.2, 0.8, 0.2, 1),
+    letter-spacing 0.25s ease, color 0.25s ease;
+}
+.pb-field-name { flex: none; }
+.pb-field-name .pb-field-cap { top: 1.2rem; }
+.pb-rig-field:not(:focus)::placeholder { color: transparent; }
+.pb-rig-field:is(:focus, :not(:placeholder-shown), :-webkit-autofill) + .pb-field-cap {
+  top: 0.5rem;
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+/* Brighter once small: the placeholder grey is fine at full size and too
+   faint at ten-pixel caps. */
+.pb-rig-field:is(:not(:placeholder-shown), :-webkit-autofill) + .pb-field-cap { color: #8592A3; }
+.pb-rig-field:focus + .pb-field-cap { color: rgba(${ACCENT}, 0.95); }
+@media (prefers-reduced-motion: reduce) {
+  .pb-field-cap { transition: none; }
+}
 /* Chrome recognises name beside email as an address profile and paints its
    own opaque ground into both slots, which on a rig whose whole premise is that
    the slots have no ground of their own is the one thing that breaks the
@@ -674,9 +708,6 @@ const CTA_CSS = `
   box-shadow: inset 0 0 0 100vw #101826;
   transition: background-color 9999s;
 }
-.pb-rig-field:-webkit-autofill:focus {
-  box-shadow: inset 0 0 0 100vw #101826, inset 2px 0 0 rgba(${ACCENT}, 0.7);
-}
 /* The name slot. Divided off from the row below by a hairline, so the two
    openings read as machined out of one face rather than as one box with two
    bits of text floating in it. Its own padding, because the address slot's
@@ -684,7 +715,7 @@ const CTA_CSS = `
    this one. */
 .pb-rig-name {
   flex: none;
-  padding: 0.85rem 1.1rem 0.8rem;
+  padding: 1.2rem 1.1rem 0.8rem;
   /* Brighter than the button's own divider, and it has to be: that one runs
      down the lit half of the instrument, with the meter's glow behind it,
      while this one crosses dark ground where the same 0.18 vanishes. */
@@ -697,6 +728,9 @@ const CTA_CSS = `
 .pb-cta-in-rig {
   flex: none;
   margin-top: 0;
+  /* Down by what the address slot gave its caption, so "join" stays on the
+     address's line. */
+  padding-top: 1.25rem;
   border: 0;
   border-left: 1px solid rgba(${ACCENT}, 0.18);
   border-radius: 0;
@@ -1086,38 +1120,44 @@ function Waitlist() {
   return (
     <>
       <form className="pb-rig" onSubmit={submit} {...handlers}>
-        <input
-          ref={nameRef}
-          className="pb-rig-field pb-rig-name"
-          type="text"
-          name="name"
-          required
-          autoComplete="name"
-          placeholder="your name"
-          aria-label="your name"
-          // The control plane's own ceiling is 128 CHARACTERS and this counts
-          // UTF-16 units, so the two agree on every name and the browser is
-          // the stricter of them on astral ones. Deliberately the stricter
-          // side: a name stopped at the field beats one cut on the way in.
-          maxLength={128}
-          value={name}
-          disabled={state === "busy"}
-          onChange={(event) => setName(event.target.value)}
-        />
+        <label className="pb-field pb-field-name">
+          <input
+            ref={nameRef}
+            className="pb-rig-field pb-rig-name"
+            type="text"
+            name="name"
+            required
+            autoComplete="name"
+            placeholder="Ada Lovelace"
+            aria-label="your name"
+            // The control plane's own ceiling is 128 CHARACTERS and this counts
+            // UTF-16 units, so the two agree on every name and the browser is
+            // the stricter of them on astral ones. Deliberately the stricter
+            // side: a name stopped at the field beats one cut on the way in.
+            maxLength={128}
+            value={name}
+            disabled={state === "busy"}
+            onChange={(event) => setName(event.target.value)}
+          />
+          <span className="pb-field-cap" aria-hidden="true">your name</span>
+        </label>
         <div className="pb-rig-row">
           {chrome}
-          <input
-            className="pb-rig-field"
-            type="email"
-            name="email"
-            required
-            autoComplete="email"
-            placeholder="you@example.com"
-            aria-label="email address"
-            value={email}
-            disabled={state === "busy"}
-            onChange={(event) => setEmail(event.target.value)}
-          />
+          <label className="pb-field">
+            <input
+              className="pb-rig-field"
+              type="email"
+              name="email"
+              required
+              autoComplete="email"
+              placeholder="you@example.com"
+              aria-label="email address"
+              value={email}
+              disabled={state === "busy"}
+              onChange={(event) => setEmail(event.target.value)}
+            />
+            <span className="pb-field-cap" aria-hidden="true">email address</span>
+          </label>
           <SubmitButton busy={state === "busy"} />
         </div>
       </form>

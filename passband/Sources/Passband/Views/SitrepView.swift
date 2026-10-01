@@ -582,29 +582,14 @@ struct SitrepView: View {
             cursor.index = rows.count
             return
         }
-        cursor.index = max(0, min(rows.count - 1, next))
+        guard !rows.isEmpty else { return }
+        // Off either end of the list as drawn WRAPS: down from the last row
+        // goes back to the top, up from the first goes to the bottom.
+        cursor.index = (next % rows.count + rows.count) % rows.count
     }
 
     private func markReadingDone(_ rs: ReadingSender) async {
-        // Bulk-resolve every aggregated update; one toast, optimistic drop.
-        store.zones.reading.removeAll { $0.address == rs.address }
-        do {
-            for item in rs.items {
-                try await APIClient.shared.setStatus(item.id, .done)
-                // Record it as resolved, not just gone from this zone: the same
-                // message can be sitting in a band or on the mail page, and this
-                // path never went through removeFromBands.
-                store.noteResolved(item.id)
-                // Unpin as each one lands, not at the end: a throw partway
-                // through still leaves the resolved ones released. No undo on
-                // this path, so nothing re-pins.
-                await ImageStore.shared.release(messageId: item.id)
-            }
-            store.pushToast(
-                "done: \(SenderCache.resolved(rs.sender).displayName) (\(rs.items.count))", .info)
-        } catch {
-            store.pushToast("some marks failed; refresh to re-sync", .error)
-        }
+        await store.markReadingDone(rs.items, sender: rs.sender)
     }
 
 }

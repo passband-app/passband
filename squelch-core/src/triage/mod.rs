@@ -13,6 +13,7 @@ pub mod context;
 pub mod deadline;
 pub mod decision;
 pub mod events;
+pub mod ghost;
 pub mod extract;
 pub mod llm;
 pub mod login_code;

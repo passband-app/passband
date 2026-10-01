@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const PROMPT_VERSION: &str = "agent-triage-v4";
+pub const PROMPT_VERSION: &str = "agent-triage-v6";
 const SYSTEM: &str = include_str!("prompts/agent-v1.txt");
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "step", rename_all = "snake_case")]
@@ -794,6 +794,38 @@ fn decision_schema_body() -> Value {
             ("title", text()),
             ("start", nullable(reference("time"))),
             ("location", nullable(text())),
+            ("end", nullable(reference("time"))),
+            (
+                "duration_estimate",
+                nullable(object(vec![("minutes", integer()), ("basis", text())])),
+            ),
+            (
+                "event_kind",
+                enumeration(&[
+                    "ticket",
+                    "travel",
+                    "reservation",
+                    "invite",
+                    "proposal",
+                    "other",
+                ]),
+            ),
+            (
+                "commitment",
+                enumeration(&["committed", "invited", "proposed", "unknown"]),
+            ),
+            (
+                "change",
+                enumeration(&["created", "updated", "cancelled", "agreed"]),
+            ),
+            ("identity_refs", array(text())),
+            (
+                "likelihood",
+                nullable(object(vec![
+                    ("band", enumeration(&["likely", "maybe", "unlikely"])),
+                    ("reason", text()),
+                ])),
+            ),
             ("evidence", reference("evidence")),
         ]),
         object(vec![
@@ -985,6 +1017,46 @@ mod tests {
             let name = target.strip_prefix("#/$defs/").unwrap();
             assert!(alone["$defs"].get(name).is_some(), "dangling {target}");
         }
+    }
+    /// The calendar fields are in the event record's schema and required (the
+    /// strict structured-output mode needs every key listed), with the optional
+    /// ones nullable.
+    #[test]
+    fn event_record_schema_carries_the_calendar_fields() {
+        let schema = decision_schema();
+        let event = schema["properties"]["records"]["items"]["anyOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["properties"]["kind"]["enum"][0] == "event")
+            .expect("event record schema");
+        let required: Vec<&str> = event["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|k| k.as_str().unwrap())
+            .collect();
+        for key in [
+            "end",
+            "duration_estimate",
+            "event_kind",
+            "commitment",
+            "change",
+            "identity_refs",
+            "likelihood",
+        ] {
+            assert!(required.contains(&key), "{key} missing from {required:?}");
+        }
+        for key in ["end", "duration_estimate", "likelihood"] {
+            assert!(
+                event["properties"][key]["anyOf"][1]["type"] == "null",
+                "{key} should be nullable"
+            );
+        }
+        assert_eq!(
+            event["properties"]["commitment"]["enum"],
+            json!(["committed", "invited", "proposed", "unknown"])
+        );
     }
     fn valid() -> MessageDecision {
         let evidence = vec![EvidenceRef {

@@ -133,6 +133,48 @@ pub struct RevisitRequest {
     pub reason: String,
 }
 
+decision_enum!(EventRecordKind {
+    Other,
+    Ticket,
+    Travel,
+    Reservation,
+    Invite,
+    Proposal
+});
+// `Committed` means the user already booked, bought, registered or accepted.
+decision_enum!(EventCommitment {
+    Unknown,
+    Committed,
+    Invited,
+    Proposed
+});
+// What THIS message does to the event. `Agreed` is evidence the user accepted.
+decision_enum!(EventChange {
+    Created,
+    Updated,
+    Cancelled,
+    Agreed
+});
+decision_enum!(LikelihoodBand {
+    Maybe,
+    Likely,
+    Unlikely
+});
+/// The model's guess at an event's length. Never a fact: it is only emitted
+/// when the mail states no end. `minutes` is signed so a nonsense value
+/// deserializes and is laundered (`triage::ghost`) instead of failing the step.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DurationEstimate {
+    pub minutes: i64,
+    pub basis: String,
+}
+/// A prior for a non-committed event becoming a commitment.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct EventLikelihood {
+    pub band: LikelihoodBand,
+    pub reason: String,
+}
+
 /// Explicit facts only. No record proposal implicitly closes an obligation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -168,10 +210,28 @@ pub enum RecordProposal {
         order_refs: Vec<String>,
         evidence: Vec<EvidenceRef>,
     },
+    /// Every field after `location` arrived after decisions were already being
+    /// stored, so each defaults, as on `Delivery`. `end` is a STATED end only;
+    /// a guess lives in `duration_estimate` and is never promoted to `end`.
     Event {
         title: String,
         start: Option<SupportedTime>,
         location: Option<String>,
+        #[serde(default)]
+        end: Option<SupportedTime>,
+        #[serde(default)]
+        duration_estimate: Option<DurationEstimate>,
+        #[serde(default)]
+        event_kind: EventRecordKind,
+        #[serde(default)]
+        commitment: EventCommitment,
+        #[serde(default)]
+        change: EventChange,
+        /// iCalendar UID, confirmation or booking numbers, event page URL.
+        #[serde(default)]
+        identity_refs: Vec<String>,
+        #[serde(default)]
+        likelihood: Option<EventLikelihood>,
         evidence: Vec<EvidenceRef>,
     },
     FinancialUpdate {
@@ -205,4 +265,81 @@ pub struct MessageDecision {
     pub rule_exceptions: Vec<RuleException>,
     pub notification: NotificationAdvice,
     pub revisit: Option<RevisitRequest>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reconcile re-reads every stored decision_json, so an `event` record
+    /// written before the calendar fields existed must still deserialize, with
+    /// each new field at its default.
+    #[test]
+    fn an_event_record_without_the_calendar_fields_still_deserializes() {
+        let old = serde_json::json!({
+            "kind": "event",
+            "title": "Dinner",
+            "start": {"value": "2026-10-03T19:30:00-04:00", "timezone": null,
+                      "source_message_id": 7, "interpreted_relative": false},
+            "location": "Via Carota",
+            "evidence": [{"message_id": 7, "location": "body"}],
+        });
+        let record: RecordProposal = serde_json::from_value(old).unwrap();
+        let RecordProposal::Event {
+            title,
+            end,
+            duration_estimate,
+            event_kind,
+            commitment,
+            change,
+            identity_refs,
+            likelihood,
+            evidence,
+            ..
+        } = record
+        else {
+            panic!("not an event");
+        };
+        assert_eq!(title, "Dinner");
+        assert_eq!(end, None);
+        assert_eq!(duration_estimate, None);
+        assert_eq!(event_kind, EventRecordKind::Other);
+        assert_eq!(commitment, EventCommitment::Unknown);
+        assert_eq!(change, EventChange::Created);
+        assert!(identity_refs.is_empty());
+        assert_eq!(likelihood, None);
+        assert_eq!(evidence.len(), 1);
+    }
+
+    #[test]
+    fn an_event_record_with_the_calendar_fields_round_trips() {
+        let record = RecordProposal::Event {
+            title: "Show".into(),
+            start: None,
+            location: None,
+            end: None,
+            duration_estimate: Some(DurationEstimate {
+                minutes: 150,
+                basis: "doors 7, show 8".into(),
+            }),
+            event_kind: EventRecordKind::Ticket,
+            commitment: EventCommitment::Committed,
+            change: EventChange::Updated,
+            identity_refs: vec!["ABC123".into()],
+            likelihood: Some(EventLikelihood {
+                band: LikelihoodBand::Likely,
+                reason: "paid".into(),
+            }),
+            evidence: vec![],
+        };
+        let json = serde_json::to_value(&record).unwrap();
+        assert_eq!(json["event_kind"], "ticket");
+        assert_eq!(json["commitment"], "committed");
+        assert_eq!(json["change"], "updated");
+        assert_eq!(json["likelihood"]["band"], "likely");
+        assert_eq!(
+            serde_json::from_value::<RecordProposal>(json).unwrap(),
+            record
+        );
+    }
 }

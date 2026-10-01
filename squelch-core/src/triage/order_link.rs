@@ -68,7 +68,7 @@ const RELAY_KEYS: &[&str] = &[
 ];
 
 /// Strip control and bidi characters and collapse whitespace.
-fn plain(raw: &str) -> String {
+pub(crate) fn plain(raw: &str) -> String {
     raw.chars()
         .filter(|c| !c.is_control() || c.is_whitespace())
         .filter(|c| {

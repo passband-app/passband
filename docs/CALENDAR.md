@@ -23,10 +23,11 @@ Standing rules (DECIDED):
   user already did (bought, booked, registered, accepted) goes on the real
   calendar. Something another person is asking for stays a ghost until the
   user agrees.
-- **No generated prose, ever.** Passband does not draft email. Actions create
-  events, hold slots, RSVP through an API, or open the reply box with the
-  cursor in it. Inserting a formatted fact the user clicked (a time slot such
-  as "Tue Oct 6, 2:00pm PT") is allowed; writing the sentence around it is not.
+- **No model-written prose, ever.** Passband does not generate email text.
+  Actions create events, hold slots, RSVP through an API, or fill the reply
+  box. What may go into a reply is a formatted fact the user clicked (a time
+  such as "10am ET on the 21st") and the user's OWN saved reply line around it
+  (§6, "One click to accept"). Nothing in a reply is written by a model.
 - **Time is one resource.** Availability is the union of every account.
   Identity stays per account (§4).
 - **An estimate is never stored as a fact.** A guessed end time lives in its
@@ -424,8 +425,7 @@ answer without the mail being opened:
     Thu 2:00pm   free
     Fri morning  dentist 9 to 10
 
-- One key takes a slot: it becomes a held ghost and the reply box opens with
-  the cursor in it. The user writes the reply.
+- One key or click takes a slot. See "One click to accept" below.
 - For a real calendar invitation the key is the RSVP itself, an API call. No
   email is written.
 - A candidate that is a range ("Friday morning") is shown with what blocks it,
@@ -457,11 +457,47 @@ all in another timezone.
   at a glance. The alternative considered is the app's own margin, aligned to
   the line, with a compact list under the message when a line cannot be
   located.
-- **Taking one.** Clicking a hint (or its key) holds that overlap and inserts
-  the time as text into the reply, as in §7. The user writes the reply.
+- **Taking one.** Clicking a hint that shows the user as free is the one-click
+  accept below.
 - **Before the calendar grant** the hint is the time conversion alone, which
   needs no permission. Free and busy appear only once the real calendar is
   connected: a ghost-only "free" would be a guess presented as a fact.
+
+### One click to accept (founder's ask, 2026-10-01)
+
+Clicking an offered time the user is free for does three things at once, and
+then the only thing left is Send:
+
+1. **Fills the reply.** Greeting, the acceptance line with the chosen time,
+   an empty line with the cursor on it for the user's own words, and the
+   signature:
+
+       Taiki,
+
+       Let's do 10am ET on the 21st.
+
+       |
+
+   The acceptance line is the user's own saved sentence with the time
+   dropped in, not model output. It ships with one plain default and is
+   editable in Settings. The time is written in the zone the sender offered
+   it in.
+2. **Puts it on the calendar.** The chosen time goes on the user's real
+   calendar straight away as an event Passband created, so it blocks the time
+   from that moment.
+3. **Waits for Send.** Discarding the draft removes the event again.
+
+Rules:
+
+- If the sender then sends a calendar invitation for that time (as in the
+  example: "I'll shoot over a cal invite"), the invitation replaces Passband's
+  placeholder event; it does not sit beside it.
+- An offered WINDOW ("10am to 1pm") needs a start and a length. A click takes
+  the start of the free part of the window; the length is a default the user
+  can drag. Choosing a later start inside the window is a second gesture, to
+  be designed.
+- Needs the calendar grant. Before it, the click still fills the reply and
+  keeps a hold inside Passband.
 
 ## 7. Scheduling from the composer
 
@@ -650,7 +686,7 @@ Each wave is useful on its own and is committed when verified.
 
 ## 13. Not building
 
-- Generated email text of any kind.
+- Model-written email text of any kind.
 - Automatic rescheduling of the user's day.
 - Booking-link pages.
 - Web lookups about venues or events.
@@ -663,8 +699,11 @@ Each wave is useful on its own and is committed when verified.
   know about the user's time.
 - A reservation in the user's name that someone else booked: committed or
   invited? Leaning committed.
-- Are holds written to the real calendar as tentative events (coworkers see
-  the user as busy) or kept inside Passband?
+- A time the user accepts with one click is written to the real calendar
+  (DECIDED, §6). Still open: whether slots the user merely OFFERS from the
+  composer are written too, or stay holds inside Passband.
+- The default acceptance line, and whether its wording and time format ("10a"
+  or "10am") should follow the user's own past replies.
 - Which calendar inside an account receives writes when there are several.
   Leaning primary.
 - How much an expired, unanswered ghost counts as a "no".

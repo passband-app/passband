@@ -66,6 +66,7 @@ run_suite credential-probe \
   Sources/Passband/Model/WireTypes.swift \
   Sources/Passband/Model/APIError.swift \
   Sources/Passband/Model/APIClient.swift \
+  Sources/Passband/Lib/ClientIdentity.swift \
   Sources/Passband/Lib/TriageTargets.swift \
   Sources/Passband/Assistant/JSONValue.swift \
   Tests/CredentialProbeTests.swift
@@ -74,6 +75,12 @@ run_suite anthropic-stream \
   Sources/Passband/Assistant/JSONValue.swift \
   Sources/Passband/Assistant/AnthropicStream.swift \
   Tests/AnthropicStreamTests.swift
+
+# What the app tells its daemon it is. The daemon drops anything that is not
+# <platform>/<dotted digits>, so the client must never build anything else.
+run_suite client-identity \
+  Sources/Passband/Lib/ClientIdentity.swift \
+  Tests/ClientIdentityTests.swift
 
 # Pairing pulls in Sessions.swift only because it builds its own URLSession
 # there; nothing in this suite makes a request. Same payoff as above: the code

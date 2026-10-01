@@ -84,6 +84,11 @@ const LAST_USED_THROTTLE_SECS: i64 = 60;
 /// where the old version left it (nothing is written under the OLD tag for a
 /// request that named a new one). That is a fine trade for a number an operator
 /// reads in days.
+///
+/// "An hour" assumes the old client has gone quiet. Two apps sharing ONE token
+/// at different versions (a dev build and the installed release, which read
+/// the same keychain item) are not that: whichever was recorded first keeps
+/// refreshing its own stamp, and the other is never recorded while it does.
 const CLIENT_CHANGE_THROTTLE_SECS: i64 = 60 * 60;
 
 /// Most (platform, version) pairs [`SqliteStore::client_versions_seen`] hands

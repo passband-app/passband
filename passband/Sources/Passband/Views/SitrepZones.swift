@@ -655,6 +655,18 @@ struct ReadingZone: View {
     #endif
     /// Gutter, both axes.
     private static var gap: CGFloat { Space.s10 }
+    /// How many cards stand unfolded. The feed decides what BELONGS; this only
+    /// keeps a busy week from burying the records under a wall of cards. The
+    /// rest sits behind the same quiet expander For-your-eyes uses.
+    #if os(iOS)
+        // The phone draws two-up, so 24 would be twelve rows of cards before
+        // the fold; 8 is four rows, in line with its For-your-eyes fold of 4.
+        private static let collapsed = 8
+    #else
+        private static let collapsed = 24
+    #endif
+
+    @State private var expanded = false
 
     var body: some View {
         // Always on the board, empty or not: a zone that vanishes reads as a
@@ -673,15 +685,36 @@ struct ReadingZone: View {
 
     /// NON-LAZY on purpose: a LazyVGrid rebuilds cards as they cross the
     /// viewport, and each rebuild costs a hero lookup and a fresh `.task`. A
-    /// week of recurring senders is bounded, so holding all of it is cheaper.
+    /// week of recurring senders is bounded (the feed fetches 200 messages, and
+    /// the zone folds at `collapsed`), so holding all of it is cheaper.
     private var grid: some View {
-        AdaptiveGrid(minimum: Self.cardMinimum, spacing: Self.gap) { cards }
+        let overflow = senders.count - Self.collapsed
+        return VStack(alignment: .leading, spacing: 0) {
+            AdaptiveGrid(minimum: Self.cardMinimum, spacing: Self.gap) { cards }
+            if overflow > 0 { expander(overflow) }
+        }
     }
 
     @ViewBuilder private var cards: some View {
-        ForEach(senders) { rs in
+        ForEach(expanded ? senders : Array(senders.prefix(Self.collapsed))) { rs in
             ReadingCard(sender: rs, cursor: cursor)
         }
+    }
+
+    /// For-your-eyes' expander, so the two zones fold the same way.
+    private func expander(_ overflow: Int) -> some View {
+        Button {
+            withAnimation(.smooth(duration: 0.28)) { expanded.toggle() }
+        } label: {
+            Text(expanded ? "show less" : "\(overflow) more")
+                .font(Typo.micro)
+                .foregroundStyle(Palette.inkFaint)
+                .padding(.horizontal, Space.scaled(11))
+                .padding(.vertical, Space.s4)
+        }
+        .buttonStyle(.glass)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.top, Space.s10)
     }
 }
 

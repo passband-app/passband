@@ -182,11 +182,10 @@ struct AttentionUpdate: Codable, Sendable, Identifiable, Hashable {
     /// on the agent door, which is why every read goes through `senderString`
     /// rather than this directly.
     var from_name: String?
-    /// The mail's own `Subject` and the opening of its body. PRESENT ONLY ON
-    /// THE SPAM PAGE, and absent everywhere else by design rather than by
-    /// accident: a spam row was never triaged, so `one_line` is empty on every
-    /// one of them and these are what the row says instead. Every other page
-    /// has a summary and the daemon does not pay to send these beside it.
+    /// The mail's own `Subject` and the opening of its body. The inventory the
+    /// mail pages read serves both on every row; the legacy band listing serves
+    /// them on the spam page only, where `one_line` is empty and these are what
+    /// the row says instead. So: present on the mail pages, absent on the bands.
     ///
     /// UNTRUSTED, and more pointedly than `from_name`: this is text out of the
     /// corpus written to talk readers into things. It renders as words on a
@@ -194,6 +193,12 @@ struct AttentionUpdate: Codable, Sendable, Identifiable, Hashable {
     var subject: String?
     var preview: String?
     var status: AttentionStatus
+    /// When the mail arrived. ABSENT from an older daemon, which is why every
+    /// read goes through `arrivedAt` and falls back to `surfaced_at`.
+    var received_at: String? = nil
+    /// The sitrep zone this mail lands in (`SitrepZone`). Absent from an older
+    /// daemon and from rows triage has not decided yet.
+    var placement: String? = nil
     var surfaced_at: String?
     var resolved_at: String?
     /// A PENDING reminder: when the daemon will pull this back into the bands.
@@ -208,6 +213,10 @@ struct AttentionUpdate: Codable, Sendable, Identifiable, Hashable {
     var reminded_at: String?
 
     var hasAttachments: Bool { has_attachments ?? false }
+
+    /// The stamp a mail list dates and sorts this row by: arrival, or first
+    /// listing when the daemon is too old to say when it arrived.
+    var arrivedAt: String? { received_at ?? surfaced_at }
 
     /// Whether a reminder is waiting to fire on this row.
     var hasPendingReminder: Bool { !(remind_at ?? "").isEmpty }
@@ -778,6 +787,16 @@ struct CreateRuleBody: Codable, Sendable {
 /// history, or no clear pattern.
 struct RuleSuggestion: Codable, Sendable {
     var suggestion: String?
+}
+
+/// GET /client/v2/fye/headline. Null when the daemon has no model, the band is
+/// empty, or the model had nothing to say.
+struct FyeHeadline: Codable, Sendable {
+    var headline: String?
+    /// False when the daemon's call FAILED (timeout, provider error) rather
+    /// than the model answering: worth asking again. Absent on the first
+    /// daemons to serve the route, which read as settled.
+    var settled: Bool?
 }
 
 /// POST /client/rules and PUT /client/rules/{id}.
@@ -1919,6 +1938,10 @@ struct UpdatesParams: Sendable {
     var band: Band?
     var limit: Int?
     var cursor: String?
+    /// Keyset paging: rows that arrived before this stamp (and, at that
+    /// instant, below `beforeId`). Exclusive with `cursor`.
+    var before: String? = nil
+    var beforeId: Int? = nil
     /// Narrow to rows with a PENDING reminder, soonest first. Named for the
     /// flag rather than the query value (`reminders=pending`) because unlike
     /// every field above it, it is a filter with its own ORDER: the server

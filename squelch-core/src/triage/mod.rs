@@ -14,6 +14,7 @@ pub mod deadline;
 pub mod decision;
 pub mod events;
 pub mod extract;
+pub mod fye_headline;
 pub mod llm;
 pub mod login_code;
 pub mod money;

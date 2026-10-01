@@ -368,6 +368,158 @@ async fn reading_and_records_support_explicit_history_and_done_filters() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
+/// A model mock that answers every request with `headline` and counts the
+/// requests it saw, so a test can tell a cache hit from a second call.
+async fn headline_mock(
+    headline: &'static str,
+) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = hits.clone();
+    let body = format!(
+        r#"{{"content":[{{"type":"text","text":"{{\"candidates\":[\"{headline}\"]}}"}}],"stop_reason":"end_turn","usage":{{"input_tokens":300,"output_tokens":12}}}}"#
+    );
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let body = body.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 65536];
+                let _ = sock.read(&mut buf).await;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    (format!("http://{addr}"), hits)
+}
+
+fn with_headline(state: squelch_api::ApiState, url: String) -> axum::Router {
+    use squelch_core::config::Stage2Provider;
+    use squelch_core::triage::fye_headline::HeadlineClient;
+    squelch_api::router(state.with_fye_headline(Some(HeadlineClient::new(
+        reqwest::Client::new(),
+        url,
+        "sk-test",
+        Stage2Provider::Anthropic,
+        "claude-haiku-4-5",
+        None,
+    ))))
+}
+
+const HEADLINE_URI: &str = "/client/v2/fye/headline?today=2026-10-01%20(Thursday)";
+
+#[tokio::test]
+async fn fye_headline_is_written_once_per_board_and_billed_to_its_own_category() {
+    let (url, hits) = headline_mock("Mostly one offer worth a look.").await;
+    let (state, store, acct) = state_with(|_, _| {});
+    let id = store
+        .upsert_message(&msg(acct, "offer", "offers", "A sale", "An offer"))
+        .unwrap();
+    assess(&store, acct, id, false);
+    let app = with_headline(state, url);
+
+    for _ in 0..2 {
+        let resp = app
+            .clone()
+            .oneshot(authed("GET", HEADLINE_URI))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()["cache-control"], "no-store");
+        assert_eq!(
+            body_json(resp).await["headline"],
+            "Mostly one offer worth a look."
+        );
+    }
+    // The second ask was about the same board: served from the cache.
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let categories: Vec<String> = store
+        .list_usage_by_category(acct, 30)
+        .unwrap()
+        .into_iter()
+        .map(|(c, _)| c)
+        .collect();
+    assert_eq!(categories, vec!["fye_headline".to_string()]);
+
+    // A new day is a new board even with the same rows.
+    let resp = app
+        .oneshot(authed(
+            "GET",
+            "/client/v2/fye/headline?today=2026-10-02%20(Friday)",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        body_json(resp).await["headline"],
+        "Mostly one offer worth a look."
+    );
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn fye_headline_is_null_without_a_model_or_on_an_empty_board() {
+    // No model on the default harness, rows present.
+    let h = harness(|_, _| {});
+    let id = h
+        .store
+        .upsert_message(&msg(h.acct, "offer", "offers", "A sale", "An offer"))
+        .unwrap();
+    assess(&h.store, h.acct, id, false);
+    let resp = h.app.oneshot(authed("GET", HEADLINE_URI)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["headline"], serde_json::Value::Null);
+
+    // A model, but nothing in the band: no call, no spend.
+    let (url, hits) = headline_mock("Something.").await;
+    let (state, store, acct) = state_with(|_, _| {});
+    let app = with_headline(state, url);
+    let resp = app.oneshot(authed("GET", HEADLINE_URI)).await.unwrap();
+    assert_eq!(body_json(resp).await["headline"], serde_json::Value::Null);
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(store.list_usage_by_category(acct, 30).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_fresh_headline_skips_the_cache_and_becomes_the_cached_one() {
+    let (url, hits) = headline_mock("Two packages are on their way.").await;
+    let (state, store, acct) = state_with(|_, _| {});
+    let id = store
+        .upsert_message(&msg(acct, "offer", "offers", "A sale", "An offer"))
+        .unwrap();
+    assess(&store, acct, id, false);
+    let app = with_headline(state, url);
+    let get = |uri: &'static str| {
+        let app = app.clone();
+        async move { body_json(app.oneshot(authed("GET", uri)).await.unwrap()).await }
+    };
+    assert_eq!(
+        get(HEADLINE_URI).await["headline"],
+        "Two packages are on their way."
+    );
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    // Asked for another: a second call even though the board is unchanged.
+    // The mock can only say the line on screen, which is refused, so the
+    // answer is null and the cached line survives for the next poll.
+    let fresh = get(
+        "/client/v2/fye/headline?today=2026-10-01%20(Thursday)&fresh=true&previous=Two%20packages%20are%20on%20their%20way.",
+    )
+    .await;
+    assert_eq!(fresh["headline"], serde_json::Value::Null);
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(
+        get(HEADLINE_URI).await["headline"],
+        "Two packages are on their way."
+    );
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
 /// A feed card names its sender from the `From:` display name, which the feed
 /// did not carry: every Reading card was titled from the bare address, and a
 /// mailer whose local-part is a hash got the hash.
@@ -457,4 +609,66 @@ async fn feed_omits_a_blank_sender_name() {
     let body = body_json(response).await;
     assert_eq!(body["items"][0]["message_id"], id);
     assert!(body["items"][0].get("from_name").is_none());
+}
+
+/// A model that FAILS the first request (a 500) and answers after that.
+async fn flaky_headline_mock(
+    headline: &'static str,
+) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = hits.clone();
+    let ok = format!(
+        r#"{{"content":[{{"type":"text","text":"{{\"candidates\":[\"{headline}\"]}}"}}],"stop_reason":"end_turn","usage":{{"input_tokens":300,"output_tokens":12}}}}"#
+    );
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let n = seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let ok = ok.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 65536];
+                let _ = sock.read(&mut buf).await;
+                let (status, body) = if n == 0 {
+                    ("500 X", r#"{"error":"boom"}"#.to_string())
+                } else {
+                    ("200 OK", ok)
+                };
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    (format!("http://{addr}"), hits)
+}
+
+#[tokio::test]
+async fn a_failed_headline_call_is_not_remembered_as_nothing_to_say() {
+    let (url, hits) = flaky_headline_mock("Two packages are on their way.").await;
+    let (state, store, acct) = state_with(|_, _| {});
+    let id = store
+        .upsert_message(&msg(acct, "offer", "offers", "A sale", "An offer"))
+        .unwrap();
+    assess(&store, acct, id, false);
+    let app = with_headline(state, url);
+
+    let first = body_json(
+        app.clone()
+            .oneshot(authed("GET", HEADLINE_URI))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(first["headline"], serde_json::Value::Null);
+    assert_eq!(first["settled"], false, "a 500 is a failure, not a verdict");
+    // Same board: the failure was not cached, so this asks again and answers.
+    let second = body_json(app.oneshot(authed("GET", HEADLINE_URI)).await.unwrap()).await;
+    assert_eq!(second["headline"], "Two packages are on their way.");
+    assert_eq!(second["settled"], true);
+    assert!(hits.load(std::sync::atomic::Ordering::SeqCst) >= 2);
 }

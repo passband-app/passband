@@ -1273,12 +1273,16 @@ pub const NOTIFY_USAGE_CATEGORY: &str = "notify";
 /// at notify rates; see [`runs_notify_model`].
 pub const RULE_SUGGEST_USAGE_CATEGORY: &str = "rule_suggest";
 
+/// The sitrep headline. Runs the notify model, so it is priced at notify rates.
+pub const FYE_HEADLINE_USAGE_CATEGORY: &str = "fye_headline";
+
 /// Does this ledger category run [`crate::config::NotifyConfig::model`]? The
 /// ONE list both cost estimators consult, so a small-model category cannot be
 /// priced as small in one and as Stage-1 in the other.
 pub fn runs_notify_model(category: &str) -> bool {
     category == NOTIFY_USAGE_CATEGORY
         || category == RULE_SUGGEST_USAGE_CATEGORY
+        || category == FYE_HEADLINE_USAGE_CATEGORY
         || category == crate::triage::access::USAGE_CATEGORY
         || category == crate::triage::unsub_page::USAGE_CATEGORY
 }
@@ -2224,6 +2228,7 @@ mod tests {
         // the rule suggester and the agent-access check both ride it.
         for category in [
             RULE_SUGGEST_USAGE_CATEGORY,
+            FYE_HEADLINE_USAGE_CATEGORY,
             crate::triage::access::USAGE_CATEGORY,
         ] {
             assert!(

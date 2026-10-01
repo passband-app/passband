@@ -142,6 +142,7 @@ final class Prefs {
         static let assistantTransport = "passband.assistant.transport"
         static let searchLaneModel = "passband.search.lane.model"
         static let deeperSearch = "passband.search.deeper"
+        static let mailHiddenZones = "passband.pref.mailHiddenZones"
         static let telemetry = TelemetryLevel.prefKey
     }
 
@@ -205,6 +206,7 @@ final class Prefs {
         _deeperSearch =
             DeeperSearchChoice(rawValue: defaults.string(forKey: Key.deeperSearch) ?? "")
             ?? .automatic
+        _mailHiddenZones = Set(defaults.stringArray(forKey: Key.mailHiddenZones) ?? [])
 
         // LAST, because it writes: the verdict above has to be PINNED on the
         // launch that reaches it, not re-derived on the next one. A seed lands
@@ -499,6 +501,19 @@ final class Prefs {
         set {
             _deeperSearch = newValue
             defaults.set(newValue.rawValue, forKey: Key.deeperSearch)
+        }
+    }
+
+    /// The sitrep zones the all-mail page's category picker has turned off,
+    /// as the wire's `placement` strings ("shipments", "noise", …). Remembered:
+    /// somebody who never wants shipping mail in their list wants that every
+    /// time they open it.
+    private var _mailHiddenZones: Set<String>
+    var mailHiddenZones: Set<String> {
+        get { _mailHiddenZones }
+        set {
+            _mailHiddenZones = newValue
+            defaults.set(newValue.sorted(), forKey: Key.mailHiddenZones)
         }
     }
 

@@ -51,11 +51,16 @@
 // send ceremony never learn pills exist. An external write (a draft restore)
 // re-parses.
 //
-// The keymaps register into the pane's "modal" context: the suggestion set
-// (arrows / Enter / Tab / Esc) mounts ONLY while a list is showing — within a
-// context the latest-registered set wins, so an open list eats Enter before
-// the pane's Enter-to-review sees it. The always-mounted set carries only
-// Backspace, declining whenever there is fragment text to edit normally.
+// The keymaps register into the HOST'S context, read from the environment
+// (`\.keyContext`): "modal" in the pane composer, "thread" in the reader's
+// inline reply. Naming "modal" here was the bug that made a reply's pills
+// undeletable: the reader gates every modal binding, so Backspace, and the
+// whole suggestion set with it, registered where no key would ever look. The
+// suggestion set (arrows / Enter / Tab / Esc) mounts ONLY while a list is
+// showing — within a context the latest-registered set wins, so an open list
+// eats Enter before the pane's Enter-to-review sees it. The always-mounted set
+// carries only Backspace, declining whenever there is fragment text to edit
+// normally.
 
 import SwiftUI
 
@@ -116,6 +121,9 @@ struct RecipientField<F: Hashable>: View {
     /// as a form.
     var inline = false
 
+    /// The key layer this field was mounted in, which is where its keymaps go.
+    @Environment(\.keyContext) private var keyContext
+
     /// Committed recipients — the pills.
     @State private var pills: [String] = []
     /// The live fragment being typed after the pills.
@@ -172,7 +180,7 @@ struct RecipientField<F: Hashable>: View {
                     .modifier(InlineFieldTuck(active: inline))
             }
         }
-        .keyBindings(.modal, fieldBindings)
+        .keyBindings(keyContext, fieldBindings)
         .task(id: searchFragment) { await refresh() }
         .onAppear { parse(text) }
         // External writes only (a draft restore): our own writes round-trip to
@@ -433,7 +441,7 @@ struct RecipientField<F: Hashable>: View {
                 .strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
         // Mounts WITH the list, so these register after everything else and win
         // exactly while there is a list to drive.
-        .keyBindings(.modal, suggestionBindings)
+        .keyBindings(keyContext, suggestionBindings)
     }
 
     // MARK: - keymaps

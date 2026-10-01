@@ -475,6 +475,18 @@ run_suite reading \
   Sources/Passband/Lib/Reading.swift \
   Tests/ReadingTests.swift
 
+# The all-mail list: lenses and the category picker, day headings and the
+# ranking inside them, the poll's head merging into the scrolled pages, and
+# the arrival stamp an older daemon does not send.
+run_suite mail-list \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Format.swift \
+  Sources/Passband/Lib/AsyncMemo.swift \
+  Sources/Passband/Lib/SenderIdentity.swift \
+  Sources/Passband/Lib/MailList.swift \
+  Tests/MailListTests.swift
+
 # The Reading card's logo extraction: which heroes are a mark on a flat field,
 # where the mark is, and which images must be left whole. CoreGraphics only,
 # over banners built pixel by pixel. ImageFill rides along for the colour type

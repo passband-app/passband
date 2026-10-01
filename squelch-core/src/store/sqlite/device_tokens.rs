@@ -70,6 +70,22 @@ const MAX_FAILED_CLAIMS: i64 = 5;
 /// column nobody reads at that resolution.
 const LAST_USED_THROTTLE_SECS: i64 = 60;
 
+/// How long a token's recorded client must have been quiet before a DIFFERENT
+/// platform or version replaces it.
+///
+/// A changed tag is a new metric series, and the header is the token holder's
+/// own text. With no bound, a holder who sends a new version on every request
+/// mints a series per scrape, forever, in a Prometheus this daemon does not
+/// own, and turns every GET into a store write on the way. An hour makes that
+/// 24 series a day per token at worst.
+///
+/// The cost is to the honest case: an app that updates and relaunches shows its
+/// new version up to an hour late, and until then its last-seen stamp stays
+/// where the old version left it (nothing is written under the OLD tag for a
+/// request that named a new one). That is a fine trade for a number an operator
+/// reads in days.
+const CLIENT_CHANGE_THROTTLE_SECS: i64 = 60 * 60;
+
 /// Most (platform, version) pairs [`SqliteStore::client_versions_seen`] hands
 /// back, newest first. Each one is a metric series, and a row keeps the last
 /// version its device ran forever, so without a bound an account that has
@@ -304,10 +320,11 @@ impl SqliteStore {
     /// [`SqliteStore::verify_device_token`] for a request that also said WHICH
     /// APP it is, which is recorded on the token's row when the token is good.
     ///
-    /// The three `client_*` columns move together, under the same once-a-minute
-    /// throttle as `last_used_at`, with one exception: a platform or version
-    /// that DIFFERS from what is stored is written at once. That happens once
-    /// per app update, and waiting a minute to notice it buys nothing.
+    /// The three `client_*` columns move together. The same client again
+    /// refreshes its stamp under the once-a-minute throttle `last_used_at` has;
+    /// a platform or version that DIFFERS from what is stored waits out
+    /// [`CLIENT_CHANGE_THROTTLE_SECS`] first. A token's first-ever tag is
+    /// written at once: there is nothing for it to be replacing.
     ///
     /// `client: None` leaves the stored columns exactly as they are. That is
     /// what keeps them meaning "the app", not "the token": the iOS notification
@@ -359,15 +376,18 @@ impl SqliteStore {
         }
 
         let now = Utc::now();
-        let stale = |at: Option<DateTime<Utc>>| {
-            at.is_none_or(|last| {
-                now.signed_duration_since(last) > Duration::seconds(LAST_USED_THROTTLE_SECS)
-            })
+        let older_than = |at: Option<DateTime<Utc>>, secs: i64| {
+            at.is_none_or(|last| now.signed_duration_since(last) > Duration::seconds(secs))
         };
         let named = client.filter(|c| {
-            stored_platform.as_deref() != Some(c.platform.as_str())
-                || stored_version.as_deref() != Some(c.version())
-                || stale(client_seen_at)
+            let same = stored_platform.as_deref() == Some(c.platform.as_str())
+                && stored_version.as_deref() == Some(c.version());
+            let quiet_for = if same {
+                LAST_USED_THROTTLE_SECS
+            } else {
+                CLIENT_CHANGE_THROTTLE_SECS
+            };
+            older_than(client_seen_at, quiet_for)
         });
         // Scoped by the account the row itself named, not just by id — the
         // standing invariant holds even where the id came from a row this
@@ -387,7 +407,7 @@ impl SqliteStore {
                 ],
             )?;
             token.last_used_at = Some(now);
-        } else if stale(token.last_used_at) {
+        } else if older_than(token.last_used_at, LAST_USED_THROTTLE_SECS) {
             conn.execute(
                 "UPDATE device_tokens SET last_used_at = ?3
                  WHERE id = ?1 AND account_id = ?2",

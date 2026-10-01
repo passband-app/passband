@@ -2157,7 +2157,12 @@ mod tests {
         assert!(!text.contains("squelchd_devices_paired{"));
         // One series per (platform, version), and the value is the stamp
         // itself, not an age: the dashboard does the subtraction.
-        assert!(text.contains("# TYPE squelchd_client_last_seen_timestamp_seconds gauge\n"));
+        assert_eq!(
+            text.matches("# TYPE squelchd_client_last_seen_timestamp_seconds gauge\n")
+                .count(),
+            1,
+            "one family header however many samples follow it"
+        );
         assert!(text.contains(
             "squelchd_client_last_seen_timestamp_seconds{platform=\"macos\",version=\"0.0.12\"} 1790000000\n"
         ));

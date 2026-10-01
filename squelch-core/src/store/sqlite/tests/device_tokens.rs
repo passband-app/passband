@@ -294,6 +294,11 @@ fn client_tag_parses_only_a_known_platform_and_a_numeric_version() {
             good.trim()
         );
     }
+    let oversized = format!("macos/{}", ".".repeat(100_000));
+    assert!(ClientTag::parse(&oversized).is_none());
+    // Padding alone can push a well-formed tag past the bound; that is refused
+    // too, rather than trimmed first, so the bound is on what was sent.
+    assert!(ClientTag::parse(&format!("{}macos/0.0.12", " ".repeat(64))).is_none());
     for bad in [
         "",
         "macos",
@@ -305,6 +310,11 @@ fn client_tag_parses_only_a_known_platform_and_a_numeric_version() {
         "macos/1.2.3.4.5",
         "macos/0.0.12-beta",
         "macos/0..12",
+        "macos/0.0.x",
+        "macos/a.b.c",
+        "macos/0.0.1b",
+        "macos/0.0.-1",
+        "macos/0. 0.1",
         "macos/0.0.123456",
         "macos/0.0.12\",evil=\"1",
         "macos/0.0.12/extra",
@@ -349,22 +359,66 @@ fn a_named_client_is_recorded_and_an_unnamed_request_leaves_it_alone() {
         )
     );
 
-    // An UPDATE is not throttled: the new version lands on the next request.
+    // A DIFFERENT tag does not replace a recently seen one, however stale the
+    // minute throttle says it is: each replacement is a new metric series, and
+    // a holder alternating versions must not mint one per request. Nothing is
+    // written under the old tag either, or the wait would never end.
+    let recorded = || {
+        let (platform, version, _) = raw_client(&store, issued.id);
+        format!("{}/{}", platform.unwrap(), version.unwrap())
+    };
+    let ten_minutes_ago = Utc::now() - Duration::minutes(10);
+    set_client_seen(&store, issued.id, ten_minutes_ago);
+    for changed in ["macos/0.0.13", "ios/0.0.12"] {
+        store
+            .verify_device_token_from(&issued.token, Some(&tag(changed)))
+            .unwrap()
+            .unwrap();
+        assert_eq!(recorded(), "macos/0.0.12", "{changed} must wait");
+        assert_eq!(
+            raw_client(&store, issued.id).2,
+            Some(ten_minutes_ago.to_rfc3339())
+        );
+    }
+
+    // Once the old tag has been quiet for the change window, each half of the
+    // tag is a change on its own: the version, then the platform.
+    for changed in ["macos/0.0.13", "ios/0.0.13"] {
+        set_client_seen(&store, issued.id, Utc::now() - Duration::minutes(61));
+        store
+            .verify_device_token_from(&issued.token, Some(&tag(changed)))
+            .unwrap()
+            .unwrap();
+        assert_eq!(recorded(), changed);
+    }
+
+    // An unnamed request that DOES write (its own stamp has gone stale) moves
+    // `last_used_at` and nothing else: the tag and its time stay as they were.
+    let before = raw_client(&store, issued.id);
+    backdate_last_used(&store, issued.id, Duration::seconds(120));
+    let backdated = raw_token_row(&store, issued.id).1;
+    store.verify_device_token(&issued.token).unwrap().unwrap();
+    assert_ne!(raw_token_row(&store, issued.id).1, backdated);
+    assert_eq!(raw_client(&store, issued.id), before);
+
+    // A named write is still a use of the token: both stamps move together.
+    backdate_last_used(&store, issued.id, Duration::seconds(120));
+    set_client_seen(&store, issued.id, Utc::now() - Duration::seconds(120));
     store
-        .verify_device_token_from(&issued.token, Some(&tag("macos/0.0.13")))
+        .verify_device_token_from(&issued.token, Some(&tag("ios/0.0.13")))
         .unwrap()
         .unwrap();
     assert_eq!(
-        raw_client(&store, issued.id).1.as_deref(),
-        Some("0.0.13"),
-        "a changed version is written inside the throttle window"
+        raw_token_row(&store, issued.id).1,
+        raw_client(&store, issued.id).2,
+        "recording the client also refreshes last_used_at"
     );
 
     // Past the window the stamp moves for an unchanged client too.
     let stale = Utc::now() - Duration::seconds(120);
     set_client_seen(&store, issued.id, stale);
     store
-        .verify_device_token_from(&issued.token, Some(&tag("macos/0.0.13")))
+        .verify_device_token_from(&issued.token, Some(&tag("ios/0.0.13")))
         .unwrap()
         .unwrap();
     assert_ne!(
@@ -388,9 +442,11 @@ fn client_versions_seen_is_one_entry_per_version_newest_first() {
         issued
     };
 
-    // Two Macs on one build fold into one entry carrying the NEWER stamp.
-    pair("laptop", "macos/0.0.12", 30);
+    // Two Macs on one build fold into one entry carrying the NEWER stamp,
+    // whichever row comes back first: the newer one is paired FIRST here, so
+    // a fold that keeps the last row it saw reports 30.
     pair("desktop", "macos/0.0.12", 2);
+    pair("laptop", "macos/0.0.12", 30);
     pair("old laptop", "macos/0.0.9", 400);
     let phone = pair("phone", "ios/0.0.6", 5);
     // Unpairing does not un-happen the connection.
@@ -418,6 +474,21 @@ fn client_versions_seen_is_one_entry_per_version_newest_first() {
             ("macos", "0.0.9", 400)
         ]
     );
+
+    // A platform this build does not know (written by a newer daemon, then a
+    // rollback) is skipped, not exported under a label outside the closed set.
+    let future = pair("headset", "ios/9.9.9", 1);
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE device_tokens SET client_platform = 'visionos' WHERE id = ?1",
+            params![future.id],
+        )
+        .unwrap();
+    let seen = store.client_versions_seen(acct).unwrap();
+    assert_eq!(seen.len(), 3, "{seen:?}");
+    assert!(seen.iter().all(|c| c.version != "9.9.9"));
 
     // Another account's clients are not this account's.
     let other = store.ensure_account("other@example.com").unwrap();
@@ -921,9 +992,11 @@ fn init_adds_both_tables_to_a_preexisting_db() {
 #[test]
 fn a_store_from_before_the_client_columns_still_authenticates() {
     let dir = std::env::temp_dir().join(format!("squelch-client-cols-{}", std::process::id()));
+    // The whole directory, not just the .db: a WAL sidecar left by a crashed
+    // run under a reused pid would be replayed into the fresh file.
+    let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("pre-client-columns.db");
-    let _ = std::fs::remove_file(&path);
 
     let (acct, issued) = {
         let store = SqliteStore::open(&path).unwrap();

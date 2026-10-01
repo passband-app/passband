@@ -474,6 +474,13 @@ pub struct DeviceToken {
 /// the way a session-wide User-Agent would.
 pub const CLIENT_HEADER: &str = "x-passband-client";
 
+/// Longest [`CLIENT_HEADER`] value worth looking at: the longest platform, the
+/// slash, and four runs of five digits with their dots, with slack for
+/// whitespace. The header is read BEFORE the bearer is known to be good, so
+/// anything a stranger sends reaches the parser, and a megabyte of dots must
+/// be refused by its length rather than split into a vector first.
+const MAX_CLIENT_HEADER_LEN: usize = 48;
+
 crate::types::str_enum! {
     /// Which app a client says it is. A CLOSED set, because it ends up as a
     /// metric label (`squelchd_client_last_seen_timestamp_seconds`) and a label
@@ -504,6 +511,9 @@ impl ClientTag {
     /// five digits, or a missing half. A request with an unparseable header
     /// authenticates exactly as it would with none; it just is not recorded.
     pub fn parse(header: &str) -> Option<Self> {
+        if header.len() > MAX_CLIENT_HEADER_LEN {
+            return None;
+        }
         let (platform, version) = header.trim().split_once('/')?;
         let platform = ClientPlatform::parse(platform)?;
         let parts = version.split('.').collect::<Vec<_>>();

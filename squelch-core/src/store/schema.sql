@@ -1264,6 +1264,9 @@ CREATE INDEX IF NOT EXISTS idx_message_opens_token ON message_opens(token);
 -- TOGETHER or not at all. `client_seen_at` is NOT `last_used_at`: the iOS
 -- notification extension presents the same token every time a push lands and
 -- names nothing, so `last_used_at` moves with no app open and this does not.
+-- A CHANGED platform or version only replaces the stored one after it has been
+-- quiet for an hour (`CLIENT_CHANGE_THROTTLE_SECS`), which is what stops a
+-- token holder minting a metric series per request.
 CREATE TABLE IF NOT EXISTS device_tokens (
     id           INTEGER PRIMARY KEY,
     account_id   INTEGER NOT NULL,   -- -> accounts.id

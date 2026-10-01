@@ -36,6 +36,10 @@ struct KeyDispatchTests {
         aChordAndItsBareTwinCoexist()
         aChordNeverFallsBackToItsBareTwin()
         anExactCaseBindingSitsTheFoldOut()
+        aHoldSwallowsItsOwnRepeatsAndHearsTheRelease()
+        aHoldIsReleasedWhateverShiftDid()
+        aCancelledHoldSaysSo()
+        aHoldOutlivesTheSurfaceThatStartedIt()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -186,6 +190,74 @@ struct KeyDispatchTests {
             ran.append(tag)
             return holds
         }
+    }
+
+    // MARK: - holds
+
+    /// The Reading stack's `e`: pressed, held through twenty repeats, let go.
+    /// The binding fires ONCE, the repeats go nowhere (not even to the `e`
+    /// underneath it), and the release arrives exactly once.
+    static func aHoldSwallowsItsOwnRepeatsAndHearsTheRelease() {
+        var releases: [Bool] = []
+        stage([
+            [KeyBinding("e", "under") { ran.append("under") }],
+            [KeyBinding("e", "hold", onRelease: { releases.append($0) }) { ran.append("hold") }],
+        ]) {
+            equal(press("e"), ["hold"], "the key down starts the hold")
+            ran = []
+            _ = KeyRegistry.shared.dispatch(KeyEventLike(key: "e", isRepeat: true), editing: false)
+            equal(ran, [], "an autorepeat of the held key fires nothing")
+            equal(KeyRegistry.shared.release(KeyEventLike(key: "e")), true, "the key-up is taken")
+            equal(releases, [false], "released once, not cancelled")
+            equal(KeyRegistry.shared.release(KeyEventLike(key: "e")), false, "a second key-up is nobody's")
+            ran = []
+            _ = KeyRegistry.shared.dispatch(KeyEventLike(key: "e", isRepeat: true), editing: false)
+            equal(ran, ["hold"], "with no hold, a repeat is an ordinary press again")
+            KeyRegistry.shared.cancelHold()
+        }
+    }
+
+    /// Down as `e`, up as `E` because shift went down in between: still the
+    /// same physical key, still the same hold.
+    static func aHoldIsReleasedWhateverShiftDid() {
+        var releases: [Bool] = []
+        stage([[KeyBinding("e", "hold", onRelease: { releases.append($0) }) {}]]) {
+            _ = press("e")
+            equal(KeyRegistry.shared.release(KeyEventLike(key: "E", shift: true)), true, "folded")
+            equal(releases, [false], "released")
+        }
+    }
+
+    /// The app lost the keyboard mid-hold: the binding is told, as a cancel.
+    static func aCancelledHoldSaysSo() {
+        var releases: [Bool] = []
+        stage([[KeyBinding("e", "hold", onRelease: { releases.append($0) }) {}]]) {
+            _ = press("e")
+            KeyRegistry.shared.cancelHold()
+            equal(releases, [true], "cancelled")
+            equal(KeyRegistry.shared.release(KeyEventLike(key: "e")), false, "and it is over")
+        }
+    }
+
+    /// The reader's plain `e`: it closes the reader on key-down, so its set is
+    /// gone before the first autorepeat. The repeats must STILL go nowhere, not
+    /// to the `e` on the list underneath, until the key comes up.
+    static func aHoldOutlivesTheSurfaceThatStartedIt() {
+        let registry = KeyRegistry.shared
+        let under = registry.register(.thread, box: KeyRegistry.BindingsBox([
+            KeyBinding("e", "list done") { ran.append("list") }
+        ]))
+        stage([[KeyBinding("e", "reader done", onRelease: { _ in }) { ran.append("reader") }]]) {
+            equal(press("e"), ["reader"], "the reader takes the press")
+        }
+        let ctx = registry.pushContext(.thread)
+        ran = []
+        _ = registry.dispatch(KeyEventLike(key: "e", isRepeat: true), editing: false)
+        equal(ran, [], "a repeat after the reader closed reaches nothing")
+        equal(registry.release(KeyEventLike(key: "e")), true, "the key-up ends it")
+        equal(press("e"), ["list"], "the next real press is the list's")
+        registry.popContext(ctx)
+        registry.unregister(under)
     }
 
     /// Register `sets` into the thread context IN ORDER — later sets are asked

@@ -37,6 +37,21 @@ enum PracticeTourStep: Int, CaseIterable, Sendable {
         }
     }
 
+    /// What the learner should click to finish an interaction lesson. The
+    /// guide card stays put and an arrow points here instead, because a card
+    /// that only says "click it" reads as a card with a Skip button.
+    var clickTarget: TourTarget? {
+        switch self {
+        case .openMaya: .maya
+        case .done: .readerDone
+        case .undo: .undoToast
+        case .calendar: .calendar
+        case .openBrightly: .brightly
+        case .rule: .readerRule
+        default: nil
+        }
+    }
+
     var recordCategory: TourTarget? {
         switch self {
         case .calendar: .calendar

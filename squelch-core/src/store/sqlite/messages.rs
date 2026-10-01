@@ -24,7 +24,8 @@ fn bump_unsub_violation_conn(
     let row: Option<String> = conn
         .query_row(
             "SELECT requested_at FROM unsubscribes
-             WHERE account_id = ?1 AND sender_addr = ?2 AND resolution IS NULL",
+             WHERE account_id = ?1 AND sender_addr = ?2 AND resolution IS NULL
+               AND (status IS NULL OR status IN ('done', 'opened'))",
             params![account_id, sender],
             |r| r.get(0),
         )
@@ -37,7 +38,8 @@ fn bump_unsub_violation_conn(
         conn.execute(
             "UPDATE unsubscribes
              SET violation_count = violation_count + 1, last_violation_at = ?3
-             WHERE account_id = ?1 AND sender_addr = ?2 AND resolution IS NULL",
+             WHERE account_id = ?1 AND sender_addr = ?2 AND resolution IS NULL
+               AND (status IS NULL OR status IN ('done', 'opened'))",
             params![account_id, sender, received_at.to_rfc3339()],
         )?;
     }

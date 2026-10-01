@@ -76,6 +76,7 @@ enum ActionKind { Reply, Pay, Decide, Attend, Review, Other }
 struct MessageDecision {
     kinds: Vec<EmailKind>,                 // nonempty, unique; mixed content allowed
     destinations: Vec<MessageDestination>, // unique; FYE belongs to thread attention
+    reading_kind: Option<ReadingKind>,     // content | promotion on Reading mail; Reading sorts content first
     summary: String,
     reason: String,
     auth: AuthAssessment,
@@ -303,7 +304,7 @@ Introduce a versioned human API and explicitly advertise its version/capabilitie
 
 Each request retains the existing human authentication/account boundary. A notification target carries account identity plus stable message ID and optionally thread ID. The client resolves the account, opens that exact message, and records only messages actually displayed. Retain HTML sanitization, attachment controls, and sensitive-content cache handling; remove the old auth-tap routing to a generic Auth page.
 
-`AttentionItem` contains item ID/revision, thread ID, representative message ID, kinds, combined destinations, summary, actions/state, relevant activity timestamp, rank total and explanation. `ReadingItem` contains message ID, thread ID, sender, summary and actual received timestamp. No required legacy `tier` field. All clients preserve server FYE order, including keyboard navigation and prefetched reading queues.
+`AttentionItem` contains item ID/revision, thread ID, representative message ID, kinds, combined destinations, summary, actions/state, relevant activity timestamp, rank total and explanation. `ReadingItem` contains message ID, thread ID, sender, summary, actual received timestamp and `reading_kind` (content or promotion; clients fall back to editorial-and-not-promotional kinds when it is null, and sort content first). No required legacy `tier` field. All clients preserve server FYE order, including keyboard navigation and prefetched reading queues.
 
 Remove `Lib/Ranking.swift` scoring and the competing `Prefs.rankWeight` slider. Replace `Newsletters.derive` and `NewsletterFeed` noise-tier/marketing/robot/repetition heuristics with the Reading endpoint. Sender-card grouping may remain as a pure presentation step. Rename caches/views/onboarding/accessibility copy consistently. The existing `/client/marketing` extraction endpoint is not simply renamed into Reading: promotion facts and destination membership are different contracts.
 

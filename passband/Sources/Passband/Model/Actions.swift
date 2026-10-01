@@ -73,6 +73,7 @@ enum Actions {
         do {
             try await APIClient.shared.setStatus(u.id, .done)
             Analytics.capture("email_done")
+            Discovery.note(.emailDone)
             // The message leaves the working set: drop its remembered heights and
             // unpin its images. The bytes stay on disk — the undo below is five
             // seconds away and re-pins them.
@@ -118,6 +119,7 @@ enum Actions {
         do {
             let result = try await APIClient.shared.setReminder(messageId, at: date)
             Analytics.capture("email_remind")
+            Discovery.note(.reminderSet)
             // Off the mail pages too: `removeFromBands` only covers the sitrep,
             // and the row is done from this moment on either way.
             store.removeFromMail(messageId)
@@ -265,5 +267,6 @@ enum Actions {
                 want: "", disposition: .squelch,
                 source_message_id: sourceMessageId, sweep: true))
         Analytics.capture("block_rule_created")
+        Discovery.note(.ruleSaved)
     }
 }

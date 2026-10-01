@@ -461,6 +461,7 @@ struct SearchView: View {
         // land here — the arrow-and-Enter path and a plain click on a row — so
         // the ring is written in one place.
         remember()
+        Discovery.note(.searchHitOpened)
         // openThread itself collapses `expanded` — every path into the reader
         // must, so the collapse lives there rather than here.
         store.openThread(hit.thread_id)

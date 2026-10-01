@@ -177,7 +177,10 @@ struct AuthCodeModal: View {
     private func copy() {
         guard let code, !code.isEmpty else { return }
         // Copying is the human acting on the code — stop the auto-dismiss clock.
-        if Clip.copy(code, flashing: $copied) { paused = true }
+        if Clip.copy(code, flashing: $copied) {
+            paused = true
+            Discovery.note(.codeCopied)
+        }
     }
 
     private func runTimer() async {

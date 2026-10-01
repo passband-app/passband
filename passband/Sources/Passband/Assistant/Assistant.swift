@@ -785,6 +785,7 @@ final class AssistantSession {
             Analytics.capture(
                 "assistant_asked",
                 ["model": model.shortLabel.lowercased(), "transport": transport.rawValue])
+            Discovery.note(.assistantAsked)
         }
 
         rollbackMark = history.count

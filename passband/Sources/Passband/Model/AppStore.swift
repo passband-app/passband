@@ -2121,6 +2121,7 @@ final class AppStore {
             // knows nothing about it and must not be refreshed on its behalf.
             guard e == epoch else { return }
             Analytics.capture("shipment_cleared")
+            Discovery.note(.shipmentCleared)
             pushToast("cleared \(Self.shipmentLabel(row)) · it returns if there's news", .info)
             await refreshZones(force: true)
         } catch {

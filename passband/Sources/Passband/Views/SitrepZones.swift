@@ -761,7 +761,7 @@ private struct ReadingCard: View {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(
                         sender.isContent
-                            ? Palette.readingContent.opacity(hovering ? 1 : 0.7)
+                            ? Palette.readingContent.opacity(hovering ? 1 : 0.8)
                             : Palette.hairline.opacity(hovering ? 0.85 : 0.5))
             )
             .overlay(

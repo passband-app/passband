@@ -25,16 +25,27 @@ struct ReadingSender: Identifiable, Hashable, Sendable {
     /// The items triage judged something to read (article, essay, post)
     /// rather than a promotion.
     var contentIds: Set<Int> = []
+    /// Content older than this (epoch seconds) has had its turn at the top and
+    /// files back in by date like everything else. Stamped by `derive` so the
+    /// answer is fixed for one derivation, and `prune` keeps it.
+    var contentFreshSince: Double = 0
 
-    /// Content cards sort ahead of the rest and get their own tint. Taken from
-    /// the newest message, like `summary`, so the card's placement and the
-    /// summary it shows always agree, and `prune` stays right for free.
-    var isContent: Bool { items.first.map { contentIds.contains($0.id) } ?? false }
+    /// Content cards sort ahead of the rest and get their own tint, for
+    /// `Reading.contentWindow` after they arrive. Taken from the newest message,
+    /// like `summary`, so the card's placement and the summary it shows always
+    /// agree, and `prune` stays right for free.
+    var isContent: Bool {
+        guard let newest = items.first, contentIds.contains(newest.id) else { return false }
+        return latest >= contentFreshSince
+    }
 
     var id: String { address }
 }
 
 enum Reading {
+    /// How long content keeps its place at the top of the board.
+    static let contentWindow: TimeInterval = 7 * 24 * 3600
+
     /// The adapter carries the server's real received timestamp here.
     private static func dateOf(_ update: AttentionUpdate) -> Double {
         Fmt.date(update.surfaced_at)?.timeIntervalSince1970 ?? 0
@@ -80,11 +91,13 @@ enum Reading {
     /// `content` holds the ids triage judged to be content rather than
     /// promotion; those senders sort first, newest-first within each half, and
     /// the cap applies after, so a busy week of promotions never pushes the
-    /// reading off the board.
+    /// reading off the board. Only for `contentWindow`: an unread essay from
+    /// last month should not sit above today's mail forever.
     static func derive(
         updates: [AttentionUpdate], rules: [SenderRule], content: Set<Int> = [],
-        limit: Int = 24
+        now: Date = Date(), limit: Int = 24
     ) -> [ReadingSender] {
+        let freshSince = now.timeIntervalSince1970 - contentWindow
         let groups = Dictionary(grouping: updates) { SenderID.address($0.sender) }
         return groups.compactMap { address, messages -> ReadingSender? in
             let ordered = messages.sorted {
@@ -97,7 +110,8 @@ enum Reading {
                 summary: latest.one_line, latest: dateOf(latest),
                 latestThreadId: latest.thread_id, items: ordered,
                 rule: rule(for: address, in: rules),
-                contentIds: content.intersection(ordered.map(\.id)))
+                contentIds: content.intersection(ordered.map(\.id)),
+                contentFreshSince: freshSince)
         }
         .sorted(by: boardOrder)
         .prefix(limit).map { $0 }

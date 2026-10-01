@@ -1204,6 +1204,8 @@ mod tests {
     }
     #[test]
     fn reading_kind_is_offered_and_defaults_on_stored_rows() {
+        // Product updates read like articles; the prompt must say they are not.
+        assert!(SYSTEM.contains("A company writing about its own product is promotion"));
         let schema = decision_schema();
         assert_eq!(
             schema["properties"]["reading_kind"],

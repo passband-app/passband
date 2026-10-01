@@ -25,30 +25,32 @@ struct ReadingTests {
             "Prune re-sorts the way the next poll will")
         precondition(Reading.derive(updates: [], rules: []).isEmpty, "Empty canonical membership clears cards")
 
+        // Pinned so every essay below is inside the content window.
+        let pinned = Fmt.date("2026-09-11T00:00:00Z")!
         // Content (articles, essays, posts) sorts ahead of promotions, newest
         // first within each half, and the cap applies after the split.
         let promoNew = row(10, sender: "deals@store.com", reason: "Sale", date: "2026-09-20T00:00:00Z")
         let essayOld = row(11, sender: "writer@substack.com", reason: "Essay", date: "2026-09-10T00:00:00Z")
         let postMid = row(12, sender: "blog@lab.dev", reason: "Post", date: "2026-09-15T00:00:00Z")
         let split = Reading.derive(
-            updates: [promoNew, essayOld, postMid], rules: [], content: [11, 12])
+            updates: [promoNew, essayOld, postMid], rules: [], content: [11, 12], now: pinned)
         precondition(split.map(\.address) == ["blog@lab.dev", "writer@substack.com", "deals@store.com"],
             "Content first, newest-first within each half")
         precondition(split.map(\.isContent) == [true, true, false])
         let capped = Reading.derive(
-            updates: [promoNew, essayOld], rules: [], content: [11], limit: 1)
+            updates: [promoNew, essayOld], rules: [], content: [11], now: pinned, limit: 1)
         precondition(capped.map(\.address) == ["writer@substack.com"], "A promotion never pushes content off the board")
 
         // A sender is placed by its NEWEST message, like its summary, and prune
         // re-derives that when the newest is done.
         let writerPromo = row(13, sender: "writer@substack.com", reason: "Merch", date: "2026-09-21T00:00:00Z")
-        let mixed = Reading.derive(updates: [essayOld, writerPromo], rules: [], content: [11])
+        let mixed = Reading.derive(updates: [essayOld, writerPromo], rules: [], content: [11], now: pinned)
         precondition(!mixed[0].isContent, "Newest is a promotion")
         precondition(Reading.prune(mixed, resolved: [13])[0].isContent, "Done promo uncovers the essay")
-        let board = Reading.derive(updates: [promoNew, essayOld, writerPromo], rules: [], content: [11])
+        let board = Reading.derive(updates: [promoNew, essayOld, writerPromo], rules: [], content: [11], now: pinned)
         precondition(board.map(\.address) == ["writer@substack.com", "deals@store.com"], "Both promotions: newest first")
         let postOld = row(14, sender: "blog@lab.dev", reason: "Post", date: "2026-09-05T00:00:00Z")
-        let before = Reading.derive(updates: [promoNew, postOld, essayOld, writerPromo], rules: [], content: [11, 14])
+        let before = Reading.derive(updates: [promoNew, postOld, essayOld, writerPromo], rules: [], content: [11, 14], now: pinned)
         precondition(before.map(\.address) == ["blog@lab.dev", "writer@substack.com", "deals@store.com"])
         let uncovered = Reading.prune(before, resolved: [13])
         precondition(uncovered.map(\.address) == ["writer@substack.com", "blog@lab.dev", "deals@store.com"],
@@ -73,6 +75,16 @@ struct ReadingTests {
         precondition(!demotedByKind.isReadingContent)
         precondition(legacyEditorial.isReadingContent, "Legacy editorial reads as content")
         precondition(!legacyMixed.isReadingContent, "Legacy mixed reads as promotion")
-        print("ok: 18 canonical Reading checks passed")
+        // Content keeps the top for a week, then files back in by date.
+        let now = Fmt.date("2026-09-30T00:00:00Z")!
+        let staleEssay = row(20, sender: "old@essays.com", reason: "Essay", date: "2026-09-01T00:00:00Z")
+        let freshPromo = row(21, sender: "deals@store.com", reason: "Sale", date: "2026-09-29T00:00:00Z")
+        let weekEssay = row(22, sender: "new@essays.com", reason: "Essay", date: "2026-09-24T00:00:00Z")
+        let aged = Reading.derive(
+            updates: [staleEssay, freshPromo, weekEssay], rules: [], content: [20, 22], now: now)
+        precondition(aged.map(\.address) == ["new@essays.com", "deals@store.com", "old@essays.com"],
+            "Fresh content first, stale content sorts by date")
+        precondition(aged.map(\.isContent) == [true, false, false], "Stale content loses the tint too")
+        print("ok: 20 canonical Reading checks passed")
     }
 }

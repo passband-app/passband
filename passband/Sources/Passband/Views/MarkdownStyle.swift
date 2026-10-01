@@ -43,7 +43,17 @@ enum MarkdownStyle {
         static let headingSizes: (CGFloat, CGFloat, CGFloat) = (22, 19.5, 17.5)
     #endif
 
-    static let baseFont = PlatformFont.systemFont(ofSize: baseSize)
+    // THE LADDER ABOVE IS WRITTEN IN COMPACT and resolved through `Typo.size`
+    // each time a font is built, so the editor's type follows the density
+    // setting like every other piece of interface text. Which is why the fonts
+    // below are COMPUTED: a `static let` font froze at whichever density was
+    // live the first time anything typed into a composer, and an NSTextView
+    // never re-reads it on its own. The editor's `updateNSView` notices the
+    // flip and re-runs the pass over the text it already holds (see
+    // `HighlightingTextView.applyDensity`). The phone is pinned to compact, so
+    // there this is the identity.
+
+    static var baseFont: PlatformFont { PlatformFont.systemFont(ofSize: Typo.size(baseSize)) }
 
     static var base: [NSAttributedString.Key: Any] {
         [
@@ -64,14 +74,16 @@ enum MarkdownStyle {
         case .code, .codeBlock:
             storage.addAttributes(
                 [
-                    .font: PlatformFont.monospacedSystemFont(ofSize: codeSize, weight: .regular),
+                    .font: PlatformFont.monospacedSystemFont(
+                        ofSize: Typo.size(codeSize), weight: .regular),
                     .backgroundColor: PlatformColor(Palette.hairline).withAlphaComponent(0.5),
                 ], range: range)
         case .heading(let level):
             let size =
                 level == 1 ? headingSizes.0 : (level == 2 ? headingSizes.1 : headingSizes.2)
             storage.addAttribute(
-                .font, value: PlatformFont.systemFont(ofSize: size, weight: .semibold), range: range
+                .font, value: PlatformFont.systemFont(ofSize: Typo.size(size), weight: .semibold),
+                range: range
             )
         case .listMarker, .blockquoteMarker:
             storage.addAttribute(.foregroundColor, value: PlatformColor(Palette.accent), range: range)
@@ -116,8 +128,9 @@ enum MarkdownStyle {
     private static func addTrait(
         _ trait: Trait, _ storage: NSMutableAttributedString, _ range: NSRange
     ) {
+        let fallback = baseFont
         storage.enumerateAttribute(.font, in: range) { value, sub, _ in
-            let current = (value as? PlatformFont) ?? baseFont
+            let current = (value as? PlatformFont) ?? fallback
             storage.addAttribute(.font, value: fontAdding(trait, to: current), range: sub)
         }
     }

@@ -141,7 +141,7 @@ struct ComposePane: View {
     /// Page one: the fields, the editor, and the footer that sends them.
     @ViewBuilder
     private func composerPage(_ compose: ComposeState) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: Space.s12) {
             editPane(compose)
             // A held send came back blocked: the verdict, and with it
             // the override in the footer.
@@ -152,8 +152,8 @@ struct ComposePane: View {
                 Text(error).font(Typo.micro).foregroundStyle(Palette.danger)
             }
         }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 14)
+        .padding(.horizontal, Space.scaled(18))
+        .padding(.vertical, Space.s14)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
         // NO FOOTER ON A PHONE, unless the guard blocked a send. Send
@@ -170,7 +170,7 @@ struct ComposePane: View {
 
     private func header(_ compose: ComposeState) -> some View {
         let onList = compose.page == .drafts
-        return HStack(alignment: .firstTextBaseline, spacing: 8) {
+        return HStack(alignment: .firstTextBaseline, spacing: Space.s8) {
             // THE SERIF MOMENT. A sheet has no chrome around it — it IS the
             // screen — so the phone spends Newsreader here, once, on the word
             // that names what you are doing.
@@ -244,8 +244,8 @@ struct ComposePane: View {
                 }
             #endif
         }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 13)
+        .padding(.horizontal, Space.scaled(18))
+        .padding(.vertical, Space.scaled(13))
         .overlay(alignment: .bottom) { Hairline() }
     }
 
@@ -260,8 +260,8 @@ struct ComposePane: View {
                         ? "arrow.down.right.and.arrow.up.left"
                         : "arrow.up.left.and.arrow.down.right"
                 )
-                .font(.system(size: 11, weight: .semibold))
-                .frame(width: 22, height: 22)
+                .font(Typo.ui(11, weight: .semibold))
+                .frame(width: Space.scaled(22), height: Space.scaled(22))
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -293,9 +293,9 @@ struct ComposePane: View {
             Button {
                 patch { $0.page = onList ? .compose : .drafts }
             } label: {
-                HStack(spacing: 3) {
+                HStack(spacing: Space.scaled(3)) {
                     Image(systemName: onList ? "arrow.uturn.backward" : "square.stack")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(Typo.ui(9, weight: .semibold))
                     Text(onList ? "back to \(kindLabel(compose))" : Self.draftsLabel(count))
                 }
                 .font(Typo.micro)
@@ -358,7 +358,7 @@ struct ComposePane: View {
     @ViewBuilder
     private func forwardedQuote(_ compose: ComposeState) -> some View {
         if compose.forwardOfMessageId != nil, let message = compose.forwardedMessage {
-            VStack(alignment: .leading, spacing: 9) {
+            VStack(alignment: .leading, spacing: Space.scaled(9)) {
                 // The composer's mirror of the wire's
                 // "---------- Forwarded message ---------" banner: the same
                 // sentence the outgoing mail carries, said in the house's micro
@@ -373,7 +373,7 @@ struct ComposePane: View {
                 // off `forwardedSubject` rather than off the message, because
                 // that is the value the outgoing `Fwd: …` title was built from
                 // and the two must not read differently.
-                VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: Space.scaled(3)) {
                     ComposeSummaryRow("from", message.senderString)
                     ComposeSummaryRow("date", Fmt.dateTime(message.received_at))
                     ComposeSummaryRow("subject", compose.forwardedSubject ?? "(no subject)")
@@ -404,7 +404,7 @@ struct ComposePane: View {
             // rail, minus the only thing that rail does — this one never moves
             // and never changes color, because it marks a kind of content
             // rather than where you are.
-            .padding(.leading, 12)
+            .padding(.leading, Space.s12)
             .overlay(alignment: .leading) {
                 RoundedRectangle(cornerRadius: 1, style: .continuous)
                     .fill(Palette.hairlineStrong)
@@ -418,7 +418,7 @@ struct ComposePane: View {
         // hints on the left AND the same verbs as buttons on the right, and at
         // half a window wide the hints lost the fight for room and wrapped
         // mid-word. One statement per verb: the button, with its key beside it.
-        HStack(spacing: 8) {
+        HStack(spacing: Space.s8) {
             // THE MESSAGE OPTIONS, DESKTOP ONLY. The phone renders this bar
             // only for a blocked send (see the call site), and its attach
             // chip lives in the header beside send instead: the tracker switch
@@ -462,15 +462,15 @@ struct ComposePane: View {
                     .tint(Palette.accent)
             #endif
         }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 12)
+        .padding(.horizontal, Space.scaled(18))
+        .padding(.vertical, Space.s12)
         .overlay(alignment: .top) { Hairline() }
     }
 
     /// A footer verb with its key beside it, dimmer, in the key chip's mono.
     /// The key half is Mac only: a phone has no Esc to promise.
     private func keyed(_ verb: String, _ key: String) -> some View {
-        HStack(spacing: 6) {
+        HStack(spacing: Space.s6) {
             Text(verb)
             #if os(macOS)
                 Text(key)
@@ -490,7 +490,7 @@ struct ComposePane: View {
     /// markdown LIVE with the markers kept visible, so the syntax teaches itself
     /// the first time it is typed.
     private func editPane(_ compose: ComposeState) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: Space.s12) {
             VStack(alignment: .leading, spacing: 0) {
                 recipientRow(compose)
                 Hairline()
@@ -523,12 +523,12 @@ struct ComposePane: View {
                 // The text view's own inset plus its line-fragment padding make
                 // up the rest, so the body's left edge is the labels' edge.
                 .padding(.horizontal, InlineFieldMetrics.inset - 7)
-                .padding(.vertical, 8)
+                .padding(.vertical, Space.s8)
                 // The files, under the editor where a mail client puts them,
                 // still on the card. Draws nothing when there are none.
                 AttachmentTray(slot: .compose)
                     .padding(.horizontal, InlineFieldMetrics.inset)
-                    .padding(.bottom, 10)
+                    .padding(.bottom, Space.s10)
             }
             .frame(maxHeight: .infinity)
             // Near-opaque, like every input well: a translucent card over a
@@ -593,8 +593,8 @@ struct ComposePane: View {
         Button {
             groupPickerOpen = true
         } label: {
-            HStack(spacing: 3) {
-                Image(systemName: "person.2").font(.system(size: 9, weight: .semibold))
+            HStack(spacing: Space.scaled(3)) {
+                Image(systemName: "person.2").font(Typo.ui(9, weight: .semibold))
                 Text("groups")
             }
             .font(Typo.micro)
@@ -849,8 +849,8 @@ struct GuardVerdictBox: View {
     let kinds: [String]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 4) {
+        VStack(alignment: .leading, spacing: Space.s4) {
+            HStack(spacing: Space.s4) {
                 Text("outbound guard blocked · matched (redacted):")
                     .font(Typo.micro)
                 Text(kinds.joined(separator: ", "))
@@ -861,7 +861,7 @@ struct GuardVerdictBox: View {
                 .font(Typo.micro)
                 .foregroundStyle(Palette.inkFaint)
         }
-        .padding(10)
+        .padding(Space.s10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -885,12 +885,12 @@ struct ComposeSummaryRow: View {
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .top, spacing: Space.s10) {
             Text(label)
                 .font(Typo.micro)
                 .foregroundStyle(Palette.inkFaintest)
                 .textCase(.uppercase)
-                .frame(width: 60, alignment: .leading)
+                .frame(width: Space.scaled(60), alignment: .leading)
             Text(value)
                 .font(Typo.mono(12))
                 .foregroundStyle(Palette.ink)

@@ -126,8 +126,8 @@ struct EmailsView: View {
             // asked at row 40 as readily as at row 1.
             if mode == .spam {
                 SpamNotice()
-                    .padding(.horizontal, 18)
-                    .padding(.top, 10)
+                    .padding(.horizontal, Space.scaled(18))
+                    .padding(.top, Space.s10)
             }
             #if os(macOS)
                 desktopList
@@ -253,7 +253,7 @@ struct EmailsView: View {
     /// under it, or the first sent mail would read as one more scheduled one.
     @ViewBuilder private var scheduledGroup: some View {
         if !scheduled.isEmpty {
-            SentSectionLabel("scheduled", top: 2)
+            SentSectionLabel("scheduled", top: Space.s2)
             ForEach(Array(scheduled.enumerated()), id: \.element.id) { i, row in
                 ScheduledRow(
                     row: row,
@@ -299,7 +299,7 @@ struct EmailsView: View {
                     }
                 #endif
             }
-            SentSectionLabel("sent", top: 14)
+            SentSectionLabel("sent", top: Space.s14)
         }
     }
 
@@ -375,8 +375,8 @@ struct EmailsView: View {
                             }
                         }
                     }
-                    .padding(.horizontal, 18)
-                    .padding(.vertical, 10)
+                    .padding(.horizontal, Space.scaled(18))
+                    .padding(.vertical, Space.s10)
                 }
                 .onChange(of: index) { _, i in
                     // Follow the KEYBOARD selection only. Both pages key their
@@ -470,11 +470,11 @@ struct EmailsView: View {
             @Bindable var store = store
             let noise = store.stats?.tier_counts["noise"] ?? 0
 
-            return HStack(spacing: 10) {
+            return HStack(spacing: Space.s10) {
                 GlassSegmented(
                     options: MailMode.segments(showingSpam: mode == .spam).map { ($0, $0.label) },
                     selection: $store.mailMode)
-                Spacer(minLength: 8)
+                Spacer(minLength: Space.s8)
                 if let err = store.refreshError {
                     Text("offline")
                         .font(Typo.micro).foregroundStyle(Palette.warn)
@@ -490,7 +490,7 @@ struct EmailsView: View {
                     // inbox when there is no noise count to displace, so an
                     // empty noise bin does not hide the folder behind it.
                     Button { store.mailMode = .spam } label: {
-                        HStack(spacing: 6) {
+                        HStack(spacing: Space.s6) {
                             if let spam = spamDoorCount {
                                 Text("\(spam)")
                                     .font(Typo.num(12, weight: .bold))
@@ -506,7 +506,7 @@ struct EmailsView: View {
                     // Mac — just without the word "signal" beside it, because the
                     // list underneath is already the signal.
                     Button { store.mailMode = .noise } label: {
-                        HStack(spacing: 6) {
+                        HStack(spacing: Space.s6) {
                             Text("\(noise)")
                                 .font(Typo.num(12, weight: .bold))
                                 .foregroundStyle(Palette.inkFaint)
@@ -517,8 +517,8 @@ struct EmailsView: View {
                     .buttonStyle(.plain)
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.bottom, 10)
+            .padding(.horizontal, Space.s16)
+            .padding(.bottom, Space.s10)
         }
     #endif
 
@@ -528,7 +528,7 @@ struct EmailsView: View {
         let signal = store.sitrep.standing.count + store.sitrep.new.count + store.sitrep.open.count
         let noise = store.stats?.tier_counts["noise"] ?? 0
 
-        return HStack(spacing: 10) {
+        return HStack(spacing: Space.s10) {
             // NO MODE LABEL BESIDE THE WORDMARK. It said what the segmented
             // control an inch to its right already says, and it said it in a
             // string whose width changed with the answer — so every switch
@@ -541,14 +541,14 @@ struct EmailsView: View {
             GlassSegmented(
                 options: MailMode.segments(showingSpam: mode == .spam).map { ($0, $0.label) },
                 selection: $store.mailMode)
-            Spacer(minLength: 12)
-            HStack(spacing: 8) {
+            Spacer(minLength: Space.s12)
+            HStack(spacing: Space.s8) {
                 Text("\(signal)").font(Typo.num(12, weight: .bold)).foregroundStyle(Palette.accent)
                 Text("signal").font(Typo.micro).foregroundStyle(Palette.inkFaint)
                 // The count is the door to the page it counts. A jump, not a
                 // toggle: `n` and the segments are the way back.
                 Button { store.mailMode = .noise } label: {
-                    HStack(spacing: 8) {
+                    HStack(spacing: Space.s8) {
                         Text("\(noise)")
                             .font(Typo.num(12, weight: .bold))
                             .foregroundStyle(mode == .noise ? Palette.accent : Palette.inkFaint)
@@ -573,7 +573,7 @@ struct EmailsView: View {
                 // of the three lists you live in.
                 if store.spamDoorVisible {
                     Button { store.mailMode = .spam } label: {
-                        HStack(spacing: 8) {
+                        HStack(spacing: Space.s8) {
                             // THE NUMBER ONLY WHEN THERE IS ONE. The daemon does
                             // not track this folder, so before the first visit
                             // there is no count to show and a "0" would be a
@@ -609,7 +609,7 @@ struct EmailsView: View {
             if mode == .inbox {
                 ChromeChip(
                     icon: reminders ? "bell.fill" : "bell",
-                    font: .system(size: 12),
+                    font: Typo.ui(12),
                     tone: reminders ? Palette.accent : Palette.inkFaint,
                     help: "mail with pending reminders (h sets one)"
                 ) { store.reminderFilter.toggle() }
@@ -617,13 +617,13 @@ struct EmailsView: View {
             }
             RetriageButton()
             ChromeChip(
-                text: "peer-review", font: .system(size: 12),
+                text: "peer-review", font: Typo.ui(12),
                 help: "the process page: verify how your mail was sorted"
             ) { store.setView(.process) }
         }
         // These metrics must match the sitrep masthead's: every page's bar ends
         // on the line the rail's top edge is cut to.
-        .padding(.horizontal, 24)
+        .padding(.horizontal, Space.s24)
         .frame(height: TopBar.height)
         .overlay(alignment: .bottom) { Hairline() }
     }
@@ -801,9 +801,9 @@ private struct SentSectionLabel: View {
             .foregroundStyle(Palette.inkFaint)
             .textCase(.uppercase)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 11)
+            .padding(.horizontal, Space.scaled(11))
             .padding(.top, top)
-            .padding(.bottom, 5)
+            .padding(.bottom, Space.scaled(5))
     }
 }
 
@@ -817,8 +817,8 @@ struct BandNote: View {
             .font(Typo.rowSub)
             .foregroundStyle(Palette.inkFaintest)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 18)
+            .padding(.horizontal, Space.s12)
+            .padding(.vertical, Space.scaled(18))
     }
 }
 

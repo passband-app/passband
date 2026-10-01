@@ -1977,6 +1977,11 @@ struct AgentFeedItem: Codable, Sendable {
     var message_id: Int
     var thread_id: String
     var from_addr: String
+    /// The `From:` display name. ABSENT from a daemon older than the feed's
+    /// own `from_name`, and then the card names the sender from the address,
+    /// which is how a mailer with a hashed local-part came to be titled with
+    /// 32 hex characters.
+    var from_name: String?
     var subject: String
     var received_at: String
     var decision: AgentMessageDecision
@@ -1993,6 +1998,7 @@ struct AgentFeedItem: Codable, Sendable {
             one_line: attention.summary.isEmpty ? decision.summary : attention.summary,
             reason: decision.reason,
             deadline: attention.factors.attention_at?.value,
+            from_name: from_name,
             subject: subject, status: .new, surfaced_at: received_at)
     }
 

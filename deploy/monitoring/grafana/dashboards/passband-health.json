@@ -1913,7 +1913,7 @@
     "type": "prometheus",
     "uid": "prometheus"
    },
-   "description": "Who is still using the thing, read off the daemon's own request counters (2xx only, so a scanner or a revoked token cannot make a dead tenant look alive). Last action is the newest successful WRITE on the client door: opening a message, dismissing a card, drafting, sending, a rule. Push registration and pairing are left out because the app does those by itself. App last seen is ANY client request, which includes the background polling an open app does on its own, so it means 'the app is running somewhere', not 'a person is looking at it'. A tenant whose app is seen but whose last action is a week old has it open in a corner and is not reading mail in it. 'now' means inside the last ten minutes, which is also the resolution of every other value in those two columns, and the horizon is Prometheus's 30 days of retention: older than that reads as 'none in 30d', and so does a tenant that has never done the thing at all.",
+   "description": "Who is still using the thing. Last action, App seen and the two Actions columns are read off the daemon's own request counters (2xx only, so a scanner or a revoked token cannot make a dead tenant look alive). Last action is the newest successful WRITE on the client door: opening a message, dismissing a card, drafting, sending, a rule. Push registration and pairing are left out because the app does those by itself. App seen is ANY client request, which includes the background polling an open app does on its own and the iOS notification extension fetching an event when a push lands, so it means 'something holding a token is running', not 'a person is looking at it'. A tenant whose app is seen but whose last action is a week old has it open in a corner and is not reading mail in it. 'now' means inside the last ten minutes, which is also the resolution of every other value in those two columns, and the horizon is Prometheus's 30 days of retention: older than that reads as 'none in 30d', and so does a tenant that has never done the thing at all. Mac and iOS are the newest app version of each platform to have connected and how long ago it last did (squelchd_client_last_seen_timestamp_seconds, kept in the tenant's own store, so it has no 30 day horizon and is exact to the minute). The app proper only: the notification extension does not count. A '-' there means the daemon predates the metric or the app predates the X-Passband-Client header, which is to say 'old', not 'absent'.",
    "gridPos": {
     "h": 9,
     "w": 24,
@@ -1975,6 +1975,28 @@
      "range": false,
      "instant": true,
      "format": "table"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "time() - topk by (tenant) (1, max by (tenant, mac) (label_replace(squelchd_client_last_seen_timestamp_seconds{platform=\"macos\"}, \"mac\", \"$1\", \"version\", \"(.+)\")))",
+     "refId": "F",
+     "range": false,
+     "instant": true,
+     "format": "table"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "time() - topk by (tenant) (1, max by (tenant, ios) (label_replace(squelchd_client_last_seen_timestamp_seconds{platform=\"ios\"}, \"ios\", \"$1\", \"version\", \"(.+)\")))",
+     "refId": "G",
+     "range": false,
+     "instant": true,
+     "format": "table"
     }
    ],
    "transformations": [
@@ -1994,12 +2016,18 @@
        "Time 2": true,
        "Time 3": true,
        "Time 4": true,
-       "Time 5": true
+       "Time 5": true,
+       "Time 6": true,
+       "Time 7": true
       },
       "renameByName": {
        "tenant": "Tenant",
        "Value #A": "Last action (ago)",
        "Value #B": "App seen (ago)",
+       "mac": "Mac",
+       "Value #F": "Mac seen (ago)",
+       "ios": "iOS",
+       "Value #G": "iOS seen (ago)",
        "Value #C": "Actions (24h)",
        "Value #D": "Actions (7d)",
        "Value #E": "Devices paired"
@@ -2008,9 +2036,13 @@
        "tenant": 0,
        "Value #A": 1,
        "Value #B": 2,
-       "Value #C": 3,
-       "Value #D": 4,
-       "Value #E": 5
+       "mac": 3,
+       "Value #F": 4,
+       "ios": 5,
+       "Value #G": 6,
+       "Value #C": 7,
+       "Value #D": 8,
+       "Value #E": 9
       }
      }
     }
@@ -2236,6 +2268,130 @@
        {
         "id": "decimals",
         "value": 0
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Mac"
+      },
+      "properties": [
+       {
+        "id": "noValue",
+        "value": "-"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "iOS"
+      },
+      "properties": [
+       {
+        "id": "noValue",
+        "value": "-"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Mac seen (ago)"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "s"
+       },
+       {
+        "id": "decimals",
+        "value": 1
+       },
+       {
+        "id": "thresholds",
+        "value": {
+         "mode": "absolute",
+         "steps": [
+          {
+           "color": "green",
+           "value": null
+          },
+          {
+           "color": "yellow",
+           "value": 259200
+          },
+          {
+           "color": "orange",
+           "value": 604800
+          },
+          {
+           "color": "red",
+           "value": 1209600
+          }
+         ]
+        }
+       },
+       {
+        "id": "custom.cellOptions",
+        "value": {
+         "type": "color-text"
+        }
+       },
+       {
+        "id": "noValue",
+        "value": "-"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "iOS seen (ago)"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "s"
+       },
+       {
+        "id": "decimals",
+        "value": 1
+       },
+       {
+        "id": "thresholds",
+        "value": {
+         "mode": "absolute",
+         "steps": [
+          {
+           "color": "green",
+           "value": null
+          },
+          {
+           "color": "yellow",
+           "value": 259200
+          },
+          {
+           "color": "orange",
+           "value": 604800
+          },
+          {
+           "color": "red",
+           "value": 1209600
+          }
+         ]
+        }
+       },
+       {
+        "id": "custom.cellOptions",
+        "value": {
+         "type": "color-text"
+        }
+       },
+       {
+        "id": "noValue",
+        "value": "-"
        }
       ]
      }

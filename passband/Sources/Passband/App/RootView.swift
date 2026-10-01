@@ -429,9 +429,13 @@ struct MainShell: View {
                             // fly. Between one email leaving and the next
                             // walking in there is a frame with no reader in
                             // the window, and without this the sitrep under
-                            // it flashed through on every E and S.
-                            ReaderBackdrop()
-                                .ignoresSafeArea()
+                            // it flashed through on every E and S. Only while
+                            // the flight CONTINUES: an exit that closes the
+                            // reader should reveal the sitrep as it goes.
+                            if store.skipTurn != nil || store.flightContinues {
+                                ReaderBackdrop()
+                                    .ignoresSafeArea()
+                            }
                             // ONE READER, OR TWO FOR THE LENGTH OF AN S. A
                             // ForEach keyed by thread id rather than an `.id`,
                             // so the outgoing reader keeps its identity (and
@@ -473,7 +477,7 @@ struct MainShell: View {
                     // as part of the window rather than part of each email.
                     .overlay(alignment: .topLeading) {
                         if store.walk != nil, store.threadId != nil {
-                            WalkHint()
+                            WalkHint(canSkip: store.nextQueuedThread != nil)
                                 .padding(.top, TopBar.height + 10)
                                 .padding(.leading, 20)
                                 .transition(.opacity)

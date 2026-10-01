@@ -229,7 +229,12 @@ struct SitrepView: View {
             // The end of a Space walk: the bottom of the list, celebrated.
             .overlay(alignment: .top) {
                 if let summary = store.walkFinished {
-                    WalkComplete(summary: summary) { store.walkFinished = nil }
+                    // Clears only ITS OWN summary: a celebration replaced by a
+                    // newer one has its task cancelled, and its cleanup must
+                    // not wipe the one that took its place.
+                    WalkComplete(summary: summary) {
+                        if store.walkFinished?.id == summary.id { store.walkFinished = nil }
+                    }
                         .id(summary.id)
                         .padding(.top, TopBar.height + 36)
                 }
@@ -1290,14 +1295,20 @@ struct FlowLayout: Layout {
                     .fill(.clear)
                     .glassEffect(.regular, in: .rect(cornerRadius: 22))
             }
-            .scaleEffect(shown ? 1 : 0.86)
+            .scaleEffect(shown || reduceMotion ? 1 : 0.86)
             .opacity(shown ? 1 : 0)
             .allowsHitTesting(false)
             .accessibilityElement(children: .combine)
             .accessibilityLabel("Through the list. \(tally)")
             .task {
                 NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now)
-                withAnimation(.spring(response: 0.38, dampingFraction: 0.62)) { shown = true }
+                // Said aloud too: the ring is no reward to someone who cannot
+                // see it.
+                AccessibilityNotification.Announcement("Through the list. \(tally)").post()
+                withAnimation(
+                    reduceMotion
+                        ? .easeOut(duration: 0.2) : .spring(response: 0.38, dampingFraction: 0.62)
+                ) { shown = true }
                 if reduceMotion {
                     ring = 1
                     check = 1
@@ -1308,8 +1319,12 @@ struct FlowLayout: Layout {
                     withAnimation(.easeOut(duration: 0.28)) { check = 1 }
                 }
                 try? await Task.sleep(for: .milliseconds(2400))
+                // A cancelled task (this card replaced or unmounted) wakes from
+                // every sleep at once; it has nothing left to dismiss.
+                guard !Task.isCancelled else { return }
                 withAnimation(.easeIn(duration: 0.3)) { shown = false }
                 try? await Task.sleep(for: .milliseconds(320))
+                guard !Task.isCancelled else { return }
                 dismiss()
             }
         }

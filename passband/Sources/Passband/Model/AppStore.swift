@@ -619,6 +619,18 @@ final class AppStore {
         var incomingHeader: Double = 0
     }
     var skipTurn: SkipTurn?
+    /// True while an email is leaving and ANOTHER is about to take its place
+    /// (done + next, remind + next). Only then does RootView lay its
+    /// reader-coloured floor under the flight; on a departure that closes the
+    /// reader, the sitrep showing through IS the destination arriving.
+    var flightContinues = false
+
+    /// Finish an S turn that is still settling, at once: called before
+    /// anything else moves the reader, so the skipped card never ghosts
+    /// under the next flight.
+    func settleSkipTurn() {
+        skipTurn = nil
+    }
 
     /// Space on the sitrep: open the first row with the whole band as the
     /// queue, and start counting.
@@ -2033,8 +2045,21 @@ final class AppStore {
         // The arrivals ledger follows the thread, and declines to forget on a
         // REOPEN of the same one — see ThreadArrivals.reset.
         arrivals.reset(to: threadId)
+        // A SPACE WALK LIVES ON ONE QUEUE. Its own steps (E, S, h, the arrows)
+        // hand the same list back; anything else that opens a thread (a
+        // notification, a citation, the side panel) is a different journey,
+        // and a walk carried into it would celebrate mail it never held.
+        if walk != nil, queue.map(\.thread_id) != threadQueue.map(\.thread_id) {
+            walk = nil
+        }
         self.threadQueue = queue
         self.readingMail = readingMail
+        // Any open ends an S turn that is still settling: the turn's outgoing
+        // card would otherwise linger (or sit inert, if this re-opens it)
+        // until the skip's own timer cleared it. A skip sets its turn AFTER
+        // this call, so its own open does not cancel it.
+        skipTurn = nil
+        flightContinues = false
         // The seed, after `readingMail` (the style reads it) and before the
         // view mounts. A direct open (`openMessage`) has no cached view yet
         // and hands the reader its copy through `focusedMessageView` instead.
@@ -2071,6 +2096,7 @@ final class AppStore {
         // turns one into a celebration, and it reads the walk before this.
         walk = nil
         skipTurn = nil
+        flightContinues = false
         // The preview lives in the reader's slot, so every way out of the
         // reader (Esc, the rail, an account switch) is a way out of it too.
         scheduledPreviewId = nil

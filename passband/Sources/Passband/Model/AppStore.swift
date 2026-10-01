@@ -2057,6 +2057,7 @@ final class AppStore {
         // mid-pass cannot show half of each mailbox; a failing endpoint (nil
         // rows) leaves its own zone's last good rows rather than blanking the
         // column.
+        var missed = false
         await withTaskGroup(of: ZoneAnswer.self) { group in
             group.addTask {
                 .shipments(try? await APIClient.shared.getShipments(includeDelivered: true))
@@ -2087,12 +2088,17 @@ final class AppStore {
                     if receipts != zones.receipts { zones.receipts = receipts }
                     if banking != zones.banking { zones.banking = banking }
                     if calendar != zones.calendar { zones.calendar = calendar }
-                case .shipments, .reading, .records: break
+                case .shipments, .reading, .records: missed = true
                 }
             }
         }
         guard e == epoch else { return }
-        zonesLoadedAt = Date()
+        // ONLY A FULL PASS IS FRESH. A zone whose fetch failed kept its old
+        // rows, and stamping over that made one dropped request a 45-second
+        // hole: on a mailbox just switched to, an empty Reading zone that
+        // every later tick declined to ask about again. Unstamped, the next
+        // poll tick retries.
+        if !missed { zonesLoadedAt = Date() }
 
         HeroCache.shared.preload(zones.reading.map(\.latestThreadId))
         warmZoneThreads()

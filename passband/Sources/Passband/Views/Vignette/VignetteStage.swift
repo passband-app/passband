@@ -4,10 +4,13 @@
 //
 // THE LANGUAGE (every scene is held to this):
 //
-//   CANVAS. 168 x 96 design units (7:4). Draw in those units only; the stage
-//   scales the context to whatever size it is given, so a scene is the same
-//   picture in a tile and across the top of a card. Keep 8 units clear at
-//   every edge.
+//   CANVAS. 240 x 120 design units (2:1). Draw in those units only; the stage
+//   scales the context to whatever size it is given. Sized for where it is
+//   SEEN: across the top of the 580pt card a unit is about 2.4pt, so a 3-unit
+//   bar sits near the height of a line of real text and the picture reads as
+//   a product shot at nearly life size. (The discovery ring's 168 x 96 was
+//   drawn for a 178pt tile; blown up to a card it made 76pt keycaps and bars
+//   like piano keys.) Keep 10 units clear at every edge.
 //
 //   GROUND. Always night, in BOTH themes: `VignettePalette.groundTop` to
 //   `groundBottom`. It is a screen inside the app, like the iPhone ad's phone,
@@ -21,21 +24,26 @@
 //   (red, amber, green): colour here never means urgency.
 //
 //   MAIL. An email is a rounded card of `faint` fill and `edge` border holding
-//   an avatar dot, a title bar and a sub bar. Bars, never letters: no text, no
-//   digits, no real names anywhere in a scene. The one exception is a keycap's
-//   label, because the key IS the lesson.
+//   an avatar dot, a title bar and a sub bar; in a list it is a row of the
+//   same parts. Bars, never letters: no text, no digits, no real names
+//   anywhere in a scene. The one exception is a keycap's label, because the
+//   key IS the lesson.
 //
-//   KEYCAPS. `VignetteKit.keycap`: 22 units tall, even border. Pressed, the
+//   KEYCAPS. `VignetteKit.keycap`: 18 units tall, even border. Pressed, the
 //   cap fills `phosphor`, its label goes white, it sinks 1 unit and glows
-//   evenly all round. Label a key exactly as the app's own hint does.
+//   evenly all round. Label a key exactly as the app's own hint does (`u`,
+//   not `U`: the app's `Kbd` is lower case, and so is the card's line).
 //
 //   LOOP. 4.8 seconds, built from beats: rest, gesture, rest. A loop BEGINS
 //   AND ENDS ON THE SAME FRAME, with stillness at the seam, so the repeat is
-//   invisible. Write the scene as a PURE function of `t` in 0..<loop.
+//   invisible. Never an empty screen mid-loop: the next thing arrives while
+//   the last one leaves. Write the scene as a PURE function of `t` in
+//   0..<loop.
 //
 //   MOTION. Translate, fade, a scale of at most 0.93...1.05, a stroke drawing
-//   on. No bounce past 1, no rotation, no blur, no particles. One thing moves
-//   at a time.
+//   on. No bounce past 1, no rotation, no blur, no particles. One ACTION at a
+//   time: a key's consequences may move two things together (a page and its
+//   row), but never two gestures at once.
 //
 //   POSTER. `posterTime`: the frame that best explains the gesture still.
 //   Reduce Motion, a window that is not key and a stage off screen all show
@@ -63,7 +71,7 @@ enum VignettePalette {
 }
 
 enum VignetteClock {
-    static let canvas = CGSize(width: 168, height: 96)
+    static let canvas = CGSize(width: 240, height: 120)
     static let loop: Double = 4.8
 
     /// Smoothstep of `t` across `from...to`, clamped: 0 before, 1 after.
@@ -115,12 +123,16 @@ struct VignetteStage: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var onScreen = false
+    /// When this stage started playing, so every page of a walk opens on its
+    /// own first beat instead of somewhere in the middle of a loop that has
+    /// been running against the wall clock all along.
+    @State private var startedAt = Date()
 
     private var running: Bool { live && onScreen && !reduceMotion && fixedTime == nil }
 
     var body: some View {
         // Paused, the timeline draws once and stops asking for frames.
-        TimelineView(.animation(minimumInterval: 1 / 30, paused: !running)) { timeline in
+        TimelineView(.animation(minimumInterval: 1 / 60, paused: !running)) { timeline in
             let t = time(timeline.date)
             Canvas { ctx, size in
                 Self.render(&ctx, size: size, scene: scene, t: t)
@@ -134,36 +146,49 @@ struct VignetteStage: View {
                     .strokeBorder(VignettePalette.edge, lineWidth: 0.5)
             }
         }
-        .onAppear { onScreen = true }
+        .onAppear {
+            onScreen = true
+            startedAt = .now
+        }
         .onDisappear { onScreen = false }
+        .onChange(of: running) { _, now in
+            // Coming back from the poster (the window became key again)
+            // starts the loop over rather than cutting into it.
+            if now { startedAt = .now }
+        }
         .accessibilityHidden(true)
     }
 
     private func time(_ date: Date) -> Double {
         if let fixedTime { return fixedTime }
         guard running else { return scene.posterTime }
-        return date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: VignetteClock.loop)
+        return max(0, date.timeIntervalSince(startedAt)).truncatingRemainder(dividingBy: VignetteClock.loop)
     }
 
     /// One frame, ground included. Static so a frame can be drawn with no view
-    /// around it.
+    /// around it. The ground fills whatever it is given; the scene is fitted
+    /// to the height and centred, so a band wider than 2:1 is more night
+    /// either side rather than a stretched picture.
     static func render(_ ctx: inout GraphicsContext, size: CGSize, scene: any VignetteDrawing.Type, t: Double) {
-        let scale = size.width / VignetteClock.canvas.width
-        ctx.scaleBy(x: scale, y: scale)
-        let rect = CGRect(origin: .zero, size: VignetteClock.canvas)
+        let full = CGRect(origin: .zero, size: size)
         ctx.fill(
-            Path(rect),
+            Path(full),
             with: .linearGradient(
                 Gradient(colors: [VignettePalette.groundTop, VignettePalette.groundBottom]),
-                startPoint: .zero, endPoint: CGPoint(x: 0, y: rect.height)))
+                startPoint: .zero, endPoint: CGPoint(x: 0, y: size.height)))
         // A wide, low phosphor bloom from below centre: the brand's light,
         // still, so the screen is lit rather than black.
         ctx.fill(
-            Path(rect),
+            Path(full),
             with: .radialGradient(
-                Gradient(colors: [VignettePalette.phosphor.opacity(0.16), .clear]),
-                center: CGPoint(x: rect.midX, y: rect.maxY + 10),
-                startRadius: 0, endRadius: rect.width * 0.62))
+                Gradient(colors: [VignettePalette.phosphor.opacity(0.15), .clear]),
+                center: CGPoint(x: full.midX, y: full.maxY + size.height * 0.1),
+                startRadius: 0, endRadius: size.width * 0.6))
+        let scale = min(size.width / VignetteClock.canvas.width, size.height / VignetteClock.canvas.height)
+        ctx.translateBy(
+            x: (size.width - VignetteClock.canvas.width * scale) / 2,
+            y: (size.height - VignetteClock.canvas.height * scale) / 2)
+        ctx.scaleBy(x: scale, y: scale)
         scene.draw(&ctx, t: t)
     }
 }
@@ -176,59 +201,64 @@ enum VignetteKit {
         ctx.fill(Path(roundedRect: rect, cornerRadius: rect.height / 2), with: .color(color))
     }
 
+    /// An avatar dot centred on `center`.
+    static func avatar(_ ctx: inout GraphicsContext, center: CGPoint, diameter: CGFloat, tint: Int, opacity: Double = 0.9) {
+        ctx.fill(
+            Path(ellipseIn: CGRect(
+                x: center.x - diameter / 2, y: center.y - diameter / 2, width: diameter, height: diameter)),
+            with: .color(VignettePalette.avatar[tint % 3].opacity(opacity)))
+    }
+
     /// One email card, top-left at `origin`. `design` (0..<3) picks the bar
     /// widths; `tint` picks the sender and defaults to the design's own, so a
     /// deck of three designs is three senders and a stack that passes one tint
     /// is one sender's mail. Opacities multiply the layer's own, so a part
     /// drawn into a fading layer fades with it.
     static func mail(
-        _ ctx: inout GraphicsContext, origin: CGPoint, width: CGFloat = 98, design: Int,
+        _ ctx: inout GraphicsContext, origin: CGPoint, width: CGFloat = 112, design: Int,
         tint: Int? = nil, opacity: Double, scale: CGFloat = 1, lit: Double = 0, blank: Bool = false
     ) {
-        let designs: [(title: CGFloat, sub: CGFloat)] = [(44, 60), (34, 52), (50, 38)]
+        let designs: [(title: CGFloat, sub: CGFloat)] = [(44, 66), (34, 58), (52, 42)]
         let d = designs[design % designs.count]
         let w = width * scale
         let h: CGFloat = 30 * scale
         let rect = CGRect(x: origin.x + (width - w) / 2, y: origin.y, width: w, height: h)
         var layer = ctx
         layer.opacity *= opacity
-        let card = Path(roundedRect: rect, cornerRadius: 7 * scale, style: .continuous)
+        let card = Path(roundedRect: rect, cornerRadius: 6 * scale, style: .continuous)
         layer.fill(card, with: .color(VignettePalette.card))
         layer.fill(card, with: .color(VignettePalette.faint))
-        layer.stroke(card, with: .color(VignettePalette.edge), lineWidth: 0.6)
+        layer.stroke(card, with: .color(VignettePalette.edge), lineWidth: 0.5)
         if lit > 0 {
-            layer.stroke(card, with: .color(VignettePalette.phosphor.opacity(0.85 * lit)), lineWidth: 0.8)
+            layer.stroke(card, with: .color(VignettePalette.phosphor.opacity(0.85 * lit)), lineWidth: 0.7)
         }
         // A card deep in a fanned stack is an edge, not a second email to read.
         guard !blank else { return }
-        let avatar = CGRect(
-            x: rect.minX + 8 * scale, y: rect.midY - 5 * scale, width: 10 * scale, height: 10 * scale)
-        layer.fill(
-            Path(ellipseIn: avatar), with: .color(VignettePalette.avatar[(tint ?? design) % 3].opacity(0.85)))
-        let x = avatar.maxX + 6 * scale
+        avatar(&layer, center: CGPoint(x: rect.minX + 13 * scale, y: rect.midY), diameter: 10 * scale, tint: tint ?? design)
+        let x = rect.minX + 24 * scale
         bar(
-            &layer, CGRect(x: x, y: rect.minY + 9.5 * scale, width: d.title * scale, height: 3.5 * scale),
+            &layer, CGRect(x: x, y: rect.minY + 10 * scale, width: d.title * scale, height: 3 * scale),
             VignettePalette.ink.opacity(0.8))
         bar(
-            &layer, CGRect(x: x, y: rect.minY + 17 * scale, width: d.sub * scale, height: 3 * scale),
+            &layer, CGRect(x: x, y: rect.minY + 17 * scale, width: d.sub * scale, height: 2.5 * scale),
             VignettePalette.dim)
     }
 
     /// A keycap, top-left at `origin`.
     static func keycap(
-        _ ctx: inout GraphicsContext, _ label: String, origin: CGPoint, width: CGFloat = 22, pressed: Double
+        _ ctx: inout GraphicsContext, _ label: String, origin: CGPoint, width: CGFloat = 18, pressed: Double
     ) {
-        let rect = CGRect(x: origin.x, y: origin.y + CGFloat(pressed), width: width, height: 22)
-        let cap = Path(roundedRect: rect, cornerRadius: 5, style: .continuous)
+        let rect = CGRect(x: origin.x, y: origin.y + CGFloat(pressed), width: width, height: 18)
+        let cap = Path(roundedRect: rect, cornerRadius: 4, style: .continuous)
         var layer = ctx
         if pressed > 0 {
-            layer.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.75 * pressed), radius: 6))
+            layer.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.75 * pressed), radius: 5))
         }
         layer.fill(cap, with: .color(VignettePalette.cap))
         layer.fill(cap, with: .color(VignettePalette.phosphor.opacity(0.95 * pressed)))
-        ctx.stroke(cap, with: .color(VignettePalette.edge.opacity(1 - 0.6 * pressed)), lineWidth: 0.6)
+        ctx.stroke(cap, with: .color(Color.white.opacity(0.14 * (1 - 0.6 * pressed))), lineWidth: 0.5)
         let text = Text(label)
-            .font(.system(size: 10, weight: .medium, design: .monospaced))
+            .font(.system(size: 8.5, weight: .medium, design: .monospaced))
             .foregroundStyle(pressed > 0.5 ? Color.white : VignettePalette.ink.opacity(0.85))
         ctx.draw(text, at: CGPoint(x: rect.midX, y: rect.midY), anchor: .center)
     }
@@ -244,11 +274,11 @@ enum VignetteKit {
         path.addLine(to: CGPoint(x: center.x + size, y: center.y - size * 0.8))
         var layer = ctx
         layer.opacity *= opacity
-        layer.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.8), radius: 4))
+        layer.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.8), radius: 3))
         layer.stroke(
             path.trimmedPath(from: 0, to: progress),
             with: .color(VignettePalette.phosphorHot),
-            style: StrokeStyle(lineWidth: size * 0.32, lineCap: .round, lineJoin: .round))
+            style: StrokeStyle(lineWidth: max(1.1, size * 0.3), lineCap: .round, lineJoin: .round))
     }
 
     /// A ring round `center`, drawn clockwise from twelve by `progress`.
@@ -266,17 +296,35 @@ enum VignetteKit {
         layer.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
     }
 
+    /// An arc of `sweep` (0...1 of a turn) whose head is at `head` (turns from
+    /// twelve). A spinner made of position, not rotation: the arc's ends move
+    /// round the circle, nothing is turned.
+    static func arc(
+        _ ctx: inout GraphicsContext, center: CGPoint, radius: CGFloat, head: Double, sweep: Double,
+        color: Color, lineWidth: CGFloat = 1.2, opacity: Double = 1
+    ) {
+        guard sweep > 0, opacity > 0 else { return }
+        var path = Path()
+        path.addArc(
+            center: center, radius: radius, startAngle: .degrees(-90 + 360 * (head - sweep)),
+            endAngle: .degrees(-90 + 360 * head), clockwise: false)
+        var layer = ctx
+        layer.opacity *= opacity
+        layer.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+    }
+
     /// Depth poses for a deck: offset down, scale and opacity for the card in
     /// front (0) and the three behind it. Depth 3 is invisible: where a new
     /// card waits.
-    static let poseY: [CGFloat] = [0, 7, 13, 18]
-    static let poseScale: [CGFloat] = [1, 0.93, 0.86, 0.8]
+    static let poseY: [CGFloat] = [0, 6, 11, 15]
+    static let poseScale: [CGFloat] = [1, 0.94, 0.88, 0.82]
     static let poseOpacity: [Double] = [1, 0.55, 0.26, 0]
 
     /// The cards BEHIND the front one, each `promote` (0...1) of the way to the
     /// pose in front of it. `first` is how many cards have already left.
     static func deckBehind(
-        _ ctx: inout GraphicsContext, origin: CGPoint, first: Int, promote: Double, tint: Int? = nil
+        _ ctx: inout GraphicsContext, origin: CGPoint, width: CGFloat = 112, first: Int, promote: Double,
+        tint: Int? = nil
     ) {
         // Back to front, so the nearest is drawn last.
         for depth in stride(from: 3, through: 1, by: -1) {
@@ -286,7 +334,7 @@ enum VignetteKit {
             mail(
                 &ctx,
                 origin: CGPoint(x: origin.x, y: origin.y + VignetteClock.mix(poseY[lo], poseY[hi], f)),
-                design: (first + depth) % 3, tint: tint,
+                width: width, design: (first + depth) % 3, tint: tint,
                 opacity: VignetteClock.mix(poseOpacity[lo], poseOpacity[hi], f),
                 scale: VignetteClock.mix(poseScale[lo], poseScale[hi], f))
         }

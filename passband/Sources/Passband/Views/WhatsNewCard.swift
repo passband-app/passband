@@ -27,6 +27,7 @@ import SwiftUI
 
 struct WhatsNewCard: View {
     @Environment(AppStore.self) private var store
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     #if os(macOS)
         @Environment(\.controlActiveState) private var activeState
         private var paused: Bool { activeState != .key }
@@ -38,6 +39,9 @@ struct WhatsNewCard: View {
     @State private var opened: Set<String> = []
     /// Where the walk is: an index into `features`, or past them for the record.
     @State private var page = WhatsNew.openingPage
+    /// Which way the last move went, so the words turn like a page: Next
+    /// brings them in from the right, Back from the left.
+    @State private var forward = true
 
     private var notes: [ReleaseNote] { store.whatsNew.notes }
     /// The newest release's headliners, one page each.
@@ -47,11 +51,11 @@ struct WhatsNewCard: View {
 
     private static let width: CGFloat = 580
     private static let radius: CGFloat = 20
-    /// A feature page's picture, the stage's 7:4 across the card.
+    /// A feature page's picture, the stage's 2:1 across the card.
     private static let artHeight: CGFloat = (width * VignetteClock.canvas.height / VignetteClock.canvas.width).rounded()
     /// Every page of a walk is this tall, so Next changes what the card says
     /// and never where its buttons are.
-    private static let pageHeight: CGFloat = artHeight + 132
+    private static let pageHeight: CGFloat = artHeight + 128
 
     var body: some View {
         OverlayScrim(onDismiss: dismiss) {
@@ -63,14 +67,14 @@ struct WhatsNewCard: View {
                         ZStack(alignment: .top) {
                             if onLast {
                                 record(newest, walked: true)
-                                    .transition(.opacity)
+                                    .transition(pageTurn)
                             } else {
-                                feature(features[page], in: newest)
-                                    .id(page)
+                                feature(in: newest)
                                     .transition(.opacity)
                             }
                         }
                         .frame(height: Self.pageHeight, alignment: .top)
+                        .clipped()
                     }
                 }
 
@@ -104,55 +108,91 @@ struct WhatsNewCard: View {
     private func go(to target: Int) {
         let clamped = min(max(target, 0), pageCount - 1)
         guard clamped != page else { return }
-        withAnimation(.easeInOut(duration: 0.22)) { page = clamped }
+        // The direction lands a beat BEFORE the page does: the page leaving
+        // takes the transition it was last drawn with, so a Back after a
+        // Next would otherwise slide out the wrong way.
+        forward = clamped > page
+        DispatchQueue.main.async {
+            withAnimation(reduceMotion ? .easeInOut(duration: 0.2) : .smooth(duration: 0.42)) { page = clamped }
+        }
+    }
+
+    /// The words' page turn: in from the side the walk is heading, out the
+    /// other, with a fade, since a slide alone across glass reads as a
+    /// carousel. Reduce Motion keeps only the fade.
+    private var pageTurn: AnyTransition {
+        guard !reduceMotion else { return .opacity }
+        let shift: CGFloat = 36
+        return .asymmetric(
+            insertion: .offset(x: forward ? shift : -shift).combined(with: .opacity),
+            removal: .offset(x: forward ? -shift : shift).combined(with: .opacity))
     }
 
     // MARK: - a feature's page
 
     /// One headliner: the gesture playing, what it is called, how to use it.
-    private func feature(_ headliner: ReleaseDigest.Headliner, in note: ReleaseNote) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Group {
-                if let vignette = headliner.vignette {
-                    VignetteStage(scene: vignette.scene, live: !paused, cornerRadius: 0)
-                } else {
-                    symbolArt(headliner.symbol)
+    /// Two layers that turn differently: the picture CROSSFADES, one night
+    /// screen changing channel to the next, while the words beneath it slide
+    /// like a page. Each layer is its own ZStack so the outgoing and incoming
+    /// copies overlap in place instead of stacking.
+    private func feature(in note: ReleaseNote) -> some View {
+        let headliner = features[min(page, features.count - 1)]
+        return VStack(alignment: .leading, spacing: 0) {
+            ZStack {
+                Group {
+                    if let vignette = headliner.vignette {
+                        VignetteStage(scene: vignette.scene, live: !paused, cornerRadius: 0)
+                    } else {
+                        symbolArt(headliner.symbol)
+                    }
                 }
+                .id(page)
+                .transition(.opacity)
             }
             .frame(width: Self.width, height: Self.artHeight)
             .clipShape(UnevenRoundedRectangle(topLeadingRadius: Self.radius, topTrailingRadius: Self.radius))
 
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    // The release's own name rides every page, so the walk
-                    // reads as one update rather than as four announcements.
-                    Text("\(note.headline) · \(note.version)")
-                        .font(.system(size: 9, weight: .bold).width(.expanded))
-                        .tracking(0.6)
-                        .textCase(.uppercase)
-                        .foregroundStyle(Palette.accent)
-                        .lineLimit(1)
-                    Spacer(minLength: 8)
-                    Text(headliner.surfaces.map(\.label).joined(separator: " · "))
-                        .font(Typo.micro)
-                        .foregroundStyle(Palette.inkFaint)
-                }
-                Text(headliner.text)
-                    .font(Typo.hero(28))
-                    .foregroundStyle(Palette.ink)
-                    .fixedSize(horizontal: false, vertical: true)
-                if let detail = headliner.detail {
-                    Text(Self.keyed(detail))
-                        .font(.system(size: 14))
-                        .foregroundStyle(Palette.inkDim)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+            ZStack(alignment: .topLeading) {
+                words(headliner, in: note)
+                    .id(page)
+                    .transition(pageTurn)
             }
-            .padding(.horizontal, 24)
-            .padding(.top, 18)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .clipped()
 
             Spacer(minLength: 0)
         }
+    }
+
+    private func words(_ headliner: ReleaseDigest.Headliner, in note: ReleaseNote) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                // The release's own name rides every page, so the walk
+                // reads as one update rather than as four announcements.
+                Text("\(note.headline) · \(note.version)")
+                    .font(.system(size: 9, weight: .bold).width(.expanded))
+                    .tracking(0.8)
+                    .textCase(.uppercase)
+                    .foregroundStyle(Palette.accent)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Text(headliner.surfaces.map(\.label).joined(separator: " · "))
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.inkFaint)
+            }
+            Text(headliner.text)
+                .font(Typo.hero(30))
+                .foregroundStyle(Palette.ink)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 9)
+            if let detail = headliner.detail {
+                KeyedLine(line: detail)
+                    .padding(.top, 8)
+            }
+        }
+        .padding(.horizontal, 28)
+        .padding(.top, 20)
+        .frame(width: Self.width, alignment: .leading)
         .accessibilityElement(children: .combine)
     }
 
@@ -171,21 +211,6 @@ struct WhatsNewCard: View {
         .accessibilityHidden(true)
     }
 
-    /// A page line with its keys set as keys: the table writes a key in
-    /// backticks, the way the changelog's markdown wants it.
-    static func keyed(_ line: String) -> AttributedString {
-        var out = AttributedString()
-        for (index, part) in line.split(separator: "`", omittingEmptySubsequences: false).enumerated() {
-            var run = AttributedString(String(part))
-            if index % 2 == 1 {
-                run.font = Typo.mono(13, weight: .semibold)
-                run.foregroundColor = Palette.ink
-            }
-            out += run
-        }
-        return out
-    }
-
     // MARK: - the record
 
     /// The last page, and the whole card for a release with no headliners: the
@@ -202,10 +227,18 @@ struct WhatsNewCard: View {
                     earlier(Array(notes.dropFirst()))
                 }
             }
-            .padding(.horizontal, 24)
-            .padding(.top, 18)
-            .padding(.bottom, 20)
+            .padding(.horizontal, 28)
+            .padding(.top, 20)
+            .padding(.bottom, 28)
         }
+        // The list's foot dissolves into the glass rather than being sliced
+        // by the footer's rule, which says "there is more below" without a
+        // scroller's chrome.
+        .mask(
+            LinearGradient(
+                stops: [.init(color: .black, location: 0), .init(color: .black, location: 0.86),
+                        .init(color: .clear, location: 1)],
+                startPoint: .top, endPoint: .bottom))
         VStack(spacing: 0) {
             hero(newest)
             if walked {
@@ -355,7 +388,7 @@ struct WhatsNewCard: View {
                 .buttonStyle(.glassProminent)
                 .font(.system(size: 12, weight: .semibold))
         }
-        .padding(.horizontal, 24)
+        .padding(.horizontal, 28)
         .padding(.vertical, 14)
         .overlay(alignment: .top) {
             Rectangle().fill(Palette.hairline).frame(height: 1)
@@ -372,11 +405,12 @@ struct WhatsNewCard: View {
                 } label: {
                     Capsule()
                         .fill(index == page ? Palette.accent : Palette.ink.opacity(0.16))
-                        .frame(width: index == page ? 16 : 6, height: 6)
+                        .frame(width: index == page ? 18 : 6, height: 6)
                         .padding(.vertical, 6)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .animation(.smooth(duration: 0.32), value: page)
                 .accessibilityLabel(index < features.count ? features[index].text : "Everything else")
             }
         }
@@ -524,6 +558,118 @@ extension ReleaseSurface {
         case .app: "laptopcomputer"
         case .ios: "iphone"
         case .daemon: "server.rack"
+        }
+    }
+}
+
+// MARK: - a line with keys in it
+
+/// A page's line with its keys drawn as KEYS: the table writes a key in
+/// backticks, the way the changelog's markdown wants it, and here each one is
+/// a small cap of the same make as the vignette's, so the key in the sentence
+/// and the key in the picture above are visibly the same thing. Laid out as
+/// words that wrap, since a cap cannot sit inside a `Text`.
+private struct KeyedLine: View {
+    let line: String
+
+    private enum Piece: Hashable {
+        case word(String)
+        case key(String)
+    }
+
+    private var pieces: [Piece] {
+        var out: [Piece] = []
+        for (index, part) in line.split(separator: "`", omittingEmptySubsequences: false).enumerated() {
+            if index % 2 == 1 {
+                out.append(.key(String(part)))
+            } else {
+                out += part.split(separator: " ").map { .word(String($0)) }
+            }
+        }
+        return out
+    }
+
+    var body: some View {
+        WordFlow(spacing: 4.5, lineSpacing: 5) {
+            ForEach(Array(pieces.enumerated()), id: \.offset) { _, piece in
+                switch piece {
+                case .word(let word):
+                    Text(word)
+                        .font(.system(size: 15))
+                        .foregroundStyle(Palette.inkDim)
+                case .key(let key):
+                    Text(key)
+                        .font(Typo.mono(12.5, weight: .semibold))
+                        .foregroundStyle(Palette.ink)
+                        .padding(.horizontal, 6)
+                        .frame(minWidth: 21, minHeight: 21)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .fill(Palette.ink.opacity(0.06)))
+                        // EVEN all round, and a soft shadow beneath rather
+                        // than a lit top edge.
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
+                        .shadow(color: .black.opacity(0.12), radius: 0.5, y: 1)
+                }
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(line.replacingOccurrences(of: "`", with: ""))
+    }
+}
+
+/// Words left to right, wrapping at the width offered, each line's pieces
+/// centred on one another so a cap sits level with the words beside it.
+private struct WordFlow: Layout {
+    var spacing: CGFloat
+    var lineSpacing: CGFloat
+
+    private func lines(_ subviews: Subviews, width: CGFloat) -> [[(Int, CGSize)]] {
+        var lines: [[(Int, CGSize)]] = [[]]
+        var x: CGFloat = 0
+        for (index, view) in subviews.enumerated() {
+            let size = view.sizeThatFits(.unspecified)
+            if x > 0, x + size.width > width {
+                lines.append([])
+                x = 0
+            }
+            lines[lines.count - 1].append((index, size))
+            x += size.width + spacing
+        }
+        return lines
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? .infinity
+        let rows = lines(subviews, width: width)
+        var height = lineSpacing * CGFloat(max(0, rows.count - 1))
+        var used: CGFloat = 0
+        for row in rows {
+            var rowWidth = spacing * CGFloat(max(0, row.count - 1))
+            var rowHeight: CGFloat = 0
+            for (_, size) in row {
+                rowWidth += size.width
+                rowHeight = max(rowHeight, size.height)
+            }
+            height += rowHeight
+            used = max(used, rowWidth)
+        }
+        return CGSize(width: proposal.width ?? used, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var y = bounds.minY
+        for row in lines(subviews, width: bounds.width) {
+            let height = row.map(\.1.height).max() ?? 0
+            var x = bounds.minX
+            for (index, size) in row {
+                subviews[index].place(
+                    at: CGPoint(x: x, y: y + height / 2), anchor: .leading, proposal: ProposedViewSize(size))
+                x += size.width + spacing
+            }
+            y += height + lineSpacing
         }
     }
 }

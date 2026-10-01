@@ -8,6 +8,34 @@
 //! below, as inherent methods that block delegates to. A trait impl cannot be
 //! split across files, which is why the delegations exist.
 
+/// AUTHORED BY THIS ACCOUNT, as SQL over a `messages m` row: the stored sent
+/// copy, OR a received copy whose From is the account's own address.
+///
+/// Stored `messages.is_sent` alone is not that. It is a VISIBILITY flag, sticky
+/// to 0, and the sync engine lets the INBOX sighting win whenever a message
+/// carries both labels: mail to oneself, a self-Cc, and any sent message a mail
+/// client re-labels INBOX (a "remind me if nobody replies" does exactly that).
+/// Read as inbound, the user's own question becomes an inquiry FROM a known
+/// contact, and the model has filed "reply to <the user>" in FYE on a real
+/// mailbox. So every "is this inbound mail the user might owe something on"
+/// the agent-triage store asks is asked of this, never of the bare column:
+/// the user's own mail is evidence about a thread and is not shown back to
+/// them.
+///
+/// Same rule as the reader's `authored_by_account` (`messages.rs`). The
+/// COALESCE matters: a missing account row makes the comparison NULL, which a
+/// `NOT` would read as "exclude" and a `bool` column read would reject.
+///
+/// A macro and not only a `const` so static SQL can `concat!` it, and declared
+/// ahead of the modules so every one of them can.
+macro_rules! own_mail_sql {
+    () => {
+        "(m.is_sent=1 OR COALESCE(trim(m.from_addr)!='' AND lower(trim(m.from_addr))=\
+         (SELECT lower(trim(email)) FROM accounts WHERE id=m.account_id),0))"
+    };
+}
+const OWN_MAIL: &str = own_mail_sql!();
+
 pub(crate) mod agent_budget;
 mod agent_deliveries;
 mod agent_triage;

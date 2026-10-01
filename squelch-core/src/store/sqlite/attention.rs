@@ -5,8 +5,17 @@ use super::*;
 
 // Legacy buckets remain wire-compatible, but new mail is projected from the
 // current agent decision. A neutral ingest row is pending, never classified noise.
-const CANONICAL_MAIL_CTE: &str = "WITH classified AS (
+//
+// The account's own mail in the inbound listing (see `OWN_MAIL`) is the one row
+// that is neither: it gets an access review and never a decision, so without
+// its own arm it would count as pending for good. It reads as noise, the tier
+// ingest writes on the sent copies it resembles.
+const CANONICAL_MAIL_CTE: &str = concat!(
+    "WITH classified AS (
     SELECT m.*, CASE
+      WHEN ",
+    own_mail_sql!(),
+    " THEN 'noise'
       WHEN a.message_id IS NULL THEN COALESCE(t.tier,'pending')
       WHEN d.message_id IS NULL THEN 'pending'
       WHEN COALESCE(pref.show_in_fye,CASE WHEN json_array_length(d.decision_json,'$.auth.kinds')>0 THEN 0
@@ -18,7 +27,8 @@ const CANONICAL_MAIL_CTE: &str = "WITH classified AS (
     LEFT JOIN agent_message_decisions d ON d.account_id=a.account_id AND d.message_id=a.message_id AND d.revision=a.revision
     LEFT JOIN agent_thread_attention att ON att.account_id=m.account_id AND att.thread_id=m.thread_id
     LEFT JOIN agent_thread_preferences pref ON pref.account_id=m.account_id AND pref.thread_id=m.thread_id
-)";
+)"
+);
 
 /// Columns 0..=8 of the updates SELECT — the prefix `ranked_updates` and
 /// `attention_updates` share verbatim — into an [`Update`]. An unparseable tier

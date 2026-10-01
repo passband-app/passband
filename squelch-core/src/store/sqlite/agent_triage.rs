@@ -37,12 +37,16 @@ fn decode<T: serde::de::DeserializeOwned>(value: &str) -> Result<T> {
 fn fingerprint<T: serde::Serialize>(value: &T) -> Result<String> {
     Ok(format!("{:x}", Sha256::digest(json(value)?.as_bytes())))
 }
-const MESSAGE_COLUMNS: &str = "m.id, m.thread_id, m.from_addr, m.subject, m.body, m.received_at,
-    m.is_sent, m.is_spam, COALESCE(t.status,'new'), t.opened_at, t.remind_at,
+const MESSAGE_COLUMNS: &str = concat!(
+    "m.id, m.thread_id, m.from_addr, m.subject, m.body, m.received_at,
+    ",
+    own_mail_sql!(),
+    ", m.is_spam, COALESCE(t.status,'new'), t.opened_at, t.remind_at,
     t.notify_eligible_at, COALESCE((SELECT
              revision FROM agent_thread_attention a WHERE a.account_id=m.account_id AND
              a.thread_id=m.thread_id),0),COALESCE((SELECT group_concat(field || value_json || revision)
-             FROM agent_triage_corrections c WHERE c.account_id=m.account_id AND c.message_id=m.id),'')";
+             FROM agent_triage_corrections c WHERE c.account_id=m.account_id AND c.message_id=m.id),'')"
+);
 fn message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentMessage> {
     let mut message = AgentMessage {
         source: AgentSourceSnapshot {
@@ -712,10 +716,18 @@ pub(crate) fn enqueue_agent_triage_lane(
     // A sent reply is evidence that can resolve an existing obligation. It gets
     // no placement or arrival push of its own; re-evaluate the inbound target.
     if changed && m.is_sent && !m.is_spam && trigger != "source_access" {
-        let target:Option<i64>=conn.query_row("SELECT id FROM messages WHERE account_id=?1 AND thread_id=?2 AND is_sent=0 AND is_spam=0
-             ORDER BY received_at DESC,id DESC LIMIT 1",
-        params![account,m.thread_id],
-        |r|r.get(0)).optional()?;
+        let target: Option<i64> = conn
+            .query_row(
+                concat!(
+                    "SELECT m.id FROM messages m WHERE m.account_id=?1 AND m.thread_id=?2 AND NOT ",
+                    own_mail_sql!(),
+                    " AND m.is_spam=0
+             ORDER BY m.received_at DESC,m.id DESC LIMIT 1"
+                ),
+                params![account, m.thread_id],
+                |r| r.get(0),
+            )
+            .optional()?;
         if let Some(target) = target {
             enqueue_agent_triage_conn(
                 conn,
@@ -740,7 +752,7 @@ fn queue_dependent_refreshes(
     revision: i64,
 ) -> Result<()> {
     let targets = {
-        let mut statement = conn.prepare(
+        let mut statement = conn.prepare(concat!(
             "WITH RECURSIVE edges(dependent,source) AS (
                 SELECT message_id,source_message_id FROM agent_decision_sources WHERE account_id=?1
                 UNION SELECT a.message_id,s.source_message_id FROM agent_attention_sources s
@@ -748,10 +760,12 @@ fn queue_dependent_refreshes(
              ), affected(message_id) AS (
                 SELECT dependent FROM edges WHERE source=?2
                 UNION SELECT e.dependent FROM edges e JOIN affected a ON e.source=a.message_id
-             ) SELECT m.id,a.revision,CASE WHEN m.is_sent=1 OR m.is_spam=1 THEN 'access' ELSE 'triage' END
+             ) SELECT m.id,a.revision,CASE WHEN ",
+            own_mail_sql!(),
+            " OR m.is_spam=1 THEN 'access' ELSE 'triage' END
                FROM affected d JOIN messages m ON m.account_id=?1 AND m.id=d.message_id
                JOIN agent_message_state a ON a.account_id=m.account_id AND a.message_id=m.id WHERE m.id!=?2 ORDER BY m.id",
-        )?;
+        ))?;
         statement
             .query_map(params![account, source], |row| {
                 Ok((
@@ -1691,8 +1705,12 @@ impl AgentTriageStore for SqliteStore {
         let conn = self.lock()?;
         let id: i64 = conn
             .query_row(
-                "SELECT id FROM messages WHERE account_id=?1 AND thread_id=?2 ORDER BY
-             is_sent,is_spam,received_at DESC,id DESC LIMIT 1",
+                concat!(
+                    "SELECT m.id FROM messages m WHERE m.account_id=?1 AND m.thread_id=?2 ORDER BY
+             ",
+                    own_mail_sql!(),
+                    ",m.is_spam,m.received_at DESC,m.id DESC LIMIT 1"
+                ),
                 params![account, thread],
                 |r| r.get(0),
             )
@@ -1990,12 +2008,19 @@ fn apply_attention(
     // representative for the target or replace its per-message classification.
     let cross_thread = read_message(conn, account, fallback_message)?.thread_id != thread;
     if cross_thread {
-        let previous: Option<(String, i64)> = conn.query_row(
-            "SELECT a.relevant_activity,a.message_id FROM agent_thread_attention a
+        let previous: Option<(String, i64)> = conn
+            .query_row(
+                concat!(
+                    "SELECT a.relevant_activity,a.message_id FROM agent_thread_attention a
              JOIN messages m ON m.account_id=a.account_id AND m.id=a.message_id
-             WHERE a.account_id=?1 AND a.thread_id=?2 AND m.thread_id=?2 AND m.is_sent=0 AND m.is_spam=0",
-            params![account,thread], |row| Ok((row.get(0)?,row.get(1)?)),
-        ).optional()?;
+             WHERE a.account_id=?1 AND a.thread_id=?2 AND m.thread_id=?2 AND NOT ",
+                    own_mail_sql!(),
+                    " AND m.is_spam=0"
+                ),
+                params![account, thread],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
         if previous.is_some() {
             latest = previous;
         }
@@ -2004,10 +2029,10 @@ fn apply_attention(
         Some(activity) => Some(activity),
         None => conn
             .query_row(
-                "SELECT strftime('%Y-%m-%dT%H:%M:%fZ',min(julianday(m.received_at),COALESCE(julianday(t.created_at),julianday(?3)),julianday(?3))) AS activity,m.id
+                concat!("SELECT strftime('%Y-%m-%dT%H:%M:%fZ',min(julianday(m.received_at),COALESCE(julianday(t.created_at),julianday(?3)),julianday(?3))) AS activity,m.id
              FROM messages m LEFT JOIN triage t ON t.account_id=m.account_id AND t.message_id=m.id
              WHERE m.account_id=?1 AND m.thread_id=?2
-             ORDER BY (m.is_sent=0 AND m.is_spam=0) DESC,activity DESC,m.id DESC LIMIT 1",
+             ORDER BY (NOT ",own_mail_sql!()," AND m.is_spam=0) DESC,activity DESC,m.id DESC LIMIT 1"),
                 params![account, thread,Utc::now().to_rfc3339()],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -2067,8 +2092,15 @@ fn list_items_with_query(
     // FYE skips auth mail: it lives on the Auth page's decision rail, and
     // listing it in both places means ruling on it twice. An explicit thread
     // preference (the human pinned it) and a fired reminder still win.
+    //
+    // THE USER'S OWN MAIL gets the same treatment for a plainer reason: they
+    // wrote it. A thread whose representative is theirs (see `OWN_MAIL` for how
+    // a sent message comes to sit in the inbound listing at all) is never the
+    // model's to surface, and the same two human acts still win. The other
+    // lists hold placements only a model makes, so there the exclusion is flat:
+    // rows placed before own mail stopped being triaged as inbound stay hidden.
     let sql = if destination == "fye" {
-        "SELECT
+        concat!("SELECT
              m.id,m.thread_id,m.from_addr,m.subject,
              strftime('%Y-%m-%dT%H:%M:%fZ',min(julianday(a.relevant_activity),COALESCE(julianday(t.created_at),julianday(?2)),julianday(?2))),d.decision_json,a.attention_json,a.unresolved_since,a.decision_message_id
              FROM agent_thread_attention a JOIN messages m ON m.account_id=a.account_id AND
@@ -2077,30 +2109,30 @@ fn list_items_with_query(
              t.message_id=m.id LEFT JOIN agent_thread_preferences pref ON pref.account_id=a.account_id AND
              pref.thread_id=a.thread_id WHERE a.account_id=?1 AND ?3='fye' AND
              (COALESCE(pref.show_in_fye,CASE WHEN json_array_length(COALESCE(d.decision_json,'{}'),'$.auth.kinds')>0
-             THEN 0 ELSE a.show_in_fye END)=1 OR t.reminded_at IS NOT NULL) AND m.is_sent=0 AND m.is_spam=0 AND COALESCE(t.status,'new')!='done' AND
-             (t.remind_at IS NULL OR t.remind_at<=?2) AND ?4 IS ?4 AND ?5 IS ?5"
+             OR ",own_mail_sql!()," THEN 0 ELSE a.show_in_fye END)=1 OR t.reminded_at IS NOT NULL) AND m.is_sent=0 AND m.is_spam=0 AND COALESCE(t.status,'new')!='done' AND
+             (t.remind_at IS NULL OR t.remind_at<=?2) AND ?4 IS ?4 AND ?5 IS ?5")
     } else if destination == "records" {
-        "SELECT m.id,m.thread_id,m.from_addr,m.subject,
+        concat!("SELECT m.id,m.thread_id,m.from_addr,m.subject,
              strftime('%Y-%m-%dT%H:%M:%fZ',min(julianday(m.received_at),COALESCE(julianday(t.created_at),julianday(?2)),julianday(?2))),d.decision_json,a.attention_json,a.unresolved_since,d.message_id
              FROM agent_message_decisions d JOIN messages m ON m.account_id=d.account_id AND m.id=d.message_id
              LEFT JOIN triage t ON t.account_id=m.account_id AND t.message_id=m.id
              LEFT JOIN agent_thread_attention a ON a.account_id=m.account_id AND a.thread_id=m.thread_id
-             WHERE d.account_id=?1 AND ?3='records' AND m.is_sent=0 AND m.is_spam=0
+             WHERE d.account_id=?1 AND ?3='records' AND NOT ",own_mail_sql!()," AND m.is_spam=0
              AND EXISTS(SELECT 1 FROM json_each(d.decision_json,'$.records') r
                  WHERE json_extract(r.value,'$.kind') IN ('bill','receipt','delivery','event','financial_update'))
              AND (?4 OR COALESCE(t.status,'new')!='done')
-             AND (?5 IS NULL OR min(julianday(m.received_at),COALESCE(julianday(t.created_at),julianday(?2)),julianday(?2))>=julianday(?5))"
+             AND (?5 IS NULL OR min(julianday(m.received_at),COALESCE(julianday(t.created_at),julianday(?2)),julianday(?2))>=julianday(?5))")
     } else {
-        "SELECT
+        concat!("SELECT
              m.id,m.thread_id,m.from_addr,m.subject,
              strftime('%Y-%m-%dT%H:%M:%fZ',min(julianday(m.received_at),COALESCE(julianday(t.created_at),julianday(?2)),julianday(?2))),d.decision_json,a.attention_json,a.unresolved_since,d.message_id
              FROM agent_message_destinations p JOIN messages m ON m.account_id=p.account_id AND
              m.id=p.message_id JOIN agent_message_decisions d ON d.account_id=m.account_id AND
              d.message_id=m.id LEFT JOIN triage t ON t.account_id=m.account_id AND t.message_id=m.id
              LEFT JOIN agent_thread_attention a ON a.account_id=m.account_id AND
-             a.thread_id=m.thread_id WHERE p.account_id=?1 AND p.destination=?3 AND m.is_sent=0 AND
+             a.thread_id=m.thread_id WHERE p.account_id=?1 AND p.destination=?3 AND NOT ",own_mail_sql!()," AND
              m.is_spam=0 AND (?4 OR COALESCE(t.status,'new')!='done') AND
-             (?5 IS NULL OR min(julianday(m.received_at),COALESCE(julianday(t.created_at),julianday(?2)),julianday(?2))>=julianday(?5))"
+             (?5 IS NULL OR min(julianday(m.received_at),COALESCE(julianday(t.created_at),julianday(?2)),julianday(?2))>=julianday(?5))")
     };
     let mut stmt = conn.prepare(sql)?;
     let raw = stmt
@@ -4735,12 +4767,13 @@ fn human_inventory(
         decision: Option<String>,
         attention: Option<String>,
         representative: Option<i64>,
+        own: bool,
     }
-    let mut statement=conn.prepare(
+    let mut statement=conn.prepare(concat!(
         "SELECT m.id,m.thread_id,m.from_addr,m.from_name,m.subject,m.snippet,m.received_at,
              COALESCE(t.status,'new'),t.surfaced_at,t.resolved_at,t.remind_at,t.reminded_at,
              EXISTS(SELECT 1 FROM attachments at WHERE at.account_id=m.account_id AND at.message_id=m.id),
-             d.decision_json,a.attention_json,a.message_id
+             d.decision_json,a.attention_json,a.message_id,",own_mail_sql!(),"
          FROM messages m
          LEFT JOIN triage t ON t.account_id=m.account_id AND t.message_id=m.id
          LEFT JOIN agent_message_decisions d ON d.account_id=m.account_id AND d.message_id=m.id
@@ -4748,7 +4781,7 @@ fn human_inventory(
          WHERE m.account_id=?1 AND m.is_sent=0 AND m.is_spam=?2
            AND (m.received_at>=?3 OR t.remind_at IS NOT NULL OR t.reminded_at IS NOT NULL)
          ORDER BY m.received_at DESC,m.id DESC"
-    )?;
+    ))?;
     let rows = statement
         .query_map(
             params![
@@ -4774,6 +4807,7 @@ fn human_inventory(
                     decision: row.get(13)?,
                     attention: row.get(14)?,
                     representative: row.get(15)?,
+                    own: row.get(16)?,
                 })
             },
         )?
@@ -4798,11 +4832,13 @@ fn human_inventory(
         }
         // Same rule as the `fye` list in `list_items_with_query`: auth mail
         // lives on the Auth page, so the model's FYE pick does not count for
-        // it unless the human pinned the thread.
+        // it unless the human pinned the thread. Nor does it count for mail
+        // the user wrote themselves.
         let wants_fye = attention.as_ref().is_some_and(|a| a.show_in_fye);
         let is_auth = decision.as_ref().is_some_and(|d| d.auth.is_auth());
         let selected = wants_fye
-            && (!is_auth || thread_fye_override(conn, account, &row.thread)? == Some(true));
+            && (!(is_auth || row.own)
+                || thread_fye_override(conn, account, &row.thread)? == Some(true));
         let is_standing = ((selected && row.representative == Some(row.id))
             || row.reminded.is_some())
             && thread_fye_override(conn, account, &row.thread)? != Some(false);
@@ -5455,5 +5491,258 @@ mod dependency_tests {
             store.agent_records(1, 10).unwrap()[0].decision.kinds,
             vec![EmailKind::Bill]
         );
+    }
+}
+
+/// Mail the account itself wrote, sitting in the inbound listing with
+/// `is_sent = 0` (see `OWN_MAIL`). The fixture account is `a@test`.
+#[cfg(test)]
+mod own_mail_tests {
+    use super::tests::{claim, decision, fixture};
+    use super::*;
+    use crate::store::{SitrepBand, SpamScope};
+
+    /// A message the account wrote that the INBOX walk claimed: visible row,
+    /// own From. Spelled with stray case and padding because neither side of
+    /// the address compare is normalized.
+    fn own_inbox_copy(store: &SqliteStore, id: i64, thread: &str) {
+        let conn = store.lock().unwrap();
+        conn.execute(
+            "INSERT INTO messages(id,account_id,gmail_msg_id,thread_id,from_addr,subject,received_at,snippet,body)
+             VALUES(?1,1,?2,?3,' A@Test ','subject',?4,'snippet','body')",
+            params![id, id.to_string(), thread, (Utc::now() + Duration::seconds(5)).to_rfc3339()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO triage(account_id,message_id,created_at) VALUES(1,?1,?2)",
+            params![id, Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+    }
+    fn commit(store: &SqliteStore, id: i64, verdict: &MessageDecision) {
+        let (job, context) = claim(store, id);
+        assert_eq!(job.message_id, id);
+        let sources = store
+            .snapshot_agent_sources(1, &verdict.attention.relevant_message_ids)
+            .unwrap();
+        assert_eq!(
+            store
+                .commit_agent_decision(&job, &context, verdict, &sources)
+                .unwrap(),
+            AgentCommitOutcome::Applied
+        );
+    }
+    fn fye(store: &SqliteStore) -> Vec<(String, i64)> {
+        store
+            .agent_fye(1, 10, &RankingConfig::default(), Utc::now())
+            .unwrap()
+            .into_iter()
+            .map(|item| (item.thread_id, item.message_id))
+            .collect()
+    }
+    fn inventory(
+        store: &SqliteStore,
+        band: Option<SitrepBand>,
+    ) -> Vec<crate::types::AttentionUpdate> {
+        store
+            .human_agent_updates(
+                1,
+                &AgentInventoryQuery {
+                    since: Utc::now() - Duration::days(30),
+                    min_importance: None,
+                    status: None,
+                    band,
+                    pending_reminders: false,
+                    spam: SpamScope::Exclude,
+                    ranking: RankingConfig::default(),
+                },
+            )
+            .unwrap()
+    }
+    fn jobs(store: &SqliteStore, message: i64) -> Vec<(String, String)> {
+        let conn = store.lock().unwrap();
+        let mut statement = conn
+            .prepare(
+                "SELECT kind,trigger FROM agent_triage_jobs
+                 WHERE message_id=?1 AND kind IN ('triage','access') ORDER BY id",
+            )
+            .unwrap();
+        statement
+            .query_map([message], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn own_mail_in_the_inbox_is_evidence_not_an_arrival() {
+        let store = fixture();
+        own_inbox_copy(&store, 4, "one");
+        store.enqueue_agent_triage(1, 4, "arrival", true).unwrap();
+        // Access review only, with no arrival push, exactly like a row the SENT
+        // walk stored. `triage` here is the bug: the model is asked what the
+        // user owes on their own message.
+        assert_eq!(
+            jobs(&store, 4),
+            vec![("access".to_string(), "arrival".to_string())]
+        );
+        // And like a sent reply it re-opens the inbound mail it answers, never
+        // itself: the newest `is_sent = 0` row in the thread IS the own copy.
+        assert_eq!(
+            jobs(&store, 1),
+            vec![("triage".to_string(), "thread_changed:4:1".to_string())]
+        );
+        // The model is told who wrote it, on the target and in thread context.
+        assert!(store.agent_read_message(1, 4).unwrap().is_sent);
+        let context = store.agent_thread_context(1, "one").unwrap();
+        assert_eq!(
+            context.message.id, 1,
+            "the inbound message represents the thread"
+        );
+        assert!(context.thread.iter().any(|m| m.id == 4 && m.is_sent));
+        assert!(context.thread.iter().any(|m| m.id == 1 && !m.is_sent));
+        // An access review writes no decision, so the tier count has to place
+        // the row itself or it reads "pending triage" for as long as it exists.
+        // Pending is message 1 alone, queued above; 2 keeps its legacy tier.
+        let stats = store.stats(1, Utc::now() - Duration::days(30)).unwrap();
+        assert_eq!(stats.tier_counts.get("pending"), Some(&1));
+        assert_eq!(stats.tier_counts.get("noise"), Some(&2));
+    }
+
+    #[test]
+    fn a_thread_is_represented_by_inbound_mail_not_the_users_reply() {
+        let store = fixture();
+        own_inbox_copy(&store, 4, "one");
+        let mut verdict = decision(1);
+        verdict.attention.relevant_message_ids = vec![1, 4];
+        commit(&store, 1, &verdict);
+        // Message 4 is the newer relevant row and used to win on that alone,
+        // which put a card in FYE with the user as its sender.
+        assert_eq!(fye(&store), vec![("one".to_string(), 1)]);
+    }
+
+    #[test]
+    fn the_models_pick_never_surfaces_own_mail_but_the_users_does() {
+        let store = fixture();
+        // A row triaged as inbound before authorship was asked: decision,
+        // Reading placement, a receipt, and the thread's FYE seat.
+        commit(&store, 1, &decision(1));
+        assert_eq!(fye(&store), vec![("one".to_string(), 1)]);
+        assert_eq!(store.agent_reading(1, 10).unwrap().len(), 1);
+        assert_eq!(store.agent_records(1, 10).unwrap().len(), 1);
+        store
+            .lock()
+            .unwrap()
+            .execute("UPDATE messages SET from_addr='a@test' WHERE id=1", [])
+            .unwrap();
+
+        assert!(fye(&store).is_empty());
+        assert!(store.agent_reading(1, 10).unwrap().is_empty());
+        assert!(store.agent_records(1, 10).unwrap().is_empty());
+        assert!(inventory(&store, Some(SitrepBand::Standing)).is_empty());
+        // Still the user's mail to find in the mail list, just not owed to them.
+        let listed = inventory(&store, None);
+        let own = listed.iter().find(|item| item.update.id == 1).unwrap();
+        assert_eq!(own.update.tier, crate::types::Tier::Noise);
+
+        // A reminder is the user asking to see it again, whoever wrote it.
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE triage SET reminded_at=?1 WHERE message_id=1",
+                [Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+        assert_eq!(fye(&store), vec![("one".to_string(), 1)]);
+        assert_eq!(inventory(&store, Some(SitrepBand::Standing)).len(), 1);
+        store
+            .lock()
+            .unwrap()
+            .execute("UPDATE triage SET reminded_at=NULL WHERE message_id=1", [])
+            .unwrap();
+        assert!(fye(&store).is_empty());
+
+        // So is pinning the thread.
+        store
+            .correct_agent_triage(1, 1, "show_in_fye", &serde_json::json!(true), Utc::now())
+            .unwrap();
+        assert_eq!(fye(&store), vec![("one".to_string(), 1)]);
+        assert_eq!(inventory(&store, Some(SitrepBand::Standing)).len(), 1);
+    }
+
+    #[test]
+    fn own_mail_is_per_account_and_a_blank_address_never_matches() {
+        let store = fixture();
+        // Account 2 is `b@test`: mail from `a@test` is a stranger's there.
+        store
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "UPDATE messages SET from_addr='a@test' WHERE id=3;
+                 UPDATE messages SET from_addr='' WHERE id=2;
+                 UPDATE accounts SET email='' WHERE id=1;",
+            )
+            .unwrap();
+        assert!(!store.agent_read_message(2, 3).unwrap().is_sent);
+        assert!(!store.agent_read_message(1, 2).unwrap().is_sent);
+    }
+
+    #[test]
+    fn upgrade_rereads_fye_threads_that_mistook_own_mail_for_inbound() {
+        let store = fixture();
+        // Before: message 4 arrives in thread "one", is triaged as inbound and
+        // takes the thread's FYE seat. It was the user's all along.
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO messages(id,account_id,gmail_msg_id,thread_id,from_addr,subject,received_at,snippet,body)
+                 VALUES(4,1,'4','one','sender@test','subject',?1,'snippet','body')",
+                [(Utc::now() + Duration::seconds(5)).to_rfc3339()],
+            )
+            .unwrap();
+        commit(&store, 4, &decision(4));
+        assert_eq!(fye(&store), vec![("one".to_string(), 4)]);
+        store
+            .lock()
+            .unwrap()
+            .execute("UPDATE messages SET from_addr='a@test' WHERE id=4", [])
+            .unwrap();
+        assert!(fye(&store).is_empty(), "hidden at once, before any re-read");
+
+        for _ in 0..2 {
+            let conn = store.lock().unwrap();
+            super::super::migrate::heal_own_mail_read_as_inbound(&conn).unwrap();
+        }
+        // Once, however many times the store is opened.
+        assert_eq!(
+            jobs(&store, 4),
+            vec![
+                ("triage".to_string(), "arrival".to_string()),
+                ("access".to_string(), "heal".to_string())
+            ]
+        );
+        assert_eq!(
+            jobs(&store, 1),
+            vec![("triage".to_string(), "thread_changed:4:2".to_string())]
+        );
+        // The re-read lands on the inbound message, and the thread is back.
+        let job = store
+            .claim_agent_job(1, "triage", Utc::now(), 60)
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.message_id, 1);
+        let context = store.load_agent_context(&job).unwrap();
+        let mut verdict = decision(1);
+        verdict.attention.relevant_message_ids = vec![1, 4];
+        let sources = store.snapshot_agent_sources(1, &[1, 4]).unwrap();
+        assert_eq!(
+            store
+                .commit_agent_decision(&job, &context, &verdict, &sources)
+                .unwrap(),
+            AgentCommitOutcome::Applied
+        );
+        assert_eq!(fye(&store), vec![("one".to_string(), 1)]);
     }
 }

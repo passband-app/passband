@@ -711,6 +711,60 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
         }
     }
 
+    heal_own_mail_read_as_inbound(conn)?;
+
+    Ok(())
+}
+
+/// Re-read the threads the model put in FYE while it was still being shown the
+/// user's own mail as inbound (see `OWN_MAIL`). The listings stop
+/// showing own mail on their own; what they cannot fix is a verdict REASONED
+/// from the mistake, like "reply to <the user>" pinned on a neighbour in the
+/// thread, or a thread with real inbound mail whose representative is the
+/// user's reply.
+///
+/// Scoped to threads currently flagged for FYE because that is the only place
+/// the stale reading is still visible, and each one costs a model call.
+///
+/// Idempotent through the enqueue itself: authorship is part of a message's
+/// content snapshot, so the first pass sees a changed snapshot, files the own
+/// message as access-only and re-queues the thread's inbound target the way a
+/// fresh sent reply would. Every later open finds the snapshot current, and
+/// `heal` is a no-op on unchanged content.
+pub(super) fn heal_own_mail_read_as_inbound(conn: &Connection) -> Result<()> {
+    if !tables_exist(
+        conn,
+        &[
+            "accounts",
+            "messages",
+            "agent_message_state",
+            "agent_thread_attention",
+            "agent_triage_jobs",
+            "agent_job_lanes",
+        ],
+    )? || !has_columns(conn, "messages", &["from_addr", "is_sent", "is_spam"])?
+    {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    // CROSS JOIN pins the order: this runs on every open, so it walks the
+    // threads (one row each) into the thread index, never the whole mailbox.
+    let mut own_as_inbound = {
+        let mut stmt = tx.prepare(&format!(
+            "SELECT m.account_id,m.id FROM agent_thread_attention a
+             CROSS JOIN messages m ON m.account_id=a.account_id AND m.thread_id=a.thread_id
+             JOIN agent_message_state s ON s.account_id=m.account_id AND s.message_id=m.id
+             WHERE a.show_in_fye=1 AND m.is_sent=0 AND m.is_spam=0 AND {}",
+            super::OWN_MAIL
+        ))?;
+        stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    own_as_inbound.sort_unstable();
+    for (account, message) in own_as_inbound {
+        super::agent_triage::enqueue_agent_triage_conn(&tx, account, message, "heal", false)?;
+    }
+    tx.commit()?;
     Ok(())
 }
 

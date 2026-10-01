@@ -184,8 +184,8 @@ and shown in the UI. Committed ghosts have no likelihood; they are certain.
 - Likelihood changes presentation and suggestion ranking. It never writes to
   the real calendar and never dismisses a ghost on its own. Only commitment
   evidence materializes an event.
-- A likely ghost counts as soft-busy when suggesting times: ranked lower, not
-  excluded. An unlikely one does not count.
+- **What counts as busy** (DECIDED): real events, committed ghosts and likely
+  ghosts. A maybe or unlikely ghost never blocks a suggested time.
 - Outcomes stay in the account's own database.
 
 ### 3.6 Data sketch
@@ -245,8 +245,19 @@ Ghosts are a projection reconciled from stored decisions, the same shape as
 
 ## 5. Surfaces
 
-The visual design of every surface here is an open brief, and that design pass
-is done by Opus 5.5 (DECIDED).
+The visual design pass is done by Opus 5.5 (DECIDED). Its first round is
+`docs/calendar-ux-preview.html`, and these directions from it stand until the
+founder says otherwise:
+
+- A ghost is an empty container, never a faded one. Its text stays at full
+  strength, so it does not read as a disabled control.
+- Fill density is the likelihood scale: solid is real or committed, striped is
+  likely, outline is maybe, and unlikely folds into a count.
+- An estimated end fades out with no bottom edge and reads "ends ~11pm".
+- A committed ghost before the calendar grant looks like a real event, with a
+  small mail mark (DECIDED).
+- Accounts are two muted fills. Blue is reserved for state: now, next, holds
+  and suggested slots.
 
 - **Sitrep agenda.** Replaces the Calendar zone: today and the next few days,
   real events and ghosts together, with the next commitment called out. This
@@ -263,7 +274,11 @@ is done by Opus 5.5 (DECIDED).
 - **iOS.** The agenda replaces the Calendar card in `MobileRecordsView`. The
   column and month views follow in the parity pass.
 
-A calendar destination joins the rail. The time pane is NOT a `SidePanel`
+A calendar destination joins the rail, directly under Sitrep and above All
+mail (DECIDED). Keys start as the preview drew them (`⇧C` opens the calendar;
+`d` / `w` / `m` switch views; `y` / `n` / `x` answer an invitation) and are
+adjusted after use; each is checked against the existing keymap before it is
+bound. The time pane is NOT a `SidePanel`
 view: that panel takes the modal key context, and composer plus side panel is
 already a known sore spot (#265). The pane sits beside the composer.
 
@@ -279,6 +294,8 @@ answer without the mail being opened:
   the cursor in it. The user writes the reply.
 - For a real calendar invitation the key is the RSVP itself, an API call. No
   email is written.
+- A candidate that is a range ("Friday morning") is shown with what blocks it,
+  and taking it holds the free part of the range (DECIDED).
 - Availability on the card is the client joining the daemon's candidate slots
   with the merged timeline.
 
@@ -295,6 +312,19 @@ answer without the mail being opened:
   ranked down for the morning after a late event.
 - **Click a slot** to insert its time as text at the cursor. Nothing else is
   written.
+- **The recipient's zone.** When the recipient's timezone is known with
+  confidence and differs from the user's, the inserted text carries both
+  ("Tue Oct 6, 2:00pm PT / 5:00pm ET"). The pane says what it inferred ("Sam
+  is usually on Eastern time") before anything is inserted. With no confident
+  inference, only the user's zone is inserted.
+- **How the zone is inferred**, strongest first: the zone named in a calendar
+  invitation from that person; then the UTC offset in the `Date` header of
+  their own mail, taken as the most common non-UTC offset over several recent
+  messages. Automated mail and clients that stamp UTC are ignored. An offset
+  is not a zone: two observations either side of a daylight-saving change pin
+  it down, one alone gives only "their time is 3 hours ahead". The daemon does
+  not store the sender's offset today (`messages` keeps `received_at` only),
+  so it has to be captured at ingest, and it learns forward from there.
 - **Holds.** Every slot the user offers becomes a held ghost tied to the
   thread, so the same hour is not offered twice. Holds take effect on send,
   including a scheduled send.
@@ -439,6 +469,10 @@ Each wave is useful on its own and is committed when verified.
 - How much an expired, unanswered ghost counts as a "no".
 - Whether the bands appear before there is any outcome history, or only the
   triage prior is used silently until then.
+- Whether to backfill senders' `Date` offsets for existing correspondents (a
+  headers-only fetch) or let the timezone inference learn forward only.
+- The month view (hour strips per day, no titles) is the least conventional
+  surface and has not been judged by the founder yet.
 - Whether the agent door serves the timeline.
 - Google's scope names, their classification, and the amendment process, all
   to be verified at build time.

@@ -78,6 +78,9 @@ struct ConnectView: View {
 
     @State private var mode: ConnectMode = .pair
     @State private var gateStep: ConnectGateStep = .introduction
+    /// Whether the intro has closed the squelch, for the ONE scene drawn
+    /// behind both the intro and the login steps (see `gateBody`).
+    @State private var introEngaged = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var url = "http://127.0.0.1:8848"
     @State private var code = ""
@@ -241,14 +244,26 @@ struct ConnectView: View {
 
     private var gateBody: some View {
         ZStack {
+            // ONE LIVE SCENE under the intro and every login step. Each used
+            // to mount its own, and the swap tore down the Metal layer and
+            // stood up a fresh one whose first frames are the flat backdrop:
+            // the flash between the intro and the sign-in form. Drawn here,
+            // the waves keep running and only the words change.
+            if !SquelchScene.shared.isUnavailable {
+                GeometryReader { geometry in
+                    IntroSceneBackdrop(
+                        engaged: introEngaged || !onIntro, wide: geometry.size.width >= 820)
+                }
+                .ignoresSafeArea()
+            }
             if onIntro {
-                OnboardingIntroView { finishIntro() }
-                    .transition(introExit)
+                OnboardingIntroView(onContinue: { finishIntro() }, sceneEngaged: $introEngaged)
+                    .transition(.opacity)
             } else {
                 // No screen margin here: every login step is an IntroStage,
                 // full-bleed like the intro, with its own inset.
                 loginSteps
-                    .transition(loginEntrance)
+                    .transition(.opacity)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -268,35 +283,13 @@ struct ConnectView: View {
         }
     }
 
-    /// Leaving the intro. On the phone it is a CROSSFADE: the login steps
-    /// stand on the same squelch scene the intro ends on (IntroStage), so the
-    /// scene holds still and only the words change. Anything that moved or
-    /// scaled the two layers would slide one copy of the waves over another.
-    /// The Mac still cuts.
+    /// Leaving the intro is a CROSSFADE of the words alone: the scene is
+    /// shared (`gateBody`), so it holds still underneath while the story
+    /// gives way to the form.
     private func finishIntro() {
-        #if os(iOS)
-            withAnimation(.easeInOut(duration: reduceMotion ? 0.3 : 0.5)) {
-                gateStep = .welcome
-            }
-        #else
+        withAnimation(.easeInOut(duration: reduceMotion ? 0.3 : 0.5)) {
             gateStep = .welcome
-        #endif
-    }
-
-    private var introExit: AnyTransition {
-        #if os(iOS)
-            .opacity
-        #else
-            .identity
-        #endif
-    }
-
-    private var loginEntrance: AnyTransition {
-        #if os(iOS)
-            .opacity
-        #else
-            .identity
-        #endif
+        }
     }
 
     /// Everything after the intro, on ONE stage. Moves between these are not
@@ -305,7 +298,7 @@ struct ConnectView: View {
     /// per step would remount the squelch renderer on every Back and blank it
     /// to the flat backdrop while it faded in again.
     private var loginSteps: some View {
-        IntroStage(columnWidth: stepColumnWidth) { wide in
+        IntroStage(columnWidth: stepColumnWidth, drawsScene: false) { wide in
             stepColumn(wide: wide)
         } footer: { _ in
             // On a phone the welcome screen's sign-in buttons sit at the

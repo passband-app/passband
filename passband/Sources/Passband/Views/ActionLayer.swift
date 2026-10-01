@@ -193,6 +193,7 @@ struct ActionLayer: View {
                             .padding(.vertical, 6)
                     }
                     .transition(.move(edge: .leading).combined(with: .opacity))
+                    .tourTarget(.undoToast)
                 }
             }
         }

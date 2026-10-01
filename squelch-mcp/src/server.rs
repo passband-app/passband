@@ -21,7 +21,8 @@ use squelch_core::store::agent_triage::AgentTriageStore;
 use squelch_core::store::{NewAuditEntry, SearchSort, SqliteStore, Store};
 use squelch_core::triage::agent_config::RankingConfig;
 use squelch_core::triage::decision::{
-    EmailKind, MessageDestination, RecordProposal, SupportedTime, ThreadAttentionDecision,
+    EmailKind, MessageDestination, ReadingKind, RecordProposal, SupportedTime,
+    ThreadAttentionDecision,
 };
 use squelch_core::types::{
     AccountId, Disposition, SenderRule, ShipmentLeg, ShipmentOrder, ThreadView,
@@ -296,6 +297,8 @@ pub struct InboxUpdate {
     pub summary: String,
     pub kinds: Vec<EmailKind>,
     pub destinations: Vec<MessageDestination>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reading_kind: Option<ReadingKind>,
     pub attention: ThreadAttentionDecision,
     pub score: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -526,6 +529,7 @@ impl SquelchServer {
                 summary: item.decision.summary,
                 kinds: item.decision.kinds,
                 destinations: item.decision.destinations,
+                reading_kind: item.decision.reading_kind,
                 attention: item.attention,
                 score: item.score,
             });

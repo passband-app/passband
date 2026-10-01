@@ -2042,9 +2042,10 @@ struct ThreadViewer: View {
         confirmBusy = true
         defer { confirmBusy = false }
         do {
+            let gen = UnsubscribeJobs.shared.generation
             let result = try await APIClient.shared.unsubscribe(messageId: newest.id)
             if result.method == "auto" {
-                UnsubscribeJobs.shared.started(sender: result.sender)
+                UnsubscribeJobs.shared.started(sender: result.sender, generation: gen)
             } else {
                 Opener.open(result.url)
                 store.pushToast(Self.browserToast(result), .success)

@@ -686,12 +686,13 @@ enum AgentTools {
             id: UUID(), tool: .unsubscribeSender, verb: "Unsubscribe",
             verifiedSender: target.sender, verifiedSubject: target.subject)
         return await confirmed(action, gate) {
+            let gen = UnsubscribeJobs.shared.generation
             let result = try await APIClient.shared.unsubscribe(messageId: target.messageId)
             // USUALLY THE DAEMON DOES IT: the same job `u` starts, reported in
             // the sitrep's tray, so the assistant does not have to wait on a
             // stranger's website. The model hears only that it started.
             if result.method == "auto" {
-                UnsubscribeJobs.shared.started(sender: result.sender)
+                UnsubscribeJobs.shared.started(sender: result.sender, generation: gen)
                 return (
                     json([
                         "result": "unsubscribing", "sender": result.sender,

@@ -239,10 +239,11 @@ struct ActionLayer: View {
     }
 
     private func scanViolations() async {
+        let gen = UnsubscribeJobs.shared.generation
         guard let rows = try? await APIClient.shared.getUnsubscribes() else { return }
         // The same rows carry automatic-unsubscribe jobs: a `needs_you` left
         // from before a relaunch reaches the tray through this fetch.
-        UnsubscribeJobs.shared.absorb(rows)
+        UnsubscribeJobs.shared.absorb(rows, generation: gen)
         // Surface one at a time: a stack of these is a nag, not a prompt.
         let next = rows.first {
             $0.violation_count > 0 && $0.resolution == nil && !acted.contains($0.sender)

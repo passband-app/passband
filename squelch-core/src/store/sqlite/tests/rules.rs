@@ -498,3 +498,33 @@ fn a_late_job_result_never_overwrites_a_newer_request() {
     assert_eq!(rec.method, "browser");
     assert!(rec.status.is_none());
 }
+
+/// Dismissing a job that needs the user drops the tokened link with it.
+#[test]
+fn dismissing_a_needs_you_row_forgets_its_link() {
+    let (store, acct) = store();
+    let now = Utc::now();
+    store
+        .begin_unsubscribe_job(acct, "news@x.com", None, "https://x.com/u?tok=1", now)
+        .unwrap();
+    store
+        .finish_unsubscribe_job(
+            acct,
+            "news@x.com",
+            "needs_you",
+            "auto",
+            Some("unclear"),
+            now,
+        )
+        .unwrap();
+    assert!(
+        store
+            .set_unsubscribe_resolution(acct, "news@x.com", "dismissed")
+            .unwrap()
+    );
+    assert!(
+        store.list_unsubscribes(acct).unwrap()[0]
+            .status_url
+            .is_none()
+    );
+}

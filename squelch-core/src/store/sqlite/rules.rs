@@ -448,7 +448,7 @@ impl SqliteStore {
     ) -> Result<bool> {
         let conn = self.lock()?;
         let n = conn.execute(
-            "UPDATE unsubscribes SET resolution = ?3
+            "UPDATE unsubscribes SET resolution = ?3, status_url = NULL
              WHERE account_id = ?1 AND sender_addr = ?2",
             params![account_id, sender, resolution],
         )?;

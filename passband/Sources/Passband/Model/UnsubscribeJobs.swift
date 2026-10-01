@@ -49,8 +49,9 @@ final class UnsubscribeJobs {
     @ObservationIgnored private var pending: [String: Date] = [:]
     @ObservationIgnored private var poll: Task<Void, Never>?
     /// Bumped by `reset`: an answer that left under an older generation
-    /// belongs to another account and is dropped.
-    @ObservationIgnored private var generation = 0
+    /// belongs to another account and is dropped. Every caller that awaits the
+    /// daemon before handing something here captures it FIRST.
+    @ObservationIgnored private(set) var generation = 0
 
     /// How long "Unsubscribed from X" stays up. Long enough to read, short
     /// enough that it is never in the way: success should be quiet.
@@ -99,7 +100,9 @@ final class UnsubscribeJobs {
     }
 
     /// The daemon took a job. Show it at once, before the first poll lands.
-    func started(sender: String) {
+    /// `generation` is the one captured before the request went out.
+    func started(sender: String, generation gen: Int) {
+        guard gen == generation else { return }
         let sender = sender.lowercased()
         asked.insert(sender)
         hidden.remove(sender)
@@ -119,16 +122,21 @@ final class UnsubscribeJobs {
     }
 
     /// Take a fresh ledger, from the violation scan or this model's own poll.
-    func absorb(_ fresh: [UnsubscribeRecord]) {
+    /// `generation` is the one captured before the fetch went out.
+    func absorb(_ fresh: [UnsubscribeRecord], generation gen: Int) {
+        guard gen == generation else { return }
         var fresh = fresh
         // A job started here that this answer predates stays a spinner: keep
-        // the local row until the ledger shows the job (a row stamped at or
-        // after the press). Past a minute the daemon has surely written it.
+        // the local row until the ledger shows the job, which is a RUNNING row
+        // (this press, or one it joined) or a row stamped around the press
+        // (generous, for a daemon clock behind the Mac's). Past a minute the
+        // daemon has surely written it.
         let now = Date()
         for (sender, at) in pending {
             let row = fresh.first { $0.sender == sender }
-            let seen = row.flatMap { Fmt.date($0.status_at ?? $0.requested_at) }
-                .map { $0.addingTimeInterval(2) >= at } ?? false
+            let stamped = row.flatMap { Fmt.date($0.status_at ?? $0.requested_at) }
+                .map { $0.addingTimeInterval(30) >= at } ?? false
+            let seen = row?.status == .running || stamped
             if seen || now.timeIntervalSince(at) > 60 {
                 pending[sender] = nil
             } else if let local = rows.first(where: { $0.sender == sender }) {
@@ -185,7 +193,10 @@ final class UnsubscribeJobs {
                 let fresh = try? await APIClient.shared.getUnsubscribes()
                 // Another account's ledger, if the account changed meanwhile.
                 guard gen == self.generation, !Task.isCancelled else { return }
-                if let fresh { self.absorb(fresh) }
+                if let fresh { self.absorb(fresh, generation: gen) }
+                // Expire pending starts on the clock too, so a daemon that
+                // stopped answering does not keep this loop alive forever.
+                self.pending = self.pending.filter { Date().timeIntervalSince($0.value) <= 60 }
                 if !self.rows.contains(where: { $0.status == .running }) && self.pending.isEmpty { break }
                 try? await Task.sleep(for: .seconds(1))
             }

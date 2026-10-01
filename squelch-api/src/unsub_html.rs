@@ -122,6 +122,10 @@ pub(crate) struct Page {
     pub scripts: usize,
     /// A `<meta http-equiv=refresh>` target: a redirect that needs no script.
     pub meta_refresh: Option<Url>,
+    /// Part of the page went unread: a hidden element that never closed, or
+    /// the tag or action caps. "Done" is never trusted from a partial read,
+    /// since the part we missed may hold the button that says otherwise.
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -188,6 +192,8 @@ pub(crate) struct Submit {
     /// `formaction` / `formmethod` on the button, which override the form's.
     pub action: Option<Url>,
     pub method: Option<Method>,
+    /// `formmethod=dialog`: closes a dialog, submits nothing.
+    pub dialog: bool,
 }
 
 /// A ready-to-send submission.
@@ -199,17 +205,26 @@ pub(crate) struct Submission {
 }
 
 impl Page {
-    /// The page says, in so many words, that the unsubscribe already happened,
-    /// and does not ALSO offer an unsubscribe button. Pages that ship their
-    /// success message beside the form (shown by script after the click) are
-    /// the reason: hidden text is skipped by the parser, and a live button next
-    /// to the words means the words are not about this visit yet.
+    /// The FIRST page says, in so many words, that the unsubscribe already
+    /// happened, was read whole, and does not also offer an unsubscribe FORM.
+    /// AJAX pages ship their success message beside the form, waiting for the
+    /// click: hidden text is skipped by the parser, and a live form button next
+    /// to the words means they are not about this visit yet. LINKS do not
+    /// count: a finished page's footer often offers "unsubscribe from all
+    /// Acme emails", and following that would widen what the user asked for.
     pub fn says_done(&self) -> bool {
-        (says_done(&self.text) || says_done(&self.title))
-            && !self
-                .actions
-                .iter()
-                .any(|a| a.labels().iter().any(|l| is_unsub_label(l)))
+        self.says_done_after_submit()
+            && !self.truncated
+            && !self.actions.iter().any(|a| {
+                matches!(a, Action::Form(_)) && a.labels().iter().any(|l| is_unsub_label(l))
+            })
+    }
+
+    /// The page AFTER our one action says done. Visible text is enough here:
+    /// the request went out, and a page that re-renders its own form under
+    /// the success message is still telling the truth.
+    pub fn says_done_after_submit(&self) -> bool {
+        says_done(&self.text) || says_done(&self.title)
     }
 
     /// A plain-text body, read as a page with no actions.
@@ -220,6 +235,7 @@ impl Page {
             actions: Vec::new(),
             scripts: 0,
             meta_refresh: None,
+            truncated: false,
         }
     }
 
@@ -272,7 +288,10 @@ impl Action {
     /// A form whose action is not a web address (`javascript:void(0)`, the
     /// usual sign of a form a script submits). Only a browser can take it.
     pub fn needs_script(&self) -> bool {
-        matches!(self, Action::Form(f) if !matches!(f.action.scheme(), "http" | "https"))
+        match self {
+            Action::Form(f) => !matches!(f.effective_action().scheme(), "http" | "https"),
+            Action::Link { .. } => false,
+        }
     }
 
     pub fn describe(&self) -> String {
@@ -363,6 +382,9 @@ impl Form {
 
     fn submission(&self) -> Option<Submission> {
         let submit = self.pick_submit()?;
+        if submit.dialog {
+            return None;
+        }
         let mut pairs = Vec::new();
         let mut required_radios: HashSet<&str> = HashSet::new();
         let mut chosen_radios: HashSet<&str> = HashSet::new();
@@ -452,6 +474,13 @@ impl Form {
     /// The one button a person would press. A lone button is it, whatever it
     /// says (the model already judged the form). Among several, exactly one must
     /// say unsubscribe, or failing that exactly one must say confirm.
+    /// Where pressing the chosen button would actually go.
+    fn effective_action(&self) -> &Url {
+        self.pick_submit()
+            .and_then(|s| s.action.as_ref())
+            .unwrap_or(&self.action)
+    }
+
     fn pick_submit(&self) -> Option<&Submit> {
         match self.submits.as_slice() {
             [] => None,
@@ -657,7 +686,10 @@ fn decode_entities(s: &str) -> String {
 }
 
 /// Elements whose content is never shown as text.
-const HIDDEN_CONTENT: &[&str] = &["script", "style", "noscript", "template", "svg", "head"];
+/// Not `noscript`: a client without JavaScript, which is what this is, is
+/// exactly who that content is for, and the plain fallback form often lives
+/// there.
+const HIDDEN_CONTENT: &[&str] = &["script", "style", "template", "svg", "head"];
 /// Elements that start a new line of text.
 const BLOCKS: &[&str] = &[
     "p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "section", "form", "label",
@@ -719,9 +751,12 @@ pub(crate) fn parse_page(html: &str, page_url: &Url) -> Page {
 
     let mut i = 0;
     let mut tags = 0;
+    let mut truncated = false;
+    let mut dropped_actions = false;
     loop {
         tags += 1;
         if tags > MAX_TAGS {
+            truncated = true;
             break;
         }
         let Some((start, tag)) = next_tag(html, i) else {
@@ -735,9 +770,8 @@ pub(crate) fn parse_page(html: &str, page_url: &Url) -> Page {
         if tag.closing {
             if name == "form"
                 && let Some(f) = form.take()
-                && actions.len() < MAX_ACTIONS
             {
-                actions.push(Action::Form(f));
+                push_form(&mut actions, f, &mut dropped_actions);
             }
             if BLOCKS.contains(&name) {
                 text.push('\n');
@@ -749,6 +783,9 @@ pub(crate) fn parse_page(html: &str, page_url: &Url) -> Page {
         // a form a script reveals is a form for a browser.
         if !VOID.contains(&name) && is_hidden(&tag) {
             i = skip_element(html, name, i);
+            if i >= html.len() {
+                truncated = true;
+            }
             continue;
         }
 
@@ -786,10 +823,8 @@ pub(crate) fn parse_page(html: &str, page_url: &Url) -> Page {
             "form" => {
                 // A form that never closed before the next one opens is closed
                 // here, the way a browser would.
-                if let Some(f) = form.take()
-                    && actions.len() < MAX_ACTIONS
-                {
-                    actions.push(Action::Form(f));
+                if let Some(f) = form.take() {
+                    push_form(&mut actions, f, &mut dropped_actions);
                 }
                 let action = tag
                     .attr("action")
@@ -826,7 +861,7 @@ pub(crate) fn parse_page(html: &str, page_url: &Url) -> Page {
                 if let Some(f) = form.as_mut() {
                     let kind = tag.attr("type").unwrap_or("submit").to_ascii_lowercase();
                     if kind == "submit" && !tag.has("disabled") {
-                        let (action, method) = overrides(&tag, page_url);
+                        let (action, method, dialog) = overrides(&tag, page_url);
                         f.submits.push(Submit {
                             name: tag
                                 .attr("name")
@@ -836,6 +871,7 @@ pub(crate) fn parse_page(html: &str, page_url: &Url) -> Page {
                             label,
                             action,
                             method,
+                            dialog,
                         });
                     }
                 }
@@ -903,10 +939,8 @@ pub(crate) fn parse_page(html: &str, page_url: &Url) -> Page {
             break;
         }
     }
-    if let Some(f) = form.take()
-        && actions.len() < MAX_ACTIONS
-    {
-        actions.push(Action::Form(f));
+    if let Some(f) = form.take() {
+        push_form(&mut actions, f, &mut dropped_actions);
     }
     let text = collapse(&decode_entities(&text));
     let text: String = text.chars().take(MAX_TEXT_CHARS).collect();
@@ -916,6 +950,16 @@ pub(crate) fn parse_page(html: &str, page_url: &Url) -> Page {
         actions,
         scripts,
         meta_refresh,
+        truncated: truncated || dropped_actions,
+    }
+}
+
+/// Keep a finished form, or note that the action cap dropped one.
+fn push_form(actions: &mut Vec<Action>, f: Form, dropped: &mut bool) {
+    if actions.len() < MAX_ACTIONS {
+        actions.push(Action::Form(f));
+    } else {
+        *dropped = true;
     }
 }
 
@@ -924,12 +968,17 @@ fn read_input(tag: &Tag, f: &mut Form, page_url: &Url) {
         return;
     }
     let kind = tag.attr("type").unwrap_or("text").to_ascii_lowercase();
+    // A hidden BUTTON is not one a person could press. (A hidden field still
+    // carries its value, as a browser would send it.)
+    if matches!(kind.as_str(), "submit" | "image") && is_hidden(tag) {
+        return;
+    }
     let name = tag.attr("name").unwrap_or("").to_string();
     let value = tag.attr("value").unwrap_or("").to_string();
     let required = tag.has("required");
     match kind.as_str() {
         "submit" | "image" => {
-            let (action, method) = overrides(tag, page_url);
+            let (action, method, dialog) = overrides(tag, page_url);
             f.submits.push(Submit {
                 name: (!name.is_empty()).then_some(name),
                 label: if value.is_empty() {
@@ -940,6 +989,7 @@ fn read_input(tag: &Tag, f: &mut Form, page_url: &Url) {
                 value,
                 action,
                 method,
+                dialog,
             })
         }
         "password" | "file" => f.controls.push(Control::Forbidden),
@@ -968,11 +1018,14 @@ fn read_input(tag: &Tag, f: &mut Form, page_url: &Url) {
 }
 
 /// A submit control's own `formaction` / `formmethod`.
-fn overrides(tag: &Tag, page_url: &Url) -> (Option<Url>, Option<Method>) {
+fn overrides(tag: &Tag, page_url: &Url) -> (Option<Url>, Option<Method>, bool) {
     let action = tag
         .attr("formaction")
         .filter(|a| !a.trim().is_empty())
         .and_then(|a| page_url.join(a.trim()).ok());
+    let dialog = tag
+        .attr("formmethod")
+        .is_some_and(|m| m.eq_ignore_ascii_case("dialog"));
     let method = tag.attr("formmethod").map(|m| {
         if m.eq_ignore_ascii_case("post") {
             Method::POST
@@ -980,20 +1033,20 @@ fn overrides(tag: &Tag, page_url: &Url) -> (Option<Url>, Option<Method>) {
             Method::GET
         }
     });
-    (action, method)
+    (action, method, dialog)
 }
 
 /// Content a person never sees: the `hidden` attribute, inline
-/// `display:none` / `visibility:hidden`, `aria-hidden`, and the usual utility
-/// classes. AJAX unsubscribe pages ship their "you're unsubscribed" message
-/// this way, waiting for a click; reading it as the page's answer would report
-/// done for a request that never went out.
+/// `display:none` / `visibility:hidden`, a closed `<dialog>`, and the usual
+/// utility classes. AJAX unsubscribe pages ship their "you're unsubscribed"
+/// message this way, waiting for a click; reading it as the page's answer
+/// would report done for a request that never went out.
+///
+/// NOT `aria-hidden`: that hides from screen readers, not from eyes (modal
+/// libraries set it on the whole app). And a utility class beside a responsive
+/// variant (`hidden md:block`, `d-none d-md-block`) is shown on a desktop.
 fn is_hidden(tag: &Tag) -> bool {
-    if tag.has("hidden")
-        || tag
-            .attr("aria-hidden")
-            .is_some_and(|v| v.eq_ignore_ascii_case("true"))
-    {
+    if tag.has("hidden") || (tag.name == "dialog" && !tag.has("open")) {
         return true;
     }
     if let Some(style) = tag.attr("style") {
@@ -1007,12 +1060,17 @@ fn is_hidden(tag: &Tag) -> bool {
         }
     }
     tag.attr("class").is_some_and(|c| {
-        c.split_whitespace().any(|k| {
-            matches!(
-                k.to_ascii_lowercase().as_str(),
-                "hidden" | "d-none" | "hide" | "is-hidden" | "invisible" | "display-none"
-            )
-        })
+        let classes: Vec<String> = c.split_whitespace().map(str::to_ascii_lowercase).collect();
+        let responsive = classes
+            .iter()
+            .any(|k| k.contains(':') || (k.starts_with("d-") && k != "d-none"));
+        !responsive
+            && classes.iter().any(|k| {
+                matches!(
+                    k.as_str(),
+                    "hidden" | "d-none" | "hide" | "is-hidden" | "invisible" | "display-none"
+                )
+            })
     })
 }
 
@@ -1317,7 +1375,7 @@ mod tests {
             "<div style=\"display: none\">You have been unsubscribed.</div>",
             "<div hidden>You have been unsubscribed.</div>",
             "<div class=\"msg d-none\"><p>You have been unsubscribed.</p></div>",
-            "<div aria-hidden=true>You have been unsubscribed.</div>",
+            "<dialog><p>You have been unsubscribed.</p></dialog>",
         ] {
             let p = page(&format!(
                 "<p>Unsubscribe from Acme?</p><form method=post><button>Unsubscribe</button></form>{hidden}"
@@ -1395,5 +1453,86 @@ mod tests {
     #[test]
     fn plain_text_bodies_are_read() {
         assert!(Page::from_text("OK\nYou have been unsubscribed.\n").says_done());
+    }
+
+    /// Final verify: a FINISHED page's footer link must not be read as "not
+    /// done yet", or the job follows "unsubscribe from all" and widens the ask.
+    #[test]
+    fn a_done_page_with_an_unsubscribe_all_footer_link_is_done() {
+        let p = page(
+            "<h1>You have been unsubscribed from Weekly Deals.</h1>\
+             <footer><a href='/u/all'>Unsubscribe from all Acme emails</a></footer>",
+        );
+        assert!(p.says_done());
+    }
+
+    #[test]
+    fn a_re_rendered_form_under_the_success_text_is_done_after_submit() {
+        let p = page(
+            "<p>You have been unsubscribed.</p><form method=post><button>Unsubscribe</button></form>",
+        );
+        assert!(!p.says_done(), "first page: the live form wins");
+        assert!(
+            p.says_done_after_submit(),
+            "after our submit: the words win"
+        );
+    }
+
+    #[test]
+    fn a_partial_read_never_says_done() {
+        let p = page(
+            "<p>You have been unsubscribed.</p><p hidden>never closes <form><button>Unsubscribe</button>",
+        );
+        assert!(p.truncated);
+        assert!(!p.says_done());
+    }
+
+    #[test]
+    fn the_buttons_formaction_decides_needs_script_and_dialog_submits_nothing() {
+        let p = page(
+            "<form action=/u><button formaction='javascript:void(0)'>Unsubscribe</button></form>",
+        );
+        assert!(p.actions[0].needs_script());
+        let p = page(
+            "<form action='javascript:void(0)'><button formaction=/u>Unsubscribe</button></form>",
+        );
+        assert!(!p.actions[0].needs_script());
+        let p = page(
+            "<form action=/u method=post><button formmethod=dialog>Unsubscribe</button></form>",
+        );
+        assert!(only_submission(&p).is_none());
+    }
+
+    #[test]
+    fn visibility_is_judged_like_a_desktop_browser() {
+        // aria-hidden hides from screen readers, not from eyes.
+        assert!(
+            page("<body aria-hidden=true><p>You have been unsubscribed.</p></body>").says_done()
+        );
+        // A responsive variant beside the utility class shows it on a desktop.
+        assert!(page("<div class='hidden md:block'>You have been unsubscribed.</div>").says_done());
+        assert!(
+            page("<div class='d-none d-md-block'>You have been unsubscribed.</div>").says_done()
+        );
+        // A hidden submit input is not a button anyone could press.
+        let p = page(
+            "<form method=post><input type=submit hidden value='Unsubscribe'>\
+             <input type=submit value='Save'></form>",
+        );
+        let s = only_submission(&p).unwrap();
+        assert!(
+            s.pairs.is_empty(),
+            "the visible Save, not the hidden Unsubscribe"
+        );
+        assert_eq!(p.actions[0].labels(), vec!["Save".to_string()]);
+    }
+
+    #[test]
+    fn noscript_fallback_forms_are_read() {
+        let p = page(
+            "<p>Unsubscribe from Acme?</p><noscript><form method=post action=/u>\
+             <button>Unsubscribe</button></form></noscript>",
+        );
+        assert_eq!(p.obvious_action(), Some(0));
     }
 }

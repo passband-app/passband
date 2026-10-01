@@ -352,7 +352,7 @@ pub(crate) async fn run(state: &ApiState, plan: &Plan) -> Outcome {
     let Some(result) = read(&after).await else {
         return Outcome::NeedsYou(http_failure(&after));
     };
-    if result.says_done() {
+    if result.says_done_after_submit() {
         return Outcome::Done("page");
     }
     match verdict_after_submit(state, &after.final_url, &result).await {

@@ -30,6 +30,7 @@ struct PracticeProductTour: View {
                 }
                 if store.ruleEditor == nil, let arrow = clickArrow(in: geometry.size) {
                     ClickArrow(direction: arrow.direction, reduceMotion: reduceMotion)
+                        .id(arrow.direction)
                         .frame(width: ClickArrow.size, height: ClickArrow.size)
                         .offset(x: arrow.origin.x, y: arrow.origin.y)
                         .allowsHitTesting(false)
@@ -466,20 +467,20 @@ private struct ClickArrow: View {
 
     let direction: Direction
     let reduceMotion: Bool
-    @State private var bob = false
 
     var body: some View {
+        // A phase animator, not a repeatForever started in onAppear: the
+        // first arrow appears inside the step change's own transaction, which
+        // swallowed that one-shot repeat and left Maya's arrow standing still.
         Image(systemName: "arrow.down")
             .font(.system(size: 26, weight: .heavy))
             .foregroundStyle(Palette.accent)
             .shadow(color: Palette.accent.opacity(0.45), radius: 8)
             .rotationEffect(rotation)
-            .offset(x: travel.width * (bob ? 1 : 0), y: travel.height * (bob ? 1 : 0))
+            .phaseAnimator(reduceMotion ? [false] : [false, true]) { arrow, out in
+                arrow.offset(x: out ? travel.width : 0, y: out ? travel.height : 0)
+            } animation: { _ in .easeInOut(duration: 0.6) }
             .frame(width: Self.size, height: Self.size)
-            .onAppear {
-                guard !reduceMotion else { return }
-                withAnimation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true)) { bob = true }
-            }
             .accessibilityHidden(true)
     }
 

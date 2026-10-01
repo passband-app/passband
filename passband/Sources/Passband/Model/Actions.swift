@@ -118,9 +118,9 @@ enum Actions {
         do {
             let result = try await APIClient.shared.setReminder(messageId, at: date)
             Analytics.capture("email_remind")
-            // Off the mail pages too: `removeFromBands` only covers the sitrep,
-            // and the row is done from this moment on either way.
-            store.removeFromMail(messageId)
+            // Left IN the cached mail pages: `removeFromBands` recorded the id
+            // in `resolvedIds`, which hides the row on To do and dims it on
+            // Everything until the poll brings the server's parked row.
             // The server's own stamp when it sent one — it is the value the
             // parked list will be re-fetched with, and a local string that
             // disagrees would make the row jump on the next poll.

@@ -230,6 +230,12 @@ pub struct AttentionUpdate {
     /// so an older client's decode and an older daemon's rows both still work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub received_at: Option<DateTime<Utc>>,
+    /// Where the sitrep files this mail: `eyes`, `auth`, `calendar`,
+    /// `shipments`, `billing`, `receipts`, `reading` or `noise`. A label for
+    /// the mail list, so a row says which zone holds it; absent when the mail
+    /// has no triage decision yet, and on the legacy band listing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<String>,
     pub surfaced_at: Option<DateTime<Utc>>,
     pub resolved_at: Option<DateTime<Utc>>,
     /// A PENDING reminder: when the user asked to see this again, `None` when

@@ -2323,6 +2323,21 @@ final class AppStore {
         if mailRefreshes[mode] == refresh { mailRefreshes[mode] = nil }
     }
 
+    /// Mark a cached `done` row open again on every mail page: the local half
+    /// of an undone resolve, until the next poll says the same.
+    func reopenInMail(_ messageId: Int) {
+        for mode in MailMode.allCases {
+            withMailPage(mode) { page in
+                guard var rows = page.value,
+                    let i = rows.firstIndex(where: { $0.id == messageId && $0.status == .done })
+                else { return }
+                rows[i].status = .open
+                rows[i].resolved_at = nil
+                page.value = rows
+            }
+        }
+    }
+
     /// Drop a message from the cached pages outright. For a resolve that must not
     /// come back on the next poll's slower truth. EVERY page, not just the one on
     /// screen: the inbox filters no tier, so a noise row sits in both.
@@ -2338,6 +2353,7 @@ final class AppStore {
         // already showing has nothing to spin, and flipping the flag twice a
         // tick re-rendered the list twice a tick.
         withMailPage(mode) { if $0.value == nil { $0.isLoading = true } }
+        let fetchedAt = Date()
         do {
             let fetched = try await APIClient.shared.getUpdates(
                 UpdatesParams(
@@ -2346,6 +2362,7 @@ final class AppStore {
             // below return rather than fall through, so the `isLoading` write
             // at the bottom is only ever reached by the live epoch.
             guard e == epoch else { return }
+            releaseReopened(fetched.items, fetchedAt: fetchedAt)
             // DONE MAIL STAYS IN THE CACHE. The page hides it on "to do" and
             // shows it dimmed on "everything" (`MailList.visible`), and that is
             // a view decision made per render, not a fetch decision made here.
@@ -2366,8 +2383,13 @@ final class AppStore {
             mailLoadedAt[mode] = Date()
             // Pull the head rows' threads before any click, so an open renders
             // from cache. Runs on the launch warm too, not just on a visit.
+            // The head of what the page SHOWS: on To do (the default) the
+            // done rows in the cache are never on screen, and warming them
+            // would leave the rows that are cold.
+            let showDone = Prefs.shared.mailShowsDone
             ThreadPrefetch.shared.warm(
-                next.prefix(Self.mailWarmRows).map(\.thread_id), immediate: 5)
+                next.lazy.filter { showDone || $0.status != .done }
+                    .prefix(Self.mailWarmRows).map(\.thread_id), immediate: 5)
         } catch {
             guard e == epoch else { return }
             withMailPage(mode) { $0.error = errText(error, "load failed") }
@@ -2395,8 +2417,10 @@ final class AppStore {
     /// and sort to the top. Ties (and the nil bucket) break on id, which is
     /// ingest order.
     private static func receivedTS(_ u: AttentionUpdate) -> Double {
-        guard let s = u.arrivedAt else { return .greatestFiniteMagnitude }
-        return Fmt.date(s)?.timeIntervalSince1970 ?? 0
+        // An unparseable stamp sorts with the missing ones, so both land in one
+        // "Recent" run at the top rather than one at each end of the list.
+        guard let s = u.arrivedAt, let d = Fmt.date(s) else { return .greatestFiniteMagnitude }
+        return d.timeIntervalSince1970
     }
 
     // MARK: - the sent page
@@ -5161,7 +5185,13 @@ final class AppStore {
             // it did nothing until the next poll. Harmless for undo kinds that
             // never resolved anything: the id simply is not in the set.
             // Only for a kind that resolved something: see `touchesSitrep`.
-            if entry.kind.touchesSitrep { resolvedIds.remove(entry.messageId) }
+            if entry.kind.touchesSitrep {
+                resolvedIds.remove(entry.messageId)
+                // The mail page may already hold the server's `done` row (a
+                // poll landed inside the undo window), and the next fetch is
+                // up to a TTL away; reopen it there too so the undo shows now.
+                reopenInMail(entry.messageId)
+            }
             pushToast("undone: \(entry.label)", .info)
             Analytics.capture("undo_fired", ["kind": String(describing: entry.kind)])
             // The bands dropped the row optimistically and the next poll is up
@@ -5226,7 +5256,26 @@ final class AppStore {
     /// `lastRefresh`) would keep showing a resolved row for up to a full poll —
     /// which reads as the action not working. This is the shared record such a
     /// list filters against; the poll still supplies the truth.
-    private(set) var resolvedIds: Set<Int> = []
+    private(set) var resolvedIds: Set<Int> = [] {
+        didSet {
+            for id in resolvedIds.subtracting(oldValue) { resolvedAt[id] = Date() }
+            for id in oldValue.subtracting(resolvedIds) { resolvedAt[id] = nil }
+        }
+    }
+    /// When each id joined `resolvedIds`, so a later poll can tell "the server
+    /// has not caught up yet" from "the server reopened it since".
+    private var resolvedAt: [Int: Date] = [:]
+
+    /// Let the server's word win over a resolve made this session, for the one
+    /// case where it reopens mail on its own: a reminder that fired. Only for a
+    /// fetch that STARTED well after the resolve, so a poll racing the resolve's
+    /// own write cannot hand the row back.
+    fileprivate func releaseReopened(_ rows: [AttentionUpdate], fetchedAt: Date) {
+        for u in rows where u.status != .done && u.reminded_at != nil {
+            guard let at = resolvedAt[u.id], fetchedAt.timeIntervalSince(at) > 30 else { continue }
+            resolvedIds.remove(u.id)
+        }
+    }
 
     /// Optimistically pull a message id out of whatever band holds it and keep
     /// the selection valid (advance to the next row, else the previous).

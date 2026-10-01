@@ -4810,6 +4810,7 @@ fn human_inventory(
             },
             status,
             received_at: Some(row.received),
+            placement: placement(decision.as_ref(), is_standing || selected, is_auth),
             surfaced_at: row.surfaced,
             resolved_at: row.resolved,
             remind_at: row.reminder,
@@ -4830,6 +4831,32 @@ fn human_inventory(
         });
     }
     Ok(output.into_iter().map(|(item, _)| item).collect())
+}
+
+/// The sitrep zone a message lands in, in the order the sitrep itself claims
+/// it: the attention band first (it outranks a verdict), then the Auth page,
+/// then the record zones, then Reading. Anything else that was triaged is noise.
+fn placement(decision: Option<&MessageDecision>, attention: bool, is_auth: bool) -> Option<String> {
+    use crate::triage::decision::RecordProposal;
+    if attention {
+        return Some("eyes".into());
+    }
+    let decision = decision?;
+    let zone = if is_auth {
+        "auth"
+    } else if let Some(record) = decision.records.first() {
+        match record {
+            RecordProposal::Event { .. } => "calendar",
+            RecordProposal::Delivery { .. } => "shipments",
+            RecordProposal::Receipt { .. } => "receipts",
+            RecordProposal::Bill { .. } | RecordProposal::FinancialUpdate { .. } => "billing",
+        }
+    } else if decision.destinations.contains(&MessageDestination::Reading) {
+        "reading"
+    } else {
+        "noise"
+    };
+    Some(zone.into())
 }
 
 #[cfg(test)]
@@ -4898,6 +4925,8 @@ mod inventory_tests {
         assert_eq!(item.deadline_date.as_deref(), Some("2026-10-05"));
         // The mail list dates rows by arrival, so every inventory row carries it.
         assert!(item.received_at.is_some());
+        // And names the sitrep zone a triaged row lands in.
+        assert!(item.placement.is_some());
     }
 
     #[test]

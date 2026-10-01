@@ -6,9 +6,8 @@
 //
 // Read them against Views/EmailsView.swift's `bindings` (e/d/r/v/f/Enter) and
 // Views/ActionLayer.swift's list bindings (t). The one place a verb is more than
-// a single call — done, which resolves AND drops the row from the cached mail
-// pages so the next poll cannot hand it back — is copied from `resolveSelected`
-// rather than re-derived, and says so.
+// a single call — done, which must not act on mail that is already finished —
+// is copied from `resolveSelected` rather than re-derived, and says so.
 //
 // A phone has no cursor, so there is no `actionable` guard to port: the row a
 // gesture starts on IS the selection, and it is passed in.
@@ -24,6 +23,10 @@ struct UpdateVerbs {
     /// open. The dashboard zones pass their ranked list; a zone with no walk of
     /// its own passes nothing, exactly as the Mac's zone rows do.
     var queue: [AttentionUpdate] = []
+    /// The row is already finished (all mail's Everything view shows these
+    /// dimmed). Done is withheld from it: a second resolve would push a fresh
+    /// undo, and that undo reopens mail finished long ago.
+    var finished = false
 
     private var store: AppStore { AppStore.shared }
 
@@ -32,11 +35,12 @@ struct UpdateVerbs {
         store.openThread(update.thread_id, queue: queue)
     }
 
-    /// `e` / `d`. Both halves of EmailsView.resolveSelected: the action, then the
-    /// cached-page eviction that keeps the next poll from re-serving the row.
+    /// `e` / `d`, as EmailsView.resolveSelected: the action only. The row is
+    /// NOT evicted from the cached pages; `resolvedIds` hides it on To do and
+    /// dims it on Everything, and an undo brings it straight back.
     func done() {
+        guard !finished else { return }
         Task { await Actions.done(update) }
-        store.removeFromMail(update.id)
     }
 
     /// `e` in process mode — a DIFFERENT verb from done (status stays open, the
@@ -106,18 +110,17 @@ extension UpdateVerbs {
     /// Trailing edge (drag LEFT): the resolve. Done leads because it is the one
     /// verb a triage run repeats, and it is what a full swipe commits.
     var trailingVerbs: [SwipeVerb] {
-        if isSpamPage {
-            return [
+        let done =
+            finished
+            ? []
+            : [
                 SwipeVerb(
-                    title: "Done", symbol: "checkmark", tint: Palette.positive, destructive: true,
-                    run: done)
+                    title: "Done", symbol: "checkmark", tint: Palette.positive,
+                    destructive: true, run: self.done)
             ]
-        }
-        return [
-            SwipeVerb(
-                title: "Done", symbol: "checkmark", tint: Palette.positive, destructive: true,
-                run: done),
-            SwipeVerb(title: "Tune", symbol: "slider.horizontal.3", tint: Palette.accent, run: tune),
+        if isSpamPage { return done }
+        return done + [
+            SwipeVerb(title: "Tune", symbol: "slider.horizontal.3", tint: Palette.accent, run: tune)
         ]
     }
 
@@ -172,13 +175,15 @@ struct UpdateContextMenu: ViewModifier {
                 Divider()
                 Button { verbs.archive() } label: { Label("Archive", systemImage: "archivebox") }
             }
-            Divider()
             // Destructive ROLE, not a destructive act: done is undoable for five
             // seconds like every other resolve. The role is what puts it last and
             // in red, which is where a thumb expects the one verb that empties
-            // the row.
-            Button(role: .destructive) { verbs.done() } label: {
-                Label("Done", systemImage: "checkmark")
+            // the row. Absent on a row that is already done.
+            if !verbs.finished {
+                Divider()
+                Button(role: .destructive) { verbs.done() } label: {
+                    Label("Done", systemImage: "checkmark")
+                }
             }
         }
     }

@@ -16,20 +16,11 @@ import SwiftUI
 struct MailFilterBar: View {
     @Environment(AppStore.self) private var store
     let mode: MailMode
-    /// The page's cached rows, unfiltered, for the counts.
-    let rows: [AttentionUpdate]
-    let showDone: Bool
+    /// Rows per lens under the current to-do switch (`MailList.Counts`), so a
+    /// chip says what clicking it gets you before you click.
+    let counts: [MailFilter: Int]
 
     private var reminders: Bool { store.reminderFilter }
-
-    /// How many rows each lens would show under the current to-do switch, so
-    /// a chip says what clicking it gets you before you click.
-    private func count(_ filter: MailFilter) -> Int {
-        rows.reduce(0) { n, u in
-            let shown = showDone || !MailList.isDone(u, resolved: store.resolvedIds)
-            return n + (shown && filter.matches(u) ? 1 : 0)
-        }
-    }
 
     var body: some View {
         @Bindable var prefs = Prefs.shared
@@ -40,7 +31,7 @@ struct MailFilterBar: View {
                         ForEach(MailFilter.allCases, id: \.self) { f in
                             FilterPill(
                                 text: f.label,
-                                count: f == .all ? nil : count(f),
+                                count: f == .all ? nil : counts[f, default: 0],
                                 active: !reminders && store.mailFilter == f,
                                 help: f.help
                             ) {

@@ -359,6 +359,7 @@ impl SqliteStore {
                 status: AttentionStatus::parse(&r.get::<_, String>(9)?)
                     .unwrap_or(AttentionStatus::New),
                 received_at: dt_opt(r, 15)?,
+                placement: None,
                 surfaced_at: dt_opt(r, 10)?,
                 resolved_at: dt_opt(r, 11)?,
                 // HUMAN DOOR again: columns 16/17, past the `received_at` (15).

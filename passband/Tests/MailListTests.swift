@@ -1,5 +1,8 @@
 import Foundation
 
+struct CheckFailed: Error {}
+func check(_ ok: Bool) throws { if !ok { throw CheckFailed() } }
+
 @main
 struct MailListTests {
     static func main() throws {
@@ -57,7 +60,7 @@ struct MailListTests {
         precondition(title("2026-09-21T12:00:00Z") == "Last week")
         precondition(title("2026-09-02T12:00:00Z").hasPrefix("Earlier in "))
         precondition(!title("2026-08-20T12:00:00Z").hasPrefix("Earlier"), "a past month is its name")
-        precondition(MailList.dayTitle(nil, now: now, calendar: cal) == "Recent")
+        precondition(MailList.dayTitle(nil, now: now, calendar: cal) == "Today", "no date = just arrived")
 
         // Sections are contiguous runs, with flat start positions.
         let dated = [
@@ -84,6 +87,50 @@ struct MailListTests {
         let json = #"{"id":1,"thread_id":"t","tier":"signal","importance":1,"sender":"a@b.c","one_line":"x","reason":"y","status":"open","surfaced_at":null,"resolved_at":null}"#
         let decoded = try JSONDecoder().decode(AttentionUpdate.self, from: Data(json.utf8))
         precondition(decoded.received_at == nil && decoded.arrivedAt == nil)
+        // Formatting follows the calendar's zone, not the process's: 2026-09-27
+        // 23:30 UTC is a Sunday in UTC whatever TZ the test runs under.
+        let sunday = MailList.dayTitle(
+            Fmt.date("2026-09-27T23:30:00Z"), now: now, calendar: cal)
+        precondition(sunday == "Sunday", "weekday uses the calendar zone, got \(sunday)")
+
+        // A section's id survives a row leaving above it; `start` does not.
+        let before = MailList.sections(dated, now: now, calendar: cal)
+        let after = MailList.sections(Array(dated.dropFirst()), now: now, calendar: cal)
+        precondition(before[1].id == after[1].id && before[1].start != after[1].start)
+
+        // Missing and unreadable dates share one "Today" run.
+        let odd = [row(20), row(21, received: "garbage")].map { u -> AttentionUpdate in
+            var u = u; u.surfaced_at = nil; return u
+        }
+        precondition(MailList.sections(odd, now: now, calendar: cal).count == 1)
+
+        // Within a day, importance first; days keep their order.
+        func ranked(_ id: Int, _ importance: Int, _ at: String) -> AttentionUpdate {
+            var u = row(id, received: at); u.importance = importance; return u
+        }
+        let byDay = MailList.ordered([
+            ranked(30, 10, "2026-09-30T12:00:00Z"),
+            ranked(31, 90, "2026-09-30T08:00:00Z"),
+            ranked(32, 90, "2026-09-30T07:00:00Z"),
+            ranked(33, 99, "2026-09-29T12:00:00Z"),
+        ], calendar: cal)
+        precondition(byDay.map(\.id) == [31, 32, 30, 33], "got \(byDay.map(\.id))")
+
+        // The listing memo answers again for the same inputs and changes
+        // when the rows do (a status flip included).
+        try MainActor.assumeIsolated {
+            let memo = MailList.Listing()
+            let a = memo.of(dated, showDone: false, filter: .all, resolved: [], grouped: true, now: now)
+            try check(a.rows.count == 4 && !a.sections.isEmpty)
+            var changed = dated
+            changed[0].status = .done
+            let b = memo.of(changed, showDone: false, filter: .all, resolved: [], grouped: true, now: now)
+            try check(b.rows.count == 3)
+            let lens = memo.of(changed, showDone: true, filter: .all, resolved: [], grouped: false, now: now)
+            try check(lens.sections.isEmpty && lens.rows.map(\.id) == changed.map(\.id))
+            let c = MailList.counts(rows, showDone: true, resolved: [])
+            try check(c[.important] == 2 && c[.attachments] == 1 && c[.deadlines] == 1)
+        }
         print("ok: mail list checks passed")
     }
 }

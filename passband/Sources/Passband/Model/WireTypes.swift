@@ -196,6 +196,9 @@ struct AttentionUpdate: Codable, Sendable, Identifiable, Hashable {
     /// When the mail arrived. ABSENT from an older daemon, which is why every
     /// read goes through `arrivedAt` and falls back to `surfaced_at`.
     var received_at: String? = nil
+    /// The sitrep zone this mail lands in (`SitrepZone`). Absent from an older
+    /// daemon and from rows triage has not decided yet.
+    var placement: String? = nil
     var surfaced_at: String?
     var resolved_at: String?
     /// A PENDING reminder: when the daemon will pull this back into the bands.

@@ -66,17 +66,11 @@ struct MailRow: View {
             .font(.system(size: 12.5, weight: weight))
             .foregroundStyle(done ? Palette.inkFaint : Palette.ink)
         guard !gist.isEmpty else { return head }
-        // Two spaces and a drop in ink, no glyph: the weight and colour change
+        // Three spaces and a drop in ink, no glyph: the weight and colour change
         // already say where the subject ends.
         return Text("\(head)\(Text(verbatim: "   "))\(gistText)")
     }
 
-    /// The triage's own reason, offered on hover. Hidden when it is the
-    /// placeholder an untriaged row carries.
-    private var why: String? {
-        let r = update.reason.trimmingCharacters(in: .whitespacesAndNewlines)
-        return r.isEmpty || r == "Triage pending" ? nil : "Why it's here: \(r)"
-    }
 
     var body: some View {
         let chip = Fmt.deadlineChip(update.displayDeadline)
@@ -106,7 +100,6 @@ struct MailRow: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .help(why ?? "")
 
                 HStack(spacing: 7) {
                     if update.matched_rule != nil {
@@ -131,12 +124,17 @@ struct MailRow: View {
                             .foregroundStyle(Palette.inkFaint)
                             .accessibilityLabel("has attachments")
                     }
+                    PlacementLabel(zone: SitrepZone(update.placement))
+                        .frame(width: 112, alignment: .leading)
                     if selected {
                         Text(verbHint)
                             .font(Typo.mono(9))
                             .foregroundStyle(Palette.inkFaintest)
                     }
-                    Text(MailList.stamp(Fmt.date(update.arrivedAt)))
+                    // ARRIVAL ONLY. A daemon that does not send `received_at`
+                    // has no arrival to print, and its listing time (every
+                    // backfilled row reading "11:41 AM") is worse than none.
+                    Text(MailList.stamp(update.received_at))
                         .font(.system(size: 11.5, weight: emphasized ? .semibold : .regular))
                         .monospacedDigit()
                         .foregroundStyle(emphasized ? Palette.inkDim : Palette.inkFaint)
@@ -150,14 +148,18 @@ struct MailRow: View {
         // Dimmed mostly by INK rather than opacity: the words step down and
         // the avatar keeps its colour, which reads as handled, not disabled.
         .opacity(done ? 0.8 : 1)
-        .accessibilityElement(children: .combine)
-        .accessibilityValue(done ? "done" : "")
     }
 
     /// The left gutter: a check on finished mail, the importance meter on the
     /// rest. One slot, so the sender column never moves.
     @ViewBuilder private var gutter: some View {
-        if done {
+        if update.hasPendingReminder {
+            // Parked, not finished: it is coming back.
+            Image(systemName: "bell")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Palette.accent)
+                .accessibilityLabel("reminder set")
+        } else if done {
             Image(systemName: "checkmark")
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(Palette.positive)
@@ -167,6 +169,85 @@ struct MailRow: View {
                 .font(Typo.mono(10))
                 .foregroundStyle(Palette.importanceColor(update.importance))
                 .accessibilityLabel("importance \(update.importance)")
+        }
+    }
+}
+
+/// The sitrep zone a row lives in, by the daemon's `placement`. Same symbols
+/// and names as the sitrep's own zone headers, so the label points at a place
+/// the user has seen.
+enum SitrepZone {
+    case eyes, auth, calendar, shipments, billing, receipts, reading, noise
+
+    init?(_ wire: String?) {
+        switch wire {
+        case "eyes": self = .eyes
+        case "auth": self = .auth
+        case "calendar": self = .calendar
+        case "shipments": self = .shipments
+        case "billing": self = .billing
+        case "receipts": self = .receipts
+        case "reading": self = .reading
+        case "noise": self = .noise
+        default: return nil
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .eyes: "For your eyes"
+        case .auth: "Auth"
+        case .calendar: "Calendar"
+        case .shipments: "Shipments"
+        case .billing: "Billing"
+        case .receipts: "Receipts"
+        case .reading: "Reading"
+        case .noise: "Noise"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .eyes: "eye"
+        case .auth: "lock"
+        case .calendar: "calendar"
+        case .shipments: "shippingbox"
+        case .billing: "building.columns"
+        case .receipts: "receipt"
+        case .reading: "envelope.open"
+        case .noise: "speaker.slash"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .eyes, .calendar: Palette.accent
+        case .auth: Palette.lock
+        case .shipments: Palette.warn
+        case .billing, .receipts: Palette.positive
+        case .reading: Palette.inkDim
+        case .noise: Palette.inkFaintest
+        }
+    }
+}
+
+/// The zone as an icon and its name, quiet enough to sit in every row.
+struct PlacementLabel: View {
+    let zone: SitrepZone?
+
+    var body: some View {
+        if let zone {
+            HStack(spacing: 4) {
+                Image(systemName: zone.symbol)
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundStyle(zone.tint)
+                Text(zone.title)
+                    .font(Typo.micro)
+                    .foregroundStyle(zone == .noise ? Palette.inkFaintest : Palette.inkFaint)
+                    .lineLimit(1)
+            }
+        } else {
+            Color.clear.frame(height: 1)
         }
     }
 }

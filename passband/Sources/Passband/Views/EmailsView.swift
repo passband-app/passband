@@ -63,12 +63,18 @@ struct EmailsView: View {
     /// "everything" keeps it and the row dims. The filter bar's lens narrows
     /// the inbox only — noise has no important mail by definition, and spam
     /// has no verdict for any lens to read.
-    private var rows: [AttentionUpdate] {
-        let cached = page.value ?? []
-        if reminders { return cached }
-        return MailList.visible(
-            cached, showDone: showDone, filter: filter, resolved: store.resolvedIds)
+    ///
+    /// Each day is ordered by importance (`MailList.ordered`), so the flat
+    /// cursor walks rows in the order they are drawn. Read through the memo:
+    /// this is asked a dozen times per body, and the body runs on every hover.
+    private var listing: MailList.Listing.Output {
+        MailList.Listing.shared.of(
+            // The reminder lens is ALL done rows (parking resolves), so it
+            // never runs through the to-do switch.
+            page.value ?? [], showDone: reminders || showDone, filter: filter,
+            resolved: reminders ? [] : store.resolvedIds, grouped: !reminders)
     }
+    private var rows: [AttentionUpdate] { listing.rows }
     /// The "to do / everything" switch, on the two pages that have one.
     private var hasDoneSwitch: Bool { !reminders && (mode == .inbox || mode == .noise) }
     private var showDone: Bool { hasDoneSwitch && Prefs.shared.mailShowsDone }
@@ -78,9 +84,12 @@ struct EmailsView: View {
     private func isDone(_ u: AttentionUpdate) -> Bool {
         !reminders && MailList.isDone(u, resolved: store.resolvedIds)
     }
-    /// What the reader walks with "done + next": the rows still to do. On
-    /// "everything" that skips the dimmed ones, which have nothing to finish.
-    private var queue: [AttentionUpdate] { showDone ? rows.filter { !isDone($0) } : rows }
+    /// What the reader walks with "done + next" when it opens `u`: the rows
+    /// still to do, plus `u` itself even when it is a dimmed one, so the
+    /// reader can find where it is and walk on to the next live row.
+    private func queue(opening u: AttentionUpdate) -> [AttentionUpdate] {
+        showDone ? rows.filter { !isDone($0) || $0.id == u.id } : rows
+    }
     /// Sent rows are NOT filtered against `resolvedIds`: a resolve is an inbox
     /// verdict, and it must never delete a record of something you sent.
     private var sent: [SentItem] { sentPage.value ?? [] }
@@ -149,7 +158,13 @@ struct EmailsView: View {
                     .padding(.top, 10)
             }
             if mode == .inbox || mode == .noise {
-                MailFilterBar(mode: mode, rows: page.value ?? [], showDone: showDone)
+                // The page's OWN rows for the counts, never the parked list the
+                // reminder lens swaps in.
+                MailFilterBar(
+                    mode: mode,
+                    counts: MailList.Counts.shared.of(
+                        store.mailPage(mode).value ?? [], showDone: showDone,
+                        resolved: store.resolvedIds))
             }
             #if os(macOS)
                 desktopList
@@ -248,13 +263,21 @@ struct EmailsView: View {
                 reminders
                     ? "No pending reminders."
                     : filter != .all
-                        ? "Nothing in the last 30 days matches \(filter.label)."
+                        ? (hiddenDoneMatches
+                            ? "Everything here that matches \(filter.label) is done. Choose Everything to see it."
+                            : "Nothing in the last 30 days matches \(filter.label).")
                         : !showDone && hasDoneSwitch && !(page.value ?? []).isEmpty
                             ? "All caught up. Choose Everything to see mail you have finished."
                             : mode == .noise
                                 ? "No noise in the last 30 days."
                                 : mode == .spam ? spamEmptyNote : "No mail.")
         }
+    }
+
+    /// Whether To do is hiding finished mail that the current lens matches, so
+    /// an empty lens can say where its rows went instead of "nothing matches".
+    private var hiddenDoneMatches: Bool {
+        !showDone && (page.value ?? []).contains { isDone($0) && filter.matches($0) }
     }
 
     /// Which of the spam page's three empty states this is. Only the last one
@@ -373,6 +396,11 @@ struct EmailsView: View {
         return rows[safe: i]?.id
     }
 
+    /// The day sections, cached on the rows they were built from: the body
+    /// re-evaluates on every cursor move and hover, and rebuilding the
+    /// headings each time is a measurable stutter on five hundred rows.
+    private var sections: [MailList.Section] { listing.sections }
+
     private var hasRows: Bool { page.value != nil && page.error == nil && !rows.isEmpty }
 
     #if os(macOS)
@@ -391,7 +419,7 @@ struct EmailsView: View {
                                 mailRow(u, at: i)
                             }
                         } else {
-                            ForEach(MailList.sections(rows), id: \.start) { section in
+                            ForEach(sections, id: \.id) { section in
                                 DayHeading(section.title, first: section.start == 0)
                                 ForEach(Array(section.rows.enumerated()), id: \.element.id) {
                                     j, u in
@@ -431,7 +459,7 @@ struct EmailsView: View {
                     kbActive = false
                     index = i
                 },
-                onOpen: { store.openThread(u.thread_id, queue: queue) }
+                onOpen: { store.openThread(u.thread_id, queue: queue(opening: u)) }
             )
             .id(u.id)
         }
@@ -461,7 +489,7 @@ struct EmailsView: View {
                 } else if reminders {
                     ForEach(rows) { u in phoneRow(u) }
                 } else {
-                    ForEach(MailList.sections(rows), id: \.start) { section in
+                    ForEach(sections, id: \.id) { section in
                         Section {
                             ForEach(section.rows) { u in phoneRow(u) }
                         } header: {
@@ -476,7 +504,7 @@ struct EmailsView: View {
         }
 
         @ViewBuilder private func phoneRow(_ u: AttentionUpdate) -> some View {
-            let verbs = UpdateVerbs(update: u, queue: queue)
+            let verbs = UpdateVerbs(update: u, queue: queue(opening: u), finished: isDone(u))
             UpdateRow(
                 update: u,
                 selected: false,
@@ -651,21 +679,16 @@ struct EmailsView: View {
                     .buttonStyle(.plain)
                     .help("mail your email provider filtered out — opening this fetches it")
                 }
+                // Offline still says so. The "last checked" stamp is gone:
+                // the list's own times say how fresh it is.
                 if let err = store.refreshError {
                     Text("· offline")
                         .font(Typo.micro).foregroundStyle(Palette.warn)
                         .help(err.message)
-                } else {
-                    Text("· last checked: \(Fmt.lastChecked(store.stats?.last_surfaced_at))")
-                        .font(Typo.micro).foregroundStyle(Palette.inkFaintest)
                 }
             }
             // The reminder lens moved into the filter bar, beside the others.
             RetriageButton()
-            ChromeChip(
-                text: "peer-review", font: .system(size: 12),
-                help: "the process page: verify how your mail was sorted"
-            ) { store.setView(.process) }
         }
         // These metrics must match the sitrep masthead's: every page's bar ends
         // on the line the rail's top edge is cut to.
@@ -720,7 +743,7 @@ struct EmailsView: View {
                 } else if let u = selected {
                     // The ordered rows become the viewer's queue, so "done + next"
                     // (e/d) can advance in place.
-                    store.openThread(u.thread_id, queue: queue)
+                    store.openThread(u.thread_id, queue: queue(opening: u))
                 }
             },
             KeyBinding("v", "fix triage") {
@@ -733,7 +756,7 @@ struct EmailsView: View {
             // queue Enter does — done + next keeps working from inside the reader.
             KeyBinding("r", "reply") {
                 guard triageable, let u = selected else { return }
-                Actions.reply(u, queue: queue)
+                Actions.reply(u, queue: queue(opening: u))
             },
             // `sender` IS the address on this wire type (see AttentionUpdate's
             // SenderStringConvertible note) — the display name would search the
@@ -826,6 +849,14 @@ struct EmailsView: View {
     private func resolveSelected() {
         guard triageable, let u = selected, !isDone(u) else { return }
         Task { await Actions.done(u) }
+        // On Everything the row stays put (dimmed), so nothing slides under the
+        // cursor the way it does on To do: step to the next row still to do,
+        // or "e e e" stalls on the first one.
+        if showDone, kbActive,
+            let next = rows.indices.first(where: { $0 > index && !isDone(rows[$0]) && rows[$0].id != u.id })
+        {
+            index = next
+        }
         // NOT evicted from the cached page: `Actions.done` records the id in
         // `resolvedIds`, which is all `rows` needs to drop the row on "to do"
         // or dim it on "everything" on the next frame. A poll that lands before

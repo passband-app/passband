@@ -71,6 +71,109 @@ enum MailList {
         var title: String
         var start: Int
         var rows: [AttentionUpdate]
+        /// Stable across a row leaving above it, unlike `start`: the heading
+        /// and its first mail, so SwiftUI keeps the section's identity.
+        var id: String { "\(title)|\(rows.first?.id ?? -1)" }
+    }
+
+    /// Within each day, the mail that matters most first: importance, then
+    /// arrival. Rows come in newest first, so days are contiguous runs; each
+    /// run is re-sorted on its own and the days keep their order.
+    static func ordered(
+        _ rows: [AttentionUpdate], calendar: Calendar = .current
+    ) -> [AttentionUpdate] {
+        var out: [AttentionUpdate] = []
+        out.reserveCapacity(rows.count)
+        var run: [(Int, AttentionUpdate)] = []
+        var runDay: Date?? = nil
+        func flush() {
+            run.sort { a, b in
+                a.1.importance != b.1.importance ? a.1.importance > b.1.importance : a.0 < b.0
+            }
+            out.append(contentsOf: run.map(\.1))
+            run.removeAll(keepingCapacity: true)
+        }
+        for (i, u) in rows.enumerated() {
+            let day = Fmt.date(u.arrivedAt).map { calendar.startOfDay(for: $0) }
+            if runDay != nil, runDay! != day { flush() }
+            runDay = .some(day)
+            run.append((i, u))
+        }
+        flush()
+        return out
+    }
+
+    /// Counts per lens, for the filter bar's chips.
+    static func counts(
+        _ rows: [AttentionUpdate], showDone: Bool, resolved: Set<Int>
+    ) -> [MailFilter: Int] {
+        var out: [MailFilter: Int] = [:]
+        for u in rows where showDone || !isDone(u, resolved: resolved) {
+            for f in MailFilter.allCases where f.matches(u) { out[f, default: 0] += 1 }
+        }
+        return out
+    }
+
+    /// EVERYTHING THE PAGE DRAWS, computed once per change rather than once
+    /// per read. The page's body runs on every cursor move and every hover,
+    /// and reads its rows a dozen times each run; filtering, ordering and
+    /// heading five hundred rows that often is what made the list stutter.
+    /// The key compares cheaply: arrays and sets that share storage compare by
+    /// identity first, and the cached page is the same storage until a poll
+    /// actually changes it.
+    @MainActor
+    final class Listing {
+        static let shared = Listing()
+        struct Output {
+            var rows: [AttentionUpdate] = []
+            var sections: [Section] = []
+        }
+        private struct Key: Equatable {
+            var source: [AttentionUpdate]
+            var showDone: Bool
+            var filter: MailFilter
+            var resolved: Set<Int>
+            var grouped: Bool
+            var day: Date
+        }
+        private var key: Key?
+        private var output = Output()
+
+        /// `grouped` false keeps the source order and draws no headings (the
+        /// reminder lens, sorted by when each comes back).
+        func of(
+            _ source: [AttentionUpdate], showDone: Bool, filter: MailFilter,
+            resolved: Set<Int>, grouped: Bool, now: Date = Date()
+        ) -> Output {
+            let k = Key(
+                source: source, showDone: showDone, filter: filter, resolved: resolved,
+                grouped: grouped, day: Calendar.current.startOfDay(for: now))
+            if k == key { return output }
+            let shown = MailList.visible(
+                source, showDone: showDone, filter: filter, resolved: resolved)
+            if grouped {
+                let rows = MailList.ordered(shown)
+                output = Output(rows: rows, sections: MailList.sections(rows, now: now))
+            } else {
+                output = Output(rows: shown, sections: [])
+            }
+            key = k
+            return output
+        }
+    }
+
+    /// The same, for the filter bar's counts.
+    @MainActor
+    final class Counts {
+        static let shared = Counts()
+        private var key: ([AttentionUpdate], Bool, Set<Int>)?
+        private var value: [MailFilter: Int] = [:]
+        func of(_ rows: [AttentionUpdate], showDone: Bool, resolved: Set<Int>) -> [MailFilter: Int] {
+            if let key, key.0 == rows, key.1 == showDone, key.2 == resolved { return value }
+            value = MailList.counts(rows, showDone: showDone, resolved: resolved)
+            key = (rows, showDone, resolved)
+            return value
+        }
     }
 
     /// Group rows (already newest first) under day headings: Today, Yesterday,
@@ -81,8 +184,23 @@ enum MailList {
         _ rows: [AttentionUpdate], now: Date = Date(), calendar: Calendar = .current
     ) -> [Section] {
         var out: [Section] = []
+        // One title per calendar day, not per row: a 30-day page has at most
+        // ~31 distinct days, and formatting is the expensive part.
+        var titles: [Date: String] = [:]
         for (i, u) in rows.enumerated() {
-            let title = dayTitle(Fmt.date(u.arrivedAt), now: now, calendar: calendar)
+            let date = Fmt.date(u.arrivedAt)
+            let title: String
+            if let date {
+                let day = calendar.startOfDay(for: date)
+                if let hit = titles[day] {
+                    title = hit
+                } else {
+                    title = dayTitle(date, now: now, calendar: calendar)
+                    titles[day] = title
+                }
+            } else {
+                title = dayTitle(nil, now: now, calendar: calendar)
+            }
             if out.last?.title == title {
                 out[out.count - 1].rows.append(u)
             } else {
@@ -93,34 +211,62 @@ enum MailList {
     }
 
     static func dayTitle(_ date: Date?, now: Date, calendar: Calendar = .current) -> String {
-        guard let date else { return "Recent" }
+        // No date means the daemon has not said when it arrived, and the only
+        // mail in that state is mail that has only just come in.
+        guard let date else { return "Today" }
         let today = calendar.startOfDay(for: now)
         let day = calendar.startOfDay(for: date)
         let days = calendar.dateComponents([.day], from: day, to: today).day ?? 0
         // A clock a little behind the sender's still files their mail as today.
         if days <= 0 { return "Today" }
         if days == 1 { return "Yesterday" }
-        if days < 7 { return date.formatted(.dateTime.weekday(.wide)) }
+        func fmt(_ style: Date.FormatStyle) -> String {
+            var style = style
+            style.timeZone = calendar.timeZone
+            return date.formatted(style)
+        }
+        if days < 7 { return fmt(.dateTime.weekday(.wide)) }
         if days < 14 { return "Last week" }
         let sameYear = calendar.isDate(date, equalTo: now, toGranularity: .year)
         if calendar.isDate(date, equalTo: now, toGranularity: .month) {
-            return "Earlier in \(date.formatted(.dateTime.month(.wide)))"
+            return "Earlier in \(fmt(.dateTime.month(.wide)))"
         }
         return sameYear
-            ? date.formatted(.dateTime.month(.wide))
-            : date.formatted(.dateTime.month(.wide).year())
+            ? fmt(.dateTime.month(.wide))
+            : fmt(.dateTime.month(.wide).year())
     }
 
     /// The row's stamp, the way a mail client prints one: a time today, a date
-    /// before that, and the year only once it is not this one.
+    /// before that, and the year only once it is not this one. Memoized per
+    /// stamp string and day: a row's body runs on every hover.
+    @MainActor static func stamp(_ iso: String?, now: Date = Date()) -> String {
+        guard let iso else { return "" }
+        let day = Calendar.current.startOfDay(for: now)
+        if stampDay != day {
+            stampCache = [:]
+            stampDay = day
+        }
+        if let hit = stampCache[iso] { return hit }
+        let value = stamp(Fmt.date(iso), now: now)
+        stampCache[iso] = value
+        return value
+    }
+    @MainActor private static var stampCache: [String: String] = [:]
+    @MainActor private static var stampDay: Date?
+
     static func stamp(_ date: Date?, now: Date = Date(), calendar: Calendar = .current) -> String {
         guard let date else { return "" }
+        func fmt(_ style: Date.FormatStyle) -> String {
+            var style = style
+            style.timeZone = calendar.timeZone
+            return date.formatted(style)
+        }
         if calendar.isDate(date, inSameDayAs: now) {
-            return date.formatted(.dateTime.hour().minute())
+            return fmt(.dateTime.hour().minute())
         }
         if calendar.isDate(date, equalTo: now, toGranularity: .year) {
-            return date.formatted(.dateTime.month(.abbreviated).day())
+            return fmt(.dateTime.month(.abbreviated).day())
         }
-        return date.formatted(.dateTime.month(.abbreviated).day().year())
+        return fmt(.dateTime.month(.abbreviated).day().year())
     }
 }

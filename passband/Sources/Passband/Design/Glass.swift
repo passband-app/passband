@@ -61,7 +61,7 @@ extension View {
 
     /// Standard content inset for a glass zone card.
     func zonePadding() -> some View {
-        padding(.horizontal, 16).padding(.vertical, 14)
+        padding(.horizontal, Space.s16).padding(.vertical, Space.s14)
     }
 
     /// Room for glass shadows in a scrolling column. A ScrollView clips at its
@@ -186,17 +186,17 @@ struct ZoneCard<Content: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: Space.s10) {
             // THE SUBTITLE DROPS TO ITS OWN LINE ON THE PHONE. A Mac zone header
             // is one row because the pane is wide enough to hold title, count,
             // subtitle and the trailing door side by side. At phone width that
             // same row wraps the subtitle to three lines and shoves the door off
             // the edge, so the phone spends a line rather than mangling four
             // things into one.
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: Space.s4) {
+                HStack(spacing: Space.s8) {
                     Image(systemName: symbol)
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(Typo.ui(12, weight: .semibold))
                         .foregroundStyle(tint ?? Palette.accent)
                     Text(title)
                         .font(Typo.zoneTitle)
@@ -209,14 +209,14 @@ struct ZoneCard<Content: View>: View {
                         Text("\(count)")
                             .font(Typo.num(11, weight: .semibold))
                             .foregroundStyle(Palette.inkFaint)
-                            .padding(.horizontal, 6)
+                            .padding(.horizontal, Space.s6)
                             .padding(.vertical, 1)
                             .background(Capsule().fill(Palette.hairline))
                     }
                     #if os(macOS)
                         subtitleText
                     #endif
-                    Spacer(minLength: 4)
+                    Spacer(minLength: Space.s4)
                     if let trailing { trailing }
                 }
                 #if os(iOS)
@@ -241,16 +241,16 @@ struct Chip: View {
     var filled: Bool = false
 
     var body: some View {
-        HStack(spacing: 3) {
+        HStack(spacing: Space.scaled(3)) {
             if let symbol {
-                Image(systemName: symbol).font(.system(size: 9, weight: .semibold))
+                Image(systemName: symbol).font(Typo.ui(9, weight: .semibold))
             }
             Text(text)
         }
         .font(Typo.micro)
         .foregroundStyle(tone)
-        .padding(.horizontal, 7)
-        .padding(.vertical, 2.5)
+        .padding(.horizontal, Space.scaled(7))
+        .padding(.vertical, Space.scaled(2.5))
         .background(
             Capsule().fill(filled ? tone.opacity(0.16) : Color.clear)
         )
@@ -299,8 +299,8 @@ struct ModalCard<Content: View>: View {
     @ViewBuilder var content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) { content }
-            .padding(18)
+        VStack(alignment: .leading, spacing: Space.s12) { content }
+            .padding(Space.scaled(18))
             // A MEASURE ON THE MAC, A CEILING ON THE PHONE. Every card in this app
             // is sized to read well at a desk, and the narrowest of them is still
             // wider than a phone — so on iOS the number becomes the most it may
@@ -310,7 +310,7 @@ struct ModalCard<Content: View>: View {
                 .frame(width: width)
             #else
                 .frame(maxWidth: width)
-                .padding(.horizontal, 12)
+                .padding(.horizontal, Space.s12)
             #endif
             .passbandGlass(.pane, cornerRadius: 20, tint: tint)
             .shadow(color: .black.opacity(0.28), radius: 40, y: 18)

@@ -5516,33 +5516,33 @@ pub async fn unsubscribe(
     // may not be who the From line says. Both fall through to the browser
     // response, with the reason, so the person decides with the address bar in
     // front of them.
-    let refused = if fields.is_spam {
+    let mut refused = if fields.is_spam {
         Some("spam")
-    } else if fields.auth_pass != Some(true) {
-        Some("unverified")
     } else {
-        None
+        match fields.auth_pass {
+            Some(true) => None,
+            Some(false) => Some("unverified"),
+            // Mail from before the verdict was recorded: never checked, which
+            // is not the same claim as "failed", and the client says so.
+            None => Some("unchecked"),
+        }
     };
     if body.auto
         && refused.is_none()
         && let crate::unsubscribe::UnsubPlan::Browser { url } = &plan
     {
-        // RFC 8058 one-click is a property of the HEADER's URL, and the RFC
-        // requires it to be https.
-        let job = if from_header
-            && fields.list_unsub_one_click
-            && url.to_ascii_lowercase().starts_with("https://")
+        match crate::unsub_job::choose_plan(from_header, fields.list_unsub_one_click, url, &sender)
         {
-            crate::unsub_job::Plan::OneClick(url.clone())
-        } else {
-            crate::unsub_job::Plan::Page(url.clone())
-        };
-        crate::unsub_job::start(&state, sender.clone(), message_id, job).await?;
-        audit_action(&state, "unsubscribe", target, &format!("auto:{sender}")).await;
-        resolve_sender_done(&state, &sender).await;
-        return Ok(Json(
-            json!({ "method": "auto", "sender": sender, "status": "running" }),
-        ));
+            Some(job) => {
+                crate::unsub_job::start(&state, sender.clone(), message_id, job).await?;
+                audit_action(&state, "unsubscribe", target, &format!("auto:{sender}")).await;
+                resolve_sender_done(&state, &sender).await;
+                return Ok(Json(
+                    json!({ "method": "auto", "sender": sender, "status": "running" }),
+                ));
+            }
+            None => refused = Some("footer_link"),
+        }
     }
 
     match plan {

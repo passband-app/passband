@@ -71,6 +71,56 @@ impl Plan {
     }
 }
 
+/// Which plan, if any, the automatic path may run for this link.
+///
+/// RFC 8058 one-click is a property of the HEADER's URL, and the RFC requires
+/// it to be https. A header link is the sender naming its own endpoint, so it
+/// is always eligible. A FOOTER link is us picking one out of the body, and the
+/// body is not always the sender's: a colleague's forward of a newsletter is
+/// authenticated mail from the colleague carrying the newsletter's footer, and
+/// following it would unsubscribe THEM. So a footer link runs automatically only
+/// when its site is the sender's own; otherwise `None`, and the user gets the
+/// browser.
+pub(crate) fn choose_plan(
+    from_header: bool,
+    one_click: bool,
+    url: &str,
+    sender: &str,
+) -> Option<Plan> {
+    if from_header {
+        return Some(
+            if one_click && url.to_ascii_lowercase().starts_with("https://") {
+                Plan::OneClick(url.to_string())
+            } else {
+                Plan::Page(url.to_string())
+            },
+        );
+    }
+    let link_host = url::Url::parse(url).ok()?.host_str()?.to_ascii_lowercase();
+    let sender_host = sender.rsplit_once('@')?.1.to_ascii_lowercase();
+    (site_of(&link_host) == site_of(&sender_host)).then(|| Plan::Page(url.to_string()))
+}
+
+/// The registrable part of a host, approximately: the last two labels, or the
+/// last three under a two-letter country code's common second level
+/// (`shop.co.uk`). Approximate is safe here: a miss only sends a footer link to
+/// the browser, which is where every link went before this feature.
+fn site_of(host: &str) -> String {
+    let labels: Vec<&str> = host.trim_end_matches('.').split('.').collect();
+    let n = labels.len();
+    let take = if n >= 3
+        && labels[n - 1].len() == 2
+        && matches!(
+            labels[n - 2],
+            "co" | "com" | "net" | "org" | "gov" | "ac" | "edu" | "or" | "ne"
+        ) {
+        3
+    } else {
+        2
+    };
+    labels[n.saturating_sub(take)..].join(".")
+}
+
 /// Why a job needs the user. These strings are wire values the client maps to
 /// copy; add one there before adding one here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,12 +223,23 @@ pub(crate) async fn start(
     }
     let state = state.clone();
     tokio::spawn(async move {
-        let outcome = {
-            let _slot = state.unsub.slots.clone().acquire_owned().await;
-            match tokio::time::timeout(JOB_BUDGET, run(&state, &plan)).await {
-                Ok(outcome) => outcome,
-                Err(_) => Outcome::NeedsYou(NeedsYou::Unclear),
-            }
+        // The budget covers the wait for a slot too: a queued job that never
+        // got one in time goes to the user rather than spinning forever.
+        //
+        // The work runs in a task of its own so that a PANIC in it (hostile
+        // input finding a bug) is a JoinError here, not a lost settle: the row
+        // must never be left `running` with the sender claimed until restart.
+        let inner = state.clone();
+        let work = tokio::spawn(async move {
+            let job = async {
+                let _slot = inner.unsub.slots.clone().acquire_owned().await;
+                run(&inner, &plan).await
+            };
+            tokio::time::timeout(JOB_BUDGET, job).await
+        });
+        let outcome = match work.await {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(_)) | Err(_) => Outcome::NeedsYou(NeedsYou::Unclear),
         };
         settle(&state, &sender, outcome).await;
         state.unsub.release(&sender);
@@ -212,9 +273,6 @@ async fn settle(state: &ApiState, sender: &str, outcome: Outcome) {
 
 /// The ladder. Infallible: every failure is a [`NeedsYou`].
 pub(crate) async fn run(state: &ApiState, plan: &Plan) -> Outcome {
-    let account_email = store_call(state, |store, account_id| store.account_email(account_id))
-        .await
-        .unwrap_or_default();
     let Ok(fetcher) = Fetcher::new(state.unsub.allow_local) else {
         return Outcome::NeedsYou(NeedsYou::Unclear);
     };
@@ -238,7 +296,7 @@ pub(crate) async fn run(state: &ApiState, plan: &Plan) -> Outcome {
         Ok(f) => f,
         Err(e) => return Outcome::NeedsYou(fetch_failure(&e)),
     };
-    let Some(mut page) = read(&fetched) else {
+    let Some(mut page) = read(&fetched).await else {
         return Outcome::NeedsYou(http_failure(&fetched));
     };
     let mut page_url = fetched.final_url.clone();
@@ -249,7 +307,7 @@ pub(crate) async fn run(state: &ApiState, plan: &Plan) -> Outcome {
         && page.actions.is_empty()
         && let Some(next) = page.meta_refresh.clone()
         && let Ok(f) = fetcher.get(next.as_str()).await
-        && let Some(p) = read(&f)
+        && let Some(p) = read(&f).await
     {
         page = p;
         page_url = f.final_url.clone();
@@ -275,11 +333,10 @@ pub(crate) async fn run(state: &ApiState, plan: &Plan) -> Outcome {
             None => return Outcome::NeedsYou(NeedsYou::Unclear),
         },
     };
-    let Some(submission) = page
-        .actions
-        .get(index)
-        .and_then(|a| a.submission(&account_email, &page_url))
-    else {
+    if page.actions.get(index).is_some_and(|a| a.needs_script()) {
+        return Outcome::NeedsYou(NeedsYou::NeedsBrowser);
+    }
+    let Some(submission) = page.actions.get(index).and_then(|a| a.submission()) else {
         return Outcome::NeedsYou(NeedsYou::Unclear);
     };
 
@@ -292,7 +349,7 @@ pub(crate) async fn run(state: &ApiState, plan: &Plan) -> Outcome {
     };
     // THE ACTION HAS TO PROVE ITSELF. A submit that lands on a page not saying
     // done is not done, whatever the first page promised.
-    let Some(result) = read(&after) else {
+    let Some(result) = read(&after).await else {
         return Outcome::NeedsYou(http_failure(&after));
     };
     if result.says_done() {
@@ -305,9 +362,28 @@ pub(crate) async fn run(state: &ApiState, plan: &Plan) -> Outcome {
     }
 }
 
-/// A 2xx HTML page, parsed; `None` for anything else.
-fn read(f: &Fetched) -> Option<Page> {
-    (f.status.is_success() && f.is_html()).then(|| unsub_html::parse_page(&f.body, &f.final_url))
+/// A 2xx HTML page, parsed; `None` for anything else. Parsing is bounded
+/// (`unsub_html` caps its walk) but still CPU work on hostile input, so it runs
+/// on the blocking pool, never on a runtime worker the job timeout cannot
+/// preempt.
+async fn read(f: &Fetched) -> Option<Page> {
+    if !f.status.is_success() {
+        return None;
+    }
+    // A plain-text "you have been unsubscribed" is an answer too.
+    if f.content_type
+        .as_deref()
+        .is_some_and(|c| c.to_ascii_lowercase().starts_with("text/plain"))
+    {
+        return Some(Page::from_text(&f.body));
+    }
+    if !f.is_html() {
+        return None;
+    }
+    let (body, url) = (f.body.clone(), f.final_url.clone());
+    tokio::task::spawn_blocking(move || unsub_html::parse_page(&body, &url))
+        .await
+        .ok()
 }
 
 fn fetch_failure(e: &FetchError) -> NeedsYou {
@@ -395,12 +471,19 @@ async fn ask_model(state: &ApiState, page_url: &url::Url, page: &Page) -> Option
     Some(verdict)
 }
 
-/// Reap rows orphaned by a restart. Called from the listing, so the first look
-/// after a restart already tells the truth.
+/// A `running` row older than this cannot belong to a live job: every job
+/// settles inside [`JOB_BUDGET`], slot wait included.
+const REAP_AFTER: Duration = Duration::from_secs(120);
+
+/// Reap rows orphaned by a restart. Called from the listing. Only rows past
+/// [`REAP_AFTER`] AND not owned in this process: the age test is what makes it
+/// race-free, since a job claimed while this runs has a fresh `status_at`.
 pub(crate) async fn reap(state: &ApiState) {
     let live = state.unsub.live();
+    let now = Utc::now();
+    let stale_before = now - chrono::Duration::from_std(REAP_AFTER).unwrap_or_default();
     let _ = store_call(state, move |store, account_id| {
-        store.reap_unsubscribe_jobs(account_id, &live, Utc::now())
+        store.reap_unsubscribe_jobs(account_id, &live, stale_before, now)
     })
     .await;
 }
@@ -430,6 +513,62 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         (format!("http://{addr}/oc"), hits)
+    }
+
+    #[test]
+    fn plan_choice_follows_the_header_the_rfc_and_the_senders_own_site() {
+        let one = |h, oc, u: &str, s: &str| {
+            choose_plan(h, oc, u, s).map(|p| match p {
+                Plan::OneClick(_) => "one_click",
+                Plan::Page(_) => "page",
+            })
+        };
+        assert_eq!(
+            one(true, true, "https://x.example/u", "a@b.example"),
+            Some("one_click")
+        );
+        assert_eq!(
+            one(true, true, "http://x.example/u", "a@b.example"),
+            Some("page"),
+            "RFC 8058 wants https"
+        );
+        assert_eq!(
+            one(true, false, "https://x.example/u", "a@b.example"),
+            Some("page")
+        );
+        // Footer links: the sender's own site only.
+        assert_eq!(
+            one(
+                false,
+                false,
+                "https://email.shop.example/u",
+                "news@shop.example"
+            ),
+            Some("page")
+        );
+        assert_eq!(
+            one(
+                false,
+                false,
+                "https://news.shop.co.uk/u",
+                "hi@mail.shop.co.uk"
+            ),
+            Some("page")
+        );
+        assert_eq!(
+            one(
+                false,
+                false,
+                "https://click.esp.example/u",
+                "alice@coworker.example"
+            ),
+            None,
+            "a forwarded newsletter's footer is not the forwarder's to unsubscribe from"
+        );
+        assert_eq!(
+            one(false, true, "https://other.co.uk/u", "a@shop.co.uk"),
+            None
+        );
     }
 
     fn state() -> ApiState {

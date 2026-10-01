@@ -37,7 +37,7 @@ const DONE: &str = "<html><head><title>Done</title></head><body>\
 const CONFIRM: &str = "<html><body><p>Click below to unsubscribe from all mailings.</p>\
     <form method=post action=/confirm/go>\
     <input type=hidden name=token value=t0k&amp;1>\
-    <input type=email name=email>\
+    <input type=email name=email value=me+news@example.com>\
     <button>Unsubscribe</button></form></body></html>";
 
 const PREFS: &str = "<html><body><h1>Email preferences</h1>\
@@ -322,8 +322,8 @@ async fn confirm_form_is_submitted_once_with_the_session_cookie_and_proven_done(
     assert_eq!(seen.len(), 2, "{seen:?}");
     assert_eq!(seen[0], "GET /confirm ");
     assert_eq!(
-        seen[1], "POST /confirm/go token=t0k%261&email=me%40example.com cookie=sid=abc",
-        "hidden token decoded and re-encoded, own address filled, session cookie kept"
+        seen[1], "POST /confirm/go token=t0k%261&email=me%2Bnews%40example.com cookie=sid=abc",
+        "hidden token decoded and re-encoded, the page's own prefill kept, session cookie kept"
     );
 }
 
@@ -412,7 +412,7 @@ async fn spam_and_unverified_mail_fall_back_to_the_browser_with_a_reason() {
                 auth_pass: None,
                 ..Setup::page(format!("{site}/done"))
             },
-            "unverified",
+            "unchecked",
         ),
     ] {
         let run = mount(&setup, None);
@@ -442,15 +442,26 @@ async fn an_old_client_gets_the_old_response_and_nothing_is_fetched() {
 #[tokio::test]
 async fn an_orphaned_running_row_is_reaped_into_needs_you_on_listing() {
     let run = mount(&Setup::page("https://shop.example/u".into()), None);
-    // A job that died with the last process: the row says running, and no job
-    // in this one owns it.
+    // A fresh running row with no owner is NOT reaped: it could be a job that
+    // was claimed while the listing ran.
+    run.store
+        .begin_unsubscribe_job(
+            run.acct,
+            "fresh@shop.example",
+            Some(run.mid),
+            "https://shop.example/f",
+            chrono::Utc::now(),
+        )
+        .unwrap();
+    // A job that died with the last process: the row says running, has for
+    // minutes, and no job in this one owns it.
     run.store
         .begin_unsubscribe_job(
             run.acct,
             "news@shop.example",
             Some(run.mid),
             "https://shop.example/u",
-            chrono::Utc::now(),
+            chrono::Utc::now() - chrono::Duration::minutes(10),
         )
         .unwrap();
     let resp = run
@@ -460,9 +471,19 @@ async fn an_orphaned_running_row_is_reaped_into_needs_you_on_listing() {
         .await
         .unwrap();
     let rows = body_json(resp).await;
-    assert_eq!(rows[0]["status"], "needs_you");
-    assert_eq!(rows[0]["status_reason"], "unclear");
-    assert_eq!(rows[0]["status_url"], "https://shop.example/u");
+    let row = |sender: &str| {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["sender"] == sender)
+            .unwrap()
+            .clone()
+    };
+    let old = row("news@shop.example");
+    assert_eq!(old["status"], "needs_you");
+    assert_eq!(old["status_reason"], "unclear");
+    assert_eq!(old["status_url"], "https://shop.example/u");
+    assert_eq!(row("fresh@shop.example")["status"], "running");
 }
 
 #[tokio::test]

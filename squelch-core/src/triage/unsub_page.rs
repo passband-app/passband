@@ -7,13 +7,15 @@
 //! a hostile page from steering the answer into harm is what the caller does
 //! with it, not the prompt:
 //!
-//!   - the only action a verdict can trigger is submitting ONE form the caller
-//!     already judged safe to submit (one submit control, no password or file
-//!     field, nothing to type but the account's own address), on that same
-//!     sender's page, through the same SSRF-guarded fetcher;
-//!   - `unsubscribed` and `confirm` are both checked again against the page
-//!     that comes back, so a page that LIES about being done costs the user a
-//!     "done" that a sender lying in its own footer could always have produced;
+//!   - the only action a verdict can trigger is taking ONE action the caller
+//!     already judged safe to take (one plausible submit control that is not
+//!     an "undo", no password or file field, nothing to type at all, or a
+//!     link whose own text says unsubscribe), through the same SSRF-guarded
+//!     fetcher;
+//!   - a `confirm` is checked against the page that comes back, which must say
+//!     done. An `unsubscribed` verdict on the FIRST page is taken at its word:
+//!     a page that lies about being done costs the user a "done" that a sender
+//!     lying in its own footer could always have produced;
 //!   - everything else, a refusal, a timeout, an answer outside the schema, or
 //!     no model configured, is `Unclear`, which hands the link to the user.
 //!

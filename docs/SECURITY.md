@@ -559,29 +559,45 @@ it. That move is what the guard below exists for.
 - **Not for mail we cannot trust.** Spam (`is_spam`) and mail without a passing
   authentication verdict (`auth_pass` not true) are never unsubscribed from
   automatically: fetching a spammer's link confirms the address is live, and an
-  unauthenticated From line may not be the link's real author. Both fall back to
-  the browser, with the reason (`auto_refused`) for the client to say.
+  unauthenticated From line may not be the link's real author. Mail from before
+  the verdict was recorded (`auth_pass` NULL) is treated the same way. All fall
+  back to the browser, with the reason (`auto_refused`) for the client to say.
+- **A footer link must be the sender's own.** A header link is the sender naming
+  its endpoint. A link picked out of the body runs automatically only when its
+  site matches the From domain's (`unsub_job::choose_plan`): a colleague's
+  forward of a newsletter is authenticated mail from the colleague carrying
+  someone else's footer, and following it would unsubscribe the colleague.
 - **SSRF guard, in code, for every deployment** (`squelch-api/src/unsub_fetch.rs`).
   http/https only, ports 80/443 only, no userinfo. Names resolve through a resolver
   that returns PUBLIC addresses only (no loopback, private, link-local, CGNAT,
   multicast, reserved, or v4-in-v6 forms of those); reqwest connects to exactly what
   it returned, so DNS rebinding has nothing to rebind. IP literals, which never
   reach a resolver, are checked per hop. Redirects are followed by hand so every
-  hop passes both checks. Hosted tenants also sit behind their NetworkPolicy; a
-  self-host has only this, which is why it is not optional.
+  hop passes both checks; a 307/308 never carries a body to another host, and
+  the https-first retry falls back to http only when nothing was sent. Hosted
+  tenants also sit behind their NetworkPolicy; a self-host has only this, which
+  is why it is not optional. One gap is inherent: a self-host on a network with
+  global IPv6 can reach its LAN's devices at their global addresses on 80/443,
+  because those addresses ARE public.
 - **One action, and it has to prove itself** (`squelch-api/src/unsub_html.rs`). A
-  form is submitted only when it has exactly one plausible submit control, no
-  password or file field, no required choice left unmade, and nothing to type
-  except the account's own address, which is typed only into a form on the page's
-  own host. The page that comes back must say the user is unsubscribed (in so many
-  words, or by the page reader's verdict); otherwise the job hands the link to the
-  user. Optional surveys are never answered.
+  form is submitted only when exactly one submit control plausibly unsubscribes
+  (one lone button, or the one among several that says so), with no password or
+  file field, no required choice left unmade, and NOTHING TYPED: an empty field
+  stays empty, and a required one refuses the form. A link is followed only when
+  its own text says unsubscribe; it may point at any public host, which is no
+  more than the sender's redirects could already do. "Undo", "cancel" and
+  "resubscribe" controls are never actions. Hidden text never counts as the
+  page's answer. The page that comes back must say the user is unsubscribed (in
+  so many words, or by the page reader's verdict); otherwise the job hands the
+  link to the user. Optional surveys are never answered.
 - **The page reader is fenced, cheap, capped and billed**
   (`squelch-core/src/triage/unsub_page.rs`). The page is untrusted input inside the
   usual fence; any non-answer is `unclear`, which costs the user one click. Its
   calls bill to `unsub_page` and stop at a daily cap.
-- **Bounded.** 1 MiB bodies, per-request timeouts, a 45s job budget, four jobs at
-  once, a cookie jar that lives for one job.
+- **Bounded.** 1 MiB bodies, per-request timeouts, a 45s job budget (slot wait
+  included), four jobs at once, a cookie jar that lives for one job. Parsing is
+  linear (a tag budget, a per-form control cap, no inner scan past its parent)
+  and runs on the blocking pool. A panic inside a job still settles its row.
 - **The link stays out of logs and the audit.** Audit rows carry the sender and the
   verdict; transport errors are reduced to their kind before they can be printed.
 
@@ -590,8 +606,9 @@ it. That move is what the guard below exists for.
   `reqwest` directly on one: `Fetcher` is the guard, and a client without it is an
   SSRF primitive aimed at the daemon's own door on loopback.
 - Do not prefetch an unsubscribe link to "show a preview" or to classify it early.
-- Do not widen what `Action::submission` will fill in. Typing anything but the
-  account's own address, or into another site's form, is acting for the user in a
-  way they never saw.
+- Do not make `Action::submission` type anything. The page's host is the
+  sender's choice at every hop, so there is no site an address could be safely
+  typed into, and the account's primary address is not necessarily the one the
+  list knows.
 - `needs_you` sends the user to the ORIGINAL link, not a post-redirect hop that may
   depend on this job's cookies.

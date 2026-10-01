@@ -337,11 +337,13 @@ impl SqliteStore {
         let now = now.to_rfc3339();
         // `done` restarts the grace clock from the moment the sender was asked;
         // `needs_you` leaves it, since nothing went out and the detector is not
-        // armed for that status anyway.
+        // armed for that status anyway. The link (it carries the recipient's
+        // token) is kept only while the user still needs it.
         conn.execute(
             "UPDATE unsubscribes SET
                  status = ?3, method = ?4, status_reason = ?5, status_at = ?6,
-                 requested_at = CASE WHEN ?3 = 'done' THEN ?6 ELSE requested_at END
+                 requested_at = CASE WHEN ?3 = 'done' THEN ?6 ELSE requested_at END,
+                 status_url = CASE WHEN ?3 = 'needs_you' THEN status_url ELSE NULL END
              WHERE account_id = ?1 AND sender_addr = ?2 AND status = 'running'",
             params![account_id, sender, status, method, reason, now],
         )?;
@@ -357,7 +359,8 @@ impl SqliteStore {
         let conn = self.lock()?;
         let now = now.to_rfc3339();
         let n = conn.execute(
-            "UPDATE unsubscribes SET status = 'opened', status_at = ?3, requested_at = ?3
+            "UPDATE unsubscribes SET status = 'opened', status_at = ?3, requested_at = ?3,
+                 status_url = NULL
              WHERE account_id = ?1 AND sender_addr = ?2 AND status = 'needs_you'",
             params![account_id, sender, now],
         )?;
@@ -368,20 +371,33 @@ impl SqliteStore {
         &self,
         account_id: AccountId,
         live: &[String],
+        stale_before: DateTime<Utc>,
         now: DateTime<Utc>,
     ) -> Result<usize> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT sender_addr FROM unsubscribes
+            "SELECT sender_addr, status_at FROM unsubscribes
              WHERE account_id = ?1 AND status = 'running'",
         )?;
         let running = stmt
-            .query_map(params![account_id], |r| r.get::<_, String>(0))?
+            .query_map(params![account_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         drop(stmt);
+        // Ages compared as timestamps in Rust, not as strings in SQL. A row with
+        // no readable `status_at` cannot prove it is fresh, so it is stale.
+        let stale = |at: &Option<String>| {
+            at.as_deref()
+                .and_then(|a| parse_dt(a).ok())
+                .is_none_or(|t| t < stale_before)
+        };
         let now = now.to_rfc3339();
         let mut reaped = 0;
-        for sender in running.iter().filter(|s| !live.contains(s)) {
+        for (sender, _) in running
+            .iter()
+            .filter(|(s, at)| !live.contains(s) && stale(at))
+        {
             reaped += conn.execute(
                 "UPDATE unsubscribes SET status = 'needs_you', status_reason = 'unclear',
                      status_at = ?3

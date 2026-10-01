@@ -11,8 +11,17 @@
 //! decides WHICH action finishes the unsubscribe; this decides whether that
 //! action can be taken without the user at all. It can when submitting it is
 //! exactly what clicking its one button would do: no password, no file, no
-//! choice left unmade, and nothing to type except the account's own address on
-//! the page's own site.
+//! choice left unmade, and NOTHING TO TYPE. A form whose email field the page
+//! left empty is sent with it empty (or not at all, when it is required): the
+//! page's host is the sender's choice at every hop, so no "same site" test can
+//! say who would receive an address we typed, and the account's primary
+//! address is not necessarily the one this list knows (plus-addressing,
+//! aliases, forwards).
+//!
+//! BOUNDED WORK. Every scan is linear in the page: [`MAX_TAGS`] caps the walk,
+//! [`MAX_CONTROLS`] caps a form, and no inner scan runs past its parent.
+
+use std::collections::HashSet;
 
 use reqwest::Method;
 use url::Url;
@@ -31,9 +40,14 @@ const DONE_PHRASES: &[&str] = &[
     "you're now unsubscribed",
     "you’re now unsubscribed",
     "you are unsubscribed",
+    "you have unsubscribed",
+    "you've unsubscribed",
+    "you’ve unsubscribed",
+    "you are no longer subscribed",
+    "you're no longer subscribed",
+    "you’re no longer subscribed",
     "you're unsubscribed",
     "you’re unsubscribed",
-    "successfully unsubscribed",
     "unsubscribed successfully",
     "unsubscribe successful",
     "unsubscription successful",
@@ -64,8 +78,37 @@ const UNSUB_LABELS: &[&str] = &[
 ];
 /// Weaker: "confirm" only counts when nothing says unsubscribe outright.
 const CONFIRM_LABELS: &[&str] = &["confirm", "yes"];
+/// Controls that take an unsubscribe BACK. They say "unsubscribe" too ("Undo
+/// unsubscribe"), so they are excluded by name before anything else looks at
+/// a label: pressing one is the one action worse than doing nothing.
+const UNDO_LABELS: &[&str] = &[
+    "undo",
+    "cancel",
+    "resubscribe",
+    "re-subscribe",
+    "subscribe again",
+    "changed your mind",
+    "change your mind",
+    "didn't mean",
+    "didn’t mean",
+    "keep me",
+    "stay subscribed",
+    "remain subscribed",
+    "not you",
+];
+
+/// A label that says "this one unsubscribes", and does not say "undo".
+fn is_unsub_label(label: &str) -> bool {
+    has_any(label, UNSUB_LABELS) && !has_any(label, UNDO_LABELS)
+}
 
 const MAX_TEXT_CHARS: usize = 20_000;
+/// Tags read per page. A real unsubscribe page has a few hundred; past this
+/// the rest is ignored, which can only cost us an action, never add one.
+const MAX_TAGS: usize = 20_000;
+/// Controls per form. A form with more is not an unsubscribe confirmation, and
+/// is refused outright rather than read in part.
+const MAX_CONTROLS: usize = 500;
 const MAX_ACTIONS: usize = 8;
 const MAX_LINKS: usize = 4;
 
@@ -115,6 +158,7 @@ pub(crate) enum Control {
         name: String,
         value: String,
         checked: bool,
+        required: bool,
     },
     Radio {
         name: String,
@@ -141,6 +185,9 @@ pub(crate) struct Submit {
     pub name: Option<String>,
     pub value: String,
     pub label: String,
+    /// `formaction` / `formmethod` on the button, which override the form's.
+    pub action: Option<Url>,
+    pub method: Option<Method>,
 }
 
 /// A ready-to-send submission.
@@ -152,9 +199,28 @@ pub(crate) struct Submission {
 }
 
 impl Page {
-    /// The page says, in so many words, that the unsubscribe already happened.
+    /// The page says, in so many words, that the unsubscribe already happened,
+    /// and does not ALSO offer an unsubscribe button. Pages that ship their
+    /// success message beside the form (shown by script after the click) are
+    /// the reason: hidden text is skipped by the parser, and a live button next
+    /// to the words means the words are not about this visit yet.
     pub fn says_done(&self) -> bool {
-        says_done(&self.text) || says_done(&self.title)
+        (says_done(&self.text) || says_done(&self.title))
+            && !self
+                .actions
+                .iter()
+                .any(|a| a.labels().iter().any(|l| is_unsub_label(l)))
+    }
+
+    /// A plain-text body, read as a page with no actions.
+    pub fn from_text(body: &str) -> Page {
+        Page {
+            title: String::new(),
+            text: collapse(body).chars().take(MAX_TEXT_CHARS).collect(),
+            actions: Vec::new(),
+            scripts: 0,
+            meta_refresh: None,
+        }
     }
 
     /// An app shell: scripts and next to no readable text.
@@ -179,7 +245,7 @@ impl Page {
             .actions
             .iter()
             .enumerate()
-            .filter(|(_, a)| a.labels().iter().any(|l| has_any(l, UNSUB_LABELS)));
+            .filter(|(_, a)| a.labels().iter().any(|l| is_unsub_label(l)));
         let first = hits.next()?;
         hits.next().is_none().then_some(first.0)
     }
@@ -203,6 +269,12 @@ impl Action {
         }
     }
 
+    /// A form whose action is not a web address (`javascript:void(0)`, the
+    /// usual sign of a form a script submits). Only a browser can take it.
+    pub fn needs_script(&self) -> bool {
+        matches!(self, Action::Form(f) if !matches!(f.action.scheme(), "http" | "https"))
+    }
+
     pub fn describe(&self) -> String {
         match self {
             Action::Link { url, label } => {
@@ -214,14 +286,14 @@ impl Action {
 
     /// The request that taking this action would send, or `None` when it cannot
     /// be taken without the user. See the module header for the line.
-    pub fn submission(&self, account_email: &str, page_url: &Url) -> Option<Submission> {
+    pub fn submission(&self) -> Option<Submission> {
         match self {
             Action::Link { url, .. } => Some(Submission {
                 method: Method::GET,
                 url: url.clone(),
                 pairs: Vec::new(),
             }),
-            Action::Form(f) => f.submission(account_email, page_url),
+            Action::Form(f) => f.submission(),
         }
     }
 }
@@ -289,12 +361,11 @@ impl Form {
         parts.join("; ")
     }
 
-    fn submission(&self, account_email: &str, page_url: &Url) -> Option<Submission> {
+    fn submission(&self) -> Option<Submission> {
         let submit = self.pick_submit()?;
-        let same_site = self.action.host_str() == page_url.host_str();
         let mut pairs = Vec::new();
-        let mut required_radios: Vec<&str> = Vec::new();
-        let mut chosen_radios: Vec<&str> = Vec::new();
+        let mut required_radios: HashSet<&str> = HashSet::new();
+        let mut chosen_radios: HashSet<&str> = HashSet::new();
         for c in &self.controls {
             match c {
                 Control::Forbidden => return None,
@@ -302,15 +373,11 @@ impl Form {
                 Control::Text {
                     name,
                     value,
-                    kind,
                     required,
+                    ..
                 } => {
                     if !value.is_empty() {
                         pairs.push((name.clone(), value.clone()));
-                    } else if is_email_field(name, kind) && same_site && !account_email.is_empty() {
-                        // The one thing we type: the account's own address, for
-                        // the site that already mailed it, and nowhere else.
-                        pairs.push((name.clone(), account_email.to_string()));
                     } else if *required {
                         return None;
                     } else {
@@ -321,9 +388,12 @@ impl Form {
                     name,
                     value,
                     checked,
+                    required,
                 } => {
                     if *checked {
                         pairs.push((name.clone(), value.clone()));
+                    } else if *required {
+                        return None;
                     }
                 }
                 Control::Radio {
@@ -333,10 +403,10 @@ impl Form {
                     required,
                 } => {
                     if *required {
-                        required_radios.push(name);
+                        required_radios.insert(name);
                     }
                     if *checked {
-                        chosen_radios.push(name);
+                        chosen_radios.insert(name);
                         pairs.push((name.clone(), value.clone()));
                     }
                 }
@@ -345,9 +415,12 @@ impl Form {
                     value,
                     required,
                 } => match value {
-                    Some(v) if !v.is_empty() => pairs.push((name.clone(), v.clone())),
-                    _ if *required => return None,
-                    _ => {}
+                    // A browser sends the chosen option's value even when it is
+                    // empty; `required` is what refuses an empty one.
+                    Some(v) if v.is_empty() && *required => return None,
+                    Some(v) => pairs.push((name.clone(), v.clone())),
+                    None if *required => return None,
+                    None => {}
                 },
                 Control::TextArea {
                     name,
@@ -370,8 +443,8 @@ impl Form {
             pairs.push((name.clone(), submit.value.clone()));
         }
         Some(Submission {
-            method: self.method.clone(),
-            url: self.action.clone(),
+            method: submit.method.clone().unwrap_or_else(|| self.method.clone()),
+            url: submit.action.clone().unwrap_or_else(|| self.action.clone()),
             pairs,
         })
     }
@@ -382,11 +455,14 @@ impl Form {
     fn pick_submit(&self) -> Option<&Submit> {
         match self.submits.as_slice() {
             [] => None,
+            [only] if has_any(&only.label, UNDO_LABELS) => None,
             [only] => Some(only),
             many => {
                 for phrases in [UNSUB_LABELS, CONFIRM_LABELS] {
-                    let hits: Vec<&Submit> =
-                        many.iter().filter(|s| has_any(&s.label, phrases)).collect();
+                    let hits: Vec<&Submit> = many
+                        .iter()
+                        .filter(|s| has_any(&s.label, phrases) && !has_any(&s.label, UNDO_LABELS))
+                        .collect();
                     match hits.as_slice() {
                         [one] => return Some(one),
                         [] => continue,
@@ -397,10 +473,6 @@ impl Form {
             }
         }
     }
-}
-
-fn is_email_field(name: &str, kind: &str) -> bool {
-    kind == "email" || name.to_ascii_lowercase().contains("email")
 }
 
 // ===========================================================================
@@ -537,7 +609,14 @@ fn decode_entities(s: &str) -> String {
     while let Some(amp) = rest.find('&') {
         out.push_str(&rest[..amp]);
         rest = &rest[amp..];
-        let Some(semi) = rest[..rest.len().min(12)].find(';') else {
+        // The `;` within 12 BYTES, found on character boundaries: slicing at a
+        // fixed byte offset panics inside "Shop & Save 🎉".
+        let Some(semi) = rest
+            .char_indices()
+            .take_while(|(i, _)| *i < 12)
+            .find(|(_, c)| *c == ';')
+            .map(|(i, _)| i)
+        else {
             out.push('&');
             rest = &rest[1..];
             continue;
@@ -639,7 +718,12 @@ pub(crate) fn parse_page(html: &str, page_url: &Url) -> Page {
     let mut form: Option<Form> = None;
 
     let mut i = 0;
+    let mut tags = 0;
     loop {
+        tags += 1;
+        if tags > MAX_TAGS {
+            break;
+        }
         let Some((start, tag)) = next_tag(html, i) else {
             text.push_str(&html[i..]);
             break;
@@ -658,6 +742,13 @@ pub(crate) fn parse_page(html: &str, page_url: &Url) -> Page {
             if BLOCKS.contains(&name) {
                 text.push('\n');
             }
+            continue;
+        }
+
+        // Hidden content is skipped whole, form controls inside it included:
+        // a form a script reveals is a form for a browser.
+        if !VOID.contains(&name) && is_hidden(&tag) {
+            i = skip_element(html, name, i);
             continue;
         }
 
@@ -722,7 +813,7 @@ pub(crate) fn parse_page(html: &str, page_url: &Url) -> Page {
             }
             "input" => {
                 if let Some(f) = form.as_mut() {
-                    read_input(&tag, f);
+                    read_input(&tag, f, page_url);
                 }
             }
             "button" => {
@@ -735,6 +826,7 @@ pub(crate) fn parse_page(html: &str, page_url: &Url) -> Page {
                 if let Some(f) = form.as_mut() {
                     let kind = tag.attr("type").unwrap_or("submit").to_ascii_lowercase();
                     if kind == "submit" && !tag.has("disabled") {
+                        let (action, method) = overrides(&tag, page_url);
                         f.submits.push(Submit {
                             name: tag
                                 .attr("name")
@@ -742,6 +834,8 @@ pub(crate) fn parse_page(html: &str, page_url: &Url) -> Page {
                                 .map(str::to_string),
                             value: tag.attr("value").unwrap_or("").to_string(),
                             label,
+                            action,
+                            method,
                         });
                     }
                 }
@@ -750,6 +844,7 @@ pub(crate) fn parse_page(html: &str, page_url: &Url) -> Page {
             "select" => {
                 let (s, e) = close_of(html, "select", i);
                 if let Some(f) = form.as_mut()
+                    && !over_cap(f)
                     && let Some(name) = tag.attr("name").filter(|n| !n.is_empty())
                     && !tag.has("disabled")
                 {
@@ -765,6 +860,7 @@ pub(crate) fn parse_page(html: &str, page_url: &Url) -> Page {
             "textarea" => {
                 let (s, e) = close_of(html, "textarea", i);
                 if let Some(f) = form.as_mut()
+                    && !over_cap(f)
                     && let Some(name) = tag.attr("name").filter(|n| !n.is_empty())
                     && !tag.has("disabled")
                 {
@@ -786,6 +882,7 @@ pub(crate) fn parse_page(html: &str, page_url: &Url) -> Page {
                     && links < MAX_LINKS
                     && actions.len() < MAX_ACTIONS
                     && (has_any(&label, UNSUB_LABELS) || has_any(&label, CONFIRM_LABELS))
+                    && !has_any(&label, UNDO_LABELS)
                     && let Some(href) = tag.attr("href")
                     && let Ok(url) = page_url.join(href.trim())
                     && matches!(url.scheme(), "http" | "https")
@@ -822,8 +919,8 @@ pub(crate) fn parse_page(html: &str, page_url: &Url) -> Page {
     }
 }
 
-fn read_input(tag: &Tag, f: &mut Form) {
-    if tag.has("disabled") {
+fn read_input(tag: &Tag, f: &mut Form, page_url: &Url) {
+    if tag.has("disabled") || over_cap(f) {
         return;
     }
     let kind = tag.attr("type").unwrap_or("text").to_ascii_lowercase();
@@ -831,15 +928,20 @@ fn read_input(tag: &Tag, f: &mut Form) {
     let value = tag.attr("value").unwrap_or("").to_string();
     let required = tag.has("required");
     match kind.as_str() {
-        "submit" | "image" => f.submits.push(Submit {
-            name: (!name.is_empty()).then_some(name),
-            label: if value.is_empty() {
-                tag.attr("alt").unwrap_or("Submit").to_string()
-            } else {
-                value.clone()
-            },
-            value,
-        }),
+        "submit" | "image" => {
+            let (action, method) = overrides(tag, page_url);
+            f.submits.push(Submit {
+                name: (!name.is_empty()).then_some(name),
+                label: if value.is_empty() {
+                    tag.attr("alt").unwrap_or("Submit").to_string()
+                } else {
+                    value.clone()
+                },
+                value,
+                action,
+                method,
+            })
+        }
         "password" | "file" => f.controls.push(Control::Forbidden),
         "button" | "reset" => {}
         _ if name.is_empty() => {}
@@ -848,6 +950,7 @@ fn read_input(tag: &Tag, f: &mut Form) {
             name,
             value: if value.is_empty() { "on".into() } else { value },
             checked: tag.has("checked"),
+            required,
         }),
         "radio" => f.controls.push(Control::Radio {
             name,
@@ -864,7 +967,98 @@ fn read_input(tag: &Tag, f: &mut Form) {
     }
 }
 
+/// A submit control's own `formaction` / `formmethod`.
+fn overrides(tag: &Tag, page_url: &Url) -> (Option<Url>, Option<Method>) {
+    let action = tag
+        .attr("formaction")
+        .filter(|a| !a.trim().is_empty())
+        .and_then(|a| page_url.join(a.trim()).ok());
+    let method = tag.attr("formmethod").map(|m| {
+        if m.eq_ignore_ascii_case("post") {
+            Method::POST
+        } else {
+            Method::GET
+        }
+    });
+    (action, method)
+}
+
+/// Content a person never sees: the `hidden` attribute, inline
+/// `display:none` / `visibility:hidden`, `aria-hidden`, and the usual utility
+/// classes. AJAX unsubscribe pages ship their "you're unsubscribed" message
+/// this way, waiting for a click; reading it as the page's answer would report
+/// done for a request that never went out.
+fn is_hidden(tag: &Tag) -> bool {
+    if tag.has("hidden")
+        || tag
+            .attr("aria-hidden")
+            .is_some_and(|v| v.eq_ignore_ascii_case("true"))
+    {
+        return true;
+    }
+    if let Some(style) = tag.attr("style") {
+        let style: String = style
+            .to_ascii_lowercase()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        if style.contains("display:none") || style.contains("visibility:hidden") {
+            return true;
+        }
+    }
+    tag.attr("class").is_some_and(|c| {
+        c.split_whitespace().any(|k| {
+            matches!(
+                k.to_ascii_lowercase().as_str(),
+                "hidden" | "d-none" | "hide" | "is-hidden" | "invisible" | "display-none"
+            )
+        })
+    })
+}
+
+/// Elements with no content and no closing tag.
+const VOID: &[&str] = &[
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track",
+    "wbr",
+];
+
+/// Offset just past the `</name>` that closes the element opened before
+/// `from`, counting nested elements of the same name. End of input when it
+/// never closes. Linear in what it skips, and the caller resumes after it.
+fn skip_element(html: &str, name: &str, from: usize) -> usize {
+    let mut depth = 1usize;
+    let mut i = from;
+    while let Some((_, t)) = next_tag(html, i) {
+        i = t.end;
+        if t.name == name {
+            if t.closing {
+                depth -= 1;
+                if depth == 0 {
+                    return t.end;
+                }
+            } else {
+                depth += 1;
+            }
+        }
+    }
+    html.len()
+}
+
+/// At [`MAX_CONTROLS`], the form is marked [`Control::Forbidden`] once (so it
+/// is never submitted) and nothing more is read into it.
+fn over_cap(f: &mut Form) -> bool {
+    if f.controls.len() + f.submits.len() < MAX_CONTROLS {
+        return false;
+    }
+    if !matches!(f.controls.last(), Some(Control::Forbidden)) {
+        f.controls.push(Control::Forbidden);
+    }
+    true
+}
+
 /// The value a `<select>` submits: its `selected` option, else its first.
+/// LINEAR: an option without a `value` reads its text up to the next tag, and
+/// never scans for a `</option>` that a hostile page can leave out.
 fn selected_option(html: &str, from: usize, to: usize) -> Option<String> {
     let mut first = None;
     let mut i = from;
@@ -879,8 +1073,8 @@ fn selected_option(html: &str, from: usize, to: usize) -> Option<String> {
         let value = match t.attr("value") {
             Some(v) => v.to_string(),
             None => {
-                let (cs, _) = close_of(html, "option", t.end);
-                inner_text(html, t.end, cs.min(to))
+                let stop = html[t.end..to].find('<').map_or(to, |p| t.end + p);
+                inner_text(html, t.end, stop)
             }
         };
         if t.has("selected") {
@@ -905,7 +1099,7 @@ mod tests {
 
     fn only_submission(p: &Page) -> Option<Submission> {
         assert_eq!(p.actions.len(), 1, "{:#?}", p.actions);
-        p.actions[0].submission("me@example.org", &url())
+        p.actions[0].submission()
     }
 
     #[test]
@@ -935,7 +1129,8 @@ mod tests {
         let p = page(
             r#"<form method="POST" action="/unsub/confirm">
                  <input type="hidden" name="token" value="a&amp;b">
-                 <input type="email" name="email" value="">
+                 <input type="email" name="email" value="me+news@example.org">
+                 <input type="text" name="note" value="">
                  <input type="checkbox" name="all" value="1" checked>
                  <input type="checkbox" name="partners" value="1">
                  <input type="radio" name="reason" value="many">
@@ -950,7 +1145,8 @@ mod tests {
             s.pairs,
             vec![
                 ("token".into(), "a&b".into()),
-                ("email".into(), "me@example.org".into()),
+                ("email".into(), "me+news@example.org".into()),
+                ("note".into(), String::new()),
                 ("all".into(), "1".into()),
                 ("other".into(), String::new()),
                 ("go".into(), "yes".into()),
@@ -960,16 +1156,16 @@ mod tests {
     }
 
     #[test]
-    fn the_address_is_never_typed_into_another_sites_form() {
+    fn nothing_is_typed_an_empty_email_goes_empty_and_a_required_one_refuses() {
         let p = page(
-            r#"<form method=post action="https://collector.evil.test/x">
+            r#"<form method=post action="https://news.example.com/u">
                  <input type=email name=email><button>Unsubscribe</button></form>"#,
         );
         let s = only_submission(&p).expect("still submittable, just empty");
         assert_eq!(s.pairs, vec![("email".into(), String::new())]);
 
         let p = page(
-            r#"<form method=post action="https://collector.evil.test/x">
+            r#"<form method=post action="https://news.example.com/u">
                  <input type=email name=email required><button>Unsubscribe</button></form>"#,
         );
         assert!(
@@ -1014,7 +1210,7 @@ mod tests {
         );
         assert_eq!(p.actions.len(), 1);
         assert_eq!(p.obvious_action(), Some(0));
-        let s = p.actions[0].submission("me@example.org", &url()).unwrap();
+        let s = p.actions[0].submission().unwrap();
         assert_eq!(
             s.url.as_str(),
             "https://news.example.com/u/abc/confirm?x=1&y=2"
@@ -1065,5 +1261,139 @@ mod tests {
         }
         let big = "<div>".repeat(50_000);
         let _ = page(&big);
+    }
+
+    /// The security review's case: options with no value and no closing tag
+    /// made every option scan to the end of the page (16s at 160 KB, about
+    /// 700s at the body cap). Now linear, and the form is refused as oversized.
+    #[test]
+    fn a_select_full_of_unclosed_options_parses_in_linear_time() {
+        let html = format!(
+            "<form><select name=x>{}</select><button>Go</button></form>",
+            "<option>a".repeat(100_000)
+        );
+        assert!(html.len() <= crate::unsub_fetch::MAX_BODY_BYTES);
+        let started = std::time::Instant::now();
+        let p = page(&html);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "took {:?}",
+            started.elapsed()
+        );
+        let _ = p.describe_actions();
+        let _ = p.actions.iter().map(Action::submission).count();
+    }
+
+    #[test]
+    fn a_form_past_the_control_cap_is_refused() {
+        let radios: String = (0..2000)
+            .map(|i| format!("<input type=radio name=r{i} value=a>"))
+            .collect();
+        let p = page(&format!(
+            "<form>{radios}<button>Unsubscribe</button></form>"
+        ));
+        assert!(only_submission(&p).is_none());
+    }
+
+    /// Correctness review, critical: a fixed 12-byte slice after `&` panicked
+    /// inside multibyte text, and the panic stranded the job.
+    #[test]
+    fn ampersands_beside_multibyte_text_do_not_panic() {
+        for html in [
+            "<p>Tom & 日本語のニュース</p>",
+            "<p>Shop & Save 🎉🎉🎉</p>",
+            "<a href='/u?x=1&ü=2'>Unsubscribe</a>",
+        ] {
+            let _ = page(html);
+        }
+        assert_eq!(page("<p>a &amp; 🎉</p>").text, "a & 🎉");
+    }
+
+    /// AJAX pages ship the success message hidden beside the form. It is not
+    /// the page's answer until a click reveals it.
+    #[test]
+    fn hidden_success_text_is_not_done() {
+        for hidden in [
+            "<div style=\"display: none\">You have been unsubscribed.</div>",
+            "<div hidden>You have been unsubscribed.</div>",
+            "<div class=\"msg d-none\"><p>You have been unsubscribed.</p></div>",
+            "<div aria-hidden=true>You have been unsubscribed.</div>",
+        ] {
+            let p = page(&format!(
+                "<p>Unsubscribe from Acme?</p><form method=post><button>Unsubscribe</button></form>{hidden}"
+            ));
+            assert!(!p.says_done(), "{hidden}");
+            assert_eq!(p.obvious_action(), Some(0));
+        }
+        // With no button on the page at all, only the hidden-skip stands
+        // between the hidden text and a false "done".
+        let p = page(
+            "<p>Open the link in our app to finish.</p>\
+             <div style='display:none'><h2>You have been unsubscribed.</h2></div>",
+        );
+        assert!(!p.says_done(), "hidden text alone is not an answer");
+        // Visible success text beside a live unsubscribe button is not trusted
+        // either: the button says the work is not done yet.
+        let p = page(
+            "<p>You have been unsubscribed.</p><form method=post><button>Unsubscribe</button></form>",
+        );
+        assert!(!p.says_done());
+    }
+
+    /// Correctness review, major: "Undo unsubscribe" is the one action worse
+    /// than doing nothing.
+    #[test]
+    fn undo_links_and_buttons_are_never_actions() {
+        let p = page(
+            "<h1>Unsubscribed</h1><p>You have unsubscribed from Acme News.</p>\
+             <a href=/resubscribe>Undo unsubscribe</a>\
+             <form method=post action=/resub><button>Didn't mean to unsubscribe?</button></form>",
+        );
+        assert!(p.says_done(), "past tense reads as done");
+        assert_eq!(p.obvious_action(), None);
+        assert!(p.actions.iter().all(|a| !matches!(a, Action::Link { .. })));
+        assert!(p.actions.iter().all(|a| a.submission().is_none()));
+    }
+
+    #[test]
+    fn a_buttons_formaction_and_formmethod_win() {
+        let p = page(
+            "<form method=post action=/prefs/save><input type=hidden name=t value=1>\
+             <button name=a value=save>Save preferences</button>\
+             <button formaction=/unsub-all formmethod=post>Unsubscribe from all</button></form>",
+        );
+        let s = only_submission(&p).unwrap();
+        assert_eq!(s.url.as_str(), "https://news.example.com/unsub-all");
+        assert_eq!(s.pairs, vec![("t".into(), "1".into())]);
+    }
+
+    #[test]
+    fn required_checkboxes_and_empty_options_behave_like_a_browser() {
+        let p = page(
+            "<form><input type=checkbox name=agree required><button>Unsubscribe</button></form>",
+        );
+        assert!(
+            only_submission(&p).is_none(),
+            "a required box we will not tick"
+        );
+        let p = page(
+            "<form><select name=why><option value=''>Pick one</option><option value=a>A</option></select>\
+             <button>Unsubscribe</button></form>",
+        );
+        assert_eq!(
+            only_submission(&p).unwrap().pairs,
+            vec![("why".into(), String::new())]
+        );
+    }
+
+    #[test]
+    fn a_script_only_form_needs_a_browser() {
+        let p = page("<form action='javascript:void(0)'><button>Unsubscribe</button></form>");
+        assert!(p.actions[0].needs_script());
+    }
+
+    #[test]
+    fn plain_text_bodies_are_read() {
+        assert!(Page::from_text("OK\nYou have been unsubscribed.\n").says_done());
     }
 }

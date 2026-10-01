@@ -2325,14 +2325,16 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
         now: DateTime<Utc>,
     ) -> Result<bool>;
 
-    /// Turn every `running` row whose sender is NOT in `live` into `needs_you`
-    /// with reason `unclear`: the job that owned it died with the process. Its
-    /// `status_url` is still the original link, so the user can finish by hand.
-    /// Returns how many rows were reaped.
+    /// Turn every `running` row whose sender is NOT in `live` and whose
+    /// `status_at` is before `stale_before` into `needs_you` with reason
+    /// `unclear`: the job that owned it died with the process. Its `status_url`
+    /// is still the original link, so the user can finish by hand. Returns how
+    /// many rows were reaped.
     fn reap_unsubscribe_jobs(
         &self,
         account_id: AccountId,
         live: &[String],
+        stale_before: DateTime<Utc>,
         now: DateTime<Utc>,
     ) -> Result<usize>;
 

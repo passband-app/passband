@@ -1157,9 +1157,10 @@ impl Store for SqliteStore {
         &self,
         account_id: AccountId,
         live: &[String],
+        stale_before: DateTime<Utc>,
         now: DateTime<Utc>,
     ) -> Result<usize> {
-        self.reap_unsubscribe_jobs(account_id, live, now)
+        self.reap_unsubscribe_jobs(account_id, live, stale_before, now)
     }
 
     fn set_unsubscribe_resolution(

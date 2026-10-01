@@ -436,6 +436,16 @@ fn unsub_violation_waits_for_an_automatic_request_to_go_out() {
         .unwrap();
     inbound_triaged(acct, "g2", "t2", "news@x.com", h(110), false).ingest(&store);
     assert_eq!(count(&store), 0, "needs_you: still nothing went out");
+    let rec = &store.list_unsubscribes(acct).unwrap()[0];
+    assert_eq!(
+        rec.requested_at, t0,
+        "needs_you leaves the request time alone"
+    );
+    assert_eq!(
+        rec.status_url.as_deref(),
+        Some("https://x.com/u"),
+        "kept while the user needs it"
+    );
 
     assert!(
         store
@@ -460,6 +470,10 @@ fn unsub_violation_waits_for_an_automatic_request_to_go_out() {
         .unwrap();
     let rec = &store.list_unsubscribes(acct).unwrap()[0];
     assert_eq!((rec.violation_count, rec.method.as_str()), (0, "one_click"));
+    assert!(
+        rec.status_url.is_none(),
+        "the tokened link is not kept past done"
+    );
     assert_eq!(rec.requested_at, h(301));
     inbound_triaged(acct, "g5", "t5", "news@x.com", h(400), false).ingest(&store);
     assert_eq!(count(&store), 1, "done and past grace: a violation");

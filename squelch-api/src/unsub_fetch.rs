@@ -155,18 +155,25 @@ impl Fetcher {
                 let loc = loc
                     .to_str()
                     .map_err(|_| FetchError::Refused("bad redirect"))?;
-                url = url
+                let next = url
                     .join(loc)
                     .map_err(|_| FetchError::Refused("bad redirect"))?;
                 // 307/308 keep the method and body; every other redirect is a
-                // GET from here on, which is what browsers do.
-                if !matches!(
+                // GET from here on, which is what browsers do. A body is never
+                // carried to ANOTHER host: whatever a form sent was meant for
+                // the host that served the form.
+                if matches!(
                     status,
                     StatusCode::TEMPORARY_REDIRECT | StatusCode::PERMANENT_REDIRECT
                 ) {
+                    if body.is_some() && next.host_str() != url.host_str() {
+                        return Err(FetchError::Refused("body redirected off-host"));
+                    }
+                } else {
                     method = Method::GET;
                     body = None;
                 }
+                url = next;
                 continue;
             }
             let content_type = resp
@@ -204,8 +211,11 @@ impl Fetcher {
     /// `http://` unsubscribe link is common enough (older ESPs, tracking
     /// domains) that refusing it outright would send a lot of easy cases to the
     /// user's browser. So an http URL is tried as https first, and only a
-    /// transport failure there (no TLS on that host) falls back to the URL as
-    /// written. Loopback test servers speak plain http, so tests skip this.
+    /// CONNECT failure there (no listener, no TLS on that host) falls back to
+    /// the URL as written. A failure after the request may have gone out (a
+    /// timeout, a reset mid-response) does NOT fall back: that would send the
+    /// same submission twice, the second time in the clear. Loopback test
+    /// servers speak plain http, so tests skip this.
     async fn send_hop(
         &self,
         method: &Method,
@@ -214,14 +224,17 @@ impl Fetcher {
     ) -> Result<reqwest::Response, FetchError> {
         if url.scheme() == "http" && !self.allow_local {
             let mut secure = url.clone();
-            if secure.set_scheme("https").is_ok()
-                && secure.set_port(None).is_ok()
-                && let Ok(resp) = self.send_raw(method, &secure, body).await
-            {
-                return Ok(resp);
+            if secure.set_scheme("https").is_ok() && secure.set_port(None).is_ok() {
+                match self.send_raw(method, &secure, body).await {
+                    Ok(resp) => return Ok(resp),
+                    Err(e) if e.is_connect() => {}
+                    Err(e) => return Err(FetchError::Transport(redact(&e))),
+                }
             }
         }
-        self.send_raw(method, url, body).await
+        self.send_raw(method, url, body)
+            .await
+            .map_err(|e| FetchError::Transport(redact(&e)))
     }
 
     async fn send_raw(
@@ -229,7 +242,7 @@ impl Fetcher {
         method: &Method,
         url: &Url,
         body: Option<&str>,
-    ) -> Result<reqwest::Response, FetchError> {
+    ) -> Result<reqwest::Response, reqwest::Error> {
         let mut req = self
             .client
             .request(method.clone(), url.clone())
@@ -242,9 +255,7 @@ impl Fetcher {
                 )
                 .body(b.to_string());
         }
-        req.send()
-            .await
-            .map_err(|e| FetchError::Transport(redact(&e)))
+        req.send().await
     }
 }
 
@@ -328,6 +339,15 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
     let s = ip.segments();
     // ::, ::1, and the deprecated IPv4-compatible block ::a.b.c.d.
     if s[..6].iter().all(|x| *x == 0) {
+        return false;
+    }
+    // IPv4-translated, ::ffff:0:a.b.c.d (::ffff:0:0/96).
+    if s[..4].iter().all(|x| *x == 0) && s[4] == 0xffff && s[5] == 0 {
+        return false;
+    }
+    // Local-use NAT64, 64:ff9b:1::/48: on a network that runs it, this is a
+    // way into private v4 space, so it is never public.
+    if s[0] == 0x64 && s[1] == 0xff9b && s[2] == 0x1 {
         return false;
     }
     // NAT64 (64:ff9b::/96) and 6to4 (2002::/16) carry a v4 address inside.
@@ -433,6 +453,8 @@ mod tests {
             "http://[fe80::1]/",
             "http://[64:ff9b::a9fe:a9fe]/",
             "http://[2002:7f00:1::]/",
+            "http://[::ffff:0:7f00:1]/",
+            "http://[64:ff9b:1::a00:1]/",
             "http://router.lan/",
             "http://printer.local/",
             "http://metadata.google.internal/",

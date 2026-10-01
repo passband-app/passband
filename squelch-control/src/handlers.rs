@@ -268,13 +268,49 @@ pub async fn signup_form(State(state): State<ControlState>, RawQuery(query): Raw
         .map(|code| code.chars().take(MAX_FIELD).collect::<String>())
         .filter(|code| invites::is_plausible(code))
         .unwrap_or_default();
+    let label = if invite.is_empty() {
+        String::new()
+    } else {
+        suggested_label(&state, &invite).await.unwrap_or_default()
+    };
     pages::signup_form(
         &state.config().base_domain,
         waitlist_url(&state).as_deref(),
-        "",
+        &label,
         &invite,
         None,
     )
+}
+
+/// A username to prefill for the person an emailed invite was minted for: the
+/// first of [`labels::suggestions`] that both authorities say is free.
+///
+/// A SUGGESTION, NOT A CLAIM. It is an editable value in the field, nothing is
+/// reserved, and `POST /signup` checks it again like anything typed. So every
+/// failure here is quiet and lands on an empty field, the form as it was: a
+/// lookup that errors, a shared code nobody's address is behind, or every
+/// candidate taken. A PENDING tenant counts as taken: it is somebody's
+/// half-finished signup, and only they can finish it.
+async fn suggested_label(state: &ControlState, invite: &str) -> Option<String> {
+    let email = state
+        .store()
+        .email_for_available_invite(&invites::hash(invite), chrono::Utc::now())
+        .await
+        .inspect_err(|e| tracing::warn!(error = %e, "invite address lookup failed"))
+        .ok()??;
+    for candidate in labels::suggestions(&email) {
+        match state.store().label_exists(&candidate).await {
+            Ok(false) => {}
+            Ok(true) => continue,
+            Err(_) => return None,
+        }
+        match state.warden().status(&candidate).await {
+            Ok(None) => return Some(candidate),
+            Ok(Some(_)) => continue,
+            Err(_) => return None,
+        }
+    }
+    None
 }
 
 /// Where the form sends somebody who has no invite code, or `None` on a

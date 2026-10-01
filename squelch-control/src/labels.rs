@@ -122,9 +122,71 @@ pub fn parse(raw: &str) -> Result<String, LabelError> {
     Ok(normalized)
 }
 
+/// Usernames to suggest for `email`, best first: the part before the `@`, then
+/// that part and the domain's first label joined by a hyphen (`ada@acme.com`
+/// offers `ada`, then `ada-acme`). The caller takes the first one that is free.
+///
+/// Each candidate is folded into the label alphabet (a `+tag` dropped, every
+/// other character outside it becoming a hyphen) and then has to pass
+/// [`validate`] like anything typed, so a suggestion can never be a label the
+/// form would refuse. Too short, reserved, or empty: left out, not padded.
+pub fn suggestions(email: &str) -> Vec<String> {
+    let Some((local, domain)) = email.trim().rsplit_once('@') else {
+        return Vec::new();
+    };
+    let local = fold(local.split('+').next().unwrap_or_default());
+    let stem = fold(domain.split('.').next().unwrap_or_default());
+    let mut out: Vec<String> = Vec::new();
+    for candidate in [local.clone(), format!("{local}-{stem}")] {
+        let candidate = clip(&candidate);
+        if !local.is_empty() && validate(&candidate).is_ok() && !out.contains(&candidate) {
+            out.push(candidate);
+        }
+    }
+    out
+}
+
+/// Lowercase, everything outside `[a-z0-9]` to one hyphen, no hyphen at an end.
+fn fold(raw: &str) -> String {
+    let mut out = String::new();
+    for c in raw.to_lowercase().chars() {
+        if c.is_ascii_lowercase() || c.is_ascii_digit() {
+            out.push(c);
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.trim_end_matches('-').to_string()
+}
+
+/// Cut to [`MAX_LABEL_LEN`] without leaving a hyphen at the cut.
+fn clip(label: &str) -> String {
+    let cut: String = label.chars().take(MAX_LABEL_LEN).collect();
+    cut.trim_end_matches('-').to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suggests_the_local_part_then_the_local_part_and_the_domain() {
+        assert_eq!(suggestions("ada@acme.com"), ["ada", "ada-acme"]);
+        assert_eq!(
+            suggestions("Ada.Lovelace+news@gmail.com"),
+            ["ada-lovelace", "ada-lovelace-gmail"]
+        );
+        // Too short alone, still offered with its domain.
+        assert_eq!(suggestions("al@acme.com"), ["al-acme"]);
+        // Reserved alone is the same.
+        assert_eq!(suggestions("admin@acme.com"), ["admin-acme"]);
+        // Long locals are clipped to a legal label, never past one.
+        let long = suggestions("abcdefghijklmnopqrstuvwxyz-0123456789@acme.com");
+        assert!(long.iter().all(|l| validate(l).is_ok()), "{long:?}");
+        assert_eq!(long.len(), 1, "both clip to the same label: {long:?}");
+        assert!(suggestions("not an address").is_empty());
+        assert!(suggestions("+tag@acme.com").is_empty());
+    }
 
     #[test]
     fn accepts_ordinary_labels() {

@@ -736,11 +736,15 @@ pub fn success(tenant_url: &str) -> Response {
 /// one line they will read has to say. A summary reading "connect manually"
 /// describes the remedy to somebody who has not yet worked out they need one.
 ///
-/// NO AUTOMATIC REDIRECT, and that is deliberate rather than unfinished. This
-/// page carries a live pairing code, and a redirect that fires on load would
-/// hand it to whatever claims `passband://` the moment the browser renders,
-/// before the person reading has agreed to anything. A press is one act more and
-/// it is the act that says which device this code is for.
+/// THE PAGE OPENS THE APP BY ITSELF, through a `Refresh` header (the CSP allows
+/// no script, and the reconnect page already moves the same way). This used to
+/// be a press, on the argument that a live pairing code should not go to
+/// whatever claims `passband://` before anybody agreed to it. In practice
+/// nobody reached this page except from the app's own "Sign in with Gmail",
+/// so the press was a leftover tab with one obvious button on it; and the
+/// browser asks before it hands a custom scheme to the OS anyway, which is
+/// the agreement the press stood for. The button stays as the fallback, for
+/// the cases the opening paragraph lists, where the redirect does nothing.
 ///
 /// The mailbox is named on it because this is the one screen that can say it: an
 /// app login never asked who the person was, so "signed in as" is the only
@@ -753,16 +757,16 @@ pub fn app_signed_in(
     analytics_id: Option<&str>,
 ) -> Response {
     let link = deep_link(tenant_url, pair_code, analytics_id);
-    page(
+    let mut response = page(
         StatusCode::OK,
         "Signed in",
         &format!(
             r#"<h1>You’re signed in</h1>
-<p class="lead">{email}</p>
+<p class="lead">Opening Passband for {email}…</p>
 <a class="button" href="{link}">Open Passband <span class="arrow" aria-hidden="true">→</span></a>
 <p class="alt">Need the app? <a href="{download}">Download Passband</a>.</p>
 <details>
-<summary>Button did nothing? Connect manually</summary>
+<summary>Passband didn’t open? Connect manually</summary>
 <p>In Passband, choose Sign in with Gmail and enter:</p>
 <p><code>{url}</code></p>
 <p><span class="code">{code}</span></p>
@@ -774,7 +778,14 @@ pub fn app_signed_in(
             link = escape_html(&link),
             download = DOWNLOAD_URL,
         ),
-    )
+    );
+    // Every byte of the link is ours and percent-encoded (see [`deep_link`]),
+    // so it is always a legal header value; a failure here would be a bug in
+    // the encoder, and the page still has its button.
+    if let Ok(refresh) = header::HeaderValue::from_str(&format!("0; url={link}")) {
+        response.headers_mut().insert(header::REFRESH, refresh);
+    }
+    response
 }
 
 /// The reconnect status page, one arm per [`ReconnectView`]. The states the
@@ -1802,15 +1813,27 @@ mod tests {
     /// than what to do about it. Moving the code back into the open should fail
     /// here and be a deliberate edit to this test.
     #[tokio::test]
-    async fn the_app_page_labels_the_fallback_with_the_symptom() {
-        let html = body_of(app_signed_in(
+    async fn the_app_page_opens_the_app_and_labels_the_fallback_with_the_symptom() {
+        let response = app_signed_in(
             "ada@example.com",
             "https://ada.passband.email",
             "ABCD-EFGH",
             10,
             None,
-        ))
-        .await;
+        );
+        // The page moves by itself, to the same link its button carries.
+        let refresh = response.headers()[header::REFRESH]
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            refresh,
+            format!(
+                "0; url={}",
+                deep_link("https://ada.passband.email", "ABCD-EFGH", None)
+            )
+        );
+        let html = body_of(response).await;
         let (open, folded) = html.split_once("<details>").expect("{html}");
         // The deep link is the page; the code is the way out when it fails.
         // Asserted on the wrapper, not the code: the `href` above carries
@@ -1828,7 +1851,7 @@ mod tests {
             .expect("{html}")
             .0
             .to_lowercase();
-        assert!(summary.contains("did nothing"), "{html}");
+        assert!(summary.contains("didn’t open"), "{html}");
     }
 
     /// THE DOWNLOAD LIVES AT THE END OF THE FLOW, not on the landing page: that

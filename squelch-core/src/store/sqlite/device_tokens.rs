@@ -538,6 +538,24 @@ impl SqliteStore {
         Ok(count.max(0) as u64)
     }
 
+    /// Has ANY device token on this account ever named itself as `platform`?
+    /// Revoked rows count, as in [`SqliteStore::client_versions_seen`], and
+    /// unlike that listing this is not capped: fifty Mac releases cannot push
+    /// the one time the phone connected out of the answer.
+    pub fn client_platform_seen(
+        &self,
+        account_id: AccountId,
+        platform: ClientPlatform,
+    ) -> Result<bool> {
+        let conn = self.lock()?;
+        Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM device_tokens
+                           WHERE account_id = ?1 AND client_platform = ?2)",
+            params![account_id, platform.as_str()],
+            |r| r.get(0),
+        )?)
+    }
+
     /// Which app versions have connected to this mailbox, and when each last
     /// did: one entry per (platform, version), newest first, at most
     /// [`CLIENT_VERSIONS_CAP`].

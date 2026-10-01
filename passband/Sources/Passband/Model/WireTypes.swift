@@ -998,6 +998,11 @@ struct StoreStats: Codable, Sendable, Hashable {
     /// ABSENT on a daemon too old to say, and on every self-host, and nil reads
     /// exactly like false: no button, no nudge, nothing offered.
     var invite_sharing: Bool?
+    /// Whether an iPhone app has EVER connected to this mailbox. ABSENT on a
+    /// daemon too old to say, and nil reads as "do not know": the TestFlight
+    /// ask never fires on a guess, because telling somebody about the app they
+    /// are already using is worse than not telling them.
+    var ios_connected: Bool?
     /// Whether `forward_of_message_id` on /client/actions/send MEANS anything
     /// here. ABSENT on a daemon too old to say, and nil must read as false for a
     /// reason no other capability flag has: serde ignores unknown fields, so an

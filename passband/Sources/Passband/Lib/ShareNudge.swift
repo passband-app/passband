@@ -38,7 +38,9 @@ final class ShareNudge {
     /// that a week away does not disqualify them.
     nonisolated static let nudgeAfterActiveDays = 7
 
-    private nonisolated static let firstUseKey = "passband.share.firstUseAt"
+    /// Also read by `TestFlightNudge`: there is one first launch per install,
+    /// whatever is counting from it.
+    nonisolated static let firstUseKey = "passband.share.firstUseAt"
     private nonisolated static let activeDaysKey = "passband.share.activeDays"
     private nonisolated static let lastActiveDayKey = "passband.share.lastActiveDay"
     private nonisolated static let askedKey = "passband.share.asked"

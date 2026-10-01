@@ -17,8 +17,9 @@ use serde_json::json;
 use squelch_core::CoreError;
 use squelch_core::config::{CACHE_READ_INPUT_MULT, CACHE_WRITE_INPUT_MULT};
 use squelch_core::store::{
-    ActionMessageRef, Draft, DraftKey, FtsQuery, NewAuditEntry, OutboundAttachmentMeta,
-    SearchDiagnostics, SearchFilter, SearchSort, SitrepBand, SpamScope, SqliteStore, Store,
+    ActionMessageRef, ClientPlatform, Draft, DraftKey, FtsQuery, NewAuditEntry,
+    OutboundAttachmentMeta, SearchDiagnostics, SearchFilter, SearchSort, SitrepBand, SpamScope,
+    SqliteStore, Store,
 };
 use squelch_core::sync::{LABEL_INBOX, LABEL_SPAM, decode_raw_b64url, parse_internal_date};
 use squelch_core::triage::llm::Usage;
@@ -2856,12 +2857,33 @@ pub async fn get_audit(
 
 // --- GET /client/stats -------------------------------------------------------
 
+/// Has an iPhone app ever connected to this mailbox? TWO WITNESSES, either one
+/// enough:
+///
+/// * a device token that named itself `ios/...` in `X-Passband-Client`
+///   (`client_platform_seen`, which counts revoked rows: a phone that paired
+///   and was later unpaired has still been tried), and
+/// * an iOS push registration in `devices`, which is the only trace an iOS
+///   build from BEFORE that header leaves.
+///
+/// "Ever", not "now": the question the Mac asks with it is "should we tell this
+/// person the iPhone app exists", and somebody who has installed it knows.
+fn ios_app_connected(store: &SqliteStore, account_id: AccountId) -> Result<bool, CoreError> {
+    if store.client_platform_seen(account_id, ClientPlatform::Ios)? {
+        return Ok(true);
+    }
+    Ok(store
+        .list_devices(account_id)?
+        .iter()
+        .any(|d| d.platform == "ios"))
+}
+
 pub async fn get_stats(State(state): State<ApiState>) -> Result<impl IntoResponse, ApiError> {
     // UTC day key for today's Stage-2 usage row.
     let day = Utc::now().format("%Y-%m-%d").to_string();
     // Band counts run under the same default window as the lists they head.
     let bands_since = Utc::now() - chrono::Duration::days(DEFAULT_UPDATES_WINDOW_DAYS);
-    let (stats, usage, unread, email, jobs, parked) =
+    let (stats, usage, unread, email, jobs, parked, ios_connected) =
         store_call(&state, move |store, account_id| {
             let stats = store.stats(account_id, bands_since)?;
             let usage = store.stage2_usage_today(account_id, &day)?;
@@ -2869,7 +2891,8 @@ pub async fn get_stats(State(state): State<ApiState>) -> Result<impl IntoRespons
             let email = store.account_email(account_id)?;
             let jobs = store.triage_waiting_counts(account_id, Utc::now())?;
             let parked = store.triage_budget_parked(account_id)?;
-            Ok((stats, usage, unread, email, jobs, parked))
+            let ios_connected = ios_app_connected(store, account_id)?;
+            Ok((stats, usage, unread, email, jobs, parked, ios_connected))
         })
         .await?;
 
@@ -2982,6 +3005,11 @@ pub async fn get_stats(State(state): State<ApiState>) -> Result<impl IntoRespons
     // tenant nobody has turned it on for). Always present, so a client reads an
     // answer rather than absence, and an OLD daemon's silence reads as "no".
     body["invite_sharing"] = json!(state.sharing().is_some());
+    // Whether the iPhone app has EVER talked to this mailbox. The Mac uses it
+    // to decide whether to point somebody at the TestFlight; see
+    // [`ios_app_connected`]. Always present, so an old daemon's silence is the
+    // only way to read "unknown", and the client treats that as "do not ask".
+    body["ios_connected"] = json!(ios_connected);
     // Capability flag for the app: whether this daemon understands
     // `forward_of_message_id` on POST /client/actions/send.
     //

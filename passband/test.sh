@@ -400,6 +400,13 @@ run_suite settings-search \
   Sources/Passband/Lib/SettingsSearch.swift \
   Tests/SettingsSearchTests.swift
 
+# The density curves: compact is the identity (which is what makes moving a
+# literal onto a token safe), comfortable never shrinks anything, and neither
+# curve folds two steps of the ladder onto one size.
+run_suite density \
+  Sources/Passband/Lib/Density.swift \
+  Tests/DensityTests.swift
+
 # The search field's `from:` operator: when the sender menu is open and what
 # accepting a sender does to the text. Pure string work, Foundation only.
 run_suite from-operator \

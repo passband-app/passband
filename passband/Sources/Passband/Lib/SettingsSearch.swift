@@ -144,6 +144,16 @@ enum SettingsSearch {
                 "contrast", "brightness", "look",
             ]),
         SettingsEntry(
+            card: .appearance,
+            title: "Density",
+            blurb: "How much room the interface gives each thing: comfortable or compact.",
+            keywords: [
+                "density", "dense", "compact", "comfortable", "comfort", "cozy", "spacing",
+                "space", "spacious", "roomy", "padding", "cramped", "crowded", "tight",
+                "text size", "font size", "bigger text", "larger text", "small text",
+                "row height", "whitespace",
+            ]),
+        SettingsEntry(
             card: .notifications,
             title: "Notification sound",
             blurb: "Which chime plays when an urgent or deadline banner arrives.",

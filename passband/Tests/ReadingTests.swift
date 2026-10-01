@@ -24,6 +24,10 @@ struct ReadingTests {
         precondition(pruned.map(\.address) == ["shop@example.com", "friend@example.com"],
             "Prune re-sorts the way the next poll will")
         precondition(Reading.derive(updates: [], rules: []).isEmpty, "Empty canonical membership clears cards")
+        // No silent cap: the zone folds instead, and its count is the real one.
+        let many = (0..<40).map { row(100 + $0, sender: "s\($0)@news.com", reason: "Sale",
+            date: "2026-09-01T00:00:00Z") }
+        precondition(Reading.derive(updates: many, rules: []).count == 40, "derive keeps every sender")
 
         // Pinned so every essay below is inside the content window.
         let pinned = Fmt.date("2026-09-11T00:00:00Z")!

@@ -1275,6 +1275,7 @@ pub fn runs_notify_model(category: &str) -> bool {
     category == NOTIFY_USAGE_CATEGORY
         || category == RULE_SUGGEST_USAGE_CATEGORY
         || category == crate::triage::access::USAGE_CATEGORY
+        || category == crate::triage::unsub_page::USAGE_CATEGORY
 }
 
 /// Estimated spend for a ledger rollup, costed exactly as `/client/usage` does.

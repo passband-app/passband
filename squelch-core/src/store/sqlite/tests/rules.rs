@@ -404,3 +404,127 @@ fn a_catch_all_rule_is_accepted() {
         .unwrap();
     assert_eq!(store.list_sender_rules(acct).unwrap()[0].match_pattern, "*");
 }
+
+/// An AUTOMATIC unsubscribe arms the detector only once the request actually
+/// went out: a job still running, or one waiting on the user, has asked the
+/// sender for nothing, so their mail meanwhile is not a violation. `done` and
+/// `opened` arm it, with the grace running from that moment.
+#[test]
+fn unsub_violation_waits_for_an_automatic_request_to_go_out() {
+    let (store, acct) = store();
+    let t0 = DateTime::parse_from_rfc3339("2026-07-01T00:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let h = |n| t0 + chrono::Duration::hours(n);
+    let count = |store: &SqliteStore| store.list_unsubscribes(acct).unwrap()[0].violation_count;
+
+    store
+        .begin_unsubscribe_job(acct, "news@x.com", None, "https://x.com/u", t0)
+        .unwrap();
+    inbound_triaged(acct, "g1", "t1", "news@x.com", h(100), false).ingest(&store);
+    assert_eq!(count(&store), 0, "running: nothing went out");
+
+    store
+        .finish_unsubscribe_job(
+            acct,
+            "news@x.com",
+            "needs_you",
+            "auto",
+            Some("choose_topics"),
+            h(1),
+        )
+        .unwrap();
+    inbound_triaged(acct, "g2", "t2", "news@x.com", h(110), false).ingest(&store);
+    assert_eq!(count(&store), 0, "needs_you: still nothing went out");
+    let rec = &store.list_unsubscribes(acct).unwrap()[0];
+    assert_eq!(
+        rec.requested_at, t0,
+        "needs_you leaves the request time alone"
+    );
+    assert_eq!(
+        rec.status_url.as_deref(),
+        Some("https://x.com/u"),
+        "kept while the user needs it"
+    );
+
+    assert!(
+        store
+            .mark_unsubscribe_opened(acct, "news@x.com", h(120))
+            .unwrap()
+    );
+    inbound_triaged(acct, "g3", "t3", "news@x.com", h(130), false).ingest(&store);
+    assert_eq!(
+        count(&store),
+        0,
+        "opened: grace runs from the open, not the click"
+    );
+    inbound_triaged(acct, "g4", "t4", "news@x.com", h(200), false).ingest(&store);
+    assert_eq!(count(&store), 1, "opened and past grace: a violation");
+
+    // A fresh automatic request that finishes DONE re-arms from its own moment.
+    store
+        .begin_unsubscribe_job(acct, "news@x.com", None, "https://x.com/u", h(300))
+        .unwrap();
+    store
+        .finish_unsubscribe_job(acct, "news@x.com", "done", "one_click", None, h(301))
+        .unwrap();
+    let rec = &store.list_unsubscribes(acct).unwrap()[0];
+    assert_eq!((rec.violation_count, rec.method.as_str()), (0, "one_click"));
+    assert!(
+        rec.status_url.is_none(),
+        "the tokened link is not kept past done"
+    );
+    assert_eq!(rec.requested_at, h(301));
+    inbound_triaged(acct, "g5", "t5", "news@x.com", h(400), false).ingest(&store);
+    assert_eq!(count(&store), 1, "done and past grace: a violation");
+}
+
+/// A job settles once: a row the user re-requested through the browser while
+/// it ran is not overwritten by the late answer.
+#[test]
+fn a_late_job_result_never_overwrites_a_newer_request() {
+    let (store, acct) = store();
+    let now = Utc::now();
+    store
+        .begin_unsubscribe_job(acct, "news@x.com", None, "https://x.com/u", now)
+        .unwrap();
+    store
+        .upsert_unsubscribe(acct, "news@x.com", "browser", None, now)
+        .unwrap();
+    store
+        .finish_unsubscribe_job(acct, "news@x.com", "done", "page", None, now)
+        .unwrap();
+    let rec = &store.list_unsubscribes(acct).unwrap()[0];
+    assert_eq!(rec.method, "browser");
+    assert!(rec.status.is_none());
+}
+
+/// Dismissing a job that needs the user drops the tokened link with it.
+#[test]
+fn dismissing_a_needs_you_row_forgets_its_link() {
+    let (store, acct) = store();
+    let now = Utc::now();
+    store
+        .begin_unsubscribe_job(acct, "news@x.com", None, "https://x.com/u?tok=1", now)
+        .unwrap();
+    store
+        .finish_unsubscribe_job(
+            acct,
+            "news@x.com",
+            "needs_you",
+            "auto",
+            Some("unclear"),
+            now,
+        )
+        .unwrap();
+    assert!(
+        store
+            .set_unsubscribe_resolution(acct, "news@x.com", "dismissed")
+            .unwrap()
+    );
+    assert!(
+        store.list_unsubscribes(acct).unwrap()[0]
+            .status_url
+            .is_none()
+    );
+}

@@ -1748,7 +1748,7 @@ struct ThreadViewer: View {
     /// quick `e` never flashes it.
     private static let holdGrace: Duration = .milliseconds(180)
     /// How long the ring takes to close, counted from when it appears.
-    static let holdDuration: Duration = .milliseconds(1000)
+    static let holdDuration: Duration = .milliseconds(750)
 
     /// What a held `e` would clear: the stack's rows not already done.
     private var stackRemaining: [AttentionUpdate] {

@@ -632,8 +632,9 @@ const CTA_CSS = `
   align-items: stretch;
 }
 /* The slot. No border and no ground of its own: it is an opening in the rig,
-   not a control sitting on one. Its padding matches the button's exactly, so
-   the address and the label sit on the same optical line. */
+   not a control sitting on one. Its padding matches the button's exactly
+   (the in-rig button is moved down to the caption's room), so the address
+   and the label sit on the same optical line. */
 .pb-rig-field {
   position: relative;
   z-index: 1;
@@ -688,6 +689,9 @@ const CTA_CSS = `
   letter-spacing: 0.14em;
   text-transform: uppercase;
 }
+/* Brighter once small: the placeholder grey is fine at full size and too
+   faint at ten-pixel caps. */
+.pb-rig-field:is(:not(:placeholder-shown), :-webkit-autofill) + .pb-field-cap { color: #8592A3; }
 .pb-rig-field:focus + .pb-field-cap { color: rgba(${ACCENT}, 0.95); }
 @media (prefers-reduced-motion: reduce) {
   .pb-field-cap { transition: none; }
@@ -724,6 +728,9 @@ const CTA_CSS = `
 .pb-cta-in-rig {
   flex: none;
   margin-top: 0;
+  /* Down by what the address slot gave its caption, so "join" stays on the
+     address's line. */
+  padding-top: 1.25rem;
   border: 0;
   border-left: 1px solid rgba(${ACCENT}, 0.18);
   border-radius: 0;
@@ -1114,40 +1121,42 @@ function Waitlist() {
     <>
       <form className="pb-rig" onSubmit={submit} {...handlers}>
         <label className="pb-field pb-field-name">
-        <input
-          ref={nameRef}
-          className="pb-rig-field pb-rig-name"
-          type="text"
-          name="name"
-          required
-          autoComplete="name"
-          placeholder="Ada Lovelace"
-          // The control plane's own ceiling is 128 CHARACTERS and this counts
-          // UTF-16 units, so the two agree on every name and the browser is
-          // the stricter of them on astral ones. Deliberately the stricter
-          // side: a name stopped at the field beats one cut on the way in.
-          maxLength={128}
-          value={name}
-          disabled={state === "busy"}
-          onChange={(event) => setName(event.target.value)}
-        />
-        <span className="pb-field-cap">your name</span>
+          <input
+            ref={nameRef}
+            className="pb-rig-field pb-rig-name"
+            type="text"
+            name="name"
+            required
+            autoComplete="name"
+            placeholder="Ada Lovelace"
+            aria-label="your name"
+            // The control plane's own ceiling is 128 CHARACTERS and this counts
+            // UTF-16 units, so the two agree on every name and the browser is
+            // the stricter of them on astral ones. Deliberately the stricter
+            // side: a name stopped at the field beats one cut on the way in.
+            maxLength={128}
+            value={name}
+            disabled={state === "busy"}
+            onChange={(event) => setName(event.target.value)}
+          />
+          <span className="pb-field-cap" aria-hidden="true">your name</span>
         </label>
         <div className="pb-rig-row">
           {chrome}
           <label className="pb-field">
-          <input
-            className="pb-rig-field"
-            type="email"
-            name="email"
-            required
-            autoComplete="email"
-            placeholder="you@example.com"
-            value={email}
-            disabled={state === "busy"}
-            onChange={(event) => setEmail(event.target.value)}
-          />
-          <span className="pb-field-cap">email address</span>
+            <input
+              className="pb-rig-field"
+              type="email"
+              name="email"
+              required
+              autoComplete="email"
+              placeholder="you@example.com"
+              aria-label="email address"
+              value={email}
+              disabled={state === "busy"}
+              onChange={(event) => setEmail(event.target.value)}
+            />
+            <span className="pb-field-cap" aria-hidden="true">email address</span>
           </label>
           <SubmitButton busy={state === "busy"} />
         </div>

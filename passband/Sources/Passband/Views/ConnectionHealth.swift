@@ -12,9 +12,9 @@ struct DaemonDownPane: View {
     var body: some View {
         if let error = store.refreshError {
             let auth = error.isAuthFailure
-            VStack(spacing: 14) {
+            VStack(spacing: Space.s14) {
                 Image(systemName: auth ? "key.slash" : "bolt.horizontal.circle")
-                    .font(.system(size: 30, weight: .light))
+                    .font(Typo.ui(30, weight: .light))
                     .foregroundStyle(auth ? Palette.lock : Palette.warn)
 
                 Text(auth ? "token rejected" : "can't reach the squelch daemon")
@@ -26,12 +26,12 @@ struct DaemonDownPane: View {
                         ? "The server refused the saved token. Update it in Settings."
                         : "The server URL didn't answer. Is squelchd running? Retrying every 10 seconds."
                 )
-                .font(.system(size: 13))
+                .font(Typo.ui(13))
                 .foregroundStyle(Palette.inkFaint)
                 .multilineTextAlignment(.center)
-                .frame(maxWidth: 380)
+                .frame(maxWidth: Space.scaled(380))
 
-                HStack(spacing: 10) {
+                HStack(spacing: Space.s10) {
                     if !auth { RetryButton() }
                     Button {
                         // A rejected token is fixed on the Account pane; an
@@ -40,13 +40,13 @@ struct DaemonDownPane: View {
                         store.openCredentials()
                     } label: {
                         Label("open settings", systemImage: "gearshape")
-                            .font(.system(size: 12, weight: .medium))
+                            .font(Typo.ui(12, weight: .medium))
                     }
                     .buttonStyle(.glass)
                 }
-                .padding(.top, 4)
+                .padding(.top, Space.s4)
             }
-            .padding(38)
+            .padding(Space.scaled(38))
             .passbandGlass(.pane, cornerRadius: 22, tint: auth ? Palette.lockSoft : Palette.warnSoft)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -77,28 +77,28 @@ struct ConnectionBanner: View {
             HStack(spacing: 0) {
                 Spacer(minLength: 0)
 
-                HStack(spacing: 9) {
+                HStack(spacing: Space.scaled(9)) {
                     Image(systemName: auth ? "key.slash" : "bolt.horizontal.circle")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(Typo.ui(12, weight: .semibold))
                     Text(
                         auth ? "token rejected\(staleNote)" : "daemon unreachable\(staleNote)"
                     )
-                    .font(.system(size: 12, weight: .medium))
+                    .font(Typo.ui(12, weight: .medium))
                     .lineLimit(1)
                     .truncationMode(.tail)
-                    Spacer(minLength: 8)
+                    Spacer(minLength: Space.s8)
                     if auth {
                         Button("settings") { store.openCredentials() }
                             .buttonStyle(.plain)
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(Typo.ui(11, weight: .semibold))
                             .foregroundStyle(Palette.accent)
                     } else {
                         RetryButton(compact: true)
                     }
                 }
                 .foregroundStyle(auth ? Palette.lock : Palette.warn)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
+                .padding(.horizontal, Space.s16)
+                .padding(.vertical, Space.s8)
                 .background((auth ? Palette.lockSoft : Palette.warnSoft).opacity(0.9))
                 .overlay(alignment: .bottom) { Hairline() }
                 .containerRelativeFrame(.horizontal, count: 3, span: 1, spacing: 0)
@@ -122,7 +122,7 @@ private struct RetryButton: View {
             }
         } label: {
             Label("retry now", systemImage: "arrow.clockwise")
-                .font(.system(size: compact ? 11 : 12, weight: .medium))
+                .font(Typo.ui(compact ? 11 : 12, weight: .medium))
                 .symbolEffect(.rotate, isActive: busy)
         }
         .buttonStyle(compact ? AnyButtonStyle(.plain) : AnyButtonStyle(.glass))

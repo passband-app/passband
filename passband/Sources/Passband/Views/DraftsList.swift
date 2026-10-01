@@ -78,14 +78,15 @@ struct DraftsList: View {
                             // "No other drafts" also when the only row is the
                             // one being edited: listed, but not another draft.
                             if rows.allSatisfy({ store.isInert($0) }) {
-                                note("no other drafts").padding(.top, 4)
+                                note("no other drafts").padding(.top, Space.s4)
                             }
                         }
                     }
                     // 7 + the row's own 11 puts every row's text on the
-                    // header's 18pt edge.
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 10)
+                    // header's 18pt edge. Written as the difference so the
+                    // two still meet in comfortable, where neither is 7 or 11.
+                    .padding(.horizontal, Space.scaled(18) - Space.scaled(11))
+                    .padding(.vertical, Space.s10)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .onChange(of: cursor) { _, next in
@@ -138,8 +139,8 @@ struct DraftsList: View {
         Text(text)
             .font(Typo.micro)
             .foregroundStyle(Palette.inkFaintest)
-            .padding(.horizontal, 11)
-            .padding(.vertical, 6)
+            .padding(.horizontal, Space.scaled(11))
+            .padding(.vertical, Space.s6)
     }
 
     #if os(macOS)
@@ -147,7 +148,7 @@ struct DraftsList: View {
         /// Delete only while a draft is under the cursor, because a hint for a
         /// key that does nothing here is worse than none.
         private var hints: some View {
-            HStack(spacing: 4) {
+            HStack(spacing: Space.s4) {
                 // Move, open and delete only while there is a draft under
                 // the cursor: none on an empty list, none when the only row
                 // is the one being edited.
@@ -162,8 +163,8 @@ struct DraftsList: View {
                 KeyHint("esc", returning ? "back" : "close")
                 Spacer()
             }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 12)
+            .padding(.horizontal, Space.scaled(18))
+            .padding(.vertical, Space.s12)
             .overlay(alignment: .top) { Hairline() }
         }
 
@@ -274,7 +275,7 @@ private struct DraftRow: View {
                 Text(Fmt.relAge(draft.updated_at))
                     .font(Typo.num(10))
                     .foregroundStyle(Palette.inkFaintest)
-                    .frame(minWidth: 26, alignment: .trailing)
+                    .frame(minWidth: Space.scaled(26), alignment: .trailing)
             }
         }
         .allowsHitTesting(!inert)

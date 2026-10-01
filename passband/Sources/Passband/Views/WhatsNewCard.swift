@@ -28,12 +28,12 @@ struct WhatsNewCard: View {
                 // A ceiling, not a height: one release is a short card, and
                 // three is a scroll rather than a sheet taller than the window.
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 20) {
+                    VStack(alignment: .leading, spacing: Space.s20) {
                         ForEach(notes) { note in
                             release(note)
                         }
                     }
-                    .padding(.trailing, 2)
+                    .padding(.trailing, Space.s2)
                 }
                 .frame(maxHeight: 380)
                 // A single short release must not be padded out to the ceiling.
@@ -54,7 +54,7 @@ struct WhatsNewCard: View {
     // MARK: - chrome
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: Space.scaled(3)) {
             Text("What's new")
                 .font(Typo.serif(22, weight: .medium))
                 .foregroundStyle(Palette.ink)
@@ -71,17 +71,17 @@ struct WhatsNewCard: View {
     }
 
     private var footer: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: Space.s8) {
             // WHERE THE REST LIVES. The card carries only what is unread; the
             // full history is a document, and Settings is where somebody goes
             // looking for it a second time.
             Text("Settings has this again under General.")
                 .font(Typo.micro)
                 .foregroundStyle(Palette.inkFaintest)
-            Spacer(minLength: 10)
+            Spacer(minLength: Space.s10)
             Button("Got it") { dismiss() }
                 .buttonStyle(.glassProminent)
-                .font(.system(size: 12, weight: .semibold))
+                .font(Typo.ui(12, weight: .semibold))
                 .keyboardShortcut(.defaultAction)
         }
     }
@@ -89,8 +89,8 @@ struct WhatsNewCard: View {
     // MARK: - one release
 
     private func release(_ note: ReleaseNote) -> some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
+        VStack(alignment: .leading, spacing: Space.scaled(9)) {
+            HStack(alignment: .firstTextBaseline, spacing: Space.s8) {
                 Text(note.version)
                     .font(Typo.num(12, weight: .semibold))
                     .foregroundStyle(Palette.accent)
@@ -101,7 +101,7 @@ struct WhatsNewCard: View {
             }
 
             Text(note.headline)
-                .font(.system(size: 13, weight: .semibold))
+                .font(Typo.ui(13, weight: .semibold))
                 .foregroundStyle(Palette.ink)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -112,7 +112,7 @@ struct WhatsNewCard: View {
             ForEach(ReleaseSurface.allCases, id: \.self) { surface in
                 let items = note.items(on: surface)
                 if !items.isEmpty {
-                    VStack(alignment: .leading, spacing: 6) {
+                    VStack(alignment: .leading, spacing: Space.s6) {
                         Text(surface.label)
                             .font(Typo.sectionLabel)
                             .foregroundStyle(Palette.inkFaint)
@@ -121,7 +121,7 @@ struct WhatsNewCard: View {
                             bullet(items[index].text)
                         }
                     }
-                    .padding(.top, 2)
+                    .padding(.top, Space.s2)
                 }
             }
         }
@@ -129,13 +129,15 @@ struct WhatsNewCard: View {
     }
 
     private func bullet(_ text: String) -> some View {
-        HStack(alignment: .top, spacing: 8) {
+        HStack(alignment: .top, spacing: Space.s8) {
             // Aligned to the first LINE of the text, not its centre, so a
-            // three-line item still reads as one bullet.
+            // three-line item still reads as one bullet. Half the text's size
+            // rather than a spacing step: the line's middle moves with the
+            // type, and the ladder would drop the dot below it.
             Circle()
                 .fill(Palette.inkFaintest)
                 .frame(width: 3, height: 3)
-                .padding(.top, 6)
+                .padding(.top, Typo.size(12) / 2)
             Text(text)
                 .font(Typo.rowSub)
                 .foregroundStyle(Palette.inkDim)

@@ -44,8 +44,8 @@ struct ClearNote: View {
     @State private var streak = 0
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
+        VStack(alignment: .leading, spacing: Space.s8) {
+            HStack(alignment: .firstTextBaseline, spacing: Space.s6) {
                 Text("There is no important mail.")
                     .foregroundStyle(Palette.inkDim)
                 AllMailLink()
@@ -58,7 +58,7 @@ struct ClearNote: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             if streak > 1 {
-                StreakChip(days: streak).padding(.top, 4)
+                StreakChip(days: streak).padding(.top, Space.s4)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -115,15 +115,15 @@ private struct StreakChip: View {
     let days: Int
 
     var body: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: Space.scaled(5)) {
             Image(systemName: "antenna.radiowaves.left.and.right")
-                .font(.system(size: 10, weight: .semibold))
+                .font(Typo.ui(10, weight: .semibold))
             Text("\(days) clear days running")
         }
         .font(Typo.chip)
         .foregroundStyle(Palette.accent)
-        .padding(.horizontal, 9)
-        .padding(.vertical, 4)
+        .padding(.horizontal, Space.scaled(9))
+        .padding(.vertical, Space.s4)
         .glassCapsule(tint: Palette.accent.opacity(0.16), interactive: false)
         .help("Days this board has been seen all clear, back to back, on this Mac.")
     }

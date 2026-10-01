@@ -68,14 +68,19 @@ enum ConnectPurpose: Hashable {
 private enum ConnectField: Hashable { case url, code, device, token, name, submit }
 
 /// What the account is called in the switcher, on notification titles, and in
-/// Settings. Three ready-made names cover nearly every mailbox; `custom` opens
-/// a field for the rest. Renamed any time from Settings > Accounts.
+/// Settings. Two ready-made names cover nearly every mailbox; `other` opens a
+/// field for the rest. Renamed any time from Settings > Accounts.
 enum AccountNameChoice: String, CaseIterable, Hashable {
-    case personal, work, other, custom
+    case personal, work, other
 
-    /// The stored name: capitalized, because it reads as a proper name beside
-    /// the others in the switcher. `custom` has none of its own.
-    var preset: String? { self == .custom ? nil : rawValue.capitalized }
+    /// The name stored for this choice, given what was typed under `other`:
+    /// capitalized, because it reads as a proper name beside the others in the
+    /// switcher. `other` left blank is called "Other" rather than nothing.
+    func name(typed: String) -> String {
+        guard self == .other else { return rawValue.capitalized }
+        let typed = typed.trimmed
+        return typed.isEmpty ? "Other" : typed
+    }
 }
 
 struct ConnectView: View {
@@ -95,11 +100,10 @@ struct ConnectView: View {
     @State private var deviceName = Pairing.defaultDeviceName()
     @State private var token = ""
     /// The human's name for this account, picked from presets or typed under
-    /// `custom`. An empty custom name leaves the switcher showing the daemon's
-    /// host:port, which is a real answer rather than a placeholder.
+    /// `other`.
     @State private var nameChoice: AccountNameChoice = .personal
-    @State private var customName = ""
-    private var accountLabel: String { nameChoice.preset ?? customName }
+    @State private var otherName = ""
+    private var accountLabel: String { nameChoice.name(typed: otherName) }
     /// An add-account attempt is in flight. The gate reads `store.connStatus`
     /// for this, but adding deliberately never moves it — the shell behind the
     /// sheet is standing on it.
@@ -793,7 +797,7 @@ struct ConnectView: View {
     }
 
     /// Presets first, because a mailbox is nearly always one of them and a
-    /// press beats typing; `custom` swaps in a field. The caption says what is
+    /// press beats typing; `other` swaps in a field. The caption says what is
     /// being named and that it is not final, because "account" alone next to a
     /// pairing code read as one more credential to find.
     @ViewBuilder private func accountNameChooser(inRig: Bool) -> some View {
@@ -808,8 +812,8 @@ struct ConnectView: View {
             GlassSegmented(
                 options: AccountNameChoice.allCases.map { ($0, $0.rawValue) },
                 selection: $nameChoice)
-            if nameChoice == .custom {
-                let field = TextField("Name it", text: $customName)
+            if nameChoice == .other {
+                let field = TextField("Name it", text: $otherName)
                     .textFieldStyle(.plain)
                     .font(.system(size: 14))
                     .foregroundStyle(Palette.ink)
@@ -820,14 +824,14 @@ struct ConnectView: View {
             }
         }
         .onChange(of: nameChoice) { _, now in
-            if now == .custom { focus = .name }
+            if now == .other { focus = .name }
         }
         // A second account starts on a name the switcher does not have yet.
         .task {
             let taken = Set(AccountManager.shared.accounts.map { $0.label.lowercased() })
             if taken.contains(nameChoice.rawValue),
                let free = AccountNameChoice.allCases.first(where: {
-                   $0.preset != nil && !taken.contains($0.rawValue)
+                   $0 != .other && !taken.contains($0.rawValue)
                }) {
                 nameChoice = free
             }

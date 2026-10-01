@@ -708,9 +708,12 @@ struct ConnectView: View {
         }
         .buttonStyle(.plain)
         // A pair link filled the form and stopped: ring the one press left.
+        // The row is the rig's floor, so the ring follows its rounded bottom
+        // corners; a square one is clipped off at both.
         .overlay {
             if linkArmed {
-                Rectangle()
+                UnevenRoundedRectangle(
+                    bottomLeadingRadius: 14, bottomTrailingRadius: 14, style: .continuous)
                     .strokeBorder(Palette.accent, lineWidth: 2)
                     .allowsHitTesting(false)
             }
@@ -827,22 +830,26 @@ struct ConnectView: View {
     /// pairing code read as one more credential to find.
     @ViewBuilder private func accountNameChooser(inRig: Bool) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline) {
-                FieldLabel("name this account")
+            // The caption on the trailing edge, like every other slot in the
+            // rig, so the chips and their name share one line.
+            HStack(alignment: .center) {
+                GlassSegmented(
+                    options: AccountNameChoice.allCases.map { ($0, $0.rawValue) },
+                    selection: Binding(
+                        get: { nameChoice },
+                        set: {
+                            nameChoice = $0
+                            nameTouched = true
+                            if $0 == .other { focus = .name }
+                        }))
                 Spacer(minLength: 8)
-                Text("rename any time in settings")
-                    .font(Typo.micro)
-                    .foregroundStyle(Palette.inkFaint.opacity(0.7))
+                VStack(alignment: .trailing, spacing: 2) {
+                    FieldLabel("name this account")
+                    Text("rename any time in settings")
+                        .font(Typo.micro)
+                        .foregroundStyle(Palette.inkFaint.opacity(0.7))
+                }
             }
-            GlassSegmented(
-                options: AccountNameChoice.allCases.map { ($0, $0.rawValue) },
-                selection: Binding(
-                    get: { nameChoice },
-                    set: {
-                        nameChoice = $0
-                        nameTouched = true
-                        if $0 == .other { focus = .name }
-                    }))
             if nameChoice == .other {
                 let typed = Binding(
                     get: { otherName },

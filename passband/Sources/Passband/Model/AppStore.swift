@@ -1548,7 +1548,18 @@ final class AppStore {
     /// mode being prevented here: A's row 412 is B's row 412.
     private func wipeAccountState() {
         sitrep = SitrepData()
+        // Its own line since the stats left SitrepData. The old daemon's
+        // stats over the new mailbox's empty bands read as "all clear": the
+        // quiet board played for a mailbox that had not answered yet, and a
+        // draft save took the old daemon's capabilities for the new one's.
+        stats = nil
         zones = SitrepZoneCache()
+        // AND THE TTL STAMP, which no longer rides inside the struct above.
+        // Left standing, it vouches for the rows just thrown away: the new
+        // account's first refreshes are skipped as "still fresh", and the
+        // zone cards cannot ask for themselves because an empty rail is
+        // never mounted.
+        zonesLoadedAt = nil
         // The parked refresh tasks go too, not just their results: a joiner
         // arriving after the switch would otherwise wait on — and adopt the
         // silence of — a pass that has already been disowned.

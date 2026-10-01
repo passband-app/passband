@@ -1547,6 +1547,10 @@ final class AppStore {
     /// per-daemon SQLite ints, so "looks plausible" is precisely the failure
     /// mode being prevented here: A's row 412 is B's row 412.
     private func wipeAccountState() {
+        // The unsubscribe tray's rows and buttons belong to the old account:
+        // "Finish on their site" would tell the NEW daemon about a job it has
+        // never heard of.
+        UnsubscribeJobs.shared.reset()
         sitrep = SitrepData()
         zones = SitrepZoneCache()
         // The parked refresh tasks go too, not just their results: a joiner

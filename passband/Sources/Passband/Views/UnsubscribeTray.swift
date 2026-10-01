@@ -23,7 +23,7 @@ struct UnsubscribeTray: View {
         GlassEffectContainer(spacing: 8) {
             VStack(alignment: .trailing, spacing: 7) {
                 if more > 0 {
-                    Text("\(more) more unsubscribing")
+                    Text("+\(more) more")
                         .font(Typo.micro)
                         .foregroundStyle(Palette.inkFaint)
                         .padding(.trailing, 6)

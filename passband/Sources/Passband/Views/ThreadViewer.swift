@@ -2078,6 +2078,8 @@ struct ThreadViewer: View {
         switch result.auto_refused {
         case "spam": "opened unsubscribe page for \(result.sender) (it's spam, so check the address bar)"
         case "unverified": "opened unsubscribe page for \(result.sender) (sender unverified)"
+        case "unchecked": "opened unsubscribe page for \(result.sender)"
+        case "footer_link": "opened their unsubscribe page so you can check it's really theirs"
         default: "opened unsubscribe page for \(result.sender)"
         }
     }

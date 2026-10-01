@@ -43,7 +43,14 @@ final class UnsubscribeJobs {
 
     /// Senders this session asked to unsubscribe from.
     @ObservationIgnored private var asked: Set<String> = []
+    /// Jobs started here that the ledger may not show yet, with when. A poll
+    /// that left before the daemon wrote the row would otherwise erase the
+    /// spinner it was meant to update, and stop polling with the job running.
+    @ObservationIgnored private var pending: [String: Date] = [:]
     @ObservationIgnored private var poll: Task<Void, Never>?
+    /// Bumped by `reset`: an answer that left under an older generation
+    /// belongs to another account and is dropped.
+    @ObservationIgnored private var generation = 0
 
     /// How long "Unsubscribed from X" stays up. Long enough to read, short
     /// enough that it is never in the way: success should be quiet.
@@ -79,12 +86,25 @@ final class UnsubscribeJobs {
         return out
     }
 
+    /// The account changed: nothing here is about the new one.
+    func reset() {
+        generation &+= 1
+        poll?.cancel()
+        poll = nil
+        rows = []
+        celebrating = [:]
+        hidden = []
+        asked = []
+        pending = [:]
+    }
+
     /// The daemon took a job. Show it at once, before the first poll lands.
     func started(sender: String) {
         let sender = sender.lowercased()
         asked.insert(sender)
         hidden.remove(sender)
         celebrating[sender] = nil
+        pending[sender] = Date()
         if let i = rows.firstIndex(where: { $0.sender == sender }) {
             rows[i].status = .running
         } else {
@@ -100,20 +120,38 @@ final class UnsubscribeJobs {
 
     /// Take a fresh ledger, from the violation scan or this model's own poll.
     func absorb(_ fresh: [UnsubscribeRecord]) {
+        var fresh = fresh
+        // A job started here that this answer predates stays a spinner: keep
+        // the local row until the ledger shows the job (a row stamped at or
+        // after the press). Past a minute the daemon has surely written it.
+        let now = Date()
+        for (sender, at) in pending {
+            let row = fresh.first { $0.sender == sender }
+            let seen = row.flatMap { Fmt.date($0.status_at ?? $0.requested_at) }
+                .map { $0.addingTimeInterval(2) >= at } ?? false
+            if seen || now.timeIntervalSince(at) > 60 {
+                pending[sender] = nil
+            } else if let local = rows.first(where: { $0.sender == sender }) {
+                fresh.removeAll { $0.sender == sender }
+                fresh.insert(local, at: 0)
+            }
+        }
         let before = Dictionary(rows.map { ($0.sender, $0.status) }, uniquingKeysWith: { a, _ in a })
         for row in fresh where row.status == .done && asked.contains(row.sender) {
             // Celebrate the transition, once: a row that was already done when
             // this session first saw it is history, not news.
             guard before[row.sender] == .running, celebrating[row.sender] == nil else { continue }
-            celebrating[row.sender] = Date()
+            let at = Date()
+            celebrating[row.sender] = at
             let sender = row.sender
             Task { [weak self] in
                 try? await Task.sleep(for: .seconds(Self.celebrateFor))
-                self?.celebrating[sender] = nil
+                // Only THIS celebration: a re-press since then owns the slot.
+                if self?.celebrating[sender] == at { self?.celebrating[sender] = nil }
             }
         }
         rows = fresh
-        if fresh.contains(where: { $0.status == .running }) { ensurePolling() }
+        if fresh.contains(where: { $0.status == .running }) || !pending.isEmpty { ensurePolling() }
     }
 
     /// "Finish on their site": open the original link, and tell the daemon the
@@ -137,19 +175,21 @@ final class UnsubscribeJobs {
 
     private func ensurePolling() {
         guard poll == nil else { return }
+        let gen = generation
         poll = Task { [weak self] in
             // A job is a few requests to a stranger's site: most settle in a
             // second or two, the slowest in under a minute (the daemon's budget).
             try? await Task.sleep(for: .milliseconds(700))
             while !Task.isCancelled {
                 guard let self else { return }
-                if let fresh = try? await APIClient.shared.getUnsubscribes() {
-                    self.absorb(fresh)
-                }
-                if !self.rows.contains(where: { $0.status == .running }) { break }
+                let fresh = try? await APIClient.shared.getUnsubscribes()
+                // Another account's ledger, if the account changed meanwhile.
+                guard gen == self.generation, !Task.isCancelled else { return }
+                if let fresh { self.absorb(fresh) }
+                if !self.rows.contains(where: { $0.status == .running }) && self.pending.isEmpty { break }
                 try? await Task.sleep(for: .seconds(1))
             }
-            self?.poll = nil
+            if let self, gen == self.generation { self.poll = nil }
         }
     }
 }

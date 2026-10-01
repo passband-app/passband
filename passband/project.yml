@@ -107,6 +107,8 @@ targets:
           # Its card, for the same reason: it reads Updater's phase, and the
           # phone has no relaunch to offer.
           - "Views/UpdateAlert.swift"
+          # The iPhone ask is a Mac card about the iPhone app.
+          - "Views/TestFlightNudgeModal.swift"
           # The AppKit HALF of the reader, and only that: an NSViewRepresentable
           # plus the WKWebView subclass that hands the scroll wheel back to the
           # column. Everything the reader is made of — the body-preparation

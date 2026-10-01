@@ -21,6 +21,7 @@ struct ReleaseNotesTests {
         selection()
         stamping()
         theTable()
+        digest()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -181,7 +182,59 @@ struct ReleaseNotesTests {
             expect(
                 grouped.count == note.items.count,
                 "\(note.version) items all carry a known surface")
+
+            // Everything the table says, the card says somewhere: a tile, a
+            // section bullet, or the footnote. Folding must never drop a line.
+            let d = note.digest
+            let said = Set(
+                (d.headliners.map(\.text) + d.sections.flatMap { $0.items + $0.extras })
+                    .map(ReleaseDigest.key))
+            for item in note.items {
+                expect(
+                    said.contains(ReleaseDigest.key(item.text)),
+                    "\(note.version) card still says: \(item.text.prefix(40))")
+            }
+            // A wall of tiles is the wall of bullets again, with icons.
+            expect(d.headliners.count <= 4, "\(note.version) has at most four headliners")
         }
+    }
+
+    // MARK: - the card's arrangement
+
+    static func digest() {
+        let note = ReleaseNote(
+            version: "9.9.9", date: "2026-01-01", headline: "test",
+            items: [
+                ReleaseItem(.app, "Schedule an email for later", symbol: "clock"),
+                ReleaseItem(.app, "Wide emails fit the window"),
+                ReleaseItem(.app, "UI improvements"),
+                ReleaseItem(.app, "Bug fixes"),
+                ReleaseItem(.ios, "Schedule an email for later."),
+                ReleaseItem(.daemon, "Bug fixes"),
+            ])
+        let d = note.digest
+
+        expect(d.headliners.count == 1, "one feature on two surfaces is one tile")
+        expect(d.headliners.first?.surfaces == [.app, .ios], "the tile names both surfaces")
+        expect(
+            d.sections.map(\.surface) == [.app, .daemon],
+            "a surface whose only item became a tile draws no section")
+        expect(d.sections.first?.items == ["Wide emails fit the window"], "catch-alls leave the list")
+        expect(
+            d.sections.first?.extras == ["UI improvements", "Bug fixes"],
+            "catch-alls are kept for the footnote, in order")
+        expect(d.sections.last?.items.isEmpty == true, "a section can be footnote only")
+
+        expect(
+            ReleaseDigest.footnote(["UI improvements", "Bug fixes"]) == "Plus UI improvements and bug fixes.",
+            "footnote keeps acronyms and lowers the rest")
+        expect(ReleaseDigest.footnote(["Bug Fixes"]) == "Plus bug fixes.", "one extra")
+        expect(ReleaseDigest.footnote([]) == nil, "no extras, no footnote")
+
+        let plain = ReleaseNote(
+            version: "9.9.8", date: "2026-01-01", headline: "test",
+            items: [ReleaseItem(.app, "One thing")])
+        expect(plain.digest.headliners.isEmpty, "a release with no symbols has no tiles")
     }
 
     // MARK: - harness

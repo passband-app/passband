@@ -655,6 +655,18 @@ struct ReadingZone: View {
     #endif
     /// Gutter, both axes.
     private static let gap: CGFloat = 10
+    /// How many cards stand unfolded. The feed decides what BELONGS; this only
+    /// keeps a busy week from burying the records under a wall of cards. The
+    /// rest sits behind the same quiet expander For-your-eyes uses.
+    #if os(iOS)
+        // The phone draws two-up, so 24 would be twelve rows of cards before
+        // the fold; 8 is four rows, in line with its For-your-eyes fold of 4.
+        private static let collapsed = 8
+    #else
+        private static let collapsed = 24
+    #endif
+
+    @State private var expanded = false
 
     var body: some View {
         // Always on the board, empty or not: a zone that vanishes reads as a
@@ -673,15 +685,36 @@ struct ReadingZone: View {
 
     /// NON-LAZY on purpose: a LazyVGrid rebuilds cards as they cross the
     /// viewport, and each rebuild costs a hero lookup and a fresh `.task`. A
-    /// week of recurring senders is bounded, so holding all of it is cheaper.
+    /// week of recurring senders is bounded (the feed fetches 200 messages, and
+    /// the zone folds at `collapsed`), so holding all of it is cheaper.
     private var grid: some View {
-        AdaptiveGrid(minimum: Self.cardMinimum, spacing: Self.gap) { cards }
+        let overflow = senders.count - Self.collapsed
+        return VStack(alignment: .leading, spacing: 0) {
+            AdaptiveGrid(minimum: Self.cardMinimum, spacing: Self.gap) { cards }
+            if overflow > 0 { expander(overflow) }
+        }
     }
 
     @ViewBuilder private var cards: some View {
-        ForEach(senders) { rs in
+        ForEach(expanded ? senders : Array(senders.prefix(Self.collapsed))) { rs in
             ReadingCard(sender: rs, cursor: cursor)
         }
+    }
+
+    /// For-your-eyes' expander, so the two zones fold the same way.
+    private func expander(_ overflow: Int) -> some View {
+        Button {
+            withAnimation(.smooth(duration: 0.28)) { expanded.toggle() }
+        } label: {
+            Text(expanded ? "show less" : "\(overflow) more")
+                .font(Typo.micro)
+                .foregroundStyle(Palette.inkFaint)
+                .padding(.horizontal, 11)
+                .padding(.vertical, 4)
+        }
+        .buttonStyle(.glass)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.top, 10)
     }
 }
 
@@ -818,6 +851,12 @@ private struct ReadingHero: View {
     /// masthead fitted into the square becomes an unreadable few-point strip.
     private static let maxAspect: CGFloat = 7
 
+    /// Breathing room around a mark cut out of its banner (`Hero.isMark`). The
+    /// crop is tight to the ink, and a logo touching the square's edges reads
+    /// as a cropped photo of a logo. A fraction of `side` so it holds on the
+    /// phone's smaller square.
+    private static let markInset: CGFloat = side * 0.08
+
     /// Falling back to the cache INSIDE the read keeps a recycled card from
     /// flashing empty: `@State` is gone the moment the card is dropped, the
     /// cached hero is not, so it repaints on the very first frame.
@@ -862,19 +901,26 @@ private struct ReadingHero: View {
     /// behind it belong to the caller.
     @ViewBuilder
     private func art(_ hero: HeroCache.Hero) -> some View {
+        let inset = hero.isMark ? Self.markInset : 0
         if ultraWide(hero.image) {
             // Past `maxAspect`, draw at the capped ratio and let the ENDS crop:
             // `.fill` overflows on the long axis and `.clipped` keeps the middle,
             // which is where the wordmark lives.
+            let width = Self.side - inset * 2
             Image(platformImage: hero.image)
                 .resizable()
+                .interpolation(.high)
                 .aspectRatio(contentMode: .fill)
-                .frame(width: Self.side, height: Self.side / Self.maxAspect)
+                .frame(width: width, height: width / Self.maxAspect)
                 .clipped()
         } else {
+            // A mark is always drawn WHOLE: it was cut to the ink, so there is
+            // no margin left for a fill-crop to spend.
             Image(platformImage: hero.image)
                 .resizable()
-                .aspectRatio(contentMode: fit(hero.image))
+                .interpolation(.high)
+                .aspectRatio(contentMode: hero.isMark ? .fit : fit(hero.image))
+                .padding(inset)
         }
     }
 

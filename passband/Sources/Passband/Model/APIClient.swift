@@ -147,6 +147,7 @@ actor APIClient {
         req.httpMethod = method.rawValue
         req.setValue("Bearer \(cfg.token)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.identifyClient()
         if let body {
             req.httpBody = body
             req.setValue(contentType, forHTTPHeaderField: "Content-Type")
@@ -448,6 +449,7 @@ actor APIClient {
         req.httpMethod = Method.GET.rawValue
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.identifyClient()
         do {
             let (data, _) = try await perform(req, allowPractice: false)
             guard !RehearsalMode.isEnabled else {
@@ -609,6 +611,22 @@ actor APIClient {
         return answer.suggestion
     }
 
+    /// The sitrep's headline: one sentence about what the For-your-eyes band is
+    /// about. `today` is the owner's local date, because "due tomorrow" is a
+    /// question about THEIR calendar and the daemon runs in UTC. A daemon too
+    /// old for the route 404s, which the caller reads as none.
+    /// `fresh` asks for ANOTHER line (the owner clicked the headline), skipping
+    /// the daemon's cache; `previous` is the line on screen, so it is not the
+    /// one that comes back.
+    func fyeHeadline(today: String, fresh: Bool = false, previous: String? = nil) async throws
+        -> FyeHeadline
+    {
+        var query = ["today": today]
+        if fresh { query["fresh"] = "true" }
+        if let previous { query["previous"] = previous }
+        return try await get("/client/v2/fye/headline", query: query)
+    }
+
     @discardableResult
     func createRule(_ body: CreateRuleBody) async throws -> CreatedRule {
         try await post("/client/rules", body: body)
@@ -626,14 +644,25 @@ actor APIClient {
 
     // MARK: - unsubscribe
 
-    struct UnsubBody: Codable, Sendable { var message_id: Int }
+    struct UnsubBody: Codable, Sendable {
+        var message_id: Int
+        /// Ask the daemon to do it (it may still answer with a link to open).
+        var auto: Bool
+    }
+    struct UnsubSenderBody: Codable, Sendable { var sender: String }
     struct UnsubResolutionBody: Codable, Sendable {
         var sender: String
         var resolution: String
     }
 
     func unsubscribe(messageId: Int) async throws -> UnsubscribeResult {
-        try await post("/client/unsubscribe", body: UnsubBody(message_id: messageId))
+        try await post("/client/unsubscribe", body: UnsubBody(message_id: messageId, auto: true))
+    }
+
+    /// The user followed a `needs_you` link to finish on the sender's site.
+    func markUnsubOpened(sender: String) async throws {
+        let _: UnsubscribeRecordAck = try await post(
+            "/client/unsubscribes/opened", body: UnsubSenderBody(sender: sender))
     }
 
     func getUnsubscribes() async throws -> [UnsubscribeRecord] {

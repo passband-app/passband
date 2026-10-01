@@ -236,7 +236,8 @@ impl SqliteStore {
         // This is a human action. Agent restrictions do not hide unsubscribe metadata.
         let row = conn
             .query_row(
-                "SELECT m.from_addr, m.list_unsubscribe, m.list_unsub_one_click, m.body_html
+                "SELECT m.from_addr, m.list_unsubscribe, m.list_unsub_one_click, m.body_html,
+                        m.auth_pass, m.is_spam
                  FROM messages m
                  WHERE m.account_id = ?1 AND m.id = ?2",
                 params![account_id, message_id],
@@ -246,16 +247,22 @@ impl SqliteStore {
                         r.get::<_, Option<String>>(1)?,
                         r.get::<_, i64>(2)?,
                         r.get::<_, Option<String>>(3)?,
+                        r.get::<_, Option<i64>>(4)?,
+                        r.get::<_, i64>(5)?,
                     ))
                 },
             )
             .optional()?;
         Ok(row.map(
-            |(from_addr, list_unsubscribe, one_click, body_html)| MessageUnsub {
-                from_addr,
-                list_unsubscribe,
-                list_unsub_one_click: one_click != 0,
-                body_html,
+            |(from_addr, list_unsubscribe, one_click, body_html, auth_pass, is_spam)| {
+                MessageUnsub {
+                    from_addr,
+                    list_unsubscribe,
+                    list_unsub_one_click: one_click != 0,
+                    body_html,
+                    auth_pass: auth_pass.map(|v| v != 0),
+                    is_spam: is_spam != 0,
+                }
             },
         ))
     }
@@ -278,7 +285,8 @@ impl SqliteStore {
              ON CONFLICT(account_id, sender_addr) DO UPDATE SET
                  requested_at=excluded.requested_at, method=excluded.method,
                  source_message_id=excluded.source_message_id,
-                 violation_count=0, last_violation_at=NULL, resolution=NULL",
+                 violation_count=0, last_violation_at=NULL, resolution=NULL,
+                 status=NULL, status_url=NULL, status_reason=NULL, status_at=NULL",
             params![
                 account_id,
                 sender,
@@ -290,6 +298,116 @@ impl SqliteStore {
         Ok(())
     }
 
+    pub(super) fn begin_unsubscribe_job(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+        source_message_id: Option<i64>,
+        url: &str,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let conn = self.lock()?;
+        let now = now.to_rfc3339();
+        conn.execute(
+            "INSERT INTO unsubscribes(account_id, sender_addr, requested_at, method,
+                 source_message_id, violation_count, last_violation_at, resolution,
+                 status, status_url, status_reason, status_at)
+             VALUES(?1,?2,?3,'auto',?4,0,NULL,NULL,'running',?5,NULL,?3)
+             ON CONFLICT(account_id, sender_addr) DO UPDATE SET
+                 requested_at=excluded.requested_at, method='auto',
+                 source_message_id=excluded.source_message_id,
+                 violation_count=0, last_violation_at=NULL, resolution=NULL,
+                 status='running', status_url=excluded.status_url,
+                 status_reason=NULL, status_at=excluded.status_at",
+            params![account_id, sender, now, source_message_id, url],
+        )?;
+        Ok(())
+    }
+
+    pub(super) fn finish_unsubscribe_job(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+        status: &str,
+        method: &str,
+        reason: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let conn = self.lock()?;
+        let now = now.to_rfc3339();
+        // `done` restarts the grace clock from the moment the sender was asked;
+        // `needs_you` leaves it, since nothing went out and the detector is not
+        // armed for that status anyway. The link (it carries the recipient's
+        // token) is kept only while the user still needs it.
+        conn.execute(
+            "UPDATE unsubscribes SET
+                 status = ?3, method = ?4, status_reason = ?5, status_at = ?6,
+                 requested_at = CASE WHEN ?3 = 'done' THEN ?6 ELSE requested_at END,
+                 status_url = CASE WHEN ?3 = 'needs_you' THEN status_url ELSE NULL END
+             WHERE account_id = ?1 AND sender_addr = ?2 AND status = 'running'",
+            params![account_id, sender, status, method, reason, now],
+        )?;
+        Ok(())
+    }
+
+    pub(super) fn mark_unsubscribe_opened(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+        now: DateTime<Utc>,
+    ) -> Result<bool> {
+        let conn = self.lock()?;
+        let now = now.to_rfc3339();
+        let n = conn.execute(
+            "UPDATE unsubscribes SET status = 'opened', status_at = ?3, requested_at = ?3,
+                 status_url = NULL
+             WHERE account_id = ?1 AND sender_addr = ?2 AND status = 'needs_you'",
+            params![account_id, sender, now],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub(super) fn reap_unsubscribe_jobs(
+        &self,
+        account_id: AccountId,
+        live: &[String],
+        stale_before: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<usize> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT sender_addr, status_at FROM unsubscribes
+             WHERE account_id = ?1 AND status = 'running'",
+        )?;
+        let running = stmt
+            .query_map(params![account_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(stmt);
+        // Ages compared as timestamps in Rust, not as strings in SQL. A row with
+        // no readable `status_at` cannot prove it is fresh, so it is stale.
+        let stale = |at: &Option<String>| {
+            at.as_deref()
+                .and_then(|a| parse_dt(a).ok())
+                .is_none_or(|t| t < stale_before)
+        };
+        let now = now.to_rfc3339();
+        let mut reaped = 0;
+        for (sender, _) in running
+            .iter()
+            .filter(|(s, at)| !live.contains(s) && stale(at))
+        {
+            reaped += conn.execute(
+                "UPDATE unsubscribes SET status = 'needs_you', status_reason = 'unclear',
+                     status_at = ?3
+                 WHERE account_id = ?1 AND sender_addr = ?2 AND status = 'running'",
+                params![account_id, sender, now],
+            )?;
+        }
+        Ok(reaped)
+    }
+
     pub(super) fn list_unsubscribes(
         &self,
         account_id: AccountId,
@@ -297,7 +415,8 @@ impl SqliteStore {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
             "SELECT sender_addr, requested_at, method, violation_count,
-                    last_violation_at, resolution
+                    last_violation_at, resolution, status, status_url,
+                    status_reason, status_at
              FROM unsubscribes
              WHERE account_id = ?1
              ORDER BY requested_at DESC",
@@ -311,6 +430,10 @@ impl SqliteStore {
                     violation_count: r.get(3)?,
                     last_violation_at: dt_opt(r, 4)?,
                     resolution: r.get(5)?,
+                    status: r.get(6)?,
+                    status_url: r.get(7)?,
+                    status_reason: r.get(8)?,
+                    status_at: dt_opt(r, 9)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -325,7 +448,7 @@ impl SqliteStore {
     ) -> Result<bool> {
         let conn = self.lock()?;
         let n = conn.execute(
-            "UPDATE unsubscribes SET resolution = ?3
+            "UPDATE unsubscribes SET resolution = ?3, status_url = NULL
              WHERE account_id = ?1 AND sender_addr = ?2",
             params![account_id, sender, resolution],
         )?;

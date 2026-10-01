@@ -86,15 +86,16 @@ use crate::error::{CoreError, Result};
 // The ledger's stored lane/decision strings ARE the metric labels; see `notify`.
 use crate::metrics::{NotifyDecision, NotifyLane};
 use crate::store::{
-    AttachmentBytes, BankingApplied, BlankBodyScan, ContactEntry, Device, DeviceToken, Draft,
-    DraftFields, DraftKey, ExtractQueued, FtsQuery, HealScope, InboxUnread, IssuedDeviceToken,
-    LeggedHit, MailActivityDay, MarketingApplied, MarketingOffer, MessageMissingRecipients,
-    MessageOpen, MessageUnsub, MintedPairingCode, MissingVector, NewAuditEntry, NewEvent,
-    NewNotifyDecision, NotifyDecisionRow, RevisitQueued, SPAM_SYNCED_AT_KEY, SealedBody,
-    SealedMessage, SearchDiagnostics, SearchFilter, SearchSort, SeedVerdict, SenderDigestRow,
-    SenderEntry, SenderHistory, SentMessage, SitrepBand, SpamScope, Stage1Applied, Stage1Queued,
-    Stage2Applied, Stage2CapOverrides, Stage2Queued, Stage2Usage, Stage2UsageDay, Store, SyncState,
-    TermDf, ThreadSibling, TrackedMessage, TriageDebug, TriagedMessage, UsageTokens,
+    AttachmentBytes, BankingApplied, BlankBodyScan, ClientPlatform, ClientSeen, ClientTag,
+    ContactEntry, Device, DeviceToken, Draft, DraftFields, DraftKey, ExtractQueued, FtsQuery,
+    HealScope, InboxUnread, IssuedDeviceToken, LeggedHit, MailActivityDay, MarketingApplied,
+    MarketingOffer, MessageMissingRecipients, MessageOpen, MessageUnsub, MintedPairingCode,
+    MissingVector, NewAuditEntry, NewEvent, NewNotifyDecision, NotifyDecisionRow, RevisitQueued,
+    SPAM_SYNCED_AT_KEY, SealedBody, SealedMessage, SearchDiagnostics, SearchFilter, SearchSort,
+    SeedVerdict, SenderDigestRow, SenderEntry, SenderHistory, SentMessage, SitrepBand, SpamScope,
+    Stage1Applied, Stage1Queued, Stage2Applied, Stage2CapOverrides, Stage2Queued, Stage2Usage,
+    Stage2UsageDay, Store, SyncState, TermDf, ThreadSibling, TrackedMessage, TriageDebug,
+    TriagedMessage, UsageTokens,
 };
 use crate::types::{
     AccountId, AttachmentInfo, AttentionStatus, AttentionUpdate, AuditEntry, BandCounts, Banking,
@@ -1159,6 +1160,48 @@ impl Store for SqliteStore {
 
     fn list_unsubscribes(&self, account_id: AccountId) -> Result<Vec<UnsubscribeRecord>> {
         self.list_unsubscribes(account_id)
+    }
+
+    fn begin_unsubscribe_job(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+        source_message_id: Option<i64>,
+        url: &str,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        self.begin_unsubscribe_job(account_id, sender, source_message_id, url, now)
+    }
+
+    fn finish_unsubscribe_job(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+        status: &str,
+        method: &str,
+        reason: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        self.finish_unsubscribe_job(account_id, sender, status, method, reason, now)
+    }
+
+    fn mark_unsubscribe_opened(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+        now: DateTime<Utc>,
+    ) -> Result<bool> {
+        self.mark_unsubscribe_opened(account_id, sender, now)
+    }
+
+    fn reap_unsubscribe_jobs(
+        &self,
+        account_id: AccountId,
+        live: &[String],
+        stale_before: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<usize> {
+        self.reap_unsubscribe_jobs(account_id, live, stale_before, now)
     }
 
     fn set_unsubscribe_resolution(

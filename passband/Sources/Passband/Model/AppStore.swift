@@ -534,6 +534,17 @@ final class AppStore {
             Badge.refresh(sitrep.standing)
         }
     }
+    /// The hero's sentence about what For-your-eyes is ABOUT, written by the
+    /// daemon's small model (`/client/v2/fye/headline`). nil until it answers,
+    /// and on a daemon with no model, where the hero keeps its own line.
+    var fyeHeadline: String?
+    /// The board `fyeHeadline` was written for (see `headlineKey`). The hero
+    /// keeps showing the last sentence while a newer board's is on its way:
+    /// a line a few seconds stale reads better than one that flips to the
+    /// fallback and back every time a row is cleared.
+    var fyeHeadlineKey: String?
+    /// True while a clicked-for headline is being written; the hero dims.
+    var fyeHeadlineRegenerating = false
     /// The daemon's stats, apart from the bands (see SitrepData): the sync
     /// clock, the queues, the capabilities. Assigned by the poller only on
     /// change, and it changes often — so only its readers pay for that.
@@ -572,6 +583,72 @@ final class AppStore {
     /// The ordered list the viewer was opened FROM, so "done + next" (e/d) can
     /// advance in place. Empty when opened from a surface without a queue.
     var threadQueue: [AttentionUpdate] = []
+
+    /// THE SPACE WALK: a run through For-your-eyes started with Space on the
+    /// sitrep, alive for as long as the reader stays open. While it is, the
+    /// reader shows the E/S hint; when it reaches the end of the list it
+    /// becomes a `WalkSummary` and the sitrep celebrates. Any other way out of
+    /// the reader (Esc, the rail, a plain `e`) just ends it, quietly.
+    struct Walk: Equatable {
+        var startedAt = Date()
+        var done = 0
+        var skipped = 0
+    }
+    var walk: Walk?
+    /// What a FINISHED walk came to, for the sitrep's moment. Cleared by the
+    /// moment itself once it has played.
+    struct WalkSummary: Equatable {
+        var done: Int
+        var skipped: Int
+        var duration: TimeInterval
+        let id = UUID()
+    }
+    var walkFinished: WalkSummary?
+
+    /// AN S IN FLIGHT: the page turn from one email to the next, with BOTH on
+    /// screen. The outgoing reader stays mounted (its mail already loaded, so
+    /// it never flashes back to "loading") and recedes left while the next
+    /// one slides in over it from the right; the subject bar fades out and
+    /// back in rather than sliding. RootView reads this to lay the two
+    /// readers out; ThreadViewer's skip drives it and clears it.
+    struct SkipTurn: Equatable {
+        let outgoing: String
+        /// 0 = the turn has not moved yet, 1 = the new email is home.
+        var progress: CGFloat = 0
+        var outgoingHeader: Double = 1
+        var incomingHeader: Double = 0
+    }
+    var skipTurn: SkipTurn?
+    /// True while an email is leaving and ANOTHER is about to take its place
+    /// (done + next, remind + next). Only then does RootView lay its
+    /// reader-coloured floor under the flight; on a departure that closes the
+    /// reader, the sitrep showing through IS the destination arriving.
+    var flightContinues = false
+
+    /// Finish an S turn that is still settling, at once: called before
+    /// anything else moves the reader, so the skipped card never ghosts
+    /// under the next flight.
+    func settleSkipTurn() {
+        skipTurn = nil
+    }
+
+    /// Space on the sitrep: open the first row with the whole band as the
+    /// queue, and start counting.
+    func startWalk(_ threadId: String, queue: [AttentionUpdate]) {
+        openThread(threadId, queue: queue)
+        walk = Walk()
+    }
+
+    /// The walk stepped past its last email. Close the reader and hand the
+    /// tally to the sitrep, which plays the moment.
+    func finishWalk() {
+        let finished = walk
+        closeThread()
+        guard let finished, finished.done + finished.skipped > 0 else { return }
+        walkFinished = WalkSummary(
+            done: finished.done, skipped: finished.skipped,
+            duration: Date().timeIntervalSince(finished.startedAt))
+    }
     var readingMail = false
     var readingStack: Bool {
         guard readingMail, let first = threadQueue.first else { return false }
@@ -810,6 +887,89 @@ final class AppStore {
     /// Whether `e` is still the live epoch — the post-await check every
     /// account-scoped writer outside this file makes.
     func isCurrent(_ e: Int) -> Bool { epoch == e }
+
+    // MARK: - fye headline
+
+    /// The owner clicked the headline: ask for a different one. An empty
+    /// answer keeps the line on screen (nothing flips to the fallback), and a
+    /// click while one is already being written is ignored.
+    func regenerateFyeHeadline() async {
+        guard !sitrep.standing.isEmpty, !fyeHeadlineRegenerating, connStatus == .connected
+        else { return }
+        let key = headlineKey
+        let e = epoch
+        fyeHeadlineRegenerating = true
+        defer { fyeHeadlineRegenerating = false }
+        let answer = try? await APIClient.shared.fyeHeadline(
+            today: Self.headlineToday(), fresh: true, previous: fyeHeadline)
+        guard isCurrent(e), headlineKey == key, let headline = answer?.headline else { return }
+        fyeHeadline = headline
+        fyeHeadlineKey = key
+        UserDefaults.standard.set([key, headline], forKey: Self.headlineDefaultsKey)
+    }
+
+    /// The owner's local date as the headline prompt reads it.
+    private static func headlineToday(_ now: Date = Date()) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd (EEEE)"
+        return f.string(from: now)
+    }
+
+    /// What a headline is ABOUT: the rows in the band and what triage said of
+    /// each, plus the day. Any change here is a board the old sentence may no
+    /// longer describe.
+    var headlineKey: String {
+        Self.headlineToday() + "|"
+            + sitrep.standing.map { "\($0.thread_id):\($0.one_line)" }.joined(separator: "|")
+    }
+
+    private static let headlineDefaultsKey = "fyeHeadline.last"
+
+    /// Ask the daemon for the hero's sentence, once the board has held still.
+    /// Called from the hero's `.task(id: headlineKey)`, so it only runs while
+    /// the sitrep is ON SCREEN (a reader walked with E/S never pays for the
+    /// boards it passes through) and a newer board cancels it mid-wait.
+    func refreshFyeHeadline() async {
+        let key = headlineKey
+        guard !sitrep.standing.isEmpty else { return }
+        if fyeHeadlineKey == key { return }
+        // Last launch's sentence, if it was about this exact board: shown at
+        // once instead of the fallback, and the daemon is not asked.
+        if let saved = UserDefaults.standard.stringArray(forKey: Self.headlineDefaultsKey),
+            saved.count == 2, saved[0] == key
+        {
+            fyeHeadline = saved[1]
+            fyeHeadlineKey = key
+            return
+        }
+        // Settle first. The poller reassigns the band as rows are cleared from
+        // the list or arrive in a burst; one call for the board that stuck.
+        try? await Task.sleep(for: .milliseconds(1200))
+        // A FAILED call (the daemon says `settled: false`) is asked again a
+        // couple of times, spaced out; it is not "nothing good to say", and
+        // remembering it as that would leave the fallback up all day.
+        for attempt in 0..<3 {
+            if attempt > 0 { try? await Task.sleep(for: .seconds(30)) }
+            let e = epoch
+            guard !Task.isCancelled, connStatus == .connected else { return }
+            let answer = try? await APIClient.shared.fyeHeadline(today: Self.headlineToday())
+            // A click for a new line wins over this background ask: whichever
+            // answered last would otherwise replace the line they asked for.
+            guard !Task.isCancelled, isCurrent(e), headlineKey == key, !fyeHeadlineRegenerating
+            else { return }
+            // No answer at all is an old daemon or a dropped connection: keep
+            // the fallback and do not retry against a route that is not there.
+            guard let answer else { return }
+            if answer.settled == false { continue }
+            fyeHeadline = answer.headline
+            fyeHeadlineKey = key
+            if let headline = answer.headline {
+                UserDefaults.standard.set([key, headline], forKey: Self.headlineDefaultsKey)
+            }
+            return
+        }
+    }
 
     private init() {}
 
@@ -1353,6 +1513,10 @@ final class AppStore {
             SitrepPoller.shared.stop()
         }
         await AccountManager.shared.remove(id)
+        // The saved headline can name people and plans from the mailbox just
+        // forgotten. It is keyed by board, so it could never show for another
+        // account, but it should not outlive the account either.
+        UserDefaults.standard.removeObject(forKey: Self.headlineDefaultsKey)
         guard wasActive else { return }
 
         guard let survivor = AccountManager.shared.active else {
@@ -1547,7 +1711,13 @@ final class AppStore {
     /// per-daemon SQLite ints, so "looks plausible" is precisely the failure
     /// mode being prevented here: A's row 412 is B's row 412.
     private func wipeAccountState() {
+        // The unsubscribe tray's rows and buttons belong to the old account:
+        // "Finish on their site" would tell the NEW daemon about a job it has
+        // never heard of.
+        UnsubscribeJobs.shared.reset()
         sitrep = SitrepData()
+        fyeHeadline = nil
+        fyeHeadlineKey = nil
         zones = SitrepZoneCache()
         // The parked refresh tasks go too, not just their results: a joiner
         // arriving after the switch would otherwise wait on — and adopt the
@@ -1875,8 +2045,21 @@ final class AppStore {
         // The arrivals ledger follows the thread, and declines to forget on a
         // REOPEN of the same one — see ThreadArrivals.reset.
         arrivals.reset(to: threadId)
+        // A SPACE WALK LIVES ON ONE QUEUE. Its own steps (E, S, h, the arrows)
+        // hand the same list back; anything else that opens a thread (a
+        // notification, a citation, the side panel) is a different journey,
+        // and a walk carried into it would celebrate mail it never held.
+        if walk != nil, queue.map(\.thread_id) != threadQueue.map(\.thread_id) {
+            walk = nil
+        }
         self.threadQueue = queue
         self.readingMail = readingMail
+        // Any open ends an S turn that is still settling: the turn's outgoing
+        // card would otherwise linger (or sit inert, if this re-opens it)
+        // until the skip's own timer cleared it. A skip sets its turn AFTER
+        // this call, so its own open does not cancel it.
+        skipTurn = nil
+        flightContinues = false
         // The seed, after `readingMail` (the style reads it) and before the
         // view mounts. A direct open (`openMessage`) has no cached view yet
         // and hands the reader its copy through `focusedMessageView` instead.
@@ -1909,6 +2092,11 @@ final class AppStore {
     }
 
     func closeThread() {
+        // Every way out of the reader ends a Space walk; only `finishWalk`
+        // turns one into a celebration, and it reads the walk before this.
+        walk = nil
+        skipTurn = nil
+        flightContinues = false
         // The preview lives in the reader's slot, so every way out of the
         // reader (Esc, the rail, an account switch) is a way out of it too.
         scheduledPreviewId = nil
@@ -5010,6 +5198,11 @@ final class AppStore {
     /// false means the button is never offered and the two-week nudge never
     /// fires.
     var shareAvailable: Bool { stats?.invite_sharing == true }
+
+    /// The daemon's answer to "has an iPhone app ever talked to this mailbox",
+    /// or nil when it has not given one yet (or is too old to). Drives the
+    /// TestFlight ask; see `TestFlightNudge`.
+    var iosConnected: Bool? { stats?.ios_connected }
 
     // MARK: - forwarding
 

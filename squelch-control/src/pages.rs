@@ -736,8 +736,8 @@ pub fn success(tenant_url: &str) -> Response {
 /// one line they will read has to say. A summary reading "connect manually"
 /// describes the remedy to somebody who has not yet worked out they need one.
 ///
-/// THE PAGE OPENS THE APP BY ITSELF, through a `Refresh` header (the CSP allows
-/// no script, and the reconnect page already moves the same way). This used to
+/// THE PAGE OPENS THE APP BY ITSELF, through a `Refresh` header, because the CSP
+/// allows no script. This used to
 /// be a press, on the argument that a live pairing code should not go to
 /// whatever claims `passband://` before anybody agreed to it. In practice
 /// nobody reached this page except from the app's own "Sign in with Gmail",

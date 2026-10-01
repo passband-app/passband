@@ -283,14 +283,27 @@ pub async fn signup_form(State(state): State<ControlState>, RawQuery(query): Raw
 }
 
 /// A username to prefill for the person an emailed invite was minted for: the
-/// first of [`labels::suggestions`] that both authorities say is free.
+/// first of [`labels::suggestions`] this control plane has no tenant under.
 ///
 /// A SUGGESTION, NOT A CLAIM. It is an editable value in the field, nothing is
 /// reserved, and `POST /signup` checks it again like anything typed. So every
 /// failure here is quiet and lands on an empty field, the form as it was: a
 /// lookup that errors, a shared code nobody's address is behind, or every
-/// candidate taken. A PENDING tenant counts as taken: it is somebody's
-/// half-finished signup, and only they can finish it.
+/// candidate taken.
+///
+/// THE STORE ONLY, NEVER THE WARDEN. A page view must not wait on the cluster
+/// (a hung warden would hold an invite link blank for the client's whole
+/// timeout) or let one forwarded link drive warden calls at the page rate
+/// limit, ten times what the signup POST allows. The POST asks the warden, so
+/// the one case the store misses (live in the cluster, unrecorded here) is
+/// still caught, one submit later. And a PENDING label, which only the warden
+/// knows about, stays suggestible: it is almost always this same person back
+/// to finish, which is exactly the case the POST lets through.
+///
+/// WHAT IT SHOWS: the address's local part, and with the fallback the first
+/// label of its domain. Never the address, but most of one, to whoever holds
+/// the link; the same link already carries a live code, so that holder is the
+/// invitee or somebody they gave it to.
 async fn suggested_label(state: &ControlState, invite: &str) -> Option<String> {
     let email = state
         .store()
@@ -300,13 +313,8 @@ async fn suggested_label(state: &ControlState, invite: &str) -> Option<String> {
         .ok()??;
     for candidate in labels::suggestions(&email) {
         match state.store().label_exists(&candidate).await {
-            Ok(false) => {}
+            Ok(false) => return Some(candidate),
             Ok(true) => continue,
-            Err(_) => return None,
-        }
-        match state.warden().status(&candidate).await {
-            Ok(None) => return Some(candidate),
-            Ok(Some(_)) => continue,
             Err(_) => return None,
         }
     }
@@ -321,6 +329,12 @@ async fn suggested_label(state: &ControlState, invite: &str) -> Option<String> {
 /// would put back the oracle it was written to avoid: whether the link is on
 /// the page would start answering something about the code in the URL. It is on
 /// every signup page, prefilled or not, refused or not.
+///
+/// The prefilled USERNAME does answer something, deliberately: an emailed code
+/// that is live fills it, and anything else leaves it empty. That is not an
+/// oracle worth guarding (codes are 80 bits, and `POST /signup` already tells a
+/// live code from a dead one), so it is no argument for making this link
+/// conditional too.
 ///
 /// Read from `config.waitlist` rather than [`ControlState::waitlist`]: that
 /// accessor also requires the Resend client, because the paths that MAIL an

@@ -134,7 +134,13 @@ pub fn suggestions(email: &str) -> Vec<String> {
     let Some((local, domain)) = email.trim().rsplit_once('@') else {
         return Vec::new();
     };
-    let local = fold(local.split('+').next().unwrap_or_default());
+    let local = local.split('+').next().unwrap_or_default();
+    // A letter outside ASCII would fold away and leave a mangled name behind
+    // (`jürgen` to `j-rgen`): suggest nothing rather than that.
+    if local.chars().any(|c| c.is_alphanumeric() && !c.is_ascii()) {
+        return Vec::new();
+    }
+    let local = fold(local);
     let stem = fold(domain.split('.').next().unwrap_or_default());
     let mut out: Vec<String> = Vec::new();
     for candidate in [local.clone(), format!("{local}-{stem}")] {
@@ -186,6 +192,7 @@ mod tests {
         assert_eq!(long.len(), 1, "both clip to the same label: {long:?}");
         assert!(suggestions("not an address").is_empty());
         assert!(suggestions("+tag@acme.com").is_empty());
+        assert!(suggestions("jürgen@acme.com").is_empty(), "no j-rgen");
     }
 
     #[test]

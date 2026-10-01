@@ -1339,19 +1339,27 @@ async fn the_emailed_link_suggests_a_username_from_the_address() {
         "the address stays off the page"
     );
 
-    // Taken in the cluster: the domain joins it.
-    h.rec.lock().unwrap().taken.push("grace-hopper".to_string());
+    // Taken: the domain joins it.
+    store
+        .insert_tenant("grace-hopper", "someone@else.example")
+        .await
+        .unwrap();
     let (_, _, page) = h.get(&format!("/?invite={grace}"), None).await;
     assert_eq!(username(&page), "grace-hopper-navy");
 
     // Both taken: an empty field, the form as it always was.
-    h.rec
-        .lock()
-        .unwrap()
-        .taken
-        .push("grace-hopper-navy".to_string());
+    store
+        .insert_tenant("grace-hopper-navy", "another@else.example")
+        .await
+        .unwrap();
     let (_, _, page) = h.get(&format!("/?invite={grace}"), None).await;
     assert_eq!(username(&page), "");
+
+    // Asked of the store only: a page view never waits on the warden.
+    assert!(
+        h.rec.lock().unwrap().status_lookups.is_empty(),
+        "the form asked the warden nothing"
+    );
 
     // The harness's own code was minted with no address behind it.
     let (_, _, page) = h.get(&format!("/?invite={}", h.invite_code), None).await;

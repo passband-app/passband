@@ -9,6 +9,9 @@ import SwiftUI
 
 enum TourTarget: Hashable, Sendable {
     case records, reading, eyes, calendar, shipments, banking, receipts, brightly, maya
+    /// Click targets outside the board: the reader's `done` and `new rule`
+    /// verbs and the undo toast, so an interaction lesson can point at them.
+    case readerDone, readerRule, undoToast
 }
 
 /// Which card the overlay shows. `practice` is the guide over fixture mail;

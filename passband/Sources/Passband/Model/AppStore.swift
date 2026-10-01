@@ -2662,6 +2662,7 @@ final class AppStore {
     /// Preload the emails behind the records the columns show, so clicking one
     /// opens instantly.
     private func warmZoneThreads() {
+        ThreadPrefetch.shared.warm(zones.calendar.prefix(6).compactMap(\.thread_id), immediate: 2)
         ThreadPrefetch.shared.warm(zones.banking.prefix(6).compactMap(\.thread_id), immediate: 2)
         ThreadPrefetch.shared.warm(zones.shipments.prefix(6).compactMap(\.thread_id), immediate: 2)
         // Receipts rotate at local midnight, so match the cache TTL to that.

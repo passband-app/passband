@@ -60,6 +60,20 @@ enum Density {
         resolve(compact, on: typeAnchors, in: density)
     }
 
+    /// The size the interface's reading text is set at, in compact. `measure`
+    /// grows by whatever this one grows by.
+    static let readingSize: CGFloat = 13
+
+    /// A compact WIDTH THAT HOLDS TEXT (a name column, a sheet, a field) in
+    /// the given density. It grows by the ratio the reading type grows by, and
+    /// no faster: the same words have to fit, and the spacing curve's third
+    /// would hand a column room its text never asked for, taken from the
+    /// flexible column beside it.
+    static func measure(_ compact: CGFloat, in density: DensityChoice) -> CGFloat {
+        guard density == .comfortable else { return compact }
+        return snap(compact * typeSize(readingSize, in: density) / readingSize)
+    }
+
     /// Piecewise-linear through the anchors, snapped to the half point. Below
     /// the first anchor the value is returned as it came (a 0.5pt hairline is
     /// not spacing); past the last, the last anchor's ratio carries on.

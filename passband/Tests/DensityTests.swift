@@ -33,6 +33,7 @@ struct DensityTests {
         valuesOffTheLadderFollowTheSameCurve()
         whatIsNotSpacingIsLeftAlone()
         everythingLandsOnTheHalfPoint()
+        aMeasureGrowsWithTheTypeAndNoFaster()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -110,6 +111,20 @@ struct DensityTests {
                 expect((out * 2).rounded() == out * 2, "\(v) became \(out)")
             }
         }
+    }
+
+    /// A text column on the spacing curve took a fifth more width for type
+    /// that grew a thirteenth, out of the flexible column beside it.
+    static func aMeasureGrowsWithTheTypeAndNoFaster() {
+        for w in [60, 116, 160, 440, 560] as [CGFloat] {
+            expect(Density.measure(w, in: .compact) == w, "measure \(w) moved in compact")
+            let measure = Density.measure(w, in: .comfortable)
+            expect(measure > w, "measure \(w) did not grow")
+            expect(measure < Density.space(w, in: .comfortable), "measure \(w) outgrew the gaps")
+            let type = Density.typeSize(13, in: .comfortable) / 13
+            expect(abs(measure / w - type) < 0.01, "measure \(w) left the type's ratio")
+        }
+        expect(Density.measure(440, in: .comfortable) == 474, "the sheet")
     }
 
     static func expect(_ ok: Bool, _ message: String) {

@@ -58,6 +58,13 @@ enum Typo {
         Density.typeSize(compact, in: Prefs.shared.density)
     }
 
+    /// A compact width that HOLDS TEXT (a name column, a sheet, a field's
+    /// width), grown by what the type grows by. `Space.scaled` is for the room
+    /// between things and would over-widen it.
+    static func measure(_ compact: CGFloat) -> CGFloat {
+        Density.measure(compact, in: Prefs.shared.density)
+    }
+
     /// Interface text at a compact size. The general form: the named roles
     /// below are for the shapes that recur, this is for everything else.
     static func ui(

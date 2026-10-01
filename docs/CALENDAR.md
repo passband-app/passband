@@ -449,11 +449,14 @@ all in another timezone.
   several per day, and they carry the sender's zone. The triage record's
   `candidates` (deferred from wave 1) is a list of ranges with a zone, and the
   meeting may be with someone other than the sender.
-- **Drawn in Passband's margin, never in the mail.** The hint sits beside the
-  line, in the app's own chrome, aligned to it. Nothing is injected into the
-  sender's HTML: a mail must not be able to draw something that looks like
-  Passband saying "free". When a line cannot be located reliably, the hints
-  fall back to a compact list under the message.
+- **Drawn in the mail itself** (founder's preference, 2026-10-01; to be
+  revisited, tracked in issue #352). The hint sits inline, right where the
+  offered time is written. The open design problem is trust: a mail must not
+  be able to draw something that passes for Passband saying "free", so the
+  inline mark has to be something sender HTML cannot imitate, or be verifiable
+  at a glance. The alternative considered is the app's own margin, aligned to
+  the line, with a compact list under the message when a line cannot be
+  located.
 - **Taking one.** Clicking a hint (or its key) holds that overlap and inserts
   the time as text into the reply, as in §7. The user writes the reply.
 - **Before the calendar grant** the hint is the time conversion alone, which

@@ -1858,6 +1858,11 @@ impl AgentTriageStore for SqliteStore {
     }
 }
 
+/// A blank display name is no display name.
+fn non_blank(value: Option<String>) -> Option<String> {
+    value.filter(|name| !name.trim().is_empty())
+}
+
 fn restrict_external_items(
     conn: &Connection,
     account: AccountId,
@@ -1874,7 +1879,13 @@ fn restrict_external_items(
             )?
         {
             match super::messages::thread_guard_and_subject(conn, account, &item.thread_id) {
-                Ok(_) => allowed.push(item),
+                Ok(_) => {
+                    // The display name is the human door's alone: untrusted
+                    // header text never rides out on an agent-facing listing.
+                    let mut item = item;
+                    item.from_name = None;
+                    allowed.push(item)
+                }
                 Err(CoreError::NotFound) => {}
                 Err(error) => return Err(error),
             }
@@ -2053,7 +2064,7 @@ fn list_items_with_query(
     let sql = if destination == "fye" {
         "SELECT
              m.id,m.thread_id,m.from_addr,m.subject,
-             strftime('%Y-%m-%dT%H:%M:%fZ',min(julianday(a.relevant_activity),COALESCE(julianday(t.created_at),julianday(?2)),julianday(?2))),d.decision_json,a.attention_json,a.unresolved_since,a.decision_message_id
+             strftime('%Y-%m-%dT%H:%M:%fZ',min(julianday(a.relevant_activity),COALESCE(julianday(t.created_at),julianday(?2)),julianday(?2))),d.decision_json,a.attention_json,a.unresolved_since,a.decision_message_id,m.from_name
              FROM agent_thread_attention a JOIN messages m ON m.account_id=a.account_id AND
              m.id=a.message_id LEFT JOIN agent_message_decisions d ON d.account_id=m.account_id AND
              d.message_id=m.id LEFT JOIN triage t ON t.account_id=m.account_id AND
@@ -2064,7 +2075,7 @@ fn list_items_with_query(
              (t.remind_at IS NULL OR t.remind_at<=?2) AND ?4 IS ?4 AND ?5 IS ?5"
     } else if destination == "records" {
         "SELECT m.id,m.thread_id,m.from_addr,m.subject,
-             strftime('%Y-%m-%dT%H:%M:%fZ',min(julianday(m.received_at),COALESCE(julianday(t.created_at),julianday(?2)),julianday(?2))),d.decision_json,a.attention_json,a.unresolved_since,d.message_id
+             strftime('%Y-%m-%dT%H:%M:%fZ',min(julianday(m.received_at),COALESCE(julianday(t.created_at),julianday(?2)),julianday(?2))),d.decision_json,a.attention_json,a.unresolved_since,d.message_id,m.from_name
              FROM agent_message_decisions d JOIN messages m ON m.account_id=d.account_id AND m.id=d.message_id
              LEFT JOIN triage t ON t.account_id=m.account_id AND t.message_id=m.id
              LEFT JOIN agent_thread_attention a ON a.account_id=m.account_id AND a.thread_id=m.thread_id
@@ -2076,7 +2087,7 @@ fn list_items_with_query(
     } else {
         "SELECT
              m.id,m.thread_id,m.from_addr,m.subject,
-             strftime('%Y-%m-%dT%H:%M:%fZ',min(julianday(m.received_at),COALESCE(julianday(t.created_at),julianday(?2)),julianday(?2))),d.decision_json,a.attention_json,a.unresolved_since,d.message_id
+             strftime('%Y-%m-%dT%H:%M:%fZ',min(julianday(m.received_at),COALESCE(julianday(t.created_at),julianday(?2)),julianday(?2))),d.decision_json,a.attention_json,a.unresolved_since,d.message_id,m.from_name
              FROM agent_message_destinations p JOIN messages m ON m.account_id=p.account_id AND
              m.id=p.message_id JOIN agent_message_decisions d ON d.account_id=m.account_id AND
              d.message_id=m.id LEFT JOIN triage t ON t.account_id=m.account_id AND t.message_id=m.id
@@ -2106,6 +2117,7 @@ fn list_items_with_query(
                     r.get::<_, Option<String>>(6)?,
                     r.get::<_, Option<String>>(7)?,
                     r.get::<_, i64>(8)?,
+                    r.get::<_, Option<String>>(9)?,
                 ))
             },
         )?
@@ -2123,6 +2135,7 @@ fn list_items_with_query(
                 a,
                 unresolved_since,
                 decision_source_message_id,
+                from_name,
             )| {
                 // Pending classification must not hide valid thread attention,
                 // nor borrow kinds/records from an unrelated update's source.
@@ -2140,6 +2153,7 @@ fn list_items_with_query(
                     decision_source_message_id,
                     thread_id,
                     from_addr,
+                    from_name: non_blank(from_name),
                     subject,
                     received_at,
                     decision,
@@ -2172,7 +2186,8 @@ fn append_due_reminders(
     items: &mut Vec<AgentListItem>,
 ) -> Result<()> {
     let mut statement = conn.prepare(
-        "SELECT m.id,m.thread_id,m.from_addr,m.subject,m.received_at,t.reminded_at,d.decision_json
+        "SELECT m.id,m.thread_id,m.from_addr,m.subject,m.received_at,t.reminded_at,d.decision_json,
+                m.from_name
          FROM messages m JOIN triage t ON t.account_id=m.account_id AND t.message_id=m.id
          LEFT JOIN agent_message_decisions d ON d.account_id=m.account_id AND d.message_id=m.id
          WHERE m.account_id=?1 AND m.is_sent=0 AND m.is_spam=0 AND t.status!='done'
@@ -2189,10 +2204,11 @@ fn append_due_reminders(
                 row.get::<_, String>(4)?,
                 row.get::<_, String>(5)?,
                 row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
             ))
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    for (id, thread, sender, subject, received, reminded, encoded) in rows {
+    for (id, thread, sender, subject, received, reminded, encoded, sender_name) in rows {
         if thread_fye_override(conn, account, &thread)? == Some(false) {
             continue;
         }
@@ -2220,6 +2236,7 @@ fn append_due_reminders(
             decision_source_message_id: id,
             thread_id: thread,
             from_addr: sender,
+            from_name: non_blank(sender_name),
             subject,
             received_at: received,
             decision,

@@ -116,6 +116,7 @@
 		454262AEF38CC6F59CEB4989 /* WhatsNew.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22634771F8C0BE048B034866 /* WhatsNew.swift */; };
 		45E3185440F05D41CF616B8D /* SitrepWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B7D3E42C4E6495943239602 /* SitrepWindow.swift */; };
 		462F8657C4CD7BAA224F5CDD /* NeedToday.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F65DF255404CE32FC4AD8CF /* NeedToday.swift */; };
+		48070CB06F06C8722546B0D3 /* ClientIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1286F3A9C5723C0228031FE /* ClientIdentity.swift */; };
 		4836A3C84F0310D8E5E60FCB /* UpdateVerbs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6895E072B54D7FEA646D6903 /* UpdateVerbs.swift */; };
 		4844BB010D4C2DFAD56727F5 /* ZoomSteps.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04968C0C118F8D82036B5293 /* ZoomSteps.swift */; };
 		4A484A26530C0131828B0A16 /* Loadable.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A74374DEAEE21CDF9A5067D /* Loadable.swift */; };
@@ -259,6 +260,7 @@
 		99CFBE791F3799FBEFB5D213 /* ComposePane.swift in Sources */ = {isa = PBXBuildFile; fileRef = B97BB8DF0B7CB3C4E9EC791B /* ComposePane.swift */; };
 		9A9AA77AC829165E466C9597 /* AgentCards.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09312A1F80127B91A8FDC394 /* AgentCards.swift */; };
 		9B3E18E0184901FAE39CB499 /* ThreadMinimap.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06AB2FB92191FC4913C38FFF /* ThreadMinimap.swift */; };
+		9B9E1CE2873D0D5A50A79486 /* ClientIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1286F3A9C5723C0228031FE /* ClientIdentity.swift */; };
 		9C92F8C76EDAC718182EE03C /* SpamNotice.swift in Sources */ = {isa = PBXBuildFile; fileRef = 848BEC54D1FCD1F0FC5BE1A5 /* SpamNotice.swift */; };
 		9DA60570A748B7066E7C4125 /* UnsubscribeJobs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25A865EB6EF8703D9C957D2B /* UnsubscribeJobs.swift */; };
 		9EA7C093CFE335E233A6411C /* AuthCodeModal.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A47FA6986F50A4E81628452 /* AuthCodeModal.swift */; };
@@ -651,6 +653,7 @@
 		EE90BEFCBE860D7F852028C5 /* DeeperSearchBand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeeperSearchBand.swift; sourceTree = "<group>"; };
 		EEFA34554013DFB615774309 /* Trackers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Trackers.swift; sourceTree = "<group>"; };
 		EFF2F03B0D68F54C0DC28777 /* ImageRepeats.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageRepeats.swift; sourceTree = "<group>"; };
+		F1286F3A9C5723C0228031FE /* ClientIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClientIdentity.swift; sourceTree = "<group>"; };
 		F1E7DFB379AF677D44E393FF /* AgentTools.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentTools.swift; sourceTree = "<group>"; };
 		F2064377C33D5ECB0B915EAF /* UserNotifications.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UserNotifications.framework; path = System/Library/Frameworks/UserNotifications.framework; sourceTree = SDKROOT; };
 		F2BD37CBEFEA8CEB215E3247 /* ThreadViewer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadViewer.swift; sourceTree = "<group>"; };
@@ -793,6 +796,7 @@
 				A19BF25A7D06A8FEDAE42B1F /* CalendarVisibility.swift */,
 				9C9C77BCE41A573ED04E49AA /* CidImages.swift */,
 				4C77D0AFA3B0B65D2911086A /* ClearBoard.swift */,
+				F1286F3A9C5723C0228031FE /* ClientIdentity.swift */,
 				9ED32B3054A31D7933998E59 /* ComposeAttachments.swift */,
 				E1C033DDA02DD344F437F943 /* Concurrency.swift */,
 				8418478A0084D45C077A9305 /* DeeperSearch.swift */,
@@ -1251,6 +1255,7 @@
 				8CCC6315E27DD5683F55D274 /* CidImages.swift in Sources */,
 				5B202D84CFC2EA02FC66A6F4 /* ClearBand.swift in Sources */,
 				E57A7DC67C6A327B58CA8A99 /* ClearBoard.swift in Sources */,
+				9B9E1CE2873D0D5A50A79486 /* ClientIdentity.swift in Sources */,
 				2F0512A905C0C28E9629D4D8 /* ComposeAttach.swift in Sources */,
 				CF2D4E9603C4787015DA65C7 /* ComposeAttachments.swift in Sources */,
 				D5661B76861FC80076B129EC /* ComposePane.swift in Sources */,
@@ -1441,6 +1446,7 @@
 				A32CA97991D874737EE663DA /* CidImages.swift in Sources */,
 				EB6FD58A6CF88952C59B8109 /* ClearBand.swift in Sources */,
 				0909891AEBA181CF20266C12 /* ClearBoard.swift in Sources */,
+				48070CB06F06C8722546B0D3 /* ClientIdentity.swift in Sources */,
 				856AC67B9A7F90BF5B3D18B9 /* ComposeAttach.swift in Sources */,
 				E64244782018574385BD5FB4 /* ComposeAttachments.swift in Sources */,
 				99CFBE791F3799FBEFB5D213 /* ComposePane.swift in Sources */,

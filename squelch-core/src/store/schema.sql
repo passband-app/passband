@@ -1271,6 +1271,16 @@ CREATE INDEX IF NOT EXISTS idx_message_opens_token ON message_opens(token);
 -- `last_used_at` is liveness only, written at most once a minute per token (see
 -- `verify_device_token`) so an SSE-driven client cannot turn every request into
 -- a write.
+--
+-- `client_*` is WHICH APP last presented this token: a platform from a closed
+-- set, a dotted numeric version, and when. All three are NULL until a client
+-- that names itself (`X-Passband-Client`) uses the token, and they move
+-- TOGETHER or not at all. `client_seen_at` is NOT `last_used_at`: the iOS
+-- notification extension presents the same token every time a push lands and
+-- names nothing, so `last_used_at` moves with no app open and this does not.
+-- A CHANGED platform or version only replaces the stored one after it has been
+-- quiet for an hour (`CLIENT_CHANGE_THROTTLE_SECS`), which is what stops a
+-- token holder minting a metric series per request.
 CREATE TABLE IF NOT EXISTS device_tokens (
     id           INTEGER PRIMARY KEY,
     account_id   INTEGER NOT NULL,   -- -> accounts.id
@@ -1280,7 +1290,10 @@ CREATE TABLE IF NOT EXISTS device_tokens (
     name         TEXT NOT NULL,
     created_at   TEXT NOT NULL,
     last_used_at TEXT,
-    revoked_at   TEXT
+    revoked_at   TEXT,
+    client_platform TEXT,
+    client_version  TEXT,
+    client_seen_at  TEXT
 );
 
 -- `token list` reads exactly "every token for my account".

@@ -147,6 +147,7 @@ actor APIClient {
         req.httpMethod = method.rawValue
         req.setValue("Bearer \(cfg.token)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.identifyClient()
         if let body {
             req.httpBody = body
             req.setValue(contentType, forHTTPHeaderField: "Content-Type")
@@ -448,6 +449,7 @@ actor APIClient {
         req.httpMethod = Method.GET.rawValue
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.identifyClient()
         do {
             let (data, _) = try await perform(req, allowPractice: false)
             guard !RehearsalMode.isEnabled else {

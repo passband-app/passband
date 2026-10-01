@@ -19,7 +19,10 @@ struct ReadingTests {
         precondition(cards[0].items.map(\.id) == [3, 1], "Grouping retains every message, newest first")
         precondition(cards[1].items.map(\.id) == [2], "Receipt wording is not a client exclusion")
         let pruned = Reading.prune(cards, resolved: [3])
-        precondition(pruned[0].latestThreadId == "thread-1" && pruned[0].count == 1)
+        let friend = pruned.first { $0.address == "friend@example.com" }!
+        precondition(friend.latestThreadId == "thread-1" && friend.count == 1)
+        precondition(pruned.map(\.address) == ["shop@example.com", "friend@example.com"],
+            "Prune re-sorts the way the next poll will")
         precondition(Reading.derive(updates: [], rules: []).isEmpty, "Empty canonical membership clears cards")
 
         // Content (articles, essays, posts) sorts ahead of promotions, newest
@@ -42,6 +45,14 @@ struct ReadingTests {
         let mixed = Reading.derive(updates: [essayOld, writerPromo], rules: [], content: [11])
         precondition(!mixed[0].isContent, "Newest is a promotion")
         precondition(Reading.prune(mixed, resolved: [13])[0].isContent, "Done promo uncovers the essay")
+        let board = Reading.derive(updates: [promoNew, essayOld, writerPromo], rules: [], content: [11])
+        precondition(board.map(\.address) == ["writer@substack.com", "deals@store.com"], "Both promotions: newest first")
+        let postOld = row(14, sender: "blog@lab.dev", reason: "Post", date: "2026-09-05T00:00:00Z")
+        let before = Reading.derive(updates: [promoNew, postOld, essayOld, writerPromo], rules: [], content: [11, 14])
+        precondition(before.map(\.address) == ["blog@lab.dev", "writer@substack.com", "deals@store.com"])
+        let uncovered = Reading.prune(before, resolved: [13])
+        precondition(uncovered.map(\.address) == ["writer@substack.com", "blog@lab.dev", "deals@store.com"],
+            "Prune re-sorts an uncovered essay into the content half")
 
         // The wire: reading_kind wins; decisions stored before it fall back to kinds.
         func item(_ kinds: String, _ readingKind: String?) throws -> AgentFeedItem {
@@ -62,6 +73,6 @@ struct ReadingTests {
         precondition(!demotedByKind.isReadingContent)
         precondition(legacyEditorial.isReadingContent, "Legacy editorial reads as content")
         precondition(!legacyMixed.isReadingContent, "Legacy mixed reads as promotion")
-        print("ok: 14 canonical Reading checks passed")
+        print("ok: 18 canonical Reading checks passed")
     }
 }

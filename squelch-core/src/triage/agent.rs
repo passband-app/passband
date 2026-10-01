@@ -170,8 +170,15 @@ async fn run_bounded(
                     .and_then(|()| observed.validate(&decision, &context.thread_id))
                 {
                     Ok(()) => {
+                        let mut decision = *decision;
+                        // reading_kind only means something on Reading mail; a
+                        // stale one would colour the card if Reading is added
+                        // by a correction later.
+                        if !decision.destinations.contains(&MessageDestination::Reading) {
+                            decision.reading_kind = None;
+                        }
                         return Ok(AgentRun {
-                            decision: *decision,
+                            decision,
                             source_message_ids: sources.into_iter().collect(),
                             thread_revisions: revisions,
                             usage: usage.clone(),

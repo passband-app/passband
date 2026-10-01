@@ -99,11 +99,14 @@ enum Reading {
                 rule: rule(for: address, in: rules),
                 contentIds: content.intersection(ordered.map(\.id)))
         }
-        .sorted { lhs, rhs in
-            if lhs.isContent != rhs.isContent { return lhs.isContent }
-            return lhs.latest == rhs.latest ? lhs.address < rhs.address : lhs.latest > rhs.latest
-        }
+        .sorted(by: boardOrder)
         .prefix(limit).map { $0 }
+    }
+
+    /// Content before promotions, newest first within each half.
+    private static func boardOrder(_ lhs: ReadingSender, _ rhs: ReadingSender) -> Bool {
+        if lhs.isContent != rhs.isContent { return lhs.isContent }
+        return lhs.latest == rhs.latest ? lhs.address < rhs.address : lhs.latest > rhs.latest
     }
 
     /// The `*@domain` pattern a newsletter CTA prefills into the rule editor.
@@ -117,9 +120,12 @@ enum Reading {
     /// in which marking mail done looked like it had not worked. `resolvedIds`
     /// is already the app's record of "resolved, poll has not caught up", and
     /// undo clears it, so a restored message brings its card straight back.
+    ///
+    /// Re-sorted after: a sender placed by a promotion that is now done may
+    /// have an essay underneath, and that card belongs with the content.
     static func prune(_ senders: [ReadingSender], resolved: Set<Int>) -> [ReadingSender] {
         guard !resolved.isEmpty else { return senders }
-        return senders.compactMap { nl in
+        return senders.compactMap { nl -> ReadingSender? in
             let live = nl.items.filter { !resolved.contains($0.id) }
             if live.count == nl.items.count { return nl }
             // Nothing left in the window: the card goes, rather than sitting
@@ -135,6 +141,7 @@ enum Reading {
             if !newest.one_line.isEmpty { out.summary = newest.one_line }
             return out
         }
+        .sorted(by: boardOrder)
     }
 
     static func domainPattern(_ address: String) -> String {

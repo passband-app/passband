@@ -274,6 +274,12 @@ fn apply_correction(
         }
         _ => return Err(CoreError::InvalidInput("unknown correction field".into())),
     }
+    // The model's content-vs-promotion call was made against the kinds and
+    // destinations it chose. Once the user corrects either, it is no longer
+    // theirs to outrank: clear it and let clients read the corrected kinds.
+    if matches!(field, "kinds" | "destinations") {
+        decision.reading_kind = None;
+    }
     Ok(())
 }
 pub(super) fn explicit_access_override(
@@ -3722,6 +3728,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn kind_or_destination_corrections_clear_the_models_reading_kind() {
+        use crate::triage::decision::ReadingKind;
+        use serde_json::json;
+        for (field, value) in [
+            (
+                "kinds",
+                json!({"add": ["promotional"], "remove": ["editorial"]}),
+            ),
+            ("kinds", json!(["promotional"])),
+            ("destinations", json!({"add": [], "remove": ["reading"]})),
+            ("destinations", json!(["reading"])),
+        ] {
+            let mut decision = MessageDecision {
+                kinds: vec![EmailKind::Editorial],
+                destinations: vec![MessageDestination::Reading],
+                reading_kind: Some(ReadingKind::Content),
+                ..Default::default()
+            };
+            apply_correction(&mut decision, field, &value).unwrap();
+            assert_eq!(decision.reading_kind, None, "{field} {value}");
+        }
+        let mut decision = MessageDecision {
+            reading_kind: Some(ReadingKind::Content),
+            ..Default::default()
+        };
+        apply_correction(&mut decision, "show_in_fye", &json!(true)).unwrap();
+        assert_eq!(decision.reading_kind, Some(ReadingKind::Content));
+    }
     #[test]
     fn additive_corrections_preserve_other_choices_and_future_model_categories() {
         let store = fixture();

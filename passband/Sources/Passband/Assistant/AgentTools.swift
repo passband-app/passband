@@ -267,6 +267,10 @@ enum AgentTools {
                 "from": item.from_addr, "subject": item.subject,
                 "summary": item.decision.summary, "kinds": item.decision.kinds,
                 "destinations": item.decision.destinations,
+                // The effective call, legacy fallback included, so the
+                // assistant sees what the board shows.
+                "reading_kind": item.decision.destinations.contains("reading")
+                    ? (item.isReadingContent ? "content" : "promotion") : nil,
                 "attention": item.attention.summary, "state": item.attention.state,
                 "date": item.received_at,
             ])

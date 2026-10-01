@@ -387,9 +387,9 @@ enum SettingsSearch {
         SettingsEntry(
             card: .account,
             title: "iPhone app",
-            blurb: "Join the Passband for iPhone beta on TestFlight.",
+            blurb: "Join the Passband for iPhone alpha on TestFlight.",
             keywords: [
-                "iphone", "ios", "phone", "mobile", "app", "testflight", "beta",
+                "iphone", "ios", "phone", "mobile", "app", "testflight", "beta", "alpha",
             ]),
     ]
 

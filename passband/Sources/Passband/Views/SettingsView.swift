@@ -1254,7 +1254,7 @@ struct AccountSection: View {
                             }
                             .buttonStyle(.glassProminent)
                             .tint(Palette.accent)
-                            Text("Passband for iPhone is in beta on TestFlight")
+                            Text("Passband for iPhone is in alpha on TestFlight")
                                 .font(Typo.micro)
                                 .foregroundStyle(Palette.inkFaintest)
                         }

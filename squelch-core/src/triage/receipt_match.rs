@@ -22,18 +22,50 @@ pub const MERCHANT_ONLY_WINDOW_DAYS: i64 = 30;
 
 /// Freemail domains that never establish MERCHANT identity by domain alone (two
 /// strangers share `gmail.com`); for these only full from-address equality does.
+/// Calling a domain freemail only ever makes a match stricter, so the list
+/// errs long.
 const FREEMAIL_DOMAINS: &[&str] = &[
     "gmail.com",
     "googlemail.com",
     "yahoo.com",
+    "ymail.com",
+    "rocketmail.com",
     "hotmail.com",
     "outlook.com",
     "live.com",
+    "msn.com",
     "icloud.com",
     "me.com",
+    "mac.com",
     "aol.com",
     "proton.me",
     "protonmail.com",
+    "protonmail.ch",
+    "pm.me",
+    "web.de",
+    "mail.ru",
+    "inbox.ru",
+    "list.ru",
+    "bk.ru",
+    "ya.ru",
+    "qq.com",
+    "163.com",
+    "126.com",
+    "naver.com",
+    "zoho.com",
+    "zohomail.com",
+    "fastmail.com",
+    "fastmail.fm",
+    "hey.com",
+    "tuta.io",
+    "tutamail.com",
+];
+
+/// Freemail brands registered under many country suffixes (`hotmail.co.uk`,
+/// `gmx.de`, `yandex.ru`): a registrable domain whose first label is one of
+/// these is freemail whatever follows it.
+const FREEMAIL_BRANDS: &[&str] = &[
+    "hotmail", "live", "outlook", "yahoo", "gmx", "yandex", "tutanota",
 ];
 
 /// Two-label PUBLIC (registry) suffixes, not registrable domains: `bar.co.uk`
@@ -112,6 +144,9 @@ pub fn registrable_domain(addr: &str) -> Option<String> {
 /// scope (`triage::ghost::sender_scope`) so the two never disagree.
 pub(crate) fn is_freemail_domain(registrable: &str) -> bool {
     FREEMAIL_DOMAINS.contains(&registrable)
+        || registrable
+            .split_once('.')
+            .is_some_and(|(brand, _)| FREEMAIL_BRANDS.contains(&brand))
 }
 
 /// Minimum normalized-name length for a NAME-ONLY match; shorter keys ("GE")

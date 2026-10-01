@@ -1608,15 +1608,24 @@ CREATE TABLE IF NOT EXISTS agent_delivery_projections (
 -- compared as text, and the exact order is decided in Rust. `venue_key` is
 -- `triage::ghost::venue_key(location)`, so the duration prior joins in SQL.
 --
+-- `owner_scope` is the sender scope (`triage::ghost::sender_scope`) of the
+-- record that created the ghost, set once and never changed; NULL for a ghost
+-- made from unauthenticated mail. Only a record of that same scope is ever
+-- assigned to the ghost, so another sender replying in its thread makes a
+-- ghost of its own, and a NULL-owner ghost takes nothing from other mail.
+--
 -- `supplier_message_id` is the message whose record supplied the served facts.
 -- The listing serves a ghost only while THAT message is eligible (not sent,
--- spam or restricted), so a status change no rebuild has seen yet cannot serve
--- facts from mail that may no longer feed a ghost. NULL when no assigned
--- record is eligible: the facts are kept, the ghost is hidden.
+-- spam, restricted or sealed), so a status change no rebuild has seen yet
+-- cannot serve facts from mail that may no longer feed a ghost. NULL when no
+-- assigned record is eligible, or when the supplier was deleted: the facts
+-- are kept, the ghost is hidden until a rebuild.
 --
 -- The user's end correction is a SPAN from the start (`user_end_minutes` for a
 -- timed ghost, `user_end_days` for an all-day one), so mail that moves the
--- start moves the end with it. A span at the other precision is ignored.
+-- start moves the end with it. When mail changes the start's precision the
+-- rebuild CLEARS the span at the other precision (the one projection write to
+-- a user column), so a correction cannot come back after a second change.
 --
 -- No CHECK on kind, commitment or user_state: those vocabularies are expected
 -- to grow (held, materialized), and SQLite cannot alter a CHECK.
@@ -1634,6 +1643,7 @@ CREATE TABLE IF NOT EXISTS ghost_events (
     location            TEXT,
     venue_key           TEXT,
     commitment          TEXT NOT NULL,
+    owner_scope         TEXT,
     mail_state          TEXT NOT NULL DEFAULT 'live' CHECK(mail_state IN ('live','cancelled')),
     likelihood_band     TEXT,
     likelihood_reason   TEXT,
@@ -1661,26 +1671,27 @@ CREATE INDEX IF NOT EXISTS idx_ghost_event_keys_ghost ON ghost_event_keys(accoun
 -- The ASSIGNMENT of one record to one ghost: record `position` (its index
 -- among the message's laundered event records, `triage::ghost::launder_events`)
 -- of `message_id`. A record belongs to exactly one ghost; ghosts are never
--- merged. `role` is the record's `change`; `scope` is the sender scope it was
--- matched under (`triage::ghost::sender_scope`), NULL for an unauthenticated
--- record.
+-- merged. `role` is the record's `change`. Every assigned record has the
+-- ghost's `owner_scope`, so the scope is not repeated here.
 CREATE TABLE IF NOT EXISTS ghost_event_sources (
     account_id INTEGER NOT NULL,
     ghost_id   INTEGER NOT NULL,
     message_id INTEGER NOT NULL,
     position   INTEGER NOT NULL,
     role       TEXT NOT NULL,
-    scope      TEXT,
     PRIMARY KEY(account_id, message_id, position)
 );
 CREATE INDEX IF NOT EXISTS idx_ghost_event_sources_ghost ON ghost_event_sources(account_id, ghost_id);
 -- The user's own corrections of how long things at a venue run, by kind:
--- tier 2 of the estimated end.
+-- tier 2 of the estimated end. Never for a kind with no default duration
+-- (travel). `ghost_id` is the ghost whose correction wrote the current value,
+-- so clearing that correction can take back what it taught.
 CREATE TABLE IF NOT EXISTS event_duration_priors (
     account_id INTEGER NOT NULL,
     venue_key  TEXT NOT NULL,
     kind       TEXT NOT NULL,
     minutes    INTEGER NOT NULL,
+    ghost_id   INTEGER,
     updated_at TEXT NOT NULL,
     PRIMARY KEY(account_id, venue_key, kind)
 );
@@ -1701,15 +1712,11 @@ AFTER DELETE ON messages BEGIN
       AND NOT EXISTS (SELECT 1 FROM ghost_event_sources s
                       WHERE s.account_id = OLD.account_id AND s.ghost_id = ghost_events.id
                         AND s.message_id <> OLD.id);
-    -- A surviving ghost whose supplier was this message would otherwise be
-    -- hidden until something rebuilds it (no SQL can): the newest remaining
-    -- source stands in, and the listing still requires it to be eligible.
-    UPDATE ghost_events SET supplier_message_id = (
-        SELECT s.message_id FROM ghost_event_sources s
-        JOIN messages m ON m.account_id = s.account_id AND m.id = s.message_id
-        WHERE s.account_id = OLD.account_id AND s.ghost_id = ghost_events.id
-          AND s.message_id <> OLD.id
-        ORDER BY m.received_at DESC, s.message_id DESC LIMIT 1)
+    -- A surviving ghost whose supplier was this message still carries that
+    -- message's facts, and no SQL can rebuild them from another source. So
+    -- it is HIDDEN (no supplier) until the next reconcile of a message that
+    -- feeds it, rather than served under another message's name.
+    UPDATE ghost_events SET supplier_message_id = NULL
     WHERE account_id = OLD.account_id AND supplier_message_id = OLD.id;
     DELETE FROM ghost_event_sources WHERE account_id = OLD.account_id AND message_id = OLD.id;
 END;

@@ -1392,8 +1392,9 @@ impl AgentTriageStore for SqliteStore {
                 if restricted { "restricted" } else { "allowed" }
             ],
         )?;
-        // Access changed outside the triage commit: the ghosts this message
-        // feeds are rebuilt now, not at its next re-triage.
+        // Access changed outside the triage commit: the message's stored
+        // decision is projected again now (matched afresh), not at its next
+        // re-triage.
         super::ghosts::refresh_message_guarded(&tx, job.account_id, job.message_id)?;
         finish(&tx, job, "access_applied", metadata)?;
         tx.commit()?;

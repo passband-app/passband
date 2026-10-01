@@ -1856,6 +1856,11 @@ fn ghost_view(
         "location": ghost.location,
         "commitment": ghost.commitment,
         "state": ghost.state(now),
+        // What the mail says, apart from the user's word: `state` reads
+        // `going` or `dismissed` over a real cancellation.
+        "mail_state": ghost.mail_state,
+        // False for a ghost made from mail that did not pass authentication.
+        "verified": ghost.verified(),
         "likelihood": ghost.served_likelihood().map(|l| json!({
             "band": l.band,
             "reason": (!l.reason.is_empty()).then_some(&l.reason),

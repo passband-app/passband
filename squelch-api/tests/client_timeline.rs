@@ -99,12 +99,33 @@ fn decide(
     minutes_ago: i64,
     events: &[Ev],
 ) -> i64 {
+    // Authenticated: only an authenticated sender's records match other mail
+    // by ref or commit a ghost (identity v2).
+    decide_as(
+        store,
+        account,
+        gmail,
+        thread,
+        minutes_ago,
+        Some(true),
+        events,
+    )
+}
+
+/// [`decide`] for a message whose authentication result is `auth_pass`.
+fn decide_as(
+    store: &SqliteStore,
+    account: i64,
+    gmail: &str,
+    thread: &str,
+    minutes_ago: i64,
+    auth_pass: Option<bool>,
+    events: &[Ev],
+) -> i64 {
     let id = store
         .upsert_message(&NewMessage {
             received_at: Utc::now() - Duration::minutes(minutes_ago),
-            // Authenticated: only an authenticated sender's records match
-            // other mail by ref or commit a ghost (identity v2).
-            auth_pass: Some(true),
+            auth_pass,
             ..msg(account, gmail, thread, "Your plans", "details")
         })
         .unwrap();
@@ -300,11 +321,13 @@ async fn timeline_serves_every_field_with_the_right_end_tier() {
             "kind",
             "likelihood",
             "location",
+            "mail_state",
             "sources",
             "start",
             "start_timezone",
             "state",
-            "title"
+            "title",
+            "verified"
         ]
     );
     assert!(s["id"].as_i64().unwrap() > 0);
@@ -560,6 +583,83 @@ async fn timeline_state_comes_from_the_user_then_the_mail_then_the_clock() {
     assert_eq!(by_title(&ghosts, "Dinner")["state"], "going");
     assert_eq!(by_title(&ghosts, "Gone by")["state"], "dismissed");
     assert_eq!(by_title(&ghosts, "Party")["state"], "ghost");
+}
+
+/// Round 2 (1.6): `state` says `going` over a real cancellation, so the mail's
+/// own word is served beside it as `mail_state`; and `verified` says whether
+/// the mail behind a ghost passed authentication.
+#[tokio::test]
+async fn timeline_serves_mail_state_and_verified() {
+    let now = Utc::now();
+    let h = harness(|_, _| {});
+    let dinner = |change| Ev {
+        title: "Dinner",
+        start: rfc(now + Duration::days(3)),
+        kind: EventRecordKind::Reservation,
+        change,
+        refs: &["RESV00001"],
+        ..Default::default()
+    };
+    decide(
+        &h.store,
+        h.acct,
+        "g1",
+        "t1",
+        20,
+        &[dinner(EventChange::Created)],
+    );
+    decide_as(
+        &h.store,
+        h.acct,
+        "g2",
+        "t2",
+        15,
+        None,
+        &[Ev {
+            title: "Rumour",
+            start: rfc(now + Duration::days(4)),
+            refs: &["RUMOR0001"],
+            ..Default::default()
+        }],
+    );
+    let ghosts = wide(&h.app).await;
+    let d = by_title(&ghosts, "Dinner");
+    assert_eq!(
+        (&d["mail_state"], &d["verified"]),
+        (&json!("live"), &json!(true))
+    );
+    let r = by_title(&ghosts, "Rumour");
+    assert_eq!(
+        (&r["mail_state"], &r["verified"]),
+        (&json!("live"), &json!(false))
+    );
+    assert_eq!(
+        r["commitment"], "unknown",
+        "unverified mail commits nothing"
+    );
+
+    let (status, _) = patch(
+        &h.app,
+        d["id"].as_i64().unwrap(),
+        json!({ "state": "going" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    decide(
+        &h.store,
+        h.acct,
+        "g3",
+        "t1",
+        10,
+        &[dinner(EventChange::Cancelled)],
+    );
+    let ghosts = wide(&h.app).await;
+    let d = by_title(&ghosts, "Dinner");
+    assert_eq!(d["state"], "going", "the user's word is the state");
+    assert_eq!(
+        d["mail_state"], "cancelled",
+        "and the cancellation is still served"
+    );
 }
 
 #[tokio::test]

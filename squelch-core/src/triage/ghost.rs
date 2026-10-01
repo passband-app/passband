@@ -37,13 +37,20 @@ const VENUE_CAP: usize = 120;
 /// number, a UID, a page); a record carrying dozens is a digest or an attack,
 /// and every ref is one more ghost the record could be matched against.
 pub const REFS_PER_RECORD: usize = 5;
-/// Shorter than 4 is a fragment ("12", "A1") that would merge strangers'
-/// events; longer than 200 is a body excerpt, not a reference.
-const REF_LEN: RangeInclusive<usize> = 4..=200;
+/// Event records kept per message: the first this many laundered. A real mail
+/// describes a handful (an itinerary's legs); more is a digest or an attack,
+/// and each record may mint a ghost.
+pub const EVENTS_PER_MESSAGE: usize = 20;
+/// Shorter than 5 is a fragment ("1234", "A1B2") that repeats across
+/// unrelated events; longer than 200 is a body excerpt, not a reference.
+const REF_LEN: RangeInclusive<usize> = 5..=200;
+/// An all-digit ref shorter than this is an order line or a year, not a
+/// booking number.
+const DIGITS_ONLY_MIN: usize = 6;
 
-/// Words a model prints in front of a reference ("Confirmation #", "Booking
-/// ref"). Stripped from the front so "Confirmation ABC123" and "ABC123" from
-/// the modification mail are one key.
+/// Words a model prints around a reference ("Confirmation #", "OpenTable
+/// confirmation", "Flight UA123"). Dropped wherever they stand, so the same
+/// booking number worded two ways by two mails is one key.
 const LABEL_WORDS: &[&str] = &[
     "confirmation",
     "conf",
@@ -60,8 +67,18 @@ const LABEL_WORDS: &[&str] = &[
     "record",
     "locator",
     "pnr",
+    "itinerary",
+    "flight",
+    "event",
     "id",
     "uid",
+];
+/// Words that name a PLACE inside a venue ("Seat 12A", "Gate 4", "Table for
+/// 2"). The number after one is shared by every event held there, so it and
+/// the number are dropped from a ref.
+const POSITION_WORDS: &[&str] = &[
+    "seat", "row", "gate", "table", "sec", "section", "terminal", "room", "party", "door", "floor",
+    "lot", "zone",
 ];
 /// Capitalised words a model might hand back as a "reference". A record
 /// locator is all capitals too, so these are the ones a status line shouts.
@@ -229,34 +246,94 @@ pub fn launder(record: &RecordProposal) -> Option<GhostProposal> {
     })
 }
 
-/// Every laundered `event` record of a decision, in order. A record's index in
-/// THIS list is its `position`, the second half of its identity in
-/// `ghost_event_sources`: storage assigns and reloads records by it, so both
-/// sides must count the same way, and they do by both calling this.
+/// Every laundered `event` record of a decision, in order, at most
+/// [`EVENTS_PER_MESSAGE`]. A record's index in THIS list is its `position`,
+/// the second half of its identity in `ghost_event_sources`: storage assigns
+/// and reloads records by it, so both sides must count the same way, and they
+/// do by both calling this.
 pub fn launder_events(records: &[RecordProposal]) -> Vec<GhostProposal> {
-    records.iter().filter_map(launder).collect()
+    records
+        .iter()
+        .filter_map(launder)
+        .take(EVENTS_PER_MESSAGE)
+        .collect()
 }
 
-/// Who a record speaks for: the sender's registrable domain, or the full
-/// address on a freemail domain (two strangers share `gmail.com`). None when
-/// the message is not AUTHENTICATED (`auth_pass` is anything but
-/// `Some(true)`, unknown included) or the address yields no domain: such a
-/// record speaks for nobody, so it never matches another ghost and never
-/// commits one.
+/// Who a record speaks for: the sender's [`organisation_domain`], or the full
+/// lowercased address where the domain is shared by strangers (freemail, a
+/// shared tenant). None when the message is not AUTHENTICATED (`auth_pass` is
+/// anything but `Some(true)`, unknown included) or the address has no
+/// registrable domain: such a record speaks for nobody, so it never matches
+/// another ghost and never commits one.
 ///
-/// Reuses `receipt_match`'s definition of a sender, the one the bill and
-/// shipment matchers use, rather than a second domain parser.
+/// Authentication here (`messages.auth_pass`) vouches for the From header's
+/// DOMAIN, never its local part, which is why a domain anyone can sign up on
+/// cannot be a scope by itself.
 pub fn sender_scope(from_addr: &str, auth_pass: Option<bool>) -> Option<String> {
     if auth_pass != Some(true) {
         return None;
     }
     let address = from_addr.trim().to_lowercase();
-    let domain = super::receipt_match::registrable_domain(&address)?;
-    Some(if super::receipt_match::is_freemail_domain(&domain) {
-        address
-    } else {
-        domain
-    })
+    if !address.contains('@') {
+        return None;
+    }
+    // A shared domain still has to be a real one for its address to count.
+    organisation_domain(&address).or_else(|| psl_registrable_domain(&address).map(|_| address))
+}
+
+/// Registrable domains where one domain is many unrelated senders, beyond
+/// freemail: hosts whose customers mail From the host's own domain. The
+/// Public Suffix List (as compiled into `psl` 2.1) does NOT list
+/// `onmicrosoft.com`, so every Microsoft 365 tenant's default domain
+/// (`contoso.onmicrosoft.com`) has the registrable domain `onmicrosoft.com`
+/// and needs this entry; a host the list does carry in its private section
+/// (`x.blogspot.com`) is already one registrable domain per customer.
+const SHARED_TENANT_DOMAINS: &[&str] = &["onmicrosoft.com", "googlegroups.com"];
+
+/// Is this registrable domain one that strangers share, so that only a full
+/// address identifies a sender? The freemail list (`receipt_match`'s, so the
+/// bill matcher and the calendar never disagree) or a shared tenant host.
+fn is_shared_domain(registrable: &str) -> bool {
+    super::receipt_match::is_freemail_domain(registrable)
+        || SHARED_TENANT_DOMAINS.contains(&registrable)
+}
+
+/// The registrable domain of an address (or a bare domain) under the full
+/// Public Suffix List, ICANN and private sections both, lowercased: one label
+/// above the longest matching public suffix. None when there is no domain, or
+/// the domain is itself a public suffix (`a@com.mx`, `a@onmicrosoft.com`).
+/// A TLD the list does not know counts as a one-label suffix.
+fn psl_registrable_domain(address: &str) -> Option<String> {
+    let domain = match address.rsplit_once('@') {
+        Some((_, domain)) => domain,
+        None => address,
+    };
+    let domain = domain.trim().trim_end_matches('.').to_lowercase();
+    if domain.is_empty() || domain.split('.').any(str::is_empty) {
+        return None;
+    }
+    psl::domain_str(&domain).map(str::to_string)
+}
+
+/// The domain that identifies ONE organisation behind an address: its
+/// registrable domain under the full Public Suffix List (private section
+/// included, so `hotel.com.mx` and `evil.com.mx` differ, and so do two
+/// tenants of `onmicrosoft.com`), lowercased.
+///
+/// None for an address whose domain is FREEMAIL (`gmail.com`, `hotmail.co.uk`,
+/// `gmx.de`: see `receipt_match::is_freemail_domain`) or a SHARED TENANT host
+/// (`googlegroups.com`), where the domain says nothing about who sent the mail
+/// and only the full address identifies a sender. None too when there is no
+/// registrable domain at all (an empty or one-label domain, or a domain that
+/// is itself a public suffix). Takes an address or a bare domain. Two
+/// addresses are the same organisation only when this is Some and equal for
+/// both.
+///
+/// Shared by everything that asks "same sender organisation?" on
+/// authenticated mail (the ghost scope here, the invitation binding in the
+/// correspondent-timezone code), so they cannot drift apart.
+pub(crate) fn organisation_domain(address: &str) -> Option<String> {
+    psl_registrable_domain(address).filter(|d| !is_shared_domain(d))
 }
 
 /// The keys a later message can find this record's ghost by:
@@ -279,42 +356,103 @@ pub fn identity_keys(event: &GhostProposal, scope: Option<&str>) -> Vec<String> 
 ///
 /// A ref that is or contains a URL is that URL alone (see [`url_ref`]): the
 /// label around it identifies nothing, and folding it as text would keep the
-/// query's token as alphanumerics. Anything else becomes its lowercase
-/// alphanumerics with any leading label words removed. Prose is dropped.
+/// query's token as alphanumerics. Anything else goes through [`text_ref`].
+/// Either way a key shorter than 5 characters is dropped.
+///
+/// Which refs survive changes only keys, never which RECORDS laundering
+/// keeps, so it cannot shift a stored record's position.
 pub fn normalize_ref(raw: &str) -> Option<String> {
     let raw = plain(raw);
     let raw = raw.trim();
     let key = if let Some(url) = raw.split(' ').find_map(url_core) {
         url_ref(url)?
     } else {
-        let mut tokens: Vec<&str> = raw
-            .split(|c: char| !c.is_alphanumeric())
-            .filter(|t| !t.is_empty())
-            .collect();
-        while tokens
-            .first()
-            .is_some_and(|t| LABEL_WORDS.contains(&t.to_lowercase().as_str()))
-        {
-            tokens.remove(0);
-        }
-        if tokens.is_empty() || is_bare_word(&tokens) {
-            return None;
-        }
-        tokens.concat().to_lowercase()
+        text_ref(raw)?
     };
     REF_LEN.contains(&key.chars().count()).then_some(key)
 }
 
-/// Letters only and not a record locator. A locator ("QXJZKM") is one token
-/// printed in capitals; anything else made only of letters is prose.
-fn is_bare_word(tokens: &[&str]) -> bool {
-    if tokens.iter().any(|t| t.chars().any(char::is_numeric)) {
-        return false;
+/// A ref written as text, as the key two mails worded differently agree on.
+///
+/// Split into tokens on anything not alphanumeric. Label words go wherever
+/// they stand (a brand before the label stays out of the key too, as the
+/// digit rule below leaves it behind), and so does a position in a venue
+/// ("Seat 12A", "gate4") with its number. Then:
+///
+/// - With a token carrying a digit, the key is the digit-bearing tokens
+///   joined: "OpenTable confirmation 123456789" and "123456789" agree. A key
+///   that short (under 5) takes the 1 to 3 letter token just before its
+///   first digit-bearing token, so "UA 123" and "Flight UA123" are both
+///   `ua123`.
+/// - With none, only a single all-capitals token that is not a status word
+///   is a record locator ("QXJZKM"); anything else made of letters is prose.
+///
+/// Dropped as identifying nothing: an all-digit key under 6 digits (an order
+/// line, a year) and an 8-digit key that is a valid `YYYYMMDD` date.
+fn text_ref(raw: &str) -> Option<String> {
+    let has_digit = |t: &str| t.chars().any(char::is_numeric);
+    let mut tokens: Vec<&str> = Vec::new();
+    let mut after_position = false;
+    for token in raw
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+    {
+        let lower = token.to_lowercase();
+        if LABEL_WORDS.contains(&lower.as_str()) {
+            continue;
+        }
+        if POSITION_WORDS.contains(&lower.as_str()) {
+            after_position = true;
+            continue;
+        }
+        if std::mem::take(&mut after_position) && has_digit(token) {
+            continue;
+        }
+        let glued_position = POSITION_WORDS.iter().any(|w| {
+            lower
+                .strip_prefix(w)
+                .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+        });
+        if !glued_position {
+            tokens.push(token);
+        }
     }
-    let [only] = tokens else {
-        return true;
+    let key = match tokens.iter().position(|t| has_digit(t)) {
+        Some(first) => {
+            let mut key: String = tokens
+                .iter()
+                .filter(|t| has_digit(t))
+                .map(|t| t.to_lowercase())
+                .collect();
+            if key.chars().count() < *REF_LEN.start()
+                && let Some(before) = first.checked_sub(1).map(|i| tokens[i])
+                && (1..=3).contains(&before.chars().count())
+                && before.chars().all(char::is_alphabetic)
+            {
+                key = format!("{}{key}", before.to_lowercase());
+            }
+            key
+        }
+        None => {
+            let [only] = tokens.as_slice() else {
+                return None;
+            };
+            let lower = only.to_lowercase();
+            if !only.chars().all(char::is_uppercase) || STOP_WORDS.contains(&lower.as_str()) {
+                return None;
+            }
+            lower
+        }
     };
-    !only.chars().all(char::is_uppercase) || STOP_WORDS.contains(&only.to_lowercase().as_str())
+    if key.chars().all(char::is_numeric) {
+        let digits = key.chars().count();
+        if digits < DIGITS_ONLY_MIN
+            || (digits == 8 && NaiveDate::parse_from_str(&key, "%Y%m%d").is_ok())
+        {
+            return None;
+        }
+    }
+    Some(key)
 }
 
 /// A URL ref as lowercase host and path, kept only when the path itself
@@ -364,16 +502,32 @@ fn has_uuid(segment: &str) -> bool {
 
 /// The URL in one whitespace-free token, without the punctuation prose wraps
 /// around it ("(see https://x/e/1)."), or None when the token is not a URL.
-/// A scheme or `www.` is enough; a bare `host/path` also needs an alphabetic
-/// top-level label, so "St./Elm" and "2.5/3h" stay text.
+/// A scheme or `www.` is enough, ANYWHERE in the token: a URL glued to its
+/// label ("Zoom:https://...", "Meeting<https://...>") is still a URL, and
+/// missing it kept its query, passcode and all. A bare `host/path` must start
+/// the token and needs an alphabetic top-level label, so "St./Elm" and
+/// "2.5/3h" stay text.
 fn url_core(token: &str) -> Option<&str> {
+    const TRAILING: [char; 11] = ['.', ',', ';', ':', '!', '?', ')', '>', ']', '"', '\''];
+    // ASCII lowercasing keeps every byte offset, so `at` indexes `token`.
+    let lower = token.to_ascii_lowercase();
+    let scheme = ["https://", "http://"]
+        .iter()
+        .filter_map(|s| lower.find(s))
+        .min();
+    let www = || {
+        lower
+            .match_indices("www.")
+            .map(|(i, _)| i)
+            .find(|&i| !lower[..i].ends_with(|c: char| c.is_alphanumeric()))
+    };
+    if let Some(at) = scheme.or_else(www) {
+        let core = token[at..].trim_end_matches(TRAILING);
+        return (!core.is_empty()).then_some(core);
+    }
     let core = token
         .trim_start_matches(['(', '<', '[', '"', '\''])
-        .trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '>', ']', '"', '\'']);
-    let lower = core.to_ascii_lowercase();
-    if lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("www.") {
-        return Some(core);
-    }
+        .trim_end_matches(TRAILING);
     let tld_ok = core
         .split_once('/')
         .and_then(|(host, _)| host.rsplit('.').next())
@@ -447,12 +601,19 @@ fn clean_title(raw: &str) -> Option<String> {
 /// the reason for a guess, so it is capped at [`NOTE_CAP`], and it is dropped
 /// outright (the number or band it explains stays) when it carries something
 /// mail-shaped: a URL, an address, or a run of 6 or more digits (a booking
-/// number, a phone number, a code).
+/// number, a phone number, a code). The run counts across the separators a
+/// number is printed with (space, `-`, `.`, `+`, parentheses), so "call
+/// 555-1234" and "(415) 555 1234" are runs too; a letter or any other
+/// character ends it, which keeps "doors 7, show 8" a phrase.
 fn note(raw: &str) -> String {
     let text = plain(raw);
     let mut run = 0;
     let digits = text.chars().any(|c| {
-        run = if c.is_numeric() { run + 1 } else { 0 };
+        if c.is_numeric() {
+            run += 1;
+        } else if !matches!(c, ' ' | '-' | '.' | '+' | '(' | ')') {
+            run = 0;
+        }
         run >= 6
     });
     if digits || text.contains('@') || text.split(' ').any(|t| url_core(t).is_some()) {
@@ -476,16 +637,17 @@ fn launder_location(raw: &str) -> Option<String> {
     clean_text(&text)
 }
 
-/// The zone a start claims, as its IANA name, or None. "Eastern Standard
-/// Time", "PDT" and other names a reader understands are not zones (an
-/// abbreviation names several), and the start is read in this zone.
+/// The zone a start claims, as an IANA PLACE zone, or None: a valid name with
+/// a `/` that is not under `Etc/` ([`crate::timezone::place_zone`], the
+/// correspondent-timezone code's own test). "Eastern Standard Time", "PDT",
+/// "EST" and "UTC" are not places: an abbreviation names several, and a fixed
+/// offset is wrong for half the year wherever it is read.
 fn iana_zone(raw: &str) -> Option<String> {
     let zone = plain(raw);
-    if zone.chars().count() > TIMEZONE_CAP {
+    if zone.chars().count() > TIMEZONE_CAP || !zone.contains('/') {
         return None;
     }
-    let tz: chrono_tz::Tz = zone.parse().ok()?;
-    Some(tz.name().to_string())
+    crate::timezone::place_zone(&zone).map(|tz| tz.name().to_string())
 }
 
 /// A location reduced to the key duration priors are stored under: the part
@@ -557,6 +719,9 @@ pub struct EffectiveEnd {
 /// correction, the history prior for this venue and kind, the model's
 /// estimate, the kind default. A fact that is not after `start` is skipped.
 /// A date-only start never gets an estimate, so with no fact it has no end.
+///
+/// A kind with no default (travel) has no history tier either: one long
+/// flight from "JFK Terminal 4" is no guide to the next one from there.
 pub fn effective_end(
     start: &EventTime,
     kind: EventRecordKind,
@@ -587,6 +752,7 @@ pub fn effective_end(
         return None;
     };
     let (minutes, source, basis) = history_minutes
+        .filter(|_| default_minutes(kind).is_some())
         .map(|m| (m, EndSource::History, None))
         .or_else(|| {
             model_estimate.map(|e| {
@@ -729,6 +895,113 @@ mod tests {
         assert_eq!(sender_scope("box@venue.com", Some(false)), None);
         assert_eq!(sender_scope("box@venue.com", None), None);
         assert_eq!(sender_scope("nobody", Some(true)), None);
+        assert_eq!(sender_scope("venue.com", Some(true)), None, "no address");
+        assert_eq!(sender_scope("a@com.mx", Some(true)), None, "a bare suffix");
+    }
+
+    /// Round 2 (1.2): the scope's domain comes from the real Public Suffix
+    /// List. These are the exact answers `psl` gives, pinned so a crate
+    /// update that changes one is noticed.
+    #[test]
+    fn the_scope_domain_comes_from_the_public_suffix_list() {
+        let scope = |from: &str| sender_scope(from, Some(true));
+        // `com.mx` is a public suffix: two hotels there are two senders.
+        assert_eq!(scope("res@hotel.com.mx").as_deref(), Some("hotel.com.mx"));
+        assert_eq!(scope("res@evil.com.mx").as_deref(), Some("evil.com.mx"));
+        assert_eq!(
+            scope("alerts@news.example.co.uk").as_deref(),
+            Some("example.co.uk")
+        );
+        // An unknown TLD is a one-label suffix (the fixtures' `.example`).
+        assert_eq!(
+            scope("a@sub.venue.example").as_deref(),
+            Some("venue.example")
+        );
+        // A private-section host is one registrable domain per customer.
+        assert_eq!(
+            organisation_domain("x.blogspot.com").as_deref(),
+            Some("x.blogspot.com")
+        );
+        // The list does NOT carry `onmicrosoft.com`: every tenant would be
+        // one `onmicrosoft.com`, so it is a shared tenant, scoped by address.
+        assert_eq!(
+            psl_registrable_domain("a@contoso.onmicrosoft.com").as_deref(),
+            Some("onmicrosoft.com")
+        );
+        assert_eq!(
+            scope("Ana@Contoso.onmicrosoft.com").as_deref(),
+            Some("ana@contoso.onmicrosoft.com")
+        );
+        assert_ne!(
+            scope("a@contoso.onmicrosoft.com"),
+            scope("a@fabrikam.onmicrosoft.com")
+        );
+        assert_eq!(
+            scope("club@googlegroups.com").as_deref(),
+            Some("club@googlegroups.com")
+        );
+        assert_ne!(scope("a@googlegroups.com"), scope("b@googlegroups.com"));
+    }
+
+    /// Round 2 (1.2): the freemail list is longer, and brands registered
+    /// under many suffixes are freemail under all of them.
+    #[test]
+    fn newly_listed_freemail_providers_scope_by_address() {
+        for domain in [
+            "mac.com",
+            "ymail.com",
+            "msn.com",
+            "yahoo.co.uk",
+            "hotmail.fr",
+            "hotmail.co.uk",
+            "live.co.uk",
+            "gmx.de",
+            "gmx.net",
+            "web.de",
+            "mail.ru",
+            "yandex.ru",
+            "qq.com",
+            "163.com",
+            "naver.com",
+            "zoho.com",
+            "fastmail.com",
+            "hey.com",
+            "pm.me",
+            "tutanota.de",
+            "protonmail.ch",
+        ] {
+            let alice = sender_scope(&format!("alice@{domain}"), Some(true));
+            let bob = sender_scope(&format!("bob@{domain}"), Some(true));
+            assert_eq!(alice, Some(format!("alice@{domain}")), "{domain}");
+            assert_ne!(alice, bob, "{domain}");
+            assert_eq!(
+                organisation_domain(&format!("alice@{domain}")),
+                None,
+                "{domain}"
+            );
+        }
+        // An organisation is still its domain, across mailboxes.
+        assert_eq!(
+            organisation_domain("Events@Mail.Venue.co.uk").as_deref(),
+            Some("venue.co.uk")
+        );
+        assert_eq!(
+            organisation_domain("box@venue.co.uk"),
+            organisation_domain("events@mail.venue.co.uk")
+        );
+    }
+
+    /// Round 2 (1.3): a hostile mail cannot mint unbounded ghosts.
+    #[test]
+    fn a_message_keeps_at_most_twenty_event_records() {
+        let titles: Vec<String> = (0..25).map(|i| format!("Event {i}")).collect();
+        let mut records: Vec<RecordProposal> = titles.iter().map(|t| event(t, &[])).collect();
+        // An empty title is dropped BEFORE the cap counts.
+        records.insert(0, event("  ", &[]));
+        let kept = launder_events(&records);
+        assert_eq!(kept.len(), EVENTS_PER_MESSAGE);
+        assert_eq!(kept[0].title, "Event 0");
+        assert_eq!(kept[19].title, "Event 19");
     }
 
     #[test]
@@ -769,12 +1042,14 @@ mod tests {
         ] {
             assert_eq!(normalize_ref(junk), None, "{junk:?} should drop");
         }
-        // Kept: a record locator, a number, an iCalendar UID.
+        // Kept: a record locator, a booking number, an iCalendar UID (its
+        // digit-bearing part; the domain after `@` is the sender's, and the
+        // key is already scoped by sender).
         assert_eq!(normalize_ref("QXJZKM").as_deref(), Some("qxjzkm"));
-        assert_eq!(normalize_ref("Order No. 4471").as_deref(), Some("4471"));
+        assert_eq!(normalize_ref("Order No. 447112").as_deref(), Some("447112"));
         assert_eq!(
             normalize_ref("7kq3abc@google.com").as_deref(),
-            Some("7kq3abcgooglecom")
+            Some("7kq3abc")
         );
         assert_eq!(normalize_ref(&"9".repeat(200)).map(|k| k.len()), Some(200));
     }
@@ -1279,5 +1554,206 @@ mod tests {
         ] {
             assert_eq!(both(junk), "", "{junk:?} should drop");
         }
+    }
+
+    // ---- Laundering, round 2 (1.5): the reviewer's table ----
+
+    /// F8: a brand or noun around the label stays out of the key, so two
+    /// mails wording one booking number differently agree.
+    #[test]
+    fn a_ref_keys_on_its_digit_bearing_tokens_wherever_the_labels_stand() {
+        for (raw, key) in [
+            ("OpenTable confirmation 123456789", "123456789"),
+            ("123456789", "123456789"),
+            ("Eventbrite order #1234567890", "1234567890"),
+            ("Airbnb reservation HMABCD1234", "hmabcd1234"),
+            ("HMABCD1234", "hmabcd1234"),
+            ("Your itinerary number is 5XYZ12", "5xyz12"),
+            ("Booking reference: 5XYZ12", "5xyz12"),
+            ("Confirmation #: 2CF9K8", "2cf9k8"),
+            ("PNR: DL7XKQ", "dl7xkq"),
+            ("Record locator K7Q2LM", "k7q2lm"),
+            ("ABC123", "abc123"),
+            // CJK labels are dropped too: the key is the digit-bearing token.
+            ("預約編號 AB12CD", "ab12cd"),
+        ] {
+            assert_eq!(normalize_ref(raw).as_deref(), Some(key), "{raw:?}");
+        }
+    }
+
+    /// F8: a short number takes the 1 to 3 letter carrier code before it, so
+    /// the flight is one key however it is printed; a longer word does not.
+    #[test]
+    fn a_short_number_takes_the_carrier_code_before_it() {
+        for raw in ["UA 123", "Flight UA123", "UA123", "flight ua 123"] {
+            assert_eq!(normalize_ref(raw).as_deref(), Some("ua123"), "{raw:?}");
+        }
+        assert_eq!(normalize_ref("DL 1234").as_deref(), Some("dl1234"));
+        // A label BETWEEN the carrier code and the number goes too, and a
+        // label after a locator leaves the locator alone.
+        assert_eq!(normalize_ref("UA flight 123").as_deref(), Some("ua123"));
+        assert_eq!(
+            normalize_ref("QXJZKM (confirmation code)").as_deref(),
+            Some("qxjzkm")
+        );
+        assert_eq!(
+            normalize_ref("Booking ABC-1234-XYZ").as_deref(),
+            Some("abc1234")
+        );
+        // "United" is no carrier code, and "123" alone is a fragment.
+        assert_eq!(normalize_ref("United 123"), None);
+    }
+
+    /// F8 and F9: what is left is too short, a bare small number, a date, or
+    /// a place inside a venue.
+    #[test]
+    fn short_numbers_dates_and_venue_positions_are_no_ref() {
+        for raw in [
+            "Order 2026",
+            "Order #12",
+            "4471",
+            "12345",
+            "2026-10-03",
+            "20261003",
+            "Seat 12A",
+            "seat12a",
+            "Gate 4",
+            "Row 1",
+            "Table for 2",
+            "Section 101",
+            "Terminal 4",
+            "Room 1204",
+            "UBER",
+            "TBD",
+        ] {
+            assert_eq!(normalize_ref(raw), None, "{raw:?} should drop");
+        }
+        // Six digits is a booking number; an 8-digit non-date is too.
+        assert_eq!(normalize_ref("Order 447112").as_deref(), Some("447112"));
+        assert_eq!(normalize_ref("20261399").as_deref(), Some("20261399"));
+        // A booking number survives the seat printed beside it.
+        assert_eq!(
+            normalize_ref("Order 12345678, Seat 12A").as_deref(),
+            Some("12345678")
+        );
+    }
+
+    /// F7: a URL glued to its label, or wrapped in `<...>` mid-token, is
+    /// still a URL, so its query never reaches a key or a location.
+    #[test]
+    fn a_url_glued_to_a_label_loses_its_query() {
+        assert_eq!(
+            normalize_ref("Event page:https://x.example/e/1?token=SECRET").as_deref(),
+            Some("x.example/e/1")
+        );
+        assert_eq!(
+            normalize_ref("Join<https://x.example/e/1?token=SECRET>").as_deref(),
+            Some("x.example/e/1")
+        );
+        let location = |raw: &str| {
+            launder_with(|r| {
+                if let RecordProposal::Event { location, .. } = r {
+                    *location = Some(raw.into());
+                }
+            })
+            .location
+        };
+        assert_eq!(
+            location("Zoom:https://zoom.us/j/81234567890?pwd=abcDEF123").as_deref(),
+            Some("Zoom:zoom.us/j/81234567890")
+        );
+        assert_eq!(
+            location("Join Zoom Meeting<https://zoom.us/j/81234567890?pwd=abcDEF123>").as_deref(),
+            Some("Join Zoom Meeting<zoom.us/j/81234567890>")
+        );
+        assert_eq!(
+            location("Room:WWW.x.example/e/1?k=SECRET").as_deref(),
+            Some("Room:x.example/e/1")
+        );
+        // `www.` inside a word is not a URL.
+        assert_eq!(location("Awww.cafe").as_deref(), Some("Awww.cafe"));
+    }
+
+    /// The note filter counts digits across the separators a phone number
+    /// is printed with.
+    #[test]
+    fn a_phone_number_split_by_separators_drops_the_note() {
+        let basis = |text: &str| {
+            launder_with(|r| {
+                if let RecordProposal::Event {
+                    duration_estimate, ..
+                } = r
+                {
+                    *duration_estimate = Some(DurationEstimate {
+                        minutes: 150,
+                        basis: text.into(),
+                    });
+                }
+            })
+            .estimate
+            .unwrap()
+            .basis
+        };
+        for junk in ["call 555-1234", "(415) 555 1234", "+1 415.555.1234"] {
+            assert_eq!(basis(junk), "", "{junk:?} should drop");
+        }
+        for kept in ["doors 7, show 8", "seats 12345, row 2", "2 - 3 hours"] {
+            assert_eq!(basis(kept), kept);
+        }
+    }
+
+    /// Only a place zone is kept: a fixed abbreviation, UTC and `Etc/` are
+    /// dropped.
+    #[test]
+    fn start_timezone_must_be_a_place() {
+        let zone = |raw: &str| {
+            launder_with(|r| {
+                if let RecordProposal::Event {
+                    start: Some(start), ..
+                } = r
+                {
+                    start.timezone = Some(raw.into());
+                }
+            })
+            .start_timezone
+        };
+        for junk in [
+            "EST",
+            "UTC",
+            "GMT",
+            "PDT",
+            "EST5EDT",
+            "Etc/GMT+5",
+            "Etc/UTC",
+        ] {
+            assert_eq!(zone(junk), None, "{junk:?} should drop");
+        }
+        assert_eq!(zone("Asia/Kolkata").as_deref(), Some("Asia/Kolkata"));
+    }
+
+    /// F12: a travel ghost has no default, and no history tier either.
+    #[test]
+    fn travel_never_takes_a_history_prior() {
+        let start = at("2026-10-03T08:00:00-04:00");
+        assert_eq!(
+            effective_end(&start, EventRecordKind::Travel, None, None, Some(780), None),
+            None
+        );
+        let model = GhostEstimate {
+            minutes: 300,
+            basis: String::new(),
+        };
+        assert_eq!(
+            effective_end(
+                &start,
+                EventRecordKind::Travel,
+                None,
+                None,
+                Some(780),
+                Some(&model)
+            )
+            .map(|e| e.source),
+            Some(EndSource::Model)
+        );
     }
 }

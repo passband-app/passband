@@ -2068,6 +2068,7 @@ fn init_creates_the_ghost_tables_on_fresh_and_existing_dbs() {
         "location",
         "venue_key",
         "commitment",
+        "owner_scope",
         "mail_state",
         "likelihood_band",
         "likelihood_reason",

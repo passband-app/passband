@@ -705,12 +705,21 @@ pub struct GhostEvent {
     pub last_message_id: Option<i64>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// The sender scope the ghost belongs to (`triage::ghost::sender_scope`),
+    /// set when it was created and never changed. None for a ghost made from
+    /// mail that did not pass authentication.
+    pub owner_scope: Option<String>,
     /// Oldest first.
     pub sources: Vec<GhostSource>,
 }
 impl GhostEvent {
     pub fn all_day(&self) -> bool {
         !self.start.has_clock()
+    }
+    /// Whether the mail behind this ghost passed authentication for its
+    /// sender, so a client can mark one that did not.
+    pub fn verified(&self) -> bool {
+        self.owner_scope.is_some()
     }
     pub fn effective_end(&self) -> Option<crate::triage::ghost::EffectiveEnd> {
         crate::triage::ghost::effective_end(

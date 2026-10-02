@@ -29,6 +29,10 @@ pub struct AgentConfig {
     pub max_attempts: u32,
     /// Shared provider-outage circuit cooldown. Outages do not consume attempts.
     pub outage_retry_secs: u64,
+    /// Send the configured effort to an OpenAI-compatible provider as
+    /// `reasoning_effort`. Off by default: that wire has never carried one, and
+    /// a model without the parameter rejects the request.
+    pub openai_reasoning_effort: bool,
 }
 impl Default for AgentConfig {
     fn default() -> Self {
@@ -45,6 +49,7 @@ impl Default for AgentConfig {
             background_daily_run_cap: 200,
             max_attempts: 6,
             outage_retry_secs: 300,
+            openai_reasoning_effort: false,
         }
     }
 }

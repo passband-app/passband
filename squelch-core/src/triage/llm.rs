@@ -139,7 +139,7 @@ pub async fn classify_llm(
 ) -> std::result::Result<LlmOutcome<String>, ClassifyError> {
     match provider {
         Stage2Provider::Anthropic => classify_anthropic(http, url, api_key, req, false).await,
-        Stage2Provider::OpenAI => classify_openai(http, url, api_key, req).await,
+        Stage2Provider::OpenAI => classify_openai(http, url, api_key, req, None).await,
     }
 }
 
@@ -152,16 +152,25 @@ pub async fn classify_llm(
 /// `missing_agent_submission`, which the agent already spends a repair turn
 /// on; it still parses and validates every step before a decision can commit.
 /// Other classifiers and the OpenAI transport keep their strict JSON schemas.
+///
+/// `openai_reasoning_effort` forwards `req.effort` to an OpenAI-compatible
+/// provider as `reasoning_effort`. Off, that wire carries no effort at all,
+/// which is what it has always done: several open-weight models think until
+/// the token ceiling without it, and others reject the field.
 pub async fn classify_agent_step(
     http: &reqwest::Client,
     url: &str,
     api_key: &str,
     provider: Stage2Provider,
     req: &LlmRequest<'_>,
+    openai_reasoning_effort: bool,
 ) -> std::result::Result<LlmOutcome<String>, ClassifyError> {
     match provider {
         Stage2Provider::Anthropic => classify_anthropic(http, url, api_key, req, true).await,
-        Stage2Provider::OpenAI => classify_openai(http, url, api_key, req).await,
+        Stage2Provider::OpenAI => {
+            let effort = req.effort.filter(|_| openai_reasoning_effort);
+            classify_openai(http, url, api_key, req, effort).await
+        }
     }
 }
 
@@ -293,6 +302,11 @@ struct OpenAiRequest<'a> {
     messages: Vec<OpenAiMessage<'a>>,
     max_completion_tokens: u32,
     response_format: OpenAiResponseFormat,
+    /// Only the agent step sends this, and only when the operator opted in
+    /// ([`crate::triage::agent_config::AgentConfig::openai_reasoning_effort`]):
+    /// a model that does not take the field answers it with a 400.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'a str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -567,6 +581,7 @@ async fn classify_openai(
     url: &str,
     api_key: &str,
     req: &LlmRequest<'_>,
+    reasoning_effort: Option<&str>,
 ) -> std::result::Result<LlmOutcome<String>, ClassifyError> {
     let max_completion_tokens = MAX_TOKENS;
 
@@ -591,6 +606,7 @@ async fn classify_openai(
                 schema: req.schema.clone(),
             },
         },
+        reasoning_effort,
     };
 
     let build = || {
@@ -881,6 +897,7 @@ mod tests {
                 "test",
                 Stage2Provider::Anthropic,
                 &req,
+                false,
             )
             .await
             .unwrap();

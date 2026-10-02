@@ -145,6 +145,7 @@ async fn run_bounded(
             connection.api_key,
             connection.provider,
             &request,
+            config.agent.openai_reasoning_effort,
         )
         .await
         .map_err(|error| error.kind)?;
@@ -1439,6 +1440,58 @@ mod tests {
             "choices": [{"message": {"content": content.as_str().map(str::to_owned).unwrap_or_else(|| content.to_string())}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 12, "completion_tokens": 8}
         }))
+    }
+
+    /// The OpenAI wire carries an effort only when the operator opted in.
+    #[tokio::test]
+    async fn openai_reasoning_effort_is_sent_only_when_configured() {
+        use axum::{Router, routing::post};
+        use std::sync::{Arc, Mutex};
+        for (opted_in, expected) in [(false, Value::Null), (true, json!("low"))] {
+            let seen = Arc::new(Mutex::new(Vec::<Value>::new()));
+            let record = seen.clone();
+            let app = Router::new().route(
+                "/",
+                post(move |axum::Json(request): axum::Json<Value>| {
+                    let record = record.clone();
+                    async move {
+                        record.lock().unwrap().push(request);
+                        let content = json!({"result": {"step": "finish", "decision": valid()}});
+                        axum::Json(json!({
+                            "choices": [{"message": {"content": content.to_string()}, "finish_reason": "stop"}],
+                            "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+                        }))
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let http = reqwest::Client::new();
+            let connection = AgentConnection {
+                http: &http,
+                url: &url,
+                api_key: "test",
+                provider: Stage2Provider::OpenAI,
+                model: "test",
+                effort: Some("low"),
+            };
+            let context = ContextSnapshot {
+                thread_id: "thread".into(),
+                initial: json!({"message":{"id":7,"thread_id":"thread"},"attention":null}),
+                source_message_ids: vec![7],
+                ..Default::default()
+            };
+            let mut config = AgentTriageConfig::default();
+            config.agent.openai_reasoning_effort = opted_in;
+            run_agent(connection, &config, context, &NoEvidence)
+                .await
+                .unwrap();
+            let requests = seen.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0]["reasoning_effort"], expected, "{opted_in}");
+            server.abort();
+        }
     }
 
     #[tokio::test]

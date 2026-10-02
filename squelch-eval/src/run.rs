@@ -694,10 +694,16 @@ pub async fn run(options: &RunOptions) -> Result<RunSummary> {
         "finished_at": Value::Null,
     });
     crate::private_write(&run_file, serde_json::to_string_pretty(&meta)?.as_bytes())?;
+    // The one departure from production's config: a candidate on an
+    // OpenAI-compatible provider gets its effort as `reasoning_effort`.
+    // Production leaves that off; without it GLM 5.3 thinks to the token
+    // ceiling and times out.
+    let mut config = AgentTriageConfig::default();
+    config.agent.openai_reasoning_effort = true;
     let shared = Shared {
         store: &store,
         data: &data,
-        config: AgentTriageConfig::default(),
+        config,
         http: reqwest::Client::new(),
         url,
         api_key,

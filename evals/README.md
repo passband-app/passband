@@ -400,7 +400,12 @@ harness disagrees with itself; it is reported loudly as a bug.
 - Old gold rows came from earlier prompt versions; `gold_meta.prompt_version`
   says which.
 - Runs use `AgentTriageConfig::default()`, not the daemon's live
-  configuration. Only the model and effort come from the candidate.
+  configuration. Only the model and effort come from the candidate, with one
+  exception: a candidate on an OpenAI-compatible provider has its `effort`
+  sent as `reasoning_effort` (`agent.openai_reasoning_effort`, off in
+  production). Several open-weight models think to the token ceiling
+  without it; a model that does not take the field answers 400, so leave
+  `effort` out for those.
 - Thread attention is rebuilt from each message's current decision. A
   message triaged twice loses its first decision (those cases are suspect).
   Action ids are the ones production assigned where they can be recovered

@@ -4,7 +4,7 @@
 // the re-triage run itself. The composer is NOT here anymore — it is a layout
 // pane (see ComposePane in MainShell), not an overlay.
 // Read views own the list keymap; this layer extends that same "list" context
-// with t and p. Modal-context keys live inside each overlay.
+// with p and c. Modal-context keys live inside each overlay.
 
 import SwiftUI
 
@@ -105,9 +105,6 @@ struct ActionLayer: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
         .keyBindings(.list, [
-            KeyBinding("t", "tune sender") {
-                if let u = store.selectedUpdate { Actions.tune(sender: u.sender) }
-            },
             KeyBinding("p", "process mode") { store.processModeOpen = true },
             // `c` = compose, registered per-SURFACE (here for the lists, and again
             // in the sitrep and the reader) rather than globally: a global one would

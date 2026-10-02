@@ -448,3 +448,11 @@ run_suite reading \
   Sources/Passband/Lib/SenderIdentity.swift \
   Sources/Passband/Lib/Reading.swift \
   Tests/ReadingTests.swift
+
+# The Agents pane: which probe answers mean a sign-in door (an arbitrary 401
+# must not), and the text it hands somebody to paste. A snippet with a token
+# slot gets pasted with the slot still in, so every one is asserted, and the
+# self-hosted door's snippets are pinned to what they were before.
+run_suite agent-connect \
+  Sources/Passband/Model/AgentConnect.swift \
+  Tests/AgentConnectTests.swift

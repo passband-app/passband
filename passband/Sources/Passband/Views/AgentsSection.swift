@@ -5,8 +5,9 @@
 // it is open, HOW to point a given agent at it, and WHAT the agent gets once it
 // is through. The last one is not decoration. Handing an agent your mail is
 // the kind of decision people make once and remember, and the honest version
-// of it includes the parts the agent cannot do and the fact that the door has
-// no lock of its own.
+// of it includes the parts the agent cannot do and how the door is locked: a
+// self-hosted door has no lock of its own, a hosted one asks each agent to sign
+// in with the mailbox's Google account.
 //
 // Shared by both shells: the phone files it under the account page, the Mac
 // beside the mail. This is also where managing connected agents will live
@@ -22,6 +23,12 @@ struct AgentsSection: View {
 
     private var endpoint: String? { AgentConnect.endpoint(serverURL: store.settings?.serverURL) }
     private var status: AgentDoorStatus { connect.status(for: endpoint) }
+    private var auth: AgentDoorAuth { status.auth }
+    private var agents: [AgentKind] { AgentKind.shown(for: auth) }
+    /// The chosen agent, or the first one this door offers when the choice is
+    /// not on its list (Claude Desktop picked, then the door turned out to be
+    /// the sign-in one).
+    private var shownAgent: AgentKind { agents.contains(agent) ? agent : agents[0] }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -83,6 +90,8 @@ struct AgentsSection: View {
             StatusDot(color: Palette.inkFaintest, label: "checking…")
         case .open:
             StatusDot(color: Palette.positive, label: "open")
+        case .signInRequired:
+            StatusDot(color: Palette.positive, label: "open with sign-in")
         case .hostRefused:
             StatusDot(color: Palette.warn, label: "refused by name")
         case .notServed:
@@ -100,6 +109,10 @@ struct AgentsSection: View {
             )
         case .open:
             SettingsHint("Any agent that can reach this address can connect.")
+        case .signInRequired:
+            SettingsHint(
+                "Agents connect with this address alone. There is no key to copy. Each one opens a browser and asks you to sign in with the Google account of this mailbox, then to approve it."
+            )
         case .hostRefused:
             let host = AgentConnect.host(of: endpoint) ?? "your-host"
             SettingsHint(
@@ -122,30 +135,38 @@ struct AgentsSection: View {
     // MARK: - how to connect one
 
     private func setupCard(_ endpoint: String) -> some View {
-        SectionCard(label: "Set it up", note: agent.name) {
+        let agent = shownAgent
+        return SectionCard(label: "Set it up", note: agent.name) {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 142), spacing: 8)], spacing: 8) {
-                ForEach(AgentKind.allCases) { kind in
+                ForEach(agents) { kind in
                     agentChip(kind)
                 }
             }
-            SettingsHint(agent.instruction)
-            CodeBlock(text: agent.snippet(endpoint: endpoint))
+            SettingsHint(agent.instruction(for: auth))
+            CodeBlock(text: agent.snippet(endpoint: endpoint, auth: auth))
+            if let signIn = agent.signIn(for: auth) {
+                followUp("then sign in with", signIn)
+            }
             if let check = agent.check {
-                HStack(spacing: 8) {
-                    Text("then check with")
-                        .font(Typo.micro)
-                        .foregroundStyle(Palette.inkFaintest)
-                    Text(check)
-                        .font(Typo.mono(10))
-                        .foregroundStyle(Palette.inkDim)
-                        .textSelection(.enabled)
-                }
+                followUp("then check with", check)
             }
         }
     }
 
+    private func followUp(_ label: String, _ command: String) -> some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .font(Typo.micro)
+                .foregroundStyle(Palette.inkFaintest)
+            Text(command)
+                .font(Typo.mono(10))
+                .foregroundStyle(Palette.inkDim)
+                .textSelection(.enabled)
+        }
+    }
+
     private func agentChip(_ kind: AgentKind) -> some View {
-        let active = kind == agent
+        let active = kind == shownAgent
         return Button {
             withAnimation(Motion.disclose) { agent = kind }
         } label: {
@@ -196,9 +217,15 @@ struct AgentsSection: View {
                         "Change anything in Gmail",
                     ])
             }
-            SettingsHint(
-                "The agent door has no password of its own. Anything that can reach the address above can read your triaged mail, so keep it on this computer or your tailnet."
-            )
+            if auth == .signIn {
+                SettingsHint(
+                    "An agent you approve keeps access until its sign-in expires. To cut one off sooner, contact support for now."
+                )
+            } else {
+                SettingsHint(
+                    "The agent door has no password of its own. Anything that can reach the address above can read your triaged mail, so keep it on this computer or your tailnet."
+                )
+            }
         }
     }
 

@@ -6,10 +6,11 @@ it. This feature turns that reading into a calendar the user rarely has to
 manage, and gives mail the one thing it has never known: what the user's time
 looks like.
 
-DRAFT, 2026-09-30. Only wave 1 (the ghost engine, §3.6) is built; nothing
-else here is. Sections marked DECIDED carry a
-product decision made that day; everything else is a proposal. §14 lists what
-is still open.
+DRAFT, started 2026-09-30. BUILT so far: the ghost engine (§3.6), the
+optional calendar grant and a read-only calendar sync (§8), and a first
+Calendar page in the Mac client with the connect card (§5, "Built so far").
+Nothing writes to a real calendar. Sections marked DECIDED carry a product
+decision; everything else is a proposal. §14 lists what is still open.
 
 ## 1. The bar
 
@@ -524,6 +525,15 @@ founder says otherwise:
 - Accounts are two muted fills. Blue is reserved for state: now, next, holds
   and suggested slots.
 
+**Built so far** (Mac client, behind Developer mode): a Calendar destination
+second in the rail, opened with `⇧C` and outside the number-key order; an
+agenda page (a "Next" callout, today's strip, days with ghosts and real events
+in time order, "N earlier today" and "N unlikely" folds); a detail pane with
+the mail behind each item and the model's own words shown as attributed
+quotes; going and dismiss on ghosts; the connect card (shown once per account
+as a modal, then a quiet banner), its waiting state, and a line for the sync
+state. It has never been seen on screen by the people who built it.
+
 - **Sitrep agenda.** Replaces the Calendar zone: today and the next few days,
   real events and ghosts together, with the next commitment called out. This
   is the daily surface. Most days the user needs nothing else.
@@ -964,7 +974,9 @@ create an event only behind its existing confirm step.
 All of this ships dark behind a feature flag so it can be tested on real
 accounts before anyone else sees it. A proper flag system does not exist yet
 and is being designed separately; this feature is its first customer. Until
-it lands, the daemon capability in §8 gates the server half.
+it lands, the Calendar page is shown only when the daemon reports `timeline`
+AND the client's Developer mode setting is on (`CalendarGate` in
+`passband/Sources/Passband/Lib/Agenda.swift` is the one place that decides).
 
 ## 12. Build order
 
@@ -977,7 +989,9 @@ Each wave is useful on its own and is committed when verified.
 2. **Timeline (client, no new scope).** Opus 5.5 visual pass first. Merged
    timeline model, day column, sitrep agenda replacing the Calendar zone,
    event detail with its mail, month. Ghost actions before the grant: dismiss,
-   "going", adjust the end.
+   "going", adjust the end. PARTLY BUILT: a Calendar page with an agenda,
+   event detail with its mail, going and dismiss. Not built: the day column,
+   week, month, the sitrep agenda, end editing, several accounts merged.
 3. **Likelihood.** Outcome ledger, blended score, the three bands, the
    one-line reason.
 4. **Real calendar.** Scope and optional grant, the reconnect variant and

@@ -25,6 +25,12 @@ final class WhatsNew {
     /// note for this build there is still no card.
     static let forced = ProcessInfo.processInfo.environment["PASSBAND_FORCE_WHATS_NEW"] == "1"
 
+    /// Which page of the walk the card opens on, for looking at one page with
+    /// no hand on the keyboard (a screenshot has none). 0, the first, unless
+    /// `PASSBAND_WHATS_NEW_PAGE` says otherwise; past the end is the record.
+    nonisolated static let openingPage = max(
+        0, Int(ProcessInfo.processInfo.environment["PASSBAND_WHATS_NEW_PAGE"] ?? "") ?? 0)
+
     /// What the card draws, newest release first. Empty means no card.
     private(set) var notes: [ReleaseNote] = []
 

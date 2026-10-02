@@ -47,12 +47,14 @@
 		18FD22776F56E1E1D787465D /* Density.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84AD5723EFAFDE98586BA93D /* Density.swift */; };
 		19AC9992744F5AE1DE0DF040 /* AuditView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6D39F14D1F28EEB5D9E86FE /* AuditView.swift */; };
 		1A920B5E9FD361E56B345AC3 /* DemoAppearancePicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2D68A34D5DC11532BE8E359 /* DemoAppearancePicker.swift */; };
+		1B5E5602E42CC14034AFB544 /* ReleaseVignettes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20784C558DBC1E921E560D2E /* ReleaseVignettes.swift */; };
 		1B728ED3AEA7FA2987C81319 /* ListRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A52E20474A0D6F31073DA61 /* ListRow.swift */; };
 		1CE21E966B1C0068BBAE7178 /* ThreadArrivals.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB8DC0D632309B6B97130426 /* ThreadArrivals.swift */; };
 		1D4DC0356DE1A699763FBFB0 /* UsageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8D7384FAFC16891C369CFA8 /* UsageView.swift */; };
 		1E07DF0006E501D0B7C3228A /* Ranking.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7079893CCCC8806D2B5099D8 /* Ranking.swift */; };
 		1E3D3435F491C658C93127B4 /* Format.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5883BA424612265657845246 /* Format.swift */; };
 		1E8DA017E91A02EF7B7BD2E3 /* PhosphorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C6A02D8A42FF0B05E18ED65 /* PhosphorView.swift */; };
+		2004304EDEC8E2393B815D03 /* VignetteStage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 394CFE99327CF989002CD318 /* VignetteStage.swift */; };
 		2086E66FA0564AF40E52C8CC /* ScheduledPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = 707238A27F067D0A20AAB186 /* ScheduledPreview.swift */; };
 		217F91C35460C7286C88712C /* WebKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BBC8D81B089AFD24BD4AC367 /* WebKit.framework */; };
 		21C07F48F3C41E83CEBDD284 /* OnboardingIntroView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C787F920246CFD228F21747 /* OnboardingIntroView.swift */; };
@@ -61,6 +63,7 @@
 		2305ADF476A30E034D2EC27C /* DraftSaver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06A50E65F84872DFA0504B96 /* DraftSaver.swift */; };
 		231B88B449E171FE30F25D07 /* AuthCode.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB5FEFF987265DA1E7F85007 /* AuthCode.swift */; };
 		24AF68BF417C51D26EB40ED6 /* SyncStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DAC2EA79665D763DD36958D /* SyncStatus.swift */; };
+		24B9C76ED25930D29752DBC9 /* ReleaseVignettes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20784C558DBC1E921E560D2E /* ReleaseVignettes.swift */; };
 		2530ADC217749D5FEEFFA4D9 /* DraftSaver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06A50E65F84872DFA0504B96 /* DraftSaver.swift */; };
 		26C5B834CA3DF63D12F9AAC4 /* Avatar.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC0ADC18AA758296235E8F59 /* Avatar.swift */; };
 		2785F1AA75B655313673E0D0 /* Trackers.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEFA34554013DFB615774309 /* Trackers.swift */; };
@@ -392,6 +395,7 @@
 		E13A65A578EFB91C938B0060 /* ShareNudge.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEACCDDABDFBD619EB070CEB /* ShareNudge.swift */; };
 		E1ACA531EA2201EBCD932243 /* AuthLabels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40EDDA2423A09A989C77CAED /* AuthLabels.swift */; };
 		E1B51795DAA1D253B70C671C /* TourOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 627B000AA2D3694B771F50B0 /* TourOverlay.swift */; };
+		E3023FCB2DE7ED325ED34C31 /* VignetteStage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 394CFE99327CF989002CD318 /* VignetteStage.swift */; };
 		E34EAB60EA0881853C401AE7 /* SquelchSceneView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C3BB3E8C5DCB0B058D3D5E2 /* SquelchSceneView.swift */; };
 		E35875A540CF706735EFC166 /* Keychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D19065EB7E9BFE9E846675B /* Keychain.swift */; };
 		E3F69438A22E2036CD7742D2 /* ImageFill.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE514B2862480E62EB8936A3 /* ImageFill.swift */; };
@@ -506,6 +510,7 @@
 		1EC7EBBF801C0364D402F94D /* Assistant.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Assistant.swift; sourceTree = "<group>"; };
 		1F0E547B2A7CA1DA951D255C /* Chrome.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Chrome.swift; sourceTree = "<group>"; };
 		1FFFC29B07960820C815F66C /* MessageRecipients.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageRecipients.swift; sourceTree = "<group>"; };
+		20784C558DBC1E921E560D2E /* ReleaseVignettes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReleaseVignettes.swift; sourceTree = "<group>"; };
 		20CA62DECFED05021D0C9964 /* HeroCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeroCache.swift; sourceTree = "<group>"; };
 		22634771F8C0BE048B034866 /* WhatsNew.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhatsNew.swift; sourceTree = "<group>"; };
 		22B6CF4EF83BEF15EB372184 /* SitrepZones.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SitrepZones.swift; sourceTree = "<group>"; };
@@ -533,6 +538,7 @@
 		37AEAA24984488DA00EBD6C4 /* Platform.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Platform.swift; sourceTree = "<group>"; };
 		380A6F03DF41EB8ACAACDBFC /* UsageSeries.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageSeries.swift; sourceTree = "<group>"; };
 		389673F8FDDB51FC4830D9D2 /* PassbandApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PassbandApp.swift; sourceTree = "<group>"; };
+		394CFE99327CF989002CD318 /* VignetteStage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VignetteStage.swift; sourceTree = "<group>"; };
 		39D5C019641DC37B55D7D922 /* ImageProxy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageProxy.swift; sourceTree = "<group>"; };
 		3BE1E84810E523707C4E2CC5 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		3BFBFFBE499370A5F88E2540 /* EmailWebCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmailWebCore.swift; sourceTree = "<group>"; };
@@ -753,6 +759,7 @@
 			children = (
 				C4A36A6B3A4ACA1C0083074D /* Phosphor */,
 				8C4CC5CD37504FFBBBE5B8C8 /* Squelch */,
+				AA34F06F22D5B00445F39470 /* Vignette */,
 				9B11AE47A064BB58DD81A6DB /* ActionLayer.swift */,
 				09312A1F80127B91A8FDC394 /* AgentCards.swift */,
 				0B934097D54904EB956A1B16 /* AgentsSection.swift */,
@@ -1030,6 +1037,15 @@
 				49ABACAD4FE96A07B2F2C669 /* Zoom.swift */,
 			);
 			path = App;
+			sourceTree = "<group>";
+		};
+		AA34F06F22D5B00445F39470 /* Vignette */ = {
+			isa = PBXGroup;
+			children = (
+				20784C558DBC1E921E560D2E /* ReleaseVignettes.swift */,
+				394CFE99327CF989002CD318 /* VignetteStage.swift */,
+			);
+			path = Vignette;
 			sourceTree = "<group>";
 		};
 		AD9FE44F76CEA17B37A437DE /* Sources */ = {
@@ -1409,6 +1425,7 @@
 				41CDAAADD8D0F801A74E7B5C /* RehearsalNewsletterLogo.swift in Sources */,
 				A19640E9DA24D6C6F85E215C /* RelayProxy.swift in Sources */,
 				526581101F846DEC04813704 /* ReleaseNotes.swift in Sources */,
+				24B9C76ED25930D29752DBC9 /* ReleaseVignettes.swift in Sources */,
 				2E55F517D48F9CE4E5882C21 /* RemindPalette.swift in Sources */,
 				39B48BCF60CA5737C7088687 /* RemindTimes.swift in Sources */,
 				346B6C45B35972DC0A41FD9C /* RetriageModal.swift in Sources */,
@@ -1471,6 +1488,7 @@
 				2AE0CB107FAB86784BE5C0F4 /* Updater.swift in Sources */,
 				B2E2414F9A0257E75BC3C7B0 /* UsageSeries.swift in Sources */,
 				1D4DC0356DE1A699763FBFB0 /* UsageView.swift in Sources */,
+				2004304EDEC8E2393B815D03 /* VignetteStage.swift in Sources */,
 				454262AEF38CC6F59CEB4989 /* WhatsNew.swift in Sources */,
 				CF34A69E15DFE9980A622162 /* WhatsNewCard.swift in Sources */,
 				6F3982A3598CCC296C35C2E6 /* WireTypes.swift in Sources */,
@@ -1621,6 +1639,7 @@
 				0CC3D5BBD993D4A162472FAB /* RehearsalNewsletterLogo.swift in Sources */,
 				65404ACF0C3CD7B16721D3E8 /* RelayProxy.swift in Sources */,
 				693321A39E2B0E50EC447924 /* ReleaseNotes.swift in Sources */,
+				1B5E5602E42CC14034AFB544 /* ReleaseVignettes.swift in Sources */,
 				C7AF257F381B402E8C1F1839 /* RemindPalette.swift in Sources */,
 				C8B62E16CC9F5AE6DA3B774E /* RemindTimes.swift in Sources */,
 				CF0065AF30C9FC626811FF50 /* RetriageModal.swift in Sources */,
@@ -1679,6 +1698,7 @@
 				B2DCDDC65C633129F7E17471 /* UpdateRow.swift in Sources */,
 				4836A3C84F0310D8E5E60FCB /* UpdateVerbs.swift in Sources */,
 				4C8971E5C6FA76A0AE2380E6 /* UsageSeries.swift in Sources */,
+				E3023FCB2DE7ED325ED34C31 /* VignetteStage.swift in Sources */,
 				0A10F1733FF17A416C100485 /* WhatsNew.swift in Sources */,
 				F7F2772B8DCFEA19D81F022E /* WhatsNewCard.swift in Sources */,
 				B91230E83D52E90A46495F77 /* WireTypes.swift in Sources */,
@@ -1733,7 +1753,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.0.6;
+				MARKETING_VERSION = 0.0.7;
 				PRODUCT_BUNDLE_IDENTIFIER = app.passband.client.ios.notify;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = 1;
@@ -1761,7 +1781,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.0.6;
+				MARKETING_VERSION = 0.0.7;
 				PRODUCT_BUNDLE_IDENTIFIER = app.passband.client.ios;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = 1;
@@ -1784,7 +1804,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.0.11;
+				MARKETING_VERSION = 0.0.12;
 				PRODUCT_BUNDLE_IDENTIFIER = app.passband.client;
 				PRODUCT_NAME = Passband;
 				SDKROOT = macosx;
@@ -1884,7 +1904,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.0.6;
+				MARKETING_VERSION = 0.0.7;
 				PRODUCT_BUNDLE_IDENTIFIER = app.passband.client.ios;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = 1;
@@ -1909,7 +1929,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.0.6;
+				MARKETING_VERSION = 0.0.7;
 				PRODUCT_BUNDLE_IDENTIFIER = app.passband.client.ios.notify;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = 1;
@@ -1932,7 +1952,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.0.11;
+				MARKETING_VERSION = 0.0.12;
 				PRODUCT_BUNDLE_IDENTIFIER = app.passband.client;
 				PRODUCT_NAME = Passband;
 				SDKROOT = macosx;

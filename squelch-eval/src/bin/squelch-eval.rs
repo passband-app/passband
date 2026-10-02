@@ -44,9 +44,12 @@ enum Command {
         reps: u32,
         #[arg(long, default_value_t = 4)]
         concurrency: usize,
-        /// Stratified sample of about N cases (floor 15 per stratum).
+        /// Stratified sample of about N cases, at least --floor per stratum.
         #[arg(long)]
         sample: Option<usize>,
+        /// Smallest per-stratum sample; raise it to take rare strata whole.
+        #[arg(long, default_value_t = squelch_eval::run::SAMPLE_FLOOR)]
+        floor: usize,
         #[arg(long, default_value_t = 0)]
         seed: u64,
         /// exact, reconstructed (default: everything but suspect), or all.
@@ -160,6 +163,7 @@ async fn main() -> Result<()> {
             reps,
             concurrency,
             sample,
+            floor,
             seed,
             fidelity,
             cases,
@@ -182,6 +186,7 @@ async fn main() -> Result<()> {
                 reps,
                 concurrency,
                 sample: sample.map(|n| (n, seed)),
+                sample_floor: floor,
                 fidelity,
                 cases,
                 effort,

@@ -489,6 +489,7 @@ pub fn run_options(dataset: &std::path::Path, url: &str) -> RunOptions {
         reps: 1,
         concurrency: 2,
         sample: None,
+        sample_floor: crate::run::SAMPLE_FLOOR,
         fidelity: FidelityFilter::Reconstructed,
         cases: Vec::new(),
         effort: None,

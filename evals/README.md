@@ -38,7 +38,7 @@ squelch-eval show <case-id> [--dataset DIR]
 squelch-eval sample --per-stratum N [--seed S] [--dataset DIR]
 squelch-eval init
 squelch-eval run --candidate NAME [--dataset DIR] [--reps R] [--concurrency C]
-                 [--sample N --seed S] [--fidelity exact|reconstructed|all]
+                 [--sample N --seed S --floor F] [--fidelity exact|reconstructed|all]
                  [--case ID ...] [--effort E] [--max-usd X] [--yes]
 squelch-eval report [RUN ...] [--dataset DIR] [--baseline RUN] [--diff RUN]
                     [--cache-hit F] [--md FILE] [--allow-repo-path] [--seed S]
@@ -48,9 +48,9 @@ squelch-eval adjudicate <case-id> --field F --verdict candidate|gold|either --ru
 `--dataset` defaults to the newest dataset under the root. A typical loop:
 
 1. `export`, then `sample --per-stratum 5` and read it.
-2. `run --candidate production --sample 300 --seed 1 --max-usd 20 --yes`:
+2. `run --candidate production --sample 150 --floor 100 --seed 1 --max-usd 20 --yes`:
    the noise floor (the incumbent against its own past answers).
-3. `run --candidate <cheaper> --sample 300 --seed 1 --max-usd 10 --yes`: the
+3. `run --candidate <cheaper> --sample 150 --floor 100 --seed 1 --max-usd 10 --yes`: the
    same cases, because a sample is fixed by (dataset, N, seed).
 4. `report --baseline production --diff <cheaper>`, then `adjudicate` the
    disagreements where gold is wrong, then `report` again.

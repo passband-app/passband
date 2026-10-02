@@ -32,7 +32,8 @@ pub const RUN_FILE: &str = "run.json";
 pub const TRACES_DIR: &str = "traces";
 /// Attempts per `(case, rep)` for infrastructure failures.
 pub const MAX_ATTEMPTS: u32 = 3;
-/// Smallest per-stratum sample, so a rare stratum still says something.
+/// Default smallest per-stratum sample, so a rare stratum still says
+/// something. `--floor` raises it to take the rare strata whole.
 pub const SAMPLE_FLOOR: usize = 15;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,7 +213,7 @@ pub struct Selection {
 /// Stratified by `tags[0]`: every stratum gets `min(size, max(floor,
 /// round(n * share)))` cases, each weighted `size / sampled`. Deterministic
 /// for (cases, n, seed), so two candidates replay the same cases.
-pub fn sample_cases(cases: &[Case], n: usize, seed: u64) -> Selection {
+pub fn sample_cases(cases: &[Case], n: usize, seed: u64, floor: usize) -> Selection {
     let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (index, case) in cases.iter().enumerate() {
         let stratum = case.tags.first().cloned().unwrap_or_else(|| "other".into());
@@ -224,7 +225,7 @@ pub fn sample_cases(cases: &[Case], n: usize, seed: u64) -> Selection {
     for (position, (stratum, mut members)) in groups.into_iter().enumerate() {
         let size = members.len();
         let share = (n as f64 * size as f64 / total).round() as usize;
-        let take = size.min(share.max(SAMPLE_FLOOR));
+        let take = size.min(share.max(floor));
         members.sort_by_key(|&index| cases[index].id);
         let stream = seed ^ (position as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
         crate::SplitMix64::new(stream).shuffle(&mut members);
@@ -364,6 +365,8 @@ pub struct RunOptions {
     pub concurrency: usize,
     /// `(n, seed)`.
     pub sample: Option<(usize, u64)>,
+    /// Smallest per-stratum sample ([`SAMPLE_FLOOR`] by default).
+    pub sample_floor: usize,
     pub fidelity: FidelityFilter,
     /// Restrict to these case ids.
     pub cases: Vec<i64>,
@@ -595,7 +598,7 @@ pub async fn run(options: &RunOptions) -> Result<RunSummary> {
         .filter(|case| options.cases.is_empty() || options.cases.contains(&case.id))
         .collect();
     let selection = match options.sample {
-        Some((n, seed)) => sample_cases(&cases, n, seed),
+        Some((n, seed)) => sample_cases(&cases, n, seed, options.sample_floor),
         None => Selection {
             picks: (0..cases.len()).map(|index| (index, 1.0)).collect(),
             strata: BTreeMap::new(),
@@ -683,7 +686,7 @@ pub async fn run(options: &RunOptions) -> Result<RunSummary> {
         "fidelity": options.fidelity,
         "cases": selection.picks.len(),
         "sample": options.sample.map(|(n, seed)| json!({
-            "n": n, "seed": seed, "floor": SAMPLE_FLOOR, "strata": selection.strata,
+            "n": n, "seed": seed, "floor": options.sample_floor, "strata": selection.strata,
         })),
         "prompt_version": PROMPT_VERSION,
         "harness_git_sha": git_sha(),
@@ -1444,7 +1447,7 @@ mod tests {
                 cases.push(synthetic(id, stratum));
             }
         }
-        let picked = sample_cases(&cases, 30, 7);
+        let picked = sample_cases(&cases, 30, 7, SAMPLE_FLOOR);
         let size = |s: &str| (picked.strata[s].size, picked.strata[s].sampled);
         assert_eq!(size("fye"), (40, 15), "floor");
         assert_eq!(size("reading"), (100, 21), "round(30 * 100/145)");
@@ -1457,12 +1460,25 @@ mod tests {
                 .map(|(i, _)| cases[*i].id)
                 .collect::<Vec<_>>()
         };
-        assert_eq!(ids(&picked), ids(&sample_cases(&cases, 30, 7)));
-        assert_ne!(ids(&picked), ids(&sample_cases(&cases, 30, 8)));
+        assert_eq!(
+            ids(&picked),
+            ids(&sample_cases(&cases, 30, 7, SAMPLE_FLOOR))
+        );
+        assert_ne!(
+            ids(&picked),
+            ids(&sample_cases(&cases, 30, 8, SAMPLE_FLOOR))
+        );
+        // A raised floor takes the rare strata whole, at weight 1.
+        let wide = sample_cases(&cases, 30, 7, 40);
+        assert_eq!(
+            (wide.strata["fye"].sampled, wide.strata["reading"].sampled),
+            (40, 40)
+        );
+        assert_eq!(wide.strata["fye"].weight, 1.0);
         // Input order does not matter; ids do.
         let mut shuffled = cases.clone();
         shuffled.reverse();
-        let again = sample_cases(&shuffled, 30, 7);
+        let again = sample_cases(&shuffled, 30, 7, SAMPLE_FLOOR);
         let mut a = ids(&picked);
         let mut b: Vec<i64> = again.picks.iter().map(|(i, _)| shuffled[*i].id).collect();
         a.sort_unstable();

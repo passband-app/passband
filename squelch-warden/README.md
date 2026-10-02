@@ -318,7 +318,7 @@ holds even for a tenant reconciled by hand.
 | `SQUELCH_WARDEN_TLS_SECRET` | `passband-wildcard-tls` | The wildcard certificate, in the tenant namespace. |
 | `SQUELCH_WARDEN_OAUTH_SECRET_NAME` | `google-oauth-client` | Secret holding the web client tenant daemons refresh with. |
 | `SQUELCH_WARDEN_CONSOLE_SSO_URL` | unset | Control plane origin, passed on as `SQUELCH_CONSOLE_SSO_URL`. Origin only. |
-| `SQUELCH_WARDEN_MCP_OAUTH_ISSUER` | unset | Publishes the agent door with OAuth. The AuthKit issuer, an `https://` origin with no path (e.g. `https://example.authkit.app`). Passed on as `SQUELCH_MCP_OAUTH_ISSUER`, with `SQUELCH_MCP_PUBLIC_URL=https://<label>.<base domain>/mcp`, and adds `/mcp` and `/.well-known/oauth-protected-resource` to every tenant Ingress. Unset renders exactly what a warden without it did. Set it LAST; see SETUP.md, "Publishing the agent door". |
+| `SQUELCH_WARDEN_MCP_OAUTH_ISSUER` | unset | Publishes the agent door with OAuth. The AuthKit issuer, an `https://` origin with no port and no path (e.g. `https://example.authkit.app`). Passed on as `SQUELCH_MCP_OAUTH_ISSUER`, with `SQUELCH_MCP_PUBLIC_URL=https://<label>.<base domain>/mcp`, and adds `/mcp` and `/.well-known/oauth-protected-resource` to every tenant Ingress. Unset renders exactly what a warden without it did. Set it LAST; see SETUP.md, "Publishing the agent door". |
 | `SQUELCH_WARDEN_STORAGE_CLASS` | `local-path` | k3s's built-in provisioner. |
 | `SQUELCH_WARDEN_STORAGE_SIZE` | `10Gi` | Per-tenant volume. |
 | `SQUELCH_WARDEN_CPU_REQUEST` | `100m` | Tenant daemon container. |

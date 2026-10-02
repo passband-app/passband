@@ -185,9 +185,10 @@ data:
   #
   # SET IT LAST. The order is in SETUP.md, "Publishing the agent door": the
   # daemon image that understands it rolled to the whole fleet first, the
-  # control plane's WorkOS key second, the pre-publish checklist third (one of
-  # its three checks, if it fails, means this must never be set), and this
-  # line fourth. It moves every tenant's Deployment, so the roller carries it
+  # control plane's WorkOS key and AuthKit setup second (including the JWT
+  # template that puts `email` in the token, without which every agent is
+  # refused), the pre-publish checklist third (some of its checks, if they
+  # fail, mean this must never be set), and this line fourth. It moves every tenant's Deployment, so the roller carries it
   # one tenant per tick and each reconcile re-applies the Ingress with it; the
   # one tenant shape it can miss is in that section too.
   # SQUELCH_WARDEN_MCP_OAUTH_ISSUER: "https://<something>.authkit.app"

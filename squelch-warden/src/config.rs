@@ -1015,8 +1015,8 @@ fn canonical_llm_base_url(raw: &str) -> Result<String, ConfigError> {
     Ok(url.to_string())
 }
 
-/// Validate the agent door's OAuth issuer: `https://`, a host, an optional
-/// port, and NOTHING after them.
+/// Validate the agent door's OAuth issuer: `https://`, a host, and NOTHING
+/// else, not even a port.
 ///
 /// It lands verbatim in every tenant pod as `SQUELCH_MCP_OAUTH_ISSUER`, where
 /// it is two things at once: the value every agent token's `iss` must equal,
@@ -1033,6 +1033,11 @@ fn canonical_llm_base_url(raw: &str) -> Result<String, ConfigError> {
 ///   a pasted endpoint (`.../oauth2/jwks`, `.../.well-known/...`), and since the
 ///   daemon compares `iss` as an exact string, it would refuse every token
 ///   while the door looked perfectly configured.
+/// - **no port, not even `:443`.** A tenant pod's NetworkPolicy allows egress
+///   on TCP 443 and nothing else, so a daemon told `:8443` can never fetch the
+///   signing keys; and AuthKit's `iss` carries no port, so an explicit `:443`
+///   is the same server and a string no token will ever equal. Either way every
+///   token is refused with no hint why, so it is a refusal to boot instead.
 /// - **no query, fragment, userinfo or whitespace**, and a lowercase host, for
 ///   the same exact-compare reason: a host typed in capitals is the same server
 ///   and a different string.
@@ -1063,10 +1068,12 @@ fn canonical_mcp_oauth_issuer(raw: &str) -> Result<String, ConfigError> {
             "{NAME} must be an issuer origin with no path, query or fragment (e.g. https://example.authkit.app)"
         )));
     }
-    let (host, port) = match authority.split_once(':') {
-        Some((host, port)) => (host, Some(port)),
-        None => (authority, None),
-    };
+    if authority.contains(':') {
+        return Err(ConfigError::invalid(format!(
+            "{NAME} must not carry a port, not even :443: tenant pods may only reach the issuer on 443, and AuthKit's token issuer has no port in it, so any explicit port makes every agent token fail (e.g. https://example.authkit.app)"
+        )));
+    }
+    let host = authority;
     let host_ok = !host.is_empty()
         && host
             .bytes()
@@ -1074,12 +1081,9 @@ fn canonical_mcp_oauth_issuer(raw: &str) -> Result<String, ConfigError> {
         && !host.starts_with(['.', '-'])
         && !host.ends_with(['.', '-'])
         && !host.contains("..");
-    let port_ok = port.is_none_or(|p| {
-        !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) && p.parse::<u16>().is_ok()
-    });
-    if !host_ok || !port_ok {
+    if !host_ok {
         return Err(ConfigError::invalid(format!(
-            "{NAME} is not a valid issuer: a lowercase host name and an optional port, nothing else (e.g. https://example.authkit.app)"
+            "{NAME} is not a valid issuer: a lowercase host name, nothing else (e.g. https://example.authkit.app)"
         )));
     }
     Ok(format!("https://{authority}"))
@@ -1426,10 +1430,6 @@ mod tests {
                 " https://example.authkit.app/ ",
                 "https://example.authkit.app",
             ),
-            (
-                "https://auth.passband.app:8443",
-                "https://auth.passband.app:8443",
-            ),
         ] {
             assert_eq!(issuer(value).unwrap().as_deref(), Some(want), "`{value}`");
         }
@@ -1447,6 +1447,10 @@ mod tests {
         const NO_HOST: &str = "has no host";
         const NOT_ORIGIN: &str = "no path, query or fragment";
         const BAD_HOST: &str = "is not a valid issuer";
+        // ANY explicit port, the harmless-looking `:443` included: tenant
+        // pods egress on 443 only, so another port never reaches the keys,
+        // and AuthKit's `iss` has no port, so `:443` never equals it.
+        const PORT: &str = "must not carry a port, not even :443";
         for (value, why) in [
             ("http://example.authkit.app", NOT_HTTPS),
             ("example.authkit.app", NOT_HTTPS),
@@ -1474,10 +1478,13 @@ mod tests {
             ("https://Example.AuthKit.app", BAD_HOST),
             ("https://example..authkit.app", BAD_HOST),
             ("https://.example.authkit.app", BAD_HOST),
-            ("https://example.authkit.app:", BAD_HOST),
-            ("https://example.authkit.app:http", BAD_HOST),
-            ("https://example.authkit.app:+443", BAD_HOST),
-            ("https://example.authkit.app:99999", BAD_HOST),
+            ("https://example.authkit.app:443", PORT),
+            ("https://example.authkit.app:443/", PORT),
+            ("https://auth.passband.app:8443", PORT),
+            ("https://example.authkit.app:", PORT),
+            ("https://example.authkit.app:http", PORT),
+            ("https://example.authkit.app:+443", PORT),
+            ("https://example.authkit.app:99999", PORT),
             ("https://example.authkit.app\"", BAD_HOST),
         ] {
             let err = match issuer(value) {

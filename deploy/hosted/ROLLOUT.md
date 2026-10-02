@@ -232,7 +232,8 @@ Turning on `SQUELCH_WARDEN_MCP_OAUTH_ISSUER` is NOT part of an image rollout,
 and must never ride in the same edit as one. The order is: roll the daemon
 image that understands the agent door's OAuth variables and wait for this page
 to finish (a run exiting 0, everything `already current`); set the control
-plane's `SQUELCH_CONTROL_WORKOS_API_KEY`; run the pre-publish checklist on the
+plane's `SQUELCH_CONTROL_WORKOS_API_KEY` and configure AuthKit (dedicated
+environment, JWT template); run the pre-publish checklist on the
 real environment; and only then set the issuer, apply, restart the serving
 warden, and let the roller converge a second time. Set it early and every
 tenant still on the old image answers 403 on `/mcp` until it is rolled (closed,

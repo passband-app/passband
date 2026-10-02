@@ -2137,9 +2137,14 @@ daemon's `/mcp` into OAuth mode, and every tenant Ingress adds two Prefix paths,
 `/mcp` and `/.well-known/oauth-protected-resource`, and nothing else. From then
 on the daemon is the lock. A request with no token gets a 401 pointing at the
 tenant's protected-resource metadata, which names WorkOS AuthKit as the
-authorization server; the agent signs its user in there, and comes back with an
-access token the daemon verifies locally against AuthKit's published keys:
-RS256 only, the right issuer, an audience equal to this tenant's own URL, not
+authorization server. The agent registers with AuthKit and sends its user
+there; AuthKit hands the browser to the control plane's `/agent/auth`, which
+signs the user in with Google, shows a confirmation page naming the mailbox
+the agent is about to be given, and only after the user confirms it
+(`POST /agent/confirm`) tells WorkOS who the user is. AuthKit then shows its
+own consent screen and finishes the flow. The agent comes back with an access
+token the daemon verifies locally against AuthKit's published keys: RS256
+only, the right issuer, an audience equal to this tenant's own URL, not
 expired, and an `email` claim equal to this tenant's own mailbox address.
 
 That last check is the one everything rests on. One wildcard resource indicator
@@ -2147,6 +2152,32 @@ covers the whole fleet, so any Passband user can obtain a token whose audience
 is somebody else's tenant URL; the email binding is the only thing between one
 account holder and another's mail. It is also why the pre-publish checklist
 below exists.
+
+A few things a user or an operator will run into once it is published:
+
+- **The client name on AuthKit's consent screen is not verified.** Under
+  Dynamic Client Registration every client names itself, so "Claude Code" on
+  that screen is whatever the registering program chose to write. DCR stays on
+  anyway, because most agents (Claude Code, Cursor, Codex) register that way.
+  The mailbox named on the control plane's confirmation page is the part that
+  is true.
+- **The URL must be pasted exactly as the app shows it, with no trailing
+  slash.** Some clients send the typed URL as the OAuth `resource`, and both
+  the daemon's metadata and WorkOS's wildcard resource match require the exact
+  path `https://<label>.passband.email/mcp`.
+- **Browser-based MCP clients are not supported.** `/mcp` sends no CORS
+  headers, so something like MCP Inspector in direct mode cannot call it from a
+  page. Server-side and native clients (Claude Code, Codex, Cursor, Claude
+  connectors) are unaffected.
+- **A pod that cannot reach the issuer for a day stops serving the door.** The
+  daemon refreshes its copy of the issuer's signing keys at least hourly and
+  stops trusting a cached key set after 24 hours without a successful refresh,
+  so a tenant cut off from AuthKit that long answers 503 on `/mcp` until it can
+  reach it again.
+- **Running `squelchd` by hand against this setup?** Run it from outside the
+  repo checkout. It loads the nearest `.env` walking up from the working
+  directory, so a daemon started inside the checkout silently picks up the
+  repo-root `.env`.
 
 In both states the Ingress is an allowlist, not a deny rule, and deliberately
 so: a deny rule has to enumerate every spelling of the thing it is refusing and
@@ -2182,8 +2213,8 @@ answers 403 on `/mcp` until it is rolled.
 `signup.passband.app`) mounts `/agent/auth` only when
 `SQUELCH_CONTROL_WORKOS_API_KEY` is set; without it the route is a 404, and
 every agent sign-in dead-ends there after the user has already said yes to
-AuthKit. Set it from the WorkOS dashboard's API keys page for the PRODUCTION
-environment, then check what actually deployed rather than trusting the status:
+AuthKit. Set it from the WorkOS dashboard's API keys page for the production
+environment that is dedicated to the agent door (see "DEDICATED" below), then check what actually deployed rather than trusting the status:
 
 ```sh
 railway variables -s control --json | jq 'has("SQUELCH_CONTROL_WORKOS_API_KEY")'   # true
@@ -2192,7 +2223,15 @@ curl -sS -o /dev/null -w '%{http_code}\n' https://signup.passband.app/agent/auth
 
 Then configure AuthKit itself, in the WorkOS dashboard for the same
 environment. These are the setting names as of October 2026; WorkOS moves them
-between pages, so search for the name if it is not where you expect:
+between pages, so search for the name if it is not where you expect.
+
+**The environment must be DEDICATED to the agent door.** WorkOS has one JWT
+template per environment, and it renders into every access token that
+environment issues through a user sign-in or consent flow: Connect tokens for
+DCR and CIMD clients, and AuthKit session tokens too. So any other sign-in path
+living in the same environment (another app, an SSO connection, a social
+login) is another way to mint a token with an `email` in it, and the daemon
+cannot tell those tokens from ours. Nothing else lives in this environment.
 
 - **Dynamic Client Registration: on.** Most MCP clients register themselves.
 - **Client ID Metadata Documents: on.** The newer MCP clients identify
@@ -2204,6 +2243,21 @@ between pages, so search for the name if it is not where you expect:
   console, finds that mailbox's tenant, and tells AuthKit who the user is.
 - **Resource Indicator:** `https://*.passband.email/mcp`. One wildcard for the
   fleet, which is the reason for the email binding above.
+- **JWT template:** exactly
+
+  ```
+  {"email": {{ user.email }}}
+  ```
+
+  (Authentication, then Features, then JWT Template, per WorkOS's docs). This
+  is not optional. Per WorkOS's own token-claims documentation, a Connect user
+  access token carries `iss`, `aud`, `sub`, `client_id`, `org_id`, `sid`,
+  `scope`, `jti`, `exp` and `iat`, and NO `email` claim unless the template
+  puts one there. `email` is not one of the template's reserved keys (`iss`,
+  `sub`, `exp`, `iat`, `nbf`, `jti`). Without the template every real token is
+  refused: the door answers 401 to everyone and the daemon logs the refusal
+  category `missing_email`. Closed, but useless, and checklist item (a) below
+  is how you find out before publishing rather than after.
 
 Write down the issuer while you are there: the AuthKit domain,
 `https://<something>.authkit.app`. Do not type it from the dashboard; take the
@@ -2221,11 +2275,11 @@ echo "$META" | jq '{issuer, jwks_uri, registration_endpoint, authorization_endpo
 STOP: the daemon defaults to that path and the warden does not render the
 daemon's JWKS override, so that is a code change, not a setting.
 
-**3. The pre-publish checklist.** Three facts this design depends on could not
-be confirmed from WorkOS's documentation, and each one is checked on the real
-environment by running one OAuth flow by hand and decoding the token it
-produces. The door is still unpublished, so the flow goes straight to AuthKit
-and never touches a tenant. Use a tenant whose mailbox you can sign in as.
+**3. The pre-publish checklist.** The facts this design depends on are checked
+on the real environment, by running the OAuth flow by hand, decoding the token
+it produces, and looking at the environment itself. The door is still
+unpublished, so the flow goes straight to AuthKit and never touches a tenant.
+Use a tenant whose mailbox you can sign in as.
 
 ```sh
 # Uses $ISSUER and $META from step 2.
@@ -2238,7 +2292,7 @@ uri() { jq -rn --arg v "$1" '$v|@uri'; }
 CLIENT_ID=$(curl -sS -X POST "$(echo "$META" | jq -r .registration_endpoint)" \
   -H 'content-type: application/json' \
   -d "$(jq -n --arg r "$REDIRECT" '{client_name:"passband pre-publish check",
-        redirect_uris:[$r], grant_types:["authorization_code"],
+        redirect_uris:[$r], grant_types:["authorization_code","refresh_token"],
         response_types:["code"], token_endpoint_auth_method:"none"}')" | jq -r .client_id)
 
 # PKCE.
@@ -2246,61 +2300,114 @@ VERIFIER=$(openssl rand -hex 32)
 CHALLENGE=$(printf %s "$VERIFIER" | openssl dgst -sha256 -binary | openssl base64 -A | tr '+/' '-_' | tr -d '=')
 
 # Open this in a browser, sign in with Google as $TENANT's mailbox, approve.
-echo "$(echo "$META" | jq -r .authorization_endpoint)?response_type=code&client_id=$(uri "$CLIENT_ID")&redirect_uri=$(uri "$REDIRECT")&code_challenge=$CHALLENGE&code_challenge_method=S256&resource=$(uri "$RESOURCE")&state=check"
+echo "$(echo "$META" | jq -r .authorization_endpoint)?response_type=code&client_id=$(uri "$CLIENT_ID")&redirect_uri=$(uri "$REDIRECT")&code_challenge=$CHALLENGE&code_challenge_method=S256&resource=$(uri "$RESOURCE")&scope=$(uri "openid email offline_access")&state=check"
 ```
 
 The browser goes AuthKit, then `signup.passband.app/agent/auth`, then Google,
-then AuthKit's consent screen, and finally to `127.0.0.1:8976/callback?code=...`,
-which fails to load. That is expected: copy the `code` out of the address bar.
+then the control plane's confirmation page, which names the mailbox about to
+be handed to "an agent": check it is `$TENANT`'s and click through it. Then
+AuthKit's consent screen, and finally `127.0.0.1:8976/callback?code=...`, which
+fails to load. That is expected: copy the `code` out of the address bar.
 
 ```sh
 CODE=<paste>
-TOKEN=$(curl -sS -X POST "$(echo "$META" | jq -r .token_endpoint)" \
+GRANT=$(curl -sS -X POST "$(echo "$META" | jq -r .token_endpoint)" \
   -d grant_type=authorization_code -d code="$CODE" -d redirect_uri="$REDIRECT" \
-  -d client_id="$CLIENT_ID" -d code_verifier="$VERIFIER" -d resource="$RESOURCE" \
-  | jq -r .access_token)
+  -d client_id="$CLIENT_ID" -d code_verifier="$VERIFIER" -d resource="$RESOURCE")
+TOKEN=$(echo "$GRANT" | jq -r .access_token)
+REFRESH=$(echo "$GRANT" | jq -r .refresh_token)   # kept for the revocation check below
 jwt() { printf %s "$TOKEN" | cut -d. -f"$1" | tr '_-' '/+' \
   | awk '{ while (length($0) % 4) $0 = $0 "="; print }' | base64 -d | jq .; }
 jwt 1    # header: "alg" must be "RS256"
-jwt 2    # claims: the three facts below, plus iss, aud and exp
+jwt 2    # claims: email and sub (checks a and b below), plus iss, aud and exp
 ```
 
-Check each of these against the claims, and do not publish until all three are
-true:
+Check each of these, and do not publish until every one is true:
 
-- **(a) The access token carries an `email` claim, equal to the mailbox.** The
-  daemon refuses every token without one, so if it is missing the door is
-  published and nobody can use it. If it is present but is not the mailbox
-  address the control plane sent, the binding is checking the wrong thing.
-- **(b) What `sub` is.** The control plane completes the flow with the
-  lowercased mailbox address as the user id. Write down whether `sub` is that
-  address or a WorkOS-generated user id. Nothing authorizes on it today, but
-  anyone who later reaches for `sub` instead of `email` needs to know which
-  one it is.
-- **(c) AuthKit's own hosted sign-up and sign-in cannot mint a user with an
+- **(a) The access token carries an `email` claim, equal to the mailbox.**
+  WorkOS puts none there by default; the JWT template from step 2 is what adds
+  it. Missing means the template is absent or wrong: fix the template and run
+  the flow again. Published without it, the door fails closed (every token
+  401s, logged as `missing_email`) and nobody can use it. Present but not the
+  mailbox address the control plane sent means the binding is checking the
+  wrong thing: stop.
+- **(b) `sub` is WorkOS's user id, not the mailbox.** Per WorkOS's docs `sub`
+  on a Connect user token is the WorkOS user id (`user_...`), even though the
+  control plane completes the flow with the lowercased mailbox as its own user
+  id. This check only confirms that, and confirms nothing depends on it: the
+  daemon authorizes on `email` and never reads `sub`. Anyone who later reaches
+  for `sub` should start from this fact.
+- **(c) Nothing in the environment can mint a user, or a session, with an
   arbitrary email.** In Standalone Connect the only way a user should come into
   being is the control plane's completion call, after Google has proven the
-  mailbox. If AuthKit's own pages can create a user, someone can self-register
-  as another person's address, run the agent flow, and walk in with a token
-  whose `email` matches that person's tenant: the daemon's binding passes and
-  the mail is theirs. In the dashboard, every AuthKit sign-in and sign-up method
-  must be off. Then try it: open `$ISSUER` (and `$ISSUER/sign-up`) in a private
-  window and try to create an account with an address that is not yours. If any
-  path lets you, it must be disabled, or **this feature does not ship.**
+  mailbox and the user has confirmed it. Anything else that can create a user,
+  or vouch for one, lets someone become another person's address, run the
+  agent flow, and walk in with a token whose `email` matches that person's
+  tenant: the daemon's binding passes and the mail is theirs. Every item below
+  that fails means **this feature does not ship** until it is fixed.
+  - *AuthKit's own pages.* In the dashboard, every AuthKit sign-in and sign-up
+    method is off. Then try it: open `$ISSUER` and `$ISSUER/sign-up` in a
+    private window and try to create an account with an address that is not
+    yours. Any path that lets you is a stop.
+  - *Session reuse.* Run the authorize step above a second time in the SAME
+    browser, right after the first. It must come back through
+    `signup.passband.app/agent/auth` again: the control plane's logs show an
+    agent login started twice, and you see Google and the confirmation page
+    twice. If AuthKit completes the second flow on its own remembered session
+    and goes straight to its consent screen or to the callback, the control
+    plane's Google check and confirmation page are being skipped for repeat
+    flows. That must be understood (how long the session lasts, whether it is
+    per browser, whether it can be turned off) before publishing.
+  - *Users already in the environment.* List them (the dashboard's Users page,
+    or `GET https://api.workos.com/user_management/users` with the API key)
+    and confirm every one was created by the control plane, which means a user
+    whose id is a lowercased mailbox address of a real tenant and whose email
+    matches it. Any user the control plane did not create is a stop: find out
+    where it came from and delete it.
+  - *No other identity providers.* No SSO connections, no organizations with
+    their own IdP, no social login providers (Google, Microsoft, GitHub, Apple
+    and so on) enabled in the environment. An identity provider here can
+    assert any email it likes, and the template would copy it into a token.
+  - *Cross App Access is not enabled.* With it on, a user authenticated in
+    another application can exchange that token for one scoped to this MCP
+    server, which is a sign-in path that never visits the control plane.
+  - *Nothing else shares the environment.* No other OAuth applications, no
+    first-party apps, no M2M applications. See "DEDICATED" in step 2.
+  - *Who has dashboard access.* Anyone who can edit users or impersonate them
+    in the WorkOS dashboard can mint a token for any mailbox. Write down who
+    that is. It belongs on the same short list as whoever holds the warden
+    token.
 
 While the claims are on screen, also confirm `iss` equals `$ISSUER`, `aud` is or
-contains `$RESOURCE`, and note `exp - iat`. That number is the access token
-lifetime, and it is the next paragraph's whole subject.
+contains `$RESOURCE`, and note `exp - iat`, the access token lifetime.
 
-**Revocation is bounded by the access token lifetime, not instant.** The daemon
-verifies tokens locally against AuthKit's keys and never asks AuthKit whether a
-token is still good, so revoking an agent's access in WorkOS stops it from
-getting NEW tokens and does nothing to the one it holds: that keeps working
-until its `exp`, plus the daemon's 60 seconds of clock leeway. The lifetime is
-set in the WorkOS dashboard's session settings (the access token duration),
-and `exp - iat` on a real token is the authoritative reading of it. Cancelling
+**Revocation is a WorkOS-side operator action, and it is not instant.** An
+approved agent holds a refresh token (`offline_access` is one of the standard
+scopes every DCR and CIMD client gets), so it does not lose access when its
+access token expires: it mints a new one, for as long as the GRANT stands.
+There is no per-agent revoke in the app yet. Taking an agent's access away
+means revoking its grant in WorkOS, and the access-token lifetime (`exp - iat`,
+plus the daemon's 60 seconds of clock leeway) only bounds how long the last
+token minted before the revocation keeps working, because the daemon verifies
+tokens locally and never asks AuthKit whether one is still good. Cancelling
 the account is the one instant revocation, because it takes the pod away.
-Keep the lifetime short.
+
+Where to revoke a grant is NOT VERIFIED: WorkOS's public docs as of October
+2026 describe revoking AuthKit sessions (`POST /user_management/sessions/revoke`)
+but say nothing about whether that, or anything on a user's dashboard page,
+ends a Connect grant and its refresh token. The candidates are that user's page
+in the dashboard (sessions, authorized applications) and deleting the user
+outright. So test it now, before anyone depends on it: revoke the grant you
+just made by whichever means you intend to use in an emergency, then
+
+```sh
+curl -sS -X POST "$(echo "$META" | jq -r .token_endpoint)" \
+  -d grant_type=refresh_token -d refresh_token="$REFRESH" -d client_id="$CLIENT_ID" | jq .
+```
+
+must FAIL. If it returns a new access token, that means of revocation does not
+revoke anything; keep looking until one makes this fail, and write the one that
+works into this section.
 
 **4. Only then: set the issuer and let the roll converge.** In
 `15-warden-config.yaml`, uncomment and fill in

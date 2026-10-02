@@ -294,13 +294,22 @@ the per-daemon thing this design imagined — `deploy/hosted/SETUP.md` §11.)
     issuer, audience equal to its own `/mcp` URL, and **the token's `email` equal
     to its own mailbox**. The last check is the tenant boundary. One wildcard
     resource indicator covers the fleet, so any Passband user can obtain a token
-    aimed at another tenant's URL; audience alone would let them in.
+    aimed at another tenant's URL; audience alone would let them in. The claim
+    is there only because the WorkOS environment's JWT template puts it there;
+    without the template every token is refused, which is the safe direction.
+  - Before the control plane tells WorkOS who signed in, it shows its own page
+    naming the mailbox and asking the person to confirm they started this.
+    Client names on AuthKit's consent screen are self-chosen, so that screen
+    alone was not enough against a link sent by someone else.
   - What it cost, both accepted with eyes open. WorkOS is now a party that can
     mint a token that reads a hosted mailbox's non-sealed mail (sealed mail stays
     structurally absent, and the agent door still cannot reach the write
-    credential). And revoking an agent is bounded by the access token's lifetime
-    rather than biting on the next request, which is the one place this departs
-    from the device-token rule.
+    credential). And revoking an agent is no longer ours to do on the next
+    request: AuthKit issues refresh tokens, so an approved agent keeps access
+    until its grant is revoked on the WorkOS side, an operator action today, and
+    the access token's lifetime only bounds how long a revoked grant's last
+    token still works. That is the one place this departs from the device-token
+    rule.
   - Self-host gets none of this and loses nothing: with the two env vars unset
     the door behaves exactly as before.
   - Turning it on, the rollout order, and the three WorkOS facts to verify on

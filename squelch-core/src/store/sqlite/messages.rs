@@ -1287,6 +1287,18 @@ impl SqliteStore {
         row.ok_or(CoreError::NotFound)
     }
 
+    /// The STORED `is_sent` column, which every served surface reinterprets as
+    /// authorship. Only the sync tests need the raw flag: it is what decides
+    /// whether a row was ingested as sent or as received mail.
+    #[cfg(test)]
+    pub(crate) fn stored_is_sent(&self, message_id: i64) -> Result<bool> {
+        Ok(self.lock()?.query_row(
+            "SELECT is_sent FROM messages WHERE id = ?1",
+            params![message_id],
+            |r| r.get::<_, i64>(0),
+        )? == 1)
+    }
+
     pub(super) fn sent_listing(
         &self,
         account_id: AccountId,

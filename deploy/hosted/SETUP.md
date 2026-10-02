@@ -885,6 +885,76 @@ against the tenant's assistant budget without ever seeing a credential. A
 tenant minted before the assistant era keeps working; the app's relay option
 simply does not appear until the tenant is re-minted.
 
+## 6c. iOS push through the relay
+
+A tenant daemon never holds our APNs key. It posts content-free pings to the
+relay (`https://relay.squelch.sh`, the `squelch` service on Railway) with one
+shared bearer, and the relay signs and forwards them to Apple. The daemon
+spawns its pusher only when `SQUELCH_RELAY_URL` is set, and the warden renders
+that only when it is configured to, so **until this step is done no hosted
+tenant receives an iOS push at all.** Tenant egress already allows any public
+443 host, so the cluster needs no network change.
+
+The bearer, in the tenant namespace, beside the OAuth client and made visible
+to pods the same way (by name, through a `secretKeyRef`; no RBAC and no copy):
+
+```sh
+kubectl -n tenants create secret generic apns-relay \
+  --from-literal=token="$(railway variables -s squelch --json | jq -r .SQUELCH_RELAY_AUTH_TOKEN)"
+```
+
+It is ONE bearer shared by every tenant pod and every self-hosted daemon, and
+rotating it means the relay, this Secret and every self-hosted config together.
+The blast radius and rotation are in `apns-relay.example.yaml`.
+
+Then the warden, in `15-warden-config.yaml`, where the three keys ship commented
+out:
+
+| Setting | Value | What it does |
+|---|---|---|
+| `SQUELCH_WARDEN_RELAY_URL` | `https://relay.squelch.sh` | The feature gate. Rendered as `SQUELCH_RELAY_URL`. https only: a bearer rides to it. |
+| `SQUELCH_WARDEN_RELAY_SECRET_NAME` | `apns-relay` (default) | The Secret above. Rendered as an OPTIONAL `SQUELCH_RELAY_TOKEN` reference, key `token`: a missing Secret leaves every tenant booting and 401ing at the relay, not stuck in `CreateContainerConfigError`. |
+| `SQUELCH_WARDEN_RELAY_TOPIC` | `app.passband.client.ios` | Rendered as `SQUELCH_RELAY_TOPIC`. Refused at boot without the URL. |
+
+**The topic is not optional in practice.** The relay allow-lists
+`app.passband.client,app.passband.client.ios` and defaults to the FIRST entry,
+the Mac bundle id, which APNs rejects for an iPhone's device token. Hosted
+tenants pair iPhones, so name the iOS bundle id.
+
+There is deliberately no APNs environment setting. Sandbox versus production
+belongs to the build that registered each device, so the client declares it per
+device at registration; older clients get the relay's default, production. The
+warden never renders `SQUELCH_RELAY_APNS_ENV`.
+
+**ORDERING RULE: UNCOMMENT THESE ONLY IN THE SAME CHANGE THAT BUMPS
+`SQUELCH_WARDEN_IMAGE` TO THE FIRST `daemon-*` TAG THAT CONTAINS THE
+OPENS-POLLER GATE.** On an older daemon image `SQUELCH_RELAY_URL` also starts
+the opens poller. The relay's opens buffer is one global queue, so every hosted
+tenant would then collect and delete the read-tracking opens that belong to
+self-hosted daemons.
+
+Two more things have to be true for the change to reach anyone:
+
+- **The warden image itself must be rolled** (`20-warden.yaml` and
+  `90-warden-roller.yaml`, same tag) to a build that knows these settings. An
+  older warden ignores names it does not read and renders no relay env at all.
+- **Apply, then restart the warden** (§8). The env lands on each tenant's
+  Deployment, so the roller converges existing tenants one per tick, each as an
+  ordinary pod restart.
+
+Verify on one tenant once it has restarted:
+
+```sh
+kubectl -n tenants logs deploy/<label> -c squelchd | grep 'APNs pusher'
+# squelchd: APNs pusher enabled (relay configured)
+```
+
+Then trigger a notification for that tenant and look for a `push` line with
+`topic=app.passband.client.ios` in the relay's logs (`railway logs -s squelch`).
+A pusher line and no `push` line is a device that never registered; a `push`
+line with the Mac topic is a missing `SQUELCH_WARDEN_RELAY_TOPIC`; 401s in the
+tenant's log are a missing or stale `apns-relay` Secret.
+
 ## 7. Tenant limits
 
 ```sh

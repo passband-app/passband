@@ -1,0 +1,65 @@
+# The APNs relay bearer every tenant daemon pushes with.
+#
+# DO NOT apply this file as it stands, and do not commit a filled-in copy.
+# Create it from the command line so the value never reaches a file:
+#
+#     kubectl -n tenants create secret generic apns-relay \
+#       --from-literal=token="<the relay's SQUELCH_RELAY_AUTH_TOKEN>"
+#
+# Read the value from the relay service itself rather than from a note somebody
+# kept (the table view truncates, so ask for JSON):
+#
+#     railway variables -s squelch --json | jq -r .SQUELCH_RELAY_AUTH_TOKEN
+#
+# ## What this is
+#
+# The relay (https://relay.squelch.sh, the `squelch` service on Railway) holds
+# the APNs signing key. A daemon never talks to Apple: it POSTs a content-free
+# ping for a device token it already holds, with this bearer, and the relay
+# signs and forwards it. The warden injects it into every tenant pod as
+# SQUELCH_RELAY_TOKEN, by reference, and only when SQUELCH_WARDEN_RELAY_URL is
+# set (15-warden-config.yaml). The reference is optional: with this Secret
+# missing, every tenant still boots, pushes with no bearer, gets a 401, logs it
+# and backs off. Mail is untouched; only the push is missing.
+#
+# ## The blast radius, stated plainly
+#
+# It is ONE bearer, shared by every hosted tenant pod AND every self-hosted
+# daemon. There is no per-tenant key to mint and nothing here scopes one tenant
+# away from another. Anyone holding it can do two things:
+#
+# - Send content-free pings to any device token they ALREADY hold. The bearer
+#   does not reveal a single device token, and a ping carries no mail content,
+#   but a leaked bearer plus a known token is a way to buzz that phone.
+# - Drain the relay's read-tracking buffer (GET /v1/opens). That buffer is ONE
+#   global queue, and a drain deletes what it reads, so a leaked bearer can
+#   take read-tracking opens away from the daemons they belong to.
+#
+# That is less than a mailbox credential and more than nothing, and it lives in
+# every tenant pod the same way the Google OAuth client does: custody hosted
+# already admits to, on our own infrastructure.
+#
+# ## Rotation
+#
+# Rotating it means changing THREE places together, because all of them hold
+# the same value:
+#
+# 1. the relay's SQUELCH_RELAY_AUTH_TOKEN on Railway,
+# 2. this Secret, then a restart of the tenants so they read it:
+#    `kubectl -n tenants rollout restart deploy -l app.kubernetes.io/name=squelchd`,
+# 3. every self-hosted daemon's relay token in its own config.
+#
+# Between step 1 and the others, every daemon still holding the old value gets
+# 401s and backs off. Pushes stop; mail does not.
+#
+# The Secret's NAME is `SQUELCH_WARDEN_RELAY_SECRET_NAME` on the warden
+# (default `apns-relay`); the data key is fixed at `token`.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: apns-relay
+  namespace: tenants
+type: Opaque
+stringData:
+  # The relay's SQUELCH_RELAY_AUTH_TOKEN, verbatim.
+  token: REPLACE_ME

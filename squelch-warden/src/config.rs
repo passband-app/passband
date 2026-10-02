@@ -52,6 +52,15 @@ pub const DEFAULT_TLS_SECRET: &str = "passband-wildcard-tls";
 /// boot. See `deploy/hosted/SETUP.md`, "The Google OAuth client".
 pub const DEFAULT_OAUTH_SECRET_NAME: &str = "google-oauth-client";
 
+/// Secret holding the APNs relay's bearer, data key `token`.
+///
+/// One Secret, shared by every tenant, in the tenant namespace, exactly like
+/// [`DEFAULT_OAUTH_SECRET_NAME`]: the relay checks ONE bearer, the same one
+/// every self-hosted daemon presents, so there is nothing per tenant to mint.
+/// Read only when [`Config::relay_url`] is set. See
+/// `deploy/hosted/apns-relay.example.yaml`.
+pub const DEFAULT_RELAY_SECRET_NAME: &str = "apns-relay";
+
 /// k3s's built-in dynamic provisioner.
 pub const DEFAULT_STORAGE_CLASS: &str = "local-path";
 
@@ -364,6 +373,26 @@ pub struct Config {
     /// unless the warden renders it. `0` pins the session in memory, which is
     /// the off switch if the reaper ever misbehaves in production.
     pub embed_idle_unload_secs: Option<u64>,
+    /// The APNs relay every tenant daemon pushes through, handed on as
+    /// `SQUELCH_RELAY_URL`. Absent, the whole push feature is off: no relay
+    /// vars, no token reference, byte-identical pods to a warden that never
+    /// heard of it. That absence is why no hosted tenant had EVER received an
+    /// iOS push before this field existed: the daemon spawns its pusher only
+    /// when `SQUELCH_RELAY_URL` is set, and the env a tenant gets is a CLOSED
+    /// list rendered here. Always https, for the gateway's reason: the relay is
+    /// remote and its bearer must never cross the wire in the clear.
+    pub relay_url: Option<String>,
+    /// Secret holding the relay bearer (key `token`), in [`Config::namespace`].
+    /// See [`DEFAULT_RELAY_SECRET_NAME`].
+    pub relay_secret_name: String,
+    /// The APNs topic tenant daemons push under, handed on as
+    /// `SQUELCH_RELAY_TOPIC`. Refused at boot without [`Config::relay_url`].
+    ///
+    /// Optional here and NOT optional in practice: the relay allow-lists the
+    /// Mac and iOS bundle ids and defaults to the FIRST, the Mac one, which
+    /// APNs rejects for an iPhone's device token. Hosted tenants pair iPhones,
+    /// so production sets the iOS bundle id explicitly.
+    pub relay_topic: Option<String>,
 }
 
 impl std::fmt::Debug for Config {
@@ -402,6 +431,11 @@ impl std::fmt::Debug for Config {
             .field("llm_stage1_daily_cap", &self.llm_stage1_daily_cap)
             .field("llm_stage2_daily_cap", &self.llm_stage2_daily_cap)
             .field("embed_idle_unload_secs", &self.embed_idle_unload_secs)
+            // The relay bearer is not a field at all: the warden holds only the
+            // Secret's NAME, and the kubelet resolves the value into the pod.
+            .field("relay_url", &self.relay_url)
+            .field("relay_secret_name", &self.relay_secret_name)
+            .field("relay_topic", &self.relay_topic)
             .finish()
     }
 }
@@ -665,7 +699,11 @@ impl Config {
 
         let llm_base_url = match var(get, "SQUELCH_WARDEN_LLM_BASE_URL") {
             None => None,
-            Some(raw) => Some(canonical_llm_base_url(&raw)?),
+            Some(raw) => Some(canonical_https_url(
+                &raw,
+                "SQUELCH_WARDEN_LLM_BASE_URL",
+                "the gateway is remote and a virtual key must never cross the wire in the clear",
+            )?),
         };
         let llm_stage1_model = env_value_var(get, "SQUELCH_WARDEN_LLM_STAGE1_MODEL")?;
         let llm_stage2_model = env_value_var(get, "SQUELCH_WARDEN_LLM_STAGE2_MODEL")?;
@@ -699,6 +737,22 @@ impl Config {
                     )));
                 }
             }
+        }
+        let relay_url = match var(get, "SQUELCH_WARDEN_RELAY_URL") {
+            None => None,
+            Some(raw) => Some(canonical_https_url(
+                &raw,
+                "SQUELCH_WARDEN_RELAY_URL",
+                "the relay is remote and its bearer must never cross the wire in the clear",
+            )?),
+        };
+        let relay_topic = env_value_var(get, "SQUELCH_WARDEN_RELAY_TOPIC")?;
+        // Same posture as the LLM tuning vars: a topic the pods never receive
+        // is an operator believing their tenants push under it.
+        if relay_url.is_none() && relay_topic.is_some() {
+            return Err(ConfigError::invalid(
+                "SQUELCH_WARDEN_RELAY_TOPIC is set but SQUELCH_WARDEN_RELAY_URL is not; without a relay URL the value would never reach a tenant",
+            ));
         }
         let embed_idle_unload_secs = match var(get, "SQUELCH_WARDEN_EMBED_IDLE_UNLOAD_SECS") {
             None => None,
@@ -797,6 +851,13 @@ impl Config {
             llm_stage1_daily_cap,
             llm_stage2_daily_cap,
             embed_idle_unload_secs,
+            relay_url,
+            relay_secret_name: name_var(
+                get,
+                "SQUELCH_WARDEN_RELAY_SECRET_NAME",
+                DEFAULT_RELAY_SECRET_NAME,
+            )?,
+            relay_topic,
         })
     }
 
@@ -957,34 +1018,34 @@ fn canonical_cidr(raw: &str) -> Result<String, ConfigError> {
     Ok(format!("{addr}/{bits}"))
 }
 
-/// Validate the LLM gateway URL: https, a host, and nothing that would break
-/// an environment value.
+/// Validate a remote service URL that a bearer rides to: https, a host, and
+/// nothing that would break an environment value. `name` is the variable the
+/// operator set and `why` is the sentence that explains the https rule.
 ///
-/// It lands verbatim in every tenant pod as `SQUELCH_ANTHROPIC_BASE_URL`, so
-/// the checks are the boot-time versions of the two ways it fails silently
-/// later: a non-https scheme sends every tenant's virtual key over the wire in
-/// the clear, and a space or control byte becomes an env value every daemon
-/// rejects on its first triage call, hours after boot. The trailing slash is
-/// trimmed so two operator spellings of one gateway are one string.
-fn canonical_llm_base_url(raw: &str) -> Result<String, ConfigError> {
+/// Shared by the LLM gateway URL (`SQUELCH_ANTHROPIC_BASE_URL` in every pod)
+/// and the APNs relay URL (`SQUELCH_RELAY_URL`). Both land verbatim in every
+/// tenant pod, so the checks are the boot-time versions of the two ways each
+/// fails silently later: a non-https scheme sends every tenant's credential
+/// over the wire in the clear, and a space or control byte becomes an env value
+/// every daemon rejects on its first call, hours after boot. The trailing slash
+/// is trimmed so two operator spellings of one service are one string.
+fn canonical_https_url(raw: &str, name: &str, why: &str) -> Result<String, ConfigError> {
     let url = raw.trim().trim_end_matches('/');
     let Some(rest) = url.strip_prefix("https://") else {
-        return Err(ConfigError::invalid(
-            "SQUELCH_WARDEN_LLM_BASE_URL must be an https:// URL; the gateway is remote and a virtual key must never cross the wire in the clear",
-        ));
+        return Err(ConfigError::invalid(format!(
+            "{name} must be an https:// URL; {why}"
+        )));
     };
     if rest.is_empty() || rest.starts_with('/') {
-        return Err(ConfigError::invalid(
-            "SQUELCH_WARDEN_LLM_BASE_URL has no host",
-        ));
+        return Err(ConfigError::invalid(format!("{name} has no host")));
     }
     if !url
         .bytes()
         .all(|b| (b'!'..=b'~').contains(&b) && !matches!(b, b'"' | b'\'' | b'\\' | b'$' | b'`'))
     {
-        return Err(ConfigError::invalid(
-            "SQUELCH_WARDEN_LLM_BASE_URL contains a character that is not allowed in a URL",
-        ));
+        return Err(ConfigError::invalid(format!(
+            "{name} contains a character that is not allowed in a URL"
+        )));
     }
     Ok(url.to_string())
 }
@@ -1110,6 +1171,11 @@ mod tests {
         assert!(c.llm_stage2_model.is_none());
         assert!(c.llm_stage1_daily_cap.is_none());
         assert!(c.llm_stage2_daily_cap.is_none());
+        // Push through the relay is off unless the operator turns it on, and
+        // the Secret name has a default so turning it on is one line.
+        assert!(c.relay_url.is_none());
+        assert!(c.relay_topic.is_none());
+        assert_eq!(c.relay_secret_name, "apns-relay");
     }
 
     /// The boot-refusal table. Every one of these is a value that would
@@ -1213,6 +1279,15 @@ mod tests {
             // The shared-key bridge's var, removed with the bridge: a manifest
             // still setting it believes the shared Secret feeds new tenants.
             ("SQUELCH_WARDEN_ANTHROPIC_SECRET_NAME", "anthropic-api-key"),
+            // The relay URL, for the gateway's reason: a bearer rides to it.
+            ("SQUELCH_WARDEN_RELAY_URL", "http://relay.squelch.sh"),
+            ("SQUELCH_WARDEN_RELAY_URL", "relay.squelch.sh"),
+            ("SQUELCH_WARDEN_RELAY_URL", "https://"),
+            ("SQUELCH_WARDEN_RELAY_URL", "https:///push"),
+            ("SQUELCH_WARDEN_RELAY_URL", "https://relay squelch.sh"),
+            ("SQUELCH_WARDEN_RELAY_SECRET_NAME", "APNs_Relay"),
+            // A topic orphaned from its URL would never reach a pod.
+            ("SQUELCH_WARDEN_RELAY_TOPIC", "app.passband.client.ios"),
         ];
         for (key, value) in table {
             assert!(with(key, value).is_err(), "{key}=`{value}` was accepted");
@@ -1394,6 +1469,65 @@ mod tests {
         vars.insert(
             "SQUELCH_WARDEN_LLM_STAGE1_MODEL".to_string(),
             "claude haiku".to_string(),
+        );
+        assert!(load(&vars).is_err());
+    }
+
+    /// The relay block, accepted together. The URL is normalized the way the
+    /// gateway's is, and each refusal names the variable the operator set
+    /// rather than the LLM one whose validator it shares.
+    #[test]
+    fn accepts_a_full_relay_configuration() {
+        let mut vars = required();
+        vars.insert(
+            "SQUELCH_WARDEN_RELAY_URL".to_string(),
+            " https://relay.squelch.sh/ ".to_string(),
+        );
+        vars.insert(
+            "SQUELCH_WARDEN_RELAY_SECRET_NAME".to_string(),
+            "passband-relay".to_string(),
+        );
+        vars.insert(
+            "SQUELCH_WARDEN_RELAY_TOPIC".to_string(),
+            "app.passband.client.ios".to_string(),
+        );
+        let c = load(&vars).unwrap();
+        assert_eq!(c.relay_url.as_deref(), Some("https://relay.squelch.sh"));
+        assert_eq!(c.relay_secret_name, "passband-relay");
+        assert_eq!(c.relay_topic.as_deref(), Some("app.passband.client.ios"));
+        // Nothing about the relay turns the LLM block on, or the reverse.
+        assert!(c.llm_base_url.is_none());
+
+        // The URL alone is a complete configuration; the topic is an override.
+        let c = with("SQUELCH_WARDEN_RELAY_URL", "https://relay.squelch.sh").unwrap();
+        assert!(c.relay_topic.is_none());
+        assert_eq!(c.relay_secret_name, "apns-relay");
+
+        for (value, needle) in [
+            ("http://relay.squelch.sh", "must be an https:// URL"),
+            // A bare `https://` is refused too (the refusal table has it), but
+            // as a scheme error: the trailing-slash trim eats the `//` first.
+            ("https:///push", "has no host"),
+        ] {
+            let err = with("SQUELCH_WARDEN_RELAY_URL", value)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("SQUELCH_WARDEN_RELAY_URL"), "{err}");
+            assert!(!err.contains("LLM"), "{err}");
+            assert!(err.contains(needle), "{err}");
+        }
+        let err = with("SQUELCH_WARDEN_RELAY_TOPIC", "app.passband.client.ios")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("SQUELCH_WARDEN_RELAY_TOPIC is set but SQUELCH_WARDEN_RELAY_URL is not"),
+            "{err}"
+        );
+
+        // A topic with a space would break the env value it becomes.
+        vars.insert(
+            "SQUELCH_WARDEN_RELAY_TOPIC".to_string(),
+            "app passband".to_string(),
         );
         assert!(load(&vars).is_err());
     }

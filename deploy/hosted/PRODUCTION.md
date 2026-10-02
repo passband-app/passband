@@ -325,6 +325,53 @@ the tenant's virtual key is right, and the call still dies at the gateway. Run
 > 0, and the job finishes by deleting the Secret itself:
 > `kubectl -n tenants delete secret anthropic-api-key`.
 
+### The APNs relay
+
+| | |
+|---|---|
+| Service | `squelch` on Railway, `https://relay.squelch.sh`, deployed from `main` (root `railway.toml`) |
+| Holds | the APNs signing key, and `SQUELCH_RELAY_AUTH_TOKEN`, the ONE bearer every daemon presents |
+| Topics | `SQUELCH_RELAY_APNS_TOPICS=app.passband.client,app.passband.client.ios`; the first is the default |
+
+Tenant daemons reach it over public 443 like the gateway, so there is no
+cluster-side plumbing. A daemon spawns its APNs pusher only when
+`SQUELCH_RELAY_URL` is set, and the warden renders that only from the
+`SQUELCH_WARDEN_RELAY_*` block in `15-warden-config.yaml`:
+`SQUELCH_WARDEN_RELAY_URL` (the feature gate, https only),
+`SQUELCH_WARDEN_RELAY_SECRET_NAME` (default `apns-relay`, rendered as an
+OPTIONAL `SQUELCH_RELAY_TOKEN` reference, key `token`) and
+`SQUELCH_WARDEN_RELAY_TOPIC` (refused at boot without the URL). Until that
+block is uncommented, hosted tenants get no iOS push: that is how it was from
+the first hosted signup until this was written. Install procedure: `SETUP.md`
+→ "iOS push through the relay".
+
+**The topic must be `app.passband.client.ios`.** Left unset, the relay uses
+its default, the Mac bundle id, and APNs rejects every iPhone token for it.
+**The APNs environment is never set fleet-wide.** Each device declares sandbox
+or production at registration, and the warden never renders
+`SQUELCH_RELAY_APNS_ENV`; one answer for the whole fleet is the bug this
+replaced.
+
+**ORDERING RULE: UNCOMMENT THE BLOCK ONLY IN THE SAME CHANGE THAT BUMPS
+`SQUELCH_WARDEN_IMAGE` TO THE FIRST `daemon-*` TAG THAT CONTAINS THE
+OPENS-POLLER GATE.** On an older daemon `SQUELCH_RELAY_URL` also starts the
+opens poller, the relay's opens buffer is one global queue, and every hosted
+tenant would collect and delete the read-tracking opens that belong to
+self-hosted daemons. The warden's own image must also be new enough to know
+the three names (an older one ignores them and renders nothing), and the env
+lands on the tenant Deployment, so the roller restarts each tenant once to
+deliver it.
+
+Verify on a restarted tenant: `squelchd: APNs pusher enabled (relay
+configured)` in `kubectl -n tenants logs deploy/<label> -c squelchd`, then
+`push` lines with `topic=app.passband.client.ios` in `railway logs -s squelch`.
+
+**The bearer is shared, and so is its blast radius.** One value for every
+tenant pod and every self-hosted daemon. It authorizes content-free pings to
+device tokens the caller already holds, and draining the relay's read-tracking
+buffer. Rotation is the relay, the `apns-relay` Secret, and every self-hosted
+config, together; `apns-relay.example.yaml` has the steps.
+
 ## DNS
 
 Registrar and DNS provider are different questions, and here they differ per
@@ -1238,6 +1285,7 @@ a chat window.
 |---|---|---|---|
 | `warden` | `squelch-warden` | `token` | operator (`openssl rand -base64 32`); the same value is `SQUELCH_CONTROL_WARDEN_TOKEN` on Railway |
 | `tenants` | `google-oauth-client` | `client_id`, `client_secret` | operator; the confidential **web** client, the same one the control plane consents with |
+| `tenants` | `apns-relay` | `token` | operator; the relay's `SQUELCH_RELAY_AUTH_TOKEN`, shared with every self-hosted daemon. Optional: missing means no pushes, not a down tenant |
 | `cert-manager` | `acme-dns-token` | `api-token` | operator; Cloudflare token scoped to the `passband.email` zone, DNS:Edit |
 
 Managed by the cluster, listed so an inventory sweep does not mistake them for

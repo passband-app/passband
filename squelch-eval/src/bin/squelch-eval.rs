@@ -99,6 +99,10 @@ enum Command {
         /// Skip text similarity (no embedding model is loaded).
         #[arg(long)]
         no_text: bool,
+        /// Score against this run's decisions instead of gold (cases it did
+        /// not score ok are left out; adjudications do not apply).
+        #[arg(long)]
+        reference: Option<String>,
     },
     /// Record a ruling on one field of one case.
     Adjudicate {
@@ -223,6 +227,7 @@ async fn main() -> Result<()> {
             seed,
             texts,
             no_text,
+            reference,
         } => {
             if let Some(hit) = cache_hit
                 && !(0.0..=1.0).contains(&hit)
@@ -238,6 +243,7 @@ async fn main() -> Result<()> {
                 seed,
                 texts,
                 no_text,
+                reference,
             };
             print!(
                 "{}",

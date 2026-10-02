@@ -41,7 +41,7 @@ squelch-eval run --candidate NAME [--dataset DIR] [--reps R] [--concurrency C]
                  [--sample N --seed S --floor F] [--fidelity exact|reconstructed|all]
                  [--case ID ...] [--effort E] [--max-usd X] [--yes]
 squelch-eval report [RUN ...] [--dataset DIR] [--baseline RUN] [--diff RUN]
-                    [--texts N] [--no-text] [--cache-hit F] [--md FILE]
+                    [--reference RUN] [--texts N] [--no-text] [--cache-hit F] [--md FILE]
                     [--allow-repo-path] [--seed S]
 squelch-eval adjudicate <case-id> --field F --verdict candidate|gold|either --run RUN
 ```
@@ -315,6 +315,36 @@ incumbent model, and how text similarity was measured (or why not). Then:
 
 `report` always re-scores from the stored decisions. The `grade` written on
 each row is a convenience for other tools, tagged with `scorer_version`.
+
+## Gold or today's model as the reference
+
+Gold is the decision the incumbent made when the mail arrived, under the
+prompt of that day. Prompts changed: early prompt versions put
+correspondence and FYE mail in Reading far more often than today's does, so
+every run on today's prompt, the production configuration included,
+"disagrees" with those golds. Paired deltas against a `production` run
+cancel that drift in aggregate, but `--diff` against old gold is full of it.
+
+`report --reference RUN` scores every other run against RUN's own decisions
+instead (rep 0, rows that finished ok). Use it to ask "does the candidate
+decide what today's model decides": run the `production` candidate once,
+then `report --reference production`. Cases the reference did not score ok
+are left out for every run, and the header counts them. The reference
+itself appears only in the cost table. Adjudications are rulings about
+gold, so they are ignored under `--reference`. Everything else (metrics,
+directional rates, harm, strata, `--diff`, `--texts`, `--baseline`) reads
+the same, with the reference standing in for gold.
+
+The reference is one sample too: a second run of the same model would not
+score 1.0 against it. Run it with `--reps 2` and the report adds a
+self-agreement row, its rep 1 scored against its rep 0 on the cases both
+finished. That is the true noise floor (same model, prompt and input); a
+candidate within it is as close to today's model as today's model is to
+itself. With one rep the report says how to get it.
+
+Use gold when the question is "is the mail filed right", and to read and
+adjudicate. Use `--reference production` when the question is "can a
+cheaper model replace this one".
 
 ## Adjudication
 

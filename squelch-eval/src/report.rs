@@ -272,6 +272,7 @@ pub struct Costs {
 #[derive(Debug, Clone, Default)]
 pub struct RunStats {
     pub name: String,
+    pub role: Role,
     pub model: String,
     pub cases: usize,
     pub rows: usize,
@@ -348,6 +349,20 @@ pub struct ReportOptions {
     pub texts: Option<usize>,
     /// Skip text similarity (no embedder).
     pub no_text: bool,
+    /// Score against this run's decisions (rep 0, ok rows) instead of gold.
+    pub reference: Option<String>,
+}
+
+/// What a run is in the report.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Role {
+    /// Scored against gold or the reference.
+    #[default]
+    Scored,
+    /// The `--reference` run: costed, not scored (it would be 1.0).
+    Reference,
+    /// The reference's rep 1 scored against its rep 0: the noise floor.
+    SelfAgreement,
 }
 
 /// One stratum or fidelity group: (cases, headline means, mean harm).
@@ -368,6 +383,10 @@ pub struct Report {
     pub diff: Vec<DiffEntry>,
     /// `--texts`: the rows to read, or why there are none.
     pub texts: Option<Result<Vec<TextEntry>, String>>,
+    /// What the runs are scored against: "gold" or "reference".
+    pub gold_label: String,
+    /// Lines printed after the header (hints).
+    pub notes: Vec<String>,
 }
 
 fn sum_usage(calls: &[Usage]) -> [f64; 4] {
@@ -692,7 +711,7 @@ pub fn production_stats(cases: &[Case], model: &str, hit: Option<f64>) -> Produc
 #[allow(clippy::too_many_arguments)]
 pub fn build(
     dataset_name: &str,
-    cases: &[Case],
+    all_cases: &[Case],
     manifest: &Value,
     runs: &[RunData],
     adjudications: &Adjudications,
@@ -700,12 +719,25 @@ pub fn build(
     sim: Option<&dyn TextSimilarity>,
     text_line: &str,
 ) -> Result<Report> {
+    // Under --reference, each case's "gold" is the reference run's own
+    // decision, and only the cases it scored ok remain.
+    let no_rulings = Adjudications::default();
+    let reference = match &options.reference {
+        Some(name) => Some(Reference::new(name, runs, all_cases)?),
+        None => None,
+    };
+    let cases: &[Case] = reference.as_ref().map_or(all_cases, |r| &r.cases);
+    let adjudications = if reference.is_some() {
+        &no_rulings
+    } else {
+        adjudications
+    };
     let by_id: HashMap<i64, &Case> = cases.iter().map(|c| (c.id, c)).collect();
     let current_model = manifest["production_cache_hit"]["model"]
         .as_str()
         .map(str::to_owned)
         .or_else(|| {
-            cases
+            all_cases
                 .iter()
                 .max_by_key(|c| c.as_of)
                 .map(|c| c.gold_meta.model.clone())
@@ -733,37 +765,71 @@ pub fn build(
         ),
     };
     let count = |f: Fidelity| cases.iter().filter(|c| c.fidelity == f).count();
-    let mut report = Report {
-        header: vec![
-            format!(
-                "Dataset {dataset_name}: {} cases ({} exact, {} reconstructed, {} suspect); scorer v{SCORER_VERSION}; {} adjudicated field(s).",
-                cases.len(),
-                count(Fidelity::Exact),
-                count(Fidelity::Reconstructed),
-                count(Fidelity::Suspect),
-                adjudications.len(),
-            ),
-            hit_line,
+    let first = format!(
+        "Dataset {dataset_name}: {} cases ({} exact, {} reconstructed, {} suspect); scorer v{SCORER_VERSION}",
+        cases.len(),
+        count(Fidelity::Exact),
+        count(Fidelity::Reconstructed),
+        count(Fidelity::Suspect),
+    );
+    let (first, caveat) = match &reference {
+        None => (
+            format!("{first}; {} adjudicated field(s).", adjudications.len()),
             format!(
                 "Caveat: gold is one sample from the incumbent model ({current_model}), so agreement rewards imitating it. Read --diff and adjudicate before trusting a gap."
             ),
-            text_line.to_owned(),
-        ],
+        ),
+        Some(r) => (
+            format!(
+                "{first}, scored against run {} instead of gold; {} of {} cases left out because the reference did not score them ok; adjudications ignored (they rule on gold).",
+                r.name,
+                all_cases.len() - cases.len(),
+                all_cases.len()
+            ),
+            format!(
+                "Reference: run {} ({}{}, {} cases). It is itself one sample, so two runs of the same model would not score 1.0 against each other; the self-agreement row, when present, is that floor. Drop --reference for the numbers against gold.",
+                r.name,
+                r.model,
+                r.effort
+                    .as_deref()
+                    .map(|e| format!(" at effort {e}"))
+                    .unwrap_or_default(),
+                cases.len()
+            ),
+        ),
+    };
+    let mut report = Report {
+        header: vec![first, hit_line, caveat, text_line.to_owned()],
         hit,
-        production: Some(production_stats(cases, &current_model, hit)),
+        production: Some(production_stats(all_cases, &current_model, hit)),
+        gold_label: if reference.is_some() {
+            "reference".into()
+        } else {
+            "gold".into()
+        },
         baseline: options.baseline.clone(),
         diff_run: options.diff.clone(),
         ..Default::default()
     };
     for run in runs {
-        report.runs.push(run_stats(
-            run,
-            &by_id,
-            adjudications,
-            hit,
-            options.seed,
-            sim,
-        ));
+        let mut stats = run_stats(run, &by_id, adjudications, hit, options.seed, sim);
+        if reference.as_ref().is_some_and(|r| r.name == run.name) {
+            stats.role = Role::Reference;
+        }
+        report.runs.push(stats);
+    }
+    if let Some(r) = &reference {
+        match &r.self_agreement {
+            Some(second) => {
+                let mut stats = run_stats(second, &by_id, adjudications, hit, options.seed, sim);
+                stats.role = Role::SelfAgreement;
+                report.runs.push(stats);
+            }
+            None => report.notes.push(format!(
+                "No self-agreement row: run {} has no rep 1. `run --candidate {} --reps 2` would add the noise floor.",
+                r.name, r.name
+            )),
+        }
     }
     if let Some(baseline) = &options.baseline {
         let base = report
@@ -785,7 +851,11 @@ pub fn build(
                 })
                 .collect()
         };
-        for stats in report.runs.iter().filter(|r| &r.name != baseline) {
+        for stats in report
+            .runs
+            .iter()
+            .filter(|r| &r.name != baseline && r.role == Role::Scored)
+        {
             let mut deltas = BTreeMap::new();
             for (index, metric) in METRICS.iter().chain(["harm"].iter()).enumerate() {
                 if let Some(delta) = paired_delta(
@@ -799,7 +869,7 @@ pub fn build(
             report.deltas.insert(stats.name.clone(), deltas);
         }
     }
-    for stats in &report.runs {
+    for stats in report.runs.iter().filter(|r| r.role != Role::Reference) {
         let mut groups: BTreeMap<String, Vec<&CaseAgg>> = BTreeMap::new();
         for (id, agg) in &stats.per_case {
             let case = by_id[id];
@@ -836,6 +906,9 @@ pub fn build(
         bail!("--texts reads one run's text; name it with --diff RUN");
     }
     if let Some(name) = &options.diff {
+        if reference.as_ref().is_some_and(|r| &r.name == name) {
+            bail!("--diff {name} is the reference; it agrees with itself by construction");
+        }
         let (stats, run) = report
             .runs
             .iter()
@@ -852,6 +925,59 @@ pub fn build(
         }
     }
     Ok(report)
+}
+
+/// The `--reference` run, and the cases rewritten to use its decisions.
+struct Reference {
+    name: String,
+    model: String,
+    effort: Option<String>,
+    cases: Vec<Case>,
+    /// Its rep 1 rows on the kept cases, as a run of their own.
+    self_agreement: Option<RunData>,
+}
+
+impl Reference {
+    fn new(name: &str, runs: &[RunData], all_cases: &[Case]) -> Result<Self> {
+        let run = runs
+            .iter()
+            .find(|r| r.name == name)
+            .with_context(|| format!("--reference {name} is not among the runs"))?;
+        let ok = |rep: u32| -> HashMap<i64, &ResultRow> {
+            run.rows
+                .iter()
+                .filter(|row| row.rep == rep && row.status == "ok" && row.decision.is_some())
+                .filter_map(|row| row.prompt_id.parse().ok().map(|id| (id, row)))
+                .collect()
+        };
+        let first = ok(0);
+        let cases: Vec<Case> = all_cases
+            .iter()
+            .filter_map(|case| {
+                let row = first.get(&case.id)?;
+                let mut case = case.clone();
+                case.gold = row.decision.clone().expect("ok row has a decision");
+                Some(case)
+            })
+            .collect();
+        // Cases rep 0 did not score ok are not in `cases`, so scoring skips
+        // their rep 1 rows too.
+        let mut second: Vec<ResultRow> = ok(1).into_values().cloned().collect();
+        second.sort_by(|a, b| a.prompt_id.cmp(&b.prompt_id));
+        let self_agreement = (!second.is_empty()).then(|| RunData {
+            name: format!("{name} self-agreement (rep 1 vs rep 0)"),
+            rows: second,
+            errors: Vec::new(),
+            ..run.clone()
+        });
+        Ok(Self {
+            name: name.to_owned(),
+            model: run.model.clone(),
+            effort: run.meta["effort"].as_str().map(str::to_owned),
+            cases,
+            self_agreement,
+        })
+    }
 }
 
 fn row_for(run: &RunData, case: i64, rep: u32) -> &ResultRow {
@@ -1034,9 +1160,26 @@ fn cell(text: &str) -> String {
 /// Markdown; also what `report` prints.
 pub fn render(report: &Report) -> String {
     let mut out = String::new();
-    for line in &report.header {
+    for line in report.header.iter().chain(&report.notes) {
         let _ = writeln!(out, "{line}");
     }
+    let against = if report.gold_label.is_empty() {
+        "gold"
+    } else {
+        report.gold_label.as_str()
+    };
+    // The reference is costed but not scored; self-agreement is scored but
+    // its rows are the reference's own spend.
+    let costed: Vec<&RunStats> = report
+        .runs
+        .iter()
+        .filter(|r| r.role != Role::SelfAgreement)
+        .collect();
+    let scored: Vec<&RunStats> = report
+        .runs
+        .iter()
+        .filter(|r| r.role != Role::Reference)
+        .collect();
     let _ = writeln!(out, "\n## Cost and behavior (per email unless noted)\n");
     let _ = writeln!(
         out,
@@ -1065,11 +1208,16 @@ pub fn render(report: &Report) -> String {
                 .unwrap_or_default(),
         );
     }
-    for r in &report.runs {
+    for r in &costed {
         let _ = writeln!(
             out,
-            "| {} ({}) | {} | {} | {} | {} | {} | {} / {} | {} | {} | {} | {} | {} | {} | {} | {} |{}",
+            "| {}{} ({}) | {} | {} | {} | {} | {} | {} / {} | {} | {} | {} | {} | {} | {} | {} | {} |{}",
             r.name,
+            if r.role == Role::Reference {
+                " [reference]"
+            } else {
+                ""
+            },
             r.model,
             r.cases,
             r.failed,
@@ -1093,15 +1241,17 @@ pub fn render(report: &Report) -> String {
                 .unwrap_or_default(),
         );
     }
-    let names: Vec<&str> = report.runs.iter().map(|r| r.name.as_str()).collect();
-    let _ = writeln!(out, "\n## Agreement with gold (weighted mean [95% CI] n)\n");
+    let names: Vec<&str> = scored.iter().map(|r| r.name.as_str()).collect();
+    let _ = writeln!(
+        out,
+        "\n## Agreement with {against} (weighted mean [95% CI] n)\n"
+    );
     let _ = writeln!(out, "| metric | {} |", names.join(" | "));
     let _ = writeln!(out, "|---|{}", "---|".repeat(names.len()));
     for (section, metrics) in SECTIONS {
         let _ = writeln!(out, "| **{section}** |{}", " |".repeat(names.len()));
         for metric in *metrics {
-            let cells: Vec<String> = report
-                .runs
+            let cells: Vec<String> = scored
                 .iter()
                 .map(|r| {
                     if *metric == "rank_delta" {
@@ -1119,11 +1269,7 @@ pub fn render(report: &Report) -> String {
             let _ = writeln!(out, "| {label} | {} |", cells.join(" | "));
         }
     }
-    let harm: Vec<String> = report
-        .runs
-        .iter()
-        .map(|r| estimate(r.harm.as_ref()))
-        .collect();
+    let harm: Vec<String> = scored.iter().map(|r| estimate(r.harm.as_ref())).collect();
     let _ = writeln!(out, "| **harm** (lower is better) | {} |", harm.join(" | "));
     let _ = writeln!(
         out,
@@ -1131,7 +1277,7 @@ pub fn render(report: &Report) -> String {
     );
     let _ = writeln!(out, "| run | {} |", FACTORS.join(" | "));
     let _ = writeln!(out, "|---|{}", "---|".repeat(FACTORS.len()));
-    for r in &report.runs {
+    for r in &scored {
         let cells: Vec<String> = FACTORS
             .iter()
             .map(|f| num(r.factor_mae.get(*f).copied(), 3))
@@ -1148,7 +1294,7 @@ pub fn render(report: &Report) -> String {
             num(p.em_dash_rate, 3)
         );
     }
-    for r in &report.runs {
+    for r in &scored {
         let _ = writeln!(
             out,
             "| {} | {} | {} |",
@@ -1175,7 +1321,7 @@ pub fn render(report: &Report) -> String {
     );
     let _ = writeln!(out, "|---|---|---|---|---|---|---|---|");
     for field in DIRECTIONAL {
-        for r in &report.runs {
+        for r in &scored {
             let d = &r.directional[field];
             let _ = writeln!(
                 out,
@@ -1255,7 +1401,7 @@ pub fn render(report: &Report) -> String {
             );
             let _ = writeln!(out, "- from: {}", entry.from_addr);
             for (field, gold, candidate) in &entry.fields {
-                let _ = writeln!(out, "- {field}: gold {gold}, candidate {candidate}");
+                let _ = writeln!(out, "- {field}: {against} {gold}, candidate {candidate}");
             }
             if !entry.others.is_empty() {
                 let others: Vec<String> = entry
@@ -1265,13 +1411,13 @@ pub fn render(report: &Report) -> String {
                     .collect();
                 let _ = writeln!(out, "- also below 1: {}", others.join(", "));
             }
-            for (label, gold, candidate) in &entry.texts {
+            for (field, gold, candidate) in &entry.texts {
                 let _ = writeln!(
                     out,
-                    "- {label}: gold \"{gold}\" / candidate \"{candidate}\""
+                    "- {field}: {against} \"{gold}\" / candidate \"{candidate}\""
                 );
             }
-            let _ = writeln!(out, "- gold reason: {}", entry.gold_reason);
+            let _ = writeln!(out, "- {against} reason: {}", entry.gold_reason);
             let _ = writeln!(out, "- candidate reason: {}", entry.candidate_reason);
             let _ = writeln!(out, "- trace: {}\n", entry.trace.display());
         }
@@ -1289,7 +1435,7 @@ pub fn render(report: &Report) -> String {
                     "### {} rep {}: {} (mean similarity {:.2})\n",
                     entry.case, entry.rep, entry.subject, entry.mean_similarity
                 );
-                let _ = writeln!(out, "| field | gold | candidate |");
+                let _ = writeln!(out, "| field | {against} | candidate |");
                 let _ = writeln!(out, "|---|---|---|");
                 for (label, gold, candidate) in &entry.texts {
                     let _ = writeln!(out, "| {label} | {} | {} |", cell(gold), cell(candidate));
@@ -1400,7 +1546,10 @@ fn report_with(
     } else {
         options.runs.clone()
     };
-    for extra in [&options.baseline, &options.diff].into_iter().flatten() {
+    for extra in [&options.baseline, &options.diff, &options.reference]
+        .into_iter()
+        .flatten()
+    {
         if !names.contains(extra) {
             names.push(extra.clone());
         }
@@ -2089,6 +2238,263 @@ mod tests {
             text.lines().skip(4).collect::<Vec<_>>(),
             again.lines().skip(4).collect::<Vec<_>>()
         );
+    }
+
+    fn with_reference(name: &str) -> ReportOptions {
+        ReportOptions {
+            reference: Some(name.into()),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_run_against_an_identical_reference_agrees_everywhere() {
+        let setup = fixture_runs().await;
+        let report = build(
+            "set",
+            &setup.cases,
+            &setup.manifest,
+            &runs(&setup),
+            &Adjudications::default(),
+            &with_reference("mock"),
+            Some(&TokenSim),
+            "",
+        )
+        .unwrap();
+        let scored: Vec<&RunStats> = report
+            .runs
+            .iter()
+            .filter(|r| r.role == Role::Scored)
+            .collect();
+        assert_eq!(scored.len(), 1);
+        let mock2 = scored[0];
+        assert_eq!(mock2.name, "mock2");
+        assert_eq!(mock2.cases, 4);
+        for (metric, estimate) in &mock2.metrics {
+            assert_eq!(estimate.mean, 1.0, "{metric}");
+        }
+        assert!(mock2.metrics.contains_key("summary_sim"));
+        assert_eq!(mock2.harm.unwrap().mean, 0.0);
+        // Against gold the same run disagrees on D.
+        let gold = build(
+            "set",
+            &setup.cases,
+            &setup.manifest,
+            &runs(&setup),
+            &Adjudications::default(),
+            &ReportOptions::default(),
+            Some(&TokenSim),
+            "",
+        )
+        .unwrap();
+        assert_eq!(gold.runs[1].metrics["fye"].mean, 0.75);
+        // The reference is costed but not scored, and the header says so.
+        assert!(
+            report.header[0].contains("scored against run mock instead of gold"),
+            "{}",
+            report.header[0]
+        );
+        assert!(
+            report.header[0].contains("1 of 5 cases left out"),
+            "{}",
+            report.header[0]
+        );
+        assert!(
+            report.header[2].starts_with("Reference: run mock (mock-model, 4 cases)"),
+            "{}",
+            report.header[2]
+        );
+        assert!(report.header[2].contains("Drop --reference"));
+        assert_eq!(report.notes.len(), 1, "one rep: the hint");
+        assert!(report.notes[0].contains("--reps 2"));
+        let text = render(&report);
+        assert!(text.contains("| mock [reference] (mock-model) |"));
+        assert!(text.contains("## Agreement with reference"));
+        assert!(text.contains("| metric | mock2 |"));
+        assert!(!report.breakdown.contains_key("mock"));
+        // Diffing the reference against itself is refused.
+        let mut diff = with_reference("mock");
+        diff.diff = Some("mock".into());
+        assert!(
+            build(
+                "set",
+                &setup.cases,
+                &setup.manifest,
+                &runs(&setup),
+                &Adjudications::default(),
+                &diff,
+                None,
+                ""
+            )
+            .is_err()
+        );
+    }
+
+    /// The reference with A failed and D placed outside FYE.
+    fn bent_reference(setup: &Setup) -> Vec<RunData> {
+        let mut data = runs(setup);
+        for row in &mut data[0].rows {
+            if row.prompt_id == setup.fixture.ids["A"].to_string() {
+                row.status = "failed".into();
+                row.failure = Some("agent_turn_budget_exhausted".into());
+                row.decision = None;
+            }
+            if row.prompt_id == setup.fixture.ids["D"].to_string() {
+                row.decision.as_mut().unwrap().attention.show_in_fye = false;
+            }
+        }
+        data
+    }
+
+    #[tokio::test]
+    async fn cases_the_reference_failed_are_left_out_and_rulings_ignored() {
+        let setup = fixture_runs().await;
+        let data = bent_reference(&setup);
+        let report = build(
+            "set",
+            &setup.cases,
+            &setup.manifest,
+            &data,
+            &Adjudications::default(),
+            &with_reference("mock"),
+            None,
+            "",
+        )
+        .unwrap();
+        let mock2 = report.runs.iter().find(|r| r.name == "mock2").unwrap();
+        assert_eq!(mock2.cases, 3);
+        assert!(!mock2.per_case.contains_key(&setup.fixture.ids["A"]));
+        assert!((mock2.metrics["fye"].mean - 2.0 / 3.0).abs() < 1e-9);
+        assert!(
+            report.header[0].contains("2 of 5 cases left out"),
+            "{}",
+            report.header[0]
+        );
+        assert!(report.header[0].contains("adjudications ignored"));
+        // A ruling that mock2's FYE call on D is right does not apply here.
+        let ruling = Ruling {
+            case_id: setup.fixture.ids["D"],
+            field: "fye".into(),
+            verdict: Verdict::Candidate,
+            run: "mock2".into(),
+            value: serde_json::json!(true),
+            at: Utc::now(),
+        };
+        let ruled = Adjudications::from_rulings(&[ruling]);
+        let report = build(
+            "set",
+            &setup.cases,
+            &setup.manifest,
+            &data,
+            &ruled,
+            &with_reference("mock"),
+            None,
+            "",
+        )
+        .unwrap();
+        let mock2 = report.runs.iter().find(|r| r.name == "mock2").unwrap();
+        assert!((mock2.metrics["fye"].mean - 2.0 / 3.0).abs() < 1e-9);
+        // It does apply against gold.
+        let gold = build(
+            "set",
+            &setup.cases,
+            &setup.manifest,
+            &runs(&setup),
+            &ruled,
+            &ReportOptions::default(),
+            None,
+            "",
+        )
+        .unwrap();
+        assert_eq!(gold.runs[1].metrics["fye"].mean, 1.0);
+    }
+
+    #[tokio::test]
+    async fn two_reps_give_the_reference_its_own_noise_floor() {
+        let setup = fixture_runs().await;
+        let mut data = bent_reference(&setup);
+        // D unbent: rep 0 and rep 1 both put it in FYE, where gold does not.
+        let d = setup.fixture.ids["D"].to_string();
+        for row in data[0].rows.iter_mut().filter(|r| r.prompt_id == d) {
+            row.decision.as_mut().unwrap().attention.show_in_fye = true;
+        }
+        let (a, b, c) = (
+            setup.fixture.ids["A"],
+            setup.fixture.ids["B"],
+            setup.fixture.ids["C"],
+        );
+        let mut second: Vec<ResultRow> = runs(&setup)[0].rows.clone();
+        for row in &mut second {
+            row.rep = 1;
+            if row.prompt_id == b.to_string() {
+                row.decision.as_mut().unwrap().attention.show_in_fye = false;
+            }
+            if row.prompt_id == c.to_string() {
+                row.status = "failed".into();
+                row.decision = None;
+            }
+        }
+        data[0].rows.extend(second);
+        let report = build(
+            "set",
+            &setup.cases,
+            &setup.manifest,
+            &data,
+            &Adjudications::default(),
+            &with_reference("mock"),
+            None,
+            "",
+        )
+        .unwrap();
+        assert!(report.notes.is_empty());
+        let floor = report
+            .runs
+            .iter()
+            .find(|r| r.role == Role::SelfAgreement)
+            .unwrap();
+        assert_eq!(floor.name, "mock self-agreement (rep 1 vs rep 0)");
+        // Both ok on B and D only (A failed at rep 0, C at rep 1). B differs
+        // between reps; D agrees with rep 0 (against gold it would not).
+        assert_eq!(floor.cases, 2);
+        assert!(!floor.per_case.contains_key(&a));
+        assert_eq!(floor.metrics["fye"].mean, 0.5);
+        let text = render(&report);
+        assert!(text.contains("| metric | mock2 | mock self-agreement (rep 1 vs rep 0) |"));
+        assert!(
+            !text.contains("| mock self-agreement (rep 1 vs rep 0) (mock-model) |"),
+            "not costed twice"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_the_flag_nothing_changes() {
+        let setup = fixture_runs().await;
+        let report = build(
+            "set",
+            &setup.cases,
+            &setup.manifest,
+            &runs(&setup),
+            &Adjudications::default(),
+            &ReportOptions::default(),
+            None,
+            "t",
+        )
+        .unwrap();
+        assert!(
+            report.header[0].ends_with("; 0 adjudicated field(s)."),
+            "{}",
+            report.header[0]
+        );
+        assert!(
+            report.header[2].starts_with("Caveat: gold is one sample from the incumbent model")
+        );
+        assert!(report.notes.is_empty());
+        assert!(report.runs.iter().all(|r| r.role == Role::Scored));
+        assert_eq!(report.gold_label, "gold");
+        let text = render(&report);
+        assert!(text.contains("## Agreement with gold"));
+        assert!(text.contains("| metric | mock | mock2 |"));
+        assert!(!text.contains("[reference]") && !text.contains("self-agreement"));
     }
 
     #[tokio::test]

@@ -26,6 +26,8 @@ struct AgentConnectTests {
         signInSnippets()
         openSnippetsUnchanged()
         noEmDashesInCopy()
+        hostedMailboxes()
+        accessAndTeamCopy()
         print("ok: \(checks) agent connect checks passed")
     }
 
@@ -175,6 +177,7 @@ struct AgentConnectTests {
         let files = [
             "Sources/Passband/Model/AgentConnect.swift",
             "Sources/Passband/Views/AgentsSection.swift",
+            "Sources/Passband/Lib/HostedServer.swift",
         ]
         let literal = try! NSRegularExpression(pattern: #""[^"\n]*""#)
         for path in files {
@@ -189,7 +192,7 @@ struct AgentConnectTests {
                 let text = String(source[Range(match.range, in: source)!])
                 expect(!text.contains("\u{2014}"), "no em dash in \(path): \(text)")
             }
-            expect(literals > 10, "\(path) was actually scanned")
+            expect(literals > 0, "\(path) was actually scanned")
         }
         for kind in AgentKind.allCases {
             for auth in [AgentDoorAuth.none, .signIn] {
@@ -197,5 +200,69 @@ struct AgentConnectTests {
                 expect(!copy.joined().contains("\u{2014}"), "no em dash in \(kind) copy")
             }
         }
+    }
+
+    /// A hosted person is never handed a daemon remedy. 403 and "no answer"
+    /// (a 5xx lands there) read as one honest outage line, and the self-host
+    /// snippets stay off screen until the door says how it is entered.
+    static func hostedMailboxes() {
+        expect(HostedServer.isHosted(url: "https://alice.passband.email"), "a tenant host is hosted")
+        expect(HostedServer.isHosted(url: "https://Alice.Passband.Email/"), "hosts compare case-insensitively")
+        expect(HostedServer.isHosted(host: "alice.passband.email"), "the connect screen's host form")
+        for selfHost in [
+            "http://127.0.0.1:8848", "http://box.tailnet.ts.net:8848", "https://mail.example.com",
+            "https://notpassband.email", "https://alice.passband.email.example.com", "", "not a url",
+        ] {
+            expect(!HostedServer.isHosted(url: selfHost), "\(selfHost) is not hosted")
+        }
+        expect(
+            AgentConnect.classify(statusCode: 503, wwwAuthenticate: nil, body: Data()) == .unreachable,
+            "a 503 is the no-answer case, which carries the hosted wording")
+
+        for status: AgentDoorStatus in [.hostRefused, .unreachable] {
+            expect(AgentConnect.isHostedOutage(status, hosted: true), "hosted \(status) is the outage line")
+            expect(!AgentConnect.isHostedOutage(status, hosted: false), "self-hosted \(status) keeps its remedy")
+            expect(!AgentConnect.showsSetup(status, hosted: true), "no self-host snippets for hosted \(status)")
+            expect(AgentConnect.showsSetup(status, hosted: false), "self-hosted \(status) still shows setup")
+        }
+        for status: AgentDoorStatus in [.unknown, .checking, .open, .signInRequired, .notServed] {
+            expect(!AgentConnect.isHostedOutage(status, hosted: true), "hosted \(status) is not an outage")
+        }
+        expect(AgentConnect.showsSetup(.signInRequired, hosted: true), "hosted sign-in door shows setup")
+        for status: AgentDoorStatus in [.unknown, .checking, .notServed] {
+            expect(!AgentConnect.showsSetup(status, hosted: true), "hosted \(status) shows no setup yet")
+        }
+        expect(!AgentConnect.showsSetup(.notServed, hosted: false), "not served shows no setup")
+        let line = AgentConnect.hostedUnavailable
+        expect(line.contains("contact support"), "the outage line says where to go")
+        expect(!line.contains("SQUELCH_"), "the outage line names no daemon setting")
+        expect(!line.contains("\u{2014}"), "no em dash in the outage line")
+
+        // The pane must actually route through the hosted check, and the
+        // self-host remedies must still be there for self-host.
+        guard let pane = try? String(contentsOfFile: "Sources/Passband/Views/AgentsSection.swift", encoding: .utf8) else {
+            expect(false, "read the pane")
+            return
+        }
+        expect(pane.contains("AgentConnect.isHostedOutage(status, hosted: hosted)"), "the pane checks for a hosted outage")
+        expect(pane.contains("AgentConnect.showsSetup(status, hosted: hosted)"), "the pane gates setup on hosted")
+        expect(pane.contains("SQUELCH_MCP_ALLOWED_HOSTS in the daemon's environment"), "self-host 403 copy kept")
+        expect(pane.contains("check it is running and that this address reaches it"), "self-host no-answer copy kept")
+    }
+
+    static func accessAndTeamCopy() {
+        guard let pane = try? String(contentsOfFile: "Sources/Passband/Views/AgentsSection.swift", encoding: .utf8) else {
+            expect(false, "read the pane")
+            return
+        }
+        // Sign-ins renew silently, so "until it expires" was never true.
+        expect(
+            pane.contains("An agent you approve keeps access until it is removed. To remove one, contact support for now."),
+            "the access line says what is true")
+        expect(!pane.contains("expires"), "no promise that access runs out on its own")
+        let claude = AgentKind.claude.instruction(for: .signIn)
+        expect(claude.contains("Team or Enterprise"), "the connector covers team plans")
+        expect(claude.contains("Organization settings"), "and names where an owner adds it")
+        expect(AgentKind.claude.instruction(for: .signIn) == AgentKind.claude.instruction, "one connector instruction")
     }
 }

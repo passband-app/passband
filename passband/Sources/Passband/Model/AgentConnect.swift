@@ -117,7 +117,7 @@ enum AgentKind: String, CaseIterable, Identifiable, Sendable {
     func instruction(for auth: AgentDoorAuth) -> String {
         switch (self, auth) {
         case (.claude, _), (.claudeDesktop, .signIn):
-            "In Claude, open Customize, then Connectors, and choose Add custom connector. Paste this address and select Add."
+            "In Claude, open Customize, then Connectors, and choose Add custom connector. Paste this address and select Add. On a Team or Enterprise plan, an owner adds it under Organization settings first, then each member connects."
         default: instruction
         }
     }
@@ -285,6 +285,33 @@ final class AgentConnect {
         guard url.lowercased().hasPrefix("http://") else { return false }
         let host = host(of: url)?.lowercased()
         return host != "localhost" && host != "127.0.0.1"
+    }
+
+    // MARK: - hosted mailboxes
+
+    /// What a hosted mailbox says when its door answers 403 or not at all (a
+    /// 5xx included, which `classify` files as `.unreachable`). The self-host
+    /// copy for those answers tells somebody to edit the daemon's environment
+    /// or check it is running; a hosted person can do neither, and
+    /// SQUELCH_MCP_ALLOWED_HOSTS must never be set on hosted at all. Mid
+    /// rollout a hosted door can say either, so this is the one honest line.
+    nonisolated static let hostedUnavailable =
+        "The agent door isn't available for this mailbox right now. Try again later, and contact support if it stays that way."
+
+    /// Whether `status` from a hosted mailbox is one of those answers.
+    nonisolated static func isHostedOutage(_ status: AgentDoorStatus, hosted: Bool) -> Bool {
+        hosted && (status == .hostRefused || status == .unreachable)
+    }
+
+    /// Whether the setup and capability cards belong under this answer. A
+    /// self-hosted daemon shows them for anything but "not served", since its
+    /// owner is about to fix whatever the status says. A hosted mailbox shows
+    /// them only once the door has said how it is entered: the self-host
+    /// snippets and their "no password of its own" line are wrong there, and
+    /// there is nothing to set up while it is down.
+    nonisolated static func showsSetup(_ status: AgentDoorStatus, hosted: Bool) -> Bool {
+        if hosted { return status == .signInRequired || status == .open }
+        return status != .notServed
     }
 
     // MARK: - the probe

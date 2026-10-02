@@ -272,7 +272,7 @@ struct ConnectView: View {
     }
 
     private static func isHostedHost(_ host: String) -> Bool {
-        host.hasSuffix("passband.email")
+        HostedServer.isHosted(host: host)
     }
 
     /// The welcome screen's retry, only when there is a saved connection to

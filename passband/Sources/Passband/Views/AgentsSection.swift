@@ -29,13 +29,16 @@ struct AgentsSection: View {
     /// not on its list (Claude Desktop picked, then the door turned out to be
     /// the sign-in one).
     private var shownAgent: AgentKind { agents.contains(agent) ? agent : agents[0] }
+    /// A hosted mailbox (see `HostedServer`), whose owner cannot touch the
+    /// daemon, so the self-host remedies are never offered to them.
+    private var hosted: Bool { HostedServer.isHosted(url: store.settings?.serverURL ?? "") }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             doorCard
-            // Not for a server with no agent door at all (a hosted mailbox,
-            // today): a ready-to-paste command for a 404 is a trap.
-            if let endpoint, status != .notServed {
+            // Not for a server with no agent door at all: a ready-to-paste
+            // command for a 404 is a trap. See `showsSetup` for hosted.
+            if let endpoint, AgentConnect.showsSetup(status, hosted: hosted) {
                 setupCard(endpoint)
                 reachCard
             }
@@ -92,6 +95,8 @@ struct AgentsSection: View {
             StatusDot(color: Palette.positive, label: "open")
         case .signInRequired:
             StatusDot(color: Palette.positive, label: "open with sign-in")
+        case .hostRefused where hosted:
+            StatusDot(color: Palette.warn, label: "unavailable")
         case .hostRefused:
             StatusDot(color: Palette.warn, label: "refused by name")
         case .notServed:
@@ -103,6 +108,8 @@ struct AgentsSection: View {
 
     @ViewBuilder private func statusExplanation(_ endpoint: String) -> some View {
         switch status {
+        case _ where AgentConnect.isHostedOutage(status, hosted: hosted):
+            SettingsHint(AgentConnect.hostedUnavailable)
         case .open where AgentConnect.isLoopback(endpoint):
             SettingsHint(
                 "This address only works on this computer, so the agent has to run here too. For an agent on another machine, reach the daemon over your tailnet instead."
@@ -219,7 +226,7 @@ struct AgentsSection: View {
             }
             if auth == .signIn {
                 SettingsHint(
-                    "An agent you approve keeps access until its sign-in expires. To cut one off sooner, contact support for now."
+                    "An agent you approve keeps access until it is removed. To remove one, contact support for now."
                 )
             } else {
                 SettingsHint(

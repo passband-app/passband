@@ -41,7 +41,8 @@ squelch-eval run --candidate NAME [--dataset DIR] [--reps R] [--concurrency C]
                  [--sample N --seed S --floor F] [--fidelity exact|reconstructed|all]
                  [--case ID ...] [--effort E] [--max-usd X] [--yes]
 squelch-eval report [RUN ...] [--dataset DIR] [--baseline RUN] [--diff RUN]
-                    [--cache-hit F] [--md FILE] [--allow-repo-path] [--seed S]
+                    [--texts N] [--no-text] [--cache-hit F] [--md FILE]
+                    [--allow-repo-path] [--seed S]
 squelch-eval adjudicate <case-id> --field F --verdict candidate|gold|either --run RUN
 ```
 
@@ -130,37 +131,162 @@ case's context contains its gold summary or reason.
 ## Metrics
 
 Programmatic, per field, no LLM judge. Each is in [0, 1] (1 agrees) or
-absent when it does not apply. A failed run scores 0 on everything that
-applies, and harm 10.
+absent when it does not apply. A failed run scores 0 on everything gold
+makes applicable, and harm 10. The report groups them as below.
 
-| metric | agrees when | applies |
-|---|---|---|
-| `fye` | `show_in_fye` matches | always |
-| `reading` | Reading membership matches | always |
-| `auth` | `is_auth()` matches | always |
-| `auth_kinds` | the auth kind sets match | gold is auth |
-| `restricted` | `external_access.restricted` matches | always |
-| `push` | `is_auth or importance >= 50` matches | always |
-| `kinds` | Jaccard of the kind sets | always |
-| `kinds_exact` | the kind sets match | always |
-| `state` | `attention.state` matches | always |
-| `actions` | the multiset of unresolved action kinds matches | either side has one |
-| `records` | the multiset of record kinds matches | gold has records |
-| `record_fields` | share of key facts that match (bill amount and due, receipt amount, tracking number and status, event start, institution) | gold has records |
-| `reading_kind` | matches | both Reading and gold has one |
-| `revisit` | presence matches | always |
-| `rank_delta` | lower is better: the difference in the model-set part of the FYE rank | both in FYE |
+| section | metric | agrees when | applies |
+|---|---|---|---|
+| Placement | `fye` | `show_in_fye` matches | always |
+| | `reading` | Reading membership matches | always |
+| | `reading_kind` | matches | both Reading and gold has one |
+| | `kinds` | Jaccard of the kind sets | always |
+| | `kinds_exact` | the kind sets match | always |
+| | `state` | `attention.state` matches | always |
+| | `revisit` | presence matches | always |
+| | `revisit_at` | the two times are within 24 hours | both have a revisit |
+| | `related_updates` | the sets of target threads match | either side has one |
+| | `rule_exceptions` | the sets of rule ids match | either side has one |
+| Security and push | `auth` | `is_auth()` matches | always |
+| | `auth_kinds` | the auth kind sets match | gold is auth |
+| | `restricted` | `external_access.restricted` matches | always |
+| | `push` | `is_auth or importance >= 50` matches | always |
+| | `importance` | 1 minus the importance gap over 100 | always |
+| | `login_code` | both have one, same code exactly, same service ignoring case | either side has one |
+| | `text_safe` | no URL, no own login code, and (on auth or restricted mail) no 4 to 8 digit run from the email that gold never wrote, in any text the candidate wrote | always |
+| Attention detail | `factors` | 1 minus the mean absolute error of the four factors | always |
+| | `attention_at` | both have one and the times agree | either side has one |
+| | `relevant_messages` | Jaccard of the relevant message ids | always |
+| | `actions` | the multiset of unresolved action kinds matches | either side has one |
+| | `action_fields` | share of facts per gold action that agree: paired at all, resolved, due, and the carried-forward id | gold has actions |
+| | `rank_delta` | lower is better: the difference in the model-set part of the FYE rank | both in FYE |
+| Records | `records` | the multiset of record kinds matches | gold has records |
+| | `record_fields` | share of exact facts that agree on paired records (bill merchant, amount, currency, due, autopay; receipt merchant, amount, currency; delivery carrier, tracking number, status, merchant, order refs; event start; institution) | gold has records |
+| Text | `summary_sim` | similarity of `summary` | text similarity on |
+| | `attention_summary_sim` | similarity of `attention.summary` | text similarity on |
+| | `push_text_sim` | mean similarity of push title and body | text similarity on |
+| | `action_text_sim` | mean over gold actions of the paired description's similarity (0 when unpaired) | gold has actions |
+| | `record_text_sim` | mean over gold record text fields (item, title, location, description) of the paired similarity (0 when missing) | gold has one |
+| | `reason_sim` | mean similarity of the reasons: decision, access, notification, revisit, rule exceptions | text similarity on |
+| Grounding | `evidence` | Jaccard of every message id cited anywhere in the decision | always |
+
+Pairing: actions pair by the same non-null id first, then by kind
+(preferring a matching due), then order. Records pair within a kind on the
+fact that identifies them (tracking number, amount, event start and title,
+institution), ties by order; an unpaired gold record scores 0 on all of its
+facts. Times agree when two dates are equal, two timestamps are within an
+hour, or a date matches a timestamp's UTC date; text that is neither agrees
+only with identical text. Merchant and institution names agree after
+lowercasing, dropping punctuation and a trailing `com`, `inc`, `llc`, `ltd`
+or `co`, when equal or one contains the other.
 
 `harm` is one weighted cost per case: FYE miss 10 (needs_user) or 5, FYE
 false alarm 2, restricted miss 10, false restriction 1, auth miss 5, push
 miss 3, false push 2, Reading mismatch 1, record kinds 2, record facts up to
-1, kinds up to 0.5, model failure 10. The table lives in `score.rs`.
+1, kinds up to 0.5, a URL or credential in text 10, a login code
+disagreement 3, a gold action left unpaired 2 each (at most 4), model
+failure 10. The table lives in `score.rs`.
+
+Also shown, not scored: each attention factor's mean absolute error, and
+text style (the share of cases whose user-facing text has an em dash, with
+gold's own rate on the `production` row, and the median length against
+gold's).
+
+### Text similarity
+
+The `*_sim` metrics are the cosine of two embeddings from the daemon's own
+on-box model (the same weights the daemon uses for search), 1.0 when the
+texts are equal once whitespace is normalized. `report` loads the model only
+if its weights are already on this machine; it never downloads them. Vectors
+are cached at `<dataset>/embeddings.jsonl` (0600), keyed by model and text;
+a cache from another model, or a corrupt one, is thrown away. With no
+weights, or with `--no-text`, the text metrics are omitted and the header
+says why.
+
+Read these relative to the `production` run, not as absolutes: they measure
+closeness to the incumbent's wording, and two good summaries can share few
+words. `--diff RUN --texts N` lists the N rows whose user-facing text is
+least like gold's, side by side, to judge by reading.
+
+### What the agent emits and how it is scored
+
+Every leaf of the decision schema has an entry here (from `COVERAGE` in
+`score.rs`; the first matching row wins, `*` matches any prefix and a
+trailing `.*` any field below). A test walks the live schema and fails when
+a field appears that this table does not name, so a new field cannot go
+unscored by accident.
+
+| schema path | scored by |
+|---|---|
+| `related_updates[].expected_revision` | not scored: a concurrency guard the executor checks against the store, not a judgement |
+| `related_updates[].attention.*` | not scored: another thread's attention; scored as that thread's own decision, and `related_updates` checks which threads are touched |
+| `*.evidence[].location` | not scored: free-text pointers into a message; the cited message ids are scored by `evidence` |
+| `*.timezone` | not scored: display metadata; the time itself is compared by the time rule |
+| `*.interpreted_relative` | not scored: how the model read the date, not what it decided; the date is compared |
+| `*.source_message_id` | `evidence` |
+| `*.evidence[].message_id` | `evidence` |
+| `kinds` | `kinds`, `kinds_exact` |
+| `destinations` | `reading` |
+| `reading_kind` | `reading_kind` |
+| `summary` | `summary_sim`, `text_safe` |
+| `reason` | `reason_sim`, `text_safe` |
+| `auth.kinds` | `auth`, `auth_kinds`, `push` |
+| `external_access.restricted` | `restricted` |
+| `external_access.reason` | `reason_sim`, `text_safe` |
+| `attention.show_in_fye` | `fye` |
+| `attention.state` | `state` |
+| `attention.actions[].id` | `action_fields` |
+| `attention.actions[].kind` | `actions`, `action_fields` |
+| `attention.actions[].description` | `action_text_sim`, `text_safe` |
+| `attention.actions[].resolved` | `actions`, `action_fields` |
+| `attention.actions[].due.value` | `action_fields` |
+| `attention.summary` | `attention_summary_sim`, `text_safe` |
+| `attention.factors.urgency` | `factors`, `rank_delta` |
+| `attention.factors.action_need` | `factors`, `rank_delta` |
+| `attention.factors.personal_relevance` | `factors`, `rank_delta` |
+| `attention.factors.importance` | `factors`, `rank_delta` |
+| `attention.factors.attention_at.value` | `attention_at` |
+| `attention.relevant_message_ids` | `relevant_messages` |
+| `records[bill].kind` | `records` |
+| `records[bill].merchant` | `record_fields` |
+| `records[bill].amount` | `record_fields` |
+| `records[bill].currency` | `record_fields` |
+| `records[bill].due.value` | `record_fields` |
+| `records[bill].autopay` | `record_fields` |
+| `records[receipt].kind` | `records` |
+| `records[receipt].merchant` | `record_fields` |
+| `records[receipt].amount` | `record_fields` |
+| `records[receipt].currency` | `record_fields` |
+| `records[delivery].kind` | `records` |
+| `records[delivery].carrier` | `record_fields` |
+| `records[delivery].tracking_number` | `record_fields` |
+| `records[delivery].status` | `record_fields` |
+| `records[delivery].item_name` | `record_text_sim` |
+| `records[delivery].merchant` | `record_fields` |
+| `records[delivery].order_refs` | `record_fields` |
+| `records[event].kind` | `records` |
+| `records[event].title` | `record_text_sim` |
+| `records[event].start.value` | `record_fields` |
+| `records[event].location` | `record_text_sim` |
+| `records[financial_update].kind` | `records` |
+| `records[financial_update].institution` | `record_fields` |
+| `records[financial_update].description` | `record_text_sim` |
+| `related_updates[].thread_id` | `related_updates` |
+| `rule_exceptions[].rule_id` | `rule_exceptions` |
+| `rule_exceptions[].reason` | `reason_sim` |
+| `notification.importance` | `importance`, `push` |
+| `notification.title` | `push_text_sim`, `text_safe` |
+| `notification.body` | `push_text_sim`, `text_safe` |
+| `notification.reason` | `reason_sim`, `text_safe` |
+| `notification.login_code.service` | `login_code` |
+| `notification.login_code.code` | `login_code`, `text_safe` |
+| `revisit.at` | `revisit`, `revisit_at` |
+| `revisit.reason` | `reason_sim` |
 
 ## Reading the report
 
-The first three lines say which dataset, what cache hit share the cost
-projection assumes and where it came from, and that gold is one sample from
-the incumbent model. Then:
+The first four lines say which dataset, what cache hit share the cost
+projection assumes and where it came from, that gold is one sample from the
+incumbent model, and how text similarity was measured (or why not). Then:
 
 - **Cost and behavior.** The `production` row is what the mailbox costs
   today: the gold runs on the current gold model, priced at that model.
@@ -171,7 +297,8 @@ the incumbent model. Then:
   the run total, but not in the per-email cost. A run with no recorded input
   tokens, or a model with no price, shows no cost rather than zero.
 - **Agreement.** Weighted means with 95% bootstrap intervals over cases
-  (reps averaged first). Sampled runs are weighted back to the population.
+  (reps averaged first), in the sections above. Sampled runs are weighted
+  back to the population. Then the per-factor errors and text style.
 - **Directional.** Recall, precision and false-positive rate on each positive
   class, with raw miss and false-alarm counts. A buried FYE item and a
   credential left unrestricted come first. Failed runs count as negatives.
@@ -180,8 +307,10 @@ the incumbent model. Then:
 - **By stratum and fidelity.** The headline metrics per group.
 - **Disagreements** (`--diff RUN`). Every case where the run and gold differ
   on fye, restricted, auth, push, reading or records, highest harm first,
-  with both reasons and the trace path. This is where to decide whether the
-  candidate or the gold is wrong. `--md` writes the same text to a file; it
+  with both reasons, every other metric below 1 for that case, gold and
+  candidate summary and push text, and the trace path. This is where to
+  decide whether the candidate or the gold is wrong. `--texts N` adds the
+  least similar user-facing text. `--md` writes the same text to a file; it
   names senders and subjects.
 
 `report` always re-scores from the stored decisions. The `grade` written on
@@ -193,8 +322,11 @@ each row is a convenience for other tools, tagged with `scorer_version`.
 records the run's value on that field. `report` then counts that value as
 agreement for every run that gave it. For yes/no fields this replaces gold
 for that case, so the metric, the directional counts and harm all follow. A
-later `gold` ruling on the same value revokes it. `record_fields` cannot be
-ruled on.
+later `gold` ruling on the same value revokes it. Rulable fields: fye,
+reading, auth, auth_kinds, restricted, push, kinds (covers kinds_exact),
+state, actions, records, reading_kind, revisit, login_code, related_updates
+and attention_at. The graded facts (`record_fields`, `action_fields`), the
+numeric ones and the text metrics cannot be ruled on.
 
 ## Adding a candidate
 
@@ -228,7 +360,8 @@ harness disagrees with itself; it is reported loudly as a bug.
 
 - Gold is one sample from the incumbent model, so agreement rewards
   imitating it. Use the `production` candidate as a noise floor, compare
-  paired, and adjudicate.
+  paired, and adjudicate. The text metrics inherit this most: they measure
+  wording, so read them against `production` and with `--texts`.
 - The served model is not asserted: the transport does not surface the
   response's `model`.
 - Tool reads take the store's newest N results (`read_thread`,

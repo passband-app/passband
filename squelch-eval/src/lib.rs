@@ -12,6 +12,7 @@ pub mod pricing;
 pub mod report;
 pub mod run;
 pub mod score;
+pub mod textsim;
 
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};

@@ -92,6 +92,13 @@ enum Command {
         allow_repo_path: bool,
         #[arg(long, default_value_t = squelch_eval::report::DEFAULT_SEED)]
         seed: u64,
+        /// With --diff RUN: also list the N rows whose user-facing text is
+        /// least like gold's, side by side.
+        #[arg(long, requires = "diff")]
+        texts: Option<usize>,
+        /// Skip text similarity (no embedding model is loaded).
+        #[arg(long)]
+        no_text: bool,
     },
     /// Record a ruling on one field of one case.
     Adjudicate {
@@ -214,6 +221,8 @@ async fn main() -> Result<()> {
             md,
             allow_repo_path,
             seed,
+            texts,
+            no_text,
         } => {
             if let Some(hit) = cache_hit
                 && !(0.0..=1.0).contains(&hit)
@@ -227,6 +236,8 @@ async fn main() -> Result<()> {
                 diff,
                 cache_hit,
                 seed,
+                texts,
+                no_text,
             };
             print!(
                 "{}",

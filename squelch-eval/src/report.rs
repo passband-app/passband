@@ -12,13 +12,15 @@ use crate::run::{
     Candidate, ERRORS_FILE, ErrorRow, RESULTS_FILE, RUN_FILE, ResultRow, TRACES_DIR, append_line,
 };
 use crate::score::{
-    ADJUDICABLE, Accepted, DIRECTIONAL, Estimate, METRICS, SCORER_VERSION, Score, field_value,
-    paired_delta, score, weighted_mean,
+    ADJUDICABLE, Accepted, Context as ScoreContext, DIRECTIONAL, Estimate, FACTORS, METRICS,
+    SCORER_VERSION, SECTIONS, Score, TextSimilarity, USER_TEXT_METRICS, field_value, paired_delta,
+    score, style, weighted_mean,
 };
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use squelch_core::triage::decision::MessageDecision;
 use squelch_core::triage::llm::Usage;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
@@ -239,6 +241,12 @@ pub struct CaseAgg {
     pub tokens: [f64; 4],
     pub turns: f64,
     pub tool_share: f64,
+    /// Mean absolute error per attention factor, over successful reps.
+    pub factor_errors: BTreeMap<String, f64>,
+    /// Share of successful reps whose user-facing text has an em dash.
+    pub em_dash: Option<f64>,
+    /// Candidate characters over gold characters (user-facing text).
+    pub length_ratio: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -280,6 +288,10 @@ pub struct RunStats {
     pub latency_p95: Option<f64>,
     pub tokens: [Option<f64>; 4],
     pub costs: Costs,
+    pub factor_mae: BTreeMap<String, f64>,
+    pub em_dash_rate: Option<f64>,
+    /// Median over cases.
+    pub length_ratio: Option<f64>,
     pub per_case: BTreeMap<i64, CaseAgg>,
     /// Per scored row: (case, rep, score).
     pub scores: Vec<(i64, u32, Score)>,
@@ -293,6 +305,8 @@ pub struct ProductionStats {
     pub tool_rate: Option<f64>,
     pub tokens: [Option<f64>; 4],
     pub costs: Costs,
+    /// Gold's own em dash rate in user-facing text.
+    pub em_dash_rate: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -304,9 +318,23 @@ pub struct DiffEntry {
     pub subject: String,
     /// (field, gold value, candidate value)
     pub fields: Vec<(String, String, String)>,
+    /// Every other metric below 1 for this row, in [`METRICS`] order.
+    pub others: Vec<(String, f64)>,
+    /// (label, gold text, candidate text): summary, push title, push body.
+    pub texts: Vec<(String, String, String)>,
     pub gold_reason: String,
     pub candidate_reason: String,
     pub trace: PathBuf,
+}
+
+/// A `--texts` entry: one row's user-facing text next to gold's.
+#[derive(Debug, Clone)]
+pub struct TextEntry {
+    pub case: i64,
+    pub rep: u32,
+    pub subject: String,
+    pub mean_similarity: f64,
+    pub texts: Vec<(String, String, String)>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -316,6 +344,10 @@ pub struct ReportOptions {
     pub diff: Option<String>,
     pub cache_hit: Option<f64>,
     pub seed: u64,
+    /// With `diff`: list this many rows with the least similar user text.
+    pub texts: Option<usize>,
+    /// Skip text similarity (no embedder).
+    pub no_text: bool,
 }
 
 /// One stratum or fidelity group: (cases, headline means, mean harm).
@@ -334,6 +366,8 @@ pub struct Report {
     pub breakdown: BTreeMap<String, BTreeMap<String, GroupStats>>,
     pub diff_run: Option<String>,
     pub diff: Vec<DiffEntry>,
+    /// `--texts`: the rows to read, or why there are none.
+    pub texts: Option<Result<Vec<TextEntry>, String>>,
 }
 
 fn sum_usage(calls: &[Usage]) -> [f64; 4] {
@@ -369,6 +403,7 @@ pub fn run_stats(
     adjudications: &Adjudications,
     hit: Option<f64>,
     seed: u64,
+    sim: Option<&dyn TextSimilarity>,
 ) -> RunStats {
     let mut stats = RunStats {
         name: run.name.clone(),
@@ -395,15 +430,18 @@ pub fn run_stats(
             &case.gold,
             row.decision.as_ref(),
             adjudications.for_case(case.id),
+            &ScoreContext::for_case(case, sim),
         );
         stats.scores.push((case.id, row.rep, scored.clone()));
         by_case.entry(case.id).or_default().push((row, scored));
     }
     stats.cases = by_case.len();
-    let mut cells: [(f64, f64, f64, f64); 5] = [(0.0, 0.0, 0.0, 0.0); 5];
-    let mut raw: [(usize, usize, usize); 5] = [(0, 0, 0); 5];
+    let fields = DIRECTIONAL.len();
+    let mut cells = vec![(0.0, 0.0, 0.0, 0.0); fields];
+    let mut raw = vec![(0usize, 0usize, 0usize); fields];
     let mut latencies = Vec::new();
     for (id, rows) in &by_case {
+        let case = cases[id];
         let weight = rows[0].0.weight;
         let reps = rows.len();
         let share = weight / reps as f64;
@@ -415,14 +453,35 @@ pub fn run_stats(
         for metric in METRICS {
             let values: Vec<f64> = rows
                 .iter()
-                .filter_map(|(_, s)| s.metrics.get(metric).copied())
+                .filter_map(|(_, s)| s.metrics.get(*metric).copied())
                 .collect();
             if let Some(value) = mean(values.into_iter()) {
-                agg.metrics.insert(metric.into(), value);
+                agg.metrics.insert((*metric).into(), value);
             }
         }
         agg.harm = mean(rows.iter().map(|(_, s)| s.harm)).unwrap_or(0.0);
         agg.rank_delta = mean(rows.iter().filter_map(|(_, s)| s.rank_delta));
+        for factor in FACTORS {
+            if let Some(error) = mean(
+                rows.iter()
+                    .filter_map(|(_, s)| s.factor_errors.get(factor).copied()),
+            ) {
+                agg.factor_errors.insert(factor.into(), error);
+            }
+        }
+        let (_, gold_chars) = style(&case.gold);
+        let decided: Vec<(bool, usize)> = rows
+            .iter()
+            .filter_map(|(row, _)| row.decision.as_ref().map(style))
+            .collect();
+        agg.em_dash = mean(decided.iter().map(|(dash, _)| f64::from(u8::from(*dash))));
+        if gold_chars > 0 {
+            agg.length_ratio = mean(
+                decided
+                    .iter()
+                    .map(|(_, chars)| *chars as f64 / gold_chars as f64),
+            );
+        }
         let n = reps as f64;
         for (row, scored) in rows {
             let tokens = sum_usage(&row.calls);
@@ -487,6 +546,20 @@ pub fn run_stats(
     for slot in 0..4 {
         stats.tokens[slot] = weighted_mean(&pairs(&|agg: &CaseAgg| Some(agg.tokens[slot])));
     }
+    for factor in FACTORS {
+        if let Some(mae) = weighted_mean(&pairs(&|agg: &CaseAgg| {
+            agg.factor_errors.get(factor).copied()
+        })) {
+            stats.factor_mae.insert(factor.into(), mae);
+        }
+    }
+    stats.em_dash_rate = weighted_mean(&pairs(&|agg: &CaseAgg| agg.em_dash));
+    let mut ratios: Vec<f64> = stats
+        .per_case
+        .values()
+        .filter_map(|a| a.length_ratio)
+        .collect();
+    stats.length_ratio = percentile(&mut ratios, 0.5);
     stats.latency_p50 = percentile(&mut latencies.clone(), 0.5);
     stats.latency_p95 = percentile(&mut latencies, 0.95);
     for (index, field) in DIRECTIONAL.iter().enumerate() {
@@ -576,6 +649,7 @@ pub fn production_stats(cases: &[Case], model: &str, hit: Option<f64>) -> Produc
             runs.iter()
                 .map(|c| f64::from(u8::from(c.gold_meta.tool_calls > 0))),
         ),
+        em_dash_rate: mean(runs.iter().map(|c| f64::from(u8::from(style(&c.gold).0)))),
         ..Default::default()
     };
     for slot in 0..4 {
@@ -613,7 +687,9 @@ pub fn production_stats(cases: &[Case], model: &str, hit: Option<f64>) -> Produc
     stats
 }
 
-/// Build the report from loaded data. Pure.
+/// Build the report from loaded data. Pure. `sim` scores the free text;
+/// `text_line` says how (or why not) and becomes the header's last line.
+#[allow(clippy::too_many_arguments)]
 pub fn build(
     dataset_name: &str,
     cases: &[Case],
@@ -621,6 +697,8 @@ pub fn build(
     runs: &[RunData],
     adjudications: &Adjudications,
     options: &ReportOptions,
+    sim: Option<&dyn TextSimilarity>,
+    text_line: &str,
 ) -> Result<Report> {
     let by_id: HashMap<i64, &Case> = cases.iter().map(|c| (c.id, c)).collect();
     let current_model = manifest["production_cache_hit"]["model"]
@@ -669,6 +747,7 @@ pub fn build(
             format!(
                 "Caveat: gold is one sample from the incumbent model ({current_model}), so agreement rewards imitating it. Read --diff and adjudicate before trusting a gap."
             ),
+            text_line.to_owned(),
         ],
         hit,
         production: Some(production_stats(cases, &current_model, hit)),
@@ -677,9 +756,14 @@ pub fn build(
         ..Default::default()
     };
     for run in runs {
-        report
-            .runs
-            .push(run_stats(run, &by_id, adjudications, hit, options.seed));
+        report.runs.push(run_stats(
+            run,
+            &by_id,
+            adjudications,
+            hit,
+            options.seed,
+            sim,
+        ));
     }
     if let Some(baseline) = &options.baseline {
         let base = report
@@ -748,6 +832,9 @@ pub fn build(
         }
         report.breakdown.insert(stats.name.clone(), table);
     }
+    if options.texts.is_some() && options.diff.is_none() {
+        bail!("--texts reads one run's text; name it with --diff RUN");
+    }
     if let Some(name) = &options.diff {
         let (stats, run) = report
             .runs
@@ -756,26 +843,56 @@ pub fn build(
             .find(|(s, _)| &s.name == name)
             .with_context(|| format!("--diff {name} is not among the runs"))?;
         report.diff = diff_entries(stats, run, &by_id);
+        if let Some(n) = options.texts {
+            report.texts = Some(if sim.is_some() {
+                Ok(text_entries(stats, run, &by_id, n))
+            } else {
+                Err("text similarity is unavailable, so there is nothing to rank by".into())
+            });
+        }
     }
     Ok(report)
+}
+
+fn row_for(run: &RunData, case: i64, rep: u32) -> &ResultRow {
+    run.rows
+        .iter()
+        .find(|r| r.prompt_id == case.to_string() && r.rep == rep)
+        .expect("scored row")
+}
+
+/// Summary and push text, gold next to the candidate.
+fn headline_texts(
+    gold: &MessageDecision,
+    candidate: Option<&MessageDecision>,
+) -> Vec<(String, String, String)> {
+    let pick = |f: fn(&MessageDecision) -> &str| candidate.map(f).unwrap_or("(failed)").to_owned();
+    vec![
+        ("summary".into(), gold.summary.clone(), pick(|d| &d.summary)),
+        (
+            "push title".into(),
+            gold.notification.title.clone(),
+            pick(|d| &d.notification.title),
+        ),
+        (
+            "push body".into(),
+            gold.notification.body.clone(),
+            pick(|d| &d.notification.body),
+        ),
+    ]
 }
 
 fn diff_entries(stats: &RunStats, run: &RunData, cases: &HashMap<i64, &Case>) -> Vec<DiffEntry> {
     let mut entries = Vec::new();
     for (case_id, rep, scored) in &stats.scores {
         let case = cases[case_id];
-        let row = run
-            .rows
-            .iter()
-            .find(|r| r.prompt_id == case_id.to_string() && r.rep == *rep)
-            .expect("scored row");
-        let shown =
-            |field: &str, decision: Option<&squelch_core::triage::decision::MessageDecision>| {
-                decision
-                    .and_then(|d| field_value(field, d))
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "(failed)".into())
-            };
+        let row = row_for(run, *case_id, *rep);
+        let shown = |field: &str, decision: Option<&MessageDecision>| {
+            decision
+                .and_then(|d| field_value(field, d))
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "(failed)".into())
+        };
         let fields: Vec<(String, String, String)> = DIFF_FIELDS
             .iter()
             .filter(|field| scored.metrics.get(**field).is_some_and(|v| *v < 1.0))
@@ -790,6 +907,17 @@ fn diff_entries(stats: &RunStats, run: &RunData, cases: &HashMap<i64, &Case>) ->
         if fields.is_empty() {
             continue;
         }
+        let others = METRICS
+            .iter()
+            .filter(|m| !DIFF_FIELDS.contains(m))
+            .filter_map(|m| {
+                scored
+                    .metrics
+                    .get(*m)
+                    .filter(|v| **v < 1.0)
+                    .map(|v| ((*m).to_owned(), *v))
+            })
+            .collect();
         entries.push(DiffEntry {
             case: *case_id,
             rep: *rep,
@@ -797,6 +925,8 @@ fn diff_entries(stats: &RunStats, run: &RunData, cases: &HashMap<i64, &Case>) ->
             from_addr: case.from_addr.clone(),
             subject: case.subject.clone(),
             fields,
+            others,
+            texts: headline_texts(&case.gold, row.decision.as_ref()),
             gold_reason: case.gold.reason.clone(),
             candidate_reason: match (&row.decision, &row.failure) {
                 (Some(decision), _) => decision.reason.clone(),
@@ -818,6 +948,67 @@ fn diff_entries(stats: &RunStats, run: &RunData, cases: &HashMap<i64, &Case>) ->
     entries
 }
 
+/// The `n` rows with the lowest mean user-facing text similarity.
+fn text_entries(
+    stats: &RunStats,
+    run: &RunData,
+    cases: &HashMap<i64, &Case>,
+    n: usize,
+) -> Vec<TextEntry> {
+    let mut entries: Vec<TextEntry> = stats
+        .scores
+        .iter()
+        .filter_map(|(case_id, rep, scored)| {
+            let values: Vec<f64> = USER_TEXT_METRICS
+                .iter()
+                .filter_map(|m| scored.metrics.get(*m).copied())
+                .collect();
+            let mean_similarity = mean(values.into_iter())?;
+            let case = cases[case_id];
+            let decision = row_for(run, *case_id, *rep).decision.as_ref();
+            let mut texts = headline_texts(&case.gold, decision);
+            texts.insert(
+                1,
+                (
+                    "attention summary".into(),
+                    case.gold.attention.summary.clone(),
+                    decision
+                        .map(|d| d.attention.summary.clone())
+                        .unwrap_or_else(|| "(failed)".into()),
+                ),
+            );
+            let actions = |d: &MessageDecision| {
+                d.attention
+                    .actions
+                    .iter()
+                    .map(|a| a.description.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            };
+            texts.push((
+                "actions".into(),
+                actions(&case.gold),
+                decision.map(actions).unwrap_or_else(|| "(failed)".into()),
+            ));
+            Some(TextEntry {
+                case: *case_id,
+                rep: *rep,
+                subject: case.subject.clone(),
+                mean_similarity,
+                texts,
+            })
+        })
+        .collect();
+    entries.sort_by(|a, b| {
+        a.mean_similarity
+            .total_cmp(&b.mean_similarity)
+            .then(a.case.cmp(&b.case))
+            .then(a.rep.cmp(&b.rep))
+    });
+    entries.truncate(n);
+    entries
+}
+
 fn money(value: Option<f64>) -> String {
     // `+ 0.0` turns the empty sum's -0.0 into 0.0.
     value.map_or("-".into(), |v| match v + 0.0 {
@@ -834,6 +1025,10 @@ fn estimate(value: Option<&Estimate>) -> String {
     value.map_or("-".into(), |e| {
         format!("{:.3} [{:.3}, {:.3}] n={}", e.mean, e.low, e.high, e.n)
     })
+}
+
+fn cell(text: &str) -> String {
+    text.replace('|', "/").replace('\n', " ")
 }
 
 /// Markdown; also what `report` prints.
@@ -898,42 +1093,70 @@ pub fn render(report: &Report) -> String {
                 .unwrap_or_default(),
         );
     }
+    let names: Vec<&str> = report.runs.iter().map(|r| r.name.as_str()).collect();
     let _ = writeln!(out, "\n## Agreement with gold (weighted mean [95% CI] n)\n");
-    let _ = writeln!(
-        out,
-        "| metric | {} |",
-        report
-            .runs
-            .iter()
-            .map(|r| r.name.as_str())
-            .collect::<Vec<_>>()
-            .join(" | ")
-    );
-    let _ = writeln!(out, "|---|{}", "---|".repeat(report.runs.len()));
-    for metric in METRICS {
-        let cells: Vec<String> = report
-            .runs
-            .iter()
-            .map(|r| estimate(r.metrics.get(metric)))
-            .collect();
-        let _ = writeln!(out, "| {metric} | {} |", cells.join(" | "));
+    let _ = writeln!(out, "| metric | {} |", names.join(" | "));
+    let _ = writeln!(out, "|---|{}", "---|".repeat(names.len()));
+    for (section, metrics) in SECTIONS {
+        let _ = writeln!(out, "| **{section}** |{}", " |".repeat(names.len()));
+        for metric in *metrics {
+            let cells: Vec<String> = report
+                .runs
+                .iter()
+                .map(|r| {
+                    if *metric == "rank_delta" {
+                        estimate(r.rank_delta.as_ref())
+                    } else {
+                        estimate(r.metrics.get(*metric))
+                    }
+                })
+                .collect();
+            let label = if *metric == "rank_delta" {
+                "rank_delta (lower is better)"
+            } else {
+                metric
+            };
+            let _ = writeln!(out, "| {label} | {} |", cells.join(" | "));
+        }
     }
     let harm: Vec<String> = report
         .runs
         .iter()
         .map(|r| estimate(r.harm.as_ref()))
         .collect();
-    let _ = writeln!(out, "| harm (lower is better) | {} |", harm.join(" | "));
-    let rank: Vec<String> = report
-        .runs
-        .iter()
-        .map(|r| estimate(r.rank_delta.as_ref()))
-        .collect();
+    let _ = writeln!(out, "| **harm** (lower is better) | {} |", harm.join(" | "));
     let _ = writeln!(
         out,
-        "| rank_delta (lower is better) | {} |",
-        rank.join(" | ")
+        "\n## Attention factors (mean absolute error; lower is better)\n"
     );
+    let _ = writeln!(out, "| run | {} |", FACTORS.join(" | "));
+    let _ = writeln!(out, "|---|{}", "---|".repeat(FACTORS.len()));
+    for r in &report.runs {
+        let cells: Vec<String> = FACTORS
+            .iter()
+            .map(|f| num(r.factor_mae.get(*f).copied(), 3))
+            .collect();
+        let _ = writeln!(out, "| {} | {} |", r.name, cells.join(" | "));
+    }
+    let _ = writeln!(out, "\n## Text style (user-facing text; informational)\n");
+    let _ = writeln!(out, "| run | em dash rate | length vs gold (median) |");
+    let _ = writeln!(out, "|---|---|---|");
+    if let Some(p) = &report.production {
+        let _ = writeln!(
+            out,
+            "| production (gold) | {} | 1.00 |",
+            num(p.em_dash_rate, 3)
+        );
+    }
+    for r in &report.runs {
+        let _ = writeln!(
+            out,
+            "| {} | {} | {} |",
+            r.name,
+            num(r.em_dash_rate, 3),
+            num(r.length_ratio, 2)
+        );
+    }
     let _ = writeln!(
         out,
         "\n## Directional (positive class; failed runs count as negative)\n"
@@ -943,6 +1166,7 @@ pub fn render(report: &Report) -> String {
         "restricted" => "restricted (a miss is a credential left open)",
         "auth" => "auth",
         "push" => "push (auth or importance >= threshold)",
+        "login_code" => "login code extracted",
         _ => "Reading",
     };
     let _ = writeln!(
@@ -983,24 +1207,27 @@ pub fn render(report: &Report) -> String {
                 .join(" | ")
         );
         let _ = writeln!(out, "|---|{}", "---|".repeat(names.len()));
-        for metric in METRICS.iter().chain(["harm"].iter()) {
-            let cells: Vec<String> = names
-                .iter()
-                .map(|name| {
-                    report.deltas[*name].get(*metric).map_or("-".into(), |d| {
-                        format!(
-                            "{:+.3} [{:+.3}, {:+.3}] n={}{}",
-                            d.mean,
-                            d.low,
-                            d.high,
-                            d.n,
-                            if d.excludes_zero() { " *" } else { "" }
-                        )
-                    })
-                })
-                .collect();
-            let _ = writeln!(out, "| {metric} | {} |", cells.join(" | "));
+        let delta_cell = |name: &String, metric: &str| {
+            report.deltas[name].get(metric).map_or("-".into(), |d| {
+                format!(
+                    "{:+.3} [{:+.3}, {:+.3}] n={}{}",
+                    d.mean,
+                    d.low,
+                    d.high,
+                    d.n,
+                    if d.excludes_zero() { " *" } else { "" }
+                )
+            })
+        };
+        for (section, metrics) in SECTIONS {
+            let _ = writeln!(out, "| **{section}** |{}", " |".repeat(names.len()));
+            for metric in metrics.iter().filter(|m| **m != "rank_delta") {
+                let cells: Vec<String> = names.iter().map(|n| delta_cell(n, metric)).collect();
+                let _ = writeln!(out, "| {metric} | {} |", cells.join(" | "));
+            }
         }
+        let cells: Vec<String> = names.iter().map(|n| delta_cell(n, "harm")).collect();
+        let _ = writeln!(out, "| **harm** | {} |", cells.join(" | "));
     }
     for (run, table) in &report.breakdown {
         let _ = writeln!(out, "\n## {run} by stratum and fidelity\n");
@@ -1030,21 +1257,133 @@ pub fn render(report: &Report) -> String {
             for (field, gold, candidate) in &entry.fields {
                 let _ = writeln!(out, "- {field}: gold {gold}, candidate {candidate}");
             }
+            if !entry.others.is_empty() {
+                let others: Vec<String> = entry
+                    .others
+                    .iter()
+                    .map(|(m, v)| format!("{m} {v:.2}"))
+                    .collect();
+                let _ = writeln!(out, "- also below 1: {}", others.join(", "));
+            }
+            for (label, gold, candidate) in &entry.texts {
+                let _ = writeln!(
+                    out,
+                    "- {label}: gold \"{gold}\" / candidate \"{candidate}\""
+                );
+            }
             let _ = writeln!(out, "- gold reason: {}", entry.gold_reason);
             let _ = writeln!(out, "- candidate reason: {}", entry.candidate_reason);
             let _ = writeln!(out, "- trace: {}\n", entry.trace.display());
         }
+    }
+    match &report.texts {
+        Some(Ok(entries)) => {
+            let _ = writeln!(
+                out,
+                "\n## Least similar user-facing text ({} rows)\n",
+                entries.len()
+            );
+            for entry in entries {
+                let _ = writeln!(
+                    out,
+                    "### {} rep {}: {} (mean similarity {:.2})\n",
+                    entry.case, entry.rep, entry.subject, entry.mean_similarity
+                );
+                let _ = writeln!(out, "| field | gold | candidate |");
+                let _ = writeln!(out, "|---|---|---|");
+                for (label, gold, candidate) in &entry.texts {
+                    let _ = writeln!(out, "| {label} | {} | {} |", cell(gold), cell(candidate));
+                }
+                let _ = writeln!(out);
+            }
+        }
+        Some(Err(why)) => {
+            let _ = writeln!(
+                out,
+                "\n## Least similar user-facing text\n\nNot available: {why}."
+            );
+        }
+        None => {}
     }
     out
 }
 
 /// Load, build, render; write `md` too when given (never inside a repository
 /// unless `allow_repo_path`, because a diff names senders and subjects).
+/// Text similarity uses the daemon's embedding model when its weights are on
+/// this machine, cached at `<dataset>/embeddings.jsonl`.
 pub fn report(
     dataset: &Path,
     options: &ReportOptions,
     md: Option<&Path>,
     allow_repo_path: bool,
+) -> Result<String> {
+    if let Some(path) = md
+        && !allow_repo_path
+    {
+        crate::refuse_repo_path(path)?;
+    }
+    if options.no_text {
+        return report_with(
+            dataset,
+            options,
+            md,
+            allow_repo_path,
+            None,
+            "Text similarity: off (--no-text); the *_sim metrics are omitted.",
+        );
+    }
+    match crate::textsim::production() {
+        Ok((embedder, model)) => {
+            let sim = crate::textsim::EmbeddingSimilarity::open(
+                &dataset.join(crate::textsim::CACHE_FILE),
+                &model,
+                embedder,
+            );
+            report_embedded(dataset, options, md, allow_repo_path, &sim, &model)
+        }
+        Err(why) => report_with(
+            dataset,
+            options,
+            md,
+            allow_repo_path,
+            None,
+            &format!(
+                "Text similarity unavailable: {why}; the *_sim metrics are omitted (pass --no-text to skip trying)."
+            ),
+        ),
+    }
+}
+
+/// Embed everything a scoring pass will compare in batches (a dry pass
+/// collects the texts), then score for real and keep the cache.
+pub fn report_embedded(
+    dataset: &Path,
+    options: &ReportOptions,
+    md: Option<&Path>,
+    allow_repo_path: bool,
+    sim: &crate::textsim::EmbeddingSimilarity,
+    model: &str,
+) -> Result<String> {
+    let recorder = crate::textsim::RecordingSimilarity::default();
+    report_with(dataset, options, None, true, Some(&recorder), "")?;
+    let embedded = sim.prefetch(recorder.texts.into_inner())?;
+    let line = format!(
+        "Text similarity: cosine of {model} embeddings against gold's wording ({}, {embedded} newly embedded); read it against the production-model run and --texts, not as an absolute.",
+        sim.cache_note
+    );
+    let text = report_with(dataset, options, md, allow_repo_path, Some(sim), &line)?;
+    sim.save()?;
+    Ok(text)
+}
+
+fn report_with(
+    dataset: &Path,
+    options: &ReportOptions,
+    md: Option<&Path>,
+    allow_repo_path: bool,
+    sim: Option<&dyn TextSimilarity>,
+    text_line: &str,
 ) -> Result<String> {
     if let Some(path) = md
         && !allow_repo_path
@@ -1075,14 +1414,22 @@ pub fn report(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let built = build(&name, &cases, &manifest, &runs, &adjudications, options)?;
+    let built = build(
+        &name,
+        &cases,
+        &manifest,
+        &runs,
+        &adjudications,
+        options,
+        sim,
+        text_line,
+    )?;
     let text = render(&built);
     if let Some(path) = md {
         crate::private_write(path, text.as_bytes())?;
     }
     Ok(text)
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1175,6 +1522,8 @@ mod tests {
             &[data],
             &Adjudications::default(),
             &ReportOptions::default(),
+            None,
+            "",
         )
         .unwrap();
         let fye = report.runs[0].metrics["fye"];
@@ -1277,9 +1626,11 @@ mod tests {
             &runs(&setup),
             &Adjudications::default(),
             &options,
+            None,
+            "",
         )
         .unwrap();
-        assert_eq!(report.header.len(), 3);
+        assert_eq!(report.header.len(), 4);
         assert!(
             report.header[0]
                 .starts_with("Dataset set: 5 cases (1 exact, 3 reconstructed, 1 suspect)"),
@@ -1347,6 +1698,8 @@ mod tests {
             &tampered,
             &none,
             &ReportOptions::default(),
+            None,
+            "",
         )
         .unwrap();
         assert_eq!(
@@ -1379,6 +1732,8 @@ mod tests {
             &runs(&setup),
             &ruled,
             &options,
+            None,
+            "",
         )
         .unwrap();
         for stats in &after.runs {
@@ -1422,6 +1777,8 @@ mod tests {
             &silent,
             &Adjudications::default(),
             &ReportOptions::default(),
+            None,
+            "",
         )
         .unwrap();
         assert!(report.runs[0].costs.observed_per_1k.is_none());
@@ -1454,6 +1811,8 @@ mod tests {
             &runs(&setup),
             &Adjudications::default(),
             &half,
+            None,
+            "",
         )
         .unwrap();
         assert!(
@@ -1466,6 +1825,8 @@ mod tests {
             &runs(&setup),
             &Adjudications::default(),
             &ReportOptions::default(),
+            None,
+            "",
         )
         .unwrap();
         assert_eq!(
@@ -1475,13 +1836,271 @@ mod tests {
         assert!(projected.runs[0].costs.projected_per_1k > full.runs[0].costs.projected_per_1k);
     }
 
+    /// Token-set Jaccard, standing in for embeddings.
+    struct TokenSim;
+    impl TextSimilarity for TokenSim {
+        fn similarity(&self, a: &str, b: &str) -> f64 {
+            let tokens = |t: &str| -> std::collections::BTreeSet<String> {
+                t.to_lowercase()
+                    .split(|c: char| !c.is_alphanumeric())
+                    .filter(|w| !w.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            };
+            let (a, b) = (tokens(a), tokens(b));
+            a.intersection(&b).count() as f64 / a.union(&b).count().max(1) as f64
+        }
+    }
+
+    #[tokio::test]
+    async fn the_agreement_table_is_sectioned_with_factor_and_style_tables() {
+        let setup = fixture_runs().await;
+        let report = build(
+            "set",
+            &setup.cases,
+            &setup.manifest,
+            &runs(&setup),
+            &Adjudications::default(),
+            &ReportOptions::default(),
+            Some(&TokenSim),
+            "Text similarity: token overlap (test).",
+        )
+        .unwrap();
+        assert_eq!(report.header[3], "Text similarity: token overlap (test).");
+        let mock = &report.runs[0];
+        // The mock answers every case in its own words.
+        let summary = mock.metrics["summary_sim"].mean;
+        assert!(summary > 0.0 && summary < 1.0, "{summary}");
+        assert_eq!(mock.metrics["text_safe"].mean, 1.0);
+        assert!(mock.factor_mae.contains_key("urgency"));
+        assert!(mock.length_ratio.is_some());
+        let text = render(&report);
+        let at = |needle: &str| {
+            text.find(needle)
+                .unwrap_or_else(|| panic!("{needle} missing"))
+        };
+        let order = [
+            "| **Placement** |",
+            "| **Security and push** |",
+            "| **Attention detail** |",
+            "| **Records** |",
+            "| **Text** |",
+            "| **Grounding** |",
+            "| **harm** (lower is better) |",
+            "## Attention factors",
+            "## Text style",
+        ];
+        for pair in order.windows(2) {
+            assert!(at(pair[0]) < at(pair[1]), "{} before {}", pair[0], pair[1]);
+        }
+        assert!(text.contains("| rank_delta (lower is better) |"));
+        assert!(text.contains("| production (gold) |"));
+        // Every metric has a row.
+        for metric in METRICS {
+            assert!(text.contains(&format!("| {metric} | ")), "{metric}");
+        }
+        // Without a similarity the text rows are empty, not zero.
+        let plain = build(
+            "set",
+            &setup.cases,
+            &setup.manifest,
+            &runs(&setup),
+            &Adjudications::default(),
+            &ReportOptions::default(),
+            None,
+            "Text similarity: off.",
+        )
+        .unwrap();
+        assert!(!plain.runs[0].metrics.contains_key("summary_sim"));
+        assert!(render(&plain).contains("| summary_sim | - | - |"));
+    }
+
+    #[tokio::test]
+    async fn texts_lists_the_least_similar_rows_and_diff_names_the_rest() {
+        let setup = fixture_runs().await;
+        let options = ReportOptions {
+            diff: Some("mock".into()),
+            texts: Some(2),
+            ..Default::default()
+        };
+        let report = build(
+            "set",
+            &setup.cases,
+            &setup.manifest,
+            &runs(&setup),
+            &Adjudications::default(),
+            &options,
+            Some(&TokenSim),
+            "",
+        )
+        .unwrap();
+        let entries = report.texts.as_ref().unwrap().as_ref().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0].mean_similarity <= entries[1].mean_similarity);
+        let all = build(
+            "set",
+            &setup.cases,
+            &setup.manifest,
+            &runs(&setup),
+            &Adjudications::default(),
+            &ReportOptions {
+                texts: Some(10),
+                ..options.clone()
+            },
+            Some(&TokenSim),
+            "",
+        )
+        .unwrap();
+        let every = all.texts.unwrap().unwrap();
+        assert_eq!(every.len(), 4, "one per scored row");
+        // A row whose user-facing text is gold's own ranks last.
+        let a_id = setup.fixture.ids["A"];
+        let gold_a = setup
+            .cases
+            .iter()
+            .find(|c| c.id == a_id)
+            .unwrap()
+            .gold
+            .clone();
+        let mut echoed = runs(&setup);
+        for row in &mut echoed[0].rows {
+            if row.prompt_id == a_id.to_string() {
+                let decision = row.decision.as_mut().unwrap();
+                decision.summary = gold_a.summary.clone();
+                decision.attention.summary = gold_a.attention.summary.clone();
+                decision.notification = gold_a.notification.clone();
+                decision.attention.actions = gold_a.attention.actions.clone();
+            }
+        }
+        let ranked = build(
+            "set",
+            &setup.cases,
+            &setup.manifest,
+            &echoed,
+            &Adjudications::default(),
+            &ReportOptions {
+                texts: Some(4),
+                ..options.clone()
+            },
+            Some(&TokenSim),
+            "",
+        )
+        .unwrap()
+        .texts
+        .unwrap()
+        .unwrap();
+        assert_eq!(ranked.last().unwrap().case, a_id);
+        assert_eq!(ranked.last().unwrap().mean_similarity, 1.0);
+        assert_ne!(ranked[0].case, a_id);
+        assert_eq!(
+            every[0].mean_similarity, entries[0].mean_similarity,
+            "lowest first"
+        );
+        let labels: Vec<&str> = entries[0].texts.iter().map(|t| t.0.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "summary",
+                "attention summary",
+                "push title",
+                "push body",
+                "actions"
+            ]
+        );
+        let text = render(&report);
+        assert!(text.contains("## Least similar user-facing text (2 rows)"));
+        assert!(text.contains("| summary | Gold summary for "));
+        // The diff names every other metric below 1 and shows the texts.
+        let d = &report.diff[0];
+        assert!(
+            d.others.iter().any(|(m, _)| m == "summary_sim"),
+            "{:?}",
+            d.others
+        );
+        assert!(
+            !d.others.iter().any(|(m, _)| m == "fye"),
+            "listed fields are not repeated"
+        );
+        assert!(text.contains("- also below 1: "));
+        assert!(text.contains("- summary: gold \"Gold summary for D"));
+        // Without text similarity there is nothing to rank by, and --texts
+        // without --diff is refused.
+        let unranked = build(
+            "set",
+            &setup.cases,
+            &setup.manifest,
+            &runs(&setup),
+            &Adjudications::default(),
+            &options,
+            None,
+            "",
+        )
+        .unwrap();
+        assert!(unranked.texts.unwrap().is_err());
+        let orphan = ReportOptions {
+            texts: Some(1),
+            ..Default::default()
+        };
+        assert!(
+            build(
+                "set",
+                &setup.cases,
+                &setup.manifest,
+                &runs(&setup),
+                &Adjudications::default(),
+                &orphan,
+                Some(&TokenSim),
+                ""
+            )
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_report_embeds_each_text_once_across_reports() {
+        let setup = fixture_runs().await;
+        let cache = setup.dataset.join(crate::textsim::CACHE_FILE);
+        let open = || {
+            crate::textsim::EmbeddingSimilarity::open(
+                &cache,
+                "stub-model",
+                Box::new(squelch_core::embed::StubEmbedder::new(64)),
+            )
+        };
+        let options = ReportOptions::default();
+        let first = open();
+        let text =
+            report_embedded(&setup.dataset, &options, None, false, &first, "stub-model").unwrap();
+        let header = text.lines().nth(3).unwrap();
+        assert!(
+            header.contains("stub-model") && header.contains("no cache yet"),
+            "{header}"
+        );
+        assert!(!header.contains(", 0 newly embedded"), "{header}");
+        assert!(cache.exists());
+        let second = open();
+        let again =
+            report_embedded(&setup.dataset, &options, None, false, &second, "stub-model").unwrap();
+        let header = again.lines().nth(3).unwrap();
+        assert!(header.contains(", 0 newly embedded"), "{header}");
+        assert!(again.contains("| summary_sim | 0."));
+        // Same numbers from the cache as from a fresh embedding.
+        assert_eq!(
+            text.lines().skip(4).collect::<Vec<_>>(),
+            again.lines().skip(4).collect::<Vec<_>>()
+        );
+    }
+
     #[tokio::test]
     async fn markdown_refuses_a_repository_path() {
         let setup = fixture_runs().await;
         let repo = fixture::temp_dir("repo");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         let inside = repo.join("report.md");
-        let options = ReportOptions::default();
+        let options = ReportOptions {
+            no_text: true,
+            ..Default::default()
+        };
         assert!(report(&setup.dataset, &options, Some(&inside), false).is_err());
         assert!(!inside.exists());
         let text = report(&setup.dataset, &options, Some(&inside), true).unwrap();

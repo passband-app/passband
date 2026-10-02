@@ -461,11 +461,18 @@ final class Prefs {
         return sig.isEmpty ? "" : "\n\n" + sig
     }
 
-    /// True while a compose body holds nothing the user typed: blank, or exactly
-    /// the seeded signature block. The draft machinery treats such a body as
-    /// empty — it must neither block a restore nor be worth saving as a draft.
+    /// True while a compose body holds nothing the user typed: blank, or only
+    /// the signature. The draft machinery treats such a body as empty — it
+    /// must neither block a restore nor be worth saving as a draft.
+    ///
+    /// COMPARED TRIMMED, not against the seed byte for byte. A picture added
+    /// to a fresh composer and taken out again closes up one of the seed's two
+    /// leading newlines, and that body is as untyped as the one it started as:
+    /// an exact match called it written, so it sent, and Esc kept it as a
+    /// draft of nothing but the signature.
     func isBodyUntouched(_ body: String) -> Bool {
-        body.trimmed.isEmpty || body == signatureSeed
+        let typed = body.trimmed
+        return typed.isEmpty || typed == signature.trimmed
     }
 
     private var _assistantModel: AssistantModel

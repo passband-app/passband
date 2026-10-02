@@ -288,7 +288,17 @@ struct ActionLayer: View {
 /// Keyboard-shortcuts help ('?'). Draws `ShortcutCatalog`, the one table the
 /// assistant's list_shortcuts tool also reads, so the two cannot disagree.
 struct ShortcutsOverlay: View {
+    @Environment(AppStore.self) private var store
     let onClose: () -> Void
+
+    /// The sheet's way out to the assistant. It CLOSES THE SHEET FIRST: the
+    /// ask bar is mounted beneath this overlay, so the global ⌘K alone would
+    /// open it underneath, behind a scrim, where the hint that sent somebody
+    /// there had just hidden it.
+    private func askAgent() {
+        onClose()
+        store.askBarOpen = true
+    }
 
     var body: some View {
         OverlayScrim(onDismiss: onClose) {
@@ -322,6 +332,18 @@ struct ShortcutsOverlay: View {
                 }
 
                 HStack(spacing: Space.s4) {
+                    // A list of keys answers "which key", never "how do I". The
+                    // assistant reads this same table and the rest of the guide.
+                    Button(action: askAgent) {
+                        HStack(spacing: Space.s4) {
+                            Text("you can always ask the agent!")
+                                .font(Typo.micro)
+                                .foregroundStyle(Palette.inkDim)
+                            Kbd("⌘K")
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
                     Spacer()
                     Kbd("?")
                     Text("or").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
@@ -334,6 +356,9 @@ struct ShortcutsOverlay: View {
         .keyBindings(.modal, [
             KeyBinding("Escape", "close help") { onClose() },
             KeyBinding("?", "close help") { onClose() },
+            // Ahead of the global ⌘K, which this context would otherwise let
+            // through to open the bar under the sheet (see `askAgent`).
+            KeyBinding("k", "ask your inbox", meta: true, allowInInput: true) { askAgent() },
         ])
     }
 }

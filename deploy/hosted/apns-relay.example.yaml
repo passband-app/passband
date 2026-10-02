@@ -37,9 +37,16 @@
 #    truncates) and pipe it straight into the Secret:
 #
 #        railway variable list -s squelch --json \
-#          | jq -r .SQUELCH_RELAY_PUSH_TOKEN | tr -d '\n' \
+#          | jq -r '.SQUELCH_RELAY_PUSH_TOKEN // empty' | tr -d '\n' \
 #          | kubectl -n tenants create secret generic apns-relay \
 #              --from-file=token=/dev/stdin
+#
+#    Then CHECK IT, without printing it. A variable that was never set makes
+#    an unguarded `jq -r` print the word `null`, and a failed `railway` prints
+#    nothing; either gives a Secret every tenant 401s on. The length tells:
+#
+#        kubectl -n tenants get secret apns-relay -o jsonpath='{.data.token}' \
+#          | base64 -d | wc -c        # 64
 #
 #    The `tr -d '\n'` is load-bearing. `jq -r` ends its output with a newline
 #    and `--from-file` keeps every byte, so without it the Secret holds the

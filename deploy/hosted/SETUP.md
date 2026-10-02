@@ -918,8 +918,20 @@ openssl rand -hex 32 | tr -d '\n' \
 
 # 2. Read it back (JSON: the table view truncates) into the tenant Secret.
 railway variable list -s squelch --json \
-  | jq -r .SQUELCH_RELAY_PUSH_TOKEN | tr -d '\n' \
+  | jq -r '.SQUELCH_RELAY_PUSH_TOKEN // empty' | tr -d '\n' \
   | kubectl -n tenants create secret generic apns-relay --from-file=token=/dev/stdin
+```
+
+**Check the Secret before going on, without printing it.** If the variable was
+never set (step 1 failed, or the wrong service was named), an unguarded `jq -r`
+prints the word `null` and the Secret's token becomes "null"; if `railway`
+fails, it is empty. Either way every tenant 401s exactly as it would on a
+stale Secret, and the repair is a rename and a roll of the whole fleet. The
+length gives it away:
+
+```sh
+kubectl -n tenants get secret apns-relay -o jsonpath='{.data.token}' | base64 -d | wc -c
+# 64
 ```
 
 The second `tr -d '\n'` matters. `jq -r` ends its output with a newline and
@@ -1007,7 +1019,7 @@ A pusher line and no `push` line is a device that never registered; a `push`
 line with the Mac topic is a missing `SQUELCH_WARDEN_RELAY_TOPIC`; 401s in the
 tenant's log are a missing or stale `apns-relay` Secret.
 
-The two failure modes recover differently, and neither is gentle:
+The failure modes recover differently, and none is gentle:
 
 - **A 401 holds.** While the relay refuses a tenant, its pusher's cursor does
   not move. When the Secret is fixed, every notify-eligible event since the
@@ -1020,6 +1032,13 @@ The two failure modes recover differently, and neither is gentle:
   looks like. So `squelchd_apns_push_results_total{outcome="rejected"}` can
   tick steadily from one stale development-build token; alert on it relative to
   `outcome="delivered"`, not on any increase.
+- **A relay failure partway through an event is not retried for whoever
+  missed it.** One event is one relay request per group of devices sharing a
+  tag and an environment. If a later request fails after an earlier one
+  delivered (the shared rate limit answering 429 is the likely cause), the
+  event counts as delivered, the devices in the failed group never get it,
+  and the pusher backs off, up to five minutes between events while it keeps
+  happening. An event that reached anybody is never re-pushed.
 
 ## 7. Tenant limits
 

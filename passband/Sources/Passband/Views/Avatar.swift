@@ -80,6 +80,8 @@ struct Avatar: View {
         let r = resolved
         let colors = Palette.avatarPalette[r.slot % Palette.avatarPalette.count]
         return Text(r.initials)
+            // Sized to the disc, not the type ramp: the caller picked the disc,
+            // and initials that grew past it with density would crowd the rim.
             .font(.system(size: size * 0.42, weight: .semibold))
             .foregroundStyle(colors.fg)
             .frame(width: size, height: size)

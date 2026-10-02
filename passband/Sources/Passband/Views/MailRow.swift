@@ -66,11 +66,11 @@ struct MailRow: View {
             // No subject on the wire (an older daemon, a rehearsal row): the
             // one-liner takes the subject's place and its ink.
             return Text(verbatim: gist)
-                .font(.system(size: 12.5, weight: weight))
+                .font(Typo.ui(12.5, weight: weight))
                 .foregroundStyle(finished ? Palette.inkFaint : Palette.ink)
         }
         let head = Text(verbatim: subject)
-            .font(.system(size: 12.5, weight: weight))
+            .font(Typo.ui(12.5, weight: weight))
             .foregroundStyle(finished ? Palette.inkFaint : Palette.ink)
         guard !gist.isEmpty else { return head }
         // Three spaces and a drop in ink, no glyph: the weight and colour change
@@ -89,7 +89,7 @@ struct MailRow: View {
                 onOpen()
             }
         ) { selected, _ in
-            HStack(spacing: 10) {
+            HStack(spacing: Space.s10) {
                 gutter
                     .lineLimit(1)
                     .fixedSize()
@@ -98,10 +98,10 @@ struct MailRow: View {
                 Avatar(sender: update.senderString, size: 20)
 
                 Text(SenderCache.resolved(update.senderString).displayName)
-                    .font(.system(size: 12.5, weight: emphasized ? .semibold : .regular))
+                    .font(Typo.ui(12.5, weight: emphasized ? .semibold : .regular))
                     .foregroundStyle(finished ? Palette.inkFaint : Palette.ink)
                     .lineLimit(1)
-                    .frame(width: 168, alignment: .leading)
+                    .frame(width: Typo.measure(168), alignment: .leading)
 
                 // THE COLUMN THAT CARRIES THE ROW, so it is the last to give
                 // way: a floor and a priority over the chips beside it, which
@@ -109,13 +109,13 @@ struct MailRow: View {
                 middle
                     .lineLimit(1)
                     .truncationMode(.tail)
-                    .frame(minWidth: 140, maxWidth: .infinity, alignment: .leading)
+                    .frame(minWidth: Typo.measure(140), maxWidth: .infinity, alignment: .leading)
                     .layoutPriority(1)
 
-                HStack(spacing: 7) {
+                HStack(spacing: Space.scaled(7)) {
                     if update.matched_rule != nil {
                         Image(systemName: "wand.and.stars")
-                            .font(.system(size: 10))
+                            .font(Typo.ui(10))
                             .foregroundStyle(Palette.inkFaint)
                             .help("matched a sender rule")
                             .accessibilityLabel("matched a sender rule")
@@ -137,7 +137,7 @@ struct MailRow: View {
                     }
                     if update.hasAttachments {
                         Image(systemName: "paperclip")
-                            .font(.system(size: 11))
+                            .font(Typo.ui(11))
                             .foregroundStyle(Palette.inkFaint)
                             .accessibilityLabel("has attachments")
                     }
@@ -162,10 +162,10 @@ struct MailRow: View {
                     // pills line up against ("Sep 28, 2025" is the widest).
                     // Never bold: the sender and subject already carry it.
                     Text(MailList.stamp(update.received_at))
-                        .font(.system(size: 11.5))
+                        .font(Typo.ui(11.5))
                         .monospacedDigit()
                         .foregroundStyle(emphasized ? Palette.inkDim : Palette.inkFaint)
-                        .frame(width: 78, alignment: .trailing)
+                        .frame(width: Typo.measure(78), alignment: .trailing)
                 }
                 .layoutPriority(3)
             }
@@ -181,7 +181,7 @@ struct MailRow: View {
     @ViewBuilder private var gutter: some View {
         if finished {
             Image(systemName: "checkmark")
-                .font(.system(size: 10, weight: .semibold))
+                .font(Typo.ui(10, weight: .semibold))
                 .foregroundStyle(Palette.positive)
                 .accessibilityLabel("done")
         } else {
@@ -270,17 +270,17 @@ struct PlacementPill: View {
 
     var body: some View {
         let grey = muted || zone == .noise
-        HStack(spacing: 4) {
+        HStack(spacing: Space.s4) {
             Image(systemName: zone.symbol)
-                .font(.system(size: 9, weight: .semibold))
+                .font(Typo.ui(9, weight: .semibold))
             Text(zone.title)
                 .font(Typo.micro)
                 .lineLimit(1)
                 .fixedSize()
         }
         .foregroundStyle(grey ? Palette.inkFaint : zone.ink)
-        .padding(.horizontal, 7)
-        .padding(.vertical, 2.5)
+        .padding(.horizontal, Space.scaled(7))
+        .padding(.vertical, Space.scaled(2.5))
         .background(Capsule().fill((grey ? Palette.inkFaint : zone.tint).opacity(grey ? 0.10 : 0.15)))
         .accessibilityElement(children: .combine)
         .accessibilityLabel("filed under \(zone.title)")

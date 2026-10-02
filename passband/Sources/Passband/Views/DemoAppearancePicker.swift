@@ -8,11 +8,11 @@ struct DemoAppearancePicker: View {
     @State private var prefs = Prefs.shared
 
     var body: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: Space.s2) {
             option(.light, title: "Light", symbol: "sun.max.fill")
             option(.dark, title: "Dark", symbol: "moon.fill")
         }
-        .padding(3)
+        .padding(Space.scaled(3))
         .background(Palette.ink.opacity(0.06), in: Capsule())
         .overlay { Capsule().strokeBorder(Palette.hairline, lineWidth: 0.5) }
         .accessibilityElement(children: .contain)
@@ -22,9 +22,9 @@ struct DemoAppearancePicker: View {
     private func option(_ theme: ThemeChoice, title: String, symbol: String) -> some View {
         Button { prefs.theme = theme } label: {
             Label(title, systemImage: symbol)
-                .font(.system(size: 11, weight: .medium))
-                .padding(.horizontal, 9)
-                .padding(.vertical, 5)
+                .font(Typo.chip)
+                .padding(.horizontal, Space.scaled(9))
+                .padding(.vertical, Space.scaled(5))
                 .foregroundStyle(prefs.theme == theme ? Palette.ink : Palette.inkDim)
                 .background {
                     if prefs.theme == theme {

@@ -19,11 +19,11 @@ struct RevealPanel: View {
             VStack(alignment: .leading, spacing: 0) {
                 banner
 
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: Space.s4) {
                     Text(meta.subject)
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(Typo.ui(15, weight: .semibold))
                         .foregroundStyle(Palette.ink)
-                    HStack(spacing: 5) {
+                    HStack(spacing: Space.scaled(5)) {
                         Text(fromLine)
                             .font(Typo.micro)
                             .foregroundStyle(Palette.inkFaint)
@@ -34,8 +34,8 @@ struct RevealPanel: View {
                         }
                     }
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
+                .padding(.horizontal, Space.s16)
+                .padding(.vertical, Space.s12)
 
                 Divider().overlay(Palette.hairline)
 
@@ -51,7 +51,7 @@ struct RevealPanel: View {
                                 EmailWebView(html: html)
                             } else {
                                 Text(revealed.body)
-                                    .font(.system(size: 13))
+                                    .font(Typo.row)
                                     .foregroundStyle(Palette.ink)
                                     .textSelection(.enabled)
                                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -59,7 +59,7 @@ struct RevealPanel: View {
                             }
                         }
                     }
-                    .padding(16)
+                    .padding(Space.s16)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .frame(maxHeight: 480)
@@ -71,8 +71,8 @@ struct RevealPanel: View {
                 }
                 .font(Typo.micro)
                 .foregroundStyle(Palette.inkFaintest)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
+                .padding(.horizontal, Space.s16)
+                .padding(.vertical, Space.s10)
             }
             // A Mac sizes this against the window it floats in; a phone has one
             // measure and the panel takes it.
@@ -80,7 +80,7 @@ struct RevealPanel: View {
                 .frame(width: 720)
             #else
                 .frame(maxWidth: .infinity)
-                .padding(.horizontal, 12)
+                .padding(.horizontal, Space.s12)
             #endif
             .passbandGlass(.pane, cornerRadius: 20, tint: Palette.lockSoft.opacity(0.85))
             .shadow(color: .black.opacity(0.32), radius: 46, y: 20)
@@ -96,15 +96,15 @@ struct RevealPanel: View {
     }
 
     private var banner: some View {
-        HStack(spacing: 7) {
-            Image(systemName: "lock.fill").font(.system(size: 11))
+        HStack(spacing: Space.scaled(7)) {
+            Image(systemName: "lock.fill").font(Typo.ui(11))
             Text("sensitive · one-time reveal · not stored")
                 .font(Typo.micro)
             Spacer()
             // The keycap is the Mac's exit. A phone taps the scrim, and a hint
             // naming a key it has no way to press is worse than no hint.
             #if os(macOS)
-                HStack(spacing: 4) {
+                HStack(spacing: Space.s4) {
                     Kbd("esc")
                     Text("close").font(Typo.micro)
                 }
@@ -116,8 +116,8 @@ struct RevealPanel: View {
             #endif
         }
         .foregroundStyle(Palette.lock)
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
+        .padding(.horizontal, Space.s16)
+        .padding(.vertical, Space.s8)
         .frame(maxWidth: .infinity)
         .background(Palette.lockSoft)
     }

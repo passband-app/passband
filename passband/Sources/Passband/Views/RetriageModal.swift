@@ -38,13 +38,13 @@ struct RetriageModal: View {
     }
 
     private var header: some View {
-        HStack(spacing: 9) {
+        HStack(spacing: Space.scaled(9)) {
             Image(systemName: "arrow.trianglehead.2.clockwise")
-                .font(.system(size: 13, weight: .semibold))
+                .font(Typo.ui(13, weight: .semibold))
                 .foregroundStyle(Palette.accent)
                 .symbolEffect(.rotate, isActive: run.watching && !run.paused && run.blocked == nil)
             Text(title)
-                .font(.system(size: 14, weight: .semibold))
+                .font(Typo.ui(14, weight: .semibold))
                 .foregroundStyle(Palette.ink)
             Spacer(minLength: 0)
         }
@@ -80,14 +80,14 @@ struct RetriageModal: View {
                     .foregroundStyle(Palette.inkFaint)
                 Spacer(minLength: 0)
             }
-            .frame(height: 36, alignment: .bottom)
+            .frame(height: Typo.size(36), alignment: .bottom)
         } else {
             numbers
         }
     }
 
     private var numbers: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
+        HStack(alignment: .firstTextBaseline, spacing: Space.s6) {
             Text("\(run.done)")
                 .font(Typo.num(30, weight: .semibold))
                 .foregroundStyle(Palette.ink)
@@ -164,13 +164,13 @@ struct RetriageModal: View {
     private var steps: some View {
         let list = run.steps(
             sync: store.syncStatus, triage: store.stats?.triage, date: Fmt.date)
-        return VStack(alignment: .leading, spacing: 7) {
+        return VStack(alignment: .leading, spacing: Space.scaled(7)) {
             ForEach(Array(list.enumerated()), id: \.offset) { _, step in
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                HStack(alignment: .firstTextBaseline, spacing: Space.s8) {
                     Image(systemName: Self.symbol(step.state))
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(Typo.ui(11, weight: .semibold))
                         .foregroundStyle(Self.tone(step.state))
-                        .frame(width: 14)
+                        .frame(width: Space.scaled(14))
                     VStack(alignment: .leading, spacing: 1) {
                         Text(step.title)
                             .font(Typo.rowSub)
@@ -249,14 +249,14 @@ struct RetriageConfirm: View {
         OverlayScrim(onDismiss: { store.cancelRetriageAsk() }) {
             ModalCard(width: 400) {
                 Text("Re-triage the last \(days) days?")
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(Typo.ui(14, weight: .semibold))
                     .foregroundStyle(Palette.ink)
                 Text("Passband is unavailable until it finishes, at least a few minutes.")
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaint)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                HStack(spacing: 8) {
+                HStack(spacing: Space.s8) {
                     Spacer(minLength: 0)
                     Button("Cancel") { store.cancelRetriageAsk() }
                         .buttonStyle(.glass)

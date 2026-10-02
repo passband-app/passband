@@ -24,7 +24,7 @@ struct AgentsSection: View {
     private var status: AgentDoorStatus { connect.status(for: endpoint) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: Space.s16) {
             doorCard
             // Not for a server with no agent door at all (a hosted mailbox,
             // today): a ready-to-paste command for a 404 is a trap.
@@ -47,8 +47,8 @@ struct AgentsSection: View {
                     title: "Endpoint",
                     detail: "Point an agent you already run here. It reads what Passband has triaged, over MCP, and never holds your Gmail sign-in."
                 ) {
-                    VStack(alignment: .trailing, spacing: 7) {
-                        HStack(spacing: 8) {
+                    VStack(alignment: .trailing, spacing: Space.s6) {
+                        HStack(spacing: Space.s8) {
                             Text(endpoint)
                                 .font(Typo.mono(12))
                                 .foregroundStyle(Palette.ink)
@@ -57,7 +57,7 @@ struct AgentsSection: View {
                                 .truncationMode(.middle)
                             CopyButton(text: endpoint)
                         }
-                        HStack(spacing: 10) {
+                        HStack(spacing: Space.s10) {
                             statusDot
                             if status != .checking {
                                 Button("check again") {
@@ -123,7 +123,7 @@ struct AgentsSection: View {
 
     private func setupCard(_ endpoint: String) -> some View {
         SectionCard(label: "Set it up", note: agent.name) {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 142), spacing: 8)], spacing: 8) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: Typo.measure(142)), spacing: Space.s8)], spacing: Space.s8) {
                 ForEach(AgentKind.allCases) { kind in
                     agentChip(kind)
                 }
@@ -131,7 +131,7 @@ struct AgentsSection: View {
             SettingsHint(agent.instruction)
             CodeBlock(text: agent.snippet(endpoint: endpoint))
             if let check = agent.check {
-                HStack(spacing: 8) {
+                HStack(spacing: Space.s8) {
                     Text("then check with")
                         .font(Typo.micro)
                         .foregroundStyle(Palette.inkFaintest)
@@ -149,18 +149,18 @@ struct AgentsSection: View {
         return Button {
             withAnimation(Motion.disclose) { agent = kind }
         } label: {
-            HStack(spacing: 7) {
+            HStack(spacing: Space.scaled(7)) {
                 Image(systemName: kind.symbol)
-                    .font(.system(size: 11, weight: .medium))
-                    .frame(width: 14)
+                    .font(Typo.ui(11, weight: .medium))
+                    .frame(width: Space.s14)
                 Text(kind.name)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(Typo.ui(12, weight: .medium))
                     .lineLimit(1)
                 Spacer(minLength: 0)
             }
             .foregroundStyle(active ? Palette.accent : Palette.inkDim)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
+            .padding(.horizontal, Space.s10)
+            .padding(.vertical, Space.scaled(7))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -179,7 +179,7 @@ struct AgentsSection: View {
 
     private var reachCard: some View {
         SectionCard(label: "What your agent can do") {
-            HStack(alignment: .top, spacing: 18) {
+            HStack(alignment: .top, spacing: Space.scaled(18)) {
                 reachColumn(
                     "can", symbol: "checkmark", tint: Palette.positive,
                     items: [
@@ -203,17 +203,17 @@ struct AgentsSection: View {
     }
 
     private func reachColumn(_ title: String, symbol: String, tint: Color, items: [String]) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: Space.s6) {
             Text(title)
                 .font(Typo.micro)
                 .foregroundStyle(Palette.inkFaint)
                 .textCase(.uppercase)
             ForEach(items, id: \.self) { item in
-                HStack(alignment: .firstTextBaseline, spacing: 7) {
+                HStack(alignment: .firstTextBaseline, spacing: Space.scaled(7)) {
                     Image(systemName: symbol)
-                        .font(.system(size: 9, weight: .bold))
+                        .font(Typo.ui(9, weight: .bold))
                         .foregroundStyle(tint)
-                        .frame(width: 11)
+                        .frame(width: Space.scaled(11))
                     Text(item)
                         .font(Typo.rowSub)
                         .foregroundStyle(Palette.inkDim)
@@ -231,7 +231,7 @@ private struct CodeBlock: View {
     let text: String
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
+        HStack(alignment: .top, spacing: Space.s8) {
             ScrollView(.horizontal, showsIndicators: false) {
                 Text(text)
                     .font(Typo.mono(11))
@@ -242,8 +242,8 @@ private struct CodeBlock: View {
             }
             CopyButton(text: text)
         }
-        .padding(.horizontal, 11)
-        .padding(.vertical, 9)
+        .padding(.horizontal, Space.s12)
+        .padding(.vertical, Space.s8)
         .background(
             RoundedRectangle(cornerRadius: 9, style: .continuous)
                 .fill(Palette.canvas.opacity(0.75))
@@ -264,9 +264,9 @@ private struct CopyButton: View {
             Clip.copy(text, flashing: $copied)
         } label: {
             Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                .font(.system(size: 11, weight: .medium))
+                .font(Typo.ui(11, weight: .medium))
                 .foregroundStyle(copied ? Palette.positive : Palette.inkFaint)
-                .frame(width: 18, height: 18)
+                .frame(width: Space.scaled(18), height: Space.scaled(18))
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

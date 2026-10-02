@@ -95,7 +95,23 @@ struct SitrepView: View {
     /// squeezed side-by-side starves the left column first, and that column is
     /// the work surface. At the window's minimum the page measures ~920, so
     /// the smallest windows always stack.
-    private static let railBreakpoint: CGFloat = 960
+    ///
+    /// Stated as the narrowest work column worth pinning a rail beside (654,
+    /// a measure, since it is one-liners that have to fit) plus the rail, so
+    /// the comfortable rail's extra width moves the breakpoint with it.
+    private static var railBreakpoint: CGFloat { Typo.measure(654) + railWidth }
+
+    /// The page's side margin for everything above the two columns: the
+    /// column's own 24 plus the 4 a ClearNote is inset by, as a sum of two
+    /// steps so the hero and the banners stay on that inset line in either
+    /// density (a scaled 28 lands two points off it in comfortable).
+    private static var gutter: CGFloat { Space.s24 + Space.s4 }
+
+    /// The records rail. On the spacing curve rather than the type's: a rail
+    /// row is a name beside two chips and an amount, and it is the chips'
+    /// padding that grows. Held at 306, comfortable left the name no room at
+    /// all ("Hertz P…", then a bare "…").
+    private static var railWidth: CGFloat { Space.scaled(306) }
 
     /// Measured page width the breakpoint is judged against. Starts infinite
     /// so the first pass lays out side-by-side rather than flashing stacked.
@@ -130,14 +146,14 @@ struct SitrepView: View {
             // arrived actually looks.
             if store.gmailDisconnected {
                 GmailDisconnectedBanner()
-                    .padding(.horizontal, 28)
-                    .padding(.top, 14)
+                    .padding(.horizontal, Self.gutter)
+                    .padding(.top, Space.s14)
             } else if case let status = store.syncStatus, status.showsBanner {
                 // Throttled, erroring, catching up, or triage held: the same
                 // slot, because it answers the same question.
                 SyncStatusBanner(status: status)
-                    .padding(.horizontal, 28)
-                    .padding(.top, 14)
+                    .padding(.horizontal, Self.gutter)
+                    .padding(.top, Space.s14)
             }
             // THE HERO STAYS PUT. It sits above BOTH columns, so it cannot scroll
             // with one of them and hold still for the other; and "one item needs
@@ -155,8 +171,8 @@ struct SitrepView: View {
                 regenerate: { Task { await store.regenerateFyeHeadline() } },
                 empty: emptyHero)
                 .task(id: store.headlineKey) { await store.refreshFyeHeadline() }
-                .padding(.horizontal, 28)
-                .padding(.bottom, 18)
+                .padding(.horizontal, Self.gutter)
+                .padding(.bottom, Space.scaled(18))
 
             if pageWidth < Self.railBreakpoint {
                 // NARROW: one scroll, records under the work surface. The rail
@@ -164,7 +180,7 @@ struct SitrepView: View {
                 // items that need acting on — but the status strip stays the
                 // page's last line either way.
                 ScrollView(.vertical) {
-                    VStack(spacing: 16) {
+                    VStack(spacing: Space.s16) {
                         leftZones(visible: visible, overflow: overflow)
                         // Same key as the pinned rail below: whichever layout is
                         // on screen is the one the tour's ring finds.
@@ -172,27 +188,27 @@ struct SitrepView: View {
                             railCards.tourTarget(.records)
                         }
                     }
-                    .padding(.top, 14)
-                    .padding(.bottom, 28)
+                    .padding(.top, Space.s14)
+                    .padding(.bottom, Space.scaled(28))
                 }
                 .scrollIndicators(.hidden)
-                .scrollShadowRoom()
-                .padding(.horizontal, 24)
+                .scrollShadowRoom(topFade: Space.s14)
+                .padding(.horizontal, Space.s24)
             } else {
-                HStack(alignment: .top, spacing: 18) {
+                HStack(alignment: .top, spacing: Space.scaled(18)) {
                     // THE ONLY THING THAT SCROLLS WITH THE PAGE.
                     ScrollView(.vertical) {
-                        VStack(spacing: 16) {
+                        VStack(spacing: Space.s16) {
                             leftZones(visible: visible, overflow: overflow)
                         }
-                        .padding(.top, 14)
-                        .padding(.bottom, 28)
+                        .padding(.top, Space.s14)
+                        .padding(.bottom, Space.scaled(28))
                     }
                     // No bar on either column. Two of them side by side read as a
                     // split pane rather than one page, and the left one rides the
                     // column boundary instead of the window edge.
                     .scrollIndicators(.hidden)
-                    .scrollShadowRoom()
+                    .scrollShadowRoom(topFade: Space.s14)
                     .frame(maxWidth: .infinity, alignment: .top)
 
                     // THE RECORDS RAIL IS PINNED. These are reference columns you
@@ -203,22 +219,22 @@ struct SitrepView: View {
                     // instead of rubber-banding against nothing.
                     if !recordsEmpty {
                     ScrollView(.vertical) {
-                        VStack(spacing: 14) {
+                        VStack(spacing: Space.s14) {
                             railZones
                         }
-                        .padding(.top, 14)
-                        .padding(.bottom, 28)
+                        .padding(.top, Space.s14)
+                        .padding(.bottom, Space.scaled(28))
                     }
                     .scrollBounceBehavior(.basedOnSize)
                     .scrollIndicators(.hidden)
-                    .scrollShadowRoom()
-                    .frame(width: 306)
+                    .scrollShadowRoom(topFade: Space.s14)
+                    .frame(width: Self.railWidth)
                     // The COLUMN, not its content: a rail taller than the window
                     // would put the ring's bottom edge off screen.
                     .tourTarget(.records)
                     }
                 }
-                .padding(.horizontal, 24)
+                .padding(.horizontal, Space.s24)
             }
         }
         // The window shell draws the scene (it runs under the rail and the
@@ -321,7 +337,7 @@ struct SitrepView: View {
                 .tourTarget(.eyes)
         } else if isClear {
             ClearNote()
-                .padding(.horizontal, 4)
+                .padding(.horizontal, Space.s4)
                 .transition(.opacity)
         }
         // Empty reading still stands beside a live For-your-eyes (a zone that
@@ -348,13 +364,13 @@ struct SitrepView: View {
     /// height, and these cards are never the same height, so a grid opens
     /// gaps that independent columns simply pack.
     private var railCards: some View {
-        HStack(alignment: .top, spacing: 16) {
-            VStack(spacing: 16) {
+        HStack(alignment: .top, spacing: Space.s16) {
+            VStack(spacing: Space.s16) {
                 CalendarZone().tourTarget(.calendar)
                 BankingZone().tourTarget(.banking)
             }
             .frame(maxWidth: .infinity)
-            VStack(spacing: 16) {
+            VStack(spacing: Space.s16) {
                 ShipmentsZone(cursor: cursor).tourTarget(.shipments)
                 ReceiptsZone().tourTarget(.receipts)
             }
@@ -373,8 +389,8 @@ struct SitrepView: View {
     }()
 
     private var masthead: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            HStack(alignment: .firstTextBaseline, spacing: 7) {
+        HStack(alignment: .firstTextBaseline, spacing: Space.s10) {
+            HStack(alignment: .firstTextBaseline, spacing: Space.scaled(7)) {
                 Text("passband")
                     .font(Typo.serif(19, weight: .medium))
                     .foregroundStyle(Palette.ink)
@@ -391,14 +407,14 @@ struct SitrepView: View {
                     Text(branch)
                         .font(Typo.mono(10, weight: .medium))
                         .foregroundStyle(Palette.warn)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
+                        .padding(.horizontal, Space.s6)
+                        .padding(.vertical, Space.s2)
                         .background(Palette.warnSoft, in: Capsule())
                         .help("Built from branch \(branch)")
                         .accessibilityLabel("Development build from branch \(branch)")
                 }
             }
-            Spacer(minLength: 12)
+            Spacer(minLength: Space.s12)
             IngestIndicator()
             // Only the practice board gets the rehearsal appearance control.
             // The launch flag stays true after returning to the real inbox.
@@ -415,7 +431,7 @@ struct SitrepView: View {
                 }
             #endif
         }
-        .padding(.horizontal, 24)
+        .padding(.horizontal, Space.s24)
         // THE TOP BAR. The wordmark sits on the traffic lights' line rather than
         // under it, which is why this is a fixed height and not padding: the
         // rail beside it starts at the same line, and the two only read as one
@@ -483,12 +499,12 @@ struct SitrepView: View {
             Text(cursor.expanded ? "show less" : "\(overflow) more")
                 .font(Typo.micro)
                 .foregroundStyle(Palette.inkFaint)
-                .padding(.horizontal, 11)
-                .padding(.vertical, 4)
+                .padding(.horizontal, Space.scaled(11))
+                .padding(.vertical, Space.s4)
         }
         .buttonStyle(.glass)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.top, 6)
+        .padding(.top, Space.s6)
     }
 
 
@@ -624,16 +640,16 @@ private struct IngestIndicator: View {
     var body: some View {
         let count = store.sitrep.new.count
         if count > 0 {
-            HStack(spacing: 5) {
+            HStack(spacing: Space.scaled(5)) {
                 Image(systemName: "arrow.triangle.2.circlepath")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(Typo.ui(10, weight: .semibold))
                     .symbolEffect(.rotate, isActive: true)
                 Text(count == 1 ? "ingesting" : "ingesting \(count)")
             }
             .font(Typo.chip)
             .foregroundStyle(Palette.accent)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 3)
+            .padding(.horizontal, Space.scaled(9))
+            .padding(.vertical, Space.scaled(3))
             .glassCapsule(tint: Palette.accent.opacity(0.18), interactive: false)
             .help(
                 count == 1
@@ -675,7 +691,7 @@ struct GreetingLine: View {
     @FocusState private var focused: Bool
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: Space.s6) {
             if editing {
                 label(Self.greeting() + ",")
                 field
@@ -715,7 +731,7 @@ struct GreetingLine: View {
             .font(Typo.micro)
             .foregroundStyle(Palette.accent)
             .tracking(0.6)
-            .frame(maxWidth: 160)
+            .frame(maxWidth: Typo.measure(160))
             // AN OVERLAY, not a border: it has to say "this is a field" without
             // costing a single point of height, or the serif headline under it
             // would hop down and back every time the editor opens and closes.
@@ -744,7 +760,7 @@ struct GreetingLine: View {
             editing = true
         } label: {
             Image(systemName: "pencil")
-                .font(.system(size: 10, weight: .semibold))
+                .font(Typo.ui(10, weight: .semibold))
                 .foregroundStyle(Palette.accent.opacity(0.8))
                 // Clickable past the glyph, but NOT past the line: a target
                 // taller than the label it sits beside would push the serif
@@ -847,8 +863,8 @@ private struct DashHero: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(.top, 4)
-        .padding(.bottom, 2)
+        .padding(.top, Space.s4)
+        .padding(.bottom, Space.s2)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
@@ -863,7 +879,7 @@ private struct DashHero: View {
         @Environment(AppStore.self) private var store
 
         var body: some View {
-            HStack(spacing: 2) {
+            HStack(spacing: Space.s2) {
                 MastheadShortcut(symbol: "square.and.pencil", label: "new message", key: "c") {
                     store.openComposeNew()
                 }
@@ -889,7 +905,7 @@ private struct DashHero: View {
         var body: some View {
             Button(action: action) {
                 Image(systemName: symbol)
-                    .font(.system(size: 17, weight: .regular))
+                    .font(Typo.ui(17, weight: .regular))
                     .foregroundStyle(hovering ? Palette.ink : Palette.inkFaint)
                     .frame(width: 30, height: 30)
                     .contentShape(Rectangle())
@@ -904,14 +920,14 @@ private struct DashHero: View {
             // Trailing-anchored: these sit on the window's right edge, and a
             // centered hint under the last icon would run off it.
             .overlay(alignment: .topTrailing) {
-                HStack(spacing: 5) {
+                HStack(spacing: Space.scaled(5)) {
                     Text(label)
                         .font(Typo.micro)
                         .foregroundStyle(Palette.inkDim)
                     Kbd(key)
                 }
-                .padding(.horizontal, 7)
-                .padding(.vertical, 4)
+                .padding(.horizontal, Space.scaled(7))
+                .padding(.vertical, Space.s4)
                 .background(
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
                         .fill(Palette.canvas)
@@ -990,16 +1006,16 @@ private struct ObligationRow: View {
             cursor.index = index
             store.openThread(update.thread_id, queue: eyesWalk(store), from: .sitrep)
         } label: {
-            HStack(spacing: 9) {
+            HStack(spacing: Space.scaled(9)) {
                 Avatar(sender: update.senderString, size: 22)
                 Text(SenderCache.resolved(update.senderString).displayName)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(Typo.ui(12, weight: .medium))
                     .foregroundStyle(Palette.ink)
                     .lineLimit(1)
                     .layoutPriority(2)
                 if update.hasAttachments {
                     Image(systemName: "paperclip")
-                        .font(.system(size: 10))
+                        .font(Typo.ui(10))
                         .foregroundStyle(Palette.inkFaintest)
                 }
                 // The abstracted one-liner carries the meaning; it truncates first.
@@ -1034,8 +1050,8 @@ private struct ObligationRow: View {
                         .layoutPriority(3)
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
+            .padding(.horizontal, Space.s10)
+            .padding(.vertical, Space.scaled(7))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -1051,7 +1067,7 @@ private struct ObligationRow: View {
                 RoundedRectangle(cornerRadius: 1)
                     .fill(Palette.danger)
                     .frame(width: 2)
-                    .padding(.vertical, 5)
+                    .padding(.vertical, Space.scaled(5))
             }
         }
         .onHover { over in
@@ -1148,8 +1164,8 @@ struct RetriageButton: View {
                 Label("re-triage 7d", systemImage: "arrow.trianglehead.2.clockwise")
                     .font(Typo.micro)
                     .symbolEffect(.rotate, isActive: busy)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
+                    .padding(.horizontal, Space.s8)
+                    .padding(.vertical, Space.scaled(3))
             }
             // Text-only: an outlined pill would put the loudest shape on the
             // page around a dev control most readers never use.
@@ -1275,7 +1291,7 @@ struct FlowLayout: Layout {
         private var card: some View {
             VStack(spacing: 0) {
                 hero
-                VStack(spacing: 14) {
+                VStack(spacing: Space.s14) {
                     Text("Through the list.")
                         .font(Typo.hero(30))
                         .foregroundStyle(Palette.ink)
@@ -1284,7 +1300,7 @@ struct FlowLayout: Layout {
                         divider
                         stat(counted ? summary.skipped : 0, "set aside")
                         divider
-                        VStack(spacing: 2) {
+                        VStack(spacing: Space.s2) {
                             Text(Self.duration(summary.duration))
                                 .font(Typo.serif(22, weight: .medium))
                                 .foregroundStyle(Palette.ink)
@@ -1294,9 +1310,9 @@ struct FlowLayout: Layout {
                         .frame(maxWidth: .infinity)
                     }
                 }
-                .padding(.horizontal, 22)
-                .padding(.top, 18)
-                .padding(.bottom, 22)
+                .padding(.horizontal, Space.scaled(22))
+                .padding(.top, Space.scaled(18))
+                .padding(.bottom, Space.scaled(22))
             }
             .frame(width: Self.width)
             // The strong tint: the stats sit over a busy board, and the
@@ -1370,7 +1386,7 @@ struct FlowLayout: Layout {
         }
 
         private func stat(_ n: Int, _ name: String) -> some View {
-            VStack(spacing: 2) {
+            VStack(spacing: Space.s2) {
                 Text("\(n)")
                     .font(Typo.serif(22, weight: .medium))
                     .foregroundStyle(Palette.ink)
@@ -1458,7 +1474,7 @@ private struct FlowModeButton: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 5) {
+            HStack(spacing: Space.scaled(5)) {
                 // THE KEY ONLY ON HOVER. At rest the corner says what the
                 // button is; reaching for it is when the shortcut is worth
                 // teaching, so the spacebar slides in then and the pill grows
@@ -1467,8 +1483,8 @@ private struct FlowModeButton: View {
                     Text("space")
                         .font(Typo.mono(9.5, weight: .semibold))
                         .foregroundStyle(Palette.accent)
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 2)
+                        .padding(.horizontal, Space.scaled(9))
+                        .padding(.vertical, Space.s2)
                         .background(
                             Capsule(style: .continuous)
                                 .fill(Palette.accentSoft)
@@ -1482,15 +1498,15 @@ private struct FlowModeButton: View {
                         .transition(.opacity)
                 }
                 Image(systemName: "wind")
-                    .font(.system(size: 9.5, weight: .semibold))
+                    .font(Typo.ui(9.5, weight: .semibold))
                     .foregroundStyle(Palette.accent)
                 Text("flow mode")
                     .font(Typo.micro)
                     .foregroundStyle(hovering ? Palette.ink : Palette.inkDim)
             }
             .padding(.leading, hovering ? 3 : 8)
-            .padding(.trailing, 9)
-            .padding(.vertical, 3)
+            .padding(.trailing, Space.scaled(9))
+            .padding(.vertical, Space.scaled(3))
             .background(
                 Capsule(style: .continuous)
                     .fill(Palette.accentSoft.opacity(hovering ? 0.9 : 0.35))

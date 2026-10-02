@@ -12,6 +12,40 @@ updates itself, the phone comes through TestFlight, and the daemon is
 rolled onto hosted accounts or pulled as an image on a self-host box,
 so every note says which one it landed in.
 
+## 0.0.12 (2026-10-01)
+
+Philipp's Update
+
+### Mac
+
+- **"All Mail" overhaul.** Subjects, dates, day headings, filters
+- **Flow mode.** Press `space` and clear your inbox faster
+- **Zero-effort Unsubscribe.** Pressing `u` handles 98% of unsubscribing
+- **Clear a stack.** Hold `e` to clear every email in a Reading stack
+- Reading puts articles above promotions
+- Better logos in Reading cards
+- j and k wrap around on the sitrep. Arrow keys work on Rules and Groups
+- Backspace removes a recipient in a reply
+- Name an account Personal, Work or anything else
+- Click a sender to view their sender profile
+- Bug fixes
+
+### iPhone
+
+- All mail has day headings and filters, and finished mail stays visible
+- Reading puts articles above promotions
+- Reading shows every sender, folded after 8
+- Name an account Personal, Work or anything else
+- Bug fixes
+
+### Daemon
+
+- Unsubscribes for you
+- Triage sorts Reading into articles and promotions
+- Writes the sitrep headline, and only ever good news
+- Cards carry the sender's real name
+- Bug fixes
+
 ## 0.0.11 (2026-09-29)
 
 Ethan's Update

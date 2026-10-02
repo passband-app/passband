@@ -418,6 +418,137 @@ fn delete_device_by_token_is_scoped_and_idempotent() {
     );
 }
 
+// ---- THE PER-ACCOUNT DEVICE CAP ------------------------------------------
+
+use super::super::events::MAX_DEVICES_PER_ACCOUNT as CAP;
+
+/// A distinct, token-shaped value per index.
+fn cap_token(i: usize) -> String {
+    format!("{i:064x}")
+}
+
+/// Pin a row's `last_registered_at`, so "oldest" is a fact of the test and not
+/// of how fast the clock ticks between upserts.
+fn age_device(store: &SqliteStore, account: i64, token: &str, at: &str) {
+    let conn = store.lock().unwrap();
+    let n = conn
+        .execute(
+            "UPDATE devices SET last_registered_at = ?3 WHERE account_id = ?1 AND token = ?2",
+            rusqlite::params![account, token, at],
+        )
+        .unwrap();
+    assert_eq!(n, 1);
+}
+
+/// Going over the cap EVICTS the least recently registered rows rather than
+/// refusing the new one, and never the row just written.
+#[test]
+fn registering_past_the_cap_evicts_the_stalest_rows() {
+    let (store, acct) = store();
+    for i in 0..CAP + 3 {
+        store
+            .upsert_device(acct, &cap_token(i), "ios", None, None)
+            .unwrap();
+        // Strictly increasing ages by construction: token 0 is the stalest.
+        age_device(
+            &store,
+            acct,
+            &cap_token(i),
+            &format!("2026-09-01T00:00:{:02}Z", i),
+        );
+    }
+    let left: Vec<String> = store
+        .list_devices(acct)
+        .unwrap()
+        .into_iter()
+        .map(|d| d.token)
+        .collect();
+    assert_eq!(left.len(), CAP);
+    for gone in 0..3 {
+        assert!(!left.contains(&cap_token(gone)), "token {gone} survived");
+    }
+    for kept in 3..CAP + 3 {
+        assert!(left.contains(&cap_token(kept)), "token {kept} was evicted");
+    }
+}
+
+/// Re-registering an old token refreshes it, so a live phone that foregrounds
+/// survives the next eviction and the next-stalest row goes instead. Ages are
+/// compared PARSED: the refreshed row's offset spelling would collate before
+/// the others as text, and must not.
+#[test]
+fn a_reregistered_token_survives_the_next_eviction() {
+    let (store, acct) = store();
+    for i in 0..CAP {
+        store
+            .upsert_device(acct, &cap_token(i), "ios", None, None)
+            .unwrap();
+        age_device(
+            &store,
+            acct,
+            &cap_token(i),
+            &format!("2026-09-01T00:00:{:02}Z", i),
+        );
+    }
+    // Token 0 foregrounds: a real refresh through the upsert.
+    store
+        .upsert_device(acct, &cap_token(0), "ios", None, None)
+        .unwrap();
+    // Then pin it to an instant that is LATER than every other row but whose
+    // text sorts FIRST ("2026-08-..." with a +offset still means September 1).
+    age_device(&store, acct, &cap_token(0), "2026-08-31T23:00:59-01:00");
+
+    store
+        .upsert_device(acct, &cap_token(CAP), "ios", None, None)
+        .unwrap();
+    let left: Vec<String> = store
+        .list_devices(acct)
+        .unwrap()
+        .into_iter()
+        .map(|d| d.token)
+        .collect();
+    assert_eq!(left.len(), CAP);
+    assert!(
+        left.contains(&cap_token(0)),
+        "the refreshed token was evicted"
+    );
+    assert!(
+        !left.contains(&cap_token(1)),
+        "the next-stalest token should have gone"
+    );
+    assert!(
+        left.contains(&cap_token(CAP)),
+        "the new row must never be evicted"
+    );
+}
+
+/// The cap is PER ACCOUNT: another account's rows are neither counted toward
+/// this one's cap nor evicted by it.
+#[test]
+fn the_device_cap_never_counts_or_evicts_another_account() {
+    let (store, acct) = store();
+    let other = store.ensure_account("other@example.com").unwrap();
+    // The other account's rows are the STALEST in the database.
+    for i in 0..CAP {
+        let token = format!("{:064x}", 0xf000 + i);
+        store
+            .upsert_device(other, &token, "ios", None, None)
+            .unwrap();
+        age_device(&store, other, &token, "2020-01-01T00:00:00Z");
+    }
+    for i in 0..CAP + 2 {
+        store
+            .upsert_device(acct, &cap_token(i), "ios", None, None)
+            .unwrap();
+    }
+    assert_eq!(store.list_devices(acct).unwrap().len(), CAP);
+    assert_eq!(
+        store.list_devices(other).unwrap().len(),
+        CAP,
+        "another account's rows were evicted"
+    );
+}
+
 #[test]
 fn arrival_arbitration_obeys_open_done_and_snooze_for_both_lanes() {
     let (store, acct) = store();

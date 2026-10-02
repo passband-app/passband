@@ -45,6 +45,13 @@ fn map_device(r: &rusqlite::Row<'_>) -> rusqlite::Result<Device> {
     })
 }
 
+/// The most push devices one account may hold. Every distinct (tag,
+/// environment) among them costs a relay request PER EVENT, against a relay
+/// rate limit the whole hosted fleet shares, so an unbounded registry is a way
+/// for one hostile or buggy client to starve every other tenant's pushes. 16
+/// is several phones and iPads, each with a few mailboxes, with room to spare.
+pub const MAX_DEVICES_PER_ACCOUNT: usize = 16;
+
 impl SqliteStore {
     pub(super) fn append_event(&self, ev: &NewEvent) -> Result<Option<i64>> {
         let inserted = {
@@ -178,7 +185,11 @@ impl SqliteStore {
         tag: Option<&str>,
         environment: Option<&str>,
     ) -> Result<Device> {
-        let conn = self.lock()?;
+        let mut conn = self.lock()?;
+        // ONE transaction: the upsert and the eviction it may force commit
+        // together, so the account is never observed over its cap, and a
+        // failed eviction leaves the registration unwritten.
+        let tx = conn.transaction()?;
         let now = Utc::now().to_rfc3339();
         // UPSERT on UNIQUE(token); `created_at` is deliberately NOT touched on
         // conflict — first sight is a fact worth keeping.
@@ -192,7 +203,7 @@ impl SqliteStore {
         // `environment` COALESCEs where `tag` overwrites: a token's APNs
         // environment NEVER changes, so an older build re-registering the same
         // token without the field must not erase what a newer build declared.
-        let changed = conn.execute(
+        let changed = tx.execute(
             "INSERT INTO devices(account_id, token, platform, tag, environment,
                                  created_at, last_registered_at)
              VALUES(?1,?2,?3,?4,?5,?6,?6)
@@ -211,13 +222,51 @@ impl SqliteStore {
                 "device token is already registered to another account".to_string(),
             ));
         }
-        let device = conn.query_row(
+        let device = tx.query_row(
             "SELECT id, account_id, token, platform, tag, environment, created_at,
                     last_registered_at
-             FROM devices WHERE token = ?1",
-            params![token],
+             FROM devices WHERE account_id = ?1 AND token = ?2",
+            params![account_id, token],
             map_device,
         )?;
+
+        // THE CAP ([`MAX_DEVICES_PER_ACCOUNT`]). EVICT rather than refuse: rows
+        // only leave on their own when APNs retires them (410), and rejected
+        // rows are deliberately KEPT (see the pusher), so a refusal would lock
+        // a real phone out behind dead rows nobody can see. A live phone
+        // re-registers on every foreground, which refreshes
+        // `last_registered_at`, so it is never the stalest row for long.
+        //
+        // Honest cost: a paired client on the same account can push a
+        // sibling's row out by registering enough tokens, until that sibling
+        // next foregrounds. That is no more than the account's own user can
+        // already do through the DELETE route.
+        //
+        // "Least recent" is decided over PARSED `last_registered_at` in Rust,
+        // `id` breaking ties: the column is RFC3339 TEXT and this module does
+        // not rest an ordering on string collation (see `device_tokens.rs`).
+        // The row just upserted is never a candidate, whatever its clock says.
+        let mut others: Vec<(i64, DateTime<Utc>)> = {
+            let mut stmt = tx.prepare(
+                "SELECT id, last_registered_at FROM devices
+                 WHERE account_id = ?1 AND id <> ?2",
+            )?;
+            stmt.query_map(params![account_id, device.id], |r| {
+                Ok((r.get(0)?, dt(r, 1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        let excess = (others.len() + 1).saturating_sub(MAX_DEVICES_PER_ACCOUNT);
+        if excess > 0 {
+            others.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+            for (id, _) in others.iter().take(excess) {
+                tx.execute(
+                    "DELETE FROM devices WHERE account_id = ?1 AND id = ?2",
+                    params![account_id, id],
+                )?;
+            }
+        }
+        tx.commit()?;
         Ok(device)
     }
 

@@ -1610,9 +1610,9 @@ fn report_tracking_posture(config: &Config) {
 
     // The human door drops a scheme-less base URL, because it would ride into
     // outbound HTML as a RELATIVE url and resolve against the recipient's mail
-    // client. Silent there; loud here.
-    let lower = base.to_ascii_lowercase();
-    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+    // client. Silent there; loud here. The shared predicate, so this report,
+    // minting and the opens-poller gate cannot disagree about what counts.
+    if !squelch_core::tracking::is_mintable_base_url(base) {
         eprintln!(
             "squelchd: read tracking DISABLED: base_url `{base}` has no http(s) scheme, so it was rejected; sends go out untracked"
         );

@@ -31,7 +31,7 @@ common way to end up with a feature that silently records nothing.
 | Setting | Gates | Effect when unset |
 |---|---|---|
 | `[tracking] base_url` (`SQUELCH_TRACK_URL`) | **minting** — where the pixel points | No send is ever tracked, whatever the client asks for |
-| `[pusher] relay_url` (`SQUELCH_RELAY_URL`) | **collection via relay**, together with `base_url`: the opens poller runs only when BOTH are set | No opens poller; opens must arrive at the daemon directly |
+| `[pusher] relay_url` (`SQUELCH_RELAY_URL`) | **collection via relay**, together with `base_url`: the opens poller runs only when BOTH are set, `base_url` counting as set only when minting would accept it (an `http://` or `https://` scheme) | No opens poller; opens must arrive at the daemon directly |
 
 `base_url` decides which door the recipient's mail client knocks on. That is the
 only thing it decides on its own. The opens poller needs it as well as the relay
@@ -134,7 +134,8 @@ same relay will ack-delete each other's rows, and each silently never sees the
 opens the other collected.
 
 The daemon enforces the one case it can see: a daemon with a relay but no
-`[tracking] base_url` does not start the opens poller at all, so sharing a relay
+usable `[tracking] base_url` (unset, blank, or missing its http(s) scheme, the
+same rule minting applies) does not start the opens poller at all, so sharing a relay
 for push alone is safe. Two daemons that both mint pixels and share one relay
 are still the collision described above.
 

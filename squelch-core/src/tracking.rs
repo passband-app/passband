@@ -25,6 +25,21 @@ use crate::error::{CoreError, Result};
 use crate::store::{NewEvent, OPEN_PROXIED, OPEN_UNKNOWN, Store, SyncState};
 use crate::types::{AccountId, EventKind, Tier};
 
+/// Whether a `[tracking] base_url` is one a pixel may be minted against:
+/// trimmed, it starts with `http://` or `https://`, case-insensitively. A value
+/// without a scheme would ride into outbound HTML as a RELATIVE url and resolve
+/// against the recipient's mail client, so it counts as UNSET.
+///
+/// THE ONE PREDICATE three sites must agree on: minting
+/// (`ApiState::with_tracking_base_url` in squelch-api), the startup posture
+/// report (`report_tracking_posture` in squelchd), and the opens-poller gate
+/// ([`OpensPoller::from_config`]). If they drift, a daemon that mints nothing
+/// can still drain another daemon's opens off the shared relay buffer.
+pub fn is_mintable_base_url(base_url: &str) -> bool {
+    let lower = base_url.trim().to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
+}
+
 /// The opens poller's cursor row in `sync_state`: `uidvalidity` unused,
 /// `last_uid` holds the highest relay row id durably written here. Its own key,
 /// distinct from the pusher's and the sync engine's.
@@ -156,11 +171,13 @@ impl OpensPoller {
         else {
             return Ok(None);
         };
+        // The SAME rule minting applies: a scheme-less base_url mints nothing,
+        // so it must not collect either.
         let mints_pixels = config
             .tracking
             .base_url
             .as_deref()
-            .is_some_and(|u| !u.trim().is_empty());
+            .is_some_and(is_mintable_base_url);
         if !mints_pixels {
             return Ok(None);
         }
@@ -440,6 +457,21 @@ mod tests {
             OpensPoller::from_config(store.clone(), 1, &config)
                 .expect("a blank tracking url is not an error")
                 .is_none()
+        );
+        // Scheme-less: minting refuses it, so this daemon mints nothing and
+        // must not collect.
+        config.tracking.base_url = Some("track.example.com".to_string());
+        assert!(
+            OpensPoller::from_config(store.clone(), 1, &config)
+                .expect("a scheme-less tracking url is not an error")
+                .is_none()
+        );
+        // Case and surrounding whitespace do not matter, as in minting.
+        config.tracking.base_url = Some("  HTTPS://track.example.com ".to_string());
+        assert!(
+            OpensPoller::from_config(store.clone(), 1, &config)
+                .expect("building the client")
+                .is_some()
         );
 
         // Both named: the poller exists.

@@ -2326,6 +2326,13 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     /// APNs environment never changes, so an older build re-registering the same
     /// token without the field must not erase what a newer build declared. A
     /// `Some` replaces it.
+    ///
+    /// CAPPED at `MAX_DEVICES_PER_ACCOUNT` (16) rows per account, because each
+    /// distinct (tag, environment) costs a relay request per event against a
+    /// rate limit the hosted fleet shares. Going over EVICTS the account's
+    /// least recently registered rows (never the one just upserted) in the
+    /// same transaction; it does not refuse, since stale and rejected rows
+    /// would otherwise lock a real phone out. Other accounts are untouched.
     fn upsert_device(
         &self,
         account_id: AccountId,

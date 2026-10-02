@@ -151,7 +151,8 @@ pub enum ApnsPushOutcome {
     Dead,
     /// A permanent 4xx: not retried, not deleted.
     Rejected,
-    /// Retryable: `0`, `403`, `429`, `5xx`, anything unexpected.
+    /// Retryable: `0`, `403`, `429`, `400 IdleTimeout`, `5xx`, anything
+    /// unexpected. The APNs reason decides that one case and is NEVER a label.
     Failed,
 }
 

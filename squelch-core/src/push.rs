@@ -3,8 +3,9 @@
 //! THE RELAY IS BLIND — this task reads full [`Event`] rows but serializes only
 //! [`PushRequest`] (event id + collapse id), so adding a field there is a
 //! security change. Its own `sync_state` cursor ([`CURSOR_KEY`]) advances only
-//! after a delivery: at-least-once, never a skip. Bearer and device tokens are
-//! never logged.
+//! after a delivery: at-least-once, never a skip, and an event that reached
+//! anybody is never re-pushed (see [`Pusher::drain`]). Bearer and device tokens
+//! are never logged.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -98,11 +99,15 @@ pub struct PushRequest<'a> {
 }
 
 /// One token's outcome, as the relay reports it. `status` is the APNs HTTP
-/// status VERBATIM; `410` is data (delete the row), not an error.
+/// status VERBATIM; `410` is data (delete the row), not an error. `reason` is
+/// APNs' own error constant (`BadDeviceToken`, `IdleTimeout`, ...), relayed as
+/// given; absent on a 200.
 #[derive(Debug, Clone, Deserialize)]
 struct PushResult {
     token: String,
     status: u16,
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -133,29 +138,81 @@ struct PushOutcome {
     /// fallback environment for a legacy row), and deleting on that would
     /// silently unregister every phone.
     rejected: usize,
+    /// A request for this event failed at the RELAY hop (unreachable, non-2xx,
+    /// unreadable body) and the fan-out stopped there. Everything above is what
+    /// the requests BEFORE it produced: kept, not discarded, because tokens
+    /// that already took the event must not be pushed it again and a 410
+    /// already seen is definitive.
+    relay_failed: bool,
 }
 
 /// The classes a per-token APNs status falls into. `410` is retirement, the
 /// permanent 4xxs are rejection, and EVERYTHING ELSE that is not a 200 is
 /// retryable: an unknown status is safer held than dropped.
-fn classify(status: u16) -> ApnsPushOutcome {
+///
+/// The one 4xx the reason overrides is `400 IdleTimeout`: APNs closing a
+/// connection the relay held idle too long says nothing about the token, so it
+/// is retried like a `0`. Matched EXACTLY; any other 400 reason stays rejected.
+fn classify(status: u16, reason: Option<&str>) -> ApnsPushOutcome {
     match status {
         200 => ApnsPushOutcome::Delivered,
         410 => ApnsPushOutcome::Dead,
         403 | 429 => ApnsPushOutcome::Failed,
+        400 if reason == Some("IdleTimeout") => ApnsPushOutcome::Failed,
         400..=499 => ApnsPushOutcome::Rejected,
         _ => ApnsPushOutcome::Failed,
     }
 }
 
+/// The relay's `reason`, reduced to something safe to put in a log line. APNs'
+/// reasons are short CamelCase enum constants, and naming one is what lets an
+/// operator tell `BadDeviceToken` (the phone) from `DeviceTokenNotForTopic` or
+/// `TopicDisallowed` (our config). It still crosses a network hop, so it is
+/// treated as UNTRUSTED TEXT: printed only when it is 1..=40 ASCII alphanumeric
+/// characters, which no token (64 hex chars), bearer, URL or log-forging
+/// newline fits, and `-` otherwise.
+fn loggable_reason(reason: Option<&str>) -> &str {
+    match reason {
+        Some(r) if (1..=40).contains(&r.len()) && r.bytes().all(|b| b.is_ascii_alphanumeric()) => r,
+        _ => "-",
+    }
+}
+
+/// The two environments the relay accepts. Its parse is EXACT and
+/// case-sensitive, and an unknown value fails the WHOLE request with a 400, so
+/// a typo here would silence every device on the daemon.
+const ENVIRONMENTS: [&str; 2] = ["production", "sandbox"];
+
+/// Normalize `[pusher] environment` / `SQUELCH_RELAY_APNS_ENV`: trimmed and
+/// ASCII-lowercased, so `Production` means what it says. Blank is unset. A value
+/// that is still neither accepted spelling is DROPPED with a loud warning
+/// rather than forwarded: omitted, the relay applies its own default and the
+/// devices that declared their own environment keep working; forwarded, every
+/// legacy-row request would 400. The echoed value is clamped to 32 chars.
+fn normalize_environment(raw: Option<&str>) -> Option<String> {
+    let value = raw?.trim().to_ascii_lowercase();
+    if value.is_empty() {
+        return None;
+    }
+    if ENVIRONMENTS.contains(&value.as_str()) {
+        return Some(value);
+    }
+    let shown: String = value.chars().take(32).collect();
+    eprintln!(
+        "squelch: SQUELCH_RELAY_APNS_ENV / [pusher] environment {shown:?} is not `production` or `sandbox`; IGNORED, the relay's default applies"
+    );
+    None
+}
+
 impl PushOutcome {
     /// Nothing landed and something retryable failed: the APNs hop is out while
     /// the relay hop is fine — leave the cursor, back off, retry. Deliberately
-    /// NOT "any failure": a partial delivery advances, because retrying would
-    /// re-push the event to every device that already got it. `rejected` is
-    /// deliberately ABSENT: an event every token refused permanently advances,
-    /// or a daemon whose only device is rejected stalls forever and then dumps
-    /// the whole backlog on the first good device to register.
+    /// NOT "any failure": the pusher's one rule is that AN EVENT THAT REACHED
+    /// ANYBODY IS NEVER RE-PUSHED, so a partial delivery advances (and so does
+    /// a relay failure on a later request, see [`Pusher::drain`]). `rejected`
+    /// is deliberately ABSENT: an event every token refused permanently
+    /// advances, or a daemon whose only device is rejected stalls forever and
+    /// then dumps the whole backlog on the first good device to register.
     fn nothing_landed(&self) -> bool {
         self.delivered == 0 && self.failed > 0
     }
@@ -267,7 +324,7 @@ impl Pusher {
             push_url: format!("{}/v1/push", relay_url.trim_end_matches('/')),
             relay_token: config.pusher.relay_token.clone().filter(|t| !t.is_empty()),
             topic: config.pusher.topic.clone().filter(|t| !t.is_empty()),
-            environment: config.pusher.environment.clone().filter(|t| !t.is_empty()),
+            environment: normalize_environment(config.pusher.environment.as_deref()),
             http,
             metrics: SyncMetrics::new(),
         }))
@@ -336,9 +393,17 @@ impl Pusher {
     }
 
     /// Push everything past the cursor, oldest first, one event at a time.
-    /// Returns `Err` the moment the relay stops answering 200 — or a 200 carries
-    /// no delivered token — with the cursor left where the last accepted event
-    /// put it, so unsent events are retried rather than skipped.
+    ///
+    /// ONE POLICY: an event that reached anybody is never re-pushed, and one
+    /// that reached nobody is never skipped while a retry could land it. So
+    /// `Err` (cursor unmoved, backoff, retry) when the relay hop fails before
+    /// any device took the event, or a 200 carries no delivered token and
+    /// something retryable is in the mix. When a LATER request fails after an
+    /// earlier one delivered, the cursor ADVANCES past the event (the devices
+    /// still owed it lose this one ping rather than every other device getting
+    /// it twice, or forever if the failure persists) and `Err` is STILL
+    /// returned, after the write, so the run loop backs off a relay that just
+    /// failed instead of hammering it with the next event.
     async fn drain(&self) -> Result<()> {
         let mut cursor = self.cursor()?;
         loop {
@@ -383,7 +448,7 @@ impl Pusher {
                     self.set_cursor(cursor)?;
                     continue;
                 }
-                let outcome = self.push_event(ev, &devices).await?;
+                let outcome = self.push_event(ev, &devices).await;
                 let dead = &outcome.dead;
                 for token in dead {
                     // The relay passes APNs' 410 back verbatim so THIS daemon
@@ -399,13 +464,29 @@ impl Pusher {
                 }
                 if !dead.is_empty() {
                     devices.retain(|(_, t)| !dead.contains(t));
-                    if devices.is_empty() {
-                        // Every device just died. The remaining events have
-                        // nowhere to go; skip to the end of the batch.
-                        cursor = batch.last().map(|e| e.id).unwrap_or(cursor);
+                }
+                // The relay hop failed partway. Dead rows are already gone (a
+                // 410 is definitive whatever came after it); what remains is
+                // whether anybody got the event.
+                if outcome.relay_failed {
+                    if outcome.delivered > 0 {
+                        eprintln!(
+                            "squelch: APNs relay failed a later request after {} device(s) took this event; not re-pushing it",
+                            outcome.delivered
+                        );
+                        cursor = ev.id;
                         self.set_cursor(cursor)?;
-                        break;
+                    } else {
+                        eprintln!("squelch: nobody took this event; cursor unmoved");
                     }
+                    return Err(relay_failure());
+                }
+                if !dead.is_empty() && devices.is_empty() {
+                    // Every device just died. The remaining events have
+                    // nowhere to go; skip to the end of the batch.
+                    cursor = batch.last().map(|e| e.id).unwrap_or(cursor);
+                    self.set_cursor(cursor)?;
+                    break;
                 }
                 // The relay answered, APNs did not: every surviving token came
                 // back 0/403/429/5xx (or was rejected), so this event reached
@@ -428,10 +509,16 @@ impl Pusher {
     }
 
     /// POST one event to the relay for every registered device — one request
-    /// per tag bucket, each chunked to the relay's ceiling — returning the
-    /// per-token tally: a 200 from the relay says nothing about whether APNs
-    /// took anything.
-    async fn push_event(&self, ev: &Event, devices: &[(Route, String)]) -> Result<PushOutcome> {
+    /// per (tag, environment) bucket, each chunked to the relay's ceiling —
+    /// returning the per-token tally: a 200 from the relay says nothing about
+    /// whether APNs took anything.
+    ///
+    /// INFALLIBLE BY DESIGN. A relay-hop failure stops the fan-out at that
+    /// request and sets [`PushOutcome::relay_failed`], but the tally of the
+    /// requests that already went out is RETURNED, not thrown away: discarding
+    /// it would re-push the event to devices that already have it and forget
+    /// their 410s. [`Pusher::drain`] decides what the cursor does with it.
+    async fn push_event(&self, ev: &Event, devices: &[(Route, String)]) -> PushOutcome {
         let collapse = collapse_id(&ev.thread_id);
         let mut outcome = PushOutcome::default();
         for (route, tokens) in by_route(devices) {
@@ -452,50 +539,59 @@ impl Pusher {
                 if let Some(token) = &self.relay_token {
                     req = req.bearer_auth(token);
                 }
-                // The error is NOT propagated: reqwest's Display embeds the URL and
+                // The error is NOT inspected: reqwest's Display embeds the URL and
                 // the builder held the bearer. Only the class of failure escapes.
-                let resp = req.send().await.map_err(|_| {
-                    eprintln!("squelch: APNs relay unreachable; cursor unmoved");
-                    relay_failure()
-                })?;
+                let Ok(resp) = req.send().await else {
+                    eprintln!("squelch: APNs relay unreachable");
+                    outcome.relay_failed = true;
+                    return outcome;
+                };
                 let status = resp.status();
                 if !status.is_success() {
                     eprintln!(
-                        "squelch: APNs relay refused the push (HTTP {}); cursor unmoved",
+                        "squelch: APNs relay refused the push (HTTP {})",
                         status.as_u16()
                     );
-                    return Err(relay_failure());
+                    outcome.relay_failed = true;
+                    return outcome;
                 }
-                let parsed: PushResponse = resp.json().await.map_err(|_| {
-                    eprintln!("squelch: APNs relay returned an unreadable body; cursor unmoved");
-                    relay_failure()
-                })?;
+                let Ok(parsed) = resp.json::<PushResponse>().await else {
+                    eprintln!("squelch: APNs relay returned an unreadable body");
+                    outcome.relay_failed = true;
+                    return outcome;
+                };
                 for result in parsed.results {
-                    let class = classify(result.status);
+                    let reason = result.reason.as_deref();
+                    let class = classify(result.status, reason);
                     self.metrics.record_apns_push(class);
                     match class {
                         ApnsPushOutcome::Delivered => outcome.delivered += 1,
                         // The device is gone. Data, not an error.
                         ApnsPushOutcome::Dead => outcome.dead.push(result.token),
                         // Permanent for this token and request: not retried, NOT
-                        // deleted (see `PushOutcome::rejected`). Status and
-                        // prefix only, never the token or a reason string.
+                        // deleted (see `PushOutcome::rejected`). Status, token
+                        // prefix, and the reason ONLY as `loggable_reason`
+                        // passes it: the reason is what separates a bad phone
+                        // from a bad topic, but it is untrusted text.
                         ApnsPushOutcome::Rejected => {
                             outcome.rejected += 1;
                             eprintln!(
-                                "squelch: APNs rejected the push for one device with status {} (token {}…); not retried",
+                                "squelch: APNs rejected the push for one device with status {} reason {} (token {}…); not retried",
                                 result.status,
+                                loggable_reason(reason),
                                 token_prefix(&result.token)
                             );
                         }
                         // Retryable: `0` is the relay's word for an unreachable or
-                        // timed-out APNs; 403/429/5xx come through verbatim. Log
-                        // the status only — never the token value or a reason.
+                        // timed-out APNs; 403/429/5xx/`400 IdleTimeout` come
+                        // through verbatim. Never the token value; the reason
+                        // only through the same sanitizer.
                         ApnsPushOutcome::Failed => {
                             outcome.failed += 1;
                             eprintln!(
-                                "squelch: APNs push for one device returned status {} (token {}…)",
+                                "squelch: APNs push for one device returned status {} reason {} (token {}…)",
                                 result.status,
+                                loggable_reason(reason),
                                 token_prefix(&result.token)
                             );
                         }
@@ -503,7 +599,7 @@ impl Pusher {
                 }
             }
         }
-        Ok(outcome)
+        outcome
     }
 
     /// Run until shutdown, waking on the events broadcast, a coarse
@@ -740,18 +836,95 @@ mod tests {
     /// else (0, 5xx, the unexpected) is held for retry.
     #[test]
     fn statuses_classify_into_retire_reject_and_retry() {
-        assert_eq!(classify(200), ApnsPushOutcome::Delivered);
-        assert_eq!(classify(410), ApnsPushOutcome::Dead);
+        assert_eq!(classify(200, None), ApnsPushOutcome::Delivered);
+        assert_eq!(classify(410, None), ApnsPushOutcome::Dead);
         for permanent in [400, 404, 405, 413] {
             assert_eq!(
-                classify(permanent),
+                classify(permanent, None),
                 ApnsPushOutcome::Rejected,
                 "{permanent}"
             );
         }
         for retry in [0, 403, 429, 500, 503, 302, 201] {
-            assert_eq!(classify(retry), ApnsPushOutcome::Failed, "{retry}");
+            assert_eq!(classify(retry, None), ApnsPushOutcome::Failed, "{retry}");
         }
+    }
+
+    /// `400 IdleTimeout` is APNs dropping an idle connection, not a verdict on
+    /// the token: retried. Every other 400 reason, and IdleTimeout on any
+    /// other status, classifies exactly as the status alone says.
+    #[test]
+    fn a_400_idle_timeout_is_retried_and_only_that() {
+        assert_eq!(classify(400, Some("IdleTimeout")), ApnsPushOutcome::Failed);
+        for permanent in [
+            "BadDeviceToken",
+            "DeviceTokenNotForTopic",
+            "TopicDisallowed",
+            "idletimeout",
+            "IdleTimeout ",
+            "",
+        ] {
+            assert_eq!(
+                classify(400, Some(permanent)),
+                ApnsPushOutcome::Rejected,
+                "{permanent:?}"
+            );
+        }
+        assert_eq!(
+            classify(404, Some("IdleTimeout")),
+            ApnsPushOutcome::Rejected
+        );
+        assert_eq!(
+            classify(200, Some("IdleTimeout")),
+            ApnsPushOutcome::Delivered
+        );
+        assert_eq!(classify(410, Some("IdleTimeout")), ApnsPushOutcome::Dead);
+    }
+
+    /// The reason reaches a log only as a short alphanumeric constant.
+    #[test]
+    fn a_reason_is_logged_only_when_it_looks_like_an_apns_constant() {
+        assert_eq!(loggable_reason(Some("BadDeviceToken")), "BadDeviceToken");
+        assert_eq!(loggable_reason(Some("unreachable")), "unreachable");
+        assert_eq!(loggable_reason(Some(&"A".repeat(40))), "A".repeat(40));
+        for unsafe_reason in [
+            "",
+            "Bad Device",
+            "line\nforged",
+            "https://relay.example.com/v1/push",
+            "Bearer-secret",
+            "Bad\u{e9}Token",
+        ] {
+            assert_eq!(
+                loggable_reason(Some(unsafe_reason)),
+                "-",
+                "{unsafe_reason:?}"
+            );
+        }
+        assert_eq!(loggable_reason(Some(&"A".repeat(41))), "-");
+        // A device token is 64 hex chars: alphanumeric, but too long to pass.
+        assert_eq!(loggable_reason(Some(&"ab".repeat(32))), "-");
+        assert_eq!(loggable_reason(None), "-");
+    }
+
+    /// The configured environment is normalized to what the relay's exact parse
+    /// accepts, and anything else is dropped so the relay's default applies.
+    #[test]
+    fn the_configured_environment_is_normalized_or_dropped() {
+        assert_eq!(
+            normalize_environment(Some("Production")).as_deref(),
+            Some("production")
+        );
+        assert_eq!(
+            normalize_environment(Some(" sandbox ")).as_deref(),
+            Some("sandbox")
+        );
+        assert_eq!(normalize_environment(Some("prod")), None);
+        assert_eq!(normalize_environment(Some("")), None);
+        assert_eq!(normalize_environment(Some("   ")), None);
+        assert_eq!(normalize_environment(None), None);
+        // A long garbage value is dropped too (and only its head is echoed).
+        assert_eq!(normalize_environment(Some(&"x".repeat(500))), None);
     }
 
     #[test]
@@ -792,12 +965,14 @@ mod tests {
             delivered,
             failed,
             rejected: 0,
+            relay_failed: false,
         };
         let with_rejected = |delivered, failed, rejected| PushOutcome {
             dead: Vec::new(),
             delivered,
             failed,
             rejected,
+            relay_failed: false,
         };
 
         // Every token came back 0/429/5xx: nobody got it, retry.

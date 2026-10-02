@@ -96,6 +96,10 @@ final class Updater: NSObject, ObservableObject, SPUUserDriver, SPUUpdaterDelega
     /// only lets the card do it sooner.
     private var installNow: (() -> Void)?
 
+    /// Later's alarm: the card comes back this long after it was waved off.
+    private static let remindAfter: Duration = .seconds(60 * 60)
+    private var reminder: Task<Void, Never>?
+
     /// Set the moment the human presses Update. This is what makes the second
     /// prompt unnecessary: `showReady(toInstallAndRelaunch:)` answers itself
     /// only because consent for this exact update was already given, and a
@@ -159,25 +163,41 @@ final class Updater: NSObject, ObservableObject, SPUUserDriver, SPUUpdaterDelega
     /// Restart into an update that downloaded in the background.
     func restartNow() {
         guard let installNow else { return }
+        reminder?.cancel()
         phase = .installing
         installNow()
     }
 
-    /// Later. `dismiss`, not `skip`: the version comes back around on the next
-    /// scheduled check, because "not now" is not "never". For a silently
-    /// downloaded update it only hides the card; the next quit installs it.
+    /// Later: the card goes, and comes back an hour from now. `dismiss`, not
+    /// `skip`, because "not now" is not "never".
     func later() {
-        if case .ready = phase {
+        if case .ready(let version) = phase {
+            // Downloaded and waiting for the quit, so there is nothing to
+            // re-check: the same card simply comes back.
             phase = .idle
+            remind { $0.phase = .ready(version: version) }
             return
         }
-        guard let reply = choice else {
-            phase = .idle
-            return
+        if let reply = choice {
+            choice = nil
+            reply(.dismiss)
         }
-        choice = nil
         phase = .idle
-        reply(.dismiss)
+        // Sparkle's session is over, so coming back means asking again. A
+        // background check lands on the silent path (a `.ready` card) or, for
+        // an update that cannot install unattended, `showUpdateFound`.
+        remind { $0.engine.checkForUpdatesInBackground() }
+    }
+
+    /// Runs `bringBack` after `remindAfter`, unless the card has come back some
+    /// other way in the meantime (a menu check, a newer download).
+    private func remind(_ bringBack: @escaping @MainActor (Updater) -> Void) {
+        reminder?.cancel()
+        reminder = Task { [weak self] in
+            try? await Task.sleep(for: Self.remindAfter)
+            guard let self, !Task.isCancelled, self.phase == .idle else { return }
+            bringBack(self)
+        }
     }
 
     // MARK: - SPUUserDriver: permission
@@ -205,6 +225,7 @@ final class Updater: NSObject, ObservableObject, SPUUserDriver, SPUUpdaterDelega
         immediateInstallationBlock immediateInstallHandler: @escaping () -> Void
     ) -> Bool {
         let version = item.displayVersionString
+        reminder?.cancel()
         installNow = immediateInstallHandler
         phase = .ready(version: version)
         // Same once-per-version banner as a found update: the card only speaks
@@ -237,6 +258,7 @@ final class Updater: NSObject, ObservableObject, SPUUserDriver, SPUUpdaterDelega
             reply(.dismiss)
             return
         }
+        reminder?.cancel()
         choice = reply
         consented = false
         let version = appcastItem.displayVersionString

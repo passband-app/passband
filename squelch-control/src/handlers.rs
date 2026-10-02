@@ -22,6 +22,16 @@
 //! touches an invite code again: invites provision tenants, and this flow is for
 //! people whose tenant already exists.
 //!
+//! THE AGENT HOP is the fourth, and it is the app hop run on somebody else's
+//! behalf. WorkOS AuthKit is the OAuth authorization server agents use to reach
+//! a tenant's `/mcp`, in "Standalone Connect" mode: it runs the OAuth dance with
+//! the agent and sends the person's browser HERE to log in, with one opaque
+//! `external_auth_id`. `GET /agent/auth` takes that and nothing else, runs the
+//! app hop's identity-only Google round trip, finds the tenant from the mailbox
+//! Google names, and only then tells WorkOS who it was (see [`crate::workos`]),
+//! sending the browser on to the URL WorkOS answers with. A Google account with
+//! no mailbox here is told so after Google, and WorkOS is never called for it.
+//!
 //! WHY THE REVERSE LOOKUP IS NOT AN ORACLE, which is the question the console
 //! hop's design raises: its key is an address GOOGLE VERIFIED on this request,
 //! so the only mailbox anybody can ask about is the one they just proved they
@@ -229,6 +239,29 @@ const RECONNECT_SESSION_REFUSED: &str = "That reconnection could not be verified
 const RECONNECT_NO_TENANT_HEADING: &str = "No Passband mailbox for that Google account";
 const RECONNECT_NO_TENANT: &str = "Nothing is set up for the account you approved. If your Passband mailbox reads a \
      different Google account, start again and pick that one.";
+
+/// [`CONSOLE_SESSION_REFUSED`] in the agent flow's words. The way back is the
+/// agent that started it: this service has no link to offer, because the only
+/// way into an agent login is AuthKit sending the browser here.
+const AGENT_SESSION_REFUSED: &str = "That sign in could not be verified, or it took too long. Nothing was connected. \
+     Go back to your agent and connect again.";
+
+/// THE ONE ANSWER the agent login gives when Google came back with a mailbox
+/// this deployment does not run a daemon for. Specific, like the app login's
+/// [`APP_NO_TENANT`], and safe for the same reason: it is only ever rendered
+/// after Google has authenticated the reader as that account, so the only
+/// mailbox it can answer about is their own. Nothing is sent to WorkOS on this
+/// path, so the agent gets no token and learns only that the login did not
+/// finish.
+const AGENT_NO_TENANT_HEADING: &str = "No Passband mailbox for that Google account";
+const AGENT_NO_TENANT: &str = "This Google account has no Passband mailbox, so nothing was connected. \
+     If your mailbox is on another Google account, go back to your agent, connect again, \
+     and pick that account.";
+
+/// The longest `external_auth_id` this service will carry. AuthKit's are ULIDs
+/// (26 characters) today; this is slack for a format change, and a bound on
+/// what a stranger can park in the session table.
+const MAX_EXTERNAL_AUTH_ID: usize = 128;
 
 /// The three answers `POST /waitlist` gives. JSON rather than a page: the only
 /// client is the site's own form, which shows its own copy in its own voice, so
@@ -513,6 +546,7 @@ pub async fn signup(State(state): State<ControlState>, body: Bytes) -> Response 
         invite: Some(invite_id),
         app: false,
         reconnect: false,
+        agent: false,
         iat: chrono::Utc::now().timestamp(),
     };
     let cookie_value = cookie::sign(&config.cookie_key, &claim);
@@ -729,6 +763,7 @@ pub async fn console_auth(
         invite: None,
         app: false,
         reconnect: false,
+        agent: false,
         iat: chrono::Utc::now().timestamp(),
     };
     let cookie_value = cookie::sign(&config.cookie_key, &claim);
@@ -816,6 +851,7 @@ pub async fn app_auth(State(state): State<ControlState>) -> Response {
         // decides nothing but the wording of a refusal. See `SessionClaim::app`.
         app: true,
         reconnect: false,
+        agent: false,
         iat: chrono::Utc::now().timestamp(),
     };
     let cookie_value = cookie::sign(&config.cookie_key, &claim);
@@ -901,6 +937,7 @@ pub async fn reconnect_start(State(state): State<ControlState>) -> Response {
         app: false,
         // Refusal copy only. See `SessionClaim::reconnect`.
         reconnect: true,
+        agent: false,
         iat: chrono::Utc::now().timestamp(),
     };
     let cookie_value = cookie::sign(&config.cookie_key, &claim);
@@ -938,6 +975,149 @@ fn reconnect_refused() -> Response {
         StatusCode::BAD_REQUEST,
         "That reconnection could not be completed",
         "Nothing changed. Start again, and approve access with the Google account your mailbox reads.",
+    )
+}
+
+/// `GET /agent/auth?external_auth_id=<id>` — the agent login hop, and the
+/// Login URI configured in the WorkOS dashboard.
+///
+/// THE APP HOP WITH ONE OPAQUE INPUT. AuthKit sends the browser here holding an
+/// `external_auth_id`, and that is the only thing this route reads (the
+/// crate-wide appearance layer still honours `?theme=`, which colours a page
+/// and does nothing else). No return URL, no tenant, no address: where the
+/// browser goes at the end is whatever WorkOS answers the completion call with,
+/// checked, and never anything a caller put in this URL.
+///
+/// THE ID IS OPAQUE TO US. It is shape-checked so that it can be carried and
+/// sent safely, parked server-side in the session (see
+/// [`SessionKind::Agent`]), and sent to WorkOS and nowhere else. It is never
+/// logged, never rendered, and never put in the cookie.
+///
+/// NOT AN ORACLE, BY CONSTRUCTION. Every well-formed id gets the same 302 to
+/// Google; nothing is looked up before Google has authenticated somebody, so
+/// "does this mailbox exist" is a question only its owner can ask (I8 in the
+/// contract this was built to).
+///
+/// Mounted only when WorkOS is configured; the check below is belt and braces.
+pub async fn agent_auth(State(state): State<ControlState>, RawQuery(query): RawQuery) -> Response {
+    let config = state.config();
+    if state.workos().is_none() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    // SHAPE BEFORE ANYTHING ELSE, and one page for every way it can be wrong:
+    // missing, empty, too long, or carrying anything but ASCII letters, digits,
+    // `-` and `_`. It is about to sit in the session table and go into a JSON
+    // body at WorkOS, so it is held to a shape that cannot do anything in
+    // either. The `take` bounds the work done on a megabyte of query before the
+    // length check refuses it.
+    let external_auth_id: String = param(query.as_deref(), "external_auth_id")
+        .unwrap_or_default()
+        .chars()
+        .take(MAX_EXTERNAL_AUTH_ID + 1)
+        .collect();
+    if !is_external_auth_id(&external_auth_id) {
+        // PRIVACY: that it was refused, never what was presented.
+        tracing::info!("agent login refused: malformed external_auth_id");
+        return agent_refused();
+    }
+
+    let (sid, csrf_state) = match (random_token(), random_token()) {
+        (Ok(a), Ok(b)) => (a, b),
+        _ => {
+            tracing::error!("the system random source failed");
+            return agent_unavailable();
+        }
+    };
+
+    // Flow::Console: identity alone, online, no refresh token. Connecting an
+    // agent asks Google exactly what an app login asks, because it is the same
+    // question: who is this. What the agent may then read is decided by the
+    // token AuthKit issues, never by a Google grant.
+    let consent = match oauth::consent_url(&endpoints(&state), csrf_state, Flow::Console) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "building the agent consent url failed");
+            return agent_unavailable();
+        }
+    };
+
+    let inserted = state.sessions().insert(
+        sid.clone(),
+        SessionKind::Agent { external_auth_id },
+        consent.state,
+        consent.pkce_verifier,
+        // EMPTY, as on an app login: the tenant is found from the mailbox
+        // Google names on the way back.
+        String::new(),
+        Instant::now(),
+    );
+    if let Err(InsertError::Full) = inserted {
+        tracing::warn!(sessions = state.live_sessions(), "session table full");
+        return agent_unavailable();
+    }
+
+    let claim = SessionClaim {
+        sid,
+        label: String::new(),
+        invite: None,
+        app: false,
+        reconnect: false,
+        // A marker for refusal copy, and NOT the id. See `SessionClaim::agent`.
+        agent: true,
+        iat: chrono::Utc::now().timestamp(),
+    };
+    let cookie_value = cookie::sign(&config.cookie_key, &claim);
+
+    // PRIVACY: a count and nothing else. Never the external_auth_id.
+    tracing::info!(sessions = state.live_sessions(), "agent login started");
+
+    (
+        StatusCode::FOUND,
+        [
+            (header::LOCATION, consent.url),
+            (
+                header::SET_COOKIE,
+                cookie::set_cookie(&cookie_value, !config.is_insecure()),
+            ),
+        ],
+    )
+        .into_response()
+}
+
+/// The shape of an `external_auth_id`: 1 to [`MAX_EXTERNAL_AUTH_ID`] ASCII
+/// letters, digits, `-` or `_`. AuthKit's are ULIDs; this admits those and any
+/// URL-safe token format it might move to, and nothing that could restructure
+/// a JSON body, a header, or a log line.
+fn is_external_auth_id(id: &str) -> bool {
+    (1..=MAX_EXTERNAL_AUTH_ID).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// What an agent login gets when the request could not be one, or Google would
+/// not say who it was: the door's shape refusal and the callback's identity
+/// refusal are one page, because neither is anything to explain.
+fn agent_refused() -> Response {
+    pages::console_problem(
+        StatusCode::BAD_REQUEST,
+        "That sign in could not be completed",
+        "Nothing was connected. Go back to your agent and connect again, using the Google \
+         account your Passband mailbox belongs to.",
+    )
+}
+
+/// What an agent login gets when THIS service, or WorkOS behind it, could not
+/// do its job. Says "try again", which is true, rather than "check who you
+/// are", which would not be. ONE page for every WorkOS failure (unreachable,
+/// slow, refused, unreadable, or answering with a URL we will not follow), and
+/// nothing WorkOS said is on it.
+fn agent_unavailable() -> Response {
+    pages::console_problem(
+        StatusCode::BAD_GATEWAY,
+        "Connecting is unavailable right now",
+        "Nothing was connected. Please try again in a few minutes.",
     )
 }
 
@@ -996,7 +1176,7 @@ pub async fn oauth_callback(
         // replay is finding a session that already spent or released its code.
         return done(refused_session_for(&state, claimed_voice));
     };
-    let voice = Voice::from_session(session.kind, &session.label);
+    let voice = Voice::from_session(&session.kind, &session.label);
 
     // From here the session is gone but a signup's invite is still held, so
     // every exit hands the code back. The holder is recomputed from the session
@@ -1059,6 +1239,12 @@ pub async fn oauth_callback(
         // answers.
         SessionKind::Reconnect => {
             return done(reconnect_install(&state, code, session.pkce_verifier).await);
+        }
+        // The AGENT login forks with the app login it is built on: identity
+        // only, nothing provisioned, no invite. The `external_auth_id` it
+        // hands on comes out of the SESSION, which is the only place it lives.
+        SessionKind::Agent { external_auth_id } => {
+            return done(agent_login(&state, code, session.pkce_verifier, &external_auth_id).await);
         }
     };
 
@@ -1782,6 +1968,122 @@ async fn app_login(state: &ControlState, code: String, pkce_verifier: String) ->
     no_store(page)
 }
 
+/// The agent login's half of the callback: prove who is signed in, find the
+/// tenant THAT MAILBOX owns, tell WorkOS who it was, and send the browser where
+/// WorkOS says.
+///
+/// THE ORDER IS THE SAFETY PROPERTY. WorkOS is called LAST, and only once a
+/// Google-verified mailbox has been matched to an ACTIVE tenant here: what
+/// AuthKit is told becomes the access token's `email` claim, and that claim is
+/// what a tenant daemon holds against its own account before it serves a byte
+/// of mail. So a Google account with no mailbox here never reaches WorkOS, and
+/// the address sent is never anything the browser supplied.
+///
+/// WHAT IS SENT. `user.id` is the verified address, trimmed and lowercased, so
+/// one mailbox is one AuthKit user whatever case Google answers in. `user.email`
+/// is the address AS THE TENANT RECORD STORES IT, re-read by label here rather
+/// than carried from the lookup, so the claim a daemon compares is exactly the
+/// account this control plane provisioned.
+async fn agent_login(
+    state: &ControlState,
+    code: String,
+    pkce_verifier: String,
+    external_auth_id: &str,
+) -> Response {
+    let Some(workos) = state.workos() else {
+        // The route that opens these sessions is unmounted without WorkOS, so
+        // only a config that changed under a live session lands here.
+        tracing::error!("agent login callback with WorkOS not configured");
+        return agent_unavailable();
+    };
+
+    let account_email = match oauth::verify_identity(&endpoints(state), code, pkce_verifier).await {
+        Ok(email) => email,
+        Err(e) => {
+            // PRIVACY: the error type, which is written to carry no code, no
+            // token, and no provider body.
+            tracing::info!(error = %e, "agent login did not complete at Google");
+            return agent_refused();
+        }
+    };
+
+    // Normalized the way the store normalizes on insert, so a capitalized Google
+    // answer finds the same row rather than none.
+    let label = match state.store().active_tenant_for_email(&account_email).await {
+        Ok(Some(label)) => label,
+        // A real Google account with no mailbox here. Said plainly, AFTER
+        // Google, and WorkOS is never called: see [`AGENT_NO_TENANT`].
+        Ok(None) => {
+            tracing::info!(outcome = "no_tenant", "agent login refused");
+            return agent_no_tenant();
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "agent tenant lookup failed");
+            return agent_unavailable();
+        }
+    };
+    let stored_email = match state.store().active_tenant_email(&label).await {
+        Ok(Some(email)) => email,
+        // Torn down between the two reads: the same answer as never existing.
+        Ok(None) => {
+            tracing::info!(outcome = "no_tenant", label = %label, "agent login refused");
+            return agent_no_tenant();
+        }
+        Err(e) => {
+            tracing::error!(error = %e, label = %label, "agent tenant lookup failed");
+            return agent_unavailable();
+        }
+    };
+
+    let user_id = account_email.trim().to_lowercase();
+    let destination = match workos
+        .complete(
+            external_auth_id,
+            &user_id,
+            &stored_email,
+            state.config().is_insecure(),
+        )
+        .await
+    {
+        Ok(url) => url,
+        Err(e) => {
+            // PRIVACY: the error category and the label. Never the key, the
+            // external_auth_id, the address, or anything WorkOS said.
+            tracing::warn!(error = %e, label = %label, "agent login: WorkOS completion failed");
+            return agent_unavailable();
+        }
+    };
+
+    // PRIVACY: the label and the redirect's HOST. Never its path or query,
+    // which carry AuthKit's own state.
+    tracing::info!(
+        label = %label,
+        redirect_host = destination.host_str().unwrap_or_default(),
+        "agent login complete"
+    );
+
+    let Ok(location) = header::HeaderValue::from_str(destination.as_str()) else {
+        // Unreachable for a parsed URL (it serializes as ASCII); a refusal
+        // rather than a panic all the same.
+        tracing::error!(label = %label, "the agent redirect would not fit in a header");
+        return agent_unavailable();
+    };
+    // FOUND, as the console login's hand-back is. The URL carries AuthKit's
+    // state for this authorization, so nothing may cache it and it must not
+    // ride out as a referer.
+    no_store((StatusCode::FOUND, [(header::LOCATION, location)]).into_response())
+}
+
+/// The agent login's no-mailbox page. No link: the only way back into this
+/// flow is the agent that started it, which is not a URL this service knows.
+fn agent_no_tenant() -> Response {
+    pages::console_problem(
+        StatusCode::NOT_FOUND,
+        AGENT_NO_TENANT_HEADING,
+        AGENT_NO_TENANT,
+    )
+}
+
 /// Stamp a response as uncacheable and referer-free. Both headers exist for the
 /// same one reason on this file's pages: a live pairing code is in the body or
 /// the location.
@@ -1938,6 +2240,12 @@ fn refused_session_for(state: &ControlState, voice: Voice) -> Response {
             CONSOLE_REFUSED_HEADING,
             RECONNECT_SESSION_REFUSED,
         ),
+        // NO LINK, for the App reason: the way back is the agent.
+        Voice::Agent => pages::console_problem(
+            StatusCode::BAD_REQUEST,
+            CONSOLE_REFUSED_HEADING,
+            AGENT_SESSION_REFUSED,
+        ),
     }
 }
 
@@ -1954,6 +2262,7 @@ enum Voice {
     Console(String),
     App,
     Reconnect,
+    Agent,
 }
 
 impl Voice {
@@ -1962,22 +2271,24 @@ impl Voice {
     /// this is used exclusively on paths that are already refusing. Every path
     /// that acts uses [`Voice::from_session`].
     fn from_cookie(claim: &SessionClaim) -> Self {
-        match (claim.invite, claim.app, claim.reconnect) {
-            (Some(_), _, _) => Voice::Signup,
-            (None, _, true) => Voice::Reconnect,
-            (None, true, false) => Voice::App,
-            (None, false, false) => Voice::Console(claim.label.clone()),
+        match (claim.invite, claim.app, claim.reconnect, claim.agent) {
+            (Some(_), _, _, _) => Voice::Signup,
+            (None, _, true, _) => Voice::Reconnect,
+            (None, _, false, true) => Voice::Agent,
+            (None, true, false, false) => Voice::App,
+            (None, false, false, false) => Voice::Console(claim.label.clone()),
         }
     }
 
     /// What the SESSION says this is, which is the authority everywhere it
     /// exists.
-    fn from_session(kind: SessionKind, label: &str) -> Self {
+    fn from_session(kind: &SessionKind, label: &str) -> Self {
         match kind {
             SessionKind::Signup { .. } => Voice::Signup,
             SessionKind::Console => Voice::Console(label.to_string()),
             SessionKind::App => Voice::App,
             SessionKind::Reconnect => Voice::Reconnect,
+            SessionKind::Agent { .. } => Voice::Agent,
         }
     }
 }
@@ -2185,6 +2496,31 @@ mod tests {
         assert!(!is_code("with space"));
         assert!(!is_code("with\nnewline"));
         assert!(!is_code(&"a".repeat(MAX_CODE + 1)));
+    }
+
+    #[test]
+    fn holds_an_external_auth_id_to_a_shape() {
+        for good in [
+            "01J3X4Y5Z6A7B8C9D0E1F2G3H4",
+            "a",
+            "abc-DEF_123",
+            &"a".repeat(MAX_EXTERNAL_AUTH_ID),
+        ] {
+            assert!(is_external_auth_id(good), "{good:?}");
+        }
+        for bad in [
+            "",
+            &"a".repeat(MAX_EXTERNAL_AUTH_ID + 1),
+            "with space",
+            "with\nnewline",
+            "a.b",
+            "a/b",
+            "a\"b",
+            "https://evil.test",
+            "caf\u{e9}",
+        ] {
+            assert!(!is_external_auth_id(bad), "{bad:?}");
+        }
     }
 
     #[test]

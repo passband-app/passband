@@ -69,6 +69,55 @@ The admin POSTs take a `SameSite=Strict` session cookie AND a same-origin
 buttons. An `Origin` of `null` names nothing, so it is decided by
 `Sec-Fetch-Site`, which no page can write.
 
+## The agent door: WorkOS AuthKit login (`/agent/auth`)
+
+Agents reach a hosted tenant's `/mcp` with an OAuth access token issued by
+**WorkOS AuthKit**, running in "Standalone Connect" mode: AuthKit is the
+authorization server and does the OAuth dance with the agent, but it delegates
+the LOGIN to this service. This route is that login:
+
+```
+agent    ── OAuth authorize ──► AuthKit
+browser  ── GET /agent/auth?external_auth_id=<opaque> ──► 302 to Google (identity only)
+         ── Google consent ──►
+         ── GET /oauth/callback ──► mailbox Google names → its ACTIVE tenant here
+                                    POST https://api.workos.com/authkit/oauth2/complete
+                                    302 to the redirect_uri WorkOS answers with
+         ── AuthKit consent ──► token for the agent
+```
+
+- **One input.** `external_auth_id` is the only parameter read, and it must be
+  1 to 128 ASCII letters, digits, `-` or `_`; anything else is a 400 refusal page
+  and opens no session. No return URL, no tenant, no address. It is opaque to
+  us: parked in the server-side session (never in the cookie), sent to WorkOS,
+  and never logged.
+- **Not an oracle.** Every well-formed id gets the same 302 to Google. Nothing
+  is looked up until Google has authenticated somebody, so whether a mailbox
+  exists is a question only its owner can ask.
+- **WorkOS is called last.** Only once the Google-verified mailbox matches an
+  active tenant. A Google account with no mailbox here gets a plain "no Passband
+  mailbox" page and WorkOS hears nothing. The completion sends
+  `{"external_auth_id", "user": {"id": <verified address, lowercased>, "email":
+  <the address as the tenant record stores it>}}` with `Authorization: Bearer
+  <key>` and a 10 second budget. That `email` becomes the token's `email` claim,
+  which is what a tenant daemon holds against its own account before serving
+  anything.
+- **The redirect is checked.** The browser is sent (302, `no-store`,
+  `no-referrer`) to WorkOS's `redirect_uri` only if it is an absolute `https`
+  URL with a host and no userinfo (`http` too, on a plain-http local run). Any
+  non-2xx, a timeout, unreadable JSON, or any other URL is one "try again" page
+  that repeats nothing WorkOS said.
+- It shares the login hops' rate-limit bucket and session ceiling.
+
+**Setup.** Set `SQUELCH_CONTROL_WORKOS_API_KEY` in the `control` service's
+Railway variables; unset, `/agent/auth` is not mounted at all (404). In the WorkOS
+dashboard, under *Connect* → *Configuration*, set the **Login URI** to
+`https://<control origin>/agent/auth` (today `https://signup.passband.app/agent/auth`).
+The `control` service deploys itself from `main`: merge the change, set the
+variable, and let it redeploy. Do not `railway up`. The WorkOS API origin is a
+pinned constant (`https://api.workos.com`), not a variable, for the reason the
+Google and Resend ones are.
+
 ## Provisioning is two calls
 
 Wire v2 splits provisioning so that no single key opens two mailboxes:
@@ -158,6 +207,7 @@ Everything is validated at startup and a bad value is a refusal to boot.
 | `SQUELCH_CONTROL_RESEND_API_KEY` | trio | Resend sending key, used for the one call that mails an approved applicant their invite. Printable ASCII, no spaces. Mint it sending-only and domain-restricted. |
 | `SQUELCH_CONTROL_INVITE_FROM` | trio | The `From:` invites are sent as, e.g. `Passband <invites@passband.app>`. Must be an address on a domain **verified at Resend** or every send is refused. |
 | `SQUELCH_CONTROL_WAITLIST_ORIGIN` | no | The one browser origin allowed to post the public waitlist form, echoed as `Access-Control-Allow-Origin` on that route only, and the origin the signup page's "join the waitlist" link is built from (`<origin>/waitlist`). Default `https://passband.app`. Only meaningful with the trio above set; set alone it refuses to boot. |
+| `SQUELCH_CONTROL_WORKOS_API_KEY` | no | The WorkOS API key (`sk_live_...`), sent as a bearer on the one AuthKit completion call `/agent/auth` makes. Set: the agent door is mounted. Unset: `/agent/auth` is a 404. Printable ASCII, no spaces. A SECRET: it acts on the whole WorkOS environment. Set it in the `control` service's Railway variables. |
 | `SQUELCH_CONTROL_TRUSTED_PROXY_HOPS` | no | How many proxies write `X-Forwarded-For` in front of this listener. `0` (default) meters the TCP peer, which behind a platform edge means one shared rate-limit bucket. Set `1` on Railway. |
 | `SQUELCH_CONTROL_ALERT_WEBHOOK_URL` | no | A Slack incoming webhook (https only). When set, control posts there when a signup ends half-finished, hits an already-set-up mailbox, or provisions a tenant it then cannot record, and on every finished signup. Label and VK ids only, never the mailbox. Fire and forget: Slack being down never slows or fails a signup. A SECRET: the URL is the whole credential. Unset = log lines only. |
 | `SQUELCH_CONTROL_LOG` | no | `tracing` filter. Default `info`. |
@@ -171,7 +221,9 @@ than no variable at all.
 
 The Google endpoints are **pinned constants**, deliberately not environment
 variables: those requests carry the client secret, and "which host do we send
-the secret to" must not be a deploy-time typo.
+the secret to" must not be a deploy-time typo. Resend's and WorkOS's API origins
+are pinned for the same reason; tests point them at stubs by building the config
+struct directly.
 
 ## CLI
 
@@ -341,5 +393,7 @@ is `deploy/hosted/PRODUCTION.md`.
   the user has already granted.
 - Every invite failure is one message. Wrong, spent, revoked, and malformed are
   indistinguishable from the outside.
-- `/mcp` does not exist here, and a tenant's Ingress answers 404 for it too. The
-  hosted MVP ships the human door only.
+- `/mcp` does not exist here. On a tenant it is published only when the warden
+  is configured for agent OAuth, and then the daemon accepts nothing but an
+  AuthKit token whose `email` is its own mailbox; `/agent/auth` above is this
+  service's whole part in that.

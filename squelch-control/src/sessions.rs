@@ -8,16 +8,18 @@
 //!   verifier, and the verifier lives here, in this process's memory, for ten
 //!   minutes.
 //!
-//! THREE KINDS OF SESSION share this table, because they are the same
+//! SEVERAL KINDS OF SESSION share this table, because they are the same
 //! ten-minute hop through Google and differ only in what they ask for and what
 //! they do on the way back. A SIGNUP holds an invite reservation and provisions
 //! a tenant. A CONSOLE login holds nothing, spends nothing, and asks Google for
 //! identity alone; it ends in a pairing code for a tenant that already exists.
 //! An APP login is the console login with its one input removed: it does not
 //! know which tenant it is for, because it finds that out from the mailbox
-//! Google names. The [`SessionKind`] is what the callback branches on, and it is
-//! the AUTHORITY: the cookie's copy of the same fact is checked against it,
-//! never trusted in its place.
+//! Google names. An AGENT login is the app login on behalf of WorkOS AuthKit,
+//! and it holds the one thing AuthKit gave it to finish with. The
+//! [`SessionKind`] is what the callback branches on, and it is the AUTHORITY:
+//! the cookie's copy of the same fact is checked against it, never trusted in
+//! its place.
 //!
 //! In memory rather than in the store, deliberately. A restart drops pending
 //! consents, and that is the correct behaviour: the recovery is to start the
@@ -60,8 +62,9 @@ pub fn fingerprint(sid: &str) -> String {
 pub const MAX_SESSIONS: usize = 4_096;
 
 /// Hard ceiling on live IDENTITY sessions, CARVED OUT OF [`MAX_SESSIONS`]
-/// rather than added to it. Both login flows spend it: `GET /console/auth` and
-/// `GET /app/auth`.
+/// rather than added to it. Every hop a stranger can open spends it:
+/// `GET /console/auth`, `GET /app/auth`, `GET /reconnect` and `GET /agent/auth`
+/// (see [`SessionKind::is_identity`]).
 ///
 /// THE ASYMMETRY IS THE POINT. Either login opens a session with no credential
 /// and no invite behind it, so they are the cheap half of this table to flood; a
@@ -85,8 +88,13 @@ pub const MAX_IDENTITY_SESSIONS: usize = 512;
 ///
 /// The invite id rides INSIDE the signup variant rather than beside the kind,
 /// so "a console login has no invite" is a fact the type carries instead of a
-/// sentinel row somebody has to remember to check.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// sentinel row somebody has to remember to check. The agent login's
+/// `external_auth_id` rides inside its variant for the same reason, which is
+/// also why this type is `Clone` and not `Copy`.
+///
+/// `Debug` is HAND-WRITTEN, because a derived one would print the
+/// `external_auth_id` into any line that ever formats a kind.
+#[derive(Clone, PartialEq, Eq)]
 pub enum SessionKind {
     /// A signup: this session holds a reservation on `invite_id` and will
     /// provision the label it names.
@@ -108,19 +116,58 @@ pub enum SessionKind {
     /// accept. Asking would turn the page into an oracle and, worse, would let
     /// somebody aim a credential they legitimately own at a tenant they do not.
     Reconnect,
+    /// An AGENT login: the app login's identity hop, run because WorkOS AuthKit
+    /// sent the browser here to log somebody in for an agent's OAuth flow.
+    ///
+    /// Its label is EMPTY and stays empty, exactly as an app login's: the
+    /// tenant is found from the mailbox Google names. What it carries instead
+    /// is `external_auth_id`, AuthKit's opaque handle for the authorization in
+    /// progress, which the callback sends back to WorkOS and nowhere else.
+    ///
+    /// SERVER-SIDE ONLY. The id is not in the cookie, and that is a choice, not
+    /// an omission. The cookie is a value the client holds and this table is
+    /// the authority on what a session is for; if the id rode in both, the
+    /// callback would have to pick one, and the only safe pick is this one, so
+    /// a second copy would buy nothing but a place to get the comparison wrong.
+    /// It would also put a live AuthKit handle in one more place a browser
+    /// keeps (cookie jars are synced, exported and backed up), for no property
+    /// gained. The cookie carries a bare marker instead, for refusal copy only:
+    /// see [`crate::cookie::SessionClaim::agent`].
+    Agent { external_auth_id: String },
+}
+
+impl std::fmt::Debug for SessionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SessionKind::Signup { invite_id } => f
+                .debug_struct("Signup")
+                .field("invite_id", invite_id)
+                .finish(),
+            SessionKind::Console => f.write_str("Console"),
+            SessionKind::App => f.write_str("App"),
+            SessionKind::Reconnect => f.write_str("Reconnect"),
+            SessionKind::Agent { .. } => f
+                .debug_struct("Agent")
+                .field("external_auth_id", &"<redacted>")
+                .finish(),
+        }
+    }
 }
 
 impl SessionKind {
     /// The invite row this session holds, if it holds one. `None` for either
     /// login, which is exactly what the release path wants: nothing to hand
     /// back.
-    pub fn invite_id(self) -> Option<i64> {
+    pub fn invite_id(&self) -> Option<i64> {
         match self {
-            SessionKind::Signup { invite_id } => Some(invite_id),
+            SessionKind::Signup { invite_id } => Some(*invite_id),
             // A reconnect spends nothing either: the tenant it is for was paid
             // for by an invite once already, and re-consenting must not cost a
-            // second one.
-            SessionKind::Console | SessionKind::App | SessionKind::Reconnect => None,
+            // second one. Nor does an agent login, which provisions nothing.
+            SessionKind::Console
+            | SessionKind::App
+            | SessionKind::Reconnect
+            | SessionKind::Agent { .. } => None,
         }
     }
 
@@ -135,10 +182,17 @@ impl SessionKind {
     /// like the two logins, so it has to draw from the pool sized for that.
     /// Charging it to the signup pool instead would let anyone exhaust the
     /// table an invite holder needs.
-    pub fn is_identity(self) -> bool {
+    ///
+    /// AGENT counts here for the same reason, and more obviously: anybody can
+    /// make up an `external_auth_id`, so `/agent/auth` is a session a stranger
+    /// can open with nothing real in hand.
+    pub fn is_identity(&self) -> bool {
         matches!(
             self,
-            SessionKind::Console | SessionKind::App | SessionKind::Reconnect
+            SessionKind::Console
+                | SessionKind::App
+                | SessionKind::Reconnect
+                | SessionKind::Agent { .. }
         )
     }
 }
@@ -331,6 +385,34 @@ mod tests {
         assert_eq!(signup.kind.invite_id(), Some(1));
     }
 
+    /// An agent login carries its `external_auth_id` in the TABLE, comes back
+    /// with it intact, holds no invite, and never prints it.
+    #[test]
+    fn an_agent_session_holds_its_external_auth_id_and_hides_it() {
+        let mut s = SessionStore::new();
+        let now = Instant::now();
+        let kind = SessionKind::Agent {
+            external_auth_id: "01J3X4Y5Z6A7B8C9D0E1F2G3H4".into(),
+        };
+        assert!(kind.is_identity());
+        assert_eq!(kind.invite_id(), None);
+        let printed = format!("{kind:?}");
+        assert!(!printed.contains("01J3X4Y5Z6"), "{printed}");
+
+        s.insert(
+            "agent".into(),
+            kind.clone(),
+            "state".into(),
+            "verifier".into(),
+            String::new(),
+            now,
+        )
+        .unwrap();
+        let taken = s.take("agent", now).expect("live");
+        assert_eq!(taken.kind, kind);
+        assert_eq!(taken.label, "");
+    }
+
     #[test]
     fn an_expired_session_is_gone_and_unreplayable() {
         let mut s = SessionStore::new();
@@ -391,20 +473,23 @@ mod tests {
     fn login_flooding_cannot_spend_signup_capacity() {
         let mut s = SessionStore::new();
         let now = Instant::now();
+        let agent = || SessionKind::Agent {
+            external_auth_id: "01J3X4Y5Z6A7B8C9D0E1F2G3H4".into(),
+        };
         for i in 0..MAX_IDENTITY_SESSIONS {
-            // Alternating, so the shared ceiling is what stops this and not one
+            // Rotating, so the shared ceiling is what stops this and not one
             // kind's own.
-            let kind = if i % 2 == 0 {
-                SessionKind::Console
-            } else {
-                SessionKind::App
+            let kind = match i % 3 {
+                0 => SessionKind::Console,
+                1 => SessionKind::App,
+                _ => agent(),
             };
             insert_login(&mut s, kind, &format!("login{i}"), now).unwrap();
         }
         assert_eq!(s.identity_len(), MAX_IDENTITY_SESSIONS);
-        for kind in [SessionKind::Console, SessionKind::App] {
+        for kind in [SessionKind::Console, SessionKind::App, agent()] {
             assert_eq!(
-                insert_login(&mut s, kind, "one-login-too-many", now),
+                insert_login(&mut s, kind.clone(), "one-login-too-many", now),
                 Err(InsertError::Full),
                 "the shared login ceiling holds for {kind:?}"
             );

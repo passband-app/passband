@@ -3079,7 +3079,10 @@ async fn an_unticked_calendar_installs_nothing() {
             .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert!(body.contains("Calendar was not connected"), "{body}");
-        assert!(body.contains("nothing changed"), "{body}");
+        assert!(
+            body.contains("nothing about your Passband mailbox changed"),
+            "{body}"
+        );
         assert!(!body.contains(MAILBOX), "{body}");
         assert!(
             headers

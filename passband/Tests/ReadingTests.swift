@@ -60,6 +60,33 @@ struct ReadingTests {
         precondition(uncovered.map(\.address) == ["writer@substack.com", "blog@lab.dev", "deals@store.com"],
             "Prune re-sorts an uncovered essay into the content half")
 
+        // The walk across senders follows the board as it stood when the tile
+        // was opened. Done on writer's promotion moved writer ABOVE blog on the
+        // live board; the walk still goes on to deals, not back to blog.
+        let order = before.map(\.address)
+        func next(_ address: String, _ resolved: Set<Int>, notThread: String = "") -> String? {
+            Reading.next(
+                after: address, in: order, board: Reading.prune(before, resolved: resolved),
+                notThread: notThread)?.address
+        }
+        precondition(next("blog@lab.dev", []) == "writer@substack.com")
+        precondition(next("writer@substack.com", [13]) == "deals@store.com",
+            "A sender re-sorted by its own done does not change who is next")
+        precondition(next("writer@substack.com", [13, 11]) == "deals@store.com",
+            "The sender just cleared is off the live board and still has a place in the walk")
+        precondition(next("blog@lab.dev", [13, 11]) == "deals@store.com",
+            "A sender cleared since the snapshot is passed over")
+        let partly = Reading.next(
+            after: "blog@lab.dev", in: order, board: Reading.prune(before, resolved: [13]),
+            notThread: "")
+        precondition(partly?.latestThreadId == "thread-11" && partly?.items.map(\.id) == [11],
+            "A sender partly read opens on what is left")
+        precondition(next("blog@lab.dev", [], notThread: "thread-13") == "deals@store.com",
+            "A sender whose newest mail is the open thread is passed over")
+        precondition(next("deals@store.com", []) == nil, "The last sender ends the walk")
+        precondition(next("blog@lab.dev", [13, 11, 10]) == nil)
+        precondition(next("nobody@example.com", []) == nil, "A sender not on the snapshot has no next")
+
         // The wire: reading_kind wins; decisions stored before it fall back to kinds.
         func item(_ kinds: String, _ readingKind: String?) throws -> AgentFeedItem {
             let rk = readingKind.map { ",\"reading_kind\":\"\($0)\"" } ?? ""

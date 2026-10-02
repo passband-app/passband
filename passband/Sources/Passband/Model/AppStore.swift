@@ -605,7 +605,8 @@ final class AppStore {
     /// sitrep, alive for as long as the reader stays open. While it is, the
     /// reader shows the E/S hint; when it reaches the end of the list it
     /// becomes a `WalkSummary` and the sitrep celebrates. Any other way out of
-    /// the reader (Esc, the rail, a plain `e`) just ends it, quietly.
+    /// the reader (Esc, the rail) just ends it, quietly. Inside it plain `e`
+    /// and `s` are `E` and `S`.
     struct Walk: Equatable {
         var startedAt = Date()
         var done = 0
@@ -630,6 +631,12 @@ final class AppStore {
     /// readers out; ThreadViewer's skip drives it and clears it.
     struct SkipTurn: Equatable {
         let outgoing: String
+        /// Set when the turn crosses to ANOTHER Reading sender: whether the
+        /// card turning away was on a stack. The store's queue is already the
+        /// new sender's by then, and the outgoing card must keep the shape it
+        /// had rather than re-dress itself halfway off the screen. nil for a
+        /// turn inside one queue, where the two agree.
+        var outgoingStacked: Bool?
         /// 0 = the turn has not moved yet, 1 = the new email is home.
         var progress: CGFloat = 0
         var outgoingHeader: Double = 1
@@ -675,6 +682,30 @@ final class AppStore {
     var readingStack: Bool {
         guard readingMail, let first = threadQueue.first else { return false }
         return threadQueue.dropFirst().contains { $0.thread_id != first.thread_id }
+    }
+
+    /// THE READING BOARD'S ORDER WHEN A TILE WAS OPENED, as sender addresses:
+    /// what `E` and `S` walk once one sender's mail runs out. A snapshot for
+    /// the reason `threadQueue` is one (see `Reading.next`). Empty unless the
+    /// reader came in through a Reading tile.
+    var readingOrder: [String] = []
+
+    /// A Reading tile: the sender's newest email, with the rest of that sender
+    /// as the queue and the rest of the board behind it.
+    func openReading(_ sender: ReadingSender) {
+        guard !sender.latestThreadId.isEmpty else { return }
+        readingOrder = Reading.prune(zones.reading, resolved: resolvedIds).map(\.address)
+        openThread(
+            sender.latestThreadId, queue: sender.items, readingMail: true, from: .reading)
+    }
+
+    /// The sender after the one the reader is on. Prunes the board, so it is
+    /// for a key handler to ask, not a view body.
+    var nextReadingSender: ReadingSender? {
+        guard readingMail, let threadId, let first = threadQueue.first else { return nil }
+        return Reading.next(
+            after: SenderID.address(first.sender), in: readingOrder,
+            board: Reading.prune(zones.reading, resolved: resolvedIds), notThread: threadId)
     }
 
     /// Shared by the preview and advance action so resolved siblings never peek.
@@ -1795,6 +1826,7 @@ final class AppStore {
         arrivals.reset(to: nil)
         threadQueue = []
         readingMail = false
+        readingOrder = []
         pendingReplyMessageId = nil
         focusedMessageId = nil
         focusedMessageView = nil
@@ -2116,6 +2148,9 @@ final class AppStore {
         }
         self.threadQueue = queue
         self.readingMail = readingMail
+        // The board's order belongs to a walk that began on a Reading tile;
+        // the reader's own steps pass `readingMail` back and keep it.
+        if !readingMail { readingOrder = [] }
         // Any open ends an S turn that is still settling: the turn's outgoing
         // card would otherwise linger (or sit inert, if this re-opens it)
         // until the skip's own timer cleared it. A skip sets its turn AFTER
@@ -2168,6 +2203,7 @@ final class AppStore {
         arrivals.reset(to: nil)
         threadQueue = []
         readingMail = false
+        readingOrder = []
         // The flight is deliberately left where it is: the last email of a queue
         // is mid-departure when this runs, and there is nothing left to put back
         // in the window. `openThread` resets it for whatever comes next.

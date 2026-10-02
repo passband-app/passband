@@ -43,6 +43,21 @@ pub const SESSION_TTL: Duration = Duration::from_secs(10 * 60);
 /// for a click.
 pub const AGENT_CONFIRM_TTL: Duration = Duration::from_secs(5 * 60);
 
+/// How long a COMPLETED agent login remembers where it sent the browser, so a
+/// double-clicked Continue gets the same answer instead of a refusal. Seconds,
+/// not minutes: it exists only to cover a second press that was already in
+/// flight. See [`SessionKind::AgentDone`].
+pub const AGENT_DONE_TTL: Duration = Duration::from_secs(10);
+
+/// How long the IN-FLIGHT placeholder lives: the WorkOS completion's own
+/// budget plus five seconds. Long enough that a waiting second press always
+/// sees the first one's answer land; short enough that a first request whose
+/// task was dropped mid-call (its client went away) leaves a placeholder that
+/// is gone moments after the call it stood for could have finished. See
+/// [`SessionKind::AgentInFlight`].
+pub const AGENT_IN_FLIGHT_TTL: Duration =
+    Duration::from_secs(crate::workos::COMPLETE_TIMEOUT.as_secs() + 5);
+
 /// The only form of a session id allowed to touch the control store: lowercase
 /// hex SHA-256.
 ///
@@ -170,6 +185,46 @@ pub enum SessionKind {
         /// Google's verified address, trimmed and lowercased: `user.id`.
         user_id: String,
     },
+    /// An agent login WorkOS has already COMPLETED, remembered for
+    /// [`AGENT_DONE_TTL`] under the same session id the confirmation had.
+    ///
+    /// A DOUBLE CLICK is the reason. Two rapid presses of Continue send two
+    /// POSTs; the first takes the confirmation, completes at WorkOS (spending
+    /// AuthKit's handle) and answers a 303 the browser then abandons for the
+    /// second, which used to find nothing and show a refusal. The person had
+    /// to start over for having clicked twice. With this marker the second
+    /// POST, carrying the same signed cookie and the same CSRF token, gets the
+    /// same 303.
+    ///
+    /// WHAT IT CANNOT DO: reach WorkOS. Only [`SessionKind::AgentConfirm`]
+    /// carries what a completion needs, and that was taken, once, before this
+    /// was written; the marker holds a URL already validated and already given
+    /// to this same browser. It is not charged to the stranger-openable pool
+    /// (only a completed login writes one) and lives in this table, so the
+    /// whole-table ceiling bounds it.
+    AgentDone {
+        /// The validated AuthKit URL the first press was sent to.
+        redirect: String,
+    },
+    /// A confirmation whose WorkOS completion is IN FLIGHT right now, under
+    /// the same session id and the same CSRF token.
+    ///
+    /// A real double click's second POST lands 100 to 300 ms after the first,
+    /// which is usually while the first is still waiting on WorkOS: the
+    /// confirmation is taken and no [`SessionKind::AgentDone`] exists yet. This
+    /// placeholder is what that second press finds; it WAITS for the first to
+    /// replace it with a done or failed marker and answers the same. It holds
+    /// nothing a completion needs, so nothing that finds it can call WorkOS.
+    /// Lives [`AGENT_IN_FLIGHT_TTL`].
+    AgentInFlight,
+    /// A completion that FAILED, remembered for [`AGENT_DONE_TTL`] so a press
+    /// that waited on it (or lands just after) shows the same page class the
+    /// first press got. Which page, and nothing else.
+    AgentFailed {
+        /// AuthKit refused this authorization (spent or expired), as opposed
+        /// to WorkOS being unreachable or answering something unusable.
+        expired: bool,
+    },
 }
 
 impl std::fmt::Debug for SessionKind {
@@ -188,6 +243,13 @@ impl std::fmt::Debug for SessionKind {
                 .finish(),
             // Every field is an identity or AuthKit's handle.
             SessionKind::AgentConfirm { .. } => f.write_str("AgentConfirm { <redacted> }"),
+            // The URL carries AuthKit's state for this authorization.
+            SessionKind::AgentDone { .. } => f.write_str("AgentDone { <redacted> }"),
+            SessionKind::AgentInFlight => f.write_str("AgentInFlight"),
+            SessionKind::AgentFailed { expired } => f
+                .debug_struct("AgentFailed")
+                .field("expired", expired)
+                .finish(),
         }
     }
 }
@@ -206,7 +268,10 @@ impl SessionKind {
             | SessionKind::App
             | SessionKind::Reconnect
             | SessionKind::Agent { .. }
-            | SessionKind::AgentConfirm { .. } => None,
+            | SessionKind::AgentConfirm { .. }
+            | SessionKind::AgentDone { .. }
+            | SessionKind::AgentInFlight
+            | SessionKind::AgentFailed { .. } => None,
         }
     }
 
@@ -216,6 +281,8 @@ impl SessionKind {
     pub fn ttl(&self) -> Duration {
         match self {
             SessionKind::AgentConfirm { .. } => AGENT_CONFIRM_TTL,
+            SessionKind::AgentDone { .. } | SessionKind::AgentFailed { .. } => AGENT_DONE_TTL,
+            SessionKind::AgentInFlight => AGENT_IN_FLIGHT_TTL,
             _ => SESSION_TTL,
         }
     }
@@ -235,6 +302,19 @@ impl SessionKind {
     /// AGENT counts here for the same reason, and more obviously: anybody can
     /// make up an `external_auth_id`, so `/agent/auth` is a session a stranger
     /// can open with nothing real in hand.
+    ///
+    /// AGENT CONFIRM AND ITS THREE MARKERS (in flight, done, failed) DO NOT,
+    /// and that is the same rule read the other way. Only the callback writes a
+    /// confirmation, and only for a mailbox Google has just verified that owns
+    /// an ACTIVE tenant here; only a confirmation being completed writes the
+    /// markers. A stranger cannot open
+    /// either. Charging them to this pool would let anybody spraying
+    /// `/agent/auth` refuse a person who had ALREADY consented at Google, at
+    /// the one step after which they cannot cheaply retry. They are still
+    /// bounded by [`MAX_SESSIONS`], and per person by what it takes to make
+    /// one: a fresh `/agent/auth` session (the login bucket, ten a minute per
+    /// client, and this pool), a full Google round trip, and a live tenant, for
+    /// an entry that lives five minutes.
     pub fn is_identity(&self) -> bool {
         matches!(
             self,
@@ -242,7 +322,6 @@ impl SessionKind {
                 | SessionKind::App
                 | SessionKind::Reconnect
                 | SessionKind::Agent { .. }
-                | SessionKind::AgentConfirm { .. }
         )
     }
 }
@@ -331,6 +410,35 @@ impl SessionStore {
         // an expired session that stayed would be a slot an attacker could
         // keep probing.
         (now.saturating_duration_since(session.created) <= session.kind.ttl()).then_some(session)
+    }
+
+    /// Look at a live session WITHOUT taking it.
+    ///
+    /// For the two agent-flow reads that must be side-effect free: rendering
+    /// the confirmation page (which a refresh will ask for again) and noticing,
+    /// before anything takes it, that a session is one the asking route will
+    /// not finish. Everything that ACTS on a session still goes through
+    /// [`Self::take`].
+    pub fn peek(&self, sid: &str, now: Instant) -> Option<&PendingSession> {
+        self.sessions
+            .get(sid)
+            .filter(|s| now.saturating_duration_since(s.created) <= s.kind.ttl())
+    }
+
+    /// Turn the entry under `sid` into `kind`, in place, restarting its clock;
+    /// `false` when there is no entry. For the agent completion's markers,
+    /// which REPLACE the in-flight placeholder: an in-place change cannot grow
+    /// the table, so unlike [`Self::insert`] it is not refused by a table that
+    /// filled up while WorkOS was answering.
+    pub fn mark(&mut self, sid: &str, kind: SessionKind, now: Instant) -> bool {
+        match self.sessions.get_mut(sid) {
+            Some(entry) => {
+                entry.kind = kind;
+                entry.created = now;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Drop every expired session. Called on insert and by the background
@@ -476,8 +584,8 @@ mod tests {
             user_id: "ada@example.com".into(),
         };
         assert!(
-            confirm.is_identity(),
-            "it spends the stranger-openable pool"
+            !confirm.is_identity(),
+            "a stranger cannot open one, so it is not charged to their pool"
         );
         let printed = format!("{confirm:?}");
         assert!(!printed.contains("ada@"), "{printed}");
@@ -502,6 +610,101 @@ mod tests {
         let later = now + AGENT_CONFIRM_TTL + Duration::from_secs(1);
         assert!(s.take("c2", later).is_none());
         assert!(s.take("a1", later).is_some());
+    }
+
+    fn confirm_kind() -> SessionKind {
+        SessionKind::AgentConfirm {
+            external_auth_id: "01J3X4Y5Z6A7B8C9D0E1F2G3H4".into(),
+            stored_email: "ada@example.com".into(),
+            user_id: "ada@example.com".into(),
+        }
+    }
+
+    /// A STRANGER FLOODING `/agent/auth` CANNOT REFUSE A VERIFIED PERSON. With
+    /// the stranger-openable pool full of pre-Google agent sessions, a
+    /// confirmation (which only a Google-verified owner of a live tenant can
+    /// reach) still parks, and so does a done marker.
+    #[test]
+    fn a_full_login_pool_does_not_refuse_a_confirmation() {
+        let mut s = SessionStore::new();
+        let now = Instant::now();
+        for i in 0..MAX_IDENTITY_SESSIONS {
+            insert_login(
+                &mut s,
+                SessionKind::Agent {
+                    external_auth_id: "AAAA".into(),
+                },
+                &format!("spray{i}"),
+                now,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            insert_login(&mut s, SessionKind::App, "one-more", now),
+            Err(InsertError::Full),
+            "the pool is full"
+        );
+        assert_eq!(
+            insert_login(&mut s, confirm_kind(), "verified", now),
+            Ok(())
+        );
+        assert_eq!(
+            insert_login(
+                &mut s,
+                SessionKind::AgentDone {
+                    redirect: "https://foo.authkit.app/x".into()
+                },
+                "done",
+                now
+            ),
+            Ok(())
+        );
+    }
+
+    /// ...but the WHOLE TABLE still bounds them: a full table refuses a
+    /// confirmation like anything else.
+    #[test]
+    fn a_full_table_still_refuses_a_confirmation() {
+        let mut s = SessionStore::new();
+        let now = Instant::now();
+        for i in 0..MAX_SESSIONS {
+            insert(&mut s, &format!("sid{i}"), now).unwrap();
+        }
+        assert_eq!(
+            insert_login(&mut s, confirm_kind(), "verified", now),
+            Err(InsertError::Full)
+        );
+    }
+
+    /// `peek` reads without taking, and treats an expired entry as absent.
+    #[test]
+    fn a_peek_does_not_consume() {
+        let mut s = SessionStore::new();
+        let now = Instant::now();
+        insert_login(&mut s, confirm_kind(), "c", now).unwrap();
+        assert!(s.peek("c", now).is_some());
+        assert!(s.peek("c", now).is_some(), "still there");
+        assert_eq!(s.len(), 1);
+        assert!(
+            s.peek("c", now + AGENT_CONFIRM_TTL + Duration::from_secs(1))
+                .is_none()
+        );
+        assert!(s.take("c", now).is_some(), "and still takeable once");
+        // The done marker lives seconds.
+        insert_login(
+            &mut s,
+            SessionKind::AgentDone {
+                redirect: "https://foo.authkit.app/x".into(),
+            },
+            "d",
+            now,
+        )
+        .unwrap();
+        assert!(s.peek("d", now + AGENT_DONE_TTL).is_some());
+        assert!(
+            s.peek("d", now + AGENT_DONE_TTL + Duration::from_secs(1))
+                .is_none()
+        );
     }
 
     #[test]

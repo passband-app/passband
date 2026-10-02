@@ -81,7 +81,8 @@ agent    ── OAuth authorize ──► AuthKit
 browser  ── GET /agent/auth?external_auth_id=<opaque> ──► 302 to Google (identity only)
          ── Google consent ──►
          ── GET /oauth/callback ──► mailbox Google names → its ACTIVE tenant here
-                                    200 OUR confirmation page (fresh cookie, CSRF token)
+                                    park the result, 303 to /agent/confirm (fresh cookie)
+         ── GET /agent/confirm ──► OUR confirmation page (a read; refresh is safe)
          ── POST /agent/confirm ──► POST https://api.workos.com/authkit/oauth2/complete
                                     303 to the redirect_uri WorkOS answers with
          ── AuthKit consent ──► token for the agent
@@ -101,17 +102,42 @@ browser  ── GET /agent/auth?external_auth_id=<opaque> ──► 302 to Googl
   whatever name its builder registered. So the callback does NOT call WorkOS:
   it parks the verified result (the id, the tenant, the stored address, the
   verified address) server-side under a FRESH session id and cookie, for five
-  minutes, one-shot, inside the same bounded session table, and renders a
-  confirmation page naming the mailbox: an AI agent is asking to read this
-  mail, continue only if you started this yourself on this device, close it if
-  somebody sent you the link, and the next screen's agent name is chosen by
-  whoever built it. Unframeable, uncacheable, no script.
+  minutes, one-shot, inside the same bounded session table, and answers a 303
+  to `GET /agent/confirm`, a stable address with no query string (Google's
+  code does not stay in the address bar). That page names the mailbox: an AI
+  agent is asking to read this mail, continue only if you started this
+  yourself on this device, close it if somebody sent you the link, and the
+  next screen's agent name is chosen by whoever built it. Unframeable,
+  uncacheable, no script, no CORS grant.
+- **`GET /agent/confirm` is a read.** It renders from the parked session
+  without consuming it and sets no cookie, so a refresh, Back/Forward, or a
+  second tab shows the same page with the same one CSRF token. It answers only
+  to the flow cookie naming a live confirmation; anything else is the refusal
+  page. A refresh of the old callback URL (stale code, new cookie) is sent back
+  to this page without touching the parked session or Google: the callback
+  peeks at the session before taking it, and declines to take the two
+  agent-flow kinds it never finishes. Every other kind is still taken first.
+- **Confirmations are not charged to the login pool.** Only a Google-verified
+  owner of an active tenant can create one, so a stranger spraying
+  `/agent/auth` cannot crowd them out. They are bounded by the whole session
+  table, and per client by the `/agent/auth` bucket (each needs its own
+  pre-Google session and a Google round trip) and a five minute life.
 - **`POST /agent/confirm`** is the answer. It requires a same-origin
   `Origin`/`Sec-Fetch-Site` (the admin POSTs' check), the flow cookie, an
   atomic one-shot take of a confirmation session (any other kind is refused),
   and the form's CSRF token (constant time). Continue completes at WorkOS;
-  Cancel discards the state and says nothing was connected. It rides the
-  callback's rate-limit bucket, as the second half of a consent already given.
+  Cancel discards the state and says nothing was connected. A double click is
+  covered: while the first press is waiting on WorkOS it leaves an in-flight
+  placeholder under its session id (15 seconds at most), and a second Continue
+  from the same browser (same signed cookie, same token) that lands then waits
+  for it, polling the table, and gets the first press's answer; for 10 seconds
+  after, a done or failed marker answers the same way. The same 303, or the
+  same class of failure page, and never a second WorkOS call. A wrong token or
+  a Cancel in that window is refused without disturbing the first press, and
+  after the markers expire a replay is refused. The success answer does not clear the flow cookie, so that second
+  press can still be matched. Both methods ride the callback's rate-limit
+  bucket, as the second half of a consent already given, and a refresh must
+  not meet a 429.
   Its page's CSP widens `form-action` to `https:`, because Chrome applies
   `form-action` to the redirect a form submission gets and the AuthKit host is
   not configured here.
@@ -126,13 +152,15 @@ browser  ── GET /agent/auth?external_auth_id=<opaque> ──► 302 to Googl
   anything.
 - **The redirect is checked.** The browser is sent (303, `no-store`,
   `no-referrer`) to WorkOS's `redirect_uri` only if it is an absolute `https`
-  URL with a host and no userinfo (`http` too, on a plain-http local run). A
-  4xx other than 401/403 (a spent or expired `external_auth_id`) gets "this
-  connection request has expired, start again from your agent", since a retry
-  here can never work; 401/403, 429, 5xx, a timeout, unreadable JSON, or any
-  other URL is one "try again" page. Neither repeats anything WorkOS said.
-- `/agent/auth` shares the login hops' rate-limit bucket; both stages count
-  against the session table's login ceiling.
+  URL with a host and no userinfo (`http` too, on a plain-http local run).
+  401/403, 429, any 5xx, a timeout, unreadable JSON, or a URL that fails that
+  check is one "try again" page. Every other non-2xx status (in practice a 4xx
+  such as a spent or expired `external_auth_id`, but also a 3xx, which the
+  client never follows) gets "this connection request has expired, start
+  again from your agent", since a retry here can never work. Neither repeats
+  anything WorkOS said.
+- `/agent/auth` shares the login hops' rate-limit bucket and counts against
+  the session table's login ceiling.
 
 **Setup.** Set `SQUELCH_CONTROL_WORKOS_API_KEY` in the `control` service's
 Railway variables; unset, neither `/agent/auth` nor `/agent/confirm` is mounted

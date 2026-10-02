@@ -974,8 +974,9 @@ const CSP_AGENT_CONFIRM_INSECURE: &str = "default-src 'none'; style-src 'unsafe-
 /// person with several Google accounts must see WHICH one), and when to walk
 /// away. Short, because a long warning is a warning nobody reads.
 ///
-/// ONE FORM, TWO BUTTONS. Continue is first, so it is what Enter presses, and
-/// Cancel is quiet. Both carry the one-shot CSRF token; the server takes the
+/// ONE FORM, TWO BUTTONS. Cancel comes FIRST in the markup, so if anything
+/// ever submits the form implicitly (Enter in a field), the default is the
+/// safe answer; Continue is the solid button beside it, and Cancel is quiet. Both carry the one-shot CSRF token; the server takes the
 /// pending state either way, so Cancel really does discard it.
 pub fn agent_confirm(mailbox: &str, csrf: &str, allow_http: bool) -> Response {
     let mut resp = page(
@@ -987,8 +988,8 @@ pub fn agent_confirm(mailbox: &str, csrf: &str, allow_http: bool) -> Response {
 <p>Only continue if you just started connecting an agent yourself, on this device. If someone sent you a link to this page, close it.</p>
 <p class="hint">The next screen names the agent. That name is chosen by whoever built it, so it does not prove who they are.</p>
 <form method="post" action="/agent/confirm"><input type="hidden" name="csrf" value="{csrf}">
-<button type="submit" name="decision" value="continue">Continue <span class="arrow" aria-hidden="true">→</span></button>
 <button type="submit" name="decision" value="cancel" class="quiet">Cancel</button>
+<button type="submit" name="decision" value="continue">Continue <span class="arrow" aria-hidden="true">→</span></button>
 </form>"#,
             mailbox = escape_html(mailbox),
             csrf = escape_html(csrf),

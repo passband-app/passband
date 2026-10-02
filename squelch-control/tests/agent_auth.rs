@@ -341,22 +341,16 @@ impl Harness {
         (status, headers, body)
     }
 
-    /// Walk the agent hop through Google to the confirmation page, and return
-    /// `(fresh cookie pair, csrf token, page body)`.
+    /// Walk the agent hop through Google, follow the callback's 303, and
+    /// return `(fresh cookie pair, csrf token, page body)`.
     async fn reach_confirm(&self) -> (String, String, String) {
         let (status, headers, body) = self.run_agent().await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        let cookie = headers
-            .get_all(header::SET_COOKIE)
-            .iter()
-            .map(|v| v.to_str().unwrap())
-            .find(|c| c.starts_with("passband_signup=") && !c.contains("Max-Age=0"))
-            .expect("the confirmation sets a fresh flow cookie")
-            .split(';')
-            .next()
-            .unwrap()
-            .to_string();
-        (cookie, csrf_of(&body), body)
+        assert_eq!(status, StatusCode::SEE_OTHER, "{body}");
+        assert_eq!(headers[header::LOCATION], "/agent/confirm");
+        let cookie = fresh_cookie(&headers);
+        let (status, _, page) = self.get("/agent/confirm", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        (cookie, csrf_of(&page), page)
     }
 
     /// Press a button on the confirmation page, from this origin.
@@ -394,6 +388,20 @@ fn query_param(url: &str, name: &str) -> String {
         .find(|(k, _)| k == name)
         .map(|(_, v)| v.into_owned())
         .unwrap_or_default()
+}
+
+/// The flow cookie an answer SETS (not the one it clears), as a cookie pair.
+fn fresh_cookie(headers: &HeaderMap) -> String {
+    headers
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .map(|v| v.to_str().unwrap())
+        .find(|c| c.starts_with("passband_signup=") && !c.contains("Max-Age=0"))
+        .expect("a fresh flow cookie")
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string()
 }
 
 /// The CSRF token on a confirmation page. Base64url, so it needs no decoding.
@@ -558,8 +566,9 @@ async fn an_agent_login_completes_at_workos_and_follows_its_redirect() {
     assert_eq!(headers[header::LOCATION].to_str().unwrap(), REDIRECT);
     assert_eq!(headers[header::CACHE_CONTROL], "no-store, no-cache");
     assert_eq!(headers[header::REFERRER_POLICY], "no-referrer");
-    // The flow cookie is cleared, as on every terminal answer.
-    assert!(set_cookies(&headers).contains("Max-Age=0"), "{headers:?}");
+    // The flow cookie is NOT cleared on success: a second press already in
+    // flight must still carry it to be matched to the done marker.
+    assert!(!set_cookies(&headers).contains("Max-Age=0"), "{headers:?}");
 
     let completions = h.completions();
     assert_eq!(completions.len(), 1, "exactly one completion");
@@ -575,8 +584,8 @@ async fn an_agent_login_completes_at_workos_and_follows_its_redirect() {
 
     // Nothing was paired: an agent login mints no device credential.
     assert!(h.rec.lock().unwrap().pair_calls.is_empty());
-    // And the session is spent.
-    assert_eq!(h.state.live_sessions(), 0);
+    // The confirmation is spent; only the seconds-long done marker remains.
+    assert_eq!(h.state.live_sessions(), 1);
 }
 
 /// A Google account with NO mailbox here is told so plainly, after Google, and
@@ -728,7 +737,8 @@ async fn a_replayed_agent_callback_finds_nothing() {
     let h = Harness::new().await;
     let (consent, cookie) = h.start_agent().await;
     let (first, _, _) = h.finish(&consent, &cookie).await;
-    assert_eq!(first, StatusCode::OK);
+    assert_eq!(first, StatusCode::SEE_OTHER);
+    // Replayed with the PRE-Google cookie, whose session the first spent.
     let (second, headers, body) = h.finish(&consent, &cookie).await;
     assert_eq!(second, StatusCode::BAD_REQUEST, "{body}");
     assert!(headers.get(header::LOCATION).is_none());
@@ -850,19 +860,34 @@ async fn the_agent_hop_shares_the_login_budget() {
 
 // ---- the confirmation step ----------------------------------------------------
 
-/// THE CALLBACK NO LONGER TALKS TO WORKOS. It renders OUR page, naming the
-/// mailbox, with zero completions made; parks the verified result under a
-/// FRESH session id and cookie; and the page is uncacheable, unframeable, and
-/// free of em dashes.
+/// THE CALLBACK NO LONGER TALKS TO WORKOS. It parks the verified result under
+/// a FRESH session id and cookie and answers a 303 to the stable
+/// `GET /agent/confirm`, which renders OUR page naming the mailbox, with zero
+/// completions made; the page is uncacheable, unframeable, and free of em
+/// dashes.
 #[tokio::test]
 async fn the_callback_shows_a_confirmation_and_tells_workos_nothing() {
     let h = Harness::new().await;
     let (consent, pre_google) = h.start_agent().await;
-    let (status, headers, body) = h.finish(&consent, &pre_google).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, redirect, body) = h.finish(&consent, &pre_google).await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "{body}");
+    // A fixed path with no query: Google's code does not stay in the address bar.
+    assert_eq!(redirect[header::LOCATION], "/agent/confirm");
+    assert_eq!(redirect[header::CACHE_CONTROL], "no-store, no-cache");
+    assert!(
+        !body.contains(STORED),
+        "the callback itself renders nothing"
+    );
     assert!(
         h.completions().is_empty(),
         "WorkOS was called before the person agreed"
+    );
+    let fresh = fresh_cookie(&redirect);
+    let (status, headers, body) = h.get("/agent/confirm", Some(&fresh)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        headers.get(header::SET_COOKIE).is_none(),
+        "the page sets and clears nothing"
     );
 
     let seen = visible(&body);
@@ -899,23 +924,11 @@ async fn the_callback_shows_a_confirmation_and_tells_workos_nothing() {
 
     // A FRESH session: the cookie names a different id from the one that went
     // to Google, the old one is gone, and the new one holds the verified result.
-    let (cookie, csrf, _) = {
-        let fresh = headers
-            .get_all(header::SET_COOKIE)
-            .iter()
-            .map(|v| v.to_str().unwrap().to_string())
-            .find(|c| c.starts_with("passband_signup=") && !c.contains("Max-Age=0"))
-            .expect("a fresh cookie");
-        assert!(
-            !set_cookies(&headers).contains("passband_signup=; "),
-            "the fresh cookie must not be cleared in the same answer"
-        );
-        (
-            fresh.split(';').next().unwrap().to_string(),
-            csrf_of(&body),
-            (),
-        )
-    };
+    assert!(
+        !set_cookies(&redirect).contains("passband_signup=; "),
+        "the fresh cookie must not be cleared in the same answer"
+    );
+    let (cookie, csrf) = (fresh, csrf_of(&body));
     let old_sid = cookie_payload(&pre_google)["sid"]
         .as_str()
         .unwrap()
@@ -941,19 +954,147 @@ async fn the_callback_shows_a_confirmation_and_tells_workos_nothing() {
     assert_eq!(parked.label, LABEL);
 }
 
-/// A REPLAYED Continue finds nothing: the first completed, the second is
-/// refused, and WorkOS was asked exactly once.
+/// A DOUBLE-CLICKED Continue: the second press, from the same browser with the
+/// same token, gets the SAME 303 the first did, and WorkOS was asked exactly
+/// once. A different browser gets nothing, and once the few-second marker is
+/// gone a replay is refused as before, still with one completion.
 #[tokio::test]
-async fn a_replayed_confirmation_is_refused() {
+async fn a_double_clicked_continue_gets_the_same_redirect_once() {
     let h = Harness::new().await;
     let (cookie, csrf, _) = h.reach_confirm().await;
-    let (first, _, _) = h.decide(&cookie, &csrf, "continue").await;
+    let (first, a, _) = h.decide(&cookie, &csrf, "continue").await;
     assert_eq!(first, StatusCode::SEE_OTHER);
-    let (second, headers, body) = h.decide(&cookie, &csrf, "continue").await;
-    assert_eq!(second, StatusCode::BAD_REQUEST, "{body}");
+    let (second, b, body) = h.decide(&cookie, &csrf, "continue").await;
+    assert_eq!(second, StatusCode::SEE_OTHER, "{body}");
+    assert_eq!(a[header::LOCATION], b[header::LOCATION]);
+    assert_eq!(b[header::LOCATION].to_str().unwrap(), REDIRECT);
+    assert_eq!(b[header::CACHE_CONTROL], "no-store, no-cache");
+    assert_eq!(h.completions().len(), 1, "exactly one completion");
+
+    // Another browser: no cookie, or a cookie naming a different session.
+    let origin = h.public_url.clone();
+    let (none, h1, _) = h
+        .post(
+            "/agent/confirm",
+            None,
+            Some(&origin),
+            format!("csrf={csrf}&decision=continue"),
+        )
+        .await;
+    assert_eq!(none, StatusCode::BAD_REQUEST);
+    assert!(h1.get(header::LOCATION).is_none());
+    let (_, other) = h.start_agent().await;
+    let (other_status, h2, _) = h.decide(&other, &csrf, "continue").await;
+    assert_eq!(other_status, StatusCode::BAD_REQUEST);
+    assert!(h2.get(header::LOCATION).is_none());
+    // Same browser, wrong token: refused, not the redirect.
+    let (wrong, h3, _) = h.decide(&cookie, "not-the-token", "continue").await;
+    assert_eq!(wrong, StatusCode::BAD_REQUEST);
+    assert!(h3.get(header::LOCATION).is_none());
+
+    // After the marker's few seconds, a replay is refused as it always was.
+    let later = Instant::now() + squelch_control::sessions::AGENT_DONE_TTL + Duration::from_secs(1);
+    h.state.sessions().sweep(later);
+    let (third, headers, body) = h.decide(&cookie, &csrf, "continue").await;
+    assert_eq!(third, StatusCode::BAD_REQUEST, "{body}");
     assert!(headers.get(header::LOCATION).is_none());
     assert!(visible(&body).contains("Go back to your agent"), "{body}");
     assert_eq!(h.completions().len(), 1, "still exactly one completion");
+}
+
+/// THE PAGE IS A READ. Asking for it twice shows it twice, with the SAME one
+/// token, and leaves the parked session exactly where it was; Continue then
+/// works once.
+#[tokio::test]
+async fn the_confirmation_page_can_be_shown_twice_without_being_spent() {
+    let h = Harness::new().await;
+    let (cookie, csrf, first) = h.reach_confirm().await;
+    let (status, headers, second) = h.get("/agent/confirm", Some(&cookie)).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(csrf_of(&second), csrf, "one token per confirmation");
+    assert_eq!(visible(&first), visible(&second));
+    assert_eq!(headers[header::CACHE_CONTROL], "no-store, no-cache");
+    assert_eq!(headers[header::REFERRER_POLICY], "no-referrer");
+    assert_eq!(headers[header::X_FRAME_OPTIONS], "DENY");
+    let csp = headers[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
+    assert!(csp.contains("frame-ancestors 'none'"), "{csp}");
+    // No CORS grant: a cross-origin fetch of this page is opaque.
+    assert!(headers.get(header::ACCESS_CONTROL_ALLOW_ORIGIN).is_none());
+    assert_eq!(h.state.live_sessions(), 1, "nothing was consumed");
+
+    let (done, _, _) = h.decide(&cookie, &csrf, "continue").await;
+    assert_eq!(done, StatusCode::SEE_OTHER);
+    assert_eq!(h.completions().len(), 1);
+}
+
+/// A REFRESH OF THE OLD CALLBACK URL (stale code and state, new cookie) does
+/// not destroy the parked confirmation: it is sent back to the page, Google is
+/// not asked again, and Continue still works afterwards.
+#[tokio::test]
+async fn refreshing_the_callback_does_not_destroy_the_confirmation() {
+    let h = Harness::new().await;
+    let (consent, pre_google) = h.start_agent().await;
+    let (_, redirect, _) = h.finish(&consent, &pre_google).await;
+    let cookie = fresh_cookie(&redirect);
+    let exchanges = h.rec.lock().unwrap().exchanges;
+
+    // The browser re-requests the callback URL, now holding the NEW cookie.
+    for _ in 0..2 {
+        let (status, headers, body) = h.finish(&consent, &cookie).await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "{body}");
+        assert_eq!(headers[header::LOCATION], "/agent/confirm");
+        assert!(
+            !set_cookies(&headers).contains("Max-Age=0"),
+            "the cookie survives"
+        );
+    }
+    assert_eq!(
+        h.rec.lock().unwrap().exchanges,
+        exchanges,
+        "no second exchange"
+    );
+    assert_eq!(
+        h.state.live_sessions(),
+        1,
+        "the confirmation is still parked"
+    );
+
+    let (status, _, page) = h.get("/agent/confirm", Some(&cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (done, headers, _) = h.decide(&cookie, &csrf_of(&page), "continue").await;
+    assert_eq!(done, StatusCode::SEE_OTHER);
+    assert_eq!(headers[header::LOCATION].to_str().unwrap(), REDIRECT);
+    assert_eq!(h.completions().len(), 1);
+}
+
+/// The page answers only to a cookie naming a LIVE confirmation: no cookie,
+/// another flow's cookie, a pre-Google agent cookie, and an expired
+/// confirmation all get the refusal, with no mailbox on it.
+#[tokio::test]
+async fn the_confirmation_page_needs_a_live_confirmation() {
+    let h = Harness::new().await;
+    let (cookie, _, _) = h.reach_confirm().await;
+    let (_, app_cookie) = h.start("/app/auth").await;
+    let (_, early) = h.start_agent().await;
+    for (name, c) in [
+        ("no cookie", None),
+        ("app cookie", Some(app_cookie.as_str())),
+        ("pre-google cookie", Some(early.as_str())),
+    ] {
+        let (status, _, body) = h.get("/agent/confirm", c).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{name}: {body}");
+        assert!(!body.contains(STORED), "{name}: {body}");
+        assert!(!body.contains("csrf"), "{name}: {body}");
+    }
+    // ...and the refusals took nothing: three sessions still live.
+    assert_eq!(h.state.live_sessions(), 3);
+
+    let later =
+        Instant::now() + squelch_control::sessions::AGENT_CONFIRM_TTL + Duration::from_secs(1);
+    h.state.sessions().sweep(later);
+    let (status, _, body) = h.get("/agent/confirm", Some(&cookie)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(!body.contains(STORED), "{body}");
 }
 
 /// Every way a POST can fail to be THIS browser pressing THIS page's button is
@@ -1073,10 +1214,13 @@ async fn an_expired_confirmation_is_refused() {
     assert!(h.completions().is_empty());
 }
 
-/// With WorkOS unconfigured the confirm route does not exist either.
+/// With WorkOS unconfigured the confirm route does not exist either, in
+/// either method.
 #[tokio::test]
 async fn the_confirm_route_does_not_exist_without_workos() {
     let h = Harness::build(false, "https://signup.passband.test").await;
+    let (status, _, _) = h.get("/agent/confirm", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
     let (status, _, _) = h
         .post(
             "/agent/confirm",
@@ -1086,4 +1230,97 @@ async fn the_confirm_route_does_not_exist_without_workos() {
         )
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// Wait until the stub WorkOS has RECEIVED `n` completion requests. The stub
+/// records a request before its configured delay, so this returns while the
+/// first press's call is still in flight.
+async fn until_workos_received(h: &Harness, n: usize) {
+    for _ in 0..500 {
+        if h.completions().len() >= n {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("WorkOS never received {n} completion(s)");
+}
+
+/// A REAL DOUBLE CLICK: the second press lands WHILE the first is still
+/// waiting on WorkOS. It finds the in-flight placeholder, waits, and gets the
+/// same 303; WorkOS saw exactly one completion.
+#[tokio::test]
+async fn a_second_press_during_the_completion_waits_and_gets_the_same_redirect() {
+    let h = Harness::new().await;
+    let (cookie, csrf, _) = h.reach_confirm().await;
+    h.rec.lock().unwrap().workos_delay = Some(Duration::from_millis(800));
+
+    let first = h.decide(&cookie, &csrf, "continue");
+    let second = async {
+        until_workos_received(&h, 1).await;
+        // In flight: received, not yet answered.
+        h.decide(&cookie, &csrf, "continue").await
+    };
+    let ((s1, h1, b1), (s2, h2, b2)) = tokio::join!(first, second);
+    assert_eq!(s1, StatusCode::SEE_OTHER, "{b1}");
+    assert_eq!(s2, StatusCode::SEE_OTHER, "{b2}");
+    assert_eq!(h1[header::LOCATION].to_str().unwrap(), REDIRECT);
+    assert_eq!(h2[header::LOCATION], h1[header::LOCATION]);
+    assert_eq!(h.completions().len(), 1, "exactly one completion");
+}
+
+/// The same shape when WorkOS FAILS: both presses get the same page class,
+/// and there was still exactly one completion.
+#[tokio::test]
+async fn a_second_press_during_a_failing_completion_gets_the_same_failure() {
+    for (status, page) in [(404u16, "has expired"), (500, "try again")] {
+        let h = Harness::new().await;
+        let (cookie, csrf, _) = h.reach_confirm().await;
+        {
+            let mut r = h.rec.lock().unwrap();
+            r.workos_delay = Some(Duration::from_millis(800));
+            r.workos_answer = Some((status, json!({ "message": WORKOS_MARKER }).to_string()));
+        }
+        let first = h.decide(&cookie, &csrf, "continue");
+        let second = async {
+            until_workos_received(&h, 1).await;
+            h.decide(&cookie, &csrf, "continue").await
+        };
+        let ((s1, h1, b1), (s2, h2, b2)) = tokio::join!(first, second);
+        assert_eq!(s1, s2, "{status}: {b1} / {b2}");
+        assert!(h1.get(header::LOCATION).is_none(), "{status}");
+        assert!(h2.get(header::LOCATION).is_none(), "{status}");
+        assert!(b1.contains(page), "{status}: {b1}");
+        assert!(b2.contains(page), "{status}: {b2}");
+        assert!(!b2.contains(WORKOS_MARKER), "{status}: {b2}");
+        assert_eq!(h.completions().len(), 1, "{status}: exactly one completion");
+    }
+}
+
+/// A wrong token, or a Cancel, during the in-flight window is refused at
+/// once, and the first press still completes.
+#[tokio::test]
+async fn a_bad_press_during_the_completion_is_refused_and_disturbs_nothing() {
+    for bad in ["wrong token", "cancel"] {
+        let h = Harness::new().await;
+        let (cookie, csrf, _) = h.reach_confirm().await;
+        h.rec.lock().unwrap().workos_delay = Some(Duration::from_millis(800));
+        let first = h.decide(&cookie, &csrf, "continue");
+        let second = async {
+            until_workos_received(&h, 1).await;
+            let started = Instant::now();
+            let answer = match bad {
+                "wrong token" => h.decide(&cookie, "not-the-token", "continue").await,
+                _ => h.decide(&cookie, &csrf, "cancel").await,
+            };
+            // Refused without waiting on the first press.
+            assert!(started.elapsed() < Duration::from_millis(500), "{bad}");
+            answer
+        };
+        let ((s1, h1, b1), (s2, h2, b2)) = tokio::join!(first, second);
+        assert_eq!(s2, StatusCode::BAD_REQUEST, "{bad}: {b2}");
+        assert!(h2.get(header::LOCATION).is_none(), "{bad}");
+        assert_eq!(s1, StatusCode::SEE_OTHER, "{bad}: {b1}");
+        assert_eq!(h1[header::LOCATION].to_str().unwrap(), REDIRECT);
+        assert_eq!(h.completions().len(), 1, "{bad}");
+    }
 }

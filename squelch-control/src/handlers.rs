@@ -1171,6 +1171,52 @@ pub async fn oauth_callback(
     // while the cookie is all there is; once the session is in hand it is the
     // authority, here as everywhere else.
     let claimed_voice = Voice::from_cookie(&claim);
+
+    // THE ONE LOOK BEFORE THE TAKE, and it only ever DECLINES to take.
+    //
+    // Every session this callback can finish is taken first and checked after,
+    // and that order is unchanged: one-shot is what makes a replayed code
+    // inert. But the agent flow's two post-Google kinds are never finished
+    // here, and the browser holding their cookie can land here innocently: the
+    // confirmation is reached through a 303 FROM this URL, so a refresh, or Back
+    // then Forward, re-asks for `/oauth/callback?code=...&state=...` with the
+    // NEW cookie. Taking first would destroy a verified, parked identity for
+    // nothing. So those two kinds are recognised by a non-consuming peek and
+    // answered without touching the table: a parked confirmation is sent back
+    // to its own page (Google's stale code is ignored, never exchanged), and
+    // one being completed, or already completed or failed, gets the refusal.
+    //
+    // Not a weakening for anything else: a session of any other kind gets
+    // `None` here and goes on to the take exactly as before, and nothing this
+    // branch does reaches Google, the warden, or WorkOS.
+    let parked = state
+        .sessions()
+        .peek(&claim.sid, Instant::now())
+        .and_then(|s| match s.kind {
+            SessionKind::AgentConfirm { .. } => Some(true),
+            SessionKind::AgentDone { .. }
+            | SessionKind::AgentInFlight
+            | SessionKind::AgentFailed { .. } => Some(false),
+            _ => None,
+        });
+    match parked {
+        Some(true) => {
+            tracing::info!(
+                outcome = "stale_callback",
+                "agent callback re-requested; back to the confirmation"
+            );
+            return to_agent_confirm();
+        }
+        Some(false) => {
+            tracing::info!(
+                outcome = "stale_callback",
+                "agent callback re-requested after completion"
+            );
+            return agent_session_refused();
+        }
+        None => {}
+    }
+
     // Bound in its own statement so the session lock is released before
     // anything below can want it again.
     let session = state.sessions().take(&claim.sid, Instant::now());
@@ -1255,11 +1301,16 @@ pub async fn oauth_callback(
                 Err(refusal) => done(refusal),
             };
         }
-        // A CONFIRMATION is answered by `POST /agent/confirm` and never by a
-        // Google callback. Reaching here needs its CSRF token in `state`, so it
-        // is not a path anybody walks by accident; refused all the same, and
-        // the parked identity is gone with the session.
-        SessionKind::AgentConfirm { .. } => {
+        // A CONFIRMATION (or a completed one) is answered by
+        // `/agent/confirm` and never by a Google callback. The peek above
+        // turns both away before the take, so reaching here means one was
+        // written between the peek and the take under a sid this cookie
+        // names, which a 256-bit random id makes a non-event; refused all the
+        // same.
+        SessionKind::AgentConfirm { .. }
+        | SessionKind::AgentDone { .. }
+        | SessionKind::AgentInFlight
+        | SessionKind::AgentFailed { .. } => {
             tracing::warn!(
                 outcome = "kind_refused",
                 "a confirmation came back as a callback"
@@ -1992,9 +2043,14 @@ async fn app_login(state: &ControlState, code: String, pkce_verifier: String) ->
 /// tenant THAT MAILBOX owns, and ASK THE PERSON before anything is sent to
 /// WorkOS.
 ///
-/// `Ok` is the confirmation page, which carries a FRESH flow cookie and must
-/// not have it cleared; `Err` is a terminal answer, which the callback clears
-/// the cookie on like every other.
+/// `Ok` is a 303 to the confirmation page (`GET /agent/confirm`), which
+/// carries a FRESH flow cookie and must not have it cleared; `Err` is a
+/// terminal answer, which the callback clears the cookie on like every other.
+///
+/// A REDIRECT, NOT THE PAGE ITSELF. Rendered at the callback URL, the page sat
+/// under `?code=...&state=...`: Google's code stayed in the address bar, and a
+/// refresh re-ran the callback. The page now lives at a stable address with no
+/// query string that renders from the parked session without consuming it.
 ///
 /// WORKOS IS NOT CALLED HERE ANY MORE, and that is the fix for a confirmed
 /// consent-phishing path: the `/agent/auth?external_auth_id=` link can be
@@ -2111,26 +2167,92 @@ async fn agent_login(
 
     // PRIVACY: an outcome and the label. Never the mailbox, the id, or the
     // token.
-    tracing::info!(outcome = "confirm_shown", label = %label, "agent login awaiting confirmation");
+    tracing::info!(outcome = "confirm_parked", label = %label, "agent login awaiting confirmation");
 
-    // The page names a mailbox and carries a live CSRF token, so it is
-    // uncacheable and referer-free (the shell sets both; `no_store` restates
-    // them so the property does not hang on the shell), and unframeable
-    // (`frame-ancestors 'none'` and `X-Frame-Options: DENY`), which is what
-    // keeps the Continue button from being clickjacked.
-    let mut page = no_store(pages::agent_confirm(
-        &stored_email,
-        &csrf,
-        state.config().is_insecure(),
-    ));
+    let mut answer = to_agent_confirm();
     if let Ok(value) = header::HeaderValue::from_str(&cookie::set_cookie(
         &cookie_value,
         !state.config().is_insecure(),
     )) {
         // REPLACES the pre-Google cookie: same name, same path.
-        page.headers_mut().append(header::SET_COOKIE, value);
+        answer.headers_mut().append(header::SET_COOKIE, value);
     }
-    Ok(page)
+    Ok(answer)
+}
+
+/// A 303 to the confirmation page. A fixed same-origin path: nothing a caller
+/// sent is in it.
+fn to_agent_confirm() -> Response {
+    no_store(
+        (
+            StatusCode::SEE_OTHER,
+            [(
+                header::LOCATION,
+                header::HeaderValue::from_static("/agent/confirm"),
+            )],
+        )
+            .into_response(),
+    )
+}
+
+/// `GET /agent/confirm` — the confirmation page, rendered from the parked
+/// session.
+///
+/// A READ AND NOTHING ELSE. It peeks, never takes, and sets and clears no
+/// cookie, so a refresh, Back and Forward, or a second tab all show the same
+/// page with the same one CSRF token, and only the POST spends the session.
+/// It answers only to the flow cookie naming a live
+/// [`SessionKind::AgentConfirm`]; anything else (no cookie, another flow's,
+/// expired) is the flow's refusal page.
+///
+/// WHAT A CROSS-SITE GET CAN LEARN: nothing. A page elsewhere can navigate
+/// the victim here (the Lax cookie rides a top-level GET), and the victim then
+/// sees their own confirmation, which is the page's purpose. It cannot READ
+/// the answer: there is no CORS header, so a `fetch` is opaque, and
+/// `frame-ancestors 'none'` with `X-Frame-Options: DENY` keeps it out of a
+/// frame, which is also what stops the Continue button being clickjacked. The
+/// page is `no-store` and `no-referrer` because it names a mailbox and carries
+/// a live token.
+pub async fn agent_confirm_page(State(state): State<ControlState>, headers: HeaderMap) -> Response {
+    if state.workos().is_none() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let claim = headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(cookie::from_header)
+        .and_then(|v| {
+            cookie::verify(
+                &state.config().cookie_key,
+                v,
+                chrono::Utc::now().timestamp(),
+            )
+        });
+    let Some(claim) = claim else {
+        return agent_session_refused();
+    };
+    // Copied out under the lock and released at once.
+    let view = state
+        .sessions()
+        .peek(&claim.sid, Instant::now())
+        .and_then(|s| match &s.kind {
+            SessionKind::AgentConfirm { stored_email, .. } => {
+                Some((stored_email.clone(), s.state.clone(), s.label.clone()))
+            }
+            _ => None,
+        });
+    let Some((stored_email, csrf, label)) = view else {
+        tracing::info!(outcome = "expired", "agent confirmation page refused");
+        return agent_session_refused();
+    };
+    // PRIVACY: an outcome and the label. Never the mailbox, the id, or the
+    // token.
+    tracing::info!(outcome = "confirm_shown", label = %label, "agent login awaiting confirmation");
+    no_store(pages::agent_confirm(
+        &stored_email,
+        &csrf,
+        state.config().is_insecure(),
+    ))
 }
 
 /// `POST /agent/confirm` — the person's answer on the confirmation page.
@@ -2157,7 +2279,12 @@ async fn agent_login(
 ///
 /// Then the decision: `continue` completes at WorkOS, `cancel` shows the
 /// nothing-was-connected page, and anything else (including no decision at
-/// all) is refused. The session is gone in every case.
+/// all) is refused. The confirmation is gone in every case.
+///
+/// ONE EXCEPTION BEFORE GATE 3: a press that arrives within seconds of a
+/// completed one, with the same cookie and the same token, is answered from
+/// the done marker with the same 303 (see [`SessionKind::AgentDone`]). It
+/// never reaches WorkOS, so the completion is still exactly once.
 pub async fn agent_confirm(
     State(state): State<ControlState>,
     headers: HeaderMap,
@@ -2189,6 +2316,35 @@ pub async fn agent_confirm(
         tracing::info!(outcome = "no_session", "agent confirmation refused");
         return done(agent_session_refused());
     };
+
+    // A DOUBLE CLICK, answered from the markers the first press leaves under
+    // this sid (see [`SessionKind::AgentInFlight`], [`SessionKind::AgentDone`]
+    // and [`SessionKind::AgentFailed`]). Peeked, never taken, so a third press
+    // gets the same answer. It needs this browser's signed cookie (the markers
+    // sit under that sid), the same CSRF token the confirmation carried, and
+    // `continue`; anything else is refused WITHOUT touching the marker, so a
+    // wrong token or a Cancel cannot disturb the first press. None of the
+    // three holds what a completion needs, so nothing on this path can reach
+    // WorkOS: the completion happens once, in the press that took the
+    // confirmation.
+    if let Some(marker) = agent_marker(&state, &claim.sid) {
+        let csrf = field(&body, "csrf");
+        let same_press = !csrf.is_empty()
+            && squelch_httpauth::ct_eq(csrf.as_bytes(), marker.token().as_bytes())
+            && field(&body, "decision") == "continue";
+        if !same_press {
+            tracing::warn!(outcome = "csrf_refused", "agent confirmation refused");
+            return agent_session_refused();
+        }
+        tracing::info!(
+            outcome = "confirmed_replay",
+            "agent confirmation pressed twice"
+        );
+        return match marker {
+            AgentMarker::InFlight(_) => await_first_press(&state, &claim.sid, done).await,
+            other => answer_from_marker(other, done),
+        };
+    }
 
     // Bound in its own statement so the session lock is released at once.
     let session = state.sessions().take(&claim.sid, Instant::now());
@@ -2225,6 +2381,34 @@ pub async fn agent_confirm(
         }
     }
 
+    // THE IN-FLIGHT PLACEHOLDER, before WorkOS is asked: a second press that
+    // lands while this call is out finds it and waits for this press's answer
+    // instead of finding nothing. Same sid, same token. Best effort like the
+    // other markers: without one, a double click is refused as it was before.
+    if state
+        .sessions()
+        .insert(
+            claim.sid.clone(),
+            SessionKind::AgentInFlight,
+            session.state.clone(),
+            String::new(),
+            label.clone(),
+            Instant::now(),
+        )
+        .is_err()
+    {
+        tracing::warn!(
+            sessions = state.live_sessions(),
+            "no room for the in-flight marker"
+        );
+    }
+    // Replace the placeholder with what happened, for anybody waiting on it.
+    // `mark` changes the entry in place (it cannot be refused for room); if
+    // the placeholder never made it in, there is nobody to tell.
+    let settle = |kind: SessionKind| {
+        state.sessions().mark(&claim.sid, kind, Instant::now());
+    };
+
     let destination = match workos
         .complete(
             &external_auth_id,
@@ -2240,12 +2424,14 @@ pub async fn agent_confirm(
         // from the agent rather than "try again in a few minutes".
         Err(crate::workos::WorkosError::Refused) => {
             tracing::info!(outcome = "workos_refused", label = %label, "agent login: WorkOS completion refused");
+            settle(SessionKind::AgentFailed { expired: true });
             return done(agent_expired());
         }
         Err(e) => {
             // PRIVACY: the error category and the label. Never the key, the
             // external_auth_id, the address, or anything WorkOS said.
             tracing::warn!(error = %e, label = %label, "agent login: WorkOS completion failed");
+            settle(SessionKind::AgentFailed { expired: false });
             return done(agent_unavailable());
         }
     };
@@ -2263,15 +2449,125 @@ pub async fn agent_confirm(
         // Unreachable for a parsed URL (it serializes as ASCII); a refusal
         // rather than a panic all the same.
         tracing::error!(label = %label, "the agent redirect would not fit in a header");
+        settle(SessionKind::AgentFailed { expired: false });
         return done(agent_unavailable());
     };
+    // THE DONE MARKER, replacing the placeholder: the same sid and token now
+    // name the URL just validated, for a few seconds, so a second press
+    // (waiting already, or landing just after) gets this same answer.
+    settle(SessionKind::AgentDone {
+        redirect: destination.to_string(),
+    });
+
     // SEE OTHER, the POST-to-GET answer this crate gives after `POST /signup`:
     // the browser must GET AuthKit's URL, never re-POST the form to it. The URL
     // carries AuthKit's state, so nothing may cache it and it must not ride out
     // as a referer.
-    done(no_store(
-        (StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response(),
-    ))
+    //
+    // THE COOKIE IS NOT CLEARED HERE, unlike every refusal: a browser that
+    // abandons this answer for a second press may or may not have applied its
+    // headers, and a second press without the cookie could not be matched to
+    // the marker. It names a session that is gone within seconds, and the next
+    // flow overwrites it.
+    no_store((StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response())
+}
+
+/// What a second press can find under its sid, copied out of the table so no
+/// lock is held across an await.
+enum AgentMarker {
+    /// The first press is talking to WorkOS. Holds the token.
+    InFlight(String),
+    /// It succeeded: the validated URL, and the token.
+    Done(String, String),
+    /// It failed: which page class (`true` is "expired"), and the token.
+    Failed(bool, String),
+}
+
+impl AgentMarker {
+    fn token(&self) -> &str {
+        match self {
+            AgentMarker::InFlight(t) | AgentMarker::Done(_, t) | AgentMarker::Failed(_, t) => t,
+        }
+    }
+}
+
+/// The marker under `sid`, if there is a live one. A PEEK: it never takes.
+fn agent_marker(state: &ControlState, sid: &str) -> Option<AgentMarker> {
+    state
+        .sessions()
+        .peek(sid, Instant::now())
+        .and_then(|s| match &s.kind {
+            SessionKind::AgentInFlight => Some(AgentMarker::InFlight(s.state.clone())),
+            SessionKind::AgentDone { redirect } => {
+                Some(AgentMarker::Done(redirect.clone(), s.state.clone()))
+            }
+            SessionKind::AgentFailed { expired } => {
+                Some(AgentMarker::Failed(*expired, s.state.clone()))
+            }
+            _ => None,
+        })
+}
+
+/// The answer a SETTLED marker stands for: the first press's 303 (cookie kept,
+/// for the reason the first press keeps it), or its failure page (cookie
+/// cleared, as the first press cleared it).
+fn answer_from_marker(marker: AgentMarker, done: impl Fn(Response) -> Response) -> Response {
+    match marker {
+        AgentMarker::Done(redirect, _) => match header::HeaderValue::from_str(&redirect) {
+            Ok(location) => {
+                no_store((StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response())
+            }
+            Err(_) => done(agent_unavailable()),
+        },
+        AgentMarker::Failed(true, _) => done(agent_expired()),
+        AgentMarker::Failed(false, _) => done(agent_unavailable()),
+        // Not settled; the caller waits instead of asking this.
+        AgentMarker::InFlight(_) => done(agent_session_refused()),
+    }
+}
+
+/// How often a waiting second press looks at the table.
+const IN_FLIGHT_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// How long a second press waits for the first: just over the WorkOS budget,
+/// and under the placeholder's own life, so a first press that is merely slow
+/// is always waited out.
+const IN_FLIGHT_WAIT: std::time::Duration =
+    std::time::Duration::from_secs(crate::workos::COMPLETE_TIMEOUT.as_secs() + 2);
+
+/// A second press, waiting for the first press's WorkOS answer.
+///
+/// IT ONLY READS. Every look is a peek, no lock is held across the sleep, and
+/// it writes nothing, so it is cancellation-safe: a waiter whose client goes
+/// away is dropped mid-sleep and leaves nothing behind. It never calls WorkOS:
+/// it does not hold, and cannot reach, what a completion needs.
+///
+/// NOT A WAY TO TIE UP THE SERVER. Only a request carrying this browser's
+/// signed cookie AND the confirmation's CSRF token gets here, only during the
+/// few seconds one completion is in flight for that session, and each wait is
+/// a sleeping task bounded by [`IN_FLIGHT_WAIT`] that holds no lock and no
+/// connection to anybody. The callback bucket meters how many of those one
+/// client can start, and somebody holding the cookie and the token can already
+/// do anything this page can.
+///
+/// The outcome: the first press's 303 or failure page; if the placeholder
+/// vanishes (its first press was dropped and it expired) or the bound passes,
+/// the refusal or "try again", never a guess.
+async fn await_first_press(
+    state: &ControlState,
+    sid: &str,
+    done: impl Fn(Response) -> Response,
+) -> Response {
+    let deadline = Instant::now() + IN_FLIGHT_WAIT;
+    loop {
+        tokio::time::sleep(IN_FLIGHT_POLL).await;
+        match agent_marker(state, sid) {
+            Some(AgentMarker::InFlight(_)) if Instant::now() < deadline => continue,
+            Some(AgentMarker::InFlight(_)) => return done(agent_unavailable()),
+            Some(settled) => return answer_from_marker(settled, done),
+            None => return done(agent_session_refused()),
+        }
+    }
 }
 
 /// The agent flow's unverifiable-session page: every refusal on
@@ -2517,7 +2813,11 @@ impl Voice {
             SessionKind::Console => Voice::Console(label.to_string()),
             SessionKind::App => Voice::App,
             SessionKind::Reconnect => Voice::Reconnect,
-            SessionKind::Agent { .. } | SessionKind::AgentConfirm { .. } => Voice::Agent,
+            SessionKind::Agent { .. }
+            | SessionKind::AgentConfirm { .. }
+            | SessionKind::AgentDone { .. }
+            | SessionKind::AgentInFlight
+            | SessionKind::AgentFailed { .. } => Voice::Agent,
         }
     }
 }

@@ -172,9 +172,15 @@ pub fn router(state: ControlState) -> Router {
     // rations. Mounted only with WorkOS configured, like `/agent/auth`.
     let mut callback = Router::new().route("/oauth/callback", get(handlers::oauth_callback));
     if state.config().workos.is_some() {
+        // The GET renders the parked page and the POST answers it. The GET is
+        // here for the POST's reason, plus one: it is what a refresh asks for,
+        // and a person refreshing a page they already consented their way to
+        // must not meet a 429. It opens nothing and spends nothing.
         callback = callback.route(
             "/agent/confirm",
-            post(handlers::agent_confirm).layer(DefaultBodyLimit::max(handlers::MAX_BODY)),
+            get(handlers::agent_confirm_page)
+                .post(handlers::agent_confirm)
+                .layer(DefaultBodyLimit::max(handlers::MAX_BODY)),
         );
     }
     let callback = callback

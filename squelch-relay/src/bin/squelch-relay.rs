@@ -20,6 +20,7 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::from_env().map_err(|e| anyhow::anyhow!("squelch-relay: {e}"))?;
     let bind = config.bind;
     let authed = config.auth_token.is_some();
+    let push_token = config.push_token.is_some();
     let topics = config.apns_topics.len();
     let environment = config.apns_env.as_str();
     let overridden = config.apns_url_override.is_some();
@@ -38,10 +39,12 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let bound = listener.local_addr().unwrap_or(bind);
-    // Single startup line. No key material, bearer token, or topic value.
+    // Single startup line. No key material, bearer token, or topic value:
+    // `push_token` says only WHETHER the push-only bearer is configured.
     tracing::info!(
         %bound,
         authed,
+        push_token,
         topics,
         environment,
         "squelch-relay: serving"

@@ -27,6 +27,9 @@ pub fn config(apns_url_override: Option<String>, auth_token: Option<String>) -> 
         apns_topics: vec![TOPIC.into(), BETA_TOPIC.into()],
         apns_env: Environment::Production,
         auth_token,
+        // Unset, as on every relay that predates it: the tests that exercise
+        // the split set it on their own copy.
+        push_token: None,
         apns_url_override,
         // In-memory open buffer: it lives as long as the `RelayState` the test
         // holds, and never leaves a file behind.

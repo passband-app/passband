@@ -288,79 +288,10 @@ struct ActionLayer: View {
 
 // MARK: - shortcuts overlay
 
-/// Keyboard-shortcuts help ('?'). Curated and grouped by hand rather than
-/// dumped from the keymap registry, which carries per-context duplicates.
+/// Keyboard-shortcuts help ('?'). Draws `ShortcutCatalog`, the one table the
+/// assistant's list_shortcuts tool also reads, so the two cannot disagree.
 struct ShortcutsOverlay: View {
     let onClose: () -> Void
-
-    private struct Group: Identifiable {
-        var title: String
-        var items: [(keys: [String], desc: String)]
-        var id: String { title }
-    }
-
-    private static let groups: [Group] = [
-        Group(
-            title: "Sitrep & inbox",
-            items: [
-                (["j", "k"], "move selection"),
-                (["Enter"], "open thread"),
-                (["r"], "reply"),
-                (["c"], "new message"),
-                (["e", "d"], "mark done"),
-                (["v"], "fix a wrong triage verdict"),
-                (["h"], "remind me about this later"),
-                (["t"], "tune sender rule"),
-                (["f"], "search this sender"),
-                (["p"], "process mode"),
-                (["u"], "undo last action"),
-            ]),
-        Group(
-            title: "Thread viewer",
-            items: [
-                (["j", "k"], "older / newer message"),
-                (["←", "→"], "previous / next queued email"),
-                (["r"], "reply"),
-                (["Enter"], "reply all"),
-                (["c"], "new message"),
-                (["e", "d"], "done, and close the reader"),
-                (["E", "D"], "done, and open the next email"),
-                (["S"], "skip to the next email, leave this one"),
-                (["h"], "remind + next"),
-                (["u"], "unsubscribe from this sender"),
-                (["t"], "new rule for this sender"),
-                // `f` is FORWARD in the reader and search-this-sender
-                // everywhere else; the group above still shows `f` as search,
-                // and this row is the one place a reader can see that the key
-                // changes hands. The reader has no search-this-sender key of
-                // its own: `/` then `from:` is the spelled-out way.
-                (["f"], "forward this message"),
-                (["Esc"], "back"),
-            ]),
-        Group(
-            title: "Navigate",
-            items: [
-                (["1", "2", "3", "4", "5"], "sitrep · emails · auth · rules · groups"),
-                (["⌘["], "back"),
-                (["⌘]"], "forward"),
-                (["a"], "browse all mail"),
-                (["n"], "noise page (and back)"),
-                (["/"], "search"),
-                (["⌘K"], "ask your inbox"),
-                (["⌘⇧K"], "new ask chat"),
-                (["⌘,"], "settings"),
-                (["g"], "auth messages"),
-                (["T"], "rules"),
-                (["A"], "audit log (in settings)"),
-            ]),
-        Group(
-            title: "App",
-            items: [
-                (["\\"], "toggle light / dark theme"),
-                (["?"], "this help"),
-                (["Esc"], "close panel / overlay"),
-            ]),
-    ]
 
     var body: some View {
         OverlayScrim(onDismiss: onClose) {
@@ -373,7 +304,7 @@ struct ShortcutsOverlay: View {
                     columns: [GridItem(.flexible(), spacing: Space.scaled(22)), GridItem(.flexible())],
                     alignment: .leading, spacing: Space.scaled(18)
                 ) {
-                    ForEach(Self.groups) { group in
+                    ForEach(ShortcutCatalog.groups) { group in
                         VStack(alignment: .leading, spacing: Space.scaled(5)) {
                             Text(group.title)
                                 .font(Typo.sectionLabel)

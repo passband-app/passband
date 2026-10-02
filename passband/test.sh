@@ -425,6 +425,19 @@ run_suite settings-search \
   Sources/Passband/Lib/SettingsSearch.swift \
   Tests/SettingsSearchTests.swift
 
+# What the assistant says about Passband itself: the three help tools' answers.
+# All three are text a model reads and repeats to a person, so the suite asks
+# the questions ("how do I reply all?", "where is dark mode?") and holds the
+# prose to the house style. The shortcut table and the settings index ride
+# along because two of the tools ARE those tables, and the release table
+# because "what's new" is read off it.
+run_suite product-guide \
+  Sources/Passband/Lib/ShortcutCatalog.swift \
+  Sources/Passband/Lib/SettingsSearch.swift \
+  Sources/Passband/Lib/ReleaseNotes.swift \
+  Sources/Passband/Lib/ProductGuide.swift \
+  Tests/ProductGuideTests.swift
+
 # The density curves: compact is the identity (which is what makes moving a
 # literal onto a token safe), comfortable never shrinks anything, and neither
 # curve folds two steps of the ladder onto one size.

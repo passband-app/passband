@@ -81,7 +81,9 @@ enum Actions {
     }
 
     /// Done (undo-first): status->done, revert resets status to open.
-    static func done(_ u: AttentionUpdate, via: Via, on surface: Surface) async {
+    static func done(
+        _ u: AttentionUpdate, via: Via, on surface: Surface, rewind: WalkRewind? = nil
+    ) async {
         let restore = store.removeFromBands(u.id)
         do {
             try await APIClient.shared.setStatus(u.id, .done)
@@ -91,7 +93,9 @@ enum Actions {
             // seconds away and re-pins them.
             FrameHeights.shared.clear(messageId: u.id)
             await ImageStore.shared.release(messageId: u.id)
-            store.pushUndo(kind: .done, messageId: u.id, label: "done \(u.sender)") {
+            store.pushUndo(
+                kind: .done, messageId: u.id, label: "done \(u.sender)", rewind: rewind
+            ) {
                 try await APIClient.shared.setStatus(u.id, .open)
                 await ImageStore.shared.repin(messageId: u.id)
             }

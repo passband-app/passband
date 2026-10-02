@@ -854,9 +854,12 @@ async fn an_event_stream_is_closed_when_its_token_expires() {
     let jwks = StubJwks::start().await;
     let app = oauth_door(&jwks.url);
 
-    // A token about 3 seconds from the end of its leeway.
+    // A token at the very end of its leeway. Its responses get the 30 second
+    // floor (`RESPONSE_MIN_LIFETIME`) and not a second more, so this test
+    // takes about half a minute of real time: the stub JWKS is real network,
+    // which rules out a paused tokio clock.
     let mut c = good_claims();
-    c["exp"] = json!(now() - 57);
+    c["exp"] = json!(now() - 59);
     let token = sign(&c);
 
     // The POST response is a normal, complete body.
@@ -903,7 +906,7 @@ async fn an_event_stream_is_closed_when_its_token_expires() {
     assert_eq!(resp.status(), StatusCode::OK);
     let started = Instant::now();
     let ended = tokio::time::timeout(
-        Duration::from_secs(15),
+        Duration::from_secs(45),
         axum::body::to_bytes(resp.into_body(), usize::MAX),
     )
     .await;
@@ -912,7 +915,7 @@ async fn an_event_stream_is_closed_when_its_token_expires() {
         "the stream outlived its token: {ended:?}"
     );
     assert!(
-        started.elapsed() < Duration::from_secs(10),
+        started.elapsed() < Duration::from_secs(40),
         "ended late: {:?}",
         started.elapsed()
     );
@@ -964,4 +967,37 @@ async fn an_event_stream_with_a_long_lived_token_stays_open() {
     )
     .await;
     assert!(still_open.is_err(), "the stream ended on its own");
+}
+
+// ---------------------------------------------------------------------------
+// Absurd expiries (E1)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn an_absurd_exp_is_served_normally_without_a_panic() {
+    let jwks = StubJwks::start().await;
+    let app = oauth_door(&jwks.url);
+    for exp in [json!(1e19), json!(1e300), json!(f64::MAX)] {
+        let mut c = good_claims();
+        c["exp"] = exp.clone();
+        // Through the real router, as a spawned connection task would run it,
+        // so a panic surfaces as a JoinError rather than a test abort.
+        let app = app.clone();
+        let req = initialize(PUBLIC_HOST, Some(&sign(&c)));
+        let joined = tokio::spawn(async move {
+            let resp = app.oneshot(req).await.unwrap();
+            let status = resp.status();
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, body)
+        })
+        .await;
+        let (status, body) = joined.unwrap_or_else(|e| panic!("exp {exp} panicked: {e}"));
+        assert_eq!(status, StatusCode::OK, "exp {exp}");
+        assert!(
+            String::from_utf8_lossy(&body).contains("\"protocolVersion\""),
+            "exp {exp}"
+        );
+    }
 }

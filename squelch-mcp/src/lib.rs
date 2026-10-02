@@ -168,7 +168,6 @@ pub fn agent_door_router(
                 .route(auth::PROTECTED_RESOURCE_METADATA_PATH, get(meta.clone()))
                 .route(auth::PROTECTED_RESOURCE_METADATA_ROOT_PATH, get(meta));
 
-            eprintln!("squelch-mcp: agent door requires OAuth bearer tokens");
             Ok(door.merge(metadata))
         }
     }

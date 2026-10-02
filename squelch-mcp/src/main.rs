@@ -110,19 +110,26 @@ async fn serve_http(addr: SocketAddr) -> anyhow::Result<()> {
     let shutdown = CancellationToken::new();
     // Construction errors surface before we bind. The door's auth mode comes
     // from the same env the daemon reads, through the same constructor.
+    let account_email = squelch_core::config::account_email();
+    // Bound to the account here as well as inside the router, so the mode
+    // printed below is the mode the router serves.
+    let auth = AgentDoorAuth::from_env().for_account(&account_email);
     let router = agent_door_router(
         store,
-        &squelch_core::config::account_email(),
+        &account_email,
         shipment_policy(),
         squelch_core::config::Config::load().triage.ranking,
         shutdown.child_token(),
-        &AgentDoorAuth::from_env(),
+        &auth,
     )?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr().unwrap_or(addr);
 
     // No tokens or message content are ever logged.
-    eprintln!("squelch-mcp: serving MCP Streamable HTTP on http://{bound}{HTTP_MCP_PATH}");
+    eprintln!(
+        "squelch-mcp: serving MCP Streamable HTTP on http://{bound}{HTTP_MCP_PATH} ({mode})",
+        mode = auth.describe(),
+    );
 
     // On ctrl-c, cancel the token: that terminates active MCP sessions.
     let shutdown_signal = {

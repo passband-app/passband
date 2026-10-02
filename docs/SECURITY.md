@@ -597,10 +597,18 @@ failure, and the cheap, local steps come before anything that touches keys:
    A token with no `email` claim is refused.
 
 Every refusal after step 1 is a 401 with `error="invalid_token"` added to the
-challenge, and an empty body. A token that passes bounds its response: the body
-is ended when the token's `exp` (plus the leeway) passes, so a long-lived GET event
-stream closes and the client must come back with a fresh token. Nothing an agent
-receives outlives the credential that asked for it. The library verifies the signature and nothing else:
+challenge, and an empty body, with one exception: when no key set can be trusted
+(step 4: never fetched, or no successful fetch for 24 hours) the answer is a 503
+with no challenge, because the token was never judged. A token that passes bounds
+its response (`auth.rs:response_lifetime`): the body is ended when the token's `exp`
+plus the leeway passes, so a long-lived GET event stream closes and the client
+must come back with a fresh token. Two clamps keep that bound from misfiring. A
+FLOOR of 30 seconds lets a response opened by a token accepted late in its leeway
+finish, rather than return an empty body after the tool has already run. A CAP of
+24 hours applies whatever `exp` says, and the arithmetic is total, so an absurd
+`exp` (`1e300`) gets a normal response instead of a panicked connection. Nothing an
+agent receives outlives the credential that asked for it by more than the floor.
+The library verifies the signature and nothing else:
 every claim check is ours, because its defaults check `aud` and `iss` only when
 present and leave `nbf` off.
 
@@ -654,8 +662,9 @@ token.
 **Logging.** A refusal is counted under one closed category (`auth.rs:Refusal`,
 e.g. `wrong_mailbox`, `expired`), and only the counts are ever written. No token, no claim value and no email
 address reaches a log line or a response; a misconfiguration names the setting,
-not its value. The startup line shows the mode and, in OAuth mode, the public URL,
-which the metadata publishes anyway.
+not its value. Both binaries' startup lines (`squelchd serve` and the standalone
+`squelch-mcp --http`) print the same mode text (`AgentDoorAuth::describe`): the
+mode and, in OAuth mode, the public URL, which the metadata publishes anyway.
 
 **Accepted costs.**
 - **WorkOS can mint a token that reads a mailbox.** AuthKit holds the signing key,

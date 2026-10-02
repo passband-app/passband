@@ -2170,7 +2170,8 @@ A few things a user or an operator will run into once it is published:
   page. Server-side and native clients (Claude Code, Codex, Cursor, Claude
   connectors) are unaffected.
 - **A pod that cannot reach the issuer for a day stops serving the door.** The
-  daemon refreshes its copy of the issuer's signing keys at least hourly and
+  daemon refetches the issuer's signing keys when a request finds its copy more
+  than an hour old (there is no timer, so an idle pod fetches nothing) and
   stops trusting a cached key set after 24 hours without a successful refresh,
   so a tenant cut off from AuthKit that long answers 503 on `/mcp` until it can
   reach it again.
@@ -2304,8 +2305,8 @@ echo "$(echo "$META" | jq -r .authorization_endpoint)?response_type=code&client_
 ```
 
 The browser goes AuthKit, then `signup.passband.app/agent/auth`, then Google,
-then the control plane's confirmation page, which names the mailbox about to
-be handed to "an agent": check it is `$TENANT`'s and click through it. Then
+then the control plane's confirmation page, which names the mailbox an AI
+agent is asking to read: check it is `$TENANT`'s and click through it. Then
 AuthKit's consent screen, and finally `127.0.0.1:8976/callback?code=...`, which
 fails to load. That is expected: copy the `code` out of the address bar.
 

@@ -216,6 +216,17 @@ impl AgentDoorAuth {
         Self::from_values(issuer.as_deref(), public.as_deref(), jwks.as_deref())
     }
 
+    /// The mode for a startup line, shared by both binaries so they say the
+    /// same thing. The public URL is public (the metadata publishes it); a
+    /// misconfiguration names the setting at fault, never its value.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Open => "open, no agent sign-in".to_string(),
+            Self::OAuth(c) => format!("OAuth, public URL {}", c.public_url),
+            Self::Misconfigured(why) => format!("MISCONFIGURED, answering 503: {why}"),
+        }
+    }
+
     /// Bind the mode to the mailbox this daemon serves.
     ///
     /// OAuth binds every token to the account email (I1), so OAuth with no
@@ -671,11 +682,36 @@ pub struct Verified {
     pub exp: f64,
 }
 
+/// The shortest life a response gets, however close to expiry its token was.
+/// A token accepted late in its leeway must still let the call it opened
+/// finish: cutting a `tools/call` off mid-flight would return an empty body
+/// after the tool had run, instead of a 401 that tells the client to refresh.
+pub const RESPONSE_MIN_LIFETIME: Duration = Duration::from_secs(30);
+
+/// The longest life a response gets, whatever the token's `exp` says. A
+/// correctly signed token may carry an absurd `exp`; the stream still ends
+/// within a day and the client reconnects.
+pub const RESPONSE_MAX_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// How long a response opened by a token with `exp` may keep streaming, at
+/// wall-clock time `now` (both seconds since the epoch): its `exp` plus the
+/// leeway, floored at [`RESPONSE_MIN_LIFETIME`] and capped at
+/// [`RESPONSE_MAX_LIFETIME`]. Total for every f64: no input panics.
+pub fn response_lifetime(exp: f64, now: f64) -> Duration {
+    let secs = exp + LEEWAY_SECS as f64 - now;
+    if secs.is_nan() {
+        return RESPONSE_MAX_LIFETIME;
+    }
+    // NaN, infinite or too big for a Duration: the cap.
+    let left = Duration::try_from_secs_f64(secs.max(0.0)).unwrap_or(RESPONSE_MAX_LIFETIME);
+    left.clamp(RESPONSE_MIN_LIFETIME, RESPONSE_MAX_LIFETIME)
+}
+
 impl Verified {
-    /// How long from now the token stays acceptable (its `exp` plus the
-    /// leeway), which is how long a response it opened may keep streaming.
+    /// How long a response this token opened may keep streaming. See
+    /// [`response_lifetime`].
     pub fn remaining(&self) -> Duration {
-        Duration::from_secs_f64((self.exp + LEEWAY_SECS as f64 - now_secs()).max(0.0))
+        response_lifetime(self.exp, now_secs())
     }
 }
 
@@ -790,6 +826,11 @@ impl Verifier {
         let now = now_secs();
         let leeway = LEEWAY_SECS as f64;
         let exp = c.exp.ok_or(Refusal::MissingExp)?;
+        // JSON cannot spell NaN or infinity, but a comparison with NaN is
+        // always false, so it would sail past the expiry check: refuse it.
+        if !exp.is_finite() {
+            return Err(Refusal::Malformed);
+        }
         if exp + leeway < now {
             return Err(Refusal::Expired);
         }
@@ -1039,7 +1080,14 @@ pub async fn require_agent_token(
         .and_then(|v| v.to_str().ok());
     match state.verifier.verify(authz).await {
         Ok(verified) => {
-            let deadline = tokio::time::Instant::now() + verified.remaining();
+            let now = tokio::time::Instant::now();
+            // `remaining` is capped at a day, so this cannot overflow in
+            // practice; checked anyway, because a panic here resets the
+            // client's connection.
+            let deadline = now
+                .checked_add(verified.remaining())
+                .or_else(|| now.checked_add(RESPONSE_MAX_LIFETIME))
+                .unwrap_or(now);
             next.run(req).await.map(|inner| {
                 Body::new(ExpiringBody {
                     inner,
@@ -1280,5 +1328,78 @@ mod tests {
         assert_eq!(modulus_bits(&enc(&[0xff; 256])), Some(2048));
         assert_eq!(modulus_bits(&enc(&[0x7f; 256])), Some(2047));
         assert_eq!(modulus_bits(&enc(&[0x00])), None);
+    }
+
+    #[test]
+    fn a_response_lifetime_is_floored_capped_and_never_panics() {
+        let now = 1_000_000.0;
+        // Plenty left: exp + leeway - now.
+        assert_eq!(
+            response_lifetime(now + 600.0, now),
+            Duration::from_secs(660)
+        );
+        // Accepted late in its leeway: still the floor.
+        assert_eq!(response_lifetime(now - 59.5, now), RESPONSE_MIN_LIFETIME);
+        assert_eq!(response_lifetime(now - 1000.0, now), RESPONSE_MIN_LIFETIME);
+        // Absurd or non-finite: the cap, no panic.
+        for exp in [1e19, 1e300, f64::MAX, f64::INFINITY, f64::NAN] {
+            assert_eq!(response_lifetime(exp, now), RESPONSE_MAX_LIFETIME, "{exp}");
+        }
+        assert_eq!(
+            response_lifetime(f64::NEG_INFINITY, now),
+            RESPONSE_MIN_LIFETIME
+        );
+    }
+
+    /// A token accepted with about a second of leeway left still gets the
+    /// whole response from a handler that takes longer than that.
+    #[tokio::test]
+    async fn a_slow_response_to_a_late_token_is_not_cut_off() {
+        use crate::testing::{KEY_A_PEM, KID_A, StubJwks, sign, unix_now, valid_claims};
+        use tower::ServiceExt as _;
+        let jwks = StubJwks::start().await;
+        let AgentDoorAuth::OAuth(config) = AgentDoorAuth::from_values(
+            Some("https://a.authkit.app"),
+            Some("https://alice.passband.email/mcp"),
+            Some(&jwks.url),
+        ) else {
+            panic!("expected OAuth");
+        };
+        let (log, _lines, _clock) = fake_log(Duration::from_secs(60));
+        let state =
+            AuthLayerState::with_parts(Verifier::new(&config, "alice@example.com"), &config, log);
+        let app = axum::Router::new()
+            .route(
+                "/mcp",
+                axum::routing::any(|| async {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    "the whole answer"
+                }),
+            )
+            .route_layer(axum::middleware::from_fn_with_state(
+                state,
+                require_agent_token,
+            ));
+        let mut c = valid_claims(
+            "https://a.authkit.app",
+            "https://alice.passband.email/mcp",
+            "alice@example.com",
+        );
+        c["exp"] = serde_json::json!(unix_now() - 59);
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header(
+                "authorization",
+                format!("Bearer {}", sign(&c, KEY_A_PEM, KID_A)),
+            )
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"the whole answer");
     }
 }

@@ -1948,12 +1948,8 @@ fn agent_door_status(auth: &squelch_mcp::AgentDoorAuth) -> squelch_api::AgentDoo
 /// door's own metadata publishes it); nothing else about the config is shown,
 /// and a misconfiguration names the setting at fault, never its value.
 fn describe_agent_door(auth: &squelch_mcp::AgentDoorAuth) -> String {
-    use squelch_mcp::AgentDoorAuth;
-    match auth {
-        AgentDoorAuth::Open => "open, no agent sign-in".to_string(),
-        AgentDoorAuth::OAuth(c) => format!("OAuth, public URL {}", c.public_url()),
-        AgentDoorAuth::Misconfigured(why) => format!("MISCONFIGURED, answering 503: {why}"),
-    }
+    // The same wording the standalone squelch-mcp binary prints.
+    auth.describe()
 }
 
 /// The router hosting both doors: `/mcp` (agent door, read-only, sealed-absent)

@@ -578,6 +578,12 @@ final class AppStore {
     /// clock, the queues, the capabilities. Assigned by the poller only on
     /// change, and it changes often — so only its readers pay for that.
     var stats: StoreStats?
+    /// The epoch of the poll that wrote `stats`. `stats` is not wiped on an
+    /// account switch, so until the new mailbox's first poll lands it still
+    /// describes the one just left; anything that must not mix two accounts
+    /// (the calendar grant and its consent link, `calendarAccess`) reads
+    /// `stats` only while this is the live epoch.
+    var statsEpoch: Int?
     var lastRefresh: Date?
     var refreshError: RefreshError?
 
@@ -610,10 +616,14 @@ final class AppStore {
     /// The connect card, while it is up. Its own property, apart from the
     /// feed: `modalOverlayOpen` reads it, and the whole shell reads that.
     var calendarConnectAsk: CalendarConnectAsk?
-    /// When Connect was last pressed: the page says it is waiting for Google
-    /// until the grant shows up on the stats poll or the consent session has
-    /// certainly died (`CalendarGate.connectWaitWindow`).
-    var calendarConnectWaitingSince: Date?
+    /// Since Connect was last pressed, and for which account: the page says
+    /// it is waiting for Google until the grant shows up on the stats poll or
+    /// the consent session has certainly died (`CalendarGate.connectWaitWindow`).
+    var calendarConnectWait: CalendarConnectWait?
+    /// Bumped by every timeline request and every local write to the feed;
+    /// an answer is applied only if nothing newer has started since it was
+    /// asked for. Not observed: it is bookkeeping, never drawn.
+    @ObservationIgnored var calendarLoadGeneration = 0
     /// When the last full zone refresh COMPLETED. nil = never loaded. OUT of
     /// the observed struct: it is a TTL stamp, and stamping it invalidated
     /// every zone view once per pass whether or not a row had changed.
@@ -1775,7 +1785,8 @@ final class AppStore {
         calendarFeed = nil
         calendarLoaded = false
         calendarConnectAsk = nil
-        calendarConnectWaitingSince = nil
+        calendarConnectWait = nil
+        calendarLoadGeneration &+= 1
         // The parked refresh tasks go too, not just their results: a joiner
         // arriving after the switch would otherwise wait on — and adopt the
         // silence of — a pass that has already been disowned.
@@ -2255,7 +2266,7 @@ final class AppStore {
             || ruleEditor != nil
             || groupEditor != nil
             || !authQueue.isEmpty || retriage != nil || retriageAsk != nil
-            || reconnectAsk != nil || calendarConnectAsk != nil
+            || reconnectAsk != nil || calendarCardUp
             || tour.wantsBlur || whatsNew.active
     }
 

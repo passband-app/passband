@@ -39,6 +39,10 @@ struct AgendaTests {
         dayTitles()
         todaysStrip()
         theGate()
+        theGateIsTheActiveAccounts()
+        syncNotices()
+        ghostStanding()
+        aBadCalendarObjectCannotFailTheStatsPoll()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -147,6 +151,14 @@ struct AgendaTests {
         }
         expect(b.events?.first?.self_response == .accepted, "an event decodes")
         expect(b.calendar?.granted == true, "the calendar status decodes")
+        expect(b.calendar?.truncated == nil, "no truncated key reads as absent")
+        let cut = """
+            {"ghosts":[],"events":[],
+             "calendar":{"granted":true,"synced_at":"2026-10-02T02:40:09.688012+00:00","error":"quota","truncated":true}}
+            """
+        let c = try? JSONDecoder().decode(TimelineFeed.self, from: Data(cut.utf8))
+        expect(c?.calendar?.truncated == true && c?.calendar?.error == .quota,
+               "a truncated status with an error decodes")
 
         let oldStats = """
             {"tier_counts":{},"total":0,"sealed":0,"bands":{"standing":0,"new":0,"open":0}}
@@ -324,6 +336,17 @@ struct AgendaTests {
                                calendar: cal)!
         expect(Agenda.endLabel(trip, on: trip.start, calendar: cal)?.text == "until Oct 19",
                "a real event's date-only end is its last day too, as the daemon serves it")
+        expect(Agenda.endLabel(trip, on: day("2026-10-16"), calendar: cal)?.text == "until Oct 19",
+               "a multi-day all-day row listed under a later day still says through when")
+        expect(Agenda.endLabel(trip, on: day("2026-10-19"), calendar: cal) == nil,
+               "and on its last day says nothing more")
+        // The fixture's own today: a trip that began yesterday, still on.
+        let started = build([ghost(57, "Offsite", start: "2026-10-04", end: "2026-10-07",
+                                   allDay: true, commitment: .committed)])
+        let todayRow = started.first?.visible.first
+        expect(todayRow?.id == "g:57", "a trip that began yesterday is listed under today")
+        expect(todayRow.map { Agenda.endLabel($0, on: day("2026-10-05"), calendar: cal)?.text }
+               == "until Oct 7", "with its end, not a bare all day")
         let oneDay = Agenda.item(event("o", "Holiday", start: "2026-10-14", end: "2026-10-14", allDay: true),
                                  calendar: cal)!
         expect(Agenda.endLabel(oneDay, on: oneDay.start, calendar: cal) == nil,
@@ -422,8 +445,19 @@ struct AgendaTests {
         let dawn = Agenda.item(ghost(101, "Flight", start: "2026-10-05T05:00:00-07:00",
                                      end: "2026-10-05T06:00:00-07:00", commitment: .committed),
                                calendar: cal)!
-        expect(Agenda.stripSpan(dawn, day: today, calendar: cal)?.lowerBound == 0,
-               "before 7am clamps onto the strip's start rather than vanishing")
+        expect(Agenda.stripSpan(dawn, day: today, calendar: cal) == nil,
+               "over by 7am is not on the 7am to midnight strip")
+        let small = Agenda.item(ghost(103, "Party", start: "2026-10-04T22:00:00-07:00",
+                                      end: "2026-10-05T01:30:00-07:00", commitment: .committed),
+                                calendar: cal)!
+        expect(Agenda.stripSpan(small, day: today, calendar: cal) == nil,
+               "a 1:30am finish draws no sliver at the 7am edge")
+        let early = Agenda.item(ghost(104, "Shift", start: "2026-10-05T06:00:00-07:00",
+                                      end: "2026-10-05T08:00:00-07:00", commitment: .committed),
+                                calendar: cal)!
+        let earlySpan = Agenda.stripSpan(early, day: today, calendar: cal)
+        expect(earlySpan?.lowerBound == 0 && earlySpan.map { abs($0.upperBound - 1.0 / 17) < 1e-9 } == true,
+               "something that began before 7am and runs past it clamps onto the strip's start")
         let allDay = Agenda.item(ghost(102, "Bill", start: "2026-10-05", allDay: true), calendar: cal)!
         expect(Agenda.stripSpan(allDay, day: today, calendar: cal) == nil, "all-day is not a block")
         let n = Agenda.stripNow(now, day: today, calendar: cal)
@@ -464,6 +498,129 @@ struct AgendaTests {
         expect(!CalendarGate.isWaiting(since: now, now: now.addingTimeInterval(10 * 60)),
                "not past the consent session's life")
         expect(!CalendarGate.isWaiting(since: nil, now: now), "not without a click")
+    }
+
+    /// FINDING 1 OF THE REVIEW: stats outlive an account switch, so until the
+    /// active account's own poll lands, nothing about connecting is offered.
+    static func theGateIsTheActiveAccounts() {
+        let link = "https://console.passband.app/reconnect?calendar=1&hint=a%40b.example"
+        let previous = CalendarAccess(granted: false, connect_url: link)
+        // Account A's stats were written under epoch 3; the switch made it 4.
+        let stale = CalendarGate.access(previous, statsEpoch: 3, epoch: 4)
+        expect(stale == nil, "stats from before the switch are no answer")
+        expect(CalendarGate.connectRoute(stale) == nil, "so there is no connect route")
+        expect(CalendarGate.offer(route: CalendarGate.connectRoute(stale), cardSeen: false, practice: false)
+               == .none, "and no card is offered to the new account from them")
+        expect(CalendarGate.renewRoute(stale) == nil, "nor a renewal")
+        expect(CalendarGate.access(previous, statsEpoch: nil, epoch: 0) == nil,
+               "no poll landed yet is no answer")
+        let own = CalendarGate.access(previous, statsEpoch: 4, epoch: 4)
+        expect(own == previous, "the active account's own stats are the answer")
+        expect(CalendarGate.offer(route: CalendarGate.connectRoute(own), cardSeen: false, practice: false)
+               == .card, "and offer its card")
+
+        let granted = CalendarAccess(granted: true, connect_url: link)
+        expect(CalendarGate.connectRoute(granted) == nil && CalendarGate.renewRoute(granted) == .link(link),
+               "a granted calendar offers no connect, but can be renewed through the same door")
+        expect(CalendarGate.renewRoute(CalendarAccess(granted: true, connect_command: "squelchd auth --calendar"))
+               == .command("squelchd auth --calendar"), "self-host renews with its command")
+    }
+
+    static func syncNotices() {
+        func status(_ error: TimelineSyncError?, synced: String? = "2026-10-05T23:12:00Z",
+                    granted: Bool = true, truncated: Bool? = nil) -> TimelineCalendarStatus {
+            TimelineCalendarStatus(granted: granted, synced_at: synced, error: error, truncated: truncated)
+        }
+        func notice(_ s: TimelineCalendarStatus?) -> CalendarGate.SyncNotice? {
+            CalendarGate.syncNotice(s, now: now, calendar: cal)
+        }
+        expect(notice(status(nil)) == nil, "a healthy sync says nothing")
+        expect(notice(nil) == nil, "an older daemon says nothing")
+        expect(notice(status(.auth, granted: false)) == nil, "not granted is the connect banner's to say")
+        expect(notice(status(.auth)) == CalendarGate.SyncNotice(
+            kind: .renew,
+            text: "Your Google Calendar connection needs renewing. The events here may be out of date."),
+               "auth asks for a renewal")
+        // 23:12Z on Oct 5 is 4:12pm in San Francisco: today, after `now`'s
+        // date but the same day.
+        expect(notice(status(.quota)) == CalendarGate.SyncNotice(
+            kind: .couldNotRefresh, text: "Could not refresh your calendar. Last synced at 4:12pm."),
+               "quota says it could not refresh, and when it last did")
+        expect(notice(status(.unavailable, synced: "2026-10-04T23:12:00.5+00:00"))?.text
+               == "Could not refresh your calendar. Last synced yesterday at 4:12pm.",
+               "unavailable says the same, a day back, fractional seconds and all")
+        expect(notice(status(.unavailable, synced: "2026-10-01T23:12:00Z"))?.text
+               == "Could not refresh your calendar. Last synced Oct 1 at 4:12pm.", "further back")
+        expect(notice(status(.quota, synced: nil))?.text == "Could not refresh your calendar.",
+               "never synced: no time is invented")
+        expect(notice(status(.quota))?.kind == .couldNotRefresh
+               && notice(status(.unavailable))?.kind == .couldNotRefresh,
+               "neither offers an action")
+
+        expect(CalendarGate.truncatedNote(status(nil, truncated: true)) == "Only the nearest events are shown.",
+               "a cut list says so")
+        expect(CalendarGate.truncatedNote(status(nil, truncated: false)) == nil
+               && CalendarGate.truncatedNote(status(nil)) == nil, "an uncut one does not")
+
+        expect(!CalendarGate.renewalLanded(status(.auth)), "still failing on auth: not renewed")
+        expect(!CalendarGate.renewalLanded(status(.quota)), "a quota failure proves nothing")
+        expect(CalendarGate.renewalLanded(status(nil)), "a clean sync: renewed")
+    }
+
+    static func ghostStanding() {
+        func standing(_ g: TimelineGhost) -> Agenda.Standing? { Agenda.standing(g) }
+        let at = "2026-10-08T19:00:00-07:00"
+        expect(standing(ghost(110, "x", start: at, commitment: .unknown)) == nil,
+               "unknown commitment and no likelihood: nothing is claimed")
+        expect(standing(ghost(111, "x", start: at, commitment: .invited)) == .status("Invited, not answered"),
+               "an invitation")
+        expect(standing(ghost(112, "x", start: at, commitment: .proposed)) == .status("Proposed, not agreed"),
+               "a proposal")
+        expect(standing(ghost(113, "x", start: at, commitment: .unknown, band: .maybe))
+               == .likelihood(GhostLikelihood(band: .maybe, reason: nil)), "a band is the likelihood")
+        expect(standing(ghost(114, "x", start: at, state: .going, mail: .cancelled))
+               == .status("You said you are going. The mail says it was cancelled."),
+               "going over a cancellation says both")
+        expect(standing(ghost(115, "x", start: at, commitment: .committed, state: .cancelled, mail: .cancelled))
+               == .status("Cancelled, according to the mail"), "cancelled")
+        expect(standing(ghost(116, "x", start: at, state: .going)) == .status("You said you are going"),
+               "going")
+        expect(standing(ghost(117, "x", start: at, commitment: .committed, band: .unlikely))
+               == .status("Booked, bought or accepted"), "committed outranks a band")
+    }
+
+    /// The stats poll is everyone's, every ten seconds: a calendar object it
+    /// cannot read must cost the calendar, not the poll.
+    static func aBadCalendarObjectCannotFailTheStatsPoll() {
+        let base = #""tier_counts":{},"total":3,"sealed":0,"bands":{"standing":0,"new":0,"open":0},"timeline":true"#
+        for (bad, what) in [
+            (#""calendar":{"connect_url":null}"#, "no granted"),
+            (#""calendar":"yes""#, "not an object"),
+            (#""calendar":{"granted":"maybe"}"#, "granted not a bool"),
+            (#""calendar":null"#, "null"),
+        ] {
+            let stats = try? JSONDecoder().decode(StoreStats.self, from: Data("{\(base),\(bad)}".utf8))
+            expect(stats?.total == 3 && stats?.timeline == true && stats?.calendar == nil,
+                   "a calendar with \(what) reads as absent and the rest decodes")
+        }
+        let good = try? JSONDecoder().decode(
+            StoreStats.self,
+            from: Data("{\(base),\"calendar\":{\"granted\":true,\"connect_command\":\"squelchd auth --calendar\"}}".utf8))
+        expect(good?.calendar == CalendarAccess(granted: true, connect_command: "squelchd auth --calendar"),
+               "a good one still decodes")
+        // And it encodes back as a plain optional would (practice mode's
+        // fixture daemon encodes its stats).
+        if let good, let data = try? JSONEncoder().encode(good),
+            let again = try? JSONDecoder().decode(StoreStats.self, from: data)
+        {
+            expect(again.calendar == good.calendar, "it round-trips")
+        } else {
+            expect(false, "it round-trips")
+        }
+        var none = good
+        none?.calendar = nil
+        let json = none.flatMap { try? JSONEncoder().encode($0) }.map { String(decoding: $0, as: UTF8.self) }
+        expect(json.map { !$0.contains("calendar") } == true, "nil is left out, not written as null")
     }
 
     static func expect(_ cond: Bool, _ what: String) {

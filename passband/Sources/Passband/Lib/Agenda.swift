@@ -41,11 +41,32 @@ enum CalendarGate {
         case command(String)
     }
 
+    /// THE CALENDAR HALF OF /client/stats, BUT ONLY THE ACTIVE ACCOUNT'S.
+    /// `stats` outlives an account switch (only the poller writes it), so
+    /// between the switch and the new mailbox's first poll it still describes
+    /// the mailbox just left: its grant, its consent link, its address.
+    /// Anything calendar-related derived from that would ask account B to
+    /// connect with account A's link. `statsEpoch` is the store epoch of the
+    /// poll that wrote `stats`; until it is the live epoch there is no answer,
+    /// and no answer means no card, no banner, no route and no grant.
+    static func access(_ access: CalendarAccess?, statsEpoch: Int?, epoch: Int) -> CalendarAccess? {
+        statsEpoch == epoch ? access : nil
+    }
+
     /// How this mailbox can connect a calendar, or nil when there is nothing
     /// to offer: already granted, a daemon too old to say, or a daemon that
     /// said nothing usable. Nil means no card and no banner.
     static func connectRoute(_ access: CalendarAccess?) -> ConnectRoute? {
         guard let access, !access.granted else { return nil }
+        return renewRoute(access)
+    }
+
+    /// The same door for a calendar that IS granted but whose token Google
+    /// has stopped accepting (the timeline's sync status says `auth`): the
+    /// daemon sends its consent link or command whether or not it is
+    /// granted, and renewing is the same consent over again.
+    static func renewRoute(_ access: CalendarAccess?) -> ConnectRoute? {
+        guard let access else { return nil }
         if let url = access.connect_url?.trimmingCharacters(in: .whitespaces),
             let scheme = URL(string: url)?.scheme?.lowercased(),
             scheme == "https" || scheme == "http"
@@ -86,6 +107,62 @@ enum CalendarGate {
     static func isWaiting(since: Date?, now: Date) -> Bool {
         guard let since else { return false }
         return now >= since && now.timeIntervalSince(since) < connectWaitWindow
+    }
+
+    // MARK: sync status
+
+    /// What the page says about the calendar sync, when it has to say
+    /// anything. Quiet by design: the events on screen stay, and only a
+    /// broken connection gets a button.
+    struct SyncNotice: Equatable, Sendable {
+        enum Kind: Equatable, Sendable {
+            /// Google stopped accepting the token: renew it (the Connect door).
+            case renew
+            /// Google was busy or unreachable: nothing to do but wait.
+            case couldNotRefresh
+        }
+        let kind: Kind
+        let text: String
+    }
+
+    /// The timeline's `calendar` status, as a line on the page. Nil while the
+    /// sync is healthy, while calendar is not granted (the connect banner is
+    /// that page's line), and on a daemon too old to send a status.
+    static func syncNotice(
+        _ status: TimelineCalendarStatus?, now: Date, calendar: Calendar
+    ) -> SyncNotice? {
+        guard let status, status.granted, let error = status.error else { return nil }
+        switch error {
+        case .auth:
+            return SyncNotice(
+                kind: .renew,
+                text: "Your Google Calendar connection needs renewing. The events here may be out of date.")
+        case .quota, .unavailable:
+            guard let raw = status.synced_at,
+                let synced = AgendaTime.parse(raw, zone: nil, calendar: calendar), !synced.dateOnly
+            else {
+                return SyncNotice(kind: .couldNotRefresh, text: "Could not refresh your calendar.")
+            }
+            return SyncNotice(
+                kind: .couldNotRefresh,
+                text: "Could not refresh your calendar. Last synced \(Agenda.lastSynced(synced.date, now: now, calendar: calendar)).")
+        }
+    }
+
+    /// The faint note under a list the daemon cut short (`truncated`).
+    static func truncatedNote(_ status: TimelineCalendarStatus?) -> String? {
+        status?.granted == true && status?.truncated == true
+            ? "Only the nearest events are shown." : nil
+    }
+
+    /// Whether a renewal the user started has visibly worked. The grant flag
+    /// cannot say so (it never went false: the scopes were still recorded),
+    /// so the sign is the sync itself: it was failing with `auth` when the
+    /// renewal began, and a clean one since means the new token works. A
+    /// quota or network failure is not a success, so it keeps waiting.
+    static func renewalLanded(_ status: TimelineCalendarStatus?) -> Bool {
+        guard let status else { return false }
+        return status.granted && status.error == nil
     }
 }
 
@@ -391,16 +468,22 @@ enum Agenda {
     /// printed only when it lands on another day ("ends 2am Sat"); the rest
     /// are in the detail, or the agenda turns into a timetable. An all-day
     /// row spanning several days says through when ("until Oct 19"). Nil for
-    /// a row listed under a later day than its start: its time column
+    /// a timed row listed under a later day than its start: its time column
     /// already says "until".
     static func endLabel(_ item: AgendaItem, on day: Date, calendar: Calendar) -> EndLabel? {
-        guard let end = item.end, item.start >= day else { return nil }
+        guard let end = item.end else { return nil }
         if item.allDay {
+            // An all-day row's time column only ever says "all day", so the
+            // span is said here even under a later day than its start (a
+            // trip that began Sunday, listed under today): through when,
+            // whenever that is after the day it is listed under.
+            let listed = max(calendar.startOfDay(for: item.start), calendar.startOfDay(for: day))
             guard let last = calendar.date(byAdding: .day, value: -1, to: end),
-                calendar.startOfDay(for: last) > calendar.startOfDay(for: item.start)
+                calendar.startOfDay(for: last) > listed
             else { return nil }
             return EndLabel(text: "until \(format(last, "MMM d", calendar))", estimated: false)
         }
+        guard item.start >= day else { return nil }
         let crosses = !calendar.isDate(end, inSameDayAs: item.start)
             && end.timeIntervalSince(calendar.startOfDay(for: end)) > 0
         let when = clock(end, calendar) + (crosses ? " \(format(end, "EEE", calendar))" : "")
@@ -441,11 +524,54 @@ enum Agenda {
         return (lead, tail)
     }
 
+    /// When the calendar last synced, for the "could not refresh" line: "at
+    /// 4:12pm", "yesterday at 4:12pm", "Oct 3 at 4:12pm".
+    static func lastSynced(_ date: Date, now: Date, calendar: Calendar) -> String {
+        let at = "at \(clock(date, calendar))"
+        switch dayDistance(from: now, to: date, calendar) {
+        case 0: return at
+        case -1: return "yesterday \(at)"
+        default: return "\(format(date, "MMM d", calendar)) \(at)"
+        }
+    }
+
+    /// How real a ghost is, as the detail's "Status" or "Likelihood" row.
+    enum Standing: Equatable, Sendable {
+        /// A plain sentence derived from the wire's own fields.
+        case status(String)
+        /// The band, drawn beside its swatch, with the model's reason quoted.
+        case likelihood(GhostLikelihood)
+    }
+
+    /// Nil when there is nothing true to say: a ghost the daemon could not
+    /// place (`commitment` unknown) and gave no likelihood.
+    static func standing(_ ghost: TimelineGhost) -> Standing? {
+        let mailCancelled = ghost.state == .cancelled || ghost.mail_state == .cancelled
+        if mailCancelled {
+            // The user's word and the mail's are two facts, and both are
+            // said: a going over a cancellation is a plan to check, not one
+            // to quietly drop.
+            return .status(
+                ghost.state == .going
+                    ? "You said you are going. The mail says it was cancelled."
+                    : "Cancelled, according to the mail")
+        }
+        if ghost.state == .going { return .status("You said you are going") }
+        if ghost.commitment == .committed { return .status("Booked, bought or accepted") }
+        if let likelihood = ghost.likelihood { return .likelihood(likelihood) }
+        switch ghost.commitment {
+        case .invited: return .status("Invited, not answered")
+        case .proposed: return .status("Proposed, not agreed")
+        case .unknown, .committed: return nil
+        }
+    }
+
     // MARK: today's strip
 
-    /// The waking hours today's strip spans: 7am to midnight. Something
-    /// earlier is clamped onto its left edge rather than widening the axis,
-    /// so the strip's shape means the same thing every day.
+    /// The waking hours today's strip spans: 7am to midnight. Something that
+    /// began earlier and runs past 7am is clamped onto its left edge rather
+    /// than widening the axis, so the strip's shape means the same thing
+    /// every day; something over by 7am is not on the strip at all.
     static let stripFromHour = 7
 
     /// Where a row sits on today's strip, as fractions of its width, or nil
@@ -454,7 +580,9 @@ enum Agenda {
         guard !item.allDay,
             let from = calendar.date(byAdding: .hour, value: stripFromHour, to: day),
             let to = calendar.date(byAdding: .day, value: 1, to: day),
-            item.start < to, item.effectiveEnd > day
+            // Against the strip's own start, not the day's: a 1:30am finish
+            // would otherwise be drawn as a quarter-hour sliver at 7am.
+            item.start < to, item.effectiveEnd > from
         else { return nil }
         let width = to.timeIntervalSince(from)
         let lo = max(0, min(1, item.start.timeIntervalSince(from) / width))

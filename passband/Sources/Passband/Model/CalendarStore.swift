@@ -5,6 +5,11 @@
 //
 // Shared with the phone target, which has no calendar page yet: nothing here
 // draws, and nothing here is reachable there until something calls it.
+//
+// ONE ACCOUNT AT A TIME. Every calendar answer derived from `stats` goes
+// through `calendarAccess`, which is nil until the active account's own first
+// poll has landed (`CalendarGate.access`); the card and the wait carry the
+// epoch they were made under and mean nothing under any other.
 
 import Foundation
 import SwiftUI
@@ -16,6 +21,21 @@ import SwiftUI
 struct CalendarConnectAsk: Hashable {
     let route: CalendarGate.ConnectRoute
     let email: String?
+    /// The store epoch the card was raised under: the account it is FOR. A
+    /// card whose epoch is not the live one is not drawn and does nothing.
+    let epoch: Int
+    /// Raised to renew a granted calendar whose token Google stopped
+    /// accepting, rather than to connect one for the first time.
+    var renewing = false
+}
+
+/// Connect was pressed: since when, for which account, and by which route
+/// (the waiting line says "Google" or "squelchd" by it).
+struct CalendarConnectWait: Hashable {
+    let since: Date
+    let epoch: Int
+    let route: CalendarGate.ConnectRoute
+    let renewing: Bool
 }
 
 extension AppStore {
@@ -24,18 +44,38 @@ extension AppStore {
     /// Whether the Calendar destination exists at all. Rail, Go menu, ⇧C and
     /// the route all read this one property; the rule itself, and why it
     /// includes developer mode, is `CalendarGate.pageAvailable`.
+    ///
+    /// Deliberately off the raw `stats`, not `calendarAccess`: this says only
+    /// whether a page exists, never whose calendar is in it. Reading it
+    /// through the account guard would hide the page for the second between
+    /// an account switch and the first poll, and the shell watcher would
+    /// throw the user off it. The page's data is fetched from the new daemon
+    /// under the new epoch either way.
     var calendarPageAvailable: Bool {
         CalendarGate.pageAvailable(
             timeline: stats?.timeline, developerMode: Prefs.shared.developerMode)
     }
 
-    /// How this mailbox could connect a calendar; nil when there is nothing
-    /// to offer (granted, an older daemon, or nothing usable sent).
-    var calendarConnectRoute: CalendarGate.ConnectRoute? {
-        CalendarGate.connectRoute(stats?.calendar)
+    /// The calendar grant as the ACTIVE account's own stats report it; nil
+    /// until they have arrived. Everything below reads this, never
+    /// `stats?.calendar` directly.
+    var calendarAccess: CalendarAccess? {
+        CalendarGate.access(stats?.calendar, statsEpoch: statsEpoch, epoch: epoch)
     }
 
-    var calendarGranted: Bool { stats?.calendar?.granted == true }
+    /// How this mailbox could connect a calendar; nil when there is nothing
+    /// to offer (granted, an older daemon, nothing usable sent, or no stats
+    /// for this account yet).
+    var calendarConnectRoute: CalendarGate.ConnectRoute? {
+        CalendarGate.connectRoute(calendarAccess)
+    }
+
+    /// The same door, for renewing a granted calendar whose sync says `auth`.
+    var calendarRenewRoute: CalendarGate.ConnectRoute? {
+        CalendarGate.renewRoute(calendarAccess)
+    }
+
+    var calendarGranted: Bool { calendarAccess?.granted == true }
 
     /// What the page offers about connecting, given what this account has
     /// already been shown.
@@ -45,10 +85,19 @@ extension AppStore {
             practice: RehearsalMode.isEnabled)
     }
 
+    /// The connect card is up, for the account on screen.
+    var calendarCardUp: Bool { calendarConnectAsk?.epoch == epoch }
+
+    /// The wait, if it is this account's.
+    var calendarLiveWait: CalendarConnectWait? {
+        guard let wait = calendarConnectWait, wait.epoch == epoch else { return nil }
+        return wait
+    }
+
     /// True between Connect and the grant arriving, for as long as Google's
     /// consent page can still be finished.
     func calendarWaiting(now: Date = Date()) -> Bool {
-        CalendarGate.isWaiting(since: calendarConnectWaitingSince, now: now)
+        CalendarGate.isWaiting(since: calendarLiveWait?.since, now: now)
     }
 
     // MARK: - per-account memory
@@ -69,7 +118,10 @@ extension AppStore {
     /// flips, so the plain UserDefaults read never goes stale on screen.
     var calendarCardSeen: Bool { UserDefaults.standard.bool(forKey: calendarCardKey) }
 
-    private func markCalendarCardSeen() {
+    /// Only for a card raised under the live epoch: the key is the ACTIVE
+    /// account's, and a card left over from another must not mark it.
+    private func markCalendarCardSeen(_ ask: CalendarConnectAsk) {
+        guard ask.epoch == epoch else { return }
         UserDefaults.standard.set(true, forKey: calendarCardKey)
     }
 
@@ -80,21 +132,32 @@ extension AppStore {
     /// and the next poll tick tries again. `kick` first asks the daemon to
     /// sync the calendar now (on the page's appearance); a daemon without the
     /// sync, or inside its throttle, answers something this ignores.
+    ///
+    /// NEWEST REQUEST WINS. A poll tick's GET can be sent before a mark's
+    /// PATCH and land after the mark's own reload; applied, it would put a
+    /// dismissed row back on screen until the next tick. So each request
+    /// takes a generation, local writes take one too, and an answer is
+    /// applied only while its generation is still the latest.
     func refreshCalendar(kick: Bool = false) async {
         let e = epoch
         if kick { try? await APIClient.shared.refreshTimeline() }
         guard isCurrent(e) else { return }
+        calendarLoadGeneration &+= 1
+        let generation = calendarLoadGeneration
         // Local midnight YESTERDAY: last night's still-running party has to
         // come back, and the daemon judges `expired` in this offset.
         let cal = Calendar.current
         let from = cal.date(byAdding: .day, value: -1, to: cal.startOfDay(for: Date())) ?? Date()
         do {
             let feed = try await APIClient.shared.getTimeline(from: from)
-            guard isCurrent(e) else { return }
+            guard isCurrent(e), generation == calendarLoadGeneration else { return }
             // Assignment is invalidation: an unchanged answer is not written.
             if feed != calendarFeed { calendarFeed = feed }
+            if let wait = calendarLiveWait, wait.renewing, CalendarGate.renewalLanded(feed.calendar) {
+                calendarRenewed()
+            }
         } catch {
-            guard isCurrent(e) else { return }
+            guard isCurrent(e), generation == calendarLoadGeneration else { return }
         }
         if !calendarLoaded { calendarLoaded = true }
     }
@@ -122,6 +185,8 @@ extension AppStore {
                 let id = ghost.id
                 pushUndo(kind: .ghostDismiss, messageId: id, label: "dismissed \(ghost.title)") {
                     [weak self] in
+                    // A write: whatever was asked for before it is stale.
+                    await self?.retireCalendarLoads()
                     _ = try await APIClient.shared.setGhostState(id, priorMark)
                     await self?.refreshCalendar()
                 }
@@ -134,7 +199,14 @@ extension AppStore {
         }
     }
 
+    /// A write is newer than every answer already on its way: none of them
+    /// may be applied over it (see `refreshCalendar`).
+    func retireCalendarLoads() {
+        calendarLoadGeneration &+= 1
+    }
+
     private func setGhostLocally(_ id: Int, _ state: GhostState) {
+        retireCalendarLoads()
         guard var feed = calendarFeed, let i = feed.ghosts.firstIndex(where: { $0.id == id })
         else { return }
         feed.ghosts[i].state = state
@@ -144,26 +216,33 @@ extension AppStore {
     // MARK: - the connect card
 
     /// The page's first visit for an account that has not connected: raise
-    /// the card, once. Every later visit gets the banner instead.
+    /// the card, once. Every later visit gets the banner instead. The offer
+    /// is `.none` until this account's own stats have landed, so nothing is
+    /// raised from the stats of the account before a switch.
     func raiseCalendarCardIfOwed() {
-        guard calendarOffer == .card, calendarConnectAsk == nil else { return }
+        guard calendarOffer == .card, !calendarCardUp else { return }
         openCalendarConnect()
     }
 
-    /// Raise the card on purpose (the banner's Connect).
-    func openCalendarConnect() {
-        guard let route = calendarConnectRoute else { return }
-        let email = stats?.account_email?.trimmingCharacters(in: .whitespacesAndNewlines)
+    /// Raise the card on purpose (the banner's Connect, or the sync line's
+    /// when the connection needs renewing). Built from THIS account's stats
+    /// only, and stamped with this epoch.
+    func openCalendarConnect(renewing: Bool = false) {
+        guard let route = renewing ? calendarRenewRoute : calendarConnectRoute else { return }
+        let email = (statsEpoch == epoch ? stats?.account_email : nil)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         calendarConnectAsk = CalendarConnectAsk(
-            route: route, email: (email?.isEmpty ?? true) ? nil : email)
+            route: route, email: (email?.isEmpty ?? true) ? nil : email, epoch: epoch,
+            renewing: renewing)
     }
 
     /// Connect: open Google's consent in the browser and wait for the grant
     /// to show up on the stats poll. The card stays up, saying so.
     func confirmCalendarConnect() {
-        guard let ask = calendarConnectAsk, case .link(let url) = ask.route else { return }
-        markCalendarCardSeen()
-        calendarConnectWaitingSince = Date()
+        guard let ask = calendarConnectAsk, ask.epoch == epoch, case .link(let url) = ask.route
+        else { return }
+        markCalendarCardSeen(ask)
+        startCalendarWait(ask)
         Analytics.capture("calendar_connect_clicked", ["self_host": false])
         Opener.open(url)
     }
@@ -171,11 +250,17 @@ extension AppStore {
     /// Self-host's Connect: the command goes on the clipboard, to be run where
     /// the daemon runs. The card stays up and waits the same way.
     func copyCalendarCommand() {
-        guard let ask = calendarConnectAsk, case .command(let command) = ask.route else { return }
-        markCalendarCardSeen()
+        guard let ask = calendarConnectAsk, ask.epoch == epoch, case .command(let command) = ask.route
+        else { return }
+        markCalendarCardSeen(ask)
         Clip.copy(command)
-        calendarConnectWaitingSince = Date()
+        startCalendarWait(ask)
         Analytics.capture("calendar_connect_clicked", ["self_host": true])
+    }
+
+    private func startCalendarWait(_ ask: CalendarConnectAsk) {
+        calendarConnectWait = CalendarConnectWait(
+            since: Date(), epoch: ask.epoch, route: ask.route, renewing: ask.renewing)
     }
 
     /// Any way out of the card: Not now, Escape, the scrim, or Close while
@@ -183,22 +268,43 @@ extension AppStore {
     /// card that is already waiting is not a refusal, and is not counted as
     /// one.
     func dismissCalendarConnect() {
-        guard calendarConnectAsk != nil else { return }
+        guard let ask = calendarConnectAsk else { return }
         let waiting = calendarWaiting()
         calendarConnectAsk = nil
-        markCalendarCardSeen()
+        markCalendarCardSeen(ask)
         if !waiting { Analytics.capture("calendar_connect_dismissed") }
+    }
+
+    /// The user went to another page with the card up: the card is the
+    /// calendar page's, so it goes. It has been seen, but leaving is not a
+    /// refusal, so nothing is counted. A wait in progress stays, and the
+    /// page's own waiting line says so on the way back.
+    func closeCalendarConnectForNavigation() {
+        guard let ask = calendarConnectAsk else { return }
+        calendarConnectAsk = nil
+        markCalendarCardSeen(ask)
     }
 
     /// The grant arrived (on the stats poll): put the card and the wait away
     /// and load the real events. Called by the shell's watcher, so it lands
-    /// wherever the user is.
+    /// wherever the user is. Only THIS account's card or wait counts as
+    /// having asked: `calendarGranted` reads this account's stats alone, and
+    /// a card or wait from before a switch is not this account's.
     func calendarGrantArrived() {
-        let wasAsking = calendarConnectAsk != nil || calendarConnectWaitingSince != nil
+        let wasAsking = calendarCardUp || calendarLiveWait != nil
         calendarConnectAsk = nil
-        calendarConnectWaitingSince = nil
+        calendarConnectWait = nil
         guard wasAsking else { return }
         pushToast("Google Calendar connected", .success)
         Task { await refreshCalendar(kick: true) }
+    }
+
+    /// A renewal worked: the sync that was failing on the old token has come
+    /// back clean. The grant flag never moved, so this is heard off the
+    /// timeline rather than the stats.
+    private func calendarRenewed() {
+        if calendarConnectAsk?.renewing == true { calendarConnectAsk = nil }
+        calendarConnectWait = nil
+        pushToast("Google Calendar reconnected", .success)
     }
 }

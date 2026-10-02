@@ -278,6 +278,13 @@ private struct ShellWatchers: View {
             .onChange(of: store.calendarPageAvailable) { _, available in
                 if !available, store.activeView == .calendar { store.setView(.sitrep) }
             }
+            // The connect card belongs to the calendar page: leaving the page
+            // (a digit, ⇧-anything, the rail) takes it down rather than
+            // leaving it over a page it says nothing about. A wait already
+            // started is kept, and the page's waiting line carries it.
+            .onChange(of: store.activeView) { _, view in
+                if view != .calendar { store.closeCalendarConnectForNavigation() }
+            }
             .onChange(of: store.lastRefresh) { old, new in
                 if old == nil, new != nil {
                     store.tour.maybeStart()

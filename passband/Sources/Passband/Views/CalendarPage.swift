@@ -46,6 +46,9 @@
         /// day for earlier today.
         @State private var openFolds: Set<String> = []
         @State private var pageWidth: CGFloat = .infinity
+        /// The last agenda built, so a body re-run that changed nothing it
+        /// is built from (a window resize, a selection) does not rebuild it.
+        @State private var memo = AgendaMemo()
 
         /// Two columns once the list's measure and the detail both fit.
         private var twoColumns: Bool {
@@ -54,6 +57,10 @@
         private static var listMeasure: CGFloat { Typo.measure(560) }
         private static var detailWidth: CGFloat { Typo.measure(340) }
 
+        // THIS BODY NEVER READS `stats`. The poller reassigns it nearly every
+        // ten seconds, and a reader here would rebuild the whole agenda on
+        // each tick; everything about connecting and the sync's health is in
+        // `CalendarStatusLines`, a leaf that takes those ticks alone.
         var body: some View {
             // A minute clock: "Next, in 50 min", the earlier fold and the
             // strip's now tick all move with it. The feed itself changes on
@@ -61,8 +68,7 @@
             TimelineView(.everyMinute) { context in
                 let now = context.date
                 let cal = Calendar.current
-                let items = store.calendarFeed.map { Agenda.items($0, calendar: cal) } ?? []
-                let days = Agenda.days(items, now: now, calendar: cal)
+                let days = memo.days(store.calendarFeed, now: now, calendar: cal)
                 let next = Agenda.next(days, now: now)
                 let rows = navigable(days)
                 let selected = rows.first { $0.id == selection } ?? defaultSelection(next, rows)
@@ -70,9 +76,6 @@
             }
             .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { pageWidth = $0 }
             .background { CalendarRefreshKeeper() }
-            .onChange(of: store.calendarOffer, initial: true) { _, offer in
-                if offer == .card { store.raiseCalendarCardIfOwed() }
-            }
             .onAppear {
                 Analytics.capture("calendar_opened", ["granted": store.calendarGranted])
             }
@@ -84,7 +87,7 @@
             selected: AgendaItem?, now: Date, cal: Calendar
         ) -> some View {
             VStack(spacing: 0) {
-                connectLine(now: now)
+                CalendarStatusLines()
                 if store.calendarFeed == nil && !store.calendarLoaded {
                     BandNote("loading your calendar…")
                         .padding(.horizontal, Space.scaled(10))
@@ -129,24 +132,6 @@
             .keyBindings(.modal, bindings(rows: rows, selected: selected))
         }
 
-        // MARK: - connect line
-
-        /// The quiet line about connecting, once the card has been seen; or
-        /// the wait, while Google's page is open. Nothing at all when the
-        /// calendar is connected or there is no way to connect it.
-        @ViewBuilder
-        private func connectLine(now: Date) -> some View {
-            let waiting = store.calendarWaiting(now: now)
-            if store.calendarConnectAsk == nil,
-                let route = store.calendarConnectRoute,
-                waiting || store.calendarOffer == .banner
-            {
-                CalendarConnectBanner(route: route, waiting: waiting)
-                    .padding(.horizontal, Space.scaled(22))
-                    .padding(.top, Space.s12)
-            }
-        }
-
         // MARK: - the agenda column
 
         @ViewBuilder
@@ -176,6 +161,14 @@
                         .font(Typo.rowSub)
                         .foregroundStyle(Palette.inkFaintest)
                         .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, Space.scaled(11))
+                }
+                // The daemon cut the list short: said where the list ends,
+                // in the faintest ink, because nothing is wrong.
+                if let note = CalendarGate.truncatedNote(store.calendarFeed?.calendar) {
+                    Text(note)
+                        .font(Typo.micro)
+                        .foregroundStyle(Palette.inkFaintest)
                         .padding(.horizontal, Space.scaled(11))
                 }
             }
@@ -276,10 +269,13 @@
         // detail (each one a clickable key hint), and a bar under the list
         // repeating them read as the same three keys printed twice.
 
-        /// The page's keys. They decline while the connect card is up, which
-        /// takes the same context above them for its own Escape and Enter.
+        /// The page's keys. They decline while ANY modal overlay is up (the
+        /// connect card, the shortcuts help, What's New, the reconnect
+        /// prompt): those share this key context, and one that does not bind
+        /// x itself would otherwise let x dismiss a ghost behind it. The
+        /// overlay's own keys are untouched; declining hands them on.
         private func bindings(rows: [AgendaItem], selected: AgendaItem?) -> [KeyBinding] {
-            let free = { store.calendarConnectAsk == nil }
+            let free = { !store.modalOverlayOpen }
             func step(_ delta: Int) -> Bool {
                 guard free(), !rows.isEmpty else { return false }
                 let at = selected.flatMap { s in rows.firstIndex { $0.id == s.id } } ?? -1
@@ -376,7 +372,10 @@
             Color.clear
                 .frame(width: 0, height: 0)
                 .task(id: store.lastRefresh) {
-                    let kick = !kicked
+                    // Also while a renewal is waiting: the sign it worked is
+                    // a clean sync, and the daemon's own loop is five minutes
+                    // away. The daemon throttles the kick to one per 30s.
+                    let kick = !kicked || store.calendarLiveWait?.renewing == true
                     kicked = true
                     await store.refreshCalendar(kick: kick)
                 }
@@ -693,6 +692,122 @@
         }
     }
 
+    // MARK: - the agenda, memoized
+
+    /// The page's one costly derivation, kept until something it is built
+    /// from changes: the feed, the minute, the zone. A reference held in
+    /// `@State` and never observed, so filling it invalidates nothing.
+    private final class AgendaMemo {
+        private var feed: TimelineFeed?
+        private var now: Date?
+        private var zone: TimeZone?
+        private var built: [AgendaDay] = []
+
+        func days(_ feed: TimelineFeed?, now: Date, calendar: Calendar) -> [AgendaDay] {
+            if now == self.now, calendar.timeZone == zone, feed == self.feed { return built }
+            let items = feed.map { Agenda.items($0, calendar: calendar) } ?? []
+            built = Agenda.days(items, now: now, calendar: calendar)
+            (self.feed, self.now, zone) = (feed, now, calendar.timeZone)
+            return built
+        }
+    }
+
+    // MARK: - connecting and the sync
+
+    /// Everything on the page that reads `stats`, and so changes on the
+    /// poll's ten-second clock: the connect offer (and raising the card on a
+    /// first visit), the wait, and the sync's health. A leaf, so a stats tick
+    /// rebuilds these lines and not the agenda under them. Nothing drawn when
+    /// there is nothing to say, and then it takes no room.
+    private struct CalendarStatusLines: View {
+        @Environment(AppStore.self) private var store
+
+        var body: some View {
+            // The wait has a deadline, so these lines keep a minute clock of
+            // their own.
+            TimelineView(.everyMinute) { context in
+                lines(now: context.date)
+            }
+            .onChange(of: store.calendarOffer, initial: true) { _, offer in
+                if offer == .card { store.raiseCalendarCardIfOwed() }
+            }
+        }
+
+        @ViewBuilder
+        private func lines(now: Date) -> some View {
+            let wait = store.calendarLiveWait
+            let waiting = store.calendarWaiting(now: now)
+            let notice = CalendarGate.syncNotice(
+                store.calendarFeed?.calendar, now: now, calendar: .current)
+            VStack(spacing: 0) {
+                // While the card is up it says all of this itself.
+                if !store.calendarCardUp {
+                    if waiting, let wait {
+                        CalendarConnectBanner(route: wait.route, waiting: true, renewing: wait.renewing)
+                            .padding(.horizontal, Space.scaled(22))
+                            .padding(.top, Space.s12)
+                    } else if store.calendarOffer == .banner, let route = store.calendarConnectRoute {
+                        CalendarConnectBanner(route: route, waiting: false, renewing: false)
+                            .padding(.horizontal, Space.scaled(22))
+                            .padding(.top, Space.s12)
+                    }
+                }
+                if !waiting, let notice {
+                    CalendarSyncLine(notice: notice, canRenew: store.calendarRenewRoute != nil)
+                        .padding(.horizontal, Space.scaled(22))
+                        .padding(.top, Space.s12)
+                }
+            }
+        }
+    }
+
+    /// The sync is not well. A renewal is the banner's shape with the
+    /// banner's Connect, because it is the same door; a refresh that failed
+    /// for Google's reasons is one faint line with nothing to press. Neither
+    /// takes the danger or warning colour, and the events stay on screen.
+    private struct CalendarSyncLine: View {
+        @Environment(AppStore.self) private var store
+        let notice: CalendarGate.SyncNotice
+        let canRenew: Bool
+
+        var body: some View {
+            switch notice.kind {
+            case .renew:
+                HStack(spacing: Space.s10) {
+                    Image(systemName: "calendar")
+                        .font(Typo.ui(12))
+                        .foregroundStyle(Palette.inkFaint)
+                    Text(notice.text)
+                        .font(Typo.rowSub)
+                        .foregroundStyle(Palette.inkDim)
+                    Spacer(minLength: Space.s8)
+                    if canRenew {
+                        Button("Connect") { store.openCalendarConnect(renewing: true) }
+                            .buttonStyle(.glass)
+                            .controlSize(.small)
+                    }
+                }
+                // Two lines, not one: this sentence is longer than the
+                // banner's, and cut off it would lose the reason for the button.
+                .lineLimit(2)
+                .padding(.horizontal, Space.s12)
+                .padding(.vertical, Space.s6)
+                .background(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .strokeBorder(Palette.hairline, lineWidth: 1)
+                )
+                .accessibilityElement(children: .combine)
+            case .couldNotRefresh:
+                Text(notice.text)
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.inkFaint)
+                    .lineLimit(1)
+                    .padding(.horizontal, Space.scaled(11))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
     // MARK: - connect banner
 
     /// The calendar is not connected, said once and quietly, for an account
@@ -703,6 +818,8 @@
         @Environment(AppStore.self) private var store
         let route: CalendarGate.ConnectRoute
         let waiting: Bool
+        /// The wait is for a renewal: "Show again" raises the renewal's card.
+        let renewing: Bool
 
         var body: some View {
             HStack(spacing: Space.s10) {
@@ -720,7 +837,9 @@
                         .foregroundStyle(Palette.inkDim)
                 }
                 Spacer(minLength: Space.s8)
-                Button(waiting ? "Show again" : "Connect") { store.openCalendarConnect() }
+                Button(waiting ? "Show again" : "Connect") {
+                    store.openCalendarConnect(renewing: renewing)
+                }
                     .buttonStyle(.glass)
                     .controlSize(.small)
             }

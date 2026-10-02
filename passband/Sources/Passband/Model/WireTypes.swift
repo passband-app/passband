@@ -1071,7 +1071,46 @@ struct StoreStats: Codable, Sendable, Hashable {
     /// ABSENT on a daemon too old to have the grant path, and absence reads as
     /// "do not know", never as "not granted": with no way to connect there is
     /// nothing true to ask, so no connect card or banner is drawn.
-    var calendar: CalendarAccess?
+    ///
+    /// LENIENT: a `calendar` this client cannot read (no `granted`, not an
+    /// object) reads as absent. This struct is everyone's ten-second poll, and
+    /// one optional field must never be able to fail the whole decode.
+    @LenientDecoded var calendar: CalendarAccess? = nil
+}
+
+/// An optional field that decodes to nil instead of throwing when its value
+/// is malformed. For a field on a struct whose decode must not fail because
+/// of it; a missing key or `null` is nil as usual, and encoding writes the
+/// value or nothing.
+@propertyWrapper
+struct LenientDecoded<Value: Codable & Sendable & Hashable>: Codable, Sendable, Hashable {
+    var wrappedValue: Value?
+
+    init(wrappedValue: Value?) { self.wrappedValue = wrappedValue }
+
+    init(from decoder: Decoder) throws {
+        wrappedValue = try? decoder.singleValueContainer().decode(Value.self)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        try c.encode(wrappedValue)
+    }
+}
+
+extension KeyedDecodingContainer {
+    /// What synthesized `Decodable` calls for a `@LenientDecoded` property: a
+    /// missing key is nil rather than `keyNotFound`, and a bad value is nil.
+    func decode<V>(_: LenientDecoded<V>.Type, forKey key: Key) throws -> LenientDecoded<V> {
+        LenientDecoded(wrappedValue: try? decodeIfPresent(V.self, forKey: key))
+    }
+}
+
+extension KeyedEncodingContainer {
+    /// The key is left out when the value is nil, as a plain optional's is.
+    mutating func encode<V>(_ value: LenientDecoded<V>, forKey key: Key) throws {
+        try encodeIfPresent(value.wrappedValue, forKey: key)
+    }
 }
 
 /// The calendar grant off /client/stats. Exactly one of the two ways to
@@ -1338,6 +1377,9 @@ struct TimelineCalendarStatus: Codable, Sendable, Hashable {
     var granted: Bool
     var synced_at: String?
     var error: TimelineSyncError?
+    /// The daemon served only the nearest events of a longer list. ABSENT on
+    /// a daemon too old to cut one, and absence reads as false.
+    var truncated: Bool?
 }
 
 /// `PATCH /client/timeline/ghosts/{id}` answers this.

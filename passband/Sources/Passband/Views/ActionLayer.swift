@@ -98,8 +98,12 @@ struct ActionLayer: View {
             if let days = store.retriageAsk { RetriageConfirm(days: days) }
             if let ask = store.reconnectAsk { ReconnectAccountPrompt(ask: ask) }
             // The calendar connect card: same slot and same reasoning as the
-            // reconnect prompt above, which it is built like.
-            if let ask = store.calendarConnectAsk { CalendarConnectCard(ask: ask) }
+            // reconnect prompt above, which it is built like. Only for the
+            // account it was raised for (`calendarCardUp`): a switch that
+            // happens under it takes it down, whatever else is cleared.
+            if let ask = store.calendarConnectAsk, store.calendarCardUp {
+                CalendarConnectCard(ask: ask)
+            }
             // LAST, and it outranks even the card above: that one is a greeting
             // the user can dismiss, this one is the app being unavailable while
             // a re-triage rewrites what every other overlay here is about.

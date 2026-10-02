@@ -170,15 +170,15 @@
 
         /// How real a ghost is: certain (and why), or its band, which names
         /// itself beside its own swatch, with the model's reason quoted.
+        /// The words are `Agenda.standing`'s, pure and tested.
         @ViewBuilder
         private func standing(_ ghost: TimelineGhost) -> some View {
-            if item.cancelled {
-                FactRow(label: "Status") { plain("Cancelled, according to the mail") }
-            } else if ghost.state == .going {
-                FactRow(label: "Status") { plain("You said you are going") }
-            } else if ghost.commitment == .committed {
-                FactRow(label: "Status") { plain("Booked, bought or accepted") }
-            } else if let likelihood = ghost.likelihood {
+            switch Agenda.standing(ghost) {
+            case .status(let text):
+                FactRow(label: "Status") {
+                    plain(text).fixedSize(horizontal: false, vertical: true)
+                }
+            case .likelihood(let likelihood):
                 FactRow(label: "Likelihood") {
                     VStack(alignment: .leading, spacing: Space.s4) {
                         HStack(spacing: Space.s6) {
@@ -193,10 +193,8 @@
                         }
                     }
                 }
-            } else {
-                FactRow(label: "Status") {
-                    plain(ghost.commitment == .proposed ? "Proposed, not agreed" : "Invited, not answered")
-                }
+            case nil:
+                EmptyView()
             }
         }
 

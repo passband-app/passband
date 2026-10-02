@@ -175,6 +175,11 @@ final class SitrepPoller {
             // rode inside `SitrepData` this compare never once said "same".
             if next != store.sitrep { store.sitrep = next }
             if st != store.stats { store.stats = st }
+            // Whose stats these are: the epoch this pull was asked under,
+            // which the guard above has just confirmed is the live one. Set
+            // even when the body is identical, because identical stats can
+            // still belong to a mailbox switched to since they were written.
+            if store.statsEpoch != e { store.statsEpoch = e }
             noteCatchUp(st.catch_up)
             // THE BADGE IS REFRESHED EVEN WHEN NOTHING CHANGED, and this is the
             // second write point rather than an accident. `AppStore.sitrep`'s

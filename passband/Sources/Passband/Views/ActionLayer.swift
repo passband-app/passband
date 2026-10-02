@@ -4,7 +4,7 @@
 // the re-triage run itself. The composer is NOT here anymore — it is a layout
 // pane (see ComposePane in MainShell), not an overlay.
 // Read views own the list keymap; this layer extends that same "list" context
-// with t and p. Modal-context keys live inside each overlay.
+// with c. Modal-context keys live inside each overlay.
 
 import SwiftUI
 
@@ -104,9 +104,6 @@ struct ActionLayer: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
         .keyBindings(.list, [
-            KeyBinding("t", "tune sender") {
-                if let u = store.selectedUpdate { Actions.tune(sender: u.sender) }
-            },
             // `c` = compose, registered per-SURFACE (here for the lists, and again
             // in the sitrep and the reader) rather than globally: a global one would
             // fire from inside a modal, where the letter belongs to whatever is
@@ -286,78 +283,20 @@ struct ActionLayer: View {
 
 // MARK: - shortcuts overlay
 
-/// Keyboard-shortcuts help ('?'). Curated and grouped by hand rather than
-/// dumped from the keymap registry, which carries per-context duplicates.
+/// Keyboard-shortcuts help ('?'). Draws `ShortcutCatalog`, the one table the
+/// assistant's list_shortcuts tool also reads, so the two cannot disagree.
 struct ShortcutsOverlay: View {
+    @Environment(AppStore.self) private var store
     let onClose: () -> Void
 
-    private struct Group: Identifiable {
-        var title: String
-        var items: [(keys: [String], desc: String)]
-        var id: String { title }
+    /// The sheet's way out to the assistant. It CLOSES THE SHEET FIRST: the
+    /// ask bar is mounted beneath this overlay, so the global ⌘K alone would
+    /// open it underneath, behind a scrim, where the hint that sent somebody
+    /// there had just hidden it.
+    private func askAgent() {
+        onClose()
+        store.askBarOpen = true
     }
-
-    private static let groups: [Group] = [
-        Group(
-            title: "Sitrep & inbox",
-            items: [
-                (["j", "k"], "move selection"),
-                (["Enter"], "open thread"),
-                (["r"], "reply"),
-                (["c"], "new message"),
-                (["e", "d"], "mark done"),
-                (["v"], "fix a wrong triage verdict"),
-                (["h"], "remind me about this later"),
-                (["t"], "tune sender rule"),
-                (["f"], "search this sender"),
-                (["u"], "undo last action"),
-            ]),
-        Group(
-            title: "Thread viewer",
-            items: [
-                (["j", "k"], "older / newer message"),
-                (["←", "→"], "previous / next queued email"),
-                (["r"], "reply"),
-                (["Enter"], "reply all"),
-                (["c"], "new message"),
-                (["e", "d"], "done, and close the reader"),
-                (["E", "D"], "done, and open the next email"),
-                (["S"], "skip to the next email, leave this one"),
-                (["h"], "remind + next"),
-                (["u"], "unsubscribe from this sender"),
-                (["t"], "new rule for this sender"),
-                // `f` is FORWARD in the reader and search-this-sender
-                // everywhere else; the group above still shows `f` as search,
-                // and this row is the one place a reader can see that the key
-                // changes hands. The reader has no search-this-sender key of
-                // its own: `/` then `from:` is the spelled-out way.
-                (["f"], "forward this message"),
-                (["Esc"], "back"),
-            ]),
-        Group(
-            title: "Navigate",
-            items: [
-                (["1", "2", "3", "4", "5"], "sitrep · emails · auth · rules · groups"),
-                (["⌘["], "back"),
-                (["⌘]"], "forward"),
-                (["a"], "browse all mail"),
-                (["n"], "noise page (and back)"),
-                (["/"], "search"),
-                (["⌘K"], "ask your inbox"),
-                (["⌘⇧K"], "new ask chat"),
-                (["⌘,"], "settings"),
-                (["g"], "auth messages"),
-                (["T"], "rules"),
-                (["A"], "audit log (in settings)"),
-            ]),
-        Group(
-            title: "App",
-            items: [
-                (["\\"], "toggle light / dark theme"),
-                (["?"], "this help"),
-                (["Esc"], "close panel / overlay"),
-            ]),
-    ]
 
     var body: some View {
         OverlayScrim(onDismiss: onClose) {
@@ -370,7 +309,7 @@ struct ShortcutsOverlay: View {
                     columns: [GridItem(.flexible(), spacing: Space.scaled(22)), GridItem(.flexible())],
                     alignment: .leading, spacing: Space.scaled(18)
                 ) {
-                    ForEach(Self.groups) { group in
+                    ForEach(ShortcutCatalog.groups) { group in
                         VStack(alignment: .leading, spacing: Space.scaled(5)) {
                             Text(group.title)
                                 .font(Typo.sectionLabel)
@@ -391,6 +330,18 @@ struct ShortcutsOverlay: View {
                 }
 
                 HStack(spacing: Space.s4) {
+                    // A list of keys answers "which key", never "how do I". The
+                    // assistant reads this same table and the rest of the guide.
+                    Button(action: askAgent) {
+                        HStack(spacing: Space.s4) {
+                            Text("you can always ask the agent!")
+                                .font(Typo.micro)
+                                .foregroundStyle(Palette.inkDim)
+                            Kbd("⌘K")
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
                     Spacer()
                     Kbd("?")
                     Text("or").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
@@ -403,6 +354,9 @@ struct ShortcutsOverlay: View {
         .keyBindings(.modal, [
             KeyBinding("Escape", "close help") { onClose() },
             KeyBinding("?", "close help") { onClose() },
+            // Ahead of the global ⌘K, which this context would otherwise let
+            // through to open the bar under the sheet (see `askAgent`).
+            KeyBinding("k", "ask your inbox", meta: true, allowInInput: true) { askAgent() },
         ])
     }
 }

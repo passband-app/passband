@@ -30,7 +30,9 @@ pub use transfer::{
     encode_transfer,
 };
 
-use crate::config::{GMAIL_READONLY_SCOPE, OAuthClientConfig, WRITE_SCOPES};
+use crate::config::{
+    CALENDAR_EVENTS_SCOPE, CALENDAR_SCOPES, GMAIL_READONLY_SCOPE, OAuthClientConfig, WRITE_SCOPES,
+};
 use crate::credentials::{CredentialKind, RefreshedToken, StoredToken};
 use crate::error::{CoreError, Result};
 use base64::Engine as _;
@@ -114,6 +116,11 @@ pub enum AuthScopes {
     Read,
     /// `gmail.modify` + `gmail.send` — the Write credential.
     Write,
+    /// `calendar.events` + `calendar.calendarlist.readonly` — the Calendar
+    /// credential (`squelchd auth --calendar`), self-host only. The one scope
+    /// set whose REQUEST is wider than its REQUIREMENT: see
+    /// [`AuthScopes::required`].
+    Calendar,
 }
 
 impl AuthScopes {
@@ -122,7 +129,36 @@ impl AuthScopes {
         match self {
             AuthScopes::Read => vec![GMAIL_READONLY_SCOPE.to_string()],
             AuthScopes::Write => WRITE_SCOPES.iter().map(|s| s.to_string()).collect(),
+            AuthScopes::Calendar => CALENDAR_SCOPES.iter().map(|s| s.to_string()).collect(),
         }
+    }
+
+    /// The scopes a grant must COVER to be stored. The same as
+    /// [`AuthScopes::scopes`] for the two Gmail sets. For Calendar it is the
+    /// events scope alone: the calendar-list scope is wanted, not needed
+    /// (without it the primary calendar is still readable), so a person who
+    /// unticks only that box still gets a working calendar.
+    pub fn required(self) -> Vec<String> {
+        match self {
+            AuthScopes::Read | AuthScopes::Write => self.scopes(),
+            AuthScopes::Calendar => vec![CALENDAR_EVENTS_SCOPE.to_string()],
+        }
+    }
+
+    /// Whether this consent asks Google for incremental authorization
+    /// (`include_granted_scopes=true`), so the token it returns ALSO carries
+    /// what this OAuth client was granted before.
+    ///
+    /// Calendar only, and for a reason that is not convenience: the exchange
+    /// learns WHICH ACCOUNT consented from Gmail's profile endpoint, which a
+    /// calendar-only token cannot call. Asking for the earlier grants back is
+    /// what lets the one identity check every other consent runs run here too,
+    /// instead of inventing a second one. The cost, stated plainly: the token in
+    /// the Calendar slot carries the Gmail scopes this client already holds, so
+    /// its reach is the union. As for the Read slot, the slot a code path loads
+    /// is what enforces the split, not the token's scope (`docs/SECURITY.md`).
+    pub fn include_granted_scopes(self) -> bool {
+        matches!(self, AuthScopes::Calendar)
     }
 
     /// The credential kind this scope set maps to.
@@ -130,6 +166,7 @@ impl AuthScopes {
         match self {
             AuthScopes::Read => CredentialKind::Read,
             AuthScopes::Write => CredentialKind::Write,
+            AuthScopes::Calendar => CredentialKind::Calendar,
         }
     }
 
@@ -138,6 +175,9 @@ impl AuthScopes {
         match self {
             AuthScopes::Read => "read-only Gmail (gmail.readonly)",
             AuthScopes::Write => "Gmail modify + send (gmail.modify, gmail.send)",
+            AuthScopes::Calendar => {
+                "Google Calendar (calendar.events, calendar.calendarlist.readonly)"
+            }
         }
     }
 }
@@ -149,6 +189,7 @@ impl From<CredentialKind> for AuthScopes {
         match kind {
             CredentialKind::Read => AuthScopes::Read,
             CredentialKind::Write => AuthScopes::Write,
+            CredentialKind::Calendar => AuthScopes::Calendar,
         }
     }
 }
@@ -220,6 +261,9 @@ fn authorize_url(
     for scope in scopes.scopes() {
         req = req.add_scope(Scope::new(scope));
     }
+    if scopes.include_granted_scopes() {
+        req = req.add_extra_param("include_granted_scopes", "true");
+    }
     let (url, csrf_token) = req
         // Ask for a refresh token and force consent so we reliably get one.
         .add_extra_param("access_type", "offline")
@@ -264,7 +308,8 @@ fn exchange_code(
         .map(|granted| granted.iter().map(|s| s.to_string()).collect());
     check_scope_grant(scopes, granted.as_deref())?;
 
-    let mailbox = fetch_profile_email(&http, GMAIL_PROFILE_URL, token.access_token().secret())?;
+    let mailbox = fetch_profile_email(&http, GMAIL_PROFILE_URL, token.access_token().secret())
+        .map_err(|e| calendar_identity_hint(scopes, e))?;
     if let Some(expected) = expected_account {
         check_account_match(expected, &mailbox)?;
     }
@@ -275,7 +320,30 @@ fn exchange_code(
             token.access_token().secret().to_string(),
             token.refresh_token().map(|r| r.secret().to_string()),
             token.expires_in(),
-        ),
+        )
+        .with_scopes(Some(recorded_scopes(scopes, granted))),
+    ))
+}
+
+/// The scopes to RECORD on a freshly exchanged token: what Google reported, or,
+/// when the response left `scope` out, what was requested (RFC 6749 §5.1 says
+/// absent means "identical to the request", and [`check_scope_grant`] already
+/// took it that way).
+fn recorded_scopes(requested: AuthScopes, granted: Option<Vec<String>>) -> Vec<String> {
+    granted.unwrap_or_else(|| requested.scopes())
+}
+
+/// A calendar consent whose token cannot read Gmail's profile has nothing to
+/// check the account against. Said in words that name the fix: the calendar
+/// grant leans on the Gmail grant this host already holds.
+fn calendar_identity_hint(scopes: AuthScopes, err: CoreError) -> CoreError {
+    if scopes != AuthScopes::Calendar {
+        return err;
+    }
+    CoreError::Credential(format!(
+        "{err}. A calendar consent is matched to your mailbox through the Gmail access this \
+         OAuth client already has, so authorize Gmail first with `squelchd auth`, then run \
+         `squelchd auth --calendar` again."
     ))
 }
 
@@ -466,7 +534,7 @@ fn check_scope_grant(requested: AuthScopes, granted: Option<&[String]>) -> Resul
         return Ok(());
     };
     let missing: Vec<String> = requested
-        .scopes()
+        .required()
         .into_iter()
         .filter(|want| !granted.iter().any(|got| got == want))
         .collect();
@@ -2153,6 +2221,7 @@ mod tests {
             access_token: "stale-access".to_string(),
             refresh_token: Some("pasted-refresh-secret".to_string()),
             expires_at: None,
+            scopes: None,
         }
     }
 
@@ -2304,6 +2373,150 @@ mod tests {
             json_answer("200 OK", r#"{"emailAddress":"me@gmail.com"}"#),
         ]);
         assert!(verify_at(&base, "me@gmail.com", CredentialKind::Read).is_ok());
+    }
+
+    /// What an import STORES records the scopes Google named on the refresh it
+    /// ran, so a Calendar entry lands knowing it grants calendar. The blob's
+    /// own `scopes` (attacker-authored, like every other field in it) never
+    /// survives: the pasted token here claims calendar and the refresh does
+    /// not, and the refresh wins.
+    #[test]
+    fn an_imported_credential_records_the_scopes_its_refresh_named() {
+        let granted = format!("{GMAIL_READONLY_SCOPE} {}", CALENDAR_SCOPES.join(" "));
+        let base = scripted_google(vec![
+            token_answer(Some(&granted)),
+            json_answer("200 OK", r#"{"emailAddress":"me@gmail.com"}"#),
+        ]);
+        let stored = verify_at(&base, "me@gmail.com", CredentialKind::Calendar).unwrap();
+        assert!(stored.grants_calendar());
+        assert_eq!(
+            stored.scopes,
+            Some(granted.split(' ').map(str::to_string).collect())
+        );
+
+        let base = scripted_google(vec![
+            token_answer(Some(GMAIL_READONLY_SCOPE)),
+            json_answer("200 OK", r#"{"emailAddress":"me@gmail.com"}"#),
+        ]);
+        let mut claims_calendar = pasted_token();
+        claims_calendar.scopes = Some(vec![CALENDAR_EVENTS_SCOPE.to_string()]);
+        let stored = verify_transfer_credential_at(
+            &test_client(),
+            "me@gmail.com",
+            CredentialKind::Read,
+            &claims_calendar,
+            &format!("{base}/token"),
+            &format!("{base}/profile"),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert!(
+            !stored.grants_calendar(),
+            "the blob's claim must not survive"
+        );
+        assert_eq!(stored.scopes, Some(vec![GMAIL_READONLY_SCOPE.to_string()]));
+
+        // And a Calendar entry whose refresh does not carry the events scope
+        // is refused for the Calendar slot.
+        let base = scripted_google(vec![
+            token_answer(Some(GMAIL_READONLY_SCOPE)),
+            json_answer("200 OK", r#"{"emailAddress":"me@gmail.com"}"#),
+        ]);
+        let err = verify_err(&base, "me@gmail.com", CredentialKind::Calendar);
+        assert!(err.contains(CALENDAR_EVENTS_SCOPE), "{err}");
+    }
+
+    /// The calendar consent asks for both calendar scopes and REQUIRES only
+    /// the events one: unticking the list box still stores a working grant,
+    /// unticking events stores nothing. Extras (the Gmail scopes incremental
+    /// authorization hands back) pass, as everywhere.
+    #[test]
+    fn the_calendar_scope_set_requires_events_only() {
+        assert_eq!(
+            AuthScopes::Calendar.scopes(),
+            CALENDAR_SCOPES
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            AuthScopes::Calendar.required(),
+            vec![CALENDAR_EVENTS_SCOPE.to_string()]
+        );
+        // The Gmail sets are unchanged: required is exactly requested.
+        for gmail in [AuthScopes::Read, AuthScopes::Write] {
+            assert_eq!(gmail.required(), gmail.scopes());
+        }
+
+        let events_only = vec![CALENDAR_EVENTS_SCOPE.to_string()];
+        assert!(check_scope_grant(AuthScopes::Calendar, Some(&events_only)).is_ok());
+        let unioned: Vec<String> = [GMAIL_READONLY_SCOPE]
+            .iter()
+            .chain(CALENDAR_SCOPES)
+            .map(|s| s.to_string())
+            .collect();
+        assert!(check_scope_grant(AuthScopes::Calendar, Some(&unioned)).is_ok());
+
+        let list_only = vec![crate::config::CALENDAR_LIST_SCOPE.to_string()];
+        let err = check_scope_grant(AuthScopes::Calendar, Some(&list_only))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(CALENDAR_EVENTS_SCOPE), "{err}");
+        let gmail_only = vec![GMAIL_READONLY_SCOPE.to_string()];
+        assert!(check_scope_grant(AuthScopes::Calendar, Some(&gmail_only)).is_err());
+        // A Calendar grant is not a Read one.
+        assert!(check_scope_grant(AuthScopes::Read, Some(&events_only)).is_err());
+
+        assert_eq!(AuthScopes::Calendar.kind(), CredentialKind::Calendar);
+        assert_eq!(
+            AuthScopes::from(CredentialKind::Calendar),
+            AuthScopes::Calendar
+        );
+    }
+
+    /// ONLY the calendar consent asks Google for incremental authorization:
+    /// it is how that token can still read Gmail's profile, which is the one
+    /// account check every consent runs. The Gmail consents are unchanged.
+    #[test]
+    fn only_the_calendar_consent_includes_granted_scopes() {
+        let oauth = google_client(&test_client(), "http://127.0.0.1:8847").unwrap();
+        for scopes in [AuthScopes::Read, AuthScopes::Write, AuthScopes::Calendar] {
+            let (url, _, _) = authorize_url(&oauth, scopes, CsrfToken::new_random());
+            let params: std::collections::HashMap<String, String> = url
+                .query_pairs()
+                .map(|(k, v)| (k.into(), v.into()))
+                .collect();
+            let incremental = params.get("include_granted_scopes").map(String::as_str);
+            if scopes == AuthScopes::Calendar {
+                assert_eq!(incremental, Some("true"));
+                assert_eq!(
+                    params.get("scope").map(String::as_str),
+                    Some(CALENDAR_SCOPES.join(" ").as_str())
+                );
+            } else {
+                assert_eq!(incremental, None, "{scopes:?}");
+            }
+            assert_eq!(
+                params.get("access_type").map(String::as_str),
+                Some("offline")
+            );
+            assert_eq!(params.get("prompt").map(String::as_str), Some("consent"));
+        }
+    }
+
+    /// An exchange records what Google reported, and an absent `scope` reads as
+    /// the request (RFC 6749 §5.1), the same way the grant check reads it.
+    #[test]
+    fn an_exchange_records_its_granted_scopes() {
+        let granted = vec![GMAIL_READONLY_SCOPE.to_string()];
+        assert_eq!(
+            recorded_scopes(AuthScopes::Read, Some(granted.clone())),
+            granted
+        );
+        assert_eq!(
+            recorded_scopes(AuthScopes::Calendar, None),
+            AuthScopes::Calendar.scopes()
+        );
     }
 
     // --- the consent listener ----------------------------------------------

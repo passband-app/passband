@@ -148,7 +148,11 @@ CREATE TABLE IF NOT EXISTS reconnect_jobs (
     attempts INTEGER NOT NULL DEFAULT 0,
     retry_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     lease_until TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- What the consent behind this job was for. A late column: see
+    -- RECONNECT_ADDED_COLUMNS, which adds it to a database that predates it.
+    purpose TEXT NOT NULL DEFAULT 'reconnect'
+        CHECK (purpose IN ('reconnect', 'calendar'))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS reconnect_pending_label
     ON reconnect_jobs(label) WHERE status = 'pending';
@@ -328,6 +332,16 @@ const TENANT_ADDED_COLUMNS: [(&str, &str); 6] = [
     ("share_token_hash", "TEXT"),
     ("share_token_minted_at", "TEXT COLLATE \"C\""),
 ];
+
+/// Columns `reconnect_jobs` gained after it shipped. Same shape as
+/// [`TENANT_ADDED_COLUMNS`]: `ADD COLUMN IF NOT EXISTS`, and a DEFAULT so every
+/// row written before the column existed reads as the plain reconnect it was.
+/// The definition is the SCHEMA's word for word, so a fresh database and a
+/// migrated one cannot disagree about the constraint.
+const RECONNECT_ADDED_COLUMNS: [(&str, &str); 1] = [(
+    "purpose",
+    "TEXT NOT NULL DEFAULT 'reconnect' CHECK (purpose IN ('reconnect', 'calendar'))",
+)];
 
 /// Store errors.
 ///
@@ -1688,6 +1702,7 @@ async fn migrate(tx: &Transaction<'_>) -> Result<()> {
     add_missing_columns(tx, "invite_codes", &ADDED_COLUMNS).await?;
     add_missing_columns(tx, "tenants", &TENANT_ADDED_COLUMNS).await?;
     add_missing_columns(tx, "users", &USER_ADDED_COLUMNS).await?;
+    add_missing_columns(tx, "reconnect_jobs", &RECONNECT_ADDED_COLUMNS).await?;
     add_share_token_index(tx).await?;
     add_invited_by_index(tx).await?;
     backfill_expiry(tx).await?;

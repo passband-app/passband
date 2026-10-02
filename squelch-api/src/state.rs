@@ -131,6 +131,13 @@ pub struct ApiState {
     /// a LINK TARGET and nothing more: no trust flows from here, because whatever
     /// comes back is a pairing code the store adjudicates on its own terms.
     pub(crate) console_sso_url: Option<Arc<str>>,
+    /// The calendar token resolver, which is also how `/client/stats` learns
+    /// whether calendar is granted. `None` when no OAuth client is configured
+    /// (no refresh is possible, so nothing could call the Calendar API) and in
+    /// every test harness that did not attach one; `None` reports
+    /// `calendar.granted: false`. HUMAN DOOR ONLY: nothing on `/mcp` or
+    /// `/client/agent/*` reads it.
+    pub(crate) calendar: Option<Arc<squelch_core::credentials::CalendarCredentials>>,
     /// The process's metrics registry, read by `/client/stats` to answer
     /// whether this mailbox's Gmail credential is currently working.
     ///
@@ -414,6 +421,7 @@ impl ApiState {
                 crate::auth::DEVICE_AUTH_CONCURRENCY,
             )),
             console_sso_url: None,
+            calendar: None,
             sync_metrics: None,
             gmail_budget: None,
             console_allow_insecure_cookie: false,
@@ -615,6 +623,21 @@ impl ApiState {
 
     pub(crate) fn console_sso_url(&self) -> Option<&str> {
         self.console_sso_url.as_deref()
+    }
+
+    /// Attach the calendar token resolver. See [`ApiState::calendar`].
+    pub fn with_calendar_credentials(
+        mut self,
+        calendar: squelch_core::credentials::CalendarCredentials,
+    ) -> Self {
+        self.calendar = Some(Arc::new(calendar));
+        self
+    }
+
+    /// The calendar token resolver, if one is attached. Slice B's sync and
+    /// `/client/stats` read the grant through this one object.
+    pub fn calendar(&self) -> Option<&Arc<squelch_core::credentials::CalendarCredentials>> {
+        self.calendar.as_ref()
     }
 
     /// Declare that this console is served over plain http, the LAN escape
@@ -988,12 +1011,23 @@ impl ApiState {
         }
 
         Ok(match cfg.oauth_client() {
-            Ok(client) => state.with_write_credentials(
-                cfg.credential_backend,
-                account_email.to_string(),
-                cfg.resolve_credentials_path(),
-                client,
-            ),
+            Ok(client) => {
+                let account_id = state.account_id;
+                state
+                    .with_calendar_credentials(squelch_core::credentials::CalendarCredentials::new(
+                        account_id,
+                        account_email.to_string(),
+                        cfg.credential_backend,
+                        cfg.resolve_credentials_path(),
+                        client.clone(),
+                    ))
+                    .with_write_credentials(
+                        cfg.credential_backend,
+                        account_email.to_string(),
+                        cfg.resolve_credentials_path(),
+                        client,
+                    )
+            }
             Err(_) => {
                 eprintln!(
                     "squelch-api: no OAuth client configured; action endpoints will return 403 \

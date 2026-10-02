@@ -732,11 +732,15 @@ real calendar.
   are Gmail today), works on hosted with the Mac asleep, works on iOS, and is
   the only path to RSVP, invitations with attendees, and calendar context in
   triage. Sync is incremental and stores events in the tenant's database.
-- **Scope.** One event read and write scope, asked for once. Two consents
-  would mean two trips through the unverified-app screen. The exact scope
-  names and their classification are to be checked against Google's current
-  list before building; the working assumption is that calendar scopes are
-  sensitive, not restricted.
+- **Scope.** `calendar.events` (read and write events on every calendar the
+  user can open) plus `calendar.calendarlist.readonly` (which calendars they
+  subscribe to and show), asked for once
+  (`CALENDAR_SCOPES` in `squelch-core/src/config.rs`). "Calendar is granted"
+  means a token's recorded scopes include `calendar.events`; the list scope is
+  wanted, not required. Classification is still to be confirmed against
+  Google's list at filing; the working assumption is sensitive, not
+  restricted. `docs/VERIFICATION.md` carries the declarations and the
+  justification.
 - **Two doors still hold.** Sync reads. Writes happen only in human-door
   handlers, as with Gmail.
 - **EventKit, on the client, as a supplement.** It reads every calendar
@@ -750,6 +754,33 @@ real calendar.
 
 ### Migrating existing users (DECIDED: must be designed in, not bolted on)
 
+**The grant path is BUILT (wave 2, slice A).** What shipped, where it differs
+from the plan below:
+
+- **Hosted**: `GET /reconnect?calendar=1&hint=<address>` on the control plane.
+  It asks for the three Gmail scopes AND the two calendar scopes in one
+  consent, with `include_granted_scopes=true`, and on success runs the
+  existing reconnect pipeline unchanged: tenant discovered from the account
+  Google says consented, warden recipient and custody check, the one token
+  sealed into the Read and Write slots, the durable job (which now records a
+  `purpose`, `reconnect` or `calendar`), and the status page. It does NOT ask
+  "only for the new scope": an install replaces the tenant's whole
+  credentials file, so the calendar grant has to be the SAME token with more
+  scopes, and the request has to cover what the replaced token covered.
+- **Calendar unticked** at Google: the Gmail floor passes, nothing is
+  installed or queued, and the page says calendar was not connected.
+- **Signup and reconnect** now also send `include_granted_scopes=true`, so a
+  later plain reconnect hands back a token that still carries calendar. They
+  do NOT request the calendar scopes.
+- **The daemon** records the granted scopes on the stored token
+  (`StoredToken.scopes`, from the exchange, every refresh that names them, and
+  import), resolves the calendar token with `CalendarCredentials` (Calendar
+  slot first, then a Read slot whose scopes include `calendar.events`), and
+  reports `calendar {granted, connect_url, connect_command}` on
+  `/client/stats`.
+- **Self-host**: `squelchd auth --calendar` mints a separate Calendar slot and
+  touches neither Gmail slot.
+
 - **Ghost mode needs no migration.** Every existing user gets the timeline and
   ghosts with zero consent. The grant is asked for at the first moment it is
   needed: seeing real events, automatic adds, or availability.
@@ -760,13 +791,17 @@ real calendar.
   `/client` (as it does `invite_sharing`), and the client gates on it.
 - **Existing hosted users** grant through a calendar variant of the reconnect
   pipeline, which already does a fresh consent, a durable job and a credential
-  swap without re-pairing. It asks only for the new scope, incrementally.
-  Whether the old refresh token gains the scope or must be replaced is to be
-  tested, not assumed.
-- **`login_hint` first.** The reconnect flow does not pin the Google account.
-  A calendar grant for the wrong account is worse than a failed reconnect.
-- **New signups** see calendar in the one signup consent, safe to untick.
-- **Self-host** gets a `squelchd auth` variant.
+  swap without re-pairing. BUILT as above: the consent repeats the Gmail
+  scopes beside the calendar ones and the token is replaced, not amended.
+- **`login_hint` first.** BUILT. The daemon's links carry `hint=<mailbox>`; the
+  control plane passes it to Google as `login_hint` and, at the callback,
+  installs nothing when a different account consented. The hint is a guard,
+  never an authority: the tenant is still found from the account Google names.
+- **New signups** do NOT see calendar yet: signup asks for Gmail only, and the
+  calendar is granted later from the calendar page. Folding it into signup is
+  a later decision.
+- **Self-host** gets a `squelchd auth` variant: `squelchd auth --calendar`
+  (BUILT).
 - **Order of release:** control and warden, then the daemon, then the client.
   A client that meets a daemon without the capability shows ghost mode only.
 

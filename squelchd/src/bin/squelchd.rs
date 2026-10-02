@@ -160,6 +160,18 @@ struct AuthArgs {
     #[arg(long)]
     write: bool,
 
+    /// Mint the CALENDAR credential (calendar.events +
+    /// calendar.calendarlist.readonly) into its own slot, and touch nothing
+    /// else: the Read and Write credentials stay exactly as they are.
+    ///
+    /// Optional, and only for the calendar page. Run plain `squelchd auth`
+    /// first: the consent is matched to this mailbox through the Gmail access
+    /// this OAuth client already has. Works with --headless, --broker and
+    /// --export. Conflicts with --write, which renews the Gmail pair, and with
+    /// --import, where the blob decides what is stored.
+    #[arg(long, conflicts_with_all = ["write", "import"])]
+    calendar: bool,
+
     /// Headless mode: do NOT auto-open a browser, and bind the loopback
     /// listener to a FIXED port so it can be SSH-forwarded.
     #[arg(long)]
@@ -663,14 +675,21 @@ fn scope_word(scopes: AuthScopes) -> &'static str {
     match scopes {
         AuthScopes::Read => "READ",
         AuthScopes::Write => "WRITE",
+        AuthScopes::Calendar => "CALENDAR",
     }
 }
 
 /// Which credentials one `auth` invocation mints, in order. `--write` re-mints
 /// READ too so the pair cannot drift, but it stays two scope sets, two flows,
 /// two slots — the two-door split is never collapsed into one merged token.
+///
+/// `--calendar` mints the Calendar credential ALONE. Calendar is an optional
+/// grant on top of a working mailbox, so asking for it must never re-run (and
+/// so never risk) the Gmail consents.
 fn auth_plan(args: &AuthArgs) -> Vec<AuthScopes> {
-    if args.write {
+    if args.calendar {
+        vec![AuthScopes::Calendar]
+    } else if args.write {
         vec![AuthScopes::Write, AuthScopes::Read]
     } else {
         vec![AuthScopes::Read]
@@ -768,7 +787,7 @@ fn mint_credential(
 ) -> Result<(), squelch_core::CoreError> {
     let kind = scopes.kind();
     println!(
-        "Authorizing Gmail account: {email} [{}] via {:?} backend",
+        "Authorizing Google account: {email} [{}] via {:?} backend",
         scopes.label(),
         backend
     );
@@ -2590,6 +2609,7 @@ mod tests {
     fn bare_auth_args() -> AuthArgs {
         AuthArgs {
             write: false,
+            calendar: false,
             headless: false,
             port: DEFAULT_HEADLESS_PORT,
             broker: None,
@@ -2689,6 +2709,57 @@ mod tests {
             write_scopes.iter().all(|s| !read_scopes.contains(s)),
             "write and read scope sets must not be merged into one consent"
         );
+    }
+
+    /// `--calendar` mints the Calendar credential and NOTHING ELSE: no Read
+    /// or Write consent runs, so neither slot can be touched. Its own slot,
+    /// the two calendar scopes requested, only the events scope required.
+    #[test]
+    fn auth_plan_calendar_mints_only_the_calendar_credential() {
+        for transport in [None, Some(BROKER.to_string())] {
+            let plan = auth_plan(&AuthArgs {
+                calendar: true,
+                broker: transport,
+                ..bare_auth_args()
+            });
+            assert_eq!(plan, vec![AuthScopes::Calendar]);
+        }
+        let plan = auth_plan(&AuthArgs {
+            calendar: true,
+            headless: true,
+            ..bare_auth_args()
+        });
+        assert_eq!(plan, vec![AuthScopes::Calendar]);
+        assert_eq!(plan[0].kind(), CredentialKind::Calendar);
+        assert_eq!(
+            CredentialKind::Calendar.slot_key("you@x.com"),
+            "you@x.com#calendar"
+        );
+        assert_eq!(
+            plan[0].scopes(),
+            vec![
+                squelch_core::config::CALENDAR_EVENTS_SCOPE.to_string(),
+                squelch_core::config::CALENDAR_LIST_SCOPE.to_string(),
+            ]
+        );
+        assert!(
+            plan[0].scopes().iter().all(|s| !s.contains("gmail")),
+            "the calendar consent requests no Gmail scope"
+        );
+
+        // It parses with --headless, and refuses the flags that would renew
+        // the Gmail pair or let a blob decide.
+        let (args, _) = parse_auth(["squelchd", "auth", "--calendar", "--headless"].as_ref());
+        assert!(args.calendar && args.headless);
+        for clash in [
+            ["squelchd", "auth", "--calendar", "--write"],
+            ["squelchd", "auth", "--calendar", "--import"],
+        ] {
+            assert!(
+                Cli::command().try_get_matches_from(clash).is_err(),
+                "{clash:?} must be refused"
+            );
+        }
     }
 
     /// `--broker` REPLACES the loopback listener rather than decorating it, so
@@ -2992,6 +3063,7 @@ mod tests {
                     access_token: "access".to_string(),
                     refresh_token: Some("refresh".to_string()),
                     expires_at: None,
+                    scopes: None,
                 },
             }],
         ))
@@ -3150,6 +3222,7 @@ mod tests {
                 access_token: "access".to_string(),
                 refresh_token: refresh.map(|r| r.to_string()),
                 expires_at: None,
+                scopes: None,
             },
         };
 
@@ -3182,6 +3255,7 @@ mod tests {
                     access_token: "access".to_string(),
                     refresh_token: Some("refresh".to_string()),
                     expires_at: None,
+                    scopes: None,
                 },
             }],
         );

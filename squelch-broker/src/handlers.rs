@@ -466,6 +466,14 @@ const SCOPE_DESCRIPTIONS: &[(&str, &str)] = &[
         validate::GMAIL_SEND_SCOPE,
         "Send mail as you, from your address.",
     ),
+    (
+        validate::CALENDAR_EVENTS_SCOPE,
+        "See and edit the events on every Google Calendar you can open, including calendars shared with you.",
+    ),
+    (
+        validate::CALENDAR_LIST_SCOPE,
+        "See the list of calendars you subscribe to. Read only.",
+    ),
 ];
 
 /// The requested permissions as a list, in the order the link asks for them.
@@ -735,6 +743,19 @@ mod tests {
         assert!(write.contains("moving messages to the trash"));
         assert!(write.contains("Send mail as you"));
         assert!(!write.contains("Read only"));
+
+        // `squelchd auth --calendar` is described in words too, never as a
+        // raw URL the reader has to decode.
+        let calendar = render(interstitial_page(&format!(
+            "https://accounts.google.com/o/oauth2/v2/auth?client_id=c&state=s&scope={}%20{}",
+            validate::CALENDAR_EVENTS_SCOPE,
+            validate::CALENDAR_LIST_SCOPE
+        )))
+        .await;
+        assert!(calendar.contains("See and edit the events"));
+        assert!(calendar.contains("list of calendars you subscribe to"));
+        assert!(!calendar.contains("does not recognize"));
+        assert!(!calendar.contains("Read your Gmail"));
 
         // An unrecognized scope is shown verbatim and escaped, never dropped:
         // registration refuses these, so reaching the page at all means

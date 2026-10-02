@@ -3263,8 +3263,11 @@ pub async fn get_stats(State(state): State<ApiState>) -> Result<impl IntoRespons
             // Only on the broken path: a link to re-consent is noise while the
             // mailbox works, and worse, an invitation to re-consent for no
             // reason.
+            // `hint` names this mailbox so the control plane pre-selects it at
+            // Google and refuses a consent from any other account.
             if let Some(origin) = state.console_sso_url() {
-                gmail["reconnect_url"] = json!(format!("{origin}/reconnect"));
+                gmail["reconnect_url"] =
+                    json!(format!("{origin}/reconnect?hint={}", url_component(&email)));
             }
         }
         body["gmail"] = gmail;
@@ -3338,7 +3341,39 @@ pub async fn get_stats(State(state): State<ApiState>) -> Result<impl IntoRespons
     // /client/timeline/ghosts/{id} exist. A LOUD failure like scheduled send
     // (an old daemon 404s them), so the client shows no timeline without it.
     body["timeline"] = json!(true);
+    // IS GOOGLE CALENDAR GRANTED, and if not, how to grant it. ALWAYS PRESENT
+    // (an old daemon's silence is the client's "no calendar"), and human door
+    // only: no agent route carries it.
+    //
+    // `granted` is the token resolver's answer, read off the scopes recorded
+    // on the stored token, with no call to Google. `connect_url` is the
+    // hosted/self-host split exactly as `gmail.reconnect_url` is: the console
+    // origin when this daemon has one, with the mailbox as `hint` so the
+    // control plane pre-selects it and refuses any other account. Without
+    // one, the command a self-host runs.
+    let granted = match state.calendar() {
+        Some(calendar) => calendar.granted().await,
+        None => false,
+    };
+    let connect_url = state.console_sso_url().map(|origin| {
+        format!(
+            "{origin}/reconnect?calendar=1&hint={}",
+            url_component(&email)
+        )
+    });
+    let connect_command = connect_url.is_none().then_some("squelchd auth --calendar");
+    body["calendar"] = json!({
+        "granted": granted,
+        "connect_url": connect_url,
+        "connect_command": connect_command,
+    });
     Ok(Json(body))
+}
+
+/// One query-string value, percent-encoded so an address's `+` and `@` reach
+/// the control plane as written.
+fn url_component(value: &str) -> String {
+    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
 fn rfc3339(unix: i64) -> Option<String> {

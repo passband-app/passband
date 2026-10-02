@@ -9170,9 +9170,11 @@ async fn stats_report_a_dead_credential_with_the_link_that_repairs_it() {
     let resp = app.oneshot(authed("GET", "/client/stats")).await.unwrap();
     let json = body_json(resp).await;
     assert_eq!(json["gmail"]["connected"], serde_json::json!(false));
+    // The mailbox rides along as `hint`, URL-encoded, so the control plane
+    // pre-selects it at Google and refuses a consent from any other account.
     assert_eq!(
         json["gmail"]["reconnect_url"],
-        serde_json::json!("https://signup.example/reconnect")
+        serde_json::json!("https://signup.example/reconnect?hint=me%40example.com")
     );
     assert!(
         json["gmail"]["disconnected_since"].as_str().is_some(),
@@ -9195,6 +9197,156 @@ async fn a_self_host_mailbox_is_told_it_is_disconnected_and_offered_no_link() {
     let json = body_json(resp).await;
     assert_eq!(json["gmail"]["connected"], serde_json::json!(false));
     assert!(json["gmail"].get("reconnect_url").is_none());
+}
+
+// --- calendar access on /client/stats ---------------------------------------
+
+/// A credentials file in the daemon's own on-disk shape with one Read token
+/// whose recorded scopes are `scopes`, and the resolver over it.
+fn calendar_resolver(
+    tag: &str,
+    account_id: i64,
+    scopes: Option<&[&str]>,
+) -> (
+    squelch_core::credentials::CalendarCredentials,
+    std::path::PathBuf,
+) {
+    use squelch_core::credentials::{CalendarCredentials, CredentialKind, StoredToken};
+    let path = std::env::temp_dir().join(format!(
+        "squelch-api-calendar-{tag}-{}-{}.json",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+    ));
+    let token = StoredToken {
+        access_token: "a".into(),
+        refresh_token: Some("r".into()),
+        expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+        scopes: scopes.map(|s| s.iter().map(|s| s.to_string()).collect()),
+    };
+    squelch_core::credentials::store_tokens_backend(
+        squelch_core::config::CredentialBackend::File,
+        &path,
+        "me@example.com",
+        &[
+            (CredentialKind::Read, token.clone()),
+            (CredentialKind::Write, token),
+        ],
+    )
+    .unwrap();
+    let resolver = CalendarCredentials::new(
+        account_id,
+        "me@example.com".into(),
+        squelch_core::config::CredentialBackend::File,
+        path.clone(),
+        squelch_core::config::OAuthClientConfig {
+            client_id: "id".into(),
+            client_secret: "secret".into(),
+        },
+    );
+    (resolver, path)
+}
+
+const CAL_EVENTS: &str = squelch_core::config::CALENDAR_EVENTS_SCOPE;
+const READONLY_SCOPE: &str = squelch_core::config::GMAIL_READONLY_SCOPE;
+
+/// HOSTED, NOT GRANTED: the hosted tenant's one token carries only Gmail, so
+/// `granted` is false and the link that grants it names this mailbox.
+#[tokio::test]
+async fn stats_offer_a_hosted_mailbox_the_calendar_link() {
+    let (state, _store, acct) = state_with(|_, _| {});
+    let (resolver, path) = calendar_resolver("hosted-off", acct, Some(&[READONLY_SCOPE]));
+    let app = router(
+        state
+            .with_calendar_credentials(resolver)
+            .with_console_sso_url(Some("https://signup.example/".into())),
+    );
+    let json = body_json(app.oneshot(authed("GET", "/client/stats")).await.unwrap()).await;
+    eprintln!("hosted, not granted: {}", json["calendar"]);
+    assert_eq!(
+        json["calendar"],
+        serde_json::json!({
+            "granted": false,
+            "connect_url": "https://signup.example/reconnect?calendar=1&hint=me%40example.com",
+            "connect_command": null,
+        })
+    );
+    std::fs::remove_file(&path).ok();
+}
+
+/// HOSTED, GRANTED: the same token with calendar on its recorded scopes.
+#[tokio::test]
+async fn stats_report_a_hosted_calendar_grant() {
+    let (state, _store, acct) = state_with(|_, _| {});
+    let (resolver, path) =
+        calendar_resolver("hosted-on", acct, Some(&[READONLY_SCOPE, CAL_EVENTS]));
+    let app = router(
+        state
+            .with_calendar_credentials(resolver)
+            .with_console_sso_url(Some("https://signup.example".into())),
+    );
+    let json = body_json(app.oneshot(authed("GET", "/client/stats")).await.unwrap()).await;
+    eprintln!("hosted, granted: {}", json["calendar"]);
+    assert_eq!(
+        json["calendar"],
+        serde_json::json!({
+            "granted": true,
+            "connect_url": "https://signup.example/reconnect?calendar=1&hint=me%40example.com",
+            "connect_command": null,
+        })
+    );
+    std::fs::remove_file(&path).ok();
+}
+
+/// SELF-HOST: no console origin, so the answer is the command, never a link.
+/// A token stored before scopes were recorded reads as not granted.
+#[tokio::test]
+async fn stats_tell_a_self_host_the_calendar_command() {
+    let (state, _store, acct) = state_with(|_, _| {});
+    let (resolver, path) = calendar_resolver("selfhost", acct, None);
+    let app = router(state.with_calendar_credentials(resolver));
+    let json = body_json(app.oneshot(authed("GET", "/client/stats")).await.unwrap()).await;
+    eprintln!("self-host: {}", json["calendar"]);
+    assert_eq!(
+        json["calendar"],
+        serde_json::json!({
+            "granted": false,
+            "connect_url": null,
+            "connect_command": "squelchd auth --calendar",
+        })
+    );
+    std::fs::remove_file(&path).ok();
+
+    // And a door with no resolver at all answers the same shape, not absence.
+    let Harness { app, .. } = harness(|_, _| {});
+    let json = body_json(app.oneshot(authed("GET", "/client/stats")).await.unwrap()).await;
+    assert_eq!(json["calendar"]["granted"], serde_json::json!(false));
+    assert_eq!(
+        json["calendar"]["connect_command"],
+        serde_json::json!("squelchd auth --calendar")
+    );
+}
+
+/// An address with characters a query string would misread is encoded, and
+/// so cannot add a parameter to the link.
+#[tokio::test]
+async fn the_calendar_link_encodes_the_address() {
+    let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+    let acct = store.ensure_account("a+b&calendar=0@example.com").unwrap();
+    let state = ApiState::new(store, acct, TOKEN)
+        .with_console_sso_url(Some("https://signup.example".into()));
+    let json = body_json(
+        router(state)
+            .oneshot(authed("GET", "/client/stats"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        json["calendar"]["connect_url"],
+        serde_json::json!(
+            "https://signup.example/reconnect?calendar=1&hint=a%2Bb%26calendar%3D0%40example.com"
+        )
+    );
 }
 
 /// SYNC AND TRIAGE HEALTH ARE ABSENT FROM A DOOR THAT CANNOT SEE THEM, like

@@ -26,6 +26,13 @@ pub enum CredentialKind {
     Read,
     /// Read/write (`gmail.modify` + `gmail.send`). Human-door actions only.
     Write,
+    /// Google Calendar (`calendar.events`, `calendar.calendarlist.readonly`),
+    /// minted by `squelchd auth --calendar`. SELF-HOST ONLY: a hosted tenant's
+    /// credentials file is replaced whole on every install, so a separate slot
+    /// there would be wiped by the next Gmail reconnect, and hosted carries its
+    /// calendar grant on the one token in the Read and Write slots instead. See
+    /// [`CalendarCredentials`] for how the two shapes are read.
+    Calendar,
 }
 
 impl CredentialKind {
@@ -35,6 +42,7 @@ impl CredentialKind {
         match self {
             CredentialKind::Read => "",
             CredentialKind::Write => "#write",
+            CredentialKind::Calendar => "#calendar",
         }
     }
 
@@ -70,10 +78,25 @@ pub struct StoredToken {
     /// Absolute expiry instant, if the provider supplied `expires_in`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<DateTime<Utc>>,
+    /// The scopes Google said this token carries, as of the last exchange or
+    /// refresh that named them.
+    ///
+    /// `None` is UNKNOWN: a token stored before this field existed, or one whose
+    /// every response left `scope` out. Unknown reads as "calendar not granted"
+    /// and changes nothing for Gmail, whose paths have never looked at it.
+    /// `#[serde(default)]` and skipped when `None`, so an old blob loads and a
+    /// token with nothing recorded writes the exact bytes it always did.
+    ///
+    /// Only Google's own answers fill it: a consent exchange, a refresh, and the
+    /// refresh an import runs. Never a value a blob or a caller supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scopes: Option<Vec<String>>,
 }
 
 impl StoredToken {
-    /// Build from a fresh token exchange/refresh response.
+    /// Build from a fresh token exchange/refresh response. Scopes are left
+    /// unknown; [`StoredToken::with_scopes`] records them when the response
+    /// named them.
     pub fn from_response(
         access_token: String,
         refresh_token: Option<String>,
@@ -86,7 +109,29 @@ impl StoredToken {
             access_token,
             refresh_token,
             expires_at,
+            scopes: None,
         }
+    }
+
+    /// The same token with its granted scopes recorded.
+    pub fn with_scopes(mut self, scopes: Option<Vec<String>>) -> Self {
+        self.scopes = scopes;
+        self
+    }
+
+    /// Whether the recorded scopes include `scope`. Unknown is `false`.
+    pub fn has_scope(&self, scope: &str) -> bool {
+        self.scopes
+            .as_ref()
+            .is_some_and(|granted| granted.iter().any(|g| g == scope))
+    }
+
+    /// Whether this token may call the Calendar API: its recorded scopes
+    /// include [`crate::config::CALENDAR_EVENTS_SCOPE`]. The list scope is not
+    /// part of the answer, because without it the primary calendar is still
+    /// readable.
+    pub fn grants_calendar(&self) -> bool {
+        self.has_scope(crate::config::CALENDAR_EVENTS_SCOPE)
     }
 
     /// Serialize to the JSON blob stored in a backend.
@@ -124,10 +169,10 @@ const REFRESH_SKEW_SECS: i64 = 60;
 
 /// A refresh response: the fresh token, plus the scopes Google named on it.
 ///
-/// The scopes ride alongside rather than inside [`StoredToken`], which is a
-/// storage shape and has never carried them. Exactly one caller needs them: the
-/// transfer verification, which has to prove a pasted token belongs in the slot
-/// the blob claims for it.
+/// `token.scopes` carries the same answer. The separate field stays because
+/// the transfer verification has to tell "Google named these" from "Google
+/// named nothing", and a token whose scopes were carried forward from storage
+/// would blur the two.
 pub struct RefreshedToken {
     pub token: StoredToken,
     /// `None` when the response named no scopes at all.
@@ -215,9 +260,25 @@ pub(crate) fn refresh_stored_token_detailed_at(
             resp.access_token().secret().to_string(),
             new_refresh,
             resp.expires_in(),
-        ),
+        )
+        .with_scopes(granted_scopes.clone()),
         granted_scopes,
     })
+}
+
+/// The token to persist after a refresh of `stored`.
+///
+/// A refresh response MAY omit `scope`, and when it does the grant is the one
+/// already on record, not an empty one: dropping the stored scopes there would
+/// quietly un-grant calendar on the first hourly refresh. When the response
+/// DOES name them it is the newer answer and wins, which is how a scope the
+/// user revoked at Google stops reading as granted.
+fn carry_scopes_forward(stored: &StoredToken, refreshed: RefreshedToken) -> StoredToken {
+    let mut fresh = refreshed.token;
+    if refreshed.granted_scopes.is_none() {
+        fresh.scopes = stored.scopes.clone();
+    }
+    fresh
 }
 
 /// The credential-error message for a failed refresh exchange. `invalid_grant` means
@@ -244,6 +305,24 @@ fn validate_or_refresh(
     client: &OAuthClientConfig,
     persist: impl FnOnce(&StoredToken) -> Result<()>,
 ) -> Result<OAuthToken> {
+    validate_or_refresh_at(
+        stored,
+        client,
+        crate::auth::GOOGLE_TOKEN_URL,
+        crate::auth::EXCHANGE_HTTP_TIMEOUT,
+        persist,
+    )
+}
+
+/// [`validate_or_refresh`] against an explicit token endpoint, so a test can
+/// drive the whole refresh-and-persist path against a scripted socket.
+fn validate_or_refresh_at(
+    stored: StoredToken,
+    client: &OAuthClientConfig,
+    token_url: &str,
+    timeout: Duration,
+    persist: impl FnOnce(&StoredToken) -> Result<()>,
+) -> Result<OAuthToken> {
     if stored.is_expired(ChronoDuration::seconds(REFRESH_SKEW_SECS)) {
         let refresh = stored.refresh_token.clone().ok_or_else(|| {
             CoreError::Credential(
@@ -251,7 +330,8 @@ fn validate_or_refresh(
                     .to_string(),
             )
         })?;
-        let fresh = refresh_stored_token(client, &refresh)?;
+        let refreshed = refresh_stored_token_detailed_at(client, &refresh, token_url, timeout)?;
+        let fresh = carry_scopes_forward(&stored, refreshed);
         persist(&fresh)?;
         return Ok(fresh.into_oauth());
     }
@@ -972,6 +1052,140 @@ pub fn read_store_for_backend(
     }
 }
 
+// --- which token may call the Calendar API ----------------------------------
+
+/// Pick the slot that answers for the Calendar API, given what each slot holds.
+///
+/// THE ORDER, and the one place it is decided:
+/// 1. The Calendar slot, when its recorded scopes grant calendar. Self-host's
+///    `squelchd auth --calendar` lands here, and it is the narrower grant.
+/// 2. The Read slot, when ITS recorded scopes grant calendar. This is how a
+///    hosted tenant is read: the calendar consent is the same token with more
+///    scopes, sealed into the Read and Write slots like every hosted install.
+/// 3. Nothing: calendar is not granted.
+///
+/// A slot whose scopes are unknown (`None`, a token stored before scopes were
+/// recorded) never answers, and neither does a Calendar slot whose latest
+/// refresh no longer names the events scope: that is a grant the user took
+/// back at Google. The Write slot is never consulted. Pure, so the order is
+/// tested without a backend.
+pub fn pick_calendar_slot(
+    calendar: Option<StoredToken>,
+    read: Option<StoredToken>,
+) -> Option<(CredentialKind, StoredToken)> {
+    if let Some(token) = calendar.filter(StoredToken::grants_calendar) {
+        return Some((CredentialKind::Calendar, token));
+    }
+    read.filter(StoredToken::grants_calendar)
+        .map(|token| (CredentialKind::Read, token))
+}
+
+/// THE CALENDAR TOKEN RESOLVER: the one answer to "which token may call the
+/// Calendar API", bound to one account and one configured backend.
+///
+/// Resolved on EVERY call rather than once at startup, because the answer
+/// changes under a running daemon: a self-host runs `squelchd auth --calendar`
+/// beside it, and a refresh can report the grant gone. The token it hands back
+/// refreshes exactly as the other slots do, and is persisted into the slot it
+/// came from, never into another.
+///
+/// A slot that cannot be read (absent, or a backend error) counts as holding
+/// nothing, so a broken calendar answer is "not granted" and never an error on
+/// a Gmail path (invariant: calendar failures do not fail Gmail).
+#[derive(Clone)]
+pub struct CalendarCredentials {
+    account_id: AccountId,
+    account_email: String,
+    backend: CredentialBackend,
+    credentials_path: PathBuf,
+    client: OAuthClientConfig,
+}
+
+impl CalendarCredentials {
+    pub fn new(
+        account_id: AccountId,
+        account_email: String,
+        backend: CredentialBackend,
+        credentials_path: PathBuf,
+        client: OAuthClientConfig,
+    ) -> Self {
+        Self {
+            account_id,
+            account_email,
+            backend,
+            credentials_path,
+            client,
+        }
+    }
+
+    /// Which slot answers right now, and its token as stored (not refreshed).
+    /// BLOCKING: it reads the backend.
+    pub fn resolve_blocking(&self) -> Option<(CredentialKind, StoredToken)> {
+        let load = |kind| {
+            load_token_backend(
+                self.backend,
+                &self.credentials_path,
+                &self.account_email,
+                kind,
+            )
+            .ok()
+        };
+        pick_calendar_slot(load(CredentialKind::Calendar), load(CredentialKind::Read))
+    }
+
+    /// Whether calendar is granted, without refreshing or calling Google.
+    pub async fn granted(&self) -> bool {
+        let this = self.clone();
+        tokio::task::spawn_blocking(move || this.resolve_blocking().is_some())
+            .await
+            .unwrap_or(false)
+    }
+
+    /// A currently valid access token for the Calendar API, or `Ok(None)` when
+    /// calendar is not granted. Refreshes when inside the skew window and
+    /// persists the refreshed token into the slot it was read from.
+    pub async fn calendar_token(&self, account: AccountId) -> Result<Option<OAuthToken>> {
+        if account != self.account_id {
+            return Err(CoreError::Credential(format!(
+                "account {account} not managed by this store (bound to {})",
+                self.account_id
+            )));
+        }
+        let this = self.clone();
+        tokio::task::spawn_blocking(move || this.calendar_token_blocking())
+            .await
+            .map_err(|e| CoreError::Credential(format!("join error: {e}")))?
+    }
+
+    fn calendar_token_blocking(&self) -> Result<Option<OAuthToken>> {
+        let Some((kind, stored)) = self.resolve_blocking() else {
+            return Ok(None);
+        };
+        let (backend, path, email) = (
+            self.backend,
+            self.credentials_path.clone(),
+            self.account_email.clone(),
+        );
+        validate_or_refresh(stored, &self.client, |fresh| {
+            store_token_backend(backend, &path, &email, kind, fresh)
+        })
+        .map(Some)
+    }
+}
+
+/// The [`CredentialStore`] shape of the same resolver, for code that already
+/// takes one. "Not granted" is an error here because the trait has no other
+/// way to say it; [`CalendarCredentials::calendar_token`] is the call that
+/// tells the two apart.
+#[async_trait]
+impl CredentialStore for CalendarCredentials {
+    async fn token(&self, account: AccountId) -> Result<OAuthToken> {
+        self.calendar_token(account).await?.ok_or_else(|| {
+            CoreError::Credential("Google Calendar is not granted for this mailbox".to_string())
+        })
+    }
+}
+
 /// Env-var backed stub for the v0 skeleton. Still handy for tests / CI without a
 /// keyring. Real deployments use [`KeyringCredentialStore`] / [`FileCredentialStore`].
 pub struct EnvCredentialStore;
@@ -1017,6 +1231,7 @@ mod tests {
             access_token: "aaa".to_string(),
             refresh_token: Some("rrr".to_string()),
             expires_at: Some(Utc::now()),
+            scopes: None,
         };
         let json = t.to_json().unwrap();
         let back = StoredToken::from_json(&json).unwrap();
@@ -1029,6 +1244,7 @@ mod tests {
             access_token: "aaa".to_string(),
             refresh_token: None,
             expires_at: None,
+            scopes: None,
         };
         let json = t.to_json().unwrap();
         assert!(!json.contains("refresh_token"));
@@ -1045,6 +1261,7 @@ mod tests {
             access_token: "a".into(),
             refresh_token: None,
             expires_at: Some(Utc::now() - ChronoDuration::seconds(10)),
+            scopes: None,
         };
         assert!(past.is_expired(skew));
 
@@ -1052,6 +1269,7 @@ mod tests {
             access_token: "a".into(),
             refresh_token: None,
             expires_at: Some(Utc::now() + ChronoDuration::seconds(30)),
+            scopes: None,
         };
         assert!(soon.is_expired(skew));
 
@@ -1059,6 +1277,7 @@ mod tests {
             access_token: "a".into(),
             refresh_token: None,
             expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
+            scopes: None,
         };
         assert!(!future.is_expired(skew));
 
@@ -1066,6 +1285,7 @@ mod tests {
             access_token: "a".into(),
             refresh_token: None,
             expires_at: None,
+            scopes: None,
         };
         assert!(!unknown.is_expired(skew));
     }
@@ -1111,6 +1331,7 @@ mod tests {
             access_token: "read-access".into(),
             refresh_token: Some("read-refresh".into()),
             expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
+            scopes: None,
         };
         store_token_file(&path, "you@x.com", CredentialKind::Read, &tok).unwrap();
         let back = load_token_file(&path, "you@x.com", CredentialKind::Read).unwrap();
@@ -1127,6 +1348,7 @@ mod tests {
             access_token: "a".into(),
             refresh_token: None,
             expires_at: None,
+            scopes: None,
         };
         store_token_file(&path, "you@x.com", CredentialKind::Read, &tok).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
@@ -1142,11 +1364,13 @@ mod tests {
             access_token: "READ-ONLY-TOKEN".into(),
             refresh_token: None,
             expires_at: None,
+            scopes: None,
         };
         let write_tok = StoredToken {
             access_token: "WRITE-CAPABLE-TOKEN".into(),
             refresh_token: None,
             expires_at: None,
+            scopes: None,
         };
         store_token_file(&path, "you@x.com", CredentialKind::Read, &read_tok).unwrap();
         store_token_file(&path, "you@x.com", CredentialKind::Write, &write_tok).unwrap();
@@ -1168,6 +1392,7 @@ mod tests {
             access_token: access.into(),
             refresh_token: Some("r".into()),
             expires_at: None,
+            scopes: None,
         };
 
         // A slot from an earlier import, to prove a failed one leaves it alone.
@@ -1238,6 +1463,7 @@ mod tests {
             access_token: "WRITE-CAPABLE-TOKEN".into(),
             refresh_token: None,
             expires_at: None,
+            scopes: None,
         };
         store_token_file(&path, "you@x.com", CredentialKind::Write, &write_tok).unwrap();
 
@@ -1258,6 +1484,7 @@ mod tests {
             access_token: "still-good".into(),
             refresh_token: Some("r".into()),
             expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
+            scopes: None,
         };
         store_token_file(&path, "you@x.com", CredentialKind::Read, &tok).unwrap();
         let store = FileCredentialStore::new(1_i64, "you@x.com".into(), path.clone(), client());
@@ -1308,6 +1535,7 @@ mod tests {
             access_token: access.into(),
             refresh_token: Some(refresh.into()),
             expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
+            scopes: None,
         }
     }
 
@@ -1638,6 +1866,7 @@ mod tests {
             access_token: "stale-access".into(),
             refresh_token: Some("old-refresh".into()),
             expires_at: Some(Utc::now() - ChronoDuration::minutes(5)),
+            scopes: None,
         };
         store_token_file_with(&path, "you@x.com", CredentialKind::Read, &stale, Some(&id)).unwrap();
 
@@ -1755,5 +1984,224 @@ mod tests {
         for p in [&path, &key, &blank] {
             std::fs::remove_file(p).ok();
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Recorded scopes and the calendar resolver.
+    // -----------------------------------------------------------------------
+
+    const EVENTS: &str = crate::config::CALENDAR_EVENTS_SCOPE;
+    const LIST: &str = crate::config::CALENDAR_LIST_SCOPE;
+    const READONLY: &str = crate::config::GMAIL_READONLY_SCOPE;
+
+    fn scoped(access: &str, scopes: Option<&[&str]>) -> StoredToken {
+        StoredToken {
+            access_token: access.into(),
+            refresh_token: Some("r".into()),
+            expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
+            scopes: scopes.map(|s| s.iter().map(|s| s.to_string()).collect()),
+        }
+    }
+
+    /// Every stored token written before `scopes` existed must still load, in
+    /// every backend's shape: the bare JSON the keyring holds and the slot map
+    /// the file holds. Unknown scopes read as "calendar not granted".
+    #[test]
+    fn an_old_stored_token_without_scopes_still_loads() {
+        let old = r#"{"access_token":"a","refresh_token":"r","expires_at":"2026-01-01T00:00:00Z"}"#;
+        let back = StoredToken::from_json(old).unwrap();
+        assert_eq!(back.scopes, None);
+        assert!(!back.grants_calendar());
+        assert_eq!(back.refresh_token.as_deref(), Some("r"));
+
+        let path = tmp_path("oldshape");
+        std::fs::write(&path, format!(r#"{{"slots":{{"you@x.com":{old}}}}}"#)).unwrap();
+        let loaded = load_token_file_with(&path, "you@x.com", CredentialKind::Read, None).unwrap();
+        assert_eq!(loaded.scopes, None);
+        std::fs::remove_file(&path).ok();
+
+        // And a token with nothing recorded writes the bytes it always did.
+        assert!(!scoped("a", None).to_json().unwrap().contains("scopes"));
+        let with = scoped("a", Some(&[EVENTS]));
+        assert_eq!(
+            StoredToken::from_json(&with.to_json().unwrap()).unwrap(),
+            with
+        );
+    }
+
+    /// A refresh response that omits `scope` keeps the scopes on record; one
+    /// that names them replaces them. Driven through the real refresh-and-
+    /// persist path against a scripted token endpoint, with an expired token,
+    /// so what is asserted is what lands in the backend.
+    #[test]
+    fn recorded_scopes_survive_a_refresh_that_omits_scope() {
+        let path = tmp_path("refresh-scopes");
+        let mut stale = scoped("stale", Some(&[READONLY, EVENTS]));
+        stale.expires_at = Some(Utc::now() - ChronoDuration::minutes(5));
+        store_token_file_with(&path, "you@x.com", CredentialKind::Read, &stale, None).unwrap();
+
+        let base = scripted_token_endpoint(
+            r#"{"access_token":"fresh-1","token_type":"Bearer","expires_in":3600}"#,
+        );
+        let got = validate_or_refresh_at(
+            stale.clone(),
+            &client(),
+            &format!("{base}/token"),
+            Duration::from_secs(5),
+            |fresh| store_token_file_with(&path, "you@x.com", CredentialKind::Read, fresh, None),
+        )
+        .unwrap();
+        assert_eq!(got.access_token, "fresh-1");
+        let landed = load_token_file_with(&path, "you@x.com", CredentialKind::Read, None).unwrap();
+        assert_eq!(landed.access_token, "fresh-1");
+        assert_eq!(
+            landed.scopes, stale.scopes,
+            "an omitted scope keeps the record"
+        );
+        assert!(landed.grants_calendar());
+        assert_eq!(landed.refresh_token.as_deref(), Some("r"));
+
+        // A refresh that NAMES scopes is the newer answer: calendar revoked at
+        // Google stops reading as granted.
+        let mut stale = landed;
+        stale.expires_at = Some(Utc::now() - ChronoDuration::minutes(5));
+        let base = scripted_token_endpoint(&format!(
+            r#"{{"access_token":"fresh-2","token_type":"Bearer","expires_in":3600,"scope":"{READONLY}"}}"#
+        ));
+        validate_or_refresh_at(
+            stale,
+            &client(),
+            &format!("{base}/token"),
+            Duration::from_secs(5),
+            |fresh| store_token_file_with(&path, "you@x.com", CredentialKind::Read, fresh, None),
+        )
+        .unwrap();
+        let landed = load_token_file_with(&path, "you@x.com", CredentialKind::Read, None).unwrap();
+        assert_eq!(landed.scopes, Some(vec![READONLY.to_string()]));
+        assert!(!landed.grants_calendar());
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// THE RESOLVER'S ORDER: the Calendar slot when it grants calendar, then
+    /// the Read slot when IT does, then nothing. Unknown scopes never answer.
+    #[test]
+    fn the_calendar_slot_wins_then_a_calendar_scoped_read_slot() {
+        let cal = || scoped("CAL", Some(&[EVENTS, LIST, READONLY]));
+        let read_cal = || scoped("READ-WITH-CAL", Some(&[READONLY, EVENTS]));
+        let read_plain = || scoped("READ", Some(&[READONLY]));
+        let pick = |c, r| pick_calendar_slot(c, r).map(|(k, t)| (k, t.access_token));
+
+        assert_eq!(
+            pick(Some(cal()), Some(read_cal())),
+            Some((CredentialKind::Calendar, "CAL".into()))
+        );
+        assert_eq!(
+            pick(Some(cal()), None),
+            Some((CredentialKind::Calendar, "CAL".into()))
+        );
+        assert_eq!(
+            pick(None, Some(read_cal())),
+            Some((CredentialKind::Read, "READ-WITH-CAL".into()))
+        );
+        // A Read slot without the events scope, or with unknown scopes, is
+        // not a calendar grant (the list scope alone is not one either).
+        assert_eq!(pick(None, Some(read_plain())), None);
+        assert_eq!(pick(None, Some(scoped("OLD", None))), None);
+        assert_eq!(pick(None, Some(scoped("LIST", Some(&[LIST])))), None);
+        assert_eq!(pick(None, None), None);
+        // A Calendar slot whose latest refresh no longer names events falls
+        // through to the Read slot rather than answering.
+        assert_eq!(
+            pick(
+                Some(scoped("CAL-REVOKED", Some(&[READONLY]))),
+                Some(read_cal())
+            ),
+            Some((CredentialKind::Read, "READ-WITH-CAL".into()))
+        );
+        assert_eq!(
+            pick(
+                Some(scoped("CAL-REVOKED", Some(&[READONLY]))),
+                Some(read_plain())
+            ),
+            None
+        );
+    }
+
+    /// The resolver against a real file backend: it reads the slots as the
+    /// daemon stores them, never consults Write, and hands back a live token.
+    ///
+    /// A hand-rolled runtime holding `ENV_LOCK`, like the env-wiring test: the
+    /// resolver goes through the public entry points, which read
+    /// `SQUELCH_CRED_AGE_IDENTITY`, and a neighbour pointing it at a missing
+    /// file mid-run would read as "no slot" here.
+    #[test]
+    fn the_calendar_resolver_reads_the_file_backend() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _g = ENV_LOCK.lock().unwrap();
+        rt.block_on(calendar_resolver_scenario());
+    }
+
+    async fn calendar_resolver_scenario() {
+        let path = tmp_path("calendar-resolver");
+        let resolver = CalendarCredentials::new(
+            3_i64,
+            "you@x.com".into(),
+            CredentialBackend::File,
+            path.clone(),
+            client(),
+        );
+        assert!(!resolver.granted().await, "an empty file grants nothing");
+        assert!(resolver.calendar_token(3_i64).await.unwrap().is_none());
+        assert!(resolver.token(3_i64).await.is_err());
+
+        // A calendar-scoped WRITE slot is never the answer.
+        store_tokens_backend(
+            CredentialBackend::File,
+            &path,
+            "you@x.com",
+            &[
+                (CredentialKind::Write, scoped("WRITE", Some(&[EVENTS]))),
+                (CredentialKind::Read, scoped("READ", Some(&[READONLY]))),
+            ],
+        )
+        .unwrap();
+        assert!(!resolver.granted().await);
+
+        // The hosted shape: one token, calendar on the Read slot.
+        store_token_file(
+            &path,
+            "you@x.com",
+            CredentialKind::Read,
+            &scoped("READ-WITH-CAL", Some(&[READONLY, EVENTS])),
+        )
+        .unwrap();
+        assert!(resolver.granted().await);
+        assert_eq!(
+            resolver
+                .calendar_token(3_i64)
+                .await
+                .unwrap()
+                .unwrap()
+                .access_token,
+            "READ-WITH-CAL"
+        );
+
+        // The self-host shape: the Calendar slot wins.
+        store_token_file(
+            &path,
+            "you@x.com",
+            CredentialKind::Calendar,
+            &scoped("CAL", Some(&[EVENTS])),
+        )
+        .unwrap();
+        assert_eq!(resolver.token(3_i64).await.unwrap().access_token, "CAL");
+        assert!(
+            resolver.calendar_token(4_i64).await.is_err(),
+            "bound to one account"
+        );
+        std::fs::remove_file(&path).ok();
     }
 }

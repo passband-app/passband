@@ -31,7 +31,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 
-use crate::reconnect::ReconnectView;
+use crate::reconnect::{Purpose, ReconnectView};
 use crate::store::UserRow;
 
 /// The Content-Security-Policy every page carries. The single allowance is the
@@ -796,8 +796,41 @@ pub fn app_signed_in(
 /// EXHAUSTIVE ON PURPOSE. This page's failure mode is a state that reads as
 /// "still working" forever, which is the bug the whole worker exists to end,
 /// and a `_` arm would let a new terminal state ship straight into it.
-pub fn reconnect_result(view: ReconnectView) -> Response {
-    let (heading, detail, link, button) = match view {
+///
+/// `purpose` picks the words, never the behaviour: a calendar grant installs
+/// exactly as a reconnect does, so the states, the refresh and the links are
+/// the same list, and a view the row could not be read for is told in the
+/// reconnect's neutral words.
+pub fn reconnect_result(view: ReconnectView, purpose: Purpose) -> Response {
+    let (heading, detail, link, button) = match purpose {
+        Purpose::Reconnect => reconnect_words(view),
+        Purpose::Calendar => calendar_words(view),
+    };
+    let mut response = page(
+        StatusCode::OK,
+        heading,
+        &format!(
+            "<h1>{}</h1><p class=\"lead\" role=\"status\">{}</p><a class=\"button\" href=\"{}\">{} <span class=\"arrow\" aria-hidden=\"true\">→</span></a>",
+            escape_html(heading),
+            escape_html(detail),
+            escape_html(link),
+            escape_html(button),
+        ),
+    );
+    if view.refreshes() {
+        response.headers_mut().insert(
+            header::REFRESH,
+            header::HeaderValue::from_static("5; url=/reconnect/status"),
+        );
+    }
+    response
+}
+
+/// `(heading, detail, link, button)` for a plain reconnect.
+fn reconnect_words(
+    view: ReconnectView,
+) -> (&'static str, &'static str, &'static str, &'static str) {
+    match view {
         ReconnectView::Pending => (
             "Reconnecting your mailbox…",
             "We’re restarting your mailbox with your new Google connection. This can take a few minutes. You can close this page; reconnecting will continue.",
@@ -846,25 +879,59 @@ pub fn reconnect_result(view: ReconnectView) -> Response {
             "passband://open",
             "Open Passband",
         ),
-    };
-    let mut response = page(
-        StatusCode::OK,
-        heading,
-        &format!(
-            "<h1>{}</h1><p class=\"lead\" role=\"status\">{}</p><a class=\"button\" href=\"{}\">{} <span class=\"arrow\" aria-hidden=\"true\">→</span></a>",
-            escape_html(heading),
-            escape_html(detail),
-            escape_html(link),
-            escape_html(button),
-        ),
-    );
-    if view.refreshes() {
-        response.headers_mut().insert(
-            header::REFRESH,
-            header::HeaderValue::from_static("5; url=/reconnect/status"),
-        );
     }
-    response
+}
+
+/// `(heading, detail, link, button)` for the calendar grant. The same states
+/// as [`reconnect_words`], and the same neutrality on a refusal: which record
+/// disagreed is not the browser's to learn. Every link is a constant.
+fn calendar_words(view: ReconnectView) -> (&'static str, &'static str, &'static str, &'static str) {
+    match view {
+        ReconnectView::Pending => (
+            "Connecting your calendar…",
+            "We’re restarting your mailbox with calendar access. This can take a few minutes. You can close this page; connecting will continue.",
+            "/reconnect/status",
+            "Check progress",
+        ),
+        ReconnectView::Retrying => (
+            "Connecting your calendar is taking longer than usual",
+            "We’re still working on it and will keep trying automatically. You can close this page and return later.",
+            "/reconnect/status",
+            "Check progress",
+        ),
+        ReconnectView::Checking => (
+            "Checking your calendar connection…",
+            "We’re checking the latest progress. This page will update automatically.",
+            "/reconnect/status",
+            "Check progress",
+        ),
+        ReconnectView::Complete => (
+            "Calendar is connected",
+            "Calendar is connected. You can close this tab and go back to Passband.",
+            "passband://open",
+            "Open Passband",
+        ),
+        ReconnectView::Refused => (
+            "Your calendar couldn’t be connected",
+            "Passband couldn’t connect your calendar, and nothing changed. Your mail keeps working as before. Open Passband to try again later.",
+            "passband://open",
+            "Open Passband",
+        ),
+        ReconnectView::GaveUp => (
+            "Connecting your calendar didn’t finish",
+            "We kept trying for a while but couldn’t confirm the new connection. Nothing needs undoing. Try again, or go back to Passband.",
+            "/reconnect?calendar=1",
+            "Try again",
+        ),
+        // Unreachable in practice (an expired view has no row to read a
+        // purpose from) and answered in the calendar's words anyway.
+        ReconnectView::Expired => (
+            "This page has expired",
+            "Open Passband to check on your calendar. If it is still not connected, start again from there.",
+            "passband://open",
+            "Open Passband",
+        ),
+    }
 }
 
 /// The page BOTH logins get when they are refused: the same shell as [`problem`]

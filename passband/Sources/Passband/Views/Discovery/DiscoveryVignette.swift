@@ -72,12 +72,11 @@
 //   300pt. Check every vignette at both ends: at the small end the story must
 //   still read, at the large end nothing may look like a thumbnail blown up.
 //
-// DRAWN: `flow` (here, the reference), and `clear`, `later`, `teach`, `find`
-// in `Vignettes/`. The rest are `PlaceholderVignette` until they are drawn:
-// the set's symbol breathing over a faint stack, on the same ground. Replace
-// one by adding its own file under `Vignettes/` and a case to
-// `DiscoveryVignette.scene`. The shared parts (`mail`, `row`, `miniMail`,
-// `halo`, `check`, `keycap`) are in `VignetteParts` below.
+// DRAWN: all eight. `flow` is here, the reference; `clear`, `later`, `teach`,
+// `find`, `glance`, `read` and `write` each have a file in `Vignettes/` and a
+// case in `DiscoveryVignette.scene`. A new set gets the same: its own file
+// and a case. The shared parts (`mail`, `row`, `miniMail`, `cardGround`,
+// `bar`, `halo`, `check`, `keycap`) are in `VignetteParts` below.
 
 import SwiftUI
 
@@ -171,7 +170,9 @@ struct DiscoveryVignette: View {
         case .later: LaterVignette.self
         case .teach: TeachVignette.self
         case .find: FindVignette.self
-        default: PlaceholderVignette.self
+        case .glance: GlanceVignette.self
+        case .read: ReadVignette.self
+        case .write: WriteVignette.self
         }
     }
 
@@ -260,6 +261,27 @@ enum VignetteParts {
         layer.fill(
             Path(roundedRect: CGRect(x: dot.maxX + 3, y: rect.midY - 1, width: barW, height: 2), cornerRadius: 1),
             with: .color(VignetteInk.ink.opacity(0.6)))
+    }
+
+    /// The bare ground of a card (`mail`'s fill, wash and edge) with nothing
+    /// on it, for a card that holds something other than an email's bars: a
+    /// record on the board, an issue in the reading stack, the composer.
+    static func cardGround(_ ctx: inout GraphicsContext, rect: CGRect, cornerRadius: CGFloat = 7, opacity: Double) {
+        guard opacity > 0.001 else { return }
+        var layer = ctx
+        layer.opacity = opacity
+        let card = Path(roundedRect: rect, cornerRadius: cornerRadius, style: .continuous)
+        layer.fill(card, with: .color(Color(hex: 0x1B2638)))
+        layer.fill(card, with: .color(VignetteInk.faint))
+        layer.stroke(card, with: .color(VignetteInk.edge), lineWidth: 0.6)
+    }
+
+    /// A rounded bar, the vignettes' stand-in for a line of text.
+    static func bar(_ ctx: inout GraphicsContext, _ rect: CGRect, color: Color, opacity: Double) {
+        guard opacity > 0.001, rect.width > 0 else { return }
+        var layer = ctx
+        layer.opacity = opacity
+        layer.fill(Path(roundedRect: rect, cornerRadius: rect.height / 2), with: .color(color))
     }
 
     /// A LIT OUTLINE around a card: `phosphorHot`, 1 unit, glowing evenly all
@@ -394,35 +416,5 @@ enum FlowVignette: VignetteScene {
         let skipDown = events.filter { $0.kind == .skip }.map { VignetteMotion.press(t, at: $0.at) }.max() ?? 0
         VignetteParts.keycap(&ctx, "E", origin: CGPoint(x: 128, y: 22), pressed: doneDown)
         VignetteParts.keycap(&ctx, "⇧S", origin: CGPoint(x: 124, y: 52), width: 30, pressed: skipDown)
-    }
-}
-
-// MARK: - the placeholder
-
-/// The other seven, until each gets its own: the set's symbol, breathing, over
-/// a faint stack. Honest about being a placeholder by doing very little.
-enum PlaceholderVignette: VignetteScene {
-    static let posterTime: Double = 1.2
-
-    static func draw(_ ctx: inout GraphicsContext, t: Double, set: FeatureSet) {
-        let breath = 0.5 - 0.5 * cos(t / VignetteMotion.loop * 2 * .pi)
-        for depth in stride(from: 2, through: 0, by: -1) {
-            VignetteParts.mail(
-                &ctx, origin: CGPoint(x: 16, y: 30 + CGFloat(depth) * 7), width: 82,
-                design: depth, opacity: [0.32, 0.2, 0.1][depth], scale: [1, 0.93, 0.86][depth])
-        }
-        let center = CGPoint(x: 126, y: 48)
-        let halo = ctx
-        halo.fill(
-            Path(ellipseIn: CGRect(x: center.x - 22, y: center.y - 22, width: 44, height: 44)),
-            with: .radialGradient(
-                Gradient(colors: [VignetteInk.phosphor.opacity(0.22 + 0.16 * breath), .clear]),
-                center: center, startRadius: 0, endRadius: 22))
-        var glyph = ctx
-        glyph.addFilter(.shadow(color: VignetteInk.phosphor.opacity(0.7), radius: 5 + 2 * breath))
-        let symbol = Text(Image(systemName: set.symbol))
-            .font(.system(size: 22, weight: .light))
-            .foregroundStyle(VignetteInk.phosphorHot)
-        glyph.draw(symbol, at: center, anchor: .center)
     }
 }

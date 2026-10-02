@@ -250,9 +250,9 @@ const WRONG_ACCOUNT: &str = "That was a different Google account than this Passb
 /// an error, and NOTHING was installed: their mailbox's credential is the one it
 /// was before they clicked.
 const CALENDAR_NOT_GRANTED_HEADING: &str = "Calendar was not connected";
-const CALENDAR_NOT_GRANTED: &str = "Google did not include calendar access, so nothing changed and your mail keeps \
-     working as before. To connect your calendar, start again from Passband and leave the \
-     calendar boxes checked.";
+const CALENDAR_NOT_GRANTED: &str = "Google did not include calendar access, so nothing about your Passband mailbox \
+     changed. To connect your calendar, start again from Passband and leave the calendar \
+     boxes checked.";
 
 /// The three answers `POST /waitlist` gives. JSON rather than a page: the only
 /// client is the site's own form, which shows its own copy in its own voice, so

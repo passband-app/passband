@@ -913,15 +913,18 @@ fn calendar_words(view: ReconnectView) -> (&'static str, &'static str, &'static 
         ),
         ReconnectView::Refused => (
             "Your calendar couldn’t be connected",
-            "Passband couldn’t connect your calendar, and nothing changed. Your mail keeps working as before. Open Passband to try again later.",
+            "Passband couldn’t connect your calendar, and nothing about your mail changed. Open Passband to try again later.",
             "passband://open",
             "Open Passband",
         ),
         ReconnectView::GaveUp => (
             "Connecting your calendar didn’t finish",
-            "We kept trying for a while but couldn’t confirm the new connection. Nothing needs undoing. Try again, or go back to Passband.",
-            "/reconnect?calendar=1",
-            "Try again",
+            // Back to the app, not a bare `/reconnect?calendar=1`: the app's
+            // own link carries the mailbox hint, and a retry started here
+            // would run without the wrong-account guard.
+            "We kept trying for a while but couldn’t confirm the new connection. Nothing needs undoing. Go back to Passband and connect your calendar again from there.",
+            "passband://open",
+            "Open Passband",
         ),
         // Unreachable in practice (an expired view has no row to read a
         // purpose from) and answered in the calendar's words anyway.

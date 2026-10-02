@@ -52,13 +52,16 @@ pub const DEFAULT_TLS_SECRET: &str = "passband-wildcard-tls";
 /// boot. See `deploy/hosted/SETUP.md`, "The Google OAuth client".
 pub const DEFAULT_OAUTH_SECRET_NAME: &str = "google-oauth-client";
 
-/// Secret holding the APNs relay's bearer, data key `token`.
+/// Secret holding the APNs relay's PUSH-ONLY bearer, data key `token`.
 ///
 /// One Secret, shared by every tenant, in the tenant namespace, exactly like
-/// [`DEFAULT_OAUTH_SECRET_NAME`]: the relay checks ONE bearer, the same one
-/// every self-hosted daemon presents, so there is nothing per tenant to mint.
-/// Read only when [`Config::relay_url`] is set. See
-/// `deploy/hosted/apns-relay.example.yaml`.
+/// [`DEFAULT_OAUTH_SECRET_NAME`]. Its value is the relay's
+/// `SQUELCH_RELAY_PUSH_TOKEN`, NEVER its `SQUELCH_RELAY_AUTH_TOKEN`: the push
+/// token opens `POST /v1/push` and is a 401 at `GET /v1/opens`, so a
+/// compromised tenant pod cannot read or delete the read-tracking opens of the
+/// self-hosted daemons that hold the full token. The relay knows one push
+/// token, so there is still nothing per tenant to mint. Read only when
+/// [`Config::relay_url`] is set. See `deploy/hosted/apns-relay.example.yaml`.
 pub const DEFAULT_RELAY_SECRET_NAME: &str = "apns-relay";
 
 /// k3s's built-in dynamic provisioner.
@@ -382,7 +385,8 @@ pub struct Config {
     /// list rendered here. Always https, for the gateway's reason: the relay is
     /// remote and its bearer must never cross the wire in the clear.
     pub relay_url: Option<String>,
-    /// Secret holding the relay bearer (key `token`), in [`Config::namespace`].
+    /// Secret holding the relay's push-only bearer (key `token`), in
+    /// [`Config::namespace`].
     /// See [`DEFAULT_RELAY_SECRET_NAME`].
     pub relay_secret_name: String,
     /// The APNs topic tenant daemons push under, handed on as
@@ -1047,6 +1051,17 @@ fn canonical_https_url(raw: &str, name: &str, why: &str) -> Result<String, Confi
             "{name} contains a character that is not allowed in a URL"
         )));
     }
+    // Three characters a base URL never needs and each of which turns it into
+    // something else. `@` makes everything before it USERINFO, so
+    // `https://relay@evil.example` is a request to evil.example carrying the
+    // bearer. `?` and `#` swallow whatever path the daemon appends after them
+    // (`/v1/push`, `/v1/messages`) into a query or a fragment, so every call
+    // lands on the bare host with a credential attached.
+    if url.contains(['@', '?', '#']) {
+        return Err(ConfigError::invalid(format!(
+            "{name} must be a plain base URL with no `@` (userinfo would send the bearer to the host after it), `?` or `#` (either would swallow the path the daemon appends)"
+        )));
+    }
     Ok(url.to_string())
 }
 
@@ -1270,6 +1285,20 @@ mod tests {
             ("SQUELCH_WARDEN_LLM_BASE_URL", "llm.internal"),
             ("SQUELCH_WARDEN_LLM_BASE_URL", "https://"),
             ("SQUELCH_WARDEN_LLM_BASE_URL", "https:///v1"),
+            // Userinfo sends the virtual key to the host after the `@`; a
+            // query or fragment swallows the `/v1/messages` the daemon appends.
+            (
+                "SQUELCH_WARDEN_LLM_BASE_URL",
+                "https://bifrost.passband.app@evil.example/anthropic",
+            ),
+            (
+                "SQUELCH_WARDEN_LLM_BASE_URL",
+                "https://bifrost.passband.app/anthropic?x=1",
+            ),
+            (
+                "SQUELCH_WARDEN_LLM_BASE_URL",
+                "https://bifrost.passband.app/anthropic#frag",
+            ),
             // Each of the four tuning vars, orphaned: without a gateway URL
             // they would never reach a pod, so the operator hears it at boot.
             ("SQUELCH_WARDEN_LLM_STAGE1_MODEL", "claude-haiku-4-5"),
@@ -1285,6 +1314,17 @@ mod tests {
             ("SQUELCH_WARDEN_RELAY_URL", "https://"),
             ("SQUELCH_WARDEN_RELAY_URL", "https:///push"),
             ("SQUELCH_WARDEN_RELAY_URL", "https://relay squelch.sh"),
+            // `https://relay@evil.example` is a request to evil.example with
+            // the bearer attached, and `?` / `#` eat the `/v1/push` suffix.
+            ("SQUELCH_WARDEN_RELAY_URL", "https://relay@evil.example"),
+            (
+                "SQUELCH_WARDEN_RELAY_URL",
+                "https://user:pw@relay.squelch.sh",
+            ),
+            ("SQUELCH_WARDEN_RELAY_URL", "https://relay.squelch.sh?"),
+            ("SQUELCH_WARDEN_RELAY_URL", "https://relay.squelch.sh/?a=b"),
+            ("SQUELCH_WARDEN_RELAY_URL", "https://relay.squelch.sh#"),
+            ("SQUELCH_WARDEN_RELAY_URL", "https://relay.squelch.sh/#x"),
             ("SQUELCH_WARDEN_RELAY_SECRET_NAME", "APNs_Relay"),
             // A topic orphaned from its URL would never reach a pod.
             ("SQUELCH_WARDEN_RELAY_TOPIC", "app.passband.client.ios"),
@@ -1516,6 +1556,46 @@ mod tests {
             assert!(!err.contains("LLM"), "{err}");
             assert!(err.contains(needle), "{err}");
         }
+        // Userinfo, query and fragment are refused, naming the variable and
+        // never repeating the URL (it could be carrying a credential).
+        for value in [
+            "https://relay@evil.example",
+            "https://relay.squelch.sh?x",
+            "https://relay.squelch.sh#x",
+        ] {
+            let err = with("SQUELCH_WARDEN_RELAY_URL", value)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.starts_with("SQUELCH_WARDEN_RELAY_URL must be a plain base URL"),
+                "{err}"
+            );
+            assert!(
+                !err.contains("evil.example") && !err.contains("relay.squelch.sh"),
+                "{err}"
+            );
+        }
+        let err = with("SQUELCH_WARDEN_LLM_BASE_URL", "https://a@b.example")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.starts_with("SQUELCH_WARDEN_LLM_BASE_URL must be a plain base URL"),
+            "{err}"
+        );
+
+        // The values production runs today still pass, unchanged.
+        let c = with(
+            "SQUELCH_WARDEN_LLM_BASE_URL",
+            "https://bifrost.passband.app/anthropic",
+        )
+        .unwrap();
+        assert_eq!(
+            c.llm_base_url.as_deref(),
+            Some("https://bifrost.passband.app/anthropic")
+        );
+        let c = with("SQUELCH_WARDEN_RELAY_URL", "https://relay.squelch.sh").unwrap();
+        assert_eq!(c.relay_url.as_deref(), Some("https://relay.squelch.sh"));
+
         let err = with("SQUELCH_WARDEN_RELAY_TOPIC", "app.passband.client.ios")
             .unwrap_err()
             .to_string();

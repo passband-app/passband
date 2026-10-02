@@ -159,7 +159,9 @@ pub const OAUTH_CLIENT_ID_KEY: &str = "client_id";
 pub const OAUTH_CLIENT_SECRET_KEY: &str = "client_secret";
 
 /// Data key in the shared APNs relay Secret
-/// ([`crate::config::Config::relay_secret_name`]): the relay's bearer.
+/// ([`crate::config::Config::relay_secret_name`]): the relay's PUSH-ONLY
+/// bearer (`SQUELCH_RELAY_PUSH_TOKEN` on the relay), which can push and can
+/// NOT drain the relay's opens buffer. Never the full `SQUELCH_RELAY_AUTH_TOKEN`.
 ///
 /// Same posture as the OAuth keys: the warden never reads it, it goes into the
 /// pod as a `secretKeyRef`, and only the Secret's NAME is ever in a pod spec,
@@ -1423,11 +1425,14 @@ fn daemon_env(config: &Config, name: &TenantName) -> Vec<EnvVar> {
     // hosted tenant had ever received an iOS push before this block existed.
     if let Some(relay_url) = &config.relay_url {
         env.push(plain("SQUELCH_RELAY_URL", relay_url));
-        // The bearer, from the shared Secret, never inline, and OPTIONAL for
-        // the LLM keys' reason: a missing Secret must leave the variable unset
-        // rather than hold EVERY tenant in CreateContainerConfigError at once.
-        // Unset, the daemon pushes with no bearer, the relay answers 401, the
-        // pusher logs it and backs off, and mail keeps working.
+        // The relay's push-only bearer, from the shared Secret, never inline.
+        // Push-only so a compromised tenant cannot drain the opens buffer the
+        // self-hosted daemons share (the relay 401s it at /v1/opens), and
+        // OPTIONAL for the LLM keys' reason: a missing Secret must leave the
+        // variable unset rather than hold EVERY tenant in
+        // CreateContainerConfigError at once. Unset, the daemon pushes with no
+        // bearer, the relay answers 401, the pusher logs it and backs off, and
+        // mail keeps working.
         env.push(from_optional_secret(
             "SQUELCH_RELAY_TOKEN",
             config.relay_secret_name.clone(),

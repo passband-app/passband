@@ -129,7 +129,7 @@ fallbacks and log a one-line deprecation note to stderr — migrate off them.
 | `SQUELCH_CREDENTIALS_PATH` | no | `~/.config/squelch/credentials.json` | Used only by the `file` backend. |
 | `SQUELCH_CLIENT_ID` / `SQUELCH_CLIENT_SECRET` | yes (OAuth) | — | Your GCP "Desktop app" OAuth client. |
 | `SQUELCH_RELAY_URL` | no | — | Base URL of your `squelch-relay`. Setting it is what SPAWNS the APNs pusher; unset, the daemon never talks to any relay. The read-tracking opens poller needs `SQUELCH_TRACK_URL` as well: with a relay and no tracking URL, the daemon pushes but never drains the relay's opens buffer (see `docs/TRACKING.md`). |
-| `SQUELCH_RELAY_TOKEN` | with a relay | — | Bearer the pusher presents to the relay — the value the relay validates as its own `SQUELCH_RELAY_AUTH_TOKEN`. Never logged. |
+| `SQUELCH_RELAY_TOKEN` | with a relay | — | Bearer the pusher presents to the relay — the value the relay validates as its own `SQUELCH_RELAY_AUTH_TOKEN`. Never logged. A self-hosted daemon needs that FULL token, because it also drains the read-tracking opens; the relay's push-only `SQUELCH_RELAY_PUSH_TOKEN` (what hosted tenants hold) pushes and gets a 401 from `/v1/opens`. |
 | `SQUELCH_RELAY_TOPIC` | no | relay's default | `apns-topic` (bundle id) override, forwarded verbatim; must be in the relay's allowlist. |
 | `SQUELCH_RELAY_APNS_ENV` | no | relay's default | `production` or `sandbox`. The FALLBACK only: each device registers the environment its own token was minted in (`sandbox` for Xcode and simulator builds, `production` for TestFlight and the App Store), and that always wins. This applies only to device rows that never declared one, typically from a client build older than the field. |
 

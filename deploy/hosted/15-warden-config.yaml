@@ -170,18 +170,27 @@ data:
   # The APNs relay, which is how a hosted tenant's iPhone gets a push at all.
   # With SQUELCH_WARDEN_RELAY_URL set, every tenant pod gets SQUELCH_RELAY_URL,
   # SQUELCH_RELAY_TOKEN (an OPTIONAL reference into the shared Secret named by
-  # SQUELCH_WARDEN_RELAY_SECRET_NAME, key `token`; see
-  # apns-relay.example.yaml) and SQUELCH_RELAY_TOPIC. The daemon spawns its
+  # SQUELCH_WARDEN_RELAY_SECRET_NAME, key `token`, which holds the relay's
+  # PUSH-ONLY SQUELCH_RELAY_PUSH_TOKEN and NEVER its SQUELCH_RELAY_AUTH_TOKEN;
+  # see apns-relay.example.yaml) and SQUELCH_RELAY_TOPIC. The daemon spawns its
   # pusher only when SQUELCH_RELAY_URL is set, so with these commented out no
   # hosted tenant receives an iOS push. The APNs environment is NOT a knob here
   # on purpose: each device declares its own at registration.
   #
   # UNCOMMENT THESE ONLY IN THE SAME CHANGE THAT BUMPS SQUELCH_WARDEN_IMAGE TO
-  # THE FIRST daemon-* TAG THAT CONTAINS THE OPENS-POLLER GATE. On an older
-  # daemon image, SQUELCH_RELAY_URL also starts the opens poller. The relay's
-  # opens buffer is one global queue, so every hosted tenant would then collect
-  # and delete the read-tracking opens that belong to self-hosted daemons, and
-  # those self-hosters would silently stop seeing their opens.
+  # THE FIRST daemon-* TAG THAT CONTAINS THE OPENS-POLLER GATE. daemon-0.0.11
+  # and every earlier tag do NOT contain it. On those images SQUELCH_RELAY_URL
+  # also starts the opens poller. The relay's opens buffer is one global queue,
+  # so every hosted tenant would then collect and delete the read-tracking opens
+  # that belong to self-hosted daemons, and those self-hosters would silently
+  # stop seeing their opens. The push-only token makes the relay 401 that drain,
+  # a second lock; keep this one too.
+  #
+  # A Secret made from the FULL auth token before the push token existed must
+  # be REPLACED first. And never `kubectl rollout restart` the tenants to make
+  # them read a new or late-created Secret: it freezes every one of them out of
+  # the roller (ROLLOUT.md, "The five things that actually bite"). Create it
+  # under a NEW name and change SQUELCH_WARDEN_RELAY_SECRET_NAME instead.
   #
   # The topic must be explicit. The relay's allowlist is
   # `app.passband.client,app.passband.client.ios` and its default is the FIRST

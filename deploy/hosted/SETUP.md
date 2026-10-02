@@ -887,25 +887,75 @@ simply does not appear until the tenant is re-minted.
 
 ## 6c. iOS push through the relay
 
-A tenant daemon never holds our APNs key. It posts content-free pings to the
-relay (`https://relay.squelch.sh`, the `squelch` service on Railway) with one
-shared bearer, and the relay signs and forwards them to Apple. The daemon
-spawns its pusher only when `SQUELCH_RELAY_URL` is set, and the warden renders
-that only when it is configured to, so **until this step is done no hosted
-tenant receives an iOS push at all.** Tenant egress already allows any public
-443 host, so the cluster needs no network change.
+A tenant daemon never holds our APNs key. It posts pings to the relay
+(`https://relay.squelch.sh`, the `squelch` service on Railway) with a bearer,
+and the relay signs and forwards them to Apple. The daemon spawns its pusher
+only when `SQUELCH_RELAY_URL` is set, and the warden renders that only when it
+is configured to, so **until this step is done no hosted tenant receives an iOS
+push at all.** Tenant egress already allows any public 443 host, so the cluster
+needs no network change.
 
-The bearer, in the tenant namespace, beside the OAuth client and made visible
-to pods the same way (by name, through a `secretKeyRef`; no RBAC and no copy):
+**Tenants get the relay's PUSH-ONLY token, never its full auth token.** The
+relay takes two bearers. `SQUELCH_RELAY_AUTH_TOKEN` opens `POST /v1/push` and
+`GET /v1/opens`, the drain of the read-tracking buffer, which is one global
+queue that a cursor deletes from. `SQUELCH_RELAY_PUSH_TOKEN` opens the push
+route and is a 401 at the drain. The full token stays with self-hosted daemons
+and the operator; with it, one compromised tenant pod could read, delete and
+(by replaying the open tokens to the public pixel) forge every self-hosted
+daemon's opens.
+
+A Secret created from the full auth token, as an earlier revision of this page
+said to, MUST BE REPLACED before the warden keys below are uncommented. Use the
+rename procedure under "Rotation" in `apns-relay.example.yaml`.
+
+Two steps, in this order. The value travels on stdin and through a pipe only:
+it is never an argument, never in a file and never on the screen.
 
 ```sh
-kubectl -n tenants create secret generic apns-relay \
-  --from-literal=token="$(railway variables -s squelch --json | jq -r .SQUELCH_RELAY_AUTH_TOKEN)"
+# 1. Mint the push token on the relay. This REDEPLOYS the relay; wait for it.
+openssl rand -hex 32 | tr -d '\n' \
+  | railway variable set -s squelch SQUELCH_RELAY_PUSH_TOKEN --stdin
+
+# 2. Read it back (JSON: the table view truncates) into the tenant Secret.
+railway variable list -s squelch --json \
+  | jq -r .SQUELCH_RELAY_PUSH_TOKEN | tr -d '\n' \
+  | kubectl -n tenants create secret generic apns-relay --from-file=token=/dev/stdin
 ```
 
-It is ONE bearer shared by every tenant pod and every self-hosted daemon, and
-rotating it means the relay, this Secret and every self-hosted config together.
-The blast radius and rotation are in `apns-relay.example.yaml`.
+The second `tr -d '\n'` matters. `jq -r` ends its output with a newline and
+`--from-file` keeps every byte, so without it the Secret is the token plus a
+newline, and a newline cannot appear in an HTTP header value. Today's daemon
+trims its environment; the Secret should not rely on that. The relay's startup
+line says `push_token=true` once step 1 has deployed (`railway logs -s
+squelch`), and never prints the value. A `serving` line with no `push_token`
+field at all is a relay build that predates the variable and ignores it: the
+relay auto-deploys from `main`, so the change that added it has to be merged
+first, or every tenant 401s.
+
+The Secret sits in the tenant namespace beside the OAuth client and reaches
+pods the same way (by name, through a `secretKeyRef`; no RBAC and no copy).
+Create it BEFORE uncommenting the warden keys: a `secretKeyRef` resolves once,
+at container start, so a Secret created afterwards changes nothing in the
+render and no pod picks it up on its own.
+
+**Blast radius of the push token.** Every tenant pod holds the same value. With
+it a caller can send pings to device tokens it already holds, choosing the
+`event_id` (up to 256 bytes) and `collapse_id`, both of which reach the device:
+"content-free" describes our daemon, not a malicious caller. It can also spend
+the relay's shared rate limit (120 requests a minute per client IP, and tenants
+plausibly share one egress IP), so one tenant can 429 the others. It can NOT
+read or drain opens.
+
+**Rotation, and a Secret that was missing: never `kubectl rollout restart` the
+tenants.** That restarts every tenant at once and leaves a `kubectl-rollout`
+field manager on each Deployment. The warden's drift check
+(`squelch-warden/src/drift.rs`, `foreign_managers`) treats every manager but
+its own as foreign, and the roller skips such a tenant on every roll until it
+is repaired with `squelch-control reconcile <label>` (`ROLLOUT.md`, "The five
+things that actually bite", item 1). Instead create the Secret under a NEW name
+(`apns-relay-2`) and set `SQUELCH_WARDEN_RELAY_SECRET_NAME` to it: that changes
+the rendered pod, so the roller delivers it one tenant per tick. Full steps:
+`apns-relay.example.yaml`.
 
 Then the warden, in `15-warden-config.yaml`, where the three keys ship commented
 out:
@@ -928,10 +978,12 @@ warden never renders `SQUELCH_RELAY_APNS_ENV`.
 
 **ORDERING RULE: UNCOMMENT THESE ONLY IN THE SAME CHANGE THAT BUMPS
 `SQUELCH_WARDEN_IMAGE` TO THE FIRST `daemon-*` TAG THAT CONTAINS THE
-OPENS-POLLER GATE.** On an older daemon image `SQUELCH_RELAY_URL` also starts
-the opens poller. The relay's opens buffer is one global queue, so every hosted
-tenant would then collect and delete the read-tracking opens that belong to
-self-hosted daemons.
+OPENS-POLLER GATE.** `daemon-0.0.11` and every earlier tag do NOT contain it.
+On those images `SQUELCH_RELAY_URL` also starts the opens poller. The relay's
+opens buffer is one global queue, so every hosted tenant would then collect and
+delete the read-tracking opens that belong to self-hosted daemons. With the
+push-only token in the Secret the relay refuses that drain with a 401, so the
+token is now the second lock and not the only one; keep both.
 
 Two more things have to be true for the change to reach anyone:
 
@@ -954,6 +1006,20 @@ Then trigger a notification for that tenant and look for a `push` line with
 A pusher line and no `push` line is a device that never registered; a `push`
 line with the Mac topic is a missing `SQUELCH_WARDEN_RELAY_TOPIC`; 401s in the
 tenant's log are a missing or stale `apns-relay` Secret.
+
+The two failure modes recover differently, and neither is gentle:
+
+- **A 401 holds.** While the relay refuses a tenant, its pusher's cursor does
+  not move. When the Secret is fixed, every notify-eligible event since the
+  refusal began is pushed at once: a burst of stale notifications.
+- **A per-token 400 is lost.** A wrong topic (an unset
+  `SQUELCH_WARDEN_RELAY_TOPIC`, so the Mac bundle id) or a token in the wrong
+  APNs environment is counted as rejected and the event is written off, not
+  queued. Until the topic is right those notifications never arrive.
+- **Rejected rows are kept**, because a 400 is also what configuration drift
+  looks like. So `squelchd_apns_push_results_total{outcome="rejected"}` can
+  tick steadily from one stale development-build token; alert on it relative to
+  `outcome="delivered"`, not on any increase.
 
 ## 7. Tenant limits
 

@@ -2027,8 +2027,11 @@ fn cmd_serve(
 
     // The opens poller runs the same relay in the other direction: it collects
     // read-tracking pixel hits the relay saw and appends the `opened` events the
-    // pusher then delivers. Gated on the SAME `SQUELCH_RELAY_URL`; a daemon
-    // whose pixel is reached directly needs none of this.
+    // pusher then delivers. Gated on `SQUELCH_RELAY_URL` AND `SQUELCH_TRACK_URL`
+    // both: the relay's opens buffer is one global queue whose cursor ack
+    // DELETES, so a daemon that mints no pixels (a hosted tenant given a relay
+    // for push alone) must never collect. A daemon whose pixel is reached
+    // directly needs none of this.
     let opens_poller = match squelch_core::tracking::OpensPoller::from_config(
         store.clone() as Arc<dyn squelch_core::store::Store>,
         account_id,
@@ -2131,6 +2134,8 @@ fn cmd_serve(
         let pusher_handle = match pusher {
             Some(pusher) => {
                 eprintln!("squelchd: APNs pusher enabled (relay configured)");
+                sync_metrics.set_apns_pusher_enabled(true);
+                let pusher = pusher.with_metrics(sync_metrics.clone());
                 let shutdown_rx = shutdown_rx.clone();
                 Some(tokio::spawn(async move {
                     pusher.run(pusher_wake, shutdown_rx).await
@@ -2149,13 +2154,13 @@ fn cmd_serve(
         // and is awaited on the way out, like the pusher.
         let opens_handle = match opens_poller {
             Some(poller) => {
-                eprintln!("squelchd: opens poller enabled (relay configured)");
+                eprintln!("squelchd: opens poller enabled (relay and tracking configured)");
                 let shutdown_rx = shutdown_rx.clone();
                 Some(tokio::spawn(async move { poller.run(shutdown_rx).await }))
             }
             None => {
                 eprintln!(
-                    "squelchd: opens poller disabled (no SQUELCH_RELAY_URL / [pusher] relay_url)"
+                    "squelchd: opens poller disabled (needs both SQUELCH_RELAY_URL / [pusher] relay_url and SQUELCH_TRACK_URL / [tracking] base_url)"
                 );
                 None
             }

@@ -1127,8 +1127,9 @@ impl Store for SqliteStore {
         token: &str,
         platform: &str,
         tag: Option<&str>,
+        environment: Option<&str>,
     ) -> Result<Device> {
-        self.upsert_device(account_id, token, platform, tag)
+        self.upsert_device(account_id, token, platform, tag, environment)
     }
 
     fn list_devices(&self, account_id: AccountId) -> Result<Vec<Device>> {

@@ -14,6 +14,7 @@ use tokio::sync::{broadcast, watch};
 
 use crate::config::Config;
 use crate::error::{CoreError, Result};
+use crate::metrics::{ApnsPushOutcome, SyncMetrics};
 use crate::store::{Store, SyncState};
 use crate::types::{AccountId, Event};
 
@@ -70,6 +71,16 @@ impl PushEventId {
     }
 }
 
+/// Where one device's push goes: the payload it rides in (its `tag`) and the
+/// APNs environment its token was minted in. Both are per-REQUEST on the wire,
+/// so devices that differ in either cannot share a request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Route {
+    tag: Option<String>,
+    /// The device row's declared environment; `None` = the client never said.
+    environment: Option<String>,
+}
+
 /// The complete wire body, and THE PRIVACY BOUNDARY: the content-bearing fields
 /// of [`Event`] (sender, one_line, tier, importance, kind, deadline) are absent
 /// and must stay absent. Adding a field here is a security change.
@@ -110,15 +121,41 @@ struct PushOutcome {
     /// Tokens APNs accepted (`200`).
     delivered: usize,
     /// Tokens that neither landed nor retired — `0` for an APNs the relay could
-    /// not reach or that timed out, `429` throttling, `5xx`. All retryable.
+    /// not reach or that timed out, `403` (the relay's provider token is bad,
+    /// which an operator fixes), `429` throttling, `5xx`, anything unexpected.
+    /// All retryable.
     failed: usize,
+    /// Tokens APNs refused PERMANENTLY for this request: any 4xx other than
+    /// 403, 410 and 429 (400 `BadDeviceToken` / `DeviceTokenNotForTopic`, 404,
+    /// 405, 413). Retrying the same request cannot help, so these do NOT hold
+    /// the cursor. They are NOT deleted either: a 400 is also what configuration
+    /// drift looks like (a topic missing from the relay's allowlist, a wrong
+    /// fallback environment for a legacy row), and deleting on that would
+    /// silently unregister every phone.
+    rejected: usize,
+}
+
+/// The classes a per-token APNs status falls into. `410` is retirement, the
+/// permanent 4xxs are rejection, and EVERYTHING ELSE that is not a 200 is
+/// retryable: an unknown status is safer held than dropped.
+fn classify(status: u16) -> ApnsPushOutcome {
+    match status {
+        200 => ApnsPushOutcome::Delivered,
+        410 => ApnsPushOutcome::Dead,
+        403 | 429 => ApnsPushOutcome::Failed,
+        400..=499 => ApnsPushOutcome::Rejected,
+        _ => ApnsPushOutcome::Failed,
+    }
 }
 
 impl PushOutcome {
     /// Nothing landed and something retryable failed: the APNs hop is out while
     /// the relay hop is fine — leave the cursor, back off, retry. Deliberately
     /// NOT "any failure": a partial delivery advances, because retrying would
-    /// re-push the event to every device that already got it.
+    /// re-push the event to every device that already got it. `rejected` is
+    /// deliberately ABSENT: an event every token refused permanently advances,
+    /// or a daemon whose only device is rejected stalls forever and then dumps
+    /// the whole backlog on the first good device to register.
     fn nothing_landed(&self) -> bool {
         self.delivered == 0 && self.failed > 0
     }
@@ -144,16 +181,18 @@ fn next_backoff(current: Option<Duration>) -> Duration {
     }
 }
 
-/// Devices sorted into one bucket per tag, first-seen order preserved so a
-/// fan-out and its logs stay reproducible. One request per bucket is the price
-/// of the tag: every token in a bucket shares one payload, and the payload is
-/// what carries the tag.
-fn by_tag(devices: &[(Option<String>, String)]) -> Vec<(Option<String>, Vec<String>)> {
-    let mut groups: Vec<(Option<String>, Vec<String>)> = Vec::new();
-    for (tag, token) in devices {
-        match groups.iter_mut().find(|(t, _)| t == tag) {
+/// Devices sorted into one bucket per (tag, environment), first-seen order
+/// preserved so a fan-out and its logs stay reproducible. One request per
+/// bucket is the price of both: every token in a bucket shares one payload
+/// (which carries the tag) and one `environment` (which APNs host the relay
+/// dials). A sandbox token sent to production is REJECTED, so two devices under
+/// the same tag but different environments must never share a request.
+fn by_route(devices: &[(Route, String)]) -> Vec<(Route, Vec<String>)> {
+    let mut groups: Vec<(Route, Vec<String>)> = Vec::new();
+    for (route, token) in devices {
+        match groups.iter_mut().find(|(r, _)| r == route) {
             Some((_, tokens)) => tokens.push(token.clone()),
-            None => groups.push((tag.clone(), vec![token.clone()])),
+            None => groups.push((route.clone(), vec![token.clone()])),
         }
     }
     groups
@@ -191,8 +230,13 @@ pub struct Pusher {
     /// The relay bearer. NEVER logged, never included in an error.
     relay_token: Option<String>,
     topic: Option<String>,
+    /// The FALLBACK environment, for devices that did not declare their own.
+    /// `None` omits the field and the relay applies its default.
     environment: Option<String>,
     http: reqwest::Client,
+    /// Per-token outcome counters. A private registry until
+    /// [`Pusher::with_metrics`] hands it the process's one.
+    metrics: Arc<SyncMetrics>,
 }
 
 impl Pusher {
@@ -225,6 +269,7 @@ impl Pusher {
             topic: config.pusher.topic.clone().filter(|t| !t.is_empty()),
             environment: config.pusher.environment.clone().filter(|t| !t.is_empty()),
             http,
+            metrics: SyncMetrics::new(),
         }))
     }
 
@@ -242,13 +287,27 @@ impl Pusher {
             // The SAME client the real path uses, redirect policy included —
             // otherwise the redirect test would prove nothing about production.
             http: http_client().expect("test http client"),
+            metrics: SyncMetrics::new(),
         }
+    }
+
+    /// Report per-token outcomes into the process's metrics registry.
+    pub fn with_metrics(mut self, metrics: Arc<SyncMetrics>) -> Self {
+        self.metrics = metrics;
+        self
     }
 
     /// TEST HOOK: set the relay bearer / topic / environment pass-throughs.
     #[doc(hidden)]
     pub fn with_relay_auth(mut self, token: Option<&str>) -> Self {
         self.relay_token = token.map(|t| t.to_string());
+        self
+    }
+
+    /// TEST HOOK: set the configured fallback environment.
+    #[doc(hidden)]
+    pub fn with_environment(mut self, environment: Option<&str>) -> Self {
+        self.environment = environment.map(|e| e.to_string());
         self
     }
 
@@ -287,14 +346,22 @@ impl Pusher {
             if batch.is_empty() {
                 return Ok(());
             }
-            // The TAG rides with each token: it decides which payload the
-            // token's push is carried in, so it cannot be dropped here the way
-            // the rest of the row is.
-            let mut devices: Vec<(Option<String>, String)> = self
+            // The TAG and the ENVIRONMENT ride with each token: they decide which
+            // payload and which APNs host the token's push goes out on, so they
+            // cannot be dropped here the way the rest of the row is.
+            let mut devices: Vec<(Route, String)> = self
                 .store
                 .list_devices(self.account_id)?
                 .into_iter()
-                .map(|d| (d.tag, d.token))
+                .map(|d| {
+                    (
+                        Route {
+                            tag: d.tag,
+                            environment: d.environment,
+                        },
+                        d.token,
+                    )
+                })
                 .collect();
 
             // Nothing registered: an event nobody can receive is history, not
@@ -341,8 +408,10 @@ impl Pusher {
                     }
                 }
                 // The relay answered, APNs did not: every surviving token came
-                // back 0/429/5xx, so this event reached nobody. The relay's own
-                // 200 is not evidence of delivery — bail, cursor unmoved.
+                // back 0/403/429/5xx (or was rejected), so this event reached
+                // nobody and something retryable is in the mix. The relay's own
+                // 200 is not evidence of delivery — bail, cursor unmoved. An
+                // event whose tokens were ALL rejected falls through and advances.
                 if outcome.nothing_landed() {
                     eprintln!(
                         "squelch: APNs took none of {} device(s) for this event; cursor unmoved",
@@ -362,22 +431,22 @@ impl Pusher {
     /// per tag bucket, each chunked to the relay's ceiling — returning the
     /// per-token tally: a 200 from the relay says nothing about whether APNs
     /// took anything.
-    async fn push_event(
-        &self,
-        ev: &Event,
-        devices: &[(Option<String>, String)],
-    ) -> Result<PushOutcome> {
+    async fn push_event(&self, ev: &Event, devices: &[(Route, String)]) -> Result<PushOutcome> {
         let collapse = collapse_id(&ev.thread_id);
         let mut outcome = PushOutcome::default();
-        for (tag, tokens) in by_tag(devices) {
-            let event_id = PushEventId::new(tag.as_deref(), ev.id);
+        for (route, tokens) in by_route(devices) {
+            let event_id = PushEventId::new(route.tag.as_deref(), ev.id);
+            // The device's OWN environment wins: it is a fact about the token.
+            // The configured one is only the fallback for rows that never said,
+            // and with neither the field is omitted for the relay's default.
+            let environment = route.environment.as_deref().or(self.environment.as_deref());
             for chunk in tokens.chunks(MAX_TOKENS_PER_REQUEST) {
                 let body = PushRequest {
                     device_tokens: chunk,
                     event_id: event_id.clone(),
                     collapse_id: Some(collapse.clone()),
                     topic: self.topic.as_deref(),
-                    environment: self.environment.as_deref(),
+                    environment,
                 };
                 let mut req = self.http.post(&self.push_url).json(&body);
                 if let Some(token) = &self.relay_token {
@@ -402,17 +471,31 @@ impl Pusher {
                     relay_failure()
                 })?;
                 for result in parsed.results {
-                    match result.status {
-                        200 => outcome.delivered += 1,
+                    let class = classify(result.status);
+                    self.metrics.record_apns_push(class);
+                    match class {
+                        ApnsPushOutcome::Delivered => outcome.delivered += 1,
                         // The device is gone. Data, not an error.
-                        410 => outcome.dead.push(result.token),
+                        ApnsPushOutcome::Dead => outcome.dead.push(result.token),
+                        // Permanent for this token and request: not retried, NOT
+                        // deleted (see `PushOutcome::rejected`). Status and
+                        // prefix only, never the token or a reason string.
+                        ApnsPushOutcome::Rejected => {
+                            outcome.rejected += 1;
+                            eprintln!(
+                                "squelch: APNs rejected the push for one device with status {} (token {}…); not retried",
+                                result.status,
+                                token_prefix(&result.token)
+                            );
+                        }
                         // Retryable: `0` is the relay's word for an unreachable or
-                        // timed-out APNs; 429/5xx come through verbatim. Log the
-                        // status only — never the token value or a reason string.
-                        other => {
+                        // timed-out APNs; 403/429/5xx come through verbatim. Log
+                        // the status only — never the token value or a reason.
+                        ApnsPushOutcome::Failed => {
                             outcome.failed += 1;
                             eprintln!(
-                                "squelch: APNs push for one device returned status {other} (token {}…)",
+                                "squelch: APNs push for one device returned status {} (token {}…)",
+                                result.status,
                                 token_prefix(&result.token)
                             );
                         }
@@ -585,38 +668,90 @@ mod tests {
         assert_eq!(tagged, serde_json::json!("acct-a:41"));
     }
 
+    fn route(tag: Option<&str>, environment: Option<&str>) -> Route {
+        Route {
+            tag: tag.map(str::to_string),
+            environment: environment.map(str::to_string),
+        }
+    }
+
     /// Two mailboxes on one phone register the same device under different
     /// tags; each bucket gets its own payload, and a token appears in exactly
     /// one of them.
     #[test]
     fn devices_bucket_by_tag_in_first_seen_order() {
         let devices = vec![
-            (Some("a".to_string()), "t1".to_string()),
-            (None, "t2".to_string()),
-            (Some("a".to_string()), "t3".to_string()),
-            (Some("b".to_string()), "t4".to_string()),
+            (route(Some("a"), None), "t1".to_string()),
+            (route(None, None), "t2".to_string()),
+            (route(Some("a"), None), "t3".to_string()),
+            (route(Some("b"), None), "t4".to_string()),
         ];
-        let groups = by_tag(&devices);
+        let groups = by_route(&devices);
         assert_eq!(
             groups,
             vec![
                 (
-                    Some("a".to_string()),
+                    route(Some("a"), None),
                     vec!["t1".to_string(), "t3".to_string()]
                 ),
-                (None, vec!["t2".to_string()]),
-                (Some("b".to_string()), vec!["t4".to_string()]),
+                (route(None, None), vec!["t2".to_string()]),
+                (route(Some("b"), None), vec!["t4".to_string()]),
             ]
         );
     }
 
-    /// An untagged fleet is the pre-tag deployment: one bucket, one request,
-    /// the same body it always sent.
+    /// The SAME tag with two environments is two buckets: a dev build and a
+    /// TestFlight build of one mailbox cannot share a request, because the
+    /// request names one APNs host. First-seen order still holds.
+    #[test]
+    fn one_tag_splits_by_environment_in_first_seen_order() {
+        let devices = vec![
+            (route(Some("a"), Some("sandbox")), "t1".to_string()),
+            (route(Some("a"), Some("production")), "t2".to_string()),
+            (route(Some("a"), Some("sandbox")), "t3".to_string()),
+            (route(Some("a"), None), "t4".to_string()),
+        ];
+        let groups = by_route(&devices);
+        assert_eq!(
+            groups,
+            vec![
+                (
+                    route(Some("a"), Some("sandbox")),
+                    vec!["t1".to_string(), "t3".to_string()]
+                ),
+                (route(Some("a"), Some("production")), vec!["t2".to_string()]),
+                (route(Some("a"), None), vec!["t4".to_string()]),
+            ]
+        );
+    }
+
+    /// An untagged, undeclared fleet is the pre-tag deployment: one bucket, one
+    /// request, the same body it always sent.
     #[test]
     fn an_untagged_fleet_is_still_one_bucket() {
-        let devices: Vec<(Option<String>, String)> =
-            (0..3).map(|i| (None, format!("t{i}"))).collect();
-        assert_eq!(by_tag(&devices).len(), 1);
+        let devices: Vec<(Route, String)> = (0..3)
+            .map(|i| (route(None, None), format!("t{i}")))
+            .collect();
+        assert_eq!(by_route(&devices).len(), 1);
+    }
+
+    /// The status classes: 410 retires, 403 and 429 are retryable even though
+    /// they are 4xx, every other 4xx is a permanent rejection, and anything
+    /// else (0, 5xx, the unexpected) is held for retry.
+    #[test]
+    fn statuses_classify_into_retire_reject_and_retry() {
+        assert_eq!(classify(200), ApnsPushOutcome::Delivered);
+        assert_eq!(classify(410), ApnsPushOutcome::Dead);
+        for permanent in [400, 404, 405, 413] {
+            assert_eq!(
+                classify(permanent),
+                ApnsPushOutcome::Rejected,
+                "{permanent}"
+            );
+        }
+        for retry in [0, 403, 429, 500, 503, 302, 201] {
+            assert_eq!(classify(retry), ApnsPushOutcome::Failed, "{retry}");
+        }
     }
 
     #[test]
@@ -656,6 +791,13 @@ mod tests {
             dead: dead.iter().map(|t| t.to_string()).collect(),
             delivered,
             failed,
+            rejected: 0,
+        };
+        let with_rejected = |delivered, failed, rejected| PushOutcome {
+            dead: Vec::new(),
+            delivered,
+            failed,
+            rejected,
         };
 
         // Every token came back 0/429/5xx: nobody got it, retry.
@@ -670,6 +812,15 @@ mod tests {
         // which is cleanup the drain loop already handles — not a retry.
         assert!(!outcome(0, 0, &["a", "b"]).nothing_landed());
         assert!(!PushOutcome::default().nothing_landed());
+
+        // Every token rejected permanently: retrying cannot help, so the event
+        // ADVANCES rather than wedging the pusher behind it.
+        assert!(!with_rejected(0, 0, 2).nothing_landed());
+        // Rejected plus retryable-failed with nothing delivered still holds:
+        // the failed share may land on a retry.
+        assert!(with_rejected(0, 1, 2).nothing_landed());
+        // And a delivery alongside rejections advances as any partial does.
+        assert!(!with_rejected(1, 1, 1).nothing_landed());
     }
 
     #[test]

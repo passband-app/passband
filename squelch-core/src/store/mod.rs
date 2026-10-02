@@ -445,6 +445,10 @@ pub struct Device {
     /// under, stamped onto every push sent here so the receiver can tell which
     /// mailbox an event id belongs to. `None` for a client that never sent one.
     pub tag: Option<String>,
+    /// The APNs environment the client declared this token was minted in,
+    /// `production` or `sandbox`. `None` for a client that did not say; the
+    /// pusher then uses its configured environment, else the relay's default.
+    pub environment: Option<String>,
     pub created_at: DateTime<Utc>,
     /// Refreshed on every re-registration — iOS re-hands its token each launch,
     /// so this, not `created_at`, is the liveness signal.
@@ -2317,12 +2321,18 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     /// `tag` is overwritten on every re-registration, including back to `None`:
     /// it describes where this device currently files the account, and a stale
     /// one would route a push at a mailbox the phone has since forgotten.
+    ///
+    /// `environment` is the OPPOSITE: `None` keeps whatever is stored. A token's
+    /// APNs environment never changes, so an older build re-registering the same
+    /// token without the field must not erase what a newer build declared. A
+    /// `Some` replaces it.
     fn upsert_device(
         &self,
         account_id: AccountId,
         token: &str,
         platform: &str,
         tag: Option<&str>,
+        environment: Option<&str>,
     ) -> Result<Device>;
 
     /// Every registered device for the account, oldest first — a stable order, so

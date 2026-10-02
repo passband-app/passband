@@ -140,6 +140,35 @@ impl CarrierPollOutcome {
     }
 }
 
+/// How APNs answered for one device token, as the pusher classifies it. A
+/// CLOSED set of four and the only label on its family: no token, tag, topic or
+/// account ever becomes a series.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApnsPushOutcome {
+    /// `200`: APNs took it.
+    Delivered,
+    /// `410`: the device is gone and its row is deleted.
+    Dead,
+    /// A permanent 4xx: not retried, not deleted.
+    Rejected,
+    /// Retryable: `0`, `403`, `429`, `5xx`, anything unexpected.
+    Failed,
+}
+
+impl ApnsPushOutcome {
+    /// Exposition order; the index into the outcome row.
+    const ALL: [Self; 4] = [Self::Delivered, Self::Dead, Self::Rejected, Self::Failed];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Delivered => "delivered",
+            Self::Dead => "dead",
+            Self::Rejected => "rejected",
+            Self::Failed => "failed",
+        }
+    }
+}
+
 /// What one row's trip through the Stage-1 refine pass produced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage1Verdict {
@@ -398,6 +427,14 @@ pub struct SyncMetrics {
     /// memory next to this one reads as cause and effect instead of a mystery.
     /// Written by [`crate::embed::LazyEmbedder`] on each load and unload.
     embedder_loaded: AtomicU64,
+
+    /// 1 when the APNs pusher task was spawned at startup, else 0. Together
+    /// with the counter below this is what makes a dead push path VISIBLE: an
+    /// outage once ran for over a month because nothing measured whether a
+    /// daemon had a pusher at all, or whether anything it sent landed.
+    apns_pusher_enabled: AtomicU64,
+    /// Per-token APNs results, indexed by [`ApnsPushOutcome`].
+    apns_push_results: [AtomicU64; ApnsPushOutcome::ALL.len()],
 
     /// Mirror of the engine's private `poll_healthy`: true once a poll has
     /// succeeded and until the next lifecycle error. The human door has no
@@ -762,6 +799,17 @@ impl SyncMetrics {
     pub fn set_embedder_loaded(&self, loaded: bool) {
         self.embedder_loaded
             .store(u64::from(loaded), Ordering::Relaxed);
+    }
+
+    /// Whether the APNs pusher task was spawned. An absolute state, set once.
+    pub fn set_apns_pusher_enabled(&self, enabled: bool) {
+        self.apns_pusher_enabled
+            .store(u64::from(enabled), Ordering::Relaxed);
+    }
+
+    /// Count one device token's APNs result.
+    pub fn record_apns_push(&self, outcome: ApnsPushOutcome) {
+        self.apns_push_results[outcome as usize].fetch_add(1, Ordering::Relaxed);
     }
 
     /// A poll advanced a shipment's status (`apply_carrier_track` said so).
@@ -1559,6 +1607,29 @@ pub fn render(metrics: &SyncMetrics, db: Option<&StoreSnapshot>) -> String {
         metrics.get(&metrics.embedder_loaded),
     );
 
+    // Always emitted, 0 included: "this daemon has no pusher" must read as a
+    // 0 a dashboard can alert on, never as absence.
+    e.scalar(
+        "squelchd_apns_pusher_enabled",
+        MetricKind::Gauge,
+        "1 when the APNs pusher task was started (a relay is configured), else 0.",
+        metrics.get(&metrics.apns_pusher_enabled),
+    );
+    // All four outcomes from the first scrape, so `rate(...)` on one that just
+    // started moving reads correctly from its first sample.
+    e.family(
+        "squelchd_apns_push_results_total",
+        MetricKind::Counter,
+        "Per-device-token APNs results from the pusher, by outcome.",
+    );
+    for outcome in ApnsPushOutcome::ALL {
+        e.sample(
+            "squelchd_apns_push_results_total",
+            &[("outcome", outcome.label())],
+            metrics.get(&metrics.apns_push_results[outcome as usize]),
+        );
+    }
+
     // ALL 20 series are emitted, including carriers this daemon has no
     // credentials for: an absent series is indistinguishable from a scraper
     // problem, and a flat 0 is what makes `rate(...)` on a carrier that just
@@ -1976,6 +2047,33 @@ mod tests {
         assert!(!text.contains("squelchd_llm_last_ok_unixtime 0\n"));
     }
 
+    /// The pusher gauge flips and each outcome counts on its own series; the
+    /// four series are the whole label space.
+    #[test]
+    fn apns_pusher_gauge_and_per_outcome_counts() {
+        let m = SyncMetrics::new();
+        m.set_apns_pusher_enabled(true);
+        m.record_apns_push(ApnsPushOutcome::Delivered);
+        m.record_apns_push(ApnsPushOutcome::Rejected);
+        m.record_apns_push(ApnsPushOutcome::Rejected);
+        let text = render(&m, None);
+        assert!(text.contains("squelchd_apns_pusher_enabled 1\n"));
+        for (outcome, n) in [
+            ("delivered", 1),
+            ("dead", 0),
+            ("rejected", 2),
+            ("failed", 0),
+        ] {
+            assert!(
+                text.contains(&format!(
+                    "squelchd_apns_push_results_total{{outcome=\"{outcome}\"}} {n}\n"
+                )),
+                "{outcome}"
+            );
+        }
+        assert_eq!(text.matches("squelchd_apns_push_results_total{").count(), 4);
+    }
+
     #[test]
     fn llm_config_failures_count_and_the_freshness_stamp_moves_only_on_a_verdict() {
         let m = SyncMetrics::new();
@@ -2062,6 +2160,8 @@ mod tests {
         // The gauge too: "not holding a session" must render as 0, never as
         // absence, or an unloaded fleet reads as a scraper problem.
         assert!(text.contains("squelchd_embedder_loaded 0\n"));
+        assert!(text.contains("squelchd_apns_pusher_enabled 0\n"));
+        assert!(text.contains("squelchd_apns_push_results_total{outcome=\"rejected\"} 0\n"));
         assert!(!text.contains("squelchd_db_size_bytes"));
         assert!(!text.contains("squelchd_store_messages"));
         assert!(!text.contains("squelchd_triage_jobs"));

@@ -39,8 +39,9 @@ fn map_device(r: &rusqlite::Row<'_>) -> rusqlite::Result<Device> {
         token: r.get(2)?,
         platform: r.get(3)?,
         tag: r.get(4)?,
-        created_at: dt(r, 5)?,
-        last_registered_at: dt(r, 6)?,
+        environment: r.get(5)?,
+        created_at: dt(r, 6)?,
+        last_registered_at: dt(r, 7)?,
     })
 }
 
@@ -175,6 +176,7 @@ impl SqliteStore {
         token: &str,
         platform: &str,
         tag: Option<&str>,
+        environment: Option<&str>,
     ) -> Result<Device> {
         let conn = self.lock()?;
         let now = Utc::now().to_rfc3339();
@@ -186,15 +188,21 @@ impl SqliteStore {
         // repoint another account's device. A cross-account collision therefore
         // changes 0 rows, and that is reported rather than swallowed — returning
         // the other account's row would be worse than the rebind.
+        //
+        // `environment` COALESCEs where `tag` overwrites: a token's APNs
+        // environment NEVER changes, so an older build re-registering the same
+        // token without the field must not erase what a newer build declared.
         let changed = conn.execute(
-            "INSERT INTO devices(account_id, token, platform, tag, created_at, last_registered_at)
-             VALUES(?1,?2,?3,?4,?5,?5)
+            "INSERT INTO devices(account_id, token, platform, tag, environment,
+                                 created_at, last_registered_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?6)
              ON CONFLICT(token) DO UPDATE SET
                  platform=excluded.platform,
                  tag=excluded.tag,
+                 environment=COALESCE(excluded.environment, devices.environment),
                  last_registered_at=excluded.last_registered_at
              WHERE devices.account_id = excluded.account_id",
-            params![account_id, token, platform, tag, now],
+            params![account_id, token, platform, tag, environment, now],
         )?;
         if changed == 0 {
             // States the RULE, never the token: this string reaches the human
@@ -204,7 +212,8 @@ impl SqliteStore {
             ));
         }
         let device = conn.query_row(
-            "SELECT id, account_id, token, platform, tag, created_at, last_registered_at
+            "SELECT id, account_id, token, platform, tag, environment, created_at,
+                    last_registered_at
              FROM devices WHERE token = ?1",
             params![token],
             map_device,
@@ -215,7 +224,8 @@ impl SqliteStore {
     pub(super) fn list_devices(&self, account_id: AccountId) -> Result<Vec<Device>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT id, account_id, token, platform, tag, created_at, last_registered_at
+            "SELECT id, account_id, token, platform, tag, environment, created_at,
+                    last_registered_at
              FROM devices WHERE account_id = ?1 ORDER BY id ASC",
         )?;
         let out = stmt

@@ -197,6 +197,11 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // nothing here can know which account a device filed itself under, and the
     // client re-registers (tag included) on its next foreground.
     add_column_if_missing(conn, "devices", "tag", "TEXT")?;
+    // The token's APNs environment (`production` | `sandbox`). NULL on every
+    // pre-existing row and NOT backfilled: only the client knows which build
+    // minted its token, and the pusher treats NULL as "use the configured
+    // fallback", which is exactly what those rows got before the column existed.
+    add_column_if_missing(conn, "devices", "environment", "TEXT")?;
     // Which app last presented each device token. NULL on every pre-existing
     // row and NOT backfilled: a client that predates `X-Passband-Client` never
     // said what it was, and the columns fill in on its first request after it

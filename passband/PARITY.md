@@ -106,7 +106,6 @@ backdrop bleeds through enough that light mode reads as a muddy dark one.
 | Unsubscribe-violation prompt | **done** | One at a time, session-level suppression |
 | Automatic unsubscribe tray | **done** (Mac only) | `u` asks the daemon to unsubscribe (`auto: true`); bottom-right of the sitrep shows running / done / needs-you with "Finish on their site". iOS has no unsubscribe action yet, so no tray |
 | Rule editor | **done** | tune / create / edit (create-then-delete so a failure can't lose the rule) |
-| Process mode (`p`) | **done** | Card deck over live bands |
 | Reveal panel | **done** | One-time, view-state only, never persisted |
 | Triage debug overlay (dev) | **done** | Full triage row |
 | Connection banner + daemon-down pane | **done** | Stale-data vs. nothing-ever-loaded, 401 vs. transport |

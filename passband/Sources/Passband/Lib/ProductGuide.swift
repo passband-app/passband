@@ -78,7 +78,7 @@ enum ProductGuide {
             case .mailList:
                 "the Emails page: all mail, filters, sent, scheduled, spam, noise, browse all"
             case .triage:
-                "how mail gets sorted, what done means, fixing a wrong call, process mode"
+                "how mail gets sorted, what done means, fixing a wrong call"
             case .senderRules:
                 "rules for a sender (allow, mute, filter) and the Rules page"
             case .reminders:
@@ -198,7 +198,7 @@ enum ProductGuide {
 
         Flow mode:
         - Space, or the "flow mode" pill at the top of For your eyes, walks the list one email at a time, starting at the highlighted row or the first one.
-        - In the reader, Shift+E is done and next, Shift+S skips and leaves the email on the board. A summary card shows at the end.
+        - In the reader during the walk, e is done and next, and s skips and leaves the email on the board. A small "FLOW MODE" card shows both keys. A summary card shows at the end.
 
         Hover tricks:
         - Hover a package and press e to clear it until its next update. Right-click has "Clear this package".
@@ -225,7 +225,8 @@ enum ProductGuide {
         - E or D (with Shift): done, and open the next email.
         - S (Shift+S): skip to the next email and leave this one as it is.
         - h: remind me later, then move on. See the reminders topic.
-        - On a Reading sender's stack, tapping e moves to that sender's next email, and holding e fills a ring and marks the whole stack done.
+        - In flow mode (Space on the Sitrep) plain e is done and next, and plain s skips.
+        - On a Reading sender's stack, tapping e moves to that sender's next email, and holding e fills a ring and marks the whole stack done. E does the same and carries on to the next sender's card.
         - Done is Passband's own status. The email leaves the board and stays in the mailbox; nothing is archived or deleted in Gmail.
 
         Acting on the sender:
@@ -348,7 +349,8 @@ enum ProductGuide {
         Other:
         - A reminder (h) parks an email and brings it back to For your eyes later. See reminders.
         - Dev mode (Settings > General > Developer) adds a "re-triage 7d" chip that re-runs triage on the last week. Passband is unavailable while that runs.
-        - Process mode (p on the Emails page) is a card-by-card pass over For your eyes: Space skips, d is done, e archives in Gmail, r replies, t writes a rule, Esc exits. It is the one place where e archives rather than marks done. Flow mode on the Sitrep (Space) is the same idea inside the reader.
+        - To work through For your eyes one email at a time, use flow mode: Space on the Sitrep. See the sitrep topic.
+        - No key archives mail in Gmail. This assistant can archive a message when asked, behind a confirmation card.
         """
 
     private static let senderRules = """

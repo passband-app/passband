@@ -818,12 +818,7 @@ private struct ReadingCard: View {
         }
     }
 
-    private func open() {
-        guard !sender.latestThreadId.isEmpty else { return }
-        store.openThread(
-            sender.latestThreadId, queue: sender.items,
-            readingMail: true, from: .reading)
-    }
+    private func open() { store.openReading(sender) }
 
 }
 

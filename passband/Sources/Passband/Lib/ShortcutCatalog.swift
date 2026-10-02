@@ -43,7 +43,6 @@ enum ShortcutCatalog {
                 Item(["h"], "remind me about this later"),
                 Item(["t"], "tune sender rule"),
                 Item(["f"], "search this sender"),
-                Item(["p"], "process mode"),
                 Item(["u"], "undo last action"),
             ]),
         Group(

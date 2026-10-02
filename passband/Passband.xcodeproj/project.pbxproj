@@ -85,7 +85,6 @@
 		314700F904BA81CBF4987A8D /* Reading.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AC75F572A768A3A2EEB001F /* Reading.swift */; };
 		331C84737DCE609E6D6C6980 /* ListRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A52E20474A0D6F31073DA61 /* ListRow.swift */; };
 		334AB5C57D2B2C941C5EEA02 /* Resources in Resources */ = {isa = PBXBuildFile; fileRef = 168312D5219614E1F658480C /* Resources */; };
-		334CF29FAF59FE56B41E581B /* ProcessMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3484EC544E0909F3D7A88E26 /* ProcessMode.swift */; };
 		3360F7B0CDBBA9D7CEAE948F /* ContactCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0333BF57C6FEC1137C53A56 /* ContactCard.swift */; };
 		337BF73412411C85F6F1327D /* SchedulePalette.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF4D8746B664E116C3036411 /* SchedulePalette.swift */; };
 		343EE0901066E3E53F8A8E6E /* RehearsalMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA6DBA73DEBD1CB392DE3A5 /* RehearsalMode.swift */; };
@@ -157,7 +156,6 @@
 		593BCE46C30053362B8C39BE /* GroupToken.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EE5AF3E60001C29040AFCF5 /* GroupToken.swift */; };
 		5A01F48CC6614747B15E38E3 /* RehearsalControlPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5D8D394D011C195B13791BE /* RehearsalControlPanel.swift */; };
 		5A8A0E6E45A1AF07A426F4A1 /* AttachmentPreviewiOS.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1CE9442DCA54FF7863D7C5 /* AttachmentPreviewiOS.swift */; };
-		5AB209F662F02A1426CD72C0 /* ProcessMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3484EC544E0909F3D7A88E26 /* ProcessMode.swift */; };
 		5B202D84CFC2EA02FC66A6F4 /* ClearBand.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E1FEEC087CEB684B1D4F861 /* ClearBand.swift */; };
 		5CE1E70309CEFF44F81AD969 /* Notifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = B13A2C48EBA35F12689998E3 /* Notifier.swift */; };
 		5E97CFE91AD528DBE39CB91A /* QuickLookUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 48410833F8D7B524FBDD2FB2 /* QuickLookUI.framework */; };
@@ -521,7 +519,6 @@
 		30CE0F7FB80B319544FD62FA /* Quotes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Quotes.swift; sourceTree = "<group>"; };
 		327BC236C39F192198AFEF7D /* RecipientField.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecipientField.swift; sourceTree = "<group>"; };
 		33EF8FAB871B43DBF883FDEE /* ShareWaitlistPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareWaitlistPanel.swift; sourceTree = "<group>"; };
-		3484EC544E0909F3D7A88E26 /* ProcessMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessMode.swift; sourceTree = "<group>"; };
 		35224D41EE816E52C2396950 /* MailList.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MailList.swift; sourceTree = "<group>"; };
 		356A38CCAAFCC056126A2978 /* MobileRecordsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileRecordsView.swift; sourceTree = "<group>"; };
 		35991F651C60388C6D9BBEDF /* ComposeSubmit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposeSubmit.swift; sourceTree = "<group>"; };
@@ -788,7 +785,6 @@
 				1FFFC29B07960820C815F66C /* MessageRecipients.swift */,
 				5C787F920246CFD228F21747 /* OnboardingIntroView.swift */,
 				0AE10FD89ABF645A3F0617E5 /* PracticeProductTour.swift */,
-				3484EC544E0909F3D7A88E26 /* ProcessMode.swift */,
 				639F5C0DB9AE5A1AE8DF69A1 /* ProcessView.swift */,
 				361AB4D81F3740E2B072C5BA /* QuickLookPanel.swift */,
 				759702EBD03C1CECFD041E57 /* ReadReceipt.swift */,
@@ -1388,7 +1384,6 @@
 				AE9F688F49884E6B3BC14D14 /* PracticeProductTour.swift in Sources */,
 				E0E0FC3C3E25A35C8DA35700 /* PracticeTourStep.swift in Sources */,
 				D8F41B5F6FA8F83DAA537CB5 /* Prefs.swift in Sources */,
-				5AB209F662F02A1426CD72C0 /* ProcessMode.swift in Sources */,
 				8DD946F7BC6990641C19ACC1 /* ProcessView.swift in Sources */,
 				BB2D4A838A4E7036B0B9C037 /* ProductGuide.swift in Sources */,
 				4F1ACF4C4907587277817F3D /* QuickLookPanel.swift in Sources */,
@@ -1599,7 +1594,6 @@
 				B36D0542B36A1421D26CA968 /* Platform.swift in Sources */,
 				A6995509034F916948DB02E9 /* PracticeTourStep.swift in Sources */,
 				7379C8366D649A8F25C27826 /* Prefs.swift in Sources */,
-				334CF29FAF59FE56B41E581B /* ProcessMode.swift in Sources */,
 				7362D6064FE828BD80A2AEDA /* ProcessView.swift in Sources */,
 				9C995D3465CAD68AD186021D /* ProductGuide.swift in Sources */,
 				13068136E70BA1E4AD4A9709 /* PushRegistration.swift in Sources */,

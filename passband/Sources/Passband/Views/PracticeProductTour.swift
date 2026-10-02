@@ -393,6 +393,10 @@ struct PracticeProductTour: View {
         // as the instruction changes instead of closing and fetching it again.
         if next == .done {
             if store.threadId != "practice-1" { openExample(1) }
+            // The lesson is "e: done, and back to the board". A learner who
+            // opened the email with Space is in flow mode, where `e` walks on
+            // to the next email instead; the lesson takes them out of it.
+            store.walk = nil
         } else if next == .rule {
             if store.threadId != "practice-11" { openExample(11) }
         } else { store.closeThread() }

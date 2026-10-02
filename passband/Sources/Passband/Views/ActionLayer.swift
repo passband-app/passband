@@ -1,10 +1,10 @@
 // The global action surface, above every other layer: undo/notice toasts, the
-// unsubscribe-violation prompt, rule editor, process mode, the 2FA modal,
+// unsubscribe-violation prompt, rule editor, the 2FA modal,
 // triage-fix palette, ⌘K ask bar, shortcuts overlay, the re-triage confirm and
 // the re-triage run itself. The composer is NOT here anymore — it is a layout
 // pane (see ComposePane in MainShell), not an overlay.
 // Read views own the list keymap; this layer extends that same "list" context
-// with p and c. Modal-context keys live inside each overlay.
+// with c. Modal-context keys live inside each overlay.
 
 import SwiftUI
 
@@ -67,7 +67,6 @@ struct ActionLayer: View {
             if let request = store.groupEditor {
                 GroupEditor(request: request) { store.closeGroupEditor() }
             }
-            if store.processModeOpen { ProcessMode { store.processModeOpen = false } }
             if !store.authQueue.isEmpty { AuthCodeModal() }
             if let target = store.triageFix {
                 TriageFixPalette(target: target) { store.closeTriageFix() }
@@ -105,7 +104,6 @@ struct ActionLayer: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
         .keyBindings(.list, [
-            KeyBinding("p", "process mode") { store.processModeOpen = true },
             // `c` = compose, registered per-SURFACE (here for the lists, and again
             // in the sitrep and the reader) rather than globally: a global one would
             // fire from inside a modal, where the letter belongs to whatever is

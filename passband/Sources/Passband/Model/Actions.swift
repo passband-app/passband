@@ -19,9 +19,8 @@ enum Actions {
     enum Via: String, Sendable { case key, click, swipe, assistant }
 
     /// WHICH PAGE a verb was input on. Together with `Via` this says where
-    /// triage actually happens: on the sitrep, in the list, inside the reader,
-    /// or in the process deck.
-    enum Surface: String, Sendable { case sitrep, emails, reader, process }
+    /// triage actually happens: on the sitrep, in the list, or inside the reader.
+    enum Surface: String, Sendable { case sitrep, emails, reader }
 
     private static func origin(_ via: Via, _ on: Surface) -> [String: Any] {
         ["via": via.rawValue, "surface": on.rawValue]

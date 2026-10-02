@@ -332,6 +332,7 @@
 		C2102B9052FF6E97DAAA2AB4 /* ImageProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39D5C019641DC37B55D7D922 /* ImageProxy.swift */; };
 		C222BEDB1AA4B6CE4B34D240 /* DraftsList.swift in Sources */ = {isa = PBXBuildFile; fileRef = 449EBE20D26F590B99D2AA0A /* DraftsList.swift */; };
 		C2C0DFC734A69CCFE13ECEFA /* SettingsSearch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 673B876D08EF2BB9C1FA0E19 /* SettingsSearch.swift */; };
+		C364DD346E23B1C8E2D85E8C /* APNsEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3AFB3100AB7A6A1BC1E6D8BA /* APNsEnvironment.swift */; };
 		C3BC6287782BE4B513C8F6F9 /* RuleGrouping.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C13060FB00E773CC4E33680 /* RuleGrouping.swift */; };
 		C3DD204EC3377648F4153546 /* Analytics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A46105028AEB554882E2D72 /* Analytics.swift */; };
 		C44797D33062B1E2B2A342FE /* MailCSP.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10C0C8780CCB9C6BAB2709C /* MailCSP.swift */; };
@@ -529,6 +530,7 @@
 		389673F8FDDB51FC4830D9D2 /* PassbandApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PassbandApp.swift; sourceTree = "<group>"; };
 		394CFE99327CF989002CD318 /* VignetteStage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VignetteStage.swift; sourceTree = "<group>"; };
 		39D5C019641DC37B55D7D922 /* ImageProxy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageProxy.swift; sourceTree = "<group>"; };
+		3AFB3100AB7A6A1BC1E6D8BA /* APNsEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APNsEnvironment.swift; sourceTree = "<group>"; };
 		3BE1E84810E523707C4E2CC5 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		3BFBFFBE499370A5F88E2540 /* EmailWebCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmailWebCore.swift; sourceTree = "<group>"; };
 		3DD43DBA7248BE2CB133F428 /* RetriageRun.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RetriageRun.swift; sourceTree = "<group>"; };
@@ -1132,6 +1134,7 @@
 		E916BDBA7589B82DD0840563 /* App */ = {
 			isa = PBXGroup;
 			children = (
+				3AFB3100AB7A6A1BC1E6D8BA /* APNsEnvironment.swift */,
 				12468DFB107CC662204BCE84 /* MobileRootView.swift */,
 				F714235A8E6F4742ABF772B3 /* PassbandiOSApp.swift */,
 				083E104C0BABF65C4BB44673 /* PushRegistration.swift */,
@@ -1478,6 +1481,7 @@
 			files = (
 				BFBC16B9E116B690313D1B5C /* APIClient.swift in Sources */,
 				93FFF0E02F7D65ADCF4824D9 /* APIError.swift in Sources */,
+				C364DD346E23B1C8E2D85E8C /* APNsEnvironment.swift in Sources */,
 				542F16866D729BD1E30B6AA6 /* AccountPage.swift in Sources */,
 				57D260FC9FFF00F0F3DB336E /* Accounts.swift in Sources */,
 				778A9FBEDBA350092B770844 /* Actions.swift in Sources */,

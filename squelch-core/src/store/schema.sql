@@ -1741,6 +1741,61 @@ AFTER DELETE ON messages BEGIN
     DELETE FROM ghost_event_sources WHERE account_id = OLD.account_id AND message_id = OLD.id;
 END;
 
+-- GOOGLE CALENDAR, READ ONLY (docs/CALENDAR.md §8, "Calendar sync"). Written
+-- only by the calendar sync loop, read only by the human door's timeline:
+-- HUMAN-DOOR ONLY, never on an agent route, never in a triage prompt.
+--
+-- One row per calendar the account has read. `calendar_id` is `primary` for
+-- the primary calendar (Google's alias for it, and all the daemon knows
+-- without the list scope), Google's id otherwise. `selected` is whether the
+-- latest pass reads it; a calendar that stops being read keeps its row with
+-- `selected = 0` and loses its events and sync state. `sync_token` carries
+-- incremental sync; `full_synced_at` is the last full read of the window, which
+-- is repeated daily because a sync token never carries an event that moved
+-- INTO the window as it slides. `last_error_kind` is `auth` / `quota` /
+-- `unavailable`, cleared by the next good read.
+CREATE TABLE IF NOT EXISTS calendar_calendars (
+    account_id      INTEGER NOT NULL,
+    calendar_id     TEXT NOT NULL,
+    summary         TEXT,
+    is_primary      INTEGER NOT NULL DEFAULT 0,
+    selected        INTEGER NOT NULL DEFAULT 1,
+    time_zone       TEXT,
+    sync_token      TEXT,
+    synced_at       TEXT,
+    full_synced_at  TEXT,
+    last_error_kind TEXT,
+    PRIMARY KEY(account_id, calendar_id)
+);
+-- The events of the synced window (a month back, 400 days ahead), recurring
+-- events as their instances. `starts_at` / `ends_at` use the ghosts' text form
+-- and convention (`YYYY-MM-DD` for all-day, RFC3339 with Google's offset
+-- otherwise; an all-day end is the INCLUSIVE last day, converted from
+-- Google's exclusive `end.date`, and NULL for a one-day event) and
+-- `start_sort` the ghosts' UTC sort key. `status` is `confirmed` or `tentative`: a cancelled event is
+-- deleted, never stored. `transparent` is "free" on the user's calendar.
+CREATE TABLE IF NOT EXISTS calendar_events (
+    account_id      INTEGER NOT NULL,
+    calendar_id     TEXT NOT NULL,
+    event_id        TEXT NOT NULL,
+    ical_uid        TEXT,
+    status          TEXT NOT NULL,
+    summary         TEXT,
+    location        TEXT,
+    starts_at       TEXT NOT NULL,
+    start_sort      TEXT NOT NULL,
+    ends_at         TEXT,
+    all_day         INTEGER NOT NULL,
+    start_timezone  TEXT,
+    organizer_email TEXT,
+    self_response   TEXT,
+    transparent     INTEGER NOT NULL DEFAULT 0,
+    html_link       TEXT,
+    updated_at      TEXT,
+    PRIMARY KEY(account_id, calendar_id, event_id)
+);
+CREATE INDEX IF NOT EXISTS idx_calendar_events_start ON calendar_events(account_id, start_sort);
+
 -- A CORRESPONDENT'S TIMEZONE (docs/CALENDAR.md §7), inferred at ingest and
 -- served on the contact card. HUMAN-DOOR ONLY. `addr` is COLLATE NOCASE in
 -- the column itself, so the key, the index and every comparison agree that

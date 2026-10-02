@@ -732,7 +732,7 @@ fn url_host_path(raw: &str) -> Option<(String, String)> {
     Some((host, path.trim_end_matches('/').to_string()))
 }
 
-fn clean_text(raw: &str) -> Option<String> {
+pub(crate) fn clean_text(raw: &str) -> Option<String> {
     let text = truncate_trimmed(&plain(raw), TEXT_CAP);
     (!text.is_empty()).then_some(text)
 }
@@ -775,7 +775,7 @@ fn note(raw: &str) -> String {
 /// alone or after a label as in "Zoom: https://...") keeps only host and
 /// path: a query string is where a meeting passcode lives. A path with a
 /// credential-shaped segment (a join token) is cut back to the host.
-fn launder_location(raw: &str) -> Option<String> {
+pub(crate) fn launder_location(raw: &str) -> Option<String> {
     let text = map_urls(&plain(raw), |url| {
         let (host, path) = url_host_path(url)?;
         if path.split('/').any(credential_shaped) {
@@ -791,7 +791,7 @@ fn launder_location(raw: &str) -> Option<String> {
 /// correspondent-timezone code's own test). "Eastern Standard Time", "PDT",
 /// "EST" and "UTC" are not places: an abbreviation names several, and a fixed
 /// offset is wrong for half the year wherever it is read.
-fn iana_zone(raw: &str) -> Option<String> {
+pub(crate) fn iana_zone(raw: &str) -> Option<String> {
     let zone = plain(raw);
     if zone.chars().count() > TIMEZONE_CAP || !zone.contains('/') {
         return None;

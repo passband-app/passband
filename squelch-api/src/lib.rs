@@ -170,6 +170,10 @@ fn client_router(state: ApiState) -> Router {
         // directions: the agent door has no timeline route.
         .route("/client/timeline", get(handlers::get_timeline))
         .route("/client/timeline/ghosts/{id}", patch(handlers::patch_ghost))
+        // Start a Google Calendar sync now (the calendar page opening), at
+        // most once per account per 30 seconds. HUMAN DOOR ONLY: the agent
+        // door neither reads the calendar nor spends its quota.
+        .route("/client/timeline/refresh", post(handlers::refresh_timeline))
         .route("/client/search", get(handlers::search))
         // The user's own sent mail. Human door only — this is the one listing
         // that reads `is_sent = 1`, and the agent door gets no such route: what

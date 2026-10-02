@@ -57,6 +57,7 @@ mod agent_deliveries;
 mod agent_triage;
 mod attention;
 mod audit;
+mod calendar;
 mod contacts;
 pub mod device_tokens;
 mod drafts;

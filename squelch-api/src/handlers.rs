@@ -1906,10 +1906,17 @@ fn ghost_view(
     })
 }
 
-/// `GET /client/timeline?from=&to=`: the calendar ghosts whose start falls in
-/// `[from, to)`, by start. HUMAN DOOR ONLY: the agent door has no timeline
+/// `GET /client/timeline?from=&to=`: the calendar ghosts and the real Google
+/// Calendar events whose start falls in `[from, to)`, each by start, and the
+/// calendar sync's status. HUMAN DOOR ONLY: the agent door has no timeline
 /// route (docs/CALENDAR.md §10 leaves that open, and until it is decided the
 /// answer is no).
+///
+/// `{ "ghosts": [...], "events": [...], "calendar": {granted, synced_at,
+/// error} }`. Events are served only while calendar is granted. Each ghost
+/// carries `matched_event` (`{calendar_id, id}` or null): a real event at the
+/// same start whose title matches ([`squelch_core::gcal::ghost_matches`]),
+/// computed here for display de-duplication and never stored.
 ///
 /// Defaults: `from` is a day ago and `to` is `from` plus the default window
 /// (so with neither, now-1d to now+90d). `state` is judged at the server's
@@ -1932,13 +1939,122 @@ pub async fn get_timeline(
         None => later(TIMELINE_DEFAULT_BEHIND + TIMELINE_DEFAULT_AHEAD)?,
     };
     let to = to.min(later(TIMELINE_MAX_SPAN)?);
-    let ghosts = store_call(&state, move |store, account_id| {
-        store.list_ghost_events(account_id, from, to)
+    // Real events are served only while calendar is granted: a grant taken
+    // back hides what was synced under it.
+    let granted = match state.calendar() {
+        Some(calendar) => calendar.granted().await,
+        None => false,
+    };
+    let (ghosts, events, (synced_at, error)) = store_call(&state, move |store, account_id| {
+        let ghosts = store.list_ghost_events(account_id, from, to)?;
+        if !granted {
+            return Ok((ghosts, Vec::new(), (None, None)));
+        }
+        let events = store.list_calendar_events(account_id, from, to)?;
+        let status = store.calendar_status(account_id)?;
+        Ok((ghosts, events, status))
     })
     .await?;
+    // The display match, computed here and never stored, so it can never go
+    // stale and never changes a ghost.
+    let matched = squelch_core::gcal::match_ghosts(
+        ghosts.iter().map(|g| (g.title.as_str(), &g.start)),
+        &events,
+    );
     let now = now.with_timezone(from.offset());
-    let ghosts: Vec<_> = ghosts.iter().map(|g| ghost_view(g, now)).collect();
-    Ok((no_store(), Json(json!({ "ghosts": ghosts }))))
+    let ghosts: Vec<_> = ghosts
+        .iter()
+        .zip(matched)
+        .map(|(g, matched)| {
+            let mut view = ghost_view(g, now);
+            view["matched_event"] = match matched.map(|i| &events[i]) {
+                Some(event) => {
+                    json!({ "calendar_id": event.calendar_id, "id": event.row.event_id })
+                }
+                None => serde_json::Value::Null,
+            };
+            view
+        })
+        .collect();
+    let events: Vec<_> = events.iter().map(calendar_event_view).collect();
+    Ok((
+        no_store(),
+        Json(json!({
+            "ghosts": ghosts,
+            "events": events,
+            "calendar": {
+                "granted": granted,
+                "synced_at": synced_at.map(|at| at.to_rfc3339()),
+                "error": error.map(|kind| kind.as_str()),
+            },
+        })),
+    ))
+}
+
+/// One real calendar event as served. SERIALIZED SHAPE IS A WIRE CONTRACT for
+/// the timeline client. HUMAN DOOR ONLY: the title, place, organizer and link
+/// are the user's personal data and no agent route serves them.
+///
+/// `start` / `end` are the ghosts' text form and convention: an all-day
+/// `end` is the INCLUSIVE last day (Google's exclusive `end.date` minus one),
+/// and null for a one-day event, as a one-day ghost has none. `busy` is false
+/// when the event is marked free. Declined events are served; the client
+/// hides them.
+fn calendar_event_view(event: &squelch_core::gcal::SyncedEvent) -> serde_json::Value {
+    let row = &event.row;
+    json!({
+        "id": row.event_id,
+        "calendar_id": event.calendar_id,
+        "calendar_name": event.calendar_name,
+        "title": row.summary,
+        "start": row.start.to_string(),
+        "end": row.end.map(|e| e.to_string()),
+        "all_day": row.all_day(),
+        "start_timezone": row.start_timezone,
+        "location": row.location,
+        "status": if row.tentative { "tentative" } else { "confirmed" },
+        "self_response": row.self_response.map(|r| r.as_str()),
+        "busy": !row.transparent,
+        "organizer": row.organizer_email,
+        "html_link": row.html_link,
+    })
+}
+
+/// The least time between two calendar syncs one account may start from the
+/// human door.
+const TIMELINE_REFRESH_FLOOR: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// `POST /client/timeline/refresh`: start a calendar sync now. The client
+/// calls it when the calendar page opens. Always 202: `kicked` says whether a
+/// sync was started. At most one per account per 30 seconds, held in memory
+/// across requests and clients; inside the floor, or with no sync loop
+/// running, nothing is done. A kick also never cuts short the loop's own
+/// backoff after Google rate-limited it.
+///
+/// A READ-path trigger, like the shipments poll: no Gmail write, nothing to
+/// audit. HUMAN DOOR ONLY.
+pub async fn refresh_timeline(State(state): State<ApiState>) -> impl IntoResponse {
+    let refresh = &state.calendar_refresh;
+    let kicked = match &refresh.kick {
+        Some(kick) => {
+            let now = std::time::Instant::now();
+            let mut last = refresh.last_kick.lock().unwrap_or_else(|e| e.into_inner());
+            let due = last
+                .get(&state.account_id)
+                .is_none_or(|at| now.duration_since(*at) >= TIMELINE_REFRESH_FLOOR);
+            if due {
+                last.insert(state.account_id, now);
+                kick.notify_one();
+            }
+            due
+        }
+        None => false,
+    };
+    (
+        StatusCode::ACCEPTED,
+        no_store(),
+        Json(json!({ "kicked": kicked })),
+    )
 }
 
 /// A field that tells ABSENT from an explicit `null`: absent stays `None`,

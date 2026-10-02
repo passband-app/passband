@@ -98,7 +98,7 @@ fn unlabel<T: serde::de::DeserializeOwned + Default>(raw: &str) -> T {
 /// text. A date-only start sorts at 00:00Z of its date; the listing widens its
 /// SQL range to cover any zone that date might be read in, and orders exactly
 /// in Rust.
-fn sort_key(time: &EventTime) -> String {
+pub(super) fn sort_key(time: &EventTime) -> String {
     match time {
         EventTime::Date(day) => format!("{}T00:00:00Z", day.format("%Y-%m-%d")),
         EventTime::At(at) => at
@@ -948,7 +948,11 @@ pub(super) fn rebuild(conn: &Connection, account: AccountId, id: i64, now: &str)
 /// before `to`'s date read in `to`'s OWN offset (or on it, when `to` is past
 /// that day's midnight). Reading `to` in `from`'s offset listed one all-day
 /// ghost in two adjacent weeks across a DST change.
-fn in_range(start: &EventTime, from: DateTime<FixedOffset>, to: DateTime<FixedOffset>) -> bool {
+pub(super) fn in_range(
+    start: &EventTime,
+    from: DateTime<FixedOffset>,
+    to: DateTime<FixedOffset>,
+) -> bool {
     match start {
         EventTime::At(at) => *at >= from && *at < to,
         EventTime::Date(day) => {
@@ -964,7 +968,7 @@ fn in_range(start: &EventTime, from: DateTime<FixedOffset>, to: DateTime<FixedOf
 /// Where a start sorts for a caller in `offset`: an instant as itself, a date
 /// at 00:00 of that date in the caller's offset (not UTC, which put a western
 /// caller's all-day Saturday before their Friday evening).
-fn listing_order(start: &EventTime, offset: &FixedOffset) -> DateTime<Utc> {
+pub(super) fn listing_order(start: &EventTime, offset: &FixedOffset) -> DateTime<Utc> {
     match start {
         EventTime::At(at) => at.with_timezone(&Utc),
         EventTime::Date(day) => day

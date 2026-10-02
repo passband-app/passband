@@ -678,13 +678,74 @@ impl CredentialsFile {
             None => json.into_bytes(),
         };
 
-        let tmp = path.with_extension("json.tmp");
-        write_private(&tmp, &bytes)?;
-        std::fs::rename(&tmp, path)
-            .map_err(|e| CoreError::Credential(format!("finalizing credentials file: {e}")))?;
+        // A temp name of this write's OWN. A fixed name let two writers open
+        // one temp file with truncate and interleave their bytes, and the
+        // torn blob was then renamed over the real file. The process lock in
+        // [`update_credentials_file`] serializes this process's writers; the
+        // unique name also keeps another process (`squelchd auth` beside a
+        // running daemon) from ever sharing a temp file with this one.
+        let tmp = unique_temp_path(path);
+        if let Err(e) = write_private(&tmp, &bytes) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+        if let Err(e) = std::fs::rename(&tmp, path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(CoreError::Credential(format!(
+                "finalizing credentials file: {e}"
+            )));
+        }
         // Be explicit about 0600: the destination may have pre-existed looser.
         set_private_mode(path)?;
         Ok(())
+    }
+}
+
+/// `credentials.json.tmp.<pid>.<n>`, beside the real file so the rename stays
+/// on one filesystem and atomic.
+fn unique_temp_path(path: &Path) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".tmp.{}.{n}", std::process::id()));
+    path.with_file_name(name)
+}
+
+/// THE ONE READ-MODIFY-WRITE of the credentials file, under a process-wide
+/// lock held across the read, the change, the temp write and the rename.
+///
+/// Hosted keeps one token in the Read and Write slots and the calendar
+/// resolver reads the same Read slot, so three refreshers come due at the
+/// same moment and all write this one file. Without the lock two of them
+/// read the same old file and the second rename drops the first's update
+/// (a refreshed slot reverts), and with the old fixed temp name their bytes
+/// could interleave into a file that no longer decodes, which is Gmail down
+/// until the credential is reinstalled. The lock covers local file work only:
+/// no caller holds it across a network call (a refresh happens before
+/// `persist` is called).
+fn update_credentials_file(
+    path: &Path,
+    identity: Option<&AgeIdentity>,
+    change: impl FnOnce(&mut CredentialsFile),
+) -> Result<()> {
+    static FILE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // A writer that panicked mid-update left at worst a stray temp file: the
+    // real file is only ever replaced by a rename. So poison is not a reason
+    // to stop persisting tokens.
+    let _held = FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut file = CredentialsFile::read(path, identity)?;
+    #[cfg(test)]
+    test_pause(path);
+    change(&mut file);
+    file.write(path, identity)
+}
+
+/// TEST HOOK: widen the read-to-rename window for a file whose name asks for
+/// it, so the concurrency test does not depend on a lucky schedule.
+#[cfg(test)]
+fn test_pause(path: &Path) {
+    if path.to_string_lossy().contains(tests::RACE_PAUSE_MARKER) {
+        std::thread::sleep(Duration::from_millis(2));
     }
 }
 
@@ -706,6 +767,8 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut f = opts
         .open(path)
         .map_err(|e| CoreError::Credential(format!("opening credentials file: {e}")))?;
+    #[cfg(test)]
+    test_pause(path);
     f.write_all(bytes)
         .map_err(|e| CoreError::Credential(format!("writing credentials file: {e}")))?;
     f.flush()
@@ -755,10 +818,10 @@ fn store_token_file_with(
     token: &StoredToken,
     identity: Option<&AgeIdentity>,
 ) -> Result<()> {
-    let mut file = CredentialsFile::read(path, identity)?;
-    file.slots
-        .insert(kind.slot_key(account_email), token.clone());
-    file.write(path, identity)
+    update_credentials_file(path, identity, |file| {
+        file.slots
+            .insert(kind.slot_key(account_email), token.clone());
+    })
 }
 
 /// Read the raw stored token for an account's kind slot from the file backend.
@@ -958,12 +1021,12 @@ pub fn store_tokens_backend(
     match backend {
         CredentialBackend::File => {
             let identity = age_identity_from_env()?;
-            let mut file = CredentialsFile::read(credentials_path, identity.as_ref())?;
-            for (kind, token) in entries {
-                file.slots
-                    .insert(kind.slot_key(account_email), token.clone());
-            }
-            file.write(credentials_path, identity.as_ref())
+            update_credentials_file(credentials_path, identity.as_ref(), |file| {
+                for (kind, token) in entries {
+                    file.slots
+                        .insert(kind.slot_key(account_email), token.clone());
+                }
+            })
         }
         CredentialBackend::Keyring => {
             // What each slot held BEFORE this run, in the order they were
@@ -1099,6 +1162,36 @@ pub struct CalendarCredentials {
     backend: CredentialBackend,
     credentials_path: PathBuf,
     client: OAuthClientConfig,
+    /// The last answer to "is calendar granted". Shared by every clone, so
+    /// the many `/client/stats` polls (every 10 seconds per client) read the
+    /// backend at most once per [`GRANTED_TTL`]: on hosted that read is a file
+    /// read plus an age decrypt, on a macOS self-host two Keychain reads.
+    granted_cache: std::sync::Arc<std::sync::Mutex<Option<GrantedAnswer>>>,
+}
+
+/// One cached answer: when it was read, and for the file backend the file's
+/// modification time then, so any write to the file (a credential install,
+/// `squelchd auth --calendar`, a refresh) is seen on the next call rather
+/// than after the TTL. A `stat` is the whole cost of a hit.
+#[derive(Debug, Clone, Copy)]
+struct GrantedAnswer {
+    at: std::time::Instant,
+    modified: Option<std::time::SystemTime>,
+    granted: bool,
+}
+
+/// How long [`CalendarCredentials::granted`] trusts its last answer. For the
+/// file backend a changed file ends it early; for the keyring, a fresh grant
+/// shows up within one or two polls. The sync loop does not use the cache (it
+/// resolves the token on every pass) and refreshes it with what it found.
+pub const GRANTED_TTL: Duration = Duration::from_secs(15);
+
+/// A token that may call the Calendar API, and whether it may also read the
+/// user's calendar list (without that, only the primary calendar is read).
+#[derive(Debug, Clone)]
+pub struct CalendarAccess {
+    pub token: OAuthToken,
+    pub list_granted: bool,
 }
 
 impl CalendarCredentials {
@@ -1115,6 +1208,27 @@ impl CalendarCredentials {
             backend,
             credentials_path,
             client,
+            granted_cache: Default::default(),
+        }
+    }
+
+    /// The credentials file's modification time, for the file backend.
+    fn file_modified(&self) -> Option<std::time::SystemTime> {
+        match self.backend {
+            CredentialBackend::File => std::fs::metadata(&self.credentials_path)
+                .and_then(|m| m.modified())
+                .ok(),
+            CredentialBackend::Keyring => None,
+        }
+    }
+
+    fn remember_granted(&self, granted: bool, modified: Option<std::time::SystemTime>) {
+        if let Ok(mut cache) = self.granted_cache.lock() {
+            *cache = Some(GrantedAnswer {
+                at: std::time::Instant::now(),
+                modified,
+                granted,
+            });
         }
     }
 
@@ -1134,11 +1248,64 @@ impl CalendarCredentials {
     }
 
     /// Whether calendar is granted, without refreshing or calling Google.
+    ///
+    /// Answered from a cache for up to [`GRANTED_TTL`]; see `granted_cache`.
     pub async fn granted(&self) -> bool {
         let this = self.clone();
-        tokio::task::spawn_blocking(move || this.resolve_blocking().is_some())
-            .await
-            .unwrap_or(false)
+        let cache = self.granted_cache.clone();
+        tokio::task::spawn_blocking(move || {
+            // Stat BEFORE reading, so a write that lands between the two
+            // leaves a stale mtime in the cache and is read again next time.
+            let modified = this.file_modified();
+            let cached = cache
+                .lock()
+                .ok()
+                .and_then(|c| *c)
+                .filter(|c| c.at.elapsed() < GRANTED_TTL && c.modified == modified);
+            if let Some(answer) = cached {
+                return answer.granted;
+            }
+            let granted = this.resolve_blocking().is_some();
+            this.remember_granted(granted, modified);
+            granted
+        })
+        .await
+        .unwrap_or(false)
+    }
+
+    /// [`Self::calendar_token`] with whether the list scope is granted too,
+    /// for the sync loop. Never cached; refreshes the `granted` cache.
+    pub async fn calendar_access(&self, account: AccountId) -> Result<Option<CalendarAccess>> {
+        if account != self.account_id {
+            return Err(CoreError::Credential(format!(
+                "account {account} not managed by this store (bound to {})",
+                self.account_id
+            )));
+        }
+        let this = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let modified = this.file_modified();
+            let access = this.calendar_access_blocking();
+            if let Ok(found) = &access {
+                this.remember_granted(found.is_some(), modified);
+            }
+            access
+        })
+        .await
+        .map_err(|e| CoreError::Credential(format!("join error: {e}")))?
+    }
+
+    fn calendar_access_blocking(&self) -> Result<Option<CalendarAccess>> {
+        let Some((kind, stored)) = self.resolve_blocking() else {
+            return Ok(None);
+        };
+        let list_granted = stored.has_scope(crate::config::CALENDAR_LIST_SCOPE);
+        self.refresh_blocking(kind, stored).map(|token| {
+            Some(CalendarAccess {
+                token,
+                list_granted,
+            })
+        })
     }
 
     /// A currently valid access token for the Calendar API, or `Ok(None)` when
@@ -1161,6 +1328,13 @@ impl CalendarCredentials {
         let Some((kind, stored)) = self.resolve_blocking() else {
             return Ok(None);
         };
+        self.refresh_blocking(kind, stored).map(Some)
+    }
+
+    /// The slot's token, refreshed when due and persisted into that same slot
+    /// through the same path the Gmail stores use, under the file backend's
+    /// write lock.
+    fn refresh_blocking(&self, kind: CredentialKind, stored: StoredToken) -> Result<OAuthToken> {
         let (backend, path, email) = (
             self.backend,
             self.credentials_path.clone(),
@@ -1169,7 +1343,6 @@ impl CalendarCredentials {
         validate_or_refresh(stored, &self.client, |fresh| {
             store_token_backend(backend, &path, &email, kind, fresh)
         })
-        .map(Some)
     }
 }
 
@@ -1387,7 +1560,11 @@ mod tests {
     /// slots must never end up describing different consents.
     #[test]
     fn a_multi_credential_store_lands_whole_or_not_at_all() {
-        let path = tmp_path("allornothing");
+        // In a directory of its own, so the failure below can be staged by
+        // making that directory refuse new files.
+        let dir = tmp_path("allornothing").with_extension("d");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("credentials.json");
         let tok = |access: &str| StoredToken {
             access_token: access.into(),
             refresh_token: Some("r".into()),
@@ -1422,10 +1599,15 @@ mod tests {
             "new-write"
         );
 
-        // A directory sitting where the temp file goes fails the write with
-        // both slots still in hand, which is the case that must change nothing.
-        let blocked = path.with_extension("json.tmp");
-        std::fs::create_dir(&blocked).unwrap();
+        // A directory that refuses the temp file fails the write with both
+        // slots still in hand, which is the case that must change nothing.
+        // (Every write has a temp name of its own now, so the old trick of a
+        // directory squatting on a fixed temp name no longer applies.)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        }
         let err = store_tokens_backend(
             CredentialBackend::File,
             &path,
@@ -1450,8 +1632,12 @@ mod tests {
             "new-write"
         );
 
-        std::fs::remove_dir(&blocked).ok();
-        std::fs::remove_file(&path).ok();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]
@@ -2144,6 +2330,54 @@ mod tests {
         rt.block_on(calendar_resolver_scenario());
     }
 
+    /// `granted` is cached, but only while the credentials file is the one
+    /// it read: a file whose contents change under the same mtime is still
+    /// answered from the cache (the hit), and any new mtime is read again.
+    #[test]
+    fn the_granted_cache_holds_until_the_file_changes() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _g = ENV_LOCK.lock().unwrap();
+        rt.block_on(async {
+            let path = tmp_path("granted-cache");
+            let resolver = CalendarCredentials::new(
+                3_i64,
+                "you@x.com".into(),
+                CredentialBackend::File,
+                path.clone(),
+                client(),
+            );
+            let write = |token: StoredToken| {
+                store_token_file(&path, "you@x.com", CredentialKind::Read, &token).unwrap()
+            };
+            write(scoped("READ-WITH-CAL", Some(&[READONLY, EVENTS])));
+            let first = std::fs::metadata(&path).unwrap().modified().unwrap();
+            assert!(resolver.granted().await);
+
+            // The grant goes, but the mtime is put back: still the cache.
+            write(scoped("READ", Some(&[READONLY])));
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(first)
+                .unwrap();
+            assert!(resolver.granted().await, "answered from the cache");
+
+            // A new mtime is a new answer at once, well inside the TTL.
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(first + Duration::from_secs(1))
+                .unwrap();
+            assert!(!resolver.granted().await, "a changed file is read again");
+            std::fs::remove_file(&path).ok();
+        });
+    }
+
     async fn calendar_resolver_scenario() {
         let path = tmp_path("calendar-resolver");
         let resolver = CalendarCredentials::new(
@@ -2203,5 +2437,131 @@ mod tests {
             "bound to one account"
         );
         std::fs::remove_file(&path).ok();
+    }
+
+    // --- concurrent writers --------------------------------------------------
+
+    /// A credentials file whose path carries this marker gets a short pause
+    /// between its read and its write and between truncate and write, so the
+    /// race below is hit on every run rather than on a lucky schedule.
+    pub(super) const RACE_PAUSE_MARKER: &str = "race-pause";
+
+    /// Many writers at once, of different sizes, to different slots and to one
+    /// shared slot, with a reader decoding the file throughout. The file must
+    /// decode every time it is read, each writer's own slot must end on the
+    /// last value that writer wrote (no update lost to another writer's
+    /// read-modify-write), and the shared slot must hold some writer's last
+    /// value. `identity` sealed or not: hosted files are age-sealed.
+    fn concurrent_writers_scenario(tag: &str, identity: Option<&AgeIdentity>) {
+        const ROUNDS: usize = 12;
+        let path = tmp_path(&format!("{RACE_PAUSE_MARKER}-{tag}"));
+        let value = |writer: usize, round: usize| {
+            // Sizes that differ between writers and rounds, so a torn file
+            // would show one writer's bytes followed by another's tail.
+            let pad = "x".repeat((writer * 211 + round * 97) % 900);
+            format!("w{writer}-r{round}-{pad}")
+        };
+        let token = |access: String| StoredToken {
+            access_token: access,
+            refresh_token: Some("r".into()),
+            expires_at: None,
+            scopes: None,
+        };
+        let owned = [
+            ("you@x.com", CredentialKind::Read),
+            ("you@x.com", CredentialKind::Write),
+            ("you@x.com", CredentialKind::Calendar),
+        ];
+        let shared = ("other@x.com", CredentialKind::Read);
+        let done = std::sync::atomic::AtomicBool::new(false);
+        let reads = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            let mut writers = Vec::new();
+            for writer in 0..6 {
+                let (email, kind) = owned.get(writer).copied().unwrap_or(shared);
+                let path = &path;
+                writers.push(scope.spawn(move || {
+                    for round in 0..ROUNDS {
+                        store_token_file_with(
+                            path,
+                            email,
+                            kind,
+                            &token(value(writer, round)),
+                            identity,
+                        )
+                        .unwrap();
+                    }
+                }));
+            }
+            scope.spawn(|| {
+                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    CredentialsFile::read(&path, identity)
+                        .expect("the credentials file decodes whenever it is read");
+                    reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+            for writer in writers {
+                writer.join().unwrap();
+            }
+            done.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+        assert!(reads.load(std::sync::atomic::Ordering::Relaxed) > 0);
+        let file = CredentialsFile::read(&path, identity).unwrap();
+        for (writer, (email, kind)) in owned.iter().enumerate() {
+            assert_eq!(
+                file.slots[&kind.slot_key(email)].access_token,
+                value(writer, ROUNDS - 1),
+                "writer {writer}'s last update was lost"
+            );
+        }
+        let last: Vec<String> = (3..6).map(|w| value(w, ROUNDS - 1)).collect();
+        assert!(last.contains(&file.slots[&shared.1.slot_key(shared.0)].access_token));
+        // No temp file is left behind.
+        let dir = path.parent().unwrap();
+        let stem = path.file_name().unwrap().to_string_lossy().to_string();
+        let strays = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                name.starts_with(&stem) && name != stem
+            })
+            .count();
+        assert_eq!(strays, 0, "temp files left beside the credentials file");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn concurrent_writers_never_tear_or_lose_the_plain_file() {
+        concurrent_writers_scenario("plain", None);
+    }
+
+    #[test]
+    fn concurrent_writers_never_tear_or_lose_the_sealed_file() {
+        let (key, identity) = identity_file("race-key");
+        concurrent_writers_scenario("sealed", Some(&identity));
+        std::fs::remove_file(&key).ok();
+    }
+
+    /// Every write gets a temp name of its own, so no two writers, in this
+    /// process or another, ever open one temp file.
+    #[test]
+    fn every_write_has_its_own_temp_file() {
+        let path = Path::new("/tmp/creds/credentials.json");
+        let (a, b) = (unique_temp_path(path), unique_temp_path(path));
+        assert_ne!(a, b);
+        for tmp in [&a, &b] {
+            assert_eq!(
+                tmp.parent(),
+                path.parent(),
+                "same directory: rename stays atomic"
+            );
+            assert!(
+                tmp.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("credentials.json.tmp.")
+            );
+        }
     }
 }

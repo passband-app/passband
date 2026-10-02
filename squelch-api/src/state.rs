@@ -138,6 +138,13 @@ pub struct ApiState {
     /// `calendar.granted: false`. HUMAN DOOR ONLY: nothing on `/mcp` or
     /// `/client/agent/*` reads it.
     pub(crate) calendar: Option<Arc<squelch_core::credentials::CalendarCredentials>>,
+    /// The calendar sync loop's kick, behind `POST /client/timeline/refresh`,
+    /// and when each account last kicked it. The stamps live here, shared by
+    /// every clone of the state, so the 30 second floor holds across requests
+    /// and clients: the calendar page opening must not become a way to hammer
+    /// Google. `kick` is `None` when no loop runs (no OAuth client), and the
+    /// endpoint then answers `kicked: false`. HUMAN DOOR ONLY.
+    pub(crate) calendar_refresh: CalendarRefresh,
     /// The process's metrics registry, read by `/client/stats` to answer
     /// whether this mailbox's Gmail credential is currently working.
     ///
@@ -228,6 +235,15 @@ pub struct ApiState {
     /// and the small model that reads an unsubscribe page. See
     /// [`crate::unsub_job`]. HUMAN DOOR ONLY.
     pub(crate) unsub: crate::unsub_job::UnsubJobs,
+}
+
+/// The calendar sync kick and its per-account throttle. See
+/// [`ApiState::calendar_refresh`].
+#[derive(Clone, Default)]
+pub(crate) struct CalendarRefresh {
+    pub(crate) kick: Option<Arc<tokio::sync::Notify>>,
+    pub(crate) last_kick:
+        Arc<std::sync::Mutex<std::collections::HashMap<AccountId, std::time::Instant>>>,
 }
 
 /// What the human door needs to force a carrier pass: the poller's
@@ -422,6 +438,7 @@ impl ApiState {
             )),
             console_sso_url: None,
             calendar: None,
+            calendar_refresh: CalendarRefresh::default(),
             sync_metrics: None,
             gmail_budget: None,
             console_allow_insecure_cookie: false,
@@ -631,6 +648,15 @@ impl ApiState {
         calendar: squelch_core::credentials::CalendarCredentials,
     ) -> Self {
         self.calendar = Some(Arc::new(calendar));
+        self
+    }
+
+    /// Attach the calendar sync loop's kick handle
+    /// ([`CalendarSync::kick_handle`]), for `POST /client/timeline/refresh`.
+    ///
+    /// [`CalendarSync::kick_handle`]: squelch_core::gcal::sync::CalendarSync::kick_handle
+    pub fn with_calendar_sync_kick(mut self, kick: Arc<tokio::sync::Notify>) -> Self {
+        self.calendar_refresh.kick = Some(kick);
         self
     }
 

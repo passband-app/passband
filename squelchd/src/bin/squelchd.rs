@@ -2135,6 +2135,28 @@ fn cmd_serve(
         None => api_state,
     };
 
+    // Google Calendar sync, read only. Built over the human door's own token
+    // resolver whenever an OAuth client is configured, GRANTED OR NOT: without
+    // a grant the loop idles and looks again each minute, because a grant can
+    // arrive under a running daemon (`squelchd auth --calendar`). Its own task
+    // with its own backoff, never inside the Gmail sync loop: a calendar
+    // failure of any kind must not fail or delay Gmail sync, triage or ingest.
+    let calendar_sync = api_state.calendar().cloned().and_then(|creds| {
+        match squelch_core::gcal::sync::CalendarSync::new(store.clone(), account_id, creds) {
+            Ok(sync) => Some(sync),
+            Err(e) => {
+                eprintln!(
+                    "squelchd: calendar sync NOT started: its HTTP client could not be built: {e}"
+                );
+                None
+            }
+        }
+    });
+    let api_state = match &calendar_sync {
+        Some(sync) => api_state.with_calendar_sync_kick(sync.kick_handle()),
+        None => api_state,
+    };
+
     let runtime = build_runtime()?;
     runtime.block_on(async move {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -2197,6 +2219,20 @@ fn cmd_serve(
                 eprintln!(
                     "squelchd: shipment poller disabled (no carrier credentials in [carriers])"
                 );
+                None
+            }
+        };
+
+        // Reads Google Calendar. Same shape as the pollers above: shares the
+        // shutdown watch, awaited on the way out.
+        let calendar_handle = match calendar_sync {
+            Some(sync) => {
+                eprintln!("squelchd: calendar sync enabled (idles until calendar is granted)");
+                let shutdown_rx = shutdown_rx.clone();
+                Some(tokio::spawn(async move { sync.run(shutdown_rx).await }))
+            }
+            None => {
+                eprintln!("squelchd: calendar sync disabled (no OAuth client configured)");
                 None
             }
         };
@@ -2557,6 +2593,13 @@ fn cmd_serve(
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => eprintln!("squelchd: shipment poller ended with error: {e}"),
                 Err(e) => eprintln!("squelchd: shipment poller task join error: {e}"),
+            }
+        }
+        if let Some(handle) = calendar_handle {
+            match handle.await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => eprintln!("squelchd: calendar sync ended with error: {e}"),
+                Err(e) => eprintln!("squelchd: calendar sync task join error: {e}"),
             }
         }
         if scheduled_handle.await.is_err() {

@@ -322,6 +322,8 @@ async fn timeline_serves_every_field_with_the_right_end_tier() {
             "likelihood",
             "location",
             "mail_state",
+            // Null here: no calendar is granted, so no real event to match.
+            "matched_event",
             "sources",
             "start",
             "start_timezone",
@@ -329,6 +331,17 @@ async fn timeline_serves_every_field_with_the_right_end_tier() {
             "title",
             "verified"
         ]
+    );
+    assert_eq!(s["matched_event"], Value::Null);
+    // The whole body: ghosts beside the real events and the calendar status,
+    // which with no grant is empty and says so.
+    let mut top: Vec<_> = body.as_object().unwrap().keys().cloned().collect();
+    top.sort();
+    assert_eq!(top, ["calendar", "events", "ghosts"]);
+    assert_eq!(body["events"], json!([]));
+    assert_eq!(
+        body["calendar"],
+        json!({"granted": false, "synced_at": null, "error": null})
     );
     assert!(s["id"].as_i64().unwrap() > 0);
     assert_eq!(s["kind"], "ticket");
@@ -473,7 +486,8 @@ async fn timeline_range_defaults_explicit_bounds_and_rejects_bad_input() {
     );
     let (status, body) = get(&h.app, &uri).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, json!({ "ghosts": [] }));
+    assert_eq!(body["ghosts"], json!([]));
+    assert_eq!(body["events"], json!([]));
 
     for bad in [
         "/client/timeline?from=yesterday",

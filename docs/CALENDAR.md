@@ -805,6 +805,51 @@ from the plan below:
 - **Order of release:** control and warden, then the daemon, then the client.
   A client that meets a daemon without the capability shows ghost mode only.
 
+### Calendar sync (BUILT in wave 2)
+
+Read only (slice B). Nothing writes to a Google Calendar.
+
+- **What is read.** The primary calendar always, plus every calendar the user
+  shows in Google Calendar (`selected`, not hidden or deleted) when the list
+  scope was granted; at most 25, the primary first. A calendar that stops
+  being shown loses its events at the next pass. Recurring events are read as
+  their instances (`singleEvents`).
+- **Window.** 30 days back to 400 days ahead. The first read of a calendar is
+  bounded by the window; later reads use Google's sync token, which Google
+  refuses beside `timeMin`/`timeMax`, so changed events outside the window are
+  dropped on arrival. A full read is repeated daily, because a sync token never
+  carries an event that moves into the window as it slides. A 410 forgets the
+  token and reads in full in the same pass.
+- **Loop.** Its own task in `squelchd`, started whether or not calendar is
+  granted: without a grant it calls nothing and looks again each minute. With
+  one it reads every 5 minutes and backs off from 1 to 30 minutes on errors.
+  It never holds the store across a call to Google, and no calendar failure
+  reaches Gmail's health.
+- **Bounds.** Titles and places laundered like a ghost's (200 characters, a
+  meeting link without its query); an organizer only when it is an address; a
+  link only to a Google page over https; 5000 events per calendar; 40 pages of
+  250 per calendar per pass, past which the calendar is reported unavailable.
+- **Tables.** `calendar_calendars` (which calendars are read, sync token, last
+  sync, last full sync, last error kind) and `calendar_events` (one row per
+  event, keyed by account, calendar and event id, indexed on start). Starts and
+  ends use the ghosts' text form and convention: an all-day `end` is the
+  inclusive last day (Google's exclusive `end.date` minus one), and none for a
+  one-day event. A cancelled event is deleted.
+- **Endpoints.** `GET /client/timeline` adds `events` (by start, the ghosts'
+  `[from, to)` rule on the start) and `calendar {granted, synced_at, error}`,
+  where `error` is `auth`, `quota` or `unavailable`. Events are served only
+  while calendar is granted. Declined events are served; the client hides
+  them. `POST /client/timeline/refresh` starts a pass, at most once per account
+  per 30 seconds (202 either way, `kicked` says which).
+- **Match rule.** A ghost carries `matched_event {calendar_id, id}` when a real
+  event starts at the same instant (or on the same date, both all-day) and the
+  titles are equal after lowercasing and collapsing whitespace, or one contains
+  the other. Worked out when the timeline is listed, never stored: it hides a
+  duplicate and changes no ghost.
+- **Human door only.** Titles, places, organizers and links never reach an
+  agent route, a log line or a triage prompt. A log names a calendar by its
+  position in the pass, never its id, which is usually an address.
+
 ### Verification and disclosure
 
 - Google verification has not started (2026-09-30). It is not held for

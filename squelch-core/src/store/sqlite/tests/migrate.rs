@@ -2142,3 +2142,110 @@ fn init_creates_the_ghost_tables_on_fresh_and_existing_dbs() {
     drop(reopened);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The Google Calendar tables are new and need no backfill either: present on
+/// a fresh store with the columns the sync and the timeline use, created on an
+/// existing mailbox from before them (dropped here), whose mail survives, and
+/// left alone by a later open.
+#[test]
+fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
+    fn columns(conn: &Connection, table: &str) -> Vec<String> {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap()
+    }
+    fn index_exists(conn: &Connection) -> bool {
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_calendar_events_start'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+            == 1
+    }
+    let (fresh, _) = store();
+    {
+        let conn = fresh.lock().unwrap();
+        assert_eq!(
+            columns(&conn, "calendar_calendars"),
+            [
+                "account_id",
+                "calendar_id",
+                "summary",
+                "is_primary",
+                "selected",
+                "time_zone",
+                "sync_token",
+                "synced_at",
+                "full_synced_at",
+                "last_error_kind",
+            ]
+        );
+        assert_eq!(
+            columns(&conn, "calendar_events"),
+            [
+                "account_id",
+                "calendar_id",
+                "event_id",
+                "ical_uid",
+                "status",
+                "summary",
+                "location",
+                "starts_at",
+                "start_sort",
+                "ends_at",
+                "all_day",
+                "start_timezone",
+                "organizer_email",
+                "self_response",
+                "transparent",
+                "html_link",
+                "updated_at",
+            ]
+        );
+        assert!(index_exists(&conn));
+    }
+
+    let dir = std::env::temp_dir().join(format!("squelch-calendar-tables-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("mail.db");
+    let _ = std::fs::remove_file(&path);
+    let acct;
+    {
+        let old = SqliteStore::open(&path).unwrap();
+        acct = old.ensure_account("me@example.com").unwrap();
+        triaged_row(acct, "g-1", "t-1", None, false, Sensitivity::Normal).ingest(&old);
+        old.lock()
+            .unwrap()
+            .execute_batch("DROP TABLE calendar_events; DROP TABLE calendar_calendars;")
+            .unwrap();
+    }
+    {
+        let upgraded = SqliteStore::open(&path).unwrap();
+        let conn = upgraded.lock().unwrap();
+        assert_eq!(columns(&conn, "calendar_events").len(), 17);
+        assert!(index_exists(&conn));
+        let mail: i64 = conn
+            .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mail, 1, "the mailbox survives the upgrade");
+        conn.execute(
+            "INSERT INTO calendar_calendars(account_id,calendar_id,is_primary) VALUES(?1,'primary',1)",
+            [acct],
+        )
+        .unwrap();
+    }
+    let reopened = SqliteStore::open(&path).unwrap();
+    let kept: i64 = reopened
+        .lock()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM calendar_calendars", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(kept, 1, "a later open keeps what is there");
+    drop(reopened);
+    let _ = std::fs::remove_dir_all(&dir);
+}

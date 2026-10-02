@@ -193,7 +193,11 @@ final class Prefs {
         // like a stored one, and this needs to see absence — the same reason
         // `tourCompleted` is written the way it is.
         _nameChosen = defaults.object(forKey: Key.nameChosen) as? Bool ?? !storedName.isEmpty
-        _signature = defaults.string(forKey: Key.signature) ?? ""
+        // ABSENT, NOT EMPTY, is what earns the default. The Settings editor
+        // stores on every keystroke, so a signature somebody cleared is a
+        // stored "" and stays none; only an install that never touched the
+        // field signs with the house line.
+        _signature = defaults.string(forKey: Key.signature) ?? Prefs.defaultSignature
         _assistantModel =
             AssistantModel.migrating(rawValue: defaults.string(forKey: Key.assistantModel) ?? "")
             ?? .haiku
@@ -431,6 +435,12 @@ final class Prefs {
         _userName = local
         defaults.set(local, forKey: Key.userName)
     }
+
+    /// What every install signs with until its human says otherwise. Markdown,
+    /// like any other signature, so the dashes need the blank line
+    /// `signatureSeed` puts above them: "--" directly under a line of text is
+    /// a CommonMark heading underline, not a separator.
+    static let defaultSignature = "--\n\nSent from [Passband](https://passband.app)"
 
     /// The email signature, as markdown — same dialect as the compose body.
     /// Stored raw (no trimming in the setter: it is bound to a live editor, and

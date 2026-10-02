@@ -186,6 +186,23 @@ mod tests {
         assert!(html.contains("a chart"));
     }
 
+    /// The client's default signature (`Prefs.defaultSignature`), seeded two
+    /// newlines under whatever was typed. The dashes must stay two literal
+    /// dashes in a paragraph of their own: not a heading underline for the
+    /// line above, and not a typographic dash.
+    #[test]
+    fn the_default_signature_renders_as_dashes_then_a_link() {
+        let html = render_email_html(
+            "Thanks,\nBraelyn\n\n--\n\nSent from [Passband](https://passband.app)",
+        );
+        assert!(!html.contains("<h2>"), "{html}");
+        assert!(html.contains("<p>--</p>"), "{html}");
+        assert!(
+            html.contains("<p>Sent from <a href=\"https://passband.app\">Passband</a></p>"),
+            "{html}"
+        );
+    }
+
     #[test]
     fn headings_and_lists_render() {
         let html = render_email_html("# Title\n\n- one\n- two");

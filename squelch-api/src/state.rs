@@ -11,6 +11,20 @@ use squelch_core::triage::rule_infer::RuleInferClient;
 use squelch_core::triage::rule_suggest::RuleSuggestClient;
 use squelch_core::types::AccountId;
 
+/// The agent door's mode as the console describes it. Mirrors squelch-mcp's
+/// `AgentDoorAuth` without depending on it (the human door does not link the
+/// agent door's crate), carrying only what the page shows.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum AgentDoorStatus {
+    /// No agent sign-in configured: the self-host door, Host guard only.
+    #[default]
+    Open,
+    /// OAuth sign-in configured; agents connect at this public URL.
+    OAuth { public_url: String },
+    /// Half-set or invalid settings: the door refuses everything (503).
+    Unavailable,
+}
+
 /// State threaded through every `/client/*` handler and the auth middleware.
 /// Cheap to clone: `Arc`s plus small copies.
 #[derive(Clone)]
@@ -126,6 +140,12 @@ pub struct ApiState {
     /// a LINK TARGET and nothing more: no trust flows from here, because whatever
     /// comes back is a pairing code the store adjudicates on its own terms.
     pub(crate) console_sso_url: Option<Arc<str>>,
+    /// What the console tells the owner about the agent door (`/mcp`). Set by
+    /// squelchd from the mode it resolved at startup; the default, Open, is
+    /// the self-host posture and what every test that does not care gets.
+    /// Display only: the door's actual auth lives in squelch-mcp, and nothing
+    /// here can loosen it.
+    pub(crate) agent_door: AgentDoorStatus,
     /// The process's metrics registry, read by `/client/stats` to answer
     /// whether this mailbox's Gmail credential is currently working.
     ///
@@ -391,6 +411,7 @@ impl ApiState {
                 crate::auth::DEVICE_AUTH_CONCURRENCY,
             )),
             console_sso_url: None,
+            agent_door: AgentDoorStatus::Open,
             sync_metrics: None,
             gmail_budget: None,
             console_allow_insecure_cookie: false,
@@ -578,6 +599,17 @@ impl ApiState {
             })
             .map(|u| Arc::from(u.as_str()));
         self
+    }
+
+    /// Tell the console which mode the agent door is in. See
+    /// [`AgentDoorStatus`].
+    pub fn with_agent_door(mut self, status: AgentDoorStatus) -> Self {
+        self.agent_door = status;
+        self
+    }
+
+    pub(crate) fn agent_door(&self) -> &AgentDoorStatus {
+        &self.agent_door
     }
 
     /// The control plane's origin, if console SSO is configured. `None` => the

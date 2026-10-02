@@ -41,3 +41,19 @@ Point an MCP client at it:
 - `SQUELCH_DB_PATH` — SQLite path (shared XDG default)
 - `SQUELCH_ACCOUNT_EMAIL` — account to serve
 - `SQUELCH_MCP_ALLOWED_HOSTS` — allowed Host headers behind a proxy
+
+## Auth (OAuth for hosted tenants)
+
+The HTTP door has three modes, picked once at startup from env (blank counts as unset):
+
+- `SQUELCH_MCP_OAUTH_ISSUER`: the authorization server's issuer (e.g. `https://foo.authkit.app`).
+- `SQUELCH_MCP_PUBLIC_URL`: this daemon's canonical `/mcp` URL (e.g. `https://alice.passband.email/mcp`). It is the expected token `aud`, the `resource` in the metadata, and the hostname added to the Host allow-list.
+- `SQUELCH_MCP_OAUTH_JWKS_URL`: optional; defaults to `<issuer>/oauth2/jwks`.
+
+| Mode | When | `/mcp` |
+|---|---|---|
+| Open | neither issuer nor public URL set | no auth, Host allow-list only. Self-host, unchanged. |
+| OAuth | both set (https, or http on loopback) | needs an RS256 bearer JWT from the issuer, with our `iss` and `aud`, unexpired, and an `email` claim equal to this daemon's account email. Missing token: `401` with `WWW-Authenticate: Bearer resource_metadata="<origin>/.well-known/oauth-protected-resource/mcp"`. Bad token: the same plus `error="invalid_token"`. JWKS never reachable: `503`. Also serves the RFC 9728 metadata at `/.well-known/oauth-protected-resource[/mcp]`. |
+| Misconfigured | exactly one set, or a value that is not a valid URL | `503` for everything, error logged at startup. Never falls back to Open. |
+
+The `email` check is the one that matters: one wildcard resource indicator covers every tenant, so `aud` alone does not stop one Passband user's token from opening another user's door. Device tokens (`sqd_`) and the master token are never accepted here. Refusals are logged as a reason category only, never a token, claim, or address. Code: `src/auth.rs`; construction: `squelch_mcp::agent_door_router`.

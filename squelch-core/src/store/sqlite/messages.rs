@@ -1299,7 +1299,15 @@ impl SqliteStore {
         // To, Cc and Bcc come back as ONE list here, unlike the reader: a sent
         // row is one line answering "who did this go to", and the thread it
         // opens onto says which header carried whom.
-        let mut stmt = conn.prepare(
+        //
+        // AUTHORSHIP, NOT THE STORED FLAG. `is_sent` is a visibility flag that
+        // is sticky to 0, and Gmail's label-filtered INBOX history has served
+        // the user's own sends: the send echo writes 1, the INBOX sighting
+        // MINs it to 0, and the mail vanished from this page for good. Every
+        // message one tenant ever sent from the composer was missing here
+        // while the mail it sent from Gmail listed. `OWN_MAIL` is the same
+        // answer the attention surfaces use for "the user wrote this".
+        let mut stmt = conn.prepare(concat!(
             "SELECT m.id, m.thread_id, COALESCE(m.to_addrs, ''), m.subject, m.snippet,
                     m.received_at,
                     (SELECT COUNT(*) FROM message_opens o
@@ -1308,10 +1316,12 @@ impl SqliteStore {
                     COALESCE(m.cc_addrs, ''), COALESCE(m.bcc_addrs, '')
              FROM messages m
              WHERE m.account_id = ?1
-               AND m.is_sent = 1
+               AND ",
+            own_mail_sql!(),
+            "
              ORDER BY m.received_at DESC, m.id DESC
-             LIMIT ?2 OFFSET ?3",
-        )?;
+             LIMIT ?2 OFFSET ?3"
+        ))?;
         let out = stmt
             .query_map(params![account_id, limit as i64, offset as i64], |r| {
                 Ok(SentMessage {

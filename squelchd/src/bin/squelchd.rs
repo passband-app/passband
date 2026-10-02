@@ -2130,7 +2130,9 @@ fn cmd_serve(
     // The agent door's auth mode, resolved from env ONCE: the router and the
     // console's description of the door are both built from this one value,
     // so they cannot disagree.
-    let agent_door = squelch_mcp::AgentDoorAuth::from_env();
+    // `for_account` is also applied inside the router; applying it here too
+    // keeps the startup line and the console truthful about the same result.
+    let agent_door = squelch_mcp::AgentDoorAuth::from_env().for_account(&email);
 
     let api_state = squelch_api::ApiState::from_config(store.clone(), &email, &config, cap_sources)
         .map_err(|e| other_err(format!("{e}")))?
@@ -3542,18 +3544,21 @@ mod tests {
     const AGENT_PUBLIC_URL: &str = "https://me.passband.email/mcp";
     const AGENT_HOST: &str = "me.passband.email";
     const MASTER: &str = "test-token";
+    /// OAuth mode refuses the `me@localhost` placeholder, so these tests use
+    /// a real-shaped address.
+    const AGENT_ACCOUNT: &str = "me@example.com";
 
     /// Both doors, as `serve` builds them, with the agent door in `auth` mode.
     fn serve_router(
         auth: &squelch_mcp::AgentDoorAuth,
     ) -> (Arc<SqliteStore>, AccountId, Arc<SyncMetrics>, axum::Router) {
         let store = Arc::new(SqliteStore::open_in_memory().expect("in-memory store"));
-        let account_id = store.ensure_account("me@localhost").expect("account");
+        let account_id = store.ensure_account(AGENT_ACCOUNT).expect("account");
         let api_state = squelch_api::ApiState::new(store.clone(), account_id, MASTER);
         let metrics = SyncMetrics::new();
         let app = build_serve_router(
             store.clone(),
-            "me@localhost",
+            AGENT_ACCOUNT,
             api_state,
             CancellationToken::new(),
             metrics.clone(),
@@ -3580,7 +3585,7 @@ mod tests {
     fn agent_jwt() -> String {
         use squelch_mcp::testing::{KEY_A_PEM, KID_A, sign, valid_claims};
         sign(
-            &valid_claims(AGENT_ISSUER, AGENT_PUBLIC_URL, "me@localhost"),
+            &valid_claims(AGENT_ISSUER, AGENT_PUBLIC_URL, AGENT_ACCOUNT),
             KEY_A_PEM,
             KID_A,
         )

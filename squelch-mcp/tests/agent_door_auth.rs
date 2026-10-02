@@ -20,8 +20,8 @@ use serde_json::{Value, json};
 use squelch_core::store::SqliteStore;
 use squelch_mcp::auth::{Refusal, Verifier};
 use squelch_mcp::testing::{
-    KEY_A_N, KEY_A_PEM, KEY_A_PUB_PEM, KEY_B_N, KEY_B_PEM, KID_A as KID, KID_B, StubJwks, jwk,
-    unix_now as now, valid_claims,
+    KEY_A_N, KEY_A_PEM, KEY_A_PUB_PEM, KEY_B_N, KEY_B_PEM, KEY_SMALL_N, KEY_SMALL_PEM,
+    KID_A as KID, KID_B, StubJwks, jwk, unix_now as now, valid_claims,
 };
 use squelch_mcp::{AgentDoorAuth, agent_door_router};
 use tokio_util::sync::CancellationToken;
@@ -569,7 +569,7 @@ async fn a_cached_key_is_served_while_a_slow_jwks_refresh_is_in_flight() {
 
     // Warm the cache with key A.
     let good = bearer(&sign(&good_claims()));
-    assert_eq!(v.verify(Some(&good)).await, Ok(()));
+    assert!(v.verify(Some(&good)).await.is_ok());
     assert_eq!(jwks.fetches(), 1);
 
     // Past the throttle window, an unknown kid starts a refresh that stalls.
@@ -589,10 +589,9 @@ async fn a_cached_key_is_served_while_a_slow_jwks_refresh_is_in_flight() {
 
     // A request whose key IS cached must not queue behind it.
     let hit = tokio::time::timeout(Duration::from_millis(500), v.verify(Some(&good))).await;
-    assert_eq!(
-        hit,
-        Ok(Ok(())),
-        "a cache hit waited on the in-flight refresh"
+    assert!(
+        matches!(hit, Ok(Ok(_))),
+        "a cache hit waited on the in-flight refresh: {hit:?}"
     );
     assert!(!slow.is_finished(), "the refresh should still be in flight");
 
@@ -617,7 +616,7 @@ async fn concurrent_misses_share_one_jwks_fetch() {
         })
         .collect();
     for t in tasks {
-        assert_eq!(t.await.unwrap(), Ok(()));
+        assert!(t.await.unwrap().is_ok());
     }
     assert_eq!(jwks.fetches(), 1);
 }
@@ -649,6 +648,320 @@ async fn an_unknown_kid_spray_cannot_lock_out_a_newly_published_key_past_the_win
 
     // One window after the LAST FETCH, the new key works.
     clock.set(60);
-    assert_eq!(v.verify(Some(&rotated)).await, Ok(()));
+    assert!(v.verify(Some(&rotated)).await.is_ok());
     assert_eq!(jwks.fetches(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// Key-set lifetime (D1): max age, replacement, hard ceiling
+// ---------------------------------------------------------------------------
+
+const MINUTE: u64 = 60;
+const HOUR: u64 = 60 * MINUTE;
+
+#[tokio::test]
+async fn a_withdrawn_key_is_refused_once_the_cache_passes_its_max_age() {
+    let jwks = StubJwks::start().await;
+    let clock = FakeClock::new();
+    let v = Verifier::with_clock(&oauth_config(&jwks.url), ACCOUNT, clock.clock());
+    let old = bearer(&sign(&good_claims()));
+    let new = bearer(&sign_with(&good_claims(), KEY_B_PEM, KID_B));
+
+    assert!(v.verify(Some(&old)).await.is_ok());
+    assert_eq!(jwks.fetches(), 1);
+
+    // The issuer withdraws key A and publishes B instead.
+    jwks.publish(json!({ "keys": [jwk(KID_B, KEY_B_N)] }));
+
+    // Inside the max age the cached set is trusted as it stands.
+    clock.set(30 * MINUTE);
+    assert!(v.verify(Some(&old)).await.is_ok());
+    assert_eq!(jwks.fetches(), 1);
+
+    // Past it, the next request refreshes FIRST, with no unknown-kid request
+    // involved, and the new set replaces the old one: A is gone.
+    clock.set(HOUR + 1);
+    assert_eq!(v.verify(Some(&old)).await, Err(Refusal::UnknownKey));
+    assert_eq!(jwks.fetches(), 2);
+    // And the rotation is picked up.
+    assert!(v.verify(Some(&new)).await.is_ok());
+    assert_eq!(jwks.fetches(), 2);
+}
+
+#[tokio::test]
+async fn an_empty_jwks_empties_the_cache() {
+    let jwks = StubJwks::start().await;
+    let clock = FakeClock::new();
+    let v = Verifier::with_clock(&oauth_config(&jwks.url), ACCOUNT, clock.clock());
+    let good = bearer(&sign(&good_claims()));
+    assert!(v.verify(Some(&good)).await.is_ok());
+
+    jwks.publish(json!({ "keys": [] }));
+    clock.set(HOUR + 1);
+    assert_eq!(v.verify(Some(&good)).await, Err(Refusal::UnknownKey));
+    assert_eq!(jwks.fetches(), 2);
+}
+
+#[tokio::test]
+async fn a_failed_refresh_keeps_the_keys_until_the_hard_ceiling_then_503() {
+    let jwks = StubJwks::start().await;
+    let clock = FakeClock::new();
+    let v = Verifier::with_clock(&oauth_config(&jwks.url), ACCOUNT, clock.clock());
+    let good = bearer(&sign(&good_claims()));
+    assert!(v.verify(Some(&good)).await.is_ok());
+
+    jwks.set_failing(true);
+    // Stale, refresh fails: the old key still serves this request.
+    clock.set(HOUR + 1);
+    assert!(v.verify(Some(&good)).await.is_ok());
+    assert_eq!(jwks.fetches(), 2);
+    // Still failing most of a day later: still served, still trying.
+    clock.set(23 * HOUR);
+    assert!(v.verify(Some(&good)).await.is_ok());
+    assert_eq!(jwks.fetches(), 3);
+    // A day without one successful refresh: nothing is trusted.
+    clock.set(24 * HOUR);
+    assert_eq!(v.verify(Some(&good)).await, Err(Refusal::JwksUnavailable));
+
+    // The issuer comes back: the next permitted refresh restores service.
+    jwks.set_failing(false);
+    clock.set(24 * HOUR + 2 * MINUTE);
+    assert!(v.verify(Some(&good)).await.is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// The fetch itself (D4)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_jwks_url_that_redirects_is_a_failed_fetch() {
+    let jwks = StubJwks::start().await;
+    let v = Verifier::new(&oauth_config(&jwks.redirect_url), ACCOUNT);
+    assert_eq!(
+        v.verify(Some(&bearer(&sign(&good_claims())))).await,
+        Err(Refusal::JwksUnavailable)
+    );
+    assert_eq!(jwks.fetches(), 0, "the redirect target was never fetched");
+}
+
+#[tokio::test]
+async fn an_oversize_jwks_body_is_a_failure_and_is_not_read_to_the_end() {
+    let jwks = StubJwks::start().await;
+    let v = Verifier::new(&oauth_config(&jwks.huge_url), ACCOUNT);
+    let started = Instant::now();
+    assert_eq!(
+        v.verify(Some(&bearer(&sign(&good_claims())))).await,
+        Err(Refusal::JwksUnavailable)
+    );
+    // An endless body read to its end would only stop at the 5s fetch
+    // timeout. Stopping at the 256 KiB cap is near instant.
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "took {:?}",
+        started.elapsed()
+    );
+    // The server may run ahead into socket buffers, but nowhere near what
+    // five seconds of reading would have pulled.
+    assert!(jwks.huge_chunks() < 400, "{} chunks", jwks.huge_chunks());
+}
+
+// ---------------------------------------------------------------------------
+// Hardening (D5)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_token_with_a_crit_header_is_refused() {
+    let jwks = StubJwks::start().await;
+    let v = Verifier::new(&oauth_config(&jwks.url), ACCOUNT);
+    let mut h = Header::new(Algorithm::RS256);
+    h.kid = Some(KID.to_string());
+    h.crit = Some(vec!["exp".to_string()]);
+    let token = jsonwebtoken::encode(
+        &h,
+        &good_claims(),
+        &EncodingKey::from_rsa_pem(KEY_A_PEM.as_bytes()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        v.verify(Some(&bearer(&token))).await,
+        Err(Refusal::CriticalHeader)
+    );
+    assert!(v.verify(Some(&bearer(&sign(&good_claims())))).await.is_ok());
+}
+
+#[tokio::test]
+async fn a_jwks_rsa_key_under_2048_bits_is_never_trusted() {
+    let jwks = StubJwks::start_with(json!({ "keys": [
+        jwk(KID, KEY_A_N),
+        jwk("small", KEY_SMALL_N),
+    ]}))
+    .await;
+    let v = Verifier::new(&oauth_config(&jwks.url), ACCOUNT);
+    let small = bearer(&sign_with(&good_claims(), KEY_SMALL_PEM, "small"));
+    assert_eq!(v.verify(Some(&small)).await, Err(Refusal::UnknownKey));
+    assert!(v.verify(Some(&bearer(&sign(&good_claims())))).await.is_ok());
+}
+
+#[tokio::test]
+async fn oauth_without_a_real_account_email_is_misconfigured() {
+    let jwks = StubJwks::start().await;
+    let auth = AgentDoorAuth::OAuth(oauth_config(&jwks.url));
+    for email in ["", "   ", "me@localhost", "ME@LOCALHOST", "not-an-address"] {
+        let bound = auth.clone().for_account(email);
+        assert!(
+            matches!(
+                bound,
+                AgentDoorAuth::Misconfigured(
+                    squelch_mcp::auth::MisconfiguredReason::NoAccountEmail
+                )
+            ),
+            "{email:?}: {bound:?}"
+        );
+
+        // And the router applies it itself, whatever the caller did.
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let app = agent_door_router(
+            store,
+            email,
+            Default::default(),
+            Default::default(),
+            CancellationToken::new(),
+            &auth,
+        )
+        .unwrap();
+        let mut c = good_claims();
+        c["email"] = json!(email);
+        let resp = send(&app, initialize(PUBLIC_HOST, Some(&sign(&c)))).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE, "{email:?}");
+        let resp = send(&app, get(METADATA_PATH, PUBLIC_HOST)).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+    // Open mode is untouched by the rule.
+    assert_eq!(
+        AgentDoorAuth::Open.for_account("me@localhost"),
+        AgentDoorAuth::Open
+    );
+}
+
+const METADATA_PATH: &str = "/.well-known/oauth-protected-resource/mcp";
+
+// ---------------------------------------------------------------------------
+// Streams end with their token (D3)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn an_event_stream_is_closed_when_its_token_expires() {
+    let jwks = StubJwks::start().await;
+    let app = oauth_door(&jwks.url);
+
+    // A token about 3 seconds from the end of its leeway.
+    let mut c = good_claims();
+    c["exp"] = json!(now() - 57);
+    let token = sign(&c);
+
+    // The POST response is a normal, complete body.
+    let resp = send(&app, initialize(PUBLIC_HOST, Some(&token))).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let session = resp
+        .headers()
+        .get("mcp-session-id")
+        .expect("a session id")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    assert!(body.contains("\"protocolVersion\""), "{body}");
+
+    let notify = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header(header::HOST, PUBLIC_HOST)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "application/json, text/event-stream")
+        .header("mcp-session-id", &session)
+        .header("mcp-protocol-version", "2025-06-18")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::from(
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        ))
+        .unwrap();
+    let resp = send(&app, notify).await;
+    assert!(resp.status().is_success(), "{}", resp.status());
+
+    // The long-lived GET stream.
+    let get_stream = Request::builder()
+        .method("GET")
+        .uri("/mcp")
+        .header(header::HOST, PUBLIC_HOST)
+        .header(header::ACCEPT, "text/event-stream")
+        .header("mcp-session-id", &session)
+        .header("mcp-protocol-version", "2025-06-18")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = send(&app, get_stream).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let started = Instant::now();
+    let ended = tokio::time::timeout(
+        Duration::from_secs(15),
+        axum::body::to_bytes(resp.into_body(), usize::MAX),
+    )
+    .await;
+    assert!(
+        matches!(ended, Ok(Ok(_))),
+        "the stream outlived its token: {ended:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "ended late: {:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn an_event_stream_with_a_long_lived_token_stays_open() {
+    // The control for the test above: the same stream with a token good for
+    // ten minutes is still open after the other one would have closed.
+    let jwks = StubJwks::start().await;
+    let app = oauth_door(&jwks.url);
+    let token = sign(&good_claims());
+
+    let resp = send(&app, initialize(PUBLIC_HOST, Some(&token))).await;
+    let session = resp.headers()["mcp-session-id"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    let _ = body_bytes(resp).await;
+    let notify = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header(header::HOST, PUBLIC_HOST)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "application/json, text/event-stream")
+        .header("mcp-session-id", &session)
+        .header("mcp-protocol-version", "2025-06-18")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::from(
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        ))
+        .unwrap();
+    let _ = send(&app, notify).await;
+    let get_stream = Request::builder()
+        .method("GET")
+        .uri("/mcp")
+        .header(header::HOST, PUBLIC_HOST)
+        .header(header::ACCEPT, "text/event-stream")
+        .header("mcp-session-id", &session)
+        .header("mcp-protocol-version", "2025-06-18")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = send(&app, get_stream).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let still_open = tokio::time::timeout(
+        Duration::from_secs(5),
+        axum::body::to_bytes(resp.into_body(), usize::MAX),
+    )
+    .await;
+    assert!(still_open.is_err(), "the stream ended on its own");
 }

@@ -558,7 +558,10 @@ build the HTTP agent door (the bare rmcp service is private to the crate):
 - **OAuth.** Both are set, each a valid `https` URL (`http` only on loopback). Every
   `/mcp` request needs a bearer token, verified below. Two unauthenticated GET routes
   publish RFC 9728 protected-resource metadata naming the issuer.
-- **Misconfigured.** Exactly one is set, or one does not parse. `/mcp` answers 503
+- **Misconfigured.** Exactly one is set, one does not parse, or OAuth is configured
+  but the daemon has no real account email to bind tokens to (unset, or the
+  `me@localhost` placeholder; `AgentDoorAuth::for_account`, applied inside
+  `agent_door_router` so no host can skip it). `/mcp` answers 503
   to everything, no metadata is published, and startup logs which setting is at
   fault. It never falls back to Open: the likeliest way to get here is a hosted pod
   that lost one variable, and that pod's `/mcp` is published. The human door is
@@ -577,15 +580,14 @@ failure, and the cheap, local steps come before anything that touches keys:
 1. An `Authorization: Bearer` header (`squelch-httpauth:parse_bearer`). Absent or
    not Bearer: 401 with `WWW-Authenticate: Bearer resource_metadata="..."`.
 2. The token is at most 8 KiB. Checked before any decoding.
-3. The JWT header parses and `alg` is exactly `RS256`. `none` does not parse, and
-   every HS* algorithm is refused here, before any key is looked up, so the RSA
-   public key can never be fed to HMAC.
-4. The header has a `kid`, and the JWKS cache has an RSA signing key for it. On a
-   miss the JWKS is refetched, at most once per 60 seconds whatever arrives, so a
-   spray of random `kid`s cannot drive outbound fetches; a throttled miss does not
-   extend that window, so a newly published key is usable at most 60 seconds after
-   the last fetch. A cached key is never delayed by a refresh in flight. If no key
-   has ever been fetched, the answer is 503, never a pass.
+3. The JWT header parses, `alg` is exactly `RS256`, and there is no `crit`
+   header (RFC 7515 §4.1.11: we understand no extensions, so we accept none).
+   `none` does not parse, and every HS* algorithm is refused here, before any key
+   is looked up, so the RSA public key can never be fed to HMAC.
+4. The header has a `kid`, and the JWKS cache has an RSA signing key of at least
+   2048 bits for it. See "The key set" below for when the cache refreshes. If no
+   refresh has ever succeeded, or none has for 24 hours, the answer is 503, never
+   a pass.
 5. The signature verifies under that key.
 6. `iss` equals our issuer and `aud` (a string, or an array) contains our public
    URL. Both are exact string compares after trimming one trailing `/`.
@@ -595,9 +597,26 @@ failure, and the cheap, local steps come before anything that touches keys:
    A token with no `email` claim is refused.
 
 Every refusal after step 1 is a 401 with `error="invalid_token"` added to the
-challenge, and an empty body. The library verifies the signature and nothing else:
+challenge, and an empty body. A token that passes bounds its response: the body
+is ended when the token's `exp` (plus the leeway) passes, so a long-lived GET event
+stream closes and the client must come back with a fresh token. Nothing an agent
+receives outlives the credential that asked for it. The library verifies the signature and nothing else:
 every claim check is ours, because its defaults check `aud` and `iss` only when
 present and leave `nbf` off.
+
+**The key set** (`auth.rs:JwksClient`). Fetched lazily from `<issuer>/oauth2/jwks`
+(or the override), with no redirects followed (a redirect is a failed fetch, since
+the https check covered only the configured URL) and the body read in chunks that
+stop at 256 KiB. A fetch happens when a `kid` is unknown or when the cached set is
+older than one hour, and never more than once per 60 seconds whatever arrives: a
+spray of random `kid`s cannot drive outbound fetches, and since a throttled request
+does not extend the window, a newly published key is usable at most 60 seconds
+after the last fetch. A successful fetch REPLACES the set, so a key the issuer
+withdraws stops verifying within about an hour, and a JWKS with no usable keys
+empties the set. A failed fetch keeps the old set, so an issuer blip does not log
+every agent out, but only until 24 hours have passed without one success; then
+nothing is trusted (503). A fresh cached key is never delayed by a refresh in
+flight.
 
 **Step 8 is the tenant boundary.** One wildcard resource indicator,
 `https://*.passband.email/mcp`, covers the whole fleet, so any Passband user can
@@ -605,6 +624,15 @@ obtain a correctly signed, unexpired token whose `aud` names someone else's tena
 `aud` says "this token is for a Passband daemon"; only `email` says whose. Without
 step 8, tenant A's owner could read tenant B's mail with a token AuthKit issued
 quite properly.
+
+**The `email` claim exists only because the operator puts it there.** A WorkOS
+Connect access token carries `iss`, `aud`, `sub`, `client_id`, `org_id`, `sid`,
+`scope`, `jti`, `exp` and `iat`, and no `email`. The claim appears only when the
+environment's JWT template is set to `{"email": {{ user.email }}}`. Without the
+template every token is refused as `missing_email`, which is the fail-closed
+direction: a forgotten template locks agents out, it does not let them in. `sub`
+is WorkOS's own user id, not anything the control plane chose, so it cannot stand
+in for the mailbox.
 
 **The doors do not share credentials.** `/mcp` never accepts an `sqd_` device
 token or the `SQUELCH_API_TOKEN` master token: neither is a JWT, so step 3 refuses
@@ -623,8 +651,8 @@ only in OAuth mode. So an older daemon image behind a newly published `/mcp`
 Ingress path answers 403 from the Host guard rather than serving mail without a
 token.
 
-**Logging.** A refusal logs one closed category (`auth.rs:Refusal`, e.g.
-`wrong_mailbox`, `expired`) and nothing else. No token, no claim value and no email
+**Logging.** A refusal is counted under one closed category (`auth.rs:Refusal`,
+e.g. `wrong_mailbox`, `expired`), and only the counts are ever written. No token, no claim value and no email
 address reaches a log line or a response; a misconfiguration names the setting,
 not its value. The startup line shows the mode and, in OAuth mode, the public URL,
 which the metadata publishes anyway.
@@ -634,25 +662,45 @@ which the metadata publishes anyway.
   so a compromise of WorkOS (or of our WorkOS API key, which completes the identity
   hop) can produce a token that passes every step above. That is the price of not
   running our own authorization server.
-- **Revocation is not instant.** The daemon checks no revocation list, so a token
-  stays valid until its `exp`. Revoking an agent in AuthKit stops new tokens; the
-  old one lasts out its lifetime.
+- **Revocation is a WorkOS-side operator action, not instant, and not ours.** The
+  daemon checks no revocation list. Access tokens are short-lived, but AuthKit
+  also issues refresh tokens (`offline_access` is among the standard scopes a
+  dynamically registered client gets), so an approved agent keeps access for as
+  long as its grant lives on the WorkOS side. Ending that access means revoking
+  the grant in WorkOS, which today is something an operator does. The
+  access-token lifetime only bounds how long a revoked grant's last token keeps
+  working, and the stream bound above makes that true for open streams too.
 
 **The phishing shape that remains.** An attacker can register their own MCP client
 with AuthKit, start a flow, and send the victim the resulting login link. If the
 victim signs in and approves, the attacker's client gets a token for the victim's
-mailbox. The defence is AuthKit's consent screen, which names the client asking;
-we add nothing on top of it.
+mailbox. Client names under dynamic registration are chosen by whoever registers
+the client and are not verified by anyone, so "Claude" on a consent screen proves
+nothing. The defence is two screens the victim must get past: our control plane's
+own confirmation page, which names the mailbox and is shown after Google sign-in
+and before anything is sent to WorkOS (`/agent/auth`, then Google, then confirm,
+then the POST that completes the hop), and then AuthKit's consent screen naming
+the client. Both depend on the victim reading them.
 
 **Not proxied on purpose.** The daemon does not serve
 `/.well-known/oauth-authorization-server`. Clients that predate the 2025-06-18
 authorization spec and expect the resource server to also be the authorization
 server will not work, and that is accepted rather than worked around.
 
+**Browser-based MCP clients are not supported.** `/mcp` sends no CORS headers, by
+choice for now, so a page in a browser cannot call it. The protected-resource
+metadata is CORS-open because it is public. Server-side and native clients, which
+is every agent we document, are unaffected.
+
+**Refusal logging is rate-bounded.** Refusals are unauthenticated, so they are
+counted per category and written as at most one summary line per minute
+(`auth.rs:RefusalLog`), never one line per request.
+
 **What a maintainer must not break.**
-- Do not drop or weaken step 8, and do not replace it with a `sub` check unless
-  `sub` is provably the mailbox: the control plane sets the AuthKit user id to the
-  lowercased mailbox address, but `email` is the claim this daemon checks.
+- Do not drop or weaken step 8, and never swap the binding to `sub`: `sub` is
+  WorkOS's user id, and `email` (from the JWT template) is the claim this daemon
+  checks against its own mailbox.
+- Do not remove the stream bound or the key-set maximum age and ceiling.
 - Do not let a misconfiguration fall back to Open, and do not mount the agent door
   any way other than `agent_door_router`.
 - Do not render `SQUELCH_MCP_ALLOWED_HOSTS` from the warden.

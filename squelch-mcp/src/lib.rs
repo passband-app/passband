@@ -99,7 +99,8 @@ fn build_service(
 ///   is added HERE and only here (I5): the warden never renders
 ///   `SQUELCH_MCP_ALLOWED_HOSTS`, so an older daemon image behind a published
 ///   Ingress path still answers 403 from the Host guard.
-/// - [`AgentDoorAuth::Misconfigured`]: every request under [`MCP_PATH`]
+/// - [`AgentDoorAuth::Misconfigured`], or OAuth with no real account email
+///   (see [`AgentDoorAuth::for_account`]): every request under [`MCP_PATH`]
 ///   answers 503 and the MCP service is never built. No metadata routes. An
 ///   error is logged here, once, at startup.
 ///
@@ -114,6 +115,9 @@ pub fn agent_door_router(
 ) -> anyhow::Result<axum::Router> {
     use axum::routing::{any, get};
 
+    // OAuth with no real mailbox to bind tokens to is Misconfigured. Applied
+    // here, on the one construction path, so no host can skip it.
+    let auth = &auth.clone().for_account(account_email);
     match auth {
         AgentDoorAuth::Open => {
             let service = streamable_http_service(

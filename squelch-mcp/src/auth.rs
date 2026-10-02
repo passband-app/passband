@@ -146,6 +146,9 @@ pub enum MisconfiguredReason {
     InvalidPublicUrl,
     /// The JWKS override is not an acceptable URL.
     InvalidJwksUrl,
+    /// OAuth is configured but the daemon has no real account email to bind
+    /// tokens to (unset, or the `me@localhost` placeholder).
+    NoAccountEmail,
 }
 
 impl MisconfiguredReason {
@@ -160,6 +163,9 @@ impl MisconfiguredReason {
             Self::InvalidIssuer => "SQUELCH_MCP_OAUTH_ISSUER is not a valid https URL",
             Self::InvalidPublicUrl => "SQUELCH_MCP_PUBLIC_URL is not a valid https URL",
             Self::InvalidJwksUrl => "SQUELCH_MCP_OAUTH_JWKS_URL is not a valid https URL",
+            Self::NoAccountEmail => {
+                "agent sign-in needs this daemon's real account email (SQUELCH_ACCOUNT_EMAIL), not the default"
+            }
         }
     }
 }
@@ -168,6 +174,15 @@ impl std::fmt::Display for MisconfiguredReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
+}
+
+/// Whether an account email can anchor the mailbox binding: non-blank, shaped
+/// like an address, and not the placeholder default.
+fn bindable_account_email(e: &str) -> bool {
+    let e = e.trim();
+    !e.is_empty()
+        && e.contains('@')
+        && !e.eq_ignore_ascii_case(squelch_core::config::DEFAULT_ACCOUNT_EMAIL)
 }
 
 /// Blank (or all-whitespace) is unset, matching every other squelch env var.
@@ -199,6 +214,25 @@ impl AgentDoorAuth {
         let public = std::env::var(ENV_MCP_PUBLIC_URL).ok();
         let jwks = std::env::var(ENV_MCP_OAUTH_JWKS_URL).ok();
         Self::from_values(issuer.as_deref(), public.as_deref(), jwks.as_deref())
+    }
+
+    /// Bind the mode to the mailbox this daemon serves.
+    ///
+    /// OAuth binds every token to the account email (I1), so OAuth with no
+    /// real address to bind to is Misconfigured: an unset value, or the
+    /// [`squelch_core::config::DEFAULT_ACCOUNT_EMAIL`] placeholder a bare
+    /// config falls back to. Open and Misconfigured pass through unchanged.
+    ///
+    /// [`crate::agent_door_router`] applies this itself, so no host can skip
+    /// it; callers that describe the mode (a startup line, the console) call
+    /// it too, so what they say matches what the router does.
+    pub fn for_account(self, account_email: &str) -> Self {
+        match self {
+            Self::OAuth(_) if !bindable_account_email(account_email) => {
+                Self::Misconfigured(MisconfiguredReason::NoAccountEmail)
+            }
+            other => other,
+        }
     }
 
     /// Pure constructor, so tests never touch process env.
@@ -271,6 +305,9 @@ pub enum Refusal {
     Malformed,
     /// Header `alg` is not RS256 (covers `none` and HS* confusion).
     Algorithm,
+    /// Header carries `crit` (RFC 7515 §4.1.11): extensions we do not
+    /// understand and so must not accept.
+    CriticalHeader,
     /// Header has no `kid`.
     MissingKid,
     /// No key in the JWKS has this `kid`, even after a permitted refresh.
@@ -304,6 +341,7 @@ impl Refusal {
             Self::Oversize => "oversize",
             Self::Malformed => "malformed",
             Self::Algorithm => "algorithm",
+            Self::CriticalHeader => "critical_header",
             Self::MissingKid => "missing_kid",
             Self::UnknownKey => "unknown_key",
             Self::BadSignature => "bad_signature",
@@ -317,6 +355,31 @@ impl Refusal {
             Self::JwksUnavailable => "jwks_unavailable",
             Self::Misconfigured => "misconfigured",
         }
+    }
+
+    /// Every category, in a fixed order: the refusal log's counters.
+    pub const ALL: [Refusal; 17] = [
+        Self::NoToken,
+        Self::Oversize,
+        Self::Malformed,
+        Self::Algorithm,
+        Self::CriticalHeader,
+        Self::MissingKid,
+        Self::UnknownKey,
+        Self::BadSignature,
+        Self::Issuer,
+        Self::Audience,
+        Self::MissingExp,
+        Self::Expired,
+        Self::NotYetValid,
+        Self::MissingEmail,
+        Self::WrongMailbox,
+        Self::JwksUnavailable,
+        Self::Misconfigured,
+    ];
+
+    fn index(self) -> usize {
+        Self::ALL.iter().position(|r| *r == self).unwrap_or(0)
     }
 }
 
@@ -340,32 +403,54 @@ fn system_clock() -> Clock {
 
 type KeyMap = HashMap<String, DecodingKey>;
 
+/// After this long, a cached key set is STALE: the next request that needs a
+/// key from it refreshes first. Without a maximum age, a key the issuer stops
+/// publishing (withdrawn after a leak, say) would stay trusted until some
+/// unrelated unknown-`kid` request happened to force a refetch.
+pub const JWKS_MAX_AGE: Duration = Duration::from_secs(60 * 60);
+
+/// Hard ceiling: a key set with no successful refresh for this long is not
+/// trusted at all (503). A failed refresh keeps serving the old keys so an
+/// issuer blip does not log every agent out, but a daemon cut off from its
+/// issuer must not trust a key set indefinitely.
+pub const JWKS_HARD_CEILING: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// The keys from the last SUCCESSFUL fetch, and when it happened.
+#[derive(Default)]
+struct KeySet {
+    keys: KeyMap,
+    /// `None` until a fetch has succeeded.
+    fetched_at: Option<Instant>,
+}
+
 /// Fetches and caches the issuer's signing keys.
 ///
 /// Lazy: nothing is fetched until a token needs a key, so a daemon whose
-/// issuer is briefly unreachable at boot still starts. Refetches on an unknown
-/// `kid` (key rotation), but never more than once per [`JWKS_MIN_REFETCH`].
+/// issuer is briefly unreachable at boot still starts. A fetch happens on an
+/// unknown `kid` (rotation) or when a request finds the cached set older than
+/// [`JWKS_MAX_AGE`], and never more than once per [`JWKS_MIN_REFETCH`]
+/// whatever arrives. A successful fetch REPLACES the set (so a withdrawn key
+/// is gone, and a JWKS with no usable keys empties it); a failed one keeps the
+/// old set until [`JWKS_HARD_CEILING`].
 ///
-/// Two locks, so that a CACHE HIT NEVER WAITS ON A FETCH:
+/// Two locks, so that a FRESH CACHE HIT NEVER WAITS ON A FETCH:
 /// - `keys` is a plain `RwLock` read on every request and written only for
-///   the instant it takes to swap in a freshly fetched map. It is never held
+///   the instant it takes to swap in a freshly fetched set. It is never held
 ///   across an await.
-/// - `refresh` is the async lock a MISS takes before it may fetch. It is held
-///   across the fetch on purpose: concurrent misses queue behind the one fetch
-///   and then find its result (or the throttle) instead of each starting their
-///   own.
+/// - `refresh` is the async lock a request takes before it may fetch. It is
+///   held across the fetch on purpose: concurrent misses queue behind the one
+///   fetch and then find its result (or the throttle) instead of each starting
+///   their own. A STALE hit only tries it: if a refresh is already in flight,
+///   that request is served from the stale set rather than queueing.
 pub struct JwksClient {
     url: String,
     http: reqwest::Client,
     min_refetch: Duration,
     now: Clock,
-    /// RS256-usable keys by `kid`. Replaced wholesale on a successful fetch,
-    /// kept as-is on a failed one (a blip at the issuer must not log every
-    /// agent out).
-    keys: std::sync::RwLock<Arc<KeyMap>>,
+    keys: std::sync::RwLock<Arc<KeySet>>,
     /// When a fetch was last ATTEMPTED, success or not. The throttle keys on
     /// attempts, so a dead endpoint is not hammered either. Only an actual
-    /// fetch moves it: a throttled miss must not extend the window, or a
+    /// fetch moves it: a throttled request must not extend the window, or a
     /// steady spray of unknown kids could keep a newly published key locked
     /// out indefinitely.
     refresh: Mutex<Option<Instant>>,
@@ -386,6 +471,10 @@ impl JwksClient {
     pub fn with_clock(url: impl Into<String>, now: Clock) -> Self {
         let http = reqwest::Client::builder()
             .timeout(JWKS_TIMEOUT)
+            // A redirect is a failed fetch. The https-only check was made on
+            // the configured URL; following a `Location` would trust whatever
+            // it names, http or anywhere else.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             // Only fails if the TLS backend cannot initialise, which would
             // break every outbound call the daemon makes; a default client
@@ -396,48 +485,85 @@ impl JwksClient {
             http,
             min_refetch: JWKS_MIN_REFETCH,
             now,
-            keys: std::sync::RwLock::new(Arc::new(KeyMap::new())),
+            keys: std::sync::RwLock::new(Arc::new(KeySet::default())),
             refresh: Mutex::new(None),
         }
     }
 
-    fn snapshot(&self) -> Arc<KeyMap> {
-        // A poisoned lock still holds a complete map: the only writer swaps an
+    fn snapshot(&self) -> Arc<KeySet> {
+        // A poisoned lock still holds a complete set: the only writer swaps an
         // `Arc` and cannot panic halfway through.
         self.keys.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    /// How old `set` is at `now`, or `None` if nothing was ever fetched.
+    fn age(set: &KeySet, now: Instant) -> Option<Duration> {
+        set.fetched_at.map(|t| now.saturating_duration_since(t))
+    }
+
+    /// The answer from `set` alone: past the hard ceiling (or never fetched)
+    /// nothing is trusted.
+    fn lookup(set: &KeySet, kid: &str, now: Instant) -> KeyLookup {
+        match Self::age(set, now) {
+            Some(age) if age < JWKS_HARD_CEILING => match set.keys.get(kid) {
+                Some(k) => KeyLookup::Found(k.clone()),
+                None => KeyLookup::Unknown,
+            },
+            _ => KeyLookup::Unavailable,
+        }
+    }
+
     async fn key(&self, kid: &str) -> KeyLookup {
-        // The hit path: no async lock, so an in-flight refresh never delays it.
-        if let Some(k) = self.snapshot().get(kid) {
+        let set = self.snapshot();
+        let now = (self.now)();
+        let fresh = Self::age(&set, now).is_some_and(|a| a < JWKS_MAX_AGE);
+
+        // The fresh-hit path: no async lock, so an in-flight refresh never
+        // delays it.
+        if fresh && let Some(k) = set.keys.get(kid) {
             return KeyLookup::Found(k.clone());
         }
 
-        let mut last_attempt = self.refresh.lock().await;
-        // Another miss may have refreshed while this one queued.
-        if let Some(k) = self.snapshot().get(kid) {
+        // A stale hit does not queue behind a refresh someone else started:
+        // it is served from the stale set (within the hard ceiling) and that
+        // refresh will replace the set for everyone after it.
+        let stale_hit = !fresh && set.keys.contains_key(kid);
+        let mut last_attempt = if stale_hit {
+            match self.refresh.try_lock() {
+                Ok(guard) => guard,
+                Err(_) => return Self::lookup(&set, kid, now),
+            }
+        } else {
+            self.refresh.lock().await
+        };
+
+        // Someone else may have refreshed while this one queued.
+        let set = self.snapshot();
+        let now = (self.now)();
+        let fresh = Self::age(&set, now).is_some_and(|a| a < JWKS_MAX_AGE);
+        if fresh && let Some(k) = set.keys.get(kid) {
             return KeyLookup::Found(k.clone());
         }
-        let now = (self.now)();
+
         let may_fetch =
             last_attempt.is_none_or(|t| now.saturating_duration_since(t) >= self.min_refetch);
         if may_fetch {
             *last_attempt = Some(now);
             match self.fetch().await {
                 Ok(keys) => {
-                    *self.keys.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(keys);
+                    *self.keys.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(KeySet {
+                        keys,
+                        fetched_at: Some(now),
+                    });
                 }
                 Err(why) => eprintln!("squelch-mcp: agent door JWKS fetch failed: {why}"),
             }
         }
         drop(last_attempt);
 
-        let keys = self.snapshot();
-        match keys.get(kid) {
-            Some(k) => KeyLookup::Found(k.clone()),
-            None if keys.is_empty() => KeyLookup::Unavailable,
-            None => KeyLookup::Unknown,
-        }
+        // Throttled or failed: whatever the current set says, within the
+        // ceiling. Succeeded: the new set, and nothing of the old one.
+        Self::lookup(&self.snapshot(), kid, (self.now)())
     }
 
     /// One fetch. The error string is a category, never a body or a URL with
@@ -459,25 +585,51 @@ impl JwksClient {
         {
             return Err("response too large");
         }
-        let body = resp.bytes().await.map_err(|_| "body read error")?;
-        if body.len() > JWKS_MAX_BYTES {
-            return Err("response too large");
+        // Read in chunks and stop at the cap: a missing or lying
+        // Content-Length must not let the issuer (or anything on the path)
+        // make us buffer an unbounded body.
+        let mut resp = resp;
+        let mut body = Vec::new();
+        while let Some(chunk) = resp.chunk().await.map_err(|_| "body read error")? {
+            if body.len() + chunk.len() > JWKS_MAX_BYTES {
+                return Err("response too large");
+            }
+            body.extend_from_slice(&chunk);
         }
         let set: JwkSet = serde_json::from_slice(&body).map_err(|_| "not a JWKS")?;
+        // An empty result is a SUCCESSFUL answer, not a failure: the issuer
+        // has withdrawn every key, and the cache must say so too.
         let keys: KeyMap = set.keys.iter().filter_map(usable_rs256_key).collect();
-        if keys.is_empty() {
-            return Err("no usable RS256 keys");
-        }
         Ok(keys)
     }
 }
 
-/// Keep only keys that can verify RS256: RSA, with a `kid`, not marked for
-/// encryption, and not pinned to a different algorithm.
+/// The smallest RSA modulus we accept from the JWKS. Below 2048 bits a key is
+/// within reach of a well-funded factoring effort, and no issuer we would
+/// trust publishes one.
+pub const MIN_RSA_BITS: usize = 2048;
+
+/// Bit length of a big-endian unsigned integer given as base64url.
+fn modulus_bits(n_b64url: &str) -> Option<usize> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(n_b64url.trim_end_matches('='))
+        .ok()?;
+    let first = bytes.iter().position(|b| *b != 0)?;
+    let top = bytes[first];
+    Some((bytes.len() - first - 1) * 8 + (8 - top.leading_zeros() as usize))
+}
+
+/// Keep only keys that can verify RS256: RSA of at least [`MIN_RSA_BITS`],
+/// with a `kid`, not marked for encryption, and not pinned to a different
+/// algorithm.
 fn usable_rs256_key(jwk: &Jwk) -> Option<(String, DecodingKey)> {
     use jsonwebtoken::jwk::{AlgorithmParameters, KeyAlgorithm, PublicKeyUse};
     let kid = jwk.common.key_id.clone()?;
-    if !matches!(jwk.algorithm, AlgorithmParameters::RSA(_)) {
+    let AlgorithmParameters::RSA(rsa) = &jwk.algorithm else {
+        return None;
+    };
+    if modulus_bits(&rsa.n)? < MIN_RSA_BITS {
         return None;
     }
     if matches!(jwk.common.public_key_use, Some(ref u) if *u != PublicKeyUse::Signature) {
@@ -510,6 +662,21 @@ struct Claims {
     exp: Option<f64>,
     nbf: Option<f64>,
     email: Option<String>,
+}
+
+/// A token that passed every check.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Verified {
+    /// The token's `exp`, seconds since the epoch.
+    pub exp: f64,
+}
+
+impl Verified {
+    /// How long from now the token stays acceptable (its `exp` plus the
+    /// leeway), which is how long a response it opened may keep streaming.
+    pub fn remaining(&self) -> Duration {
+        Duration::from_secs_f64((self.exp + LEEWAY_SECS as f64 - now_secs()).max(0.0))
+    }
 }
 
 /// Verifies agent-door bearer tokens for ONE mailbox.
@@ -548,13 +715,14 @@ impl Verifier {
         }
     }
 
-    /// Verify an `Authorization` header value (None when absent). `Ok(())`
-    /// means the request may reach the MCP service.
+    /// Verify an `Authorization` header value (None when absent). `Ok` means
+    /// the request may reach the MCP service, and carries the token's expiry,
+    /// which bounds how long the response may keep streaming.
     ///
     /// Order matters for cost: everything an unauthenticated caller can make
     /// us do before the signature check is bounded and local. The JWKS is only
     /// consulted for a well-formed RS256 token with a `kid`.
-    pub async fn verify(&self, authorization: Option<&str>) -> Result<(), Refusal> {
+    pub async fn verify(&self, authorization: Option<&str>) -> Result<Verified, Refusal> {
         // Not-a-bearer is "no token" in RFC 6750 terms. This also refuses
         // `sqd_` device tokens and the master token by construction (I3): they
         // are not JWTs, so they fail the parse below, and nothing on this path
@@ -572,6 +740,11 @@ impl Verifier {
         let header = jsonwebtoken::decode_header(token).map_err(|_| Refusal::Malformed)?;
         if header.alg != Algorithm::RS256 {
             return Err(Refusal::Algorithm);
+        }
+        // `crit` names header extensions the recipient MUST understand or
+        // reject. We understand none, so any `crit` at all is a refusal.
+        if header.crit.is_some() {
+            return Err(Refusal::CriticalHeader);
         }
         let kid = header.kid.ok_or(Refusal::MissingKid)?;
 
@@ -633,7 +806,7 @@ impl Verifier {
             return Err(Refusal::WrongMailbox);
         }
 
-        Ok(())
+        Ok(Verified { exp })
     }
 }
 
@@ -641,17 +814,136 @@ impl Verifier {
 // HTTP
 // ---------------------------------------------------------------------------
 
+/// Where refusal summaries go. stderr in production; tests observe it.
+pub type LogSink = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// How often at most a refusal summary is written.
+pub const REFUSAL_LOG_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Refusal counts per category, written as ONE summary line per interval.
+///
+/// Refusals are unauthenticated: anyone can produce them as fast as they can
+/// send requests, so a line per refusal would hand every stranger a lever on
+/// the daemon's log volume. Instead each refusal bumps a counter, and at most
+/// one line per [`REFUSAL_LOG_INTERVAL`] reports the non-zero counts. The line
+/// carries category names and numbers and nothing else (I6).
+pub struct RefusalLog {
+    counts: [std::sync::atomic::AtomicU64; Refusal::ALL.len()],
+    last_emit: std::sync::Mutex<Instant>,
+    interval: Duration,
+    now: Clock,
+    sink: LogSink,
+    ticker_started: std::sync::atomic::AtomicBool,
+}
+
+impl RefusalLog {
+    /// The production log: stderr, wall clock.
+    pub fn stderr() -> Arc<Self> {
+        Self::new(
+            Arc::new(|line: &str| eprintln!("{line}")),
+            system_clock(),
+            REFUSAL_LOG_INTERVAL,
+        )
+    }
+
+    /// A log with an injected sink and clock. A test seam.
+    pub fn new(sink: LogSink, now: Clock, interval: Duration) -> Arc<Self> {
+        Arc::new(Self {
+            counts: std::array::from_fn(|_| std::sync::atomic::AtomicU64::new(0)),
+            last_emit: std::sync::Mutex::new(now()),
+            interval,
+            now,
+            sink,
+            ticker_started: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    /// Count one refusal; write a summary if the interval has passed.
+    pub fn record(self: &Arc<Self>, why: Refusal) {
+        use std::sync::atomic::Ordering;
+        self.counts[why.index()].fetch_add(1, Ordering::Relaxed);
+        self.flush_if_due();
+        self.start_ticker();
+    }
+
+    /// Write one summary line if the interval has passed and anything was
+    /// counted since the last one.
+    pub fn flush_if_due(&self) {
+        use std::sync::atomic::Ordering;
+        let now = (self.now)();
+        let mut last = self.last_emit.lock().unwrap_or_else(|e| e.into_inner());
+        if now.saturating_duration_since(*last) < self.interval {
+            return;
+        }
+        *last = now;
+        let parts: Vec<String> = Refusal::ALL
+            .iter()
+            .filter_map(|r| {
+                let n = self.counts[r.index()].swap(0, Ordering::Relaxed);
+                (n > 0).then(|| format!("{r}={n}"))
+            })
+            .collect();
+        if !parts.is_empty() {
+            (self.sink)(&format!(
+                "squelch-mcp: agent door refusals since last report: {}",
+                parts.join(" ")
+            ));
+        }
+    }
+
+    /// Counts left behind by a burst that then stopped would otherwise wait
+    /// for the next refusal. One background task per log, started on first
+    /// use (so constructing a router needs no runtime), flushes them; it holds
+    /// only a `Weak` and ends when the log is dropped.
+    fn start_ticker(self: &Arc<Self>) {
+        use std::sync::atomic::Ordering;
+        if self.ticker_started.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let weak = Arc::downgrade(self);
+        let interval = self.interval;
+        handle.spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                match weak.upgrade() {
+                    Some(log) => log.flush_if_due(),
+                    None => return,
+                }
+            }
+        });
+    }
+}
+
 /// State for [`require_agent_token`].
 #[derive(Clone)]
 pub struct AuthLayerState {
     verifier: Arc<Verifier>,
+    log: Arc<RefusalLog>,
     /// Pre-rendered `WWW-Authenticate` values.
     challenge: HeaderValue,
     challenge_invalid: HeaderValue,
 }
 
 impl AuthLayerState {
-    pub fn new(config: &OAuthConfig, account_email: &str) -> Self {
+    /// Crate-private on purpose: the only way to put this guard in front of
+    /// an agent door is [`crate::agent_door_router`], which checks the account
+    /// email first.
+    pub(crate) fn new(config: &OAuthConfig, account_email: &str) -> Self {
+        Self::with_parts(
+            Verifier::new(config, account_email),
+            config,
+            RefusalLog::stderr(),
+        )
+    }
+
+    pub(crate) fn with_parts(
+        verifier: Verifier,
+        config: &OAuthConfig,
+        log: Arc<RefusalLog>,
+    ) -> Self {
         let meta = config.resource_metadata_url();
         // The URL came through `url::Url::parse`, so it holds no quote or
         // control character; a header value cannot fail to build from it.
@@ -662,7 +954,8 @@ impl AuthLayerState {
         ))
         .unwrap_or_else(|_| HeaderValue::from_static("Bearer error=\"invalid_token\""));
         Self {
-            verifier: Arc::new(Verifier::new(config, account_email)),
+            verifier: Arc::new(verifier),
+            log,
             challenge,
             challenge_invalid,
         }
@@ -691,6 +984,48 @@ impl AuthLayerState {
     }
 }
 
+/// A response body that ENDS when the token that opened it expires.
+///
+/// Auth runs once per HTTP request, and an MCP GET opens a server-sent-event
+/// stream that can stay up for hours. Without this, a stream opened with a
+/// valid token would outlive the token, and the day the server pushes mail
+/// down that stream, an expired (or revoked-then-expired) credential would
+/// still be receiving it. The client reconnects with a fresh token, which is
+/// what refresh tokens are for.
+///
+/// Chunks pass straight through as they arrive: nothing is buffered. At the
+/// deadline the body reports end-of-stream, which closes it cleanly.
+struct ExpiringBody {
+    inner: Body,
+    deadline: std::pin::Pin<Box<tokio::time::Sleep>>,
+}
+
+impl http_body::Body for ExpiringBody {
+    type Data = axum::body::Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        use std::future::Future as _;
+        // Polling the timer also registers this task to be woken at the
+        // deadline, so an idle stream is ended on time, not on its next chunk.
+        if self.deadline.as_mut().poll(cx).is_ready() {
+            return std::task::Poll::Ready(None);
+        }
+        std::pin::Pin::new(&mut self.inner).poll_frame(cx)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.inner.size_hint()
+    }
+}
+
 /// axum middleware guarding the agent door in OAuth mode.
 pub async fn require_agent_token(
     State(state): State<AuthLayerState>,
@@ -703,10 +1038,18 @@ pub async fn require_agent_token(
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
     match state.verifier.verify(authz).await {
-        Ok(()) => next.run(req).await,
+        Ok(verified) => {
+            let deadline = tokio::time::Instant::now() + verified.remaining();
+            next.run(req).await.map(|inner| {
+                Body::new(ExpiringBody {
+                    inner,
+                    deadline: Box::pin(tokio::time::sleep_until(deadline)),
+                })
+            })
+        }
         Err(why) => {
-            // I6: the category only.
-            eprintln!("squelch-mcp: agent door refused a request: {why}");
+            // I6: a counted category, summarised at most once per interval.
+            state.log.record(why);
             state.refusal_response(why)
         }
     }
@@ -826,5 +1169,116 @@ mod tests {
         };
         assert_eq!(c.jwks_url(), "http://127.0.0.1:9/keys");
         assert_eq!(c.public_hosts(), ["localhost", "localhost:8848"]);
+    }
+
+    /// A clock the test moves by hand, and a sink that keeps every line.
+    fn fake_log(
+        interval: Duration,
+    ) -> (
+        Arc<RefusalLog>,
+        Arc<std::sync::Mutex<Vec<String>>>,
+        Arc<std::sync::atomic::AtomicU64>,
+    ) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let lines = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let offset = Arc::new(AtomicU64::new(0));
+        let base = Instant::now();
+        let clock: Clock = {
+            let offset = offset.clone();
+            Arc::new(move || base + Duration::from_secs(offset.load(Ordering::SeqCst)))
+        };
+        let sink: LogSink = {
+            let lines = lines.clone();
+            Arc::new(move |l: &str| lines.lock().unwrap().push(l.to_string()))
+        };
+        (RefusalLog::new(sink, clock, interval), lines, offset)
+    }
+
+    #[test]
+    fn refusals_are_summarised_at_most_once_per_interval() {
+        use std::sync::atomic::Ordering;
+        let (log, lines, clock) = fake_log(Duration::from_secs(60));
+        for _ in 0..2000 {
+            log.record(Refusal::NoToken);
+        }
+        log.record(Refusal::Expired);
+        assert!(
+            lines.lock().unwrap().is_empty(),
+            "nothing inside the interval"
+        );
+
+        clock.store(61, Ordering::SeqCst);
+        log.record(Refusal::NoToken);
+        log.record(Refusal::NoToken);
+        let got = lines.lock().unwrap().clone();
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(
+            got[0],
+            "squelch-mcp: agent door refusals since last report: no_token=2001 expired=1"
+        );
+
+        // The counters reset; a quiet interval writes nothing.
+        clock.store(200, Ordering::SeqCst);
+        log.flush_if_due();
+        assert_eq!(
+            lines.lock().unwrap().len(),
+            2,
+            "the leftover one is reported"
+        );
+        clock.store(300, Ordering::SeqCst);
+        log.flush_if_due();
+        assert_eq!(lines.lock().unwrap().len(), 2, "silence writes nothing");
+    }
+
+    /// Through the real middleware: a flood of anonymous requests writes a
+    /// bounded number of lines, not one per request.
+    #[tokio::test]
+    async fn a_flood_of_refused_requests_does_not_flood_the_log() {
+        use tower::ServiceExt as _;
+        let AgentDoorAuth::OAuth(config) = AgentDoorAuth::from_values(
+            Some("https://a.authkit.app"),
+            Some("https://alice.passband.email/mcp"),
+            Some("http://127.0.0.1:9/jwks"),
+        ) else {
+            panic!("expected OAuth");
+        };
+        let (log, lines, _clock) = fake_log(Duration::from_secs(60));
+        let state =
+            AuthLayerState::with_parts(Verifier::new(&config, "alice@example.com"), &config, log);
+        let app = axum::Router::new()
+            .route("/mcp", axum::routing::any(|| async { "reached" }))
+            .route_layer(axum::middleware::from_fn_with_state(
+                state,
+                require_agent_token,
+            ));
+        for i in 0..500 {
+            let req = axum::http::Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .header(
+                    "authorization",
+                    if i % 2 == 0 { "Bearer junk" } else { "Basic x" },
+                )
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+        assert!(
+            lines.lock().unwrap().len() <= 1,
+            "{:?}",
+            lines.lock().unwrap()
+        );
+    }
+
+    #[test]
+    fn modulus_bits_counts_from_the_top_set_bit() {
+        use base64::Engine as _;
+        let enc = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+        assert_eq!(modulus_bits(&enc(&[0x01])), Some(1));
+        assert_eq!(modulus_bits(&enc(&[0x00, 0x80, 0x00])), Some(16));
+        assert_eq!(modulus_bits(&enc(&[0xff; 256])), Some(2048));
+        assert_eq!(modulus_bits(&enc(&[0x7f; 256])), Some(2047));
+        assert_eq!(modulus_bits(&enc(&[0x00])), None);
     }
 }

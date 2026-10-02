@@ -13,7 +13,8 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use axum::http::header;
+use axum::http::{StatusCode, header};
+use axum::response::IntoResponse as _;
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde_json::{Value, json};
 
@@ -29,6 +30,12 @@ pub const KEY_A_N: &str = "4ySymk0-_nx55n5FqlLuimIkA4LNDUKlzLCkUhUspEoDm3uuBEOiG
 pub const KEY_B_N: &str = "0aa-HER3FHGb3bUNEf_ZQnQRffWCXShLoW02mEBUvX12JJ54he2Tc-TXRfBMRTlzbikUteuYZFVLIoK92uOSrNZhEyaFj61AEpHjTAjtyzmKqspoPy5pB_-7FYWhKP0tW72FYSXYuPFsmReee0LMAziL9ab9oNJXibQrD8e55kzRuxGBJ6U3IXimtE7RNOoozA6SUUfIMlWVRxNiYh4k4sQ9lcxzVls-jkm0pJ1YDS2n2MaiKhlmtX4yvz_JKYoNyVpSpPtkwDEqETWZisEUBk7Wh3KJr1yvw3NW5FNdR2vv8EXUMPTMcJFwB9XGSxEM-kaZ7-ErP2LnEQ3TdrbFUw";
 /// The `kid` key A is published under.
 pub const KID_A: &str = "test-kid-1";
+/// A throwaway RSA-1024 key, below the accepted floor. Made with
+/// `openssl genrsa -out test-key-small-1024.pem 1024`; its modulus below was
+/// read with `openssl rsa -noout -modulus` and base64url-encoded.
+pub const KEY_SMALL_PEM: &str = include_str!("../tests/fixtures/test-key-small-1024.pem");
+/// The 1024-bit key's modulus, base64url.
+pub const KEY_SMALL_N: &str = "xVFO4Qn3OGpOgX0D2TECsjlW5wEhfZicdBmlAhjOnWuQt7DRpZhYz9LuOG_FqL1C7KZ_4kPtzKDBn9h7njPA6SZAu15IOz53Cb7j7HbctychJ_MssAtPlinzb_9Yqh1NcdXNE9klUg4SvMFbA-ib7Yq1XH9_uNJHsCOelU0BmF0";
 /// The `kid` key B is published under once it is rotated in.
 pub const KID_B: &str = "test-kid-2";
 
@@ -68,14 +75,22 @@ pub fn sign(claims: &Value, pem: &str, kid: &str) -> String {
 
 /// An in-process JWKS endpoint on `127.0.0.1:0`, serving `/oauth2/jwks`.
 ///
-/// It counts every request, can change what it publishes (key rotation), and
-/// can be told to stall before answering (a slow issuer).
+/// It counts every request, can change what it publishes (key rotation), can
+/// be told to stall before answering (a slow issuer) or to fail (a 500), and
+/// serves two hostile neighbours: `/redirect` (a 302 to the real JWKS) and
+/// `/huge` (a body that never ends, counting the chunks it was asked for).
 pub struct StubJwks {
     /// The full JWKS URL to configure the daemon with.
     pub url: String,
+    /// A URL that 302s to [`StubJwks::url`].
+    pub redirect_url: String,
+    /// A URL whose body is endless, with no Content-Length.
+    pub huge_url: String,
     fetches: Arc<AtomicUsize>,
     doc: Arc<RwLock<Value>>,
     delay_ms: Arc<AtomicU64>,
+    fail: Arc<std::sync::atomic::AtomicBool>,
+    huge_chunks: Arc<AtomicUsize>,
 }
 
 impl StubJwks {
@@ -86,27 +101,57 @@ impl StubJwks {
 
     /// Start a stub publishing `doc` verbatim.
     pub async fn start_with(doc: Value) -> Self {
+        use std::sync::atomic::AtomicBool;
         let fetches = Arc::new(AtomicUsize::new(0));
         let doc = Arc::new(RwLock::new(doc));
         let delay_ms = Arc::new(AtomicU64::new(0));
-        let app = {
-            let (fetches, doc, delay_ms) = (fetches.clone(), doc.clone(), delay_ms.clone());
-            axum::Router::new().route(
-                "/oauth2/jwks",
-                axum::routing::get(move || {
-                    let (fetches, doc, delay_ms) = (fetches.clone(), doc.clone(), delay_ms.clone());
-                    async move {
-                        fetches.fetch_add(1, Ordering::SeqCst);
-                        let delay = delay_ms.load(Ordering::SeqCst);
-                        if delay > 0 {
-                            tokio::time::sleep(Duration::from_millis(delay)).await;
-                        }
-                        let body = doc.read().expect("doc lock").to_string();
-                        ([(header::CONTENT_TYPE, "application/json")], body)
+        let fail = Arc::new(AtomicBool::new(false));
+        let huge_chunks = Arc::new(AtomicUsize::new(0));
+        let jwks = {
+            let (fetches, doc, delay_ms, fail) =
+                (fetches.clone(), doc.clone(), delay_ms.clone(), fail.clone());
+            axum::routing::get(move || {
+                let (fetches, doc, delay_ms, fail) =
+                    (fetches.clone(), doc.clone(), delay_ms.clone(), fail.clone());
+                async move {
+                    fetches.fetch_add(1, Ordering::SeqCst);
+                    let delay = delay_ms.load(Ordering::SeqCst);
+                    if delay > 0 {
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
                     }
+                    if fail.load(Ordering::SeqCst) {
+                        return (StatusCode::INTERNAL_SERVER_ERROR, String::new()).into_response();
+                    }
+                    let body = doc.read().expect("doc lock").to_string();
+                    ([(header::CONTENT_TYPE, "application/json")], body).into_response()
+                }
+            })
+        };
+        let huge = {
+            let chunks = huge_chunks.clone();
+            axum::routing::get(move || {
+                let chunks = chunks.clone();
+                async move {
+                    // 64 KiB of the start of a JSON document, forever.
+                    let stream = futures::stream::unfold(chunks, |chunks| async move {
+                        chunks.fetch_add(1, Ordering::SeqCst);
+                        tokio::task::yield_now().await;
+                        let chunk = axum::body::Bytes::from(vec![b' '; 64 * 1024]);
+                        Some((Ok::<_, std::io::Error>(chunk), chunks))
+                    });
+                    axum::body::Body::from_stream(stream)
+                }
+            })
+        };
+        let app = axum::Router::new()
+            .route("/oauth2/jwks", jwks)
+            .route(
+                "/redirect",
+                axum::routing::get(|| async {
+                    (StatusCode::FOUND, [(header::LOCATION, "/oauth2/jwks")])
                 }),
             )
-        };
+            .route("/huge", huge);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind stub JWKS");
@@ -116,10 +161,24 @@ impl StubJwks {
         });
         Self {
             url: format!("http://{addr}/oauth2/jwks"),
+            redirect_url: format!("http://{addr}/redirect"),
+            huge_url: format!("http://{addr}/huge"),
             fetches,
             doc,
             delay_ms,
+            fail,
+            huge_chunks,
         }
+    }
+
+    /// Make every later JWKS answer a 500 (or stop doing so).
+    pub fn set_failing(&self, failing: bool) {
+        self.fail.store(failing, Ordering::SeqCst);
+    }
+
+    /// How many 64 KiB chunks `/huge` has produced.
+    pub fn huge_chunks(&self) -> usize {
+        self.huge_chunks.load(Ordering::SeqCst)
     }
 
     /// How many requests the stub has received.

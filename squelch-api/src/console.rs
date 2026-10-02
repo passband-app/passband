@@ -1091,8 +1091,8 @@ fn agent_door_html(status: &AgentDoorStatus) -> String {
         AgentDoorStatus::OAuth { public_url } => format!(
             r#"<p>Agents connect to this mailbox at <code>{url}</code>.</p>
 <p>When an agent first connects, it asks you to sign in with the Google account of this mailbox.
-There is no token to copy. Setup steps for each agent are in the Passband app under
-Settings &gt; Agents.</p>"#,
+There is no token to copy. Setup steps for each agent are in the Passband app, under
+Agents.</p>"#,
             url = escape_html(public_url),
         ),
         AgentDoorStatus::Open => r#"<p>Agent sign-in is not set up on this daemon, so the agent door (<code>/mcp</code>) asks for
@@ -1573,7 +1573,12 @@ mod tests {
         assert!(!section.contains("<b>"), "the URL must be escaped");
         assert!(section.contains("Google account of this mailbox"));
         assert!(section.contains("There is no token to copy."));
-        assert!(section.contains("Settings &gt; Agents"));
+        // True on macOS (Settings) and iOS (the account page) alike.
+        assert!(
+            section.contains("in the Passband app, under\nAgents."),
+            "{section}"
+        );
+        assert!(!section.contains("Settings"));
         assert!(!section.contains("not set up"));
         assert!(!section.contains('\u{2014}'), "no em dashes");
     }

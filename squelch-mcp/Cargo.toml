@@ -45,12 +45,18 @@ jsonwebtoken = { version = "11", default-features = false, features = ["use_pem"
 # JWKS fetch. rustls via the workspace features, like every other outbound call.
 reqwest = { workspace = true }
 url = { workspace = true }
+# Reading a JWKS modulus to enforce the minimum RSA key size.
+base64 = { workspace = true }
+# Wrapping an authorized response body so it ends when the token expires.
+http-body = "1"
+# Only for the `testing` feature's endless-body stub.
+futures = { workspace = true, optional = true }
 
 [features]
 # Exposes `squelch_mcp::testing` (fixture keys, a token signer, a stub JWKS
 # server) to OTHER crates' tests, chiefly squelchd's router tests. Only ever
 # enabled from a [dev-dependencies] entry, so no shipped binary carries it.
-testing = []
+testing = ["dep:futures"]
 
 [dev-dependencies]
 # This crate's own integration tests use `testing` too.

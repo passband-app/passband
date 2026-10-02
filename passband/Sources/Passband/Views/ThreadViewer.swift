@@ -1542,6 +1542,14 @@ struct ThreadViewer: View {
                 Task { await skipToNext() }
                 return true
             },
+            // IN FLOW MODE the bare letter is the skip: Space said "walk me
+            // through these", so there is no other verb for `s` to be mistaken
+            // for. Outside a walk it declines, and a stray `s` stays a typo.
+            KeyBinding(declining: "s", "skip to next (flow mode)", exactCase: true) {
+                guard store.walk != nil, store.threadQueue.count > 1 else { return false }
+                Task { await skipToNext() }
+                return true
+            },
             // Plain `h`, the same key as every other surface — it took "prev
             // email"'s key (see the queue block above) rather than moving to
             // `H`, which would have made remind a verb you can ONLY reach
@@ -1840,9 +1848,11 @@ struct ThreadViewer: View {
     }
 
     /// Plain done walks a Reading sender's stack, or closes an ordinary reader.
+    /// In flow mode it is `E`: the walk is what Space started, and a done that
+    /// closed the reader would end it on the first email.
     private func doneAndClose() async {
         guard store.threadFlight == .settled else { return }
-        if store.readingStack {
+        if store.readingStack || store.walk != nil {
             await doneAndNext()
             return
         }
@@ -3452,8 +3462,8 @@ private final class WheelYield {
                 }
                 .foregroundStyle(Palette.accent.opacity(0.85))
                 VStack(alignment: .leading, spacing: Space.s6) {
-                    row("⇧E", "done + next")
-                    if canSkip { row("⇧S", "skip") }
+                    row("e", "done + next")
+                    if canSkip { row("s", "skip") }
                 }
             }
             .padding(.horizontal, Space.scaled(11))
@@ -3463,7 +3473,7 @@ private final class WheelYield {
             .allowsHitTesting(false)
             .accessibilityElement(children: .combine)
             .accessibilityLabel(
-                canSkip ? "Flow mode. Shift E: done and next. Shift S: skip." : "Flow mode. Shift E: done and next.")
+                canSkip ? "Flow mode. E: done and next. S: skip." : "Flow mode. E: done and next.")
         }
 
         private func row(_ key: String, _ label: String) -> some View {

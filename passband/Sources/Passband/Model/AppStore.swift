@@ -597,7 +597,8 @@ final class AppStore {
     /// sitrep, alive for as long as the reader stays open. While it is, the
     /// reader shows the E/S hint; when it reaches the end of the list it
     /// becomes a `WalkSummary` and the sitrep celebrates. Any other way out of
-    /// the reader (Esc, the rail, a plain `e`) just ends it, quietly.
+    /// the reader (Esc, the rail) just ends it, quietly. Inside it plain `e`
+    /// and `s` are `E` and `S`.
     struct Walk: Equatable {
         var startedAt = Date()
         var done = 0

@@ -6,11 +6,38 @@ use crate::triage::agent::{AgentConnection, run_agent};
 use crate::triage::context::{ContextSnapshot, EvidenceReader, EvidenceRequest, EvidenceResult};
 use std::collections::BTreeMap;
 
-struct StoreEvidence<'a, S: Store> {
+/// The production evidence reader: every triage tool call is served from the
+/// store through this, recording each source it exposes so the commit can
+/// check them. Public so an offline replay serves tools through the same code.
+pub struct StoreEvidence<'a, S: Store> {
     store: &'a S,
     account: AccountId,
     limit: usize,
     sources: std::sync::Mutex<Vec<AgentSourceSnapshot>>,
+}
+
+impl<'a, S: Store> StoreEvidence<'a, S> {
+    /// `limit` caps the messages any one read returns
+    /// (`context.max_related_messages` in production).
+    pub fn new(store: &'a S, account: AccountId, limit: usize) -> Self {
+        Self {
+            store,
+            account,
+            limit,
+            sources: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Seed the sources the initial snapshot already exposed.
+    pub fn with_sources(self, sources: Vec<AgentSourceSnapshot>) -> Self {
+        *self.sources.lock().expect("evidence sources") = sources;
+        self
+    }
+
+    /// Every source exposed so far: the seed plus each read's.
+    pub fn sources(&self) -> Vec<AgentSourceSnapshot> {
+        self.sources.lock().expect("evidence sources").clone()
+    }
 }
 
 fn read_job(account: AccountId, message_id: i64) -> AgentJob {
@@ -198,7 +225,10 @@ impl<S: Store> StoreEvidence<'_, S> {
     }
 }
 
-fn snapshot(context: &AgentContext, job: &AgentJob, limit: usize) -> ContextSnapshot {
+/// The model input for one investigation: the target, up to `limit` siblings,
+/// and the explicit state around them. Public so an offline replay builds its
+/// input with the same function production does.
+pub fn snapshot(context: &AgentContext, job: &AgentJob, limit: usize) -> ContextSnapshot {
     let siblings = context
         .thread
         .iter()
@@ -376,24 +406,24 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         // Snapshot the content shown in this investigation, not unseen siblings.
         // Initialization above ensures observed historical sources have an access
         // job; commit still compares the original evidence versions against now.
-        let reader = StoreEvidence {
-            store: self.store.as_ref(),
-            account: self.account_id,
-            limit: self.config.triage.context.max_related_messages,
-            sources: std::sync::Mutex::new(
-                exposed_ids
-                    .iter()
-                    .filter_map(|id| {
-                        context
-                            .thread
-                            .iter()
-                            .chain(std::iter::once(&context.message))
-                            .find(|m| m.id == *id)
-                            .map(|m| m.source.clone())
-                    })
-                    .collect(),
-            ),
-        };
+        let reader = StoreEvidence::new(
+            self.store.as_ref(),
+            self.account_id,
+            self.config.triage.context.max_related_messages,
+        )
+        .with_sources(
+            exposed_ids
+                .iter()
+                .filter_map(|id| {
+                    context
+                        .thread
+                        .iter()
+                        .chain(std::iter::once(&context.message))
+                        .find(|m| m.id == *id)
+                        .map(|m| m.source.clone())
+                })
+                .collect(),
+        );
         let mut config = self.config.triage.clone();
         let base_model = config
             .agent
@@ -449,7 +479,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                         .store
                         .stage2_bump_usage(self.account_id, day, usage.into());
                 }
-                let sources = reader.sources.lock().expect("evidence sources").clone();
+                let sources = reader.sources();
                 match self.store.commit_agent_decision_with_policy(
                     &job,
                     &context,
@@ -859,12 +889,7 @@ mod budget_tests {
     #[test]
     fn read_thread_initializes_only_exposed_source_assessments() {
         let (store, account, ids) = evidence_fixture();
-        let reader = StoreEvidence {
-            store: &store,
-            account,
-            limit: 2,
-            sources: std::sync::Mutex::new(Vec::new()),
-        };
+        let reader = StoreEvidence::new(&store, account, 2);
         let result = reader
             .read(&EvidenceRequest::ReadThread {
                 thread_id: "thread".into(),
@@ -887,6 +912,31 @@ mod budget_tests {
         assert!(
             !queued.contains(&ids[0]),
             "unseen oldest sibling remains unqueued"
+        );
+    }
+
+    /// The public seam: a seeded reader keeps its seed and appends every
+    /// source a read exposes, which is what the commit later checks.
+    #[test]
+    fn evidence_reader_keeps_seeded_sources_and_records_reads() {
+        let (store, account, ids) = evidence_fixture();
+        let seed = store.snapshot_agent_sources(account, &[ids[0]]).unwrap();
+        let reader = StoreEvidence::new(&store, account, 8).with_sources(seed.clone());
+        assert_eq!(reader.sources(), seed);
+        let result = reader
+            .read(&EvidenceRequest::ReadMessage {
+                message_id: ids[1],
+                offset: None,
+            })
+            .unwrap();
+        assert_eq!(result.source_message_ids, vec![ids[1]]);
+        assert_eq!(
+            reader
+                .sources()
+                .iter()
+                .map(|s| s.message_id)
+                .collect::<Vec<_>>(),
+            vec![ids[0], ids[1]]
         );
     }
 

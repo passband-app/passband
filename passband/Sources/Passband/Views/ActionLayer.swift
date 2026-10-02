@@ -1,5 +1,5 @@
 // The global action surface, above every other layer: undo/notice toasts, the
-// unsubscribe-violation prompt, rule editor, process mode, the 2FA modal,
+// unsubscribe-violation prompt, rule editor, the 2FA modal,
 // triage-fix palette, ⌘K ask bar, shortcuts overlay, the re-triage confirm and
 // the re-triage run itself. The composer is NOT here anymore — it is a layout
 // pane (see ComposePane in MainShell), not an overlay.
@@ -50,7 +50,6 @@ struct ActionLayer: View {
             if let request = store.groupEditor {
                 GroupEditor(request: request) { store.closeGroupEditor() }
             }
-            if store.processModeOpen { ProcessMode { store.processModeOpen = false } }
             if !store.authQueue.isEmpty { AuthCodeModal() }
             if let target = store.triageFix {
                 TriageFixPalette(target: target) { store.closeTriageFix() }
@@ -91,7 +90,6 @@ struct ActionLayer: View {
             KeyBinding("t", "tune sender") {
                 if let u = store.selectedUpdate { Actions.tune(sender: u.sender) }
             },
-            KeyBinding("p", "process mode") { store.processModeOpen = true },
             // `c` = compose, registered per-SURFACE (here for the lists, and again
             // in the sitrep and the reader) rather than globally: a global one would
             // fire from inside a modal, where the letter belongs to whatever is
@@ -286,7 +284,6 @@ struct ShortcutsOverlay: View {
                 (["h"], "remind me about this later"),
                 (["t"], "tune sender rule"),
                 (["f"], "search this sender"),
-                (["p"], "process mode"),
                 (["u"], "undo last action"),
             ]),
         Group(

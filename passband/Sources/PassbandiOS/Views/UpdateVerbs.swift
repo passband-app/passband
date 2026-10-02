@@ -1,5 +1,5 @@
 // THE ROW VERBS, ONCE. Every touch gesture in this app — a swipe rail, a
-// long-press menu, a deck card flung sideways — ends up in exactly one of these
+// long-press menu — ends up in exactly one of these
 // methods, and each method is the body of the desktop key binding that shares
 // its name. Nothing here decides anything: it looks up what `e` does and does
 // that.
@@ -39,7 +39,7 @@ struct UpdateVerbs {
         store.removeFromMail(update.id)
     }
 
-    /// `e` in process mode — a DIFFERENT verb from done (status stays open, the
+    /// The long-press menu's Archive — a DIFFERENT verb from done (status stays open, the
     /// INBOX label comes off), with its own inverse in the undo queue.
     func archive() {
         Task { await Actions.archive(update) }

@@ -686,7 +686,6 @@ final class AppStore {
     /// renders from this, so writing it on every dismiss invalidates nothing.
     @ObservationIgnored var ruleDrafts: [String: RuleDraft] = [:]
     var groupEditor: GroupEditorRequest?
-    var processModeOpen = false
     var askBarOpen = false {
         // Every way the bar closes ends the watch: it is a view of the lane
         // for as long as this one opening lasts, never a mode ⌘K reopens into.
@@ -973,7 +972,6 @@ final class AppStore {
 
     private func closeOverlaysForPractice() {
         toasts = []
-        processModeOpen = false
         askBarOpen = false
         shortcutsOpen = false
         addAccountSheetOpen = false
@@ -1984,7 +1982,7 @@ final class AppStore {
     /// like any other, but its coach marks POINT AT the board, so blurring what
     /// they are ringing would defeat them.
     var modalOverlayOpen: Bool {
-        askBarOpen || shortcutsOpen || processModeOpen
+        askBarOpen || shortcutsOpen
             || triageFix != nil || remindTarget != nil || schedulePicker != nil
             || ruleEditor != nil
             || groupEditor != nil

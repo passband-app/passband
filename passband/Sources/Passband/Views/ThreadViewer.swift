@@ -1565,7 +1565,15 @@ struct ThreadViewer: View {
                         // the mail is dealt with, so the walk carries on.
                         onScheduled: { Task { await remindAndNext() } }))
             },
-            KeyBinding("u", "unsubscribe") { confirmMode = .ask },
+            // While an undo chip is up, `u` is the undo it advertises, even
+            // here: this context is asked before "global", so a plain binding
+            // would answer an undo with an unsubscribe prompt. Declining hands
+            // the key on to the global undo.
+            KeyBinding(declining: "u", "unsubscribe") {
+                guard store.undos.isEmpty else { return false }
+                confirmMode = .ask
+                return true
+            },
             // `r` = reply, and it lives HERE rather than in the composer's own
             // set because it is what opens the composer when there is none. With
             // one open the body has focus, so `r` is input-suppressed (no

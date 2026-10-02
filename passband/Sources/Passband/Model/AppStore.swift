@@ -330,6 +330,9 @@ struct PendingUndo: Identifiable, Sendable {
     var messageId: Int
     var label: String
     var createdAt: Date = Date()
+    /// When the chip leaves on its own, for its countdown. nil for the one
+    /// the tour holds open until the learner presses `u`.
+    var expiresAt: Date?
     var revert: @Sendable () async throws -> Void
 }
 
@@ -5571,17 +5574,19 @@ final class AppStore {
         kind: UndoKind, messageId: Int, label: String,
         revert: @escaping @Sendable () async throws -> Void
     ) -> UUID {
-        let entry = PendingUndo(kind: kind, messageId: messageId, label: label, revert: revert)
-        undos.append(entry)
+        var entry = PendingUndo(kind: kind, messageId: messageId, label: label, revert: revert)
         // Let the guided undo lesson wait for the learner.
-        if RehearsalMode.isEnabled && tour.active && messageId == 1 && tour.practiceStep == .done {
-            return entry.id
-        }
+        let held =
+            RehearsalMode.isEnabled && tour.active && messageId == 1 && tour.practiceStep == .done
+        if !held { entry.expiresAt = entry.createdAt.addingTimeInterval(Self.undoTTL) }
+        undos.append(entry)
+        let id = entry.id
+        if held { return id }
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(Self.undoTTL))
-            self?.undos.removeAll { $0.id == entry.id }
+            self?.undos.removeAll { $0.id == id }
         }
-        return entry.id
+        return id
     }
 
     /// Undo the given (or most recent) queued action.

@@ -171,6 +171,12 @@ struct ActionLayer: View {
                                 Text("undo")
                                     .font(Typo.micro)
                                     .foregroundStyle(Palette.inkFaintest)
+                                if let expiresAt = undo.expiresAt {
+                                    UndoCountdown(
+                                        startedAt: undo.createdAt, expiresAt: expiresAt
+                                    )
+                                    .padding(.leading, 3)
+                                }
                             }
                         }
                         .padding(.horizontal, Space.s12)
@@ -380,5 +386,33 @@ private struct ViolationScanKeeper: View {
                 lastScan = Date()
                 await scan()
             }
+    }
+}
+
+/// How long an undo chip has left: a small ring that drains to nothing as the
+/// window closes. Drawn from the clock rather than animated to a value, like
+/// the reader's hold ring, so it empties on the same second the chip leaves
+/// even when it mounts late or the layer re-renders mid-sweep.
+private struct UndoCountdown: View {
+    let startedAt: Date
+    let expiresAt: Date
+
+    private static let size: CGFloat = 11
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1 / 30)) { ctx in
+            let total = max(0.001, expiresAt.timeIntervalSince(startedAt))
+            let left = min(1, max(0, expiresAt.timeIntervalSince(ctx.date) / total))
+            ZStack {
+                Circle()
+                    .stroke(Palette.hairlineStrong, lineWidth: 1.75)
+                Circle()
+                    .trim(from: 0, to: left)
+                    .stroke(Palette.warn, style: StrokeStyle(lineWidth: 1.75, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+            }
+            .frame(width: Self.size, height: Self.size)
+        }
+        .accessibilityHidden(true)
     }
 }

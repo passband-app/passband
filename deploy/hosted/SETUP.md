@@ -1040,12 +1040,17 @@ pairing code, the tenant URL, and the `passband://pair?...` deep link. Then:
 ```sh
 kubectl -n tenants get all,pvc,netpol -l app.kubernetes.io/instance=test1
 curl -sS -o /dev/null -w '%{http_code}\n' https://test1.passband.email/client/updates  # 401
-curl -sS -o /dev/null -w '%{http_code}\n' https://test1.passband.email/mcp             # 404
+curl -sS -o /dev/null -w '%{http_code}\n' https://test1.passband.email/mcp             # 404 (401 once published)
 ```
 
 Those last two lines are the two-door split, observable from the internet: the
 human door answers (with a 401, because you presented no token) and the agent
-door does not exist. See "The agent door is not served" below.
+door does not exist. That holds on a fresh box, where
+`SQUELCH_WARDEN_MCP_OAUTH_ISSUER` is unset. Once the agent door has been
+published with OAuth, `/mcp` answers 401 instead, which is the door asking for
+a token rather than the door being absent; a 200 there is a tenant serving mail
+to anyone, and a 403 is a daemon image too old to know about OAuth (closed, but
+not working). See "The agent door" below.
 
 The daemon will fail to sync with that empty credential, which is expected. What
 this proves is the image, the volume, the certificate, the routing, and the
@@ -2110,19 +2115,242 @@ starts and stops.
 - **One node is one failure domain.** No high availability, and a node loss is
   a restore from backup.
 
-## The agent door is not served
+## The agent door
 
-Hosted publishes the human door only. Each tenant's Ingress declares exactly
-three path prefixes, `/client`, `/console` and `/t`, and nothing else. `/mcp`
-matches no rule, so Traefik answers its own 404 for it, as it does for every
-other path on a tenant vhost.
+The daemon serves two doors: the human door (`/client`, `/console`, `/t`), which
+every hosted tenant publishes, and the agent door (`/mcp`), which MCP clients
+talk to. Whether the agent door is reachable from the internet is one warden
+setting, `SQUELCH_WARDEN_MCP_OAUTH_ISSUER`, and it has two states.
 
-That is an allowlist, not a deny rule, and deliberately so: a deny rule has to
-enumerate every spelling of the thing it is refusing and fails open when it
-misses one. This fails closed. The cost is that a new unauthenticated route in
-the daemon needs a line in `HUMAN_DOOR_PREFIXES` in
-`squelch-warden/src/objects.rs`, which is a list in code with a test on it
-rather than a controller annotation nobody reads.
+**Unset, the default: not served.** Each tenant's Ingress declares exactly
+three path prefixes, `/client`, `/console` and `/t`, plus an Exact `/` that
+redirects to the console, and nothing else. `/mcp` matches no rule, so Traefik
+answers its own 404 for it, as it does for every other path on a tenant vhost.
+The daemon still serves `/mcp` inside its own pod, in its open mode, guarded
+only by a Host allow-list of loopback names. Nothing off the box can reach it,
+and neither can another tenant.
 
-The daemon still serves `/mcp` inside its own pod. Nothing off the box can
-reach it, and neither can another tenant.
+**Set: published, with OAuth.** Every tenant pod is told the issuer and its own
+public resource URL (`SQUELCH_MCP_OAUTH_ISSUER`, and
+`SQUELCH_MCP_PUBLIC_URL=https://<label>.passband.email/mcp`), which switches the
+daemon's `/mcp` into OAuth mode, and every tenant Ingress adds two Prefix paths,
+`/mcp` and `/.well-known/oauth-protected-resource`, and nothing else. From then
+on the daemon is the lock. A request with no token gets a 401 pointing at the
+tenant's protected-resource metadata, which names WorkOS AuthKit as the
+authorization server; the agent signs its user in there, and comes back with an
+access token the daemon verifies locally against AuthKit's published keys:
+RS256 only, the right issuer, an audience equal to this tenant's own URL, not
+expired, and an `email` claim equal to this tenant's own mailbox address.
+
+That last check is the one everything rests on. One wildcard resource indicator
+covers the whole fleet, so any Passband user can obtain a token whose audience
+is somebody else's tenant URL; the email binding is the only thing between one
+account holder and another's mail. It is also why the pre-publish checklist
+below exists.
+
+In both states the Ingress is an allowlist, not a deny rule, and deliberately
+so: a deny rule has to enumerate every spelling of the thing it is refusing and
+fails open when it misses one. This fails closed. The two lists are
+`HUMAN_DOOR_PREFIXES` and `AGENT_DOOR_PREFIXES` in
+`squelch-warden/src/objects.rs`, with tests on both. A new unauthenticated
+route in the daemon needs a line in one of them, which is a list in code with a
+test on it rather than a controller annotation nobody reads.
+
+One property the rollout leans on: **the warden never sets
+`SQUELCH_MCP_ALLOWED_HOSTS`.** A daemon adds its own public hostname to its Host
+allow-list only when it is in OAuth mode. So a tenant still running an image
+that predates OAuth, behind an Ingress that now routes `/mcp`, answers 403 from
+the Host guard instead of serving its mail to whoever asked. Closed, and broken,
+which is the right way round for a mistake in the order below.
+
+### Publishing the agent door
+
+Do these in order. Each step exists because of what goes wrong if it is
+skipped, and the failure for every one of them is a door that does not work
+rather than a door that is open, except for step 3, whose failure is the open
+kind.
+
+**1. Ship and roll a daemon image that understands the new env.** Bump
+`SQUELCH_WARDEN_IMAGE` and let the roller converge the whole fleet, exactly as
+`ROLLOUT.md` describes. Wait for a run that exits 0 with every tenant under
+`already current`. Nothing about the agent door changes yet: with no issuer
+set, the new daemon's `/mcp` behaves byte for byte as the old one's did.
+Skip this and set the issuer anyway, and every tenant still on the old image
+answers 403 on `/mcp` until it is rolled.
+
+**2. Give the control plane its WorkOS API key.** The control service (Railway,
+`signup.passband.app`) mounts `/agent/auth` only when
+`SQUELCH_CONTROL_WORKOS_API_KEY` is set; without it the route is a 404, and
+every agent sign-in dead-ends there after the user has already said yes to
+AuthKit. Set it from the WorkOS dashboard's API keys page for the PRODUCTION
+environment, then check what actually deployed rather than trusting the status:
+
+```sh
+railway variables -s control --json | jq 'has("SQUELCH_CONTROL_WORKOS_API_KEY")'   # true
+curl -sS -o /dev/null -w '%{http_code}\n' https://signup.passband.app/agent/auth  # anything but 404
+```
+
+Then configure AuthKit itself, in the WorkOS dashboard for the same
+environment. These are the setting names as of October 2026; WorkOS moves them
+between pages, so search for the name if it is not where you expect:
+
+- **Dynamic Client Registration: on.** Most MCP clients register themselves.
+- **Client ID Metadata Documents: on.** The newer MCP clients identify
+  themselves by a URL instead of registering.
+- **Standalone Connect, Login URI:** `https://signup.passband.app/agent/auth`
+  (your control origin, the same value as `SQUELCH_WARDEN_CONSOLE_SSO_URL`,
+  plus `/agent/auth`). This is where AuthKit sends the user's browser to be
+  identified. The control plane does the Google sign-in it already does for the
+  console, finds that mailbox's tenant, and tells AuthKit who the user is.
+- **Resource Indicator:** `https://*.passband.email/mcp`. One wildcard for the
+  fleet, which is the reason for the email binding above.
+
+Write down the issuer while you are there: the AuthKit domain,
+`https://<something>.authkit.app`. Do not type it from the dashboard; take the
+exact string from AuthKit's own metadata, because the daemon compares it to
+every token's `iss` as an exact string:
+
+```sh
+ISSUER=https://<something>.authkit.app
+META=$(curl -sS "$ISSUER/.well-known/oauth-authorization-server")
+echo "$META" | jq '{issuer, jwks_uri, registration_endpoint, authorization_endpoint, token_endpoint}'
+```
+
+`issuer` must equal `$ISSUER` exactly (no trailing slash, same case), and
+`jwks_uri` must be `$ISSUER/oauth2/jwks`. If the second one is anything else,
+STOP: the daemon defaults to that path and the warden does not render the
+daemon's JWKS override, so that is a code change, not a setting.
+
+**3. The pre-publish checklist.** Three facts this design depends on could not
+be confirmed from WorkOS's documentation, and each one is checked on the real
+environment by running one OAuth flow by hand and decoding the token it
+produces. The door is still unpublished, so the flow goes straight to AuthKit
+and never touches a tenant. Use a tenant whose mailbox you can sign in as.
+
+```sh
+# Uses $ISSUER and $META from step 2.
+TENANT=<label>                                    # a tenant whose mailbox is yours
+RESOURCE=https://$TENANT.passband.email/mcp
+REDIRECT=http://127.0.0.1:8976/callback           # nothing needs to listen there
+uri() { jq -rn --arg v "$1" '$v|@uri'; }
+
+# Register a throwaway public client.
+CLIENT_ID=$(curl -sS -X POST "$(echo "$META" | jq -r .registration_endpoint)" \
+  -H 'content-type: application/json' \
+  -d "$(jq -n --arg r "$REDIRECT" '{client_name:"passband pre-publish check",
+        redirect_uris:[$r], grant_types:["authorization_code"],
+        response_types:["code"], token_endpoint_auth_method:"none"}')" | jq -r .client_id)
+
+# PKCE.
+VERIFIER=$(openssl rand -hex 32)
+CHALLENGE=$(printf %s "$VERIFIER" | openssl dgst -sha256 -binary | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+
+# Open this in a browser, sign in with Google as $TENANT's mailbox, approve.
+echo "$(echo "$META" | jq -r .authorization_endpoint)?response_type=code&client_id=$(uri "$CLIENT_ID")&redirect_uri=$(uri "$REDIRECT")&code_challenge=$CHALLENGE&code_challenge_method=S256&resource=$(uri "$RESOURCE")&state=check"
+```
+
+The browser goes AuthKit, then `signup.passband.app/agent/auth`, then Google,
+then AuthKit's consent screen, and finally to `127.0.0.1:8976/callback?code=...`,
+which fails to load. That is expected: copy the `code` out of the address bar.
+
+```sh
+CODE=<paste>
+TOKEN=$(curl -sS -X POST "$(echo "$META" | jq -r .token_endpoint)" \
+  -d grant_type=authorization_code -d code="$CODE" -d redirect_uri="$REDIRECT" \
+  -d client_id="$CLIENT_ID" -d code_verifier="$VERIFIER" -d resource="$RESOURCE" \
+  | jq -r .access_token)
+jwt() { printf %s "$TOKEN" | cut -d. -f"$1" | tr '_-' '/+' \
+  | awk '{ while (length($0) % 4) $0 = $0 "="; print }' | base64 -d | jq .; }
+jwt 1    # header: "alg" must be "RS256"
+jwt 2    # claims: the three facts below, plus iss, aud and exp
+```
+
+Check each of these against the claims, and do not publish until all three are
+true:
+
+- **(a) The access token carries an `email` claim, equal to the mailbox.** The
+  daemon refuses every token without one, so if it is missing the door is
+  published and nobody can use it. If it is present but is not the mailbox
+  address the control plane sent, the binding is checking the wrong thing.
+- **(b) What `sub` is.** The control plane completes the flow with the
+  lowercased mailbox address as the user id. Write down whether `sub` is that
+  address or a WorkOS-generated user id. Nothing authorizes on it today, but
+  anyone who later reaches for `sub` instead of `email` needs to know which
+  one it is.
+- **(c) AuthKit's own hosted sign-up and sign-in cannot mint a user with an
+  arbitrary email.** In Standalone Connect the only way a user should come into
+  being is the control plane's completion call, after Google has proven the
+  mailbox. If AuthKit's own pages can create a user, someone can self-register
+  as another person's address, run the agent flow, and walk in with a token
+  whose `email` matches that person's tenant: the daemon's binding passes and
+  the mail is theirs. In the dashboard, every AuthKit sign-in and sign-up method
+  must be off. Then try it: open `$ISSUER` (and `$ISSUER/sign-up`) in a private
+  window and try to create an account with an address that is not yours. If any
+  path lets you, it must be disabled, or **this feature does not ship.**
+
+While the claims are on screen, also confirm `iss` equals `$ISSUER`, `aud` is or
+contains `$RESOURCE`, and note `exp - iat`. That number is the access token
+lifetime, and it is the next paragraph's whole subject.
+
+**Revocation is bounded by the access token lifetime, not instant.** The daemon
+verifies tokens locally against AuthKit's keys and never asks AuthKit whether a
+token is still good, so revoking an agent's access in WorkOS stops it from
+getting NEW tokens and does nothing to the one it holds: that keeps working
+until its `exp`, plus the daemon's 60 seconds of clock leeway. The lifetime is
+set in the WorkOS dashboard's session settings (the access token duration),
+and `exp - iat` on a real token is the authoritative reading of it. Cancelling
+the account is the one instant revocation, because it takes the pod away.
+Keep the lifetime short.
+
+**4. Only then: set the issuer and let the roll converge.** In
+`15-warden-config.yaml`, uncomment and fill in
+
+```yaml
+  SQUELCH_WARDEN_MCP_OAUTH_ISSUER: "https://<something>.authkit.app"
+```
+
+apply it, and restart the serving warden in the same minute (rule 2 at the top
+of that file). Every tenant's Deployment now drifts by two variables, so the
+roller takes them one per tick, and each reconcile re-applies that tenant's
+Ingress right after its Deployment: the two halves land together. A
+four-tenant fleet is about twenty minutes. Then check it, on one tenant:
+
+```sh
+T=https://$TENANT.passband.email
+curl -sS -o /dev/null -D - "$T/mcp" | grep -iE '^HTTP|^www-authenticate'
+# HTTP/2 401
+# www-authenticate: Bearer resource_metadata="https://<label>.passband.email/.well-known/oauth-protected-resource/mcp"
+curl -sS "$T/.well-known/oauth-protected-resource/mcp" | jq .
+# {"resource":"https://<label>.passband.email/mcp","authorization_servers":["https://<something>.authkit.app"], ...}
+curl -sS "$T/.well-known/oauth-protected-resource" | jq -r '.authorization_servers[0]'   # the issuer
+curl -sS -o /dev/null -w '%{http_code}\n' "$T/.well-known/oauth-authorization-server"     # 404, never ours
+```
+
+A 403 on `/mcp` is a tenant whose daemon predates OAuth (step 1 was not
+finished); a 503 is a daemon told only half of the pair, which this warden
+never renders, so look for a hand edit. A 200 with no token is the one result
+that is an incident: unpublish (below) first, investigate second.
+
+And across the fleet, because there is one way for a tenant to end up with the
+new Deployment and the OLD Ingress, and the roller cannot see it. The LLM-key
+and share-token routes apply a tenant's Deployment without its Ingress, so one
+of them landing on a tenant between the restart and the roll makes that
+Deployment current with `/mcp` still unrouted, and the roller calls it current
+from then on. (A reconcile whose Ingress apply failed after its Deployment
+apply succeeded leaves the same shape.) Every row should list `/mcp`:
+
+```sh
+kubectl -n tenants get ingress -l app.kubernetes.io/managed-by=squelch-warden \
+  -o custom-columns='TENANT:.metadata.name,PATHS:.spec.rules[0].http.paths[*].path'
+```
+
+A row without it is fixed with `squelch-control reconcile <label>`, which
+re-applies all five objects. The same check after unpublishing should show no
+`/mcp` anywhere.
+
+**Unpublishing.** Comment the line out again, apply, restart the serving
+warden, and the roller takes the variables and the two paths back off one
+tenant per tick. Until a tenant's turn comes it stays published and still
+OAuth-locked. A tenant the gap above leaves with `/mcp` routed after its
+variables are gone reaches a daemon with no public hostname on its allow-list,
+which answers 403: closed, and found by the same `kubectl` check.

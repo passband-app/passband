@@ -226,6 +226,19 @@ kubectl -n warden logs -f job/verify && kubectl -n warden delete job verify
 behind. If you want reads only, edit `args:` to `["roll", "--dry-run"]` in a
 copy of the manifest.)
 
+### A release that publishes the agent door
+
+Turning on `SQUELCH_WARDEN_MCP_OAUTH_ISSUER` is NOT part of an image rollout,
+and must never ride in the same edit as one. The order is: roll the daemon
+image that understands the agent door's OAuth variables and wait for this page
+to finish (a run exiting 0, everything `already current`); set the control
+plane's `SQUELCH_CONTROL_WORKOS_API_KEY`; run the pre-publish checklist on the
+real environment; and only then set the issuer, apply, restart the serving
+warden, and let the roller converge a second time. Set it early and every
+tenant still on the old image answers 403 on `/mcp` until it is rolled (closed,
+but broken). The full procedure, the WorkOS settings, the checklist and the
+verification are in `SETUP.md`, "Publishing the agent door".
+
 ---
 
 ## When it goes wrong
@@ -330,7 +343,11 @@ rollback has fewer tenants to undo than you would fear.
 4. **The roller converges the Deployment and nothing else.** A release that
    changes a tenant's Service, Ingress, NetworkPolicy or PVC reaches new signups
    only. No roll will ever deliver it, and every drift report will call those
-   tenants current. Those want `squelch-control reconcile` per tenant.
+   tenants current. Those want `squelch-control reconcile` per tenant. The
+   agent door's issuer is the near-exception: it moves the Deployment too, so
+   the roll carries the Ingress with it, except on a tenant an `llm mint` or a
+   share-token install reached first. `SETUP.md`, "Publishing the agent door",
+   has the check.
 5. **`control` already shipped.** It deployed the moment you merged, before any
    of this. If the release pairs a control change with a carrier change, that
    gap is real and nothing enforces the pairing.

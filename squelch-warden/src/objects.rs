@@ -66,7 +66,8 @@ pub const DAEMON_PORT: i32 = 8848;
 /// **It is deliberately absent from the Service and from the Ingress**, and
 /// that absence is the isolation argument: an Ingress can only send traffic to
 /// a port its backing Service declares, so no allowlist mistake in
-/// [`HUMAN_DOOR_PREFIXES`] can publish this port through a tenant vhost. The
+/// [`HUMAN_DOOR_PREFIXES`] or [`AGENT_DOOR_PREFIXES`] can publish this port
+/// through a tenant vhost. The
 /// only thing that reaches it is the one [`network_policy`] ingress rule that
 /// names the monitoring namespace's prometheus-agent pod.
 pub const METRICS_PORT: i32 = 9464;
@@ -221,15 +222,18 @@ pub const CANCELLED_AT_ANNOTATION: &str = "passband.email/cancelled-at";
 /// managed-by label [`labels`] puts on every tenant object.
 pub const MANAGED_SELECTOR: &str = "app.kubernetes.io/managed-by=squelch-warden";
 
-/// The only path prefixes an Ingress routes to a tenant daemon.
+/// The path prefixes an Ingress ALWAYS routes to a tenant daemon: the human
+/// door.
 ///
-/// **This is how `/mcp` answers 404 at the ingress layer.** The daemon serves
-/// four trees: `/client/*` (the human door's API), `/console/*` (the tenant's
-/// own browser console), `/t/*` (the read-tracking pixel), and `/mcp` (the
-/// agent door). Hosted publishes the human door only, so the Ingress declares
-/// the human-door prefixes and nothing else. A request for `/mcp`, or for
-/// anything else on a tenant vhost, matches no rule and the ingress controller
-/// answers its own 404 (both Traefik and ingress-nginx do).
+/// The daemon serves four trees: `/client/*` (the human door's API),
+/// `/console/*` (the tenant's own browser console), `/t/*` (the read-tracking
+/// pixel), and `/mcp` (the agent door). These three are published on every
+/// tenant. The agent door is published only when the operator has configured
+/// an OAuth issuer, and its prefixes live in [`AGENT_DOOR_PREFIXES`] so that
+/// the two decisions cannot be confused for one another. A request for
+/// anything on neither list matches no rule, and the ingress controller
+/// answers its own 404 (both Traefik and ingress-nginx do). With no issuer
+/// configured, that includes `/mcp`.
 ///
 /// An allowlist, not a deny rule, and deliberately: a deny rule has to name
 /// every spelling of the thing it is refusing, and it fails open when it misses
@@ -238,6 +242,43 @@ pub const MANAGED_SELECTOR: &str = "app.kubernetes.io/managed-by=squelch-warden"
 /// than a controller annotation nobody reads. `/console` is that cost being
 /// paid for the first time.
 pub const HUMAN_DOOR_PREFIXES: &[&str] = &["/client", "/console", "/t"];
+
+/// The path prefixes the Ingress ADDS when the agent door is published, which
+/// is exactly when [`Config::mcp_oauth_issuer`] is set.
+///
+/// For a long time hosted published the human door only, because `/mcp` had no
+/// authentication of its own: its one guard was rmcp's Host-header allow-list,
+/// and putting it on a public hostname would have handed a tenant's mail to
+/// anyone who could type the URL. What changed is that the DAEMON now enforces
+/// OAuth on the agent door itself. In OAuth mode every request to `/mcp` must
+/// carry an access token from the configured issuer, for this tenant's own
+/// resource URL and this tenant's own mailbox address, or it is refused before
+/// it reaches the MCP service. The Ingress is no longer the thing keeping the
+/// door shut; it is the thing deciding whether the door is reachable at all.
+///
+/// Why these two and nothing else:
+///
+/// - `/mcp` is the agent door itself (Prefix, so `/mcp/` and anything the
+///   transport hangs under it are the same door).
+/// - `/.well-known/oauth-protected-resource` is the RFC 9728 metadata an agent
+///   is pointed at by the daemon's `401`. Prefix, because the spec puts the
+///   resource's own path after it (`.../oauth-protected-resource/mcp`) and
+///   older clients ask for the bare form; the daemon serves both, and nothing
+///   else, under it.
+///
+/// Deliberately NOT `/.well-known/` as a whole, and not
+/// `/.well-known/oauth-authorization-server`: the authorization server is
+/// AuthKit, at its own origin, and a tenant vhost that answered for it would be
+/// a second, unaudited place to look for one.
+///
+/// THE ROLLOUT INVARIANT (I5) this list leans on: the warden NEVER renders
+/// `SQUELCH_MCP_ALLOWED_HOSTS`. A daemon adds its own public hostname to the
+/// rmcp Host allow-list only when it is in OAuth mode. So a tenant still on an
+/// image that predates OAuth, sitting behind an Ingress that now publishes
+/// `/mcp`, sees a Host header it does not allow and answers 403, instead of
+/// serving mail with no authentication. Rendering that variable from here
+/// would turn exactly that tenant into an open door.
+pub const AGENT_DOOR_PREFIXES: &[&str] = &["/mcp", "/.well-known/oauth-protected-resource"];
 
 /// Namespace CoreDNS runs in on k3s. The one egress peer every tenant needs
 /// before it can resolve anything.
@@ -655,10 +696,14 @@ pub fn service(config: &Config, name: &TenantName) -> Service {
 }
 
 /// The tenant's Ingress: `<label>.<base domain>` over the wildcard certificate,
-/// routing the human door and nothing else.
+/// routing the human door, and the agent door when an OAuth issuer is
+/// configured.
 ///
-/// See [`HUMAN_DOOR_PREFIXES`] for why the agent door is absent rather than
-/// denied.
+/// See [`HUMAN_DOOR_PREFIXES`] for why an unpublished door is absent rather
+/// than denied, and [`AGENT_DOOR_PREFIXES`] for what publishing the agent door
+/// rests on. With no issuer configured the paths are exactly the human door's,
+/// in the same order, so the object is byte-identical to the one a warden that
+/// never heard of the agent door built.
 pub fn ingress(config: &Config, name: &TenantName) -> Ingress {
     let backend = IngressBackend {
         service: Some(IngressServiceBackend {
@@ -671,6 +716,14 @@ pub fn ingress(config: &Config, name: &TenantName) -> Ingress {
         ..Default::default()
     };
     let host = config.hostname(name.as_str());
+    // The agent door rides on the SAME setting that puts the daemon into OAuth
+    // mode (see [`daemon_env`]), so this Ingress never publishes `/mcp` for a
+    // pod this render did not also tell to lock it.
+    let agent_door: &[&str] = if config.mcp_oauth_issuer.is_some() {
+        AGENT_DOOR_PREFIXES
+    } else {
+        &[]
+    };
 
     Ingress {
         metadata: meta(config, name, name.as_str().to_string()),
@@ -685,6 +738,7 @@ pub fn ingress(config: &Config, name: &TenantName) -> Ingress {
                 http: Some(HTTPIngressRuleValue {
                     paths: HUMAN_DOOR_PREFIXES
                         .iter()
+                        .chain(agent_door)
                         .map(|prefix| HTTPIngressPath {
                             path: Some((*prefix).to_string()),
                             path_type: "Prefix".to_string(),
@@ -692,8 +746,9 @@ pub fn ingress(config: &Config, name: &TenantName) -> Ingress {
                         })
                         // The bare root, EXACT on purpose: it serves one
                         // redirect to /console and nothing else. A Prefix "/"
-                        // would match EVERY path — including /mcp — and turn
-                        // this allowlist into decoration.
+                        // would match EVERY path (/metrics-shaped mistakes, any
+                        // future route, and /mcp on a warden with no issuer)
+                        // and turn this allowlist into decoration.
                         .chain(std::iter::once(HTTPIngressPath {
                             path: Some("/".to_string()),
                             path_type: "Exact".to_string(),
@@ -1407,6 +1462,29 @@ fn daemon_env(config: &Config, name: &TenantName) -> Vec<EnvVar> {
         if let Some(cap) = config.llm_stage2_daily_cap {
             env.push(plain("SQUELCH_STAGE2_GLOBAL_DAILY_CAP", &cap.to_string()));
         }
+    }
+
+    // The agent door's OAuth pair, present only when the operator configured
+    // an issuer, and ABSENT otherwise so the pod is byte-identical to one a
+    // warden that never heard of the agent door built. Both or neither: the
+    // daemon treats exactly one of them as MISCONFIGURED and answers 503 on
+    // `/mcp`, so rendering them from one setting is what keeps a tenant out of
+    // that state.
+    //
+    // The public URL is built from [`Config::hostname`], the same helper the
+    // Ingress host comes from, so the resource a token is minted for and the
+    // vhost that routes it cannot disagree. It is the `aud` the daemon
+    // requires, and the hostname it adds to its own Host allow-list.
+    //
+    // NEVER `SQUELCH_MCP_ALLOWED_HOSTS`, here or anywhere in this file: see
+    // [`AGENT_DOOR_PREFIXES`] for why its absence is what keeps an old daemon
+    // image behind a published `/mcp` answering 403.
+    if let Some(issuer) = &config.mcp_oauth_issuer {
+        env.push(plain("SQUELCH_MCP_OAUTH_ISSUER", issuer));
+        env.push(plain(
+            "SQUELCH_MCP_PUBLIC_URL",
+            &format!("https://{}/mcp", config.hostname(name.as_str())),
+        ));
     }
     env
 }
@@ -2565,7 +2643,18 @@ mod tests {
             .filter(|p| p.path_type == "Prefix")
             .map(|p| p.path.as_deref().unwrap())
             .collect();
-        for spelling in ["/mcp", "/mcp/", "/mcp/messages", "/mcp/sse"] {
+        // This is the render with NO OAuth issuer configured, which is every
+        // deploy until an operator turns the agent door on: the door and its
+        // metadata are both absent.
+        assert!(c.mcp_oauth_issuer.is_none());
+        for spelling in [
+            "/mcp",
+            "/mcp/",
+            "/mcp/messages",
+            "/mcp/sse",
+            "/.well-known/oauth-protected-resource",
+            "/.well-known/oauth-protected-resource/mcp",
+        ] {
             assert!(
                 !prefixes.iter().any(|p| spelling.starts_with(*p)),
                 "{spelling} would be routed to the daemon"
@@ -2578,6 +2667,292 @@ mod tests {
             assert!(
                 declared.iter().any(|p| spelling.starts_with(*p)),
                 "{spelling} would 404 at the ingress"
+            );
+        }
+    }
+
+    /// [`test_config`] with the agent door published: an AuthKit-shaped
+    /// issuer and nothing else changed.
+    fn agent_door_config() -> Config {
+        let mut c = test_config();
+        c.mcp_oauth_issuer = Some("https://example.authkit.app".to_string());
+        c
+    }
+
+    /// Kubernetes' `Prefix` match, as the Ingress spec defines it: ELEMENT-WISE
+    /// on `/`-separated segments, with empty segments (and so a trailing `/`)
+    /// ignored. `/mcp` matches `/mcp`, `/mcp/` and `/mcp/x`, and does NOT match
+    /// `/mcpx`.
+    ///
+    /// The other tests in this module use a plain string prefix instead, which
+    /// is coarser: everything this function matches, a string prefix matches
+    /// too, so "no string prefix matches" proves "unrouted" under the spec AND
+    /// under any controller that implements `Prefix` as a plain string prefix.
+    /// That stronger check is used wherever it can pass. It cannot for a
+    /// spelling like `/mcpx`, which is unrouted under the spec and would reach
+    /// the daemon under a string-prefix controller; see the test that uses this.
+    fn k8s_prefix_matches(prefix: &str, path: &str) -> bool {
+        let want: Vec<&str> = prefix.split('/').filter(|e| !e.is_empty()).collect();
+        let got: Vec<&str> = path.split('/').filter(|e| !e.is_empty()).collect();
+        got.len() >= want.len() && got[..want.len()] == want[..]
+    }
+
+    /// The Ingress's declared (path, pathType) pairs, in order.
+    fn ingress_paths(config: &Config, label: &str) -> Vec<(String, String)> {
+        let n = TenantName::parse(label).unwrap();
+        let rules = ingress(config, &n).spec.unwrap().rules.unwrap();
+        assert_eq!(rules.len(), 1, "one vhost per tenant");
+        rules[0]
+            .http
+            .clone()
+            .unwrap()
+            .paths
+            .into_iter()
+            .map(|p| (p.path.unwrap(), p.path_type))
+            .collect()
+    }
+
+    /// The daemon container's environment.
+    fn daemon_env_of(config: &Config, label: &str) -> Vec<EnvVar> {
+        let n = TenantName::parse(label).unwrap();
+        deployment(config, &n, &credential_hash("ct"), None, None)
+            .spec
+            .unwrap()
+            .template
+            .spec
+            .unwrap()
+            .containers[0]
+            .env
+            .clone()
+            .unwrap()
+    }
+
+    /// Publishing the agent door adds EXACTLY its two prefixes to the Ingress,
+    /// as Prefix paths to the same backend, and the bare root stays Exact.
+    #[test]
+    fn an_issuer_publishes_the_agent_door_and_nothing_else() {
+        let c = agent_door_config();
+        let ing = ingress(&c, &name());
+        let rules = ing.spec.unwrap().rules.unwrap();
+        assert_eq!(rules[0].host.as_deref(), Some("alice.passband.email"));
+        let paths = rules[0].http.clone().unwrap().paths;
+
+        let declared: Vec<(&str, &str)> = paths
+            .iter()
+            .map(|p| (p.path.as_deref().unwrap(), p.path_type.as_str()))
+            .collect();
+        assert_eq!(
+            declared,
+            vec![
+                ("/client", "Prefix"),
+                ("/console", "Prefix"),
+                ("/t", "Prefix"),
+                ("/mcp", "Prefix"),
+                ("/.well-known/oauth-protected-resource", "Prefix"),
+                // Still Exact: a Prefix root would route every path there is.
+                ("/", "Exact"),
+            ]
+        );
+        for path in &paths {
+            let backend = path.backend.service.as_ref().unwrap();
+            assert_eq!(
+                backend.name, "alice",
+                "every path goes to the tenant's own Service"
+            );
+            assert_eq!(
+                backend.port,
+                Some(ServiceBackendPort {
+                    name: Some("http".to_string()),
+                    ..Default::default()
+                }),
+                "the agent door is the daemon port, never the metrics port"
+            );
+        }
+
+        let prefixes: Vec<&str> = paths
+            .iter()
+            .filter(|p| p.path_type == "Prefix")
+            .map(|p| p.path.as_deref().unwrap())
+            .collect();
+
+        // ROUTED, under the spec's element-wise match (which implies a string
+        // prefix match too, so these are routed under either reading).
+        for spelling in [
+            "/mcp",
+            "/mcp/",
+            "/.well-known/oauth-protected-resource",
+            "/.well-known/oauth-protected-resource/mcp",
+        ] {
+            assert!(
+                prefixes.iter().any(|p| k8s_prefix_matches(p, spelling)),
+                "{spelling} would 404 at the ingress with the agent door published"
+            );
+        }
+
+        // UNROUTED, under the STRONGER string-prefix check: no declared prefix
+        // is even a string prefix of these, so no controller, however it reads
+        // `Prefix`, sends them to the daemon. The Exact root matches only a
+        // literal "/", which none of them are. `/.well-known/oauth-authorization-server`
+        // is on the list by name: the authorization server is AuthKit, and a
+        // tenant vhost must not answer for it.
+        for spelling in [
+            "/metrics",
+            "/metrics/",
+            "/healthz",
+            "/.well-known/oauth-authorization-server",
+            "/.well-known/openid-configuration",
+            "/.well-known/anything-else",
+            "/.well-known",
+            "/.well-known/",
+        ] {
+            assert!(
+                !prefixes.iter().any(|p| spelling.starts_with(*p)),
+                "{spelling} would be routed to the daemon"
+            );
+            assert_ne!(spelling, "/", "an Exact root cannot match {spelling}");
+        }
+
+        // UNROUTED under the spec only. `/mcp` is a string prefix of `/mcpx`,
+        // so the coarse check above cannot clear it; Kubernetes' element-wise
+        // match does not route it. A controller that implements `Prefix` as a
+        // plain string prefix WOULD hand it to the daemon, which serves no
+        // such route and answers 404 itself, so the worst case is a 404 from a
+        // different process. This asserts what the Ingress object says, which
+        // is all this function controls.
+        for spelling in [
+            "/mcpx",
+            "/mcp-admin",
+            "/.well-known/oauth-protected-resourcex",
+        ] {
+            assert!(
+                !prefixes.iter().any(|p| k8s_prefix_matches(p, spelling)),
+                "{spelling} would be routed to the daemon"
+            );
+        }
+    }
+
+    /// Publishing the agent door changes NOTHING else about the Ingress: take
+    /// its two paths back out and what is left is the unpublished object, field
+    /// for field. And unpublished is what every existing test above pins.
+    #[test]
+    fn the_agent_door_is_the_only_difference_an_issuer_makes_to_the_ingress() {
+        let open = serde_json::to_value(ingress(&agent_door_config(), &name())).unwrap();
+        let shut = serde_json::to_value(ingress(&test_config(), &name())).unwrap();
+
+        let mut stripped = open.clone();
+        let paths = stripped["spec"]["rules"][0]["http"]["paths"]
+            .as_array_mut()
+            .unwrap();
+        let before = paths.len();
+        paths.retain(|p| !AGENT_DOOR_PREFIXES.contains(&p["path"].as_str().unwrap()));
+        assert_eq!(before - paths.len(), AGENT_DOOR_PREFIXES.len());
+        assert_eq!(stripped, shut);
+        assert_ne!(open, shut, "the issuer has to publish something");
+    }
+
+    /// With no issuer configured, the daemon is told nothing about the agent
+    /// door: no `SQUELCH_MCP_*` variable at all, so the pod is byte-identical
+    /// to one a warden that never heard of OAuth rendered, and the daemon stays
+    /// in its open, loopback-guarded mode behind an Ingress that does not
+    /// route it.
+    #[test]
+    fn no_issuer_means_no_agent_door_variable_at_all() {
+        let c = test_config();
+        assert!(c.mcp_oauth_issuer.is_none());
+        let pod = tenant_deployment(&c).spec.unwrap().template.spec.unwrap();
+        let mut containers = pod.init_containers.clone().unwrap();
+        containers.extend(pod.containers.clone());
+        for container in &containers {
+            let stray: Vec<&str> = container
+                .env
+                .iter()
+                .flatten()
+                .map(|e| e.name.as_str())
+                .filter(|n| n.starts_with("SQUELCH_MCP_"))
+                .collect();
+            assert!(
+                stray.is_empty(),
+                "{} carries {stray:?} with no issuer configured",
+                container.name
+            );
+        }
+    }
+
+    /// With an issuer configured, every pod gets EXACTLY two more variables,
+    /// appended, and nothing it already had moves. The public URL is the
+    /// tenant's OWN, and its host is the Ingress host to the byte: that URL is
+    /// the `aud` the daemon requires and the hostname it allows, so a
+    /// disagreement with the vhost would refuse every token or 403 every
+    /// request.
+    #[test]
+    fn an_issuer_tells_each_pod_its_issuer_and_its_own_resource_url() {
+        let open = agent_door_config();
+        let shut = test_config();
+
+        for label in ["alice", "bob"] {
+            let with = daemon_env_of(&open, label);
+            let without = daemon_env_of(&shut, label);
+            assert_eq!(with.len(), without.len() + 2, "exactly two new variables");
+            assert_eq!(with[..without.len()], without[..], "nothing else moved");
+
+            let added: Vec<(&str, Option<&str>)> = with[without.len()..]
+                .iter()
+                .map(|e| (e.name.as_str(), e.value.as_deref()))
+                .collect();
+            let public_url = format!("https://{label}.passband.email/mcp");
+            assert_eq!(
+                added,
+                vec![
+                    (
+                        "SQUELCH_MCP_OAUTH_ISSUER",
+                        Some("https://example.authkit.app")
+                    ),
+                    ("SQUELCH_MCP_PUBLIC_URL", Some(public_url.as_str())),
+                ]
+            );
+            // Plain values, never references: an issuer and a public URL are
+            // published in this tenant's own metadata document.
+            assert!(with[without.len()..].iter().all(|e| e.value_from.is_none()));
+
+            // The host in the resource URL IS the Ingress host.
+            let n = TenantName::parse(label).unwrap();
+            let ingress_host = ingress(&open, &n).spec.unwrap().rules.unwrap()[0]
+                .host
+                .clone()
+                .unwrap();
+            let url_host = public_url
+                .strip_prefix("https://")
+                .and_then(|rest| rest.strip_suffix("/mcp"))
+                .unwrap();
+            assert_eq!(url_host, ingress_host);
+            // And the path is the one the Ingress publishes.
+            assert!(
+                ingress_paths(&open, label)
+                    .iter()
+                    .any(|(p, t)| p == "/mcp" && t == "Prefix")
+            );
+        }
+    }
+
+    /// INVARIANT I5, in both states: the warden never renders
+    /// `SQUELCH_MCP_ALLOWED_HOSTS`. A daemon adds its public hostname to the
+    /// rmcp Host allow-list itself, and only in OAuth mode, so an image that
+    /// predates OAuth behind a published `/mcp` answers 403 rather than serving
+    /// mail unauthenticated. Checked on the whole serialized Deployment, not
+    /// just the daemon's env list, so no container, annotation or future field
+    /// can carry it either.
+    #[test]
+    fn the_warden_never_renders_the_mcp_host_allow_list() {
+        for (state, c) in [("unset", test_config()), ("set", agent_door_config())] {
+            let rendered = serde_json::to_string(&tenant_deployment(&c)).unwrap();
+            assert!(
+                !rendered.contains("SQUELCH_MCP_ALLOWED_HOSTS"),
+                "the issuer-{state} render carries SQUELCH_MCP_ALLOWED_HOSTS"
+            );
+            assert!(
+                daemon_env_of(&c, "alice")
+                    .iter()
+                    .all(|e| e.name != "SQUELCH_MCP_ALLOWED_HOSTS")
             );
         }
     }

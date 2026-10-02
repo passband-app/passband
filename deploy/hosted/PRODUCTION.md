@@ -1535,10 +1535,13 @@ drill: run it against a throwaway tenant first if one is to hand.
   runtime does not drop when the connection goes; it changes the wire shape and
   wants its own design pass. Until then, nothing about the warden's job should
   depend on whether an operator's terminal is still listening, and it does.
-- **`/mcp` bearer auth** — the hosted MVP routes around it (tenant Ingresses
-  publish `/client`, `/console` and `/t` only). Real auth is required before the
-  agent door is ever served from the internet, and until then the console's MCP
-  section says so instead of offering a URL that 404s.
+- **`/mcp` auth** is built (OAuth through WorkOS AuthKit, 2026-10-01) and NOT
+  turned on in this install. Tenant Ingresses still publish `/client`,
+  `/console` and `/t` only until `SQUELCH_WARDEN_MCP_OAUTH_ISSUER` is set, and
+  setting it has prerequisites: the daemon image that understands the new env
+  rolled first, the control plane holding a WorkOS API key, and the pre-publish
+  checklist in `SETUP.md` verified against the real WorkOS environment. Record
+  the date and the verified facts here when it is turned on.
 - **Google verification + CASA Tier 2** — the restricted-scope cap is 100 users.
   This gates user 101 and has the longest lead time of anything on this list.
   The submission, its blockers, and the assessment scope are

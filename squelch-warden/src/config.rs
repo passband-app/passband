@@ -364,6 +364,25 @@ pub struct Config {
     /// unless the warden renders it. `0` pins the session in memory, which is
     /// the off switch if the reaper ever misbehaves in production.
     pub embed_idle_unload_secs: Option<u64>,
+    /// The OAuth authorization server tenant daemons trust for the AGENT door,
+    /// from `SQUELCH_WARDEN_MCP_OAUTH_ISSUER`. Absent, the agent door stays
+    /// unpublished and the render is byte-identical to a warden that never
+    /// heard of it: no `SQUELCH_MCP_*` variable in any pod, no `/mcp` path on
+    /// any Ingress.
+    ///
+    /// Present, it does two things that only make sense together. Every tenant
+    /// pod is told its issuer and its own public resource URL
+    /// (`SQUELCH_MCP_OAUTH_ISSUER`, `SQUELCH_MCP_PUBLIC_URL`), which is what
+    /// puts the daemon's `/mcp` into OAuth mode; and every tenant Ingress
+    /// publishes the agent door ([`crate::objects::AGENT_DOOR_PREFIXES`]). One
+    /// knob for both, so an operator cannot publish a door without also telling
+    /// the daemon behind it to lock it.
+    ///
+    /// An ORIGIN, always https: it is the `iss` every agent token is checked
+    /// against, and the place agents fetch the authorization server's metadata
+    /// from. See `deploy/hosted/SETUP.md`, "Publishing the agent door", for the
+    /// order this may be turned on in.
+    pub mcp_oauth_issuer: Option<String>,
 }
 
 impl std::fmt::Debug for Config {
@@ -402,6 +421,7 @@ impl std::fmt::Debug for Config {
             .field("llm_stage1_daily_cap", &self.llm_stage1_daily_cap)
             .field("llm_stage2_daily_cap", &self.llm_stage2_daily_cap)
             .field("embed_idle_unload_secs", &self.embed_idle_unload_secs)
+            .field("mcp_oauth_issuer", &self.mcp_oauth_issuer)
             .finish()
     }
 }
@@ -717,6 +737,11 @@ impl Config {
             }
         };
 
+        let mcp_oauth_issuer = match var(get, "SQUELCH_WARDEN_MCP_OAUTH_ISSUER") {
+            None => None,
+            Some(raw) => Some(canonical_mcp_oauth_issuer(&raw)?),
+        };
+
         // Tombstone for the shared-key bridge: the var no longer exists, and a
         // manifest that still sets it belongs to an operator who believes the
         // shared Secret still feeds new tenants. Same posture as the inert
@@ -797,6 +822,7 @@ impl Config {
             llm_stage1_daily_cap,
             llm_stage2_daily_cap,
             embed_idle_unload_secs,
+            mcp_oauth_issuer,
         })
     }
 
@@ -989,6 +1015,76 @@ fn canonical_llm_base_url(raw: &str) -> Result<String, ConfigError> {
     Ok(url.to_string())
 }
 
+/// Validate the agent door's OAuth issuer: `https://`, a host, an optional
+/// port, and NOTHING after them.
+///
+/// It lands verbatim in every tenant pod as `SQUELCH_MCP_OAUTH_ISSUER`, where
+/// it is two things at once: the value every agent token's `iss` must equal,
+/// and the authorization server the daemon's protected-resource metadata
+/// sends agents to. Both fail silently when the value is wrong, which is why
+/// this is strict and a refusal to boot:
+///
+/// - **https only.** Agents fetch the authorization server's metadata and the
+///   daemon fetches its signing keys from this origin. Over plain http either
+///   fetch can be answered by anyone on the path, and a forged JWKS is a forged
+///   token for every mailbox in the fleet.
+/// - **an origin, no path.** AuthKit issuers are bare origins
+///   (`https://<name>.authkit.app`). A value with a path on it is almost always
+///   a pasted endpoint (`.../oauth2/jwks`, `.../.well-known/...`), and since the
+///   daemon compares `iss` as an exact string, it would refuse every token
+///   while the door looked perfectly configured.
+/// - **no query, fragment, userinfo or whitespace**, and a lowercase host, for
+///   the same exact-compare reason: a host typed in capitals is the same server
+///   and a different string.
+///
+/// One trailing `/` is trimmed, matching the daemon's own comparison rule, so
+/// two operator spellings of one issuer are one string.
+fn canonical_mcp_oauth_issuer(raw: &str) -> Result<String, ConfigError> {
+    const NAME: &str = "SQUELCH_WARDEN_MCP_OAUTH_ISSUER";
+    let url = raw.trim();
+    if url.len() > 512 {
+        return Err(ConfigError::invalid(format!(
+            "{NAME} is longer than 512 characters"
+        )));
+    }
+    let Some(authority) = url.strip_prefix("https://") else {
+        return Err(ConfigError::invalid(format!(
+            "{NAME} must be an https:// URL (e.g. https://example.authkit.app); it is the issuer every agent token is checked against, and its keys must never be fetched in the clear"
+        )));
+    };
+    // The one trailing slash, trimmed AFTER the scheme is known, so `https://`
+    // on its own is a missing host rather than a missing scheme.
+    let authority = authority.strip_suffix('/').unwrap_or(authority);
+    if authority.is_empty() || authority.starts_with([':', '/', '?', '#']) {
+        return Err(ConfigError::invalid(format!("{NAME} has no host")));
+    }
+    if authority.contains(['/', '?', '#']) {
+        return Err(ConfigError::invalid(format!(
+            "{NAME} must be an issuer origin with no path, query or fragment (e.g. https://example.authkit.app)"
+        )));
+    }
+    let (host, port) = match authority.split_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (authority, None),
+    };
+    let host_ok = !host.is_empty()
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'.'))
+        && !host.starts_with(['.', '-'])
+        && !host.ends_with(['.', '-'])
+        && !host.contains("..");
+    let port_ok = port.is_none_or(|p| {
+        !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) && p.parse::<u16>().is_ok()
+    });
+    if !host_ok || !port_ok {
+        return Err(ConfigError::invalid(format!(
+            "{NAME} is not a valid issuer: a lowercase host name and an optional port, nothing else (e.g. https://example.authkit.app)"
+        )));
+    }
+    Ok(format!("https://{authority}"))
+}
+
 /// An optional free-form value (a model id, an embedding `model_code`):
 /// printable, no whitespace, no shell metacharacters, because it becomes an
 /// environment value in every tenant pod.
@@ -1110,6 +1206,8 @@ mod tests {
         assert!(c.llm_stage2_model.is_none());
         assert!(c.llm_stage1_daily_cap.is_none());
         assert!(c.llm_stage2_daily_cap.is_none());
+        // The agent door stays unpublished unless the operator turns it on.
+        assert!(c.mcp_oauth_issuer.is_none());
     }
 
     /// The boot-refusal table. Every one of these is a value that would
@@ -1307,6 +1405,98 @@ mod tests {
                 .console_sso_url
                 .as_deref(),
             Some("http://localhost:8853")
+        );
+    }
+
+    /// The agent door's issuer: an https origin, or the door stays shut. Every
+    /// refusal here is a value that would otherwise boot, render into every
+    /// pod, and make every agent token fail an exact `iss` compare (or, for
+    /// http, make the signing keys forgeable on the wire).
+    #[test]
+    fn the_mcp_oauth_issuer_is_an_https_origin_or_nothing() {
+        const KEY: &str = "SQUELCH_WARDEN_MCP_OAUTH_ISSUER";
+        let issuer = |value: &str| with(KEY, value).map(|c| c.mcp_oauth_issuer);
+
+        // Accepted, trimmed, and one trailing slash removed: the daemon
+        // compares `iss` with one trailing slash trimmed, so the two spellings
+        // are one issuer and should be one string in every pod.
+        for (value, want) in [
+            ("https://example.authkit.app", "https://example.authkit.app"),
+            (
+                " https://example.authkit.app/ ",
+                "https://example.authkit.app",
+            ),
+            (
+                "https://auth.passband.app:8443",
+                "https://auth.passband.app:8443",
+            ),
+        ] {
+            assert_eq!(issuer(value).unwrap().as_deref(), Some(want), "`{value}`");
+        }
+
+        // Blank is unset, not a refusal: the door stays shut.
+        assert_eq!(issuer("").unwrap(), None);
+        assert_eq!(issuer("   ").unwrap(), None);
+        assert_eq!(without(KEY).unwrap().mcp_oauth_issuer, None);
+
+        // Each refusal is checked for the SENTENCE it produces, not just for
+        // being an error: several of these would also trip the host-shape
+        // check, and an operator told "not a valid issuer" for a pasted JWKS
+        // URL is an operator left guessing which part was wrong.
+        const NOT_HTTPS: &str = "must be an https:// URL";
+        const NO_HOST: &str = "has no host";
+        const NOT_ORIGIN: &str = "no path, query or fragment";
+        const BAD_HOST: &str = "is not a valid issuer";
+        for (value, why) in [
+            ("http://example.authkit.app", NOT_HTTPS),
+            ("example.authkit.app", NOT_HTTPS),
+            ("HTTPS://example.authkit.app", NOT_HTTPS),
+            ("ftp://example.authkit.app", NOT_HTTPS),
+            ("https://", NO_HOST),
+            ("https:///", NO_HOST),
+            ("https:///oauth2", NO_HOST),
+            ("https://:443", NO_HOST),
+            ("https://?x=1", NO_HOST),
+            // A path: a pasted endpoint, never AuthKit's issuer.
+            ("https://example.authkit.app/oauth2/jwks", NOT_ORIGIN),
+            (
+                "https://example.authkit.app/.well-known/oauth-authorization-server",
+                NOT_ORIGIN,
+            ),
+            ("https://example.authkit.app//", NOT_ORIGIN),
+            ("https://example.authkit.app?tenant=alice", NOT_ORIGIN),
+            ("https://example.authkit.app/?x=1", NOT_ORIGIN),
+            ("https://example.authkit.app#frag", NOT_ORIGIN),
+            // Trailing garbage and things that are not a host.
+            ("https://example.authkit.app junk", BAD_HOST),
+            ("https://example\tauthkit.app", BAD_HOST),
+            ("https://user@example.authkit.app", BAD_HOST),
+            ("https://Example.AuthKit.app", BAD_HOST),
+            ("https://example..authkit.app", BAD_HOST),
+            ("https://.example.authkit.app", BAD_HOST),
+            ("https://example.authkit.app:", BAD_HOST),
+            ("https://example.authkit.app:http", BAD_HOST),
+            ("https://example.authkit.app:+443", BAD_HOST),
+            ("https://example.authkit.app:99999", BAD_HOST),
+            ("https://example.authkit.app\"", BAD_HOST),
+        ] {
+            let err = match issuer(value) {
+                Ok(c) => panic!("{KEY}=`{value}` was accepted as {c:?}"),
+                Err(e) => e.to_string(),
+            };
+            assert!(
+                err.contains(why),
+                "{KEY}=`{value}`: `{err}` does not say `{why}`"
+            );
+            assert!(err.contains(KEY), "the refusal names the variable: `{err}`");
+        }
+        // Too long to be anything but a mistake.
+        let long = format!("https://{}.authkit.app", "a".repeat(512));
+        assert!(
+            issuer(&long)
+                .unwrap_err()
+                .to_string()
+                .contains("longer than 512")
         );
     }
 

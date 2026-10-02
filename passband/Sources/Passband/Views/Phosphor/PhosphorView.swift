@@ -18,6 +18,16 @@ import SwiftUI
 @MainActor @Observable
 final class PhosphorScene {
     static let shared = PhosphorScene()
+    /// The iPhone ad's own. A renderer's canvas follows the view drawing it,
+    /// so two views sharing one would resize it every frame and smear each
+    /// other's persistence; the quiet board and the card can be up at once.
+    static let card = PhosphorScene()
+    /// The What's New card's, for the same reason: it lands over the board on
+    /// the first sync, which is exactly when the iPhone ad can be up too.
+    static let whatsNew = PhosphorScene()
+    /// The end of a Space walk's card: it lands over the sitrep, which can be
+    /// showing the quiet board's own scene at the same moment.
+    static let walkDone = PhosphorScene()
 
     private(set) var renderer: PhosphorRenderer?
     private(set) var isUnavailable = false
@@ -39,10 +49,10 @@ final class PhosphorScene {
 struct PhosphorBackdrop: View {
     var params = PhosphorParams()
     var paused = false
+    var scene: PhosphorScene = .shared
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
-    private var scene: PhosphorScene { .shared }
 
     /// The top of the scene's sky (or its paper), shown until the renderer
     /// is ready so the scene fades up out of itself rather than the page.

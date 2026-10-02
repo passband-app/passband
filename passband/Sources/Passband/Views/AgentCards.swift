@@ -22,19 +22,19 @@ struct EmailCardList: View {
     let onOpen: (String) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: Space.s6) {
             ForEach(cards) { card in
                 Button {
                     onOpen(card.threadId)
                 } label: {
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack(spacing: 7) {
+                    VStack(alignment: .leading, spacing: Space.scaled(3)) {
+                        HStack(spacing: Space.scaled(7)) {
                             Avatar(sender: card.sender, size: 18)
                             Text(card.sender)
-                                .font(.system(size: 12, weight: .semibold))
+                                .font(Typo.ui(12, weight: .semibold))
                                 .foregroundStyle(Palette.ink)
                                 .lineLimit(1)
-                            Spacer(minLength: 6)
+                            Spacer(minLength: Space.s6)
                             Text(Fmt.dateTime(card.date))
                                 .font(Typo.num(10))
                                 .foregroundStyle(Palette.inkFaintest)
@@ -51,7 +51,7 @@ struct EmailCardList: View {
                                 .multilineTextAlignment(.leading)
                         }
                     }
-                    .padding(10)
+                    .padding(Space.s10)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
                 }
@@ -72,27 +72,27 @@ struct ToolChipRow: View {
     let tool: ToolActivity
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: Space.s6) {
             Image(systemName: AgentTools.Tool(rawValue: tool.name)?.symbol ?? "wrench")
-                .font(.system(size: 10, weight: .semibold))
+                .font(Typo.ui(10, weight: .semibold))
                 .foregroundStyle(Palette.inkFaint)
-                .frame(width: 12)
+                .frame(width: Typo.size(12))
             Text(tool.summary)
                 .font(Typo.micro)
                 .foregroundStyle(Palette.inkFaint)
                 .lineLimit(1)
                 .truncationMode(.tail)
-            Spacer(minLength: 4)
+            Spacer(minLength: Space.s4)
             switch tool.state {
             case .running:
                 ProgressView().controlSize(.mini)
             case .ok:
                 Image(systemName: "checkmark")
-                    .font(.system(size: 9, weight: .bold))
+                    .font(Typo.ui(9, weight: .bold))
                     .foregroundStyle(Palette.positive.opacity(0.8))
             case .failed:
                 Image(systemName: "xmark")
-                    .font(.system(size: 9, weight: .bold))
+                    .font(Typo.ui(9, weight: .bold))
                     .foregroundStyle(Palette.danger)
             }
         }

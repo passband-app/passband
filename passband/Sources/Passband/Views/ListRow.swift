@@ -22,8 +22,12 @@ struct ListRow<Content: View>: View {
     /// The selection tint — semantic per list (auth is `lock`, browse is the
     /// tier colour, triage targets are the axis colour).
     var tint: Color = Palette.accent
-    var hPadding: CGFloat = 11
-    var vPadding: CGFloat = 6
+    /// Compact values on the density curve. The defaults are tokens evaluated
+    /// at the call site, so a caller that passes its own padding passes a
+    /// token too (`Space.scaled(7)`); this view never scales what it is given,
+    /// which is what keeps a migrated caller from being scaled twice.
+    var hPadding: CGFloat
+    var vPadding: CGFloat
     /// Whether the pointer paints a hover wash. Off for lists whose selection
     /// already follows the pointer (a second wash under the first reads as a
     /// smear) — and with it off, `hovering` is never written, so a mouse sweep
@@ -44,8 +48,8 @@ struct ListRow<Content: View>: View {
         selected: Bool,
         cornerRadius: CGFloat = 9,
         tint: Color = Palette.accent,
-        hPadding: CGFloat = 11,
-        vPadding: CGFloat = 6,
+        hPadding: CGFloat = Space.scaled(11),
+        vPadding: CGFloat = Space.s6,
         hoverFill: Bool = true,
         onHoverChange: ((Bool) -> Void)? = nil,
         action: @escaping () -> Void,

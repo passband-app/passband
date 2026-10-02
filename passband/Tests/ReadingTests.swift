@@ -24,6 +24,10 @@ struct ReadingTests {
         precondition(pruned.map(\.address) == ["shop@example.com", "friend@example.com"],
             "Prune re-sorts the way the next poll will")
         precondition(Reading.derive(updates: [], rules: []).isEmpty, "Empty canonical membership clears cards")
+        // No silent cap: the zone folds instead, and its count is the real one.
+        let many = (0..<40).map { row(100 + $0, sender: "s\($0)@news.com", reason: "Sale",
+            date: "2026-09-01T00:00:00Z") }
+        precondition(Reading.derive(updates: many, rules: []).count == 40, "derive keeps every sender")
 
         // Pinned so every essay below is inside the content window.
         let pinned = Fmt.date("2026-09-11T00:00:00Z")!
@@ -85,6 +89,37 @@ struct ReadingTests {
         precondition(aged.map(\.address) == ["new@essays.com", "deals@store.com", "old@essays.com"],
             "Fresh content first, stale content sorts by date")
         precondition(aged.map(\.isContent) == [true, false, false], "Stale content loses the tint too")
-        print("ok: 20 canonical Reading checks passed")
+
+        // The card is titled from the feed's `from_name`. The feed did not
+        // carry one, so a mailer whose local-part is a hash was titled with
+        // the hash. The second item is an OLDER DAEMON's: no key at all, and
+        // it must still decode and fall back to the address.
+        let feed = try JSONDecoder().decode(AgentFeed.self, from: Data("""
+            {"version":2,"ranked_at":"2026-09-30T12:00:00Z","items":[
+              {"message_id":7,"thread_id":"mopar","from_addr":"21ebc25a592052689288153b3e3fb858@emails.revolutionparts.com",
+               "from_name":"Mopar.com National eStore",
+               "subject":"Fall Into Shipping Savings","received_at":"2026-09-30T11:00:00Z","score":1,
+               "decision":{"kinds":["promotional"],"destinations":["reading"],"summary":"New gear","reason":"Bulk"},
+               "attention":{"show_in_fye":false,"state":"informational","summary":"",
+                 "factors":{"urgency":0,"action_need":0,"personal_relevance":0,"importance":0,"attention_at":null}}},
+              {"message_id":8,"thread_id":"old","from_addr":"offers@cmail.dickblick.com",
+               "subject":"Sale","received_at":"2026-09-29T11:00:00Z","score":1,
+               "decision":{"kinds":["promotional"],"destinations":["reading"],"summary":"Sale","reason":"Bulk"},
+               "attention":{"show_in_fye":false,"state":"informational","summary":"",
+                 "factors":{"urgency":0,"action_need":0,"personal_relevance":0,"importance":0,"attention_at":null}}}
+            ]}
+            """.utf8))
+        let named = Reading.derive(updates: feed.items.map(\.readingRow), rules: [])
+        precondition(named.count == 2)
+        precondition(
+            SenderID.displayName(named[0].sender) == "Mopar.com National eStore",
+            "A feed card is titled with the sender's display name, not its address")
+        precondition(
+            named[0].address == "21ebc25a592052689288153b3e3fb858@emails.revolutionparts.com",
+            "The name never becomes the grouping key")
+        precondition(
+            named[1].sender == "offers@cmail.dickblick.com",
+            "A feed with no from_name still decodes and falls back to the address")
+        print("ok: 24 canonical Reading checks passed")
     }
 }

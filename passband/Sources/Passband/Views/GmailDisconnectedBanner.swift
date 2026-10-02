@@ -32,13 +32,13 @@ struct GmailDisconnectedBanner: View {
     @Environment(AppStore.self) private var store
 
     var body: some View {
-        HStack(alignment: .top, spacing: 11) {
+        HStack(alignment: .top, spacing: Space.scaled(11)) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(Palette.warn)
-                .font(.system(size: 14, weight: .semibold))
+                .font(Typo.ui(14, weight: .semibold))
                 .padding(.top, 1)
 
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: Space.scaled(3)) {
                 Text("Passband cannot read your mail")
                     .font(Typo.zoneTitle)
                     .foregroundStyle(Palette.ink)
@@ -54,15 +54,15 @@ struct GmailDisconnectedBanner: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            Spacer(minLength: 8)
+            Spacer(minLength: Space.s8)
 
             if store.gmailReconnectURL != nil {
                 Button("Reconnect") { store.askReconnect() }
                     .controlSize(.small)
             }
         }
-        .padding(.horizontal, 13)
-        .padding(.vertical, 10)
+        .padding(.horizontal, Space.scaled(13))
+        .padding(.vertical, Space.s10)
         .background(Palette.warnSoft, in: RoundedRectangle(cornerRadius: 9))
         .overlay(
             RoundedRectangle(cornerRadius: 9)
@@ -105,23 +105,23 @@ struct ReconnectAccountPrompt: View {
         OverlayScrim(onDismiss: { store.cancelReconnectAsk() }) {
             ModalCard(width: 400) {
                 Text("Be sure to select this email address")
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(Typo.ui(14, weight: .semibold))
                     .foregroundStyle(Palette.ink)
                 // Email-derived, so plain Text and never markup.
                 Text(verbatim: ask.email)
-                    .font(.system(size: 13, weight: .medium, design: .monospaced))
+                    .font(Typo.mono(13, weight: .medium))
                     .foregroundStyle(Palette.ink)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
+                    .padding(.horizontal, Space.s10)
+                    .padding(.vertical, Space.scaled(7))
                     .background(Palette.warnSoft, in: RoundedRectangle(cornerRadius: 7))
                 Text("Google will show every account signed in to your browser. Choosing a different one will not reconnect this mailbox.")
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaint)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                HStack(spacing: 8) {
+                HStack(spacing: Space.s8) {
                     Spacer(minLength: 0)
                     Button("Cancel") { store.cancelReconnectAsk() }
                         .buttonStyle(.glass)
@@ -154,13 +154,13 @@ struct SyncStatusBanner: View {
     let status: SyncStatus
 
     var body: some View {
-        HStack(alignment: .top, spacing: 11) {
+        HStack(alignment: .top, spacing: Space.scaled(11)) {
             Image(systemName: symbol)
                 .foregroundStyle(tone)
-                .font(.system(size: 14, weight: .semibold))
+                .font(Typo.ui(14, weight: .semibold))
                 .padding(.top, 1)
 
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: Space.scaled(3)) {
                 Text(status.headline)
                     .font(Typo.zoneTitle)
                     .foregroundStyle(Palette.ink)
@@ -172,16 +172,16 @@ struct SyncStatusBanner: View {
                     .fixedSize(horizontal: false, vertical: true)
                 if prefs.developerMode, let raw = status.rawReason {
                     Text(verbatim: raw)
-                        .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                        .font(Typo.mono(10.5, weight: .medium))
                         .foregroundStyle(Palette.inkFaint)
                         .textSelection(.enabled)
                 }
             }
 
-            Spacer(minLength: 8)
+            Spacer(minLength: Space.s8)
         }
-        .padding(.horizontal, 13)
-        .padding(.vertical, 10)
+        .padding(.horizontal, Space.scaled(13))
+        .padding(.vertical, Space.s10)
         .background(
             status.isWarning ? Palette.warnSoft : Palette.accentSoft,
             in: RoundedRectangle(cornerRadius: 9)

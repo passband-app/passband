@@ -13,7 +13,7 @@ struct LiveInboxSummary: View {
     var body: some View {
         OverlayScrim(onDismiss: { tour.finish() }) {
             ModalCard(width: 640) {
-                VStack(alignment: .leading, spacing: 22) {
+                VStack(alignment: .leading, spacing: Space.scaled(22)) {
                     Label("PASSBAND", systemImage: "sparkles")
                         .font(Typo.sectionLabel)
                         .tracking(2)
@@ -22,10 +22,10 @@ struct LiveInboxSummary: View {
                         .font(Typo.serif(32, weight: .medium))
                         .foregroundStyle(Palette.ink)
                     Text("See what needs your attention. Everything else has a place.")
-                        .font(.system(size: 15))
+                        .font(Typo.ui(15))
                         .foregroundStyle(Palette.inkDim)
                     if let stats = store.stats {
-                        HStack(spacing: 10) {
+                        HStack(spacing: Space.s10) {
                             tile(stats.total, "emails triaged", "tray", Palette.accent)
                             tile(stats.tier_counts["noise"] ?? 0, "noise set aside", "moon", Palette.positive)
                             tile(stats.bands.standing, "need your attention", "eye", Palette.accentInk)
@@ -35,16 +35,16 @@ struct LiveInboxSummary: View {
                         ProgressView("Waiting for your mailbox’s first update…")
                     }
                     Label(progress, systemImage: store.daemonDown ? "wifi.exclamationmark" : "arrow.triangle.2.circlepath")
-                        .font(.system(size: 13))
+                        .font(Typo.ui(13))
                         .foregroundStyle(Palette.inkDim)
                         .fixedSize(horizontal: false, vertical: true)
-                    HStack(spacing: 14) {
+                    HStack(spacing: Space.s14) {
                         Button("Go to my inbox") { tour.finish() }
                             .buttonStyle(.borderedProminent)
                         KeyHint("enter", "let’s begin")
                     }
                 }
-                .padding(14)
+                .padding(Space.s14)
             }
             .opacity(appeared ? 1 : 0)
             .scaleEffect(appeared || reduceMotion ? 1 : 0.96)
@@ -72,15 +72,15 @@ struct LiveInboxSummary: View {
     }
 
     private func tile(_ count: Int, _ label: String, _ symbol: String, _ color: Color) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: Space.s10) {
             Image(systemName: symbol).foregroundStyle(color)
             Text(count.formatted())
                 .font(Typo.num(32, weight: .semibold))
                 .contentTransition(.numericText())
-            Text(label).font(.system(size: 12)).foregroundStyle(Palette.inkDim)
+            Text(label).font(Typo.rowSub).foregroundStyle(Palette.inkDim)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
+        .padding(Space.s14)
         .background(color.opacity(0.07), in: RoundedRectangle(cornerRadius: 14))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(count) \(label)")

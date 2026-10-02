@@ -46,7 +46,7 @@ struct CalendarZone: View {
                             Button {
                                 store.openRecord(thread: c.thread_id, message: c.message_id)
                             } label: {
-                                HStack(spacing: 7) {
+                                HStack(spacing: Space.scaled(7)) {
                                     Text(c.event_title ?? c.organizer ?? "calendar event")
                                         .font(Typo.rowSub)
                                         .foregroundStyle(Palette.inkDim)
@@ -60,8 +60,8 @@ struct CalendarZone: View {
                                         .font(Typo.num(10))
                                         .foregroundStyle(Palette.inkFaintest)
                                 }
-                                .padding(.horizontal, 7)
-                                .padding(.vertical, 5)
+                                .padding(.horizontal, Space.scaled(7))
+                                .padding(.vertical, Space.scaled(5))
                                 .contentShape(Rectangle())
                             }
                             .buttonStyle(RecordRowStyle())
@@ -143,7 +143,7 @@ struct ShipmentsZone: View {
             if rows.isEmpty {
                 EmptyNote("Nothing en route.")
             } else {
-                VStack(spacing: 8) {
+                VStack(spacing: Space.s8) {
                     ForEach(rows) { ShipmentCard(shipment: $0, cursor: cursor) }
                 }
             }
@@ -278,8 +278,8 @@ private struct ShipmentCard: View {
         // every card has, so on its own row it left a lone pill under a lone
         // title; up here most packages are a one-line card and the rest add a
         // line only when they have something else to say.
-        VStack(alignment: .leading, spacing: 7) {
-            HStack(spacing: 7) {
+        VStack(alignment: .leading, spacing: Space.scaled(7)) {
+            HStack(spacing: Space.scaled(7)) {
                 if RehearsalMode.isEnabled, shipment.thread_id == "practice-5" {
                     RehearsalNewsletterLogo(brand: .exfed, size: 18, tile: false)
                 } else if RehearsalMode.isEnabled,
@@ -291,9 +291,9 @@ private struct ShipmentCard: View {
                 // The order line sits UNDER the title in the same column, so
                 // the badge and chip stay beside the name rather than floating
                 // over a separate row.
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: Space.s2) {
                     Text(title)
-                        .font(.system(size: 12, weight: .medium))
+                        .font(Typo.ui(12, weight: .medium))
                         .foregroundStyle(Palette.ink)
                         .lineLimit(2)
                         .help(titleHelp)
@@ -315,7 +315,7 @@ private struct ShipmentCard: View {
             // always-present HStack still spends the VStack's spacing on both
             // sides of nothing.
             if let etaText {
-                HStack(spacing: 7) {
+                HStack(spacing: Space.scaled(7)) {
                     Chip(text: etaText, tone: etaTone)
                     Spacer(minLength: 0)
                 }
@@ -327,14 +327,14 @@ private struct ShipmentCard: View {
                     .lineLimit(1)
             }
         }
-        .padding(9)
+        .padding(Space.scaled(9))
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 11, style: .continuous)
                 .fill(Palette.hairline.opacity(hovering && target != nil ? 0.85 : 0.5))
         )
         .contentShape(Rectangle())
-        .onTapGesture { if let target { store.openThread(target) } }
+        .onTapGesture { if let target { store.openThread(target, from: .sitrepCard) } }
         .warmsThreadOnHover(target)
         .onHover { over in
             hovering = over
@@ -506,7 +506,7 @@ struct BankingZone: View {
                         Button {
                             store.openRecord(thread: r.thread_id, message: r.message_id)
                         } label: {
-                            HStack(spacing: 7) {
+                            HStack(spacing: Space.scaled(7)) {
                                 Text(institutionLabel(r))
                                     .font(Typo.rowSub)
                                     .foregroundStyle(Palette.inkDim)
@@ -525,8 +525,8 @@ struct BankingZone: View {
                                         .fixedSize()
                                 }
                             }
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 5)
+                            .padding(.horizontal, Space.scaled(7))
+                            .padding(.vertical, Space.scaled(5))
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(RecordRowStyle())
@@ -544,7 +544,7 @@ struct BankingZone: View {
                             .font(Typo.rowSub)
                             .foregroundStyle(Palette.inkFaintest)
                             .frame(maxWidth: .infinity)
-                            .padding(.vertical, 5)
+                            .padding(.vertical, Space.scaled(5))
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(RecordRowStyle())
@@ -596,7 +596,7 @@ struct ReceiptsZone: View {
                         Button {
                             store.openRecord(thread: r.thread_id, message: r.message_id)
                         } label: {
-                            HStack(spacing: 7) {
+                            HStack(spacing: Space.scaled(7)) {
                                 Text(SenderCache.resolved(r.senderString).displayName)
                                     .font(Typo.rowSub)
                                     .foregroundStyle(Palette.inkDim)
@@ -609,8 +609,8 @@ struct ReceiptsZone: View {
                                         .foregroundStyle(Palette.positive)
                                 }
                             }
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 5)
+                            .padding(.horizontal, Space.scaled(7))
+                            .padding(.vertical, Space.scaled(5))
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(RecordRowStyle())
@@ -649,12 +649,24 @@ struct ReadingZone: View {
     #if os(iOS)
         // The phone's zone is only ~330pt across, where 190 buys exactly one
         // column and a page of full-width cards; 140 pins it to a two-up.
-        private static let cardMinimum: CGFloat = 140
+        private static var cardMinimum: CGFloat { Space.scaled(140) }
     #else
-        private static let cardMinimum: CGFloat = 190
+        private static var cardMinimum: CGFloat { Space.scaled(190) }
     #endif
     /// Gutter, both axes.
-    private static let gap: CGFloat = 10
+    private static var gap: CGFloat { Space.s10 }
+    /// How many cards stand unfolded. The feed decides what BELONGS; this only
+    /// keeps a busy week from burying the records under a wall of cards. The
+    /// rest sits behind the same quiet expander For-your-eyes uses.
+    #if os(iOS)
+        // The phone draws two-up, so 24 would be twelve rows of cards before
+        // the fold; 8 is four rows, in line with its For-your-eyes fold of 4.
+        private static let collapsed = 8
+    #else
+        private static let collapsed = 24
+    #endif
+
+    @State private var expanded = false
 
     var body: some View {
         // Always on the board, empty or not: a zone that vanishes reads as a
@@ -673,15 +685,36 @@ struct ReadingZone: View {
 
     /// NON-LAZY on purpose: a LazyVGrid rebuilds cards as they cross the
     /// viewport, and each rebuild costs a hero lookup and a fresh `.task`. A
-    /// week of recurring senders is bounded, so holding all of it is cheaper.
+    /// week of recurring senders is bounded (the feed fetches 200 messages, and
+    /// the zone folds at `collapsed`), so holding all of it is cheaper.
     private var grid: some View {
-        AdaptiveGrid(minimum: Self.cardMinimum, spacing: Self.gap) { cards }
+        let overflow = senders.count - Self.collapsed
+        return VStack(alignment: .leading, spacing: 0) {
+            AdaptiveGrid(minimum: Self.cardMinimum, spacing: Self.gap) { cards }
+            if overflow > 0 { expander(overflow) }
+        }
     }
 
     @ViewBuilder private var cards: some View {
-        ForEach(senders) { rs in
+        ForEach(expanded ? senders : Array(senders.prefix(Self.collapsed))) { rs in
             ReadingCard(sender: rs, cursor: cursor)
         }
+    }
+
+    /// For-your-eyes' expander, so the two zones fold the same way.
+    private func expander(_ overflow: Int) -> some View {
+        Button {
+            withAnimation(.smooth(duration: 0.28)) { expanded.toggle() }
+        } label: {
+            Text(expanded ? "show less" : "\(overflow) more")
+                .font(Typo.micro)
+                .foregroundStyle(Palette.inkFaint)
+                .padding(.horizontal, Space.scaled(11))
+                .padding(.vertical, Space.s4)
+        }
+        .buttonStyle(.glass)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.top, Space.s10)
     }
 }
 
@@ -734,15 +767,15 @@ private struct ReadingCard: View {
         Button(action: open) {
             // Hero left as a FIXED square, text right: every card in the grid
             // keeps the same height whether or not its sender ships art.
-            HStack(alignment: .top, spacing: 9) {
+            HStack(alignment: .top, spacing: Space.scaled(9)) {
                 ReadingHero(threadId: sender.latestThreadId, sender: sender.sender)
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 6) {
+                VStack(alignment: .leading, spacing: Space.s6) {
+                    HStack(spacing: Space.s6) {
                         Text(SenderCache.resolved(sender.sender).displayName)
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(Typo.ui(12, weight: .semibold))
                             .foregroundStyle(Palette.ink)
                             .lineLimit(1)
-                        Spacer(minLength: 4)
+                        Spacer(minLength: Space.s4)
                         Text(countLabel)
                             .font(Typo.micro)
                             .foregroundStyle(Palette.inkFaintest)
@@ -759,7 +792,7 @@ private struct ReadingCard: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(9)
+            .padding(Space.scaled(9))
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -789,7 +822,7 @@ private struct ReadingCard: View {
         guard !sender.latestThreadId.isEmpty else { return }
         store.openThread(
             sender.latestThreadId, queue: sender.items,
-            readingMail: true)
+            readingMail: true, from: .reading)
     }
 
 }
@@ -817,6 +850,12 @@ private struct ReadingHero: View {
     /// cropped to exactly this ratio rather than letterboxed whole: a 728x90
     /// masthead fitted into the square becomes an unreadable few-point strip.
     private static let maxAspect: CGFloat = 7
+
+    /// Breathing room around a mark cut out of its banner (`Hero.isMark`). The
+    /// crop is tight to the ink, and a logo touching the square's edges reads
+    /// as a cropped photo of a logo. A fraction of `side` so it holds on the
+    /// phone's smaller square.
+    private static let markInset: CGFloat = side * 0.08
 
     /// Falling back to the cache INSIDE the read keeps a recycled card from
     /// flashing empty: `@State` is gone the moment the card is dropped, the
@@ -862,19 +901,26 @@ private struct ReadingHero: View {
     /// behind it belong to the caller.
     @ViewBuilder
     private func art(_ hero: HeroCache.Hero) -> some View {
+        let inset = hero.isMark ? Self.markInset : 0
         if ultraWide(hero.image) {
             // Past `maxAspect`, draw at the capped ratio and let the ENDS crop:
             // `.fill` overflows on the long axis and `.clipped` keeps the middle,
             // which is where the wordmark lives.
+            let width = Self.side - inset * 2
             Image(platformImage: hero.image)
                 .resizable()
+                .interpolation(.high)
                 .aspectRatio(contentMode: .fill)
-                .frame(width: Self.side, height: Self.side / Self.maxAspect)
+                .frame(width: width, height: width / Self.maxAspect)
                 .clipped()
         } else {
+            // A mark is always drawn WHOLE: it was cut to the ink, so there is
+            // no margin left for a fill-crop to spend.
             Image(platformImage: hero.image)
                 .resizable()
-                .aspectRatio(contentMode: fit(hero.image))
+                .interpolation(.high)
+                .aspectRatio(contentMode: hero.isMark ? .fit : fit(hero.image))
+                .padding(inset)
         }
     }
 
@@ -1016,7 +1062,7 @@ struct EmptyNote: View {
             .font(Typo.micro)
             .foregroundStyle(Palette.inkFaintest)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 2)
+            .padding(.vertical, Space.s2)
     }
 }
 

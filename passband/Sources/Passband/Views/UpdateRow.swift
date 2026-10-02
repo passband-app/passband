@@ -73,12 +73,12 @@ struct UpdateRow: View {
     /// Phone rows are taller: a tap target, and two lines instead of one, so the
     /// same padding would crowd them.
     #if os(macOS)
-        private static let hPadding: CGFloat = 11
-        private static let vPadding: CGFloat = 6
+        private static var hPadding: CGFloat { Space.scaled(11) }
+        private static var vPadding: CGFloat { Space.s6 }
         private static let radius: CGFloat = 8
     #else
-        private static let hPadding: CGFloat = 12
-        private static let vPadding: CGFloat = 9
+        private static var hPadding: CGFloat { Space.s12 }
+        private static var vPadding: CGFloat { Space.scaled(9) }
         private static let radius: CGFloat = 10
     #endif
 
@@ -110,12 +110,12 @@ struct UpdateRow: View {
                 RoundedRectangle(cornerRadius: 1)
                     .fill(Palette.warn)
                     .frame(width: 3 + weight * 3)
-                    .padding(.vertical, 4)
+                    .padding(.vertical, Space.s4)
             } else if selected {
                 RoundedRectangle(cornerRadius: 1)
                     .fill(Palette.accent)
                     .frame(width: 2)
-                    .padding(.vertical, 4)
+                    .padding(.vertical, Space.s4)
             }
         }
     }
@@ -131,22 +131,22 @@ struct UpdateRow: View {
     #if !os(macOS)
         @ViewBuilder
         private func phoneGuts(chip: Fmt.DeadlineChip?) -> some View {
-            HStack(alignment: .top, spacing: 10) {
+            HStack(alignment: .top, spacing: Space.s10) {
                 Avatar(sender: update.senderString, size: 26)
 
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 7) {
+                VStack(alignment: .leading, spacing: Space.scaled(3)) {
+                    HStack(spacing: Space.scaled(7)) {
                         Text(SenderCache.resolved(update.senderString).displayName)
-                            .font(.system(size: 14, weight: .medium))
+                            .font(Typo.ui(14, weight: .medium))
                             .foregroundStyle(Palette.ink)
                             .lineLimit(1)
                         if update.hasAttachments {
                             Image(systemName: "paperclip")
-                                .font(.system(size: 10))
+                                .font(Typo.ui(10))
                                 .foregroundStyle(Palette.inkFaintest)
                                 .accessibilityLabel("has attachments")
                         }
-                        Spacer(minLength: 4)
+                        Spacer(minLength: Space.s4)
                         Text(Fmt.importanceMeter(update.importance))
                             .font(Typo.mono(10))
                             .foregroundStyle(Palette.importanceColor(update.importance))
@@ -165,9 +165,15 @@ struct UpdateRow: View {
                     // A third line only when there is something to put on it —
                     // most rows are two lines and stay two lines.
                     if chip != nil || update.matched_rule != nil || showAgeBadge
-                        || update.hasPendingReminder
+                        || update.hasPendingReminder || update.placement != nil
                     {
-                        HStack(spacing: 7) {
+                        HStack(spacing: Space.scaled(7)) {
+                            // The all-mail list's sitrep zone (the bands never
+                            // carry one), so the phone's category picker hides
+                            // something the rows actually show.
+                            if let zone = SitrepZone(update.placement) {
+                                PlacementPill(zone: zone)
+                            }
                             if update.hasPendingReminder {
                                 Chip(
                                     text: Fmt.remindChip(update.remind_at), tone: Palette.accent,
@@ -202,7 +208,7 @@ struct UpdateRow: View {
     #if os(macOS)
         @ViewBuilder
         private func desktopGuts(chip: Fmt.DeadlineChip?, selected: Bool) -> some View {
-            HStack(spacing: 9) {
+            HStack(spacing: Space.scaled(9)) {
                 Text(Fmt.importanceMeter(update.importance))
                     .font(Typo.mono(10))
                     .foregroundStyle(Palette.importanceColor(update.importance))
@@ -212,15 +218,17 @@ struct UpdateRow: View {
                 Avatar(sender: update.senderString, size: 20)
 
                 Text(SenderCache.resolved(update.senderString).displayName)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(Typo.ui(12, weight: .medium))
                     .foregroundStyle(Palette.ink)
                     .lineLimit(1)
-                    .frame(minWidth: 96, idealWidth: 150, maxWidth: 190, alignment: .leading)
+                    .frame(
+                        minWidth: Typo.measure(96), idealWidth: Typo.measure(150),
+                        maxWidth: Typo.measure(190), alignment: .leading)
                     .layoutPriority(2)
 
                 if update.hasAttachments {
                     Image(systemName: "paperclip")
-                        .font(.system(size: 10))
+                        .font(Typo.ui(10))
                         .foregroundStyle(Palette.inkFaintest)
                         .accessibilityLabel("has attachments")
                 }
@@ -230,7 +238,7 @@ struct UpdateRow: View {
                     .truncationMode(.tail)
                     .frame(maxWidth: .infinity, alignment: .leading)
 
-                HStack(spacing: 7) {
+                HStack(spacing: Space.scaled(7)) {
                     if update.matched_rule != nil {
                         Text("·rule")
                             .font(Typo.micro)
@@ -259,7 +267,7 @@ struct UpdateRow: View {
                         Text(Fmt.relAge(update.surfaced_at))
                             .font(Typo.num(10))
                             .foregroundStyle(Palette.inkFaintest)
-                            .frame(width: 30, alignment: .trailing)
+                            .frame(width: MeterSlot.width(), alignment: .trailing)
                     }
                     if selected {
                         Text(verbHint)

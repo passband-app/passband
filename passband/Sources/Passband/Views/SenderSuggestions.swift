@@ -44,12 +44,12 @@ struct SenderSuggestions: View {
                 Button {
                     accept(hit)
                 } label: {
-                    HStack(spacing: 8) {
+                    HStack(spacing: Space.s8) {
                         // Sender strings are email-derived: rendered as Text
                         // only, never as markup.
                         if let name = hit.display_name, !name.isEmpty {
                             Text(name)
-                                .font(.system(size: 11, weight: .medium))
+                                .font(Typo.ui(11, weight: .medium))
                                 .foregroundStyle(Palette.ink)
                                 .lineLimit(1)
                         }
@@ -57,13 +57,13 @@ struct SenderSuggestions: View {
                             .font(Typo.mono(11))
                             .foregroundStyle(i == index ? Palette.ink : Palette.inkDim)
                             .lineLimit(1)
-                        Spacer(minLength: 8)
+                        Spacer(minLength: Space.s8)
                         Text("\(hit.msg_count)×")
                             .font(Typo.num(10))
                             .foregroundStyle(Palette.inkFaintest)
                     }
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 5)
+                    .padding(.horizontal, Space.scaled(9))
+                    .padding(.vertical, Space.scaled(5))
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
                 }
@@ -74,7 +74,7 @@ struct SenderSuggestions: View {
                 )
             }
             if !hits.isEmpty {
-                HStack(spacing: 4) {
+                HStack(spacing: Space.s4) {
                     Kbd("↑↓")
                     Text("pick ·").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
                     Kbd("enter")
@@ -82,11 +82,11 @@ struct SenderSuggestions: View {
                     Kbd("esc")
                     Text("dismiss").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
                 }
-                .padding(.horizontal, 9)
-                .padding(.top, 4)
+                .padding(.horizontal, Space.scaled(9))
+                .padding(.top, Space.s4)
             }
         }
-        .padding(hits.isEmpty ? 0 : 4)
+        .padding(hits.isEmpty ? 0 : Space.s4)
         .background(
             RoundedRectangle(cornerRadius: 9, style: .continuous)
                 .fill(hits.isEmpty ? .clear : Palette.canvas.opacity(0.85))

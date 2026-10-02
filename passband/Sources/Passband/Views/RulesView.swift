@@ -68,8 +68,8 @@ struct RulesView: View {
             } else if let error = rulesState.error {
                 BandNote(error)
             } else if rules.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 4) {
+                VStack(alignment: .leading, spacing: Space.s6) {
+                    HStack(spacing: Space.s4) {
                         Text("no rules yet. press").font(Typo.rowSub)
                         Kbd("n")
                         Text("to create one, or").font(Typo.rowSub)
@@ -78,8 +78,8 @@ struct RulesView: View {
                     }
                     .foregroundStyle(Palette.inkFaintest)
                 }
-                .padding(.horizontal, 22)
-                .padding(.vertical, 24)
+                .padding(.horizontal, Space.scaled(22))
+                .padding(.vertical, Space.s24)
                 .frame(maxWidth: .infinity, alignment: .leading)
             } else {
                 ScrollViewReader { proxy in
@@ -107,8 +107,8 @@ struct RulesView: View {
                                 }
                             }
                         }
-                        .padding(.horizontal, 18)
-                        .padding(.bottom, 10)
+                        .padding(.horizontal, Space.scaled(18))
+                        .padding(.bottom, Space.s10)
                     }
                     .onChange(of: index) { _, i in
                         guard let rule = ordered[safe: i] else { return }
@@ -238,9 +238,9 @@ private struct RuleSectionHeader: View {
     let count: Int
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: Space.s8) {
             Text(disposition.label.uppercased())
-                .font(.system(size: 10, weight: .semibold))
+                .font(Typo.ui(10, weight: .semibold))
                 .tracking(0.9)
                 .foregroundStyle(disposition.tone)
             Text("\(count)")
@@ -250,9 +250,9 @@ private struct RuleSectionHeader: View {
                 .fill(Palette.hairline)
                 .frame(height: 1)
         }
-        .padding(.horizontal, 11)
-        .padding(.top, 18)
-        .padding(.bottom, 6)
+        .padding(.horizontal, Space.scaled(11))
+        .padding(.top, Space.scaled(18))
+        .padding(.bottom, Space.s6)
         .help(disposition.hint)
     }
 }
@@ -265,7 +265,7 @@ private struct DomainHeaderRow: View {
     let group: RuleGrouping.DomainGroup
 
     var body: some View {
-        HStack(spacing: 9) {
+        HStack(spacing: Space.scaled(9)) {
             RuleIcon(domain: group.domain, eligible: group.iconEligible, size: 15)
             Text(group.domain)
                 .font(Typo.mono(11))
@@ -275,9 +275,9 @@ private struct DomainHeaderRow: View {
                 .foregroundStyle(Palette.inkFaintest)
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 11)
-        .padding(.top, 7)
-        .padding(.bottom, 2)
+        .padding(.horizontal, Space.scaled(11))
+        .padding(.top, Space.scaled(7))
+        .padding(.bottom, Space.s2)
     }
 }
 
@@ -313,16 +313,16 @@ private struct RuleRow: View {
 
     var body: some View {
         ListRow(
-            selected: selected, cornerRadius: 8, hPadding: 11, vPadding: 7, action: onOpen
+            selected: selected, cornerRadius: 8, hPadding: Space.scaled(11), vPadding: Space.scaled(7), action: onOpen
         ) { selected, _ in
-            HStack(spacing: 9) {
+            HStack(spacing: Space.scaled(9)) {
                 if row.nested {
                     // Indented under its domain header, which already carries
                     // the icon. The rail is what makes the nesting readable at
                     // a glance instead of just a gap.
                     Rectangle()
                         .fill(Palette.hairline)
-                        .frame(width: 1, height: 13)
+                        .frame(width: 1, height: Space.scaled(13))
                         .padding(.leading, 7)
                         .padding(.trailing, 6)
                 } else if RuleGrouping.isWildcard(rule.match_pattern) {
@@ -336,7 +336,7 @@ private struct RuleRow: View {
                     .foregroundStyle(Palette.ink)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                    .frame(width: row.nested ? 196 : 218, alignment: .leading)
+                    .frame(width: Space.scaled(row.nested ? 196 : 218), alignment: .leading)
                     .help(rule.match_pattern)
                 Text(rule.want_text.isEmpty ? "·" : rule.want_text)
                     .font(Typo.micro)
@@ -356,7 +356,7 @@ private struct RuleRow: View {
                 Text(Fmt.relAge(rule.updated_at).isEmpty ? "·" : Fmt.relAge(rule.updated_at))
                     .font(Typo.num(10))
                     .foregroundStyle(Palette.inkFaintest)
-                    .frame(width: 34, alignment: .trailing)
+                    .frame(width: Space.scaled(34), alignment: .trailing)
             }
         }
     }
@@ -526,9 +526,9 @@ struct RuleEditor: View {
     private var header: some View {
         if let sender = request.sender {
             let resolved = SenderCache.resolved(sender)
-            HStack(spacing: 10) {
+            HStack(spacing: Space.s10) {
                 Avatar(sender: sender, size: 30)
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: Space.s2) {
                     Text(resolved.displayName)
                         .font(Typo.zoneTitle)
                         .foregroundStyle(Palette.ink)
@@ -542,7 +542,7 @@ struct RuleEditor: View {
                 }
             }
         } else {
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: Space.scaled(3)) {
                 Text(title)
                     .font(Typo.zoneTitle)
                     .foregroundStyle(Palette.ink)
@@ -558,13 +558,13 @@ struct RuleEditor: View {
     /// purpose, since a card that only ever showed "i dont care about X" would
     /// teach people this box is a mute button.
     private var wantField: some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: Space.s8) {
             // The one question on the card, so it reads at body size rather than
             // as a faint field caption.
             Text(wantLabel)
                 .font(Typo.row)
                 .foregroundStyle(Palette.inkDim)
-            HStack(alignment: .top, spacing: 8) {
+            HStack(alignment: .top, spacing: Space.s8) {
                 TextField(
                     "", text: $want,
                     prompt: Text(offered ?? "e.g. only order confirmations, or: always show these"),
@@ -633,8 +633,8 @@ struct RuleEditor: View {
     /// the daemon read the sentence", and a control on the front of the card
     /// would re-ask a question that has already been answered above it.
     private var dispositionOverride: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 4) {
+        VStack(alignment: .leading, spacing: Space.scaled(5)) {
+            HStack(spacing: Space.s4) {
                 Text("disposition").font(Typo.micro).foregroundStyle(Palette.inkFaint)
                 Kbd("tab")
                 Text("to cycle").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
@@ -664,7 +664,7 @@ struct RuleEditor: View {
     /// card never hides what it is about to save.
     @ViewBuilder
     private var advancedSection: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: Space.s6) {
             if !advanced {
                 Text("applies to").foregroundStyle(Palette.inkFaintest)
                 Text(pattern)
@@ -676,12 +676,12 @@ struct RuleEditor: View {
                     Text("· \(disposition.label)").foregroundStyle(Palette.inkFaint)
                 }
             }
-            Spacer(minLength: 8)
+            Spacer(minLength: Space.s8)
             Button(action: toggleAdvanced) {
-                HStack(spacing: 4) {
+                HStack(spacing: Space.s4) {
                     Text("advanced")
                     Image(systemName: "chevron.down")
-                        .font(.system(size: 8, weight: .semibold))
+                        .font(Typo.ui(8, weight: .semibold))
                         .rotationEffect(.degrees(advanced ? 180 : 0))
                 }
                 .foregroundStyle(Palette.inkFaint)
@@ -693,7 +693,7 @@ struct RuleEditor: View {
             #endif
         }
         .font(Typo.micro)
-        .padding(.top, -4)
+        .padding(.top, -Space.s4)
 
         if advanced {
             Field(label: "match pattern") {
@@ -711,7 +711,7 @@ struct RuleEditor: View {
     /// the buttons on the right. A reason save is shut takes the hints' place
     /// rather than stacking another line on the card.
     private var footer: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: Space.s8) {
             if let blocked {
                 Text(blocked)
                     .font(Typo.micro)
@@ -719,7 +719,7 @@ struct RuleEditor: View {
                     .fixedSize(horizontal: false, vertical: true)
             } else {
                 #if os(macOS)
-                    HStack(spacing: 10) {
+                    HStack(spacing: Space.s10) {
                         KeyHint("↵", offered == nil ? "save" : "use suggestion")
                         KeyHint("⌥↵", "new line")
                         // Tab takes a suggestion first; teach whichever it does.
@@ -727,7 +727,7 @@ struct RuleEditor: View {
                     }
                 #endif
             }
-            Spacer(minLength: 8)
+            Spacer(minLength: Space.s8)
             Button("cancel", action: dismiss).buttonStyle(.glass)
             Button(saving ? "saving…" : (mode == .edit ? "update rule" : "save rule")) {
                 Task { await save() }
@@ -736,7 +736,7 @@ struct RuleEditor: View {
             .tint(Palette.accent)
             .disabled(saving || !canSave)
         }
-        .padding(.top, 4)
+        .padding(.top, Space.s4)
     }
 
     /// An empty want on auto is the resting state of a fresh card, not a
@@ -826,14 +826,14 @@ struct RuleEditor: View {
     @ViewBuilder
     private var alreadyInEffect: some View {
         if mode == .tune, let inEffect, !inEffect.isEmpty {
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: Space.s6) {
                 FieldLabel(inEffect.count == 1 ? "current rule" : "current rules")
                 // Sized to its rows up to three; past that it scrolls so a
                 // sender with a pile of rules cannot push the field off the card.
                 // A ScrollView always takes every point it is offered, which is
                 // why it only appears once it has something to scroll.
                 if inEffect.count > 3 {
-                    ScrollView { inEffectRows(inEffect) }.frame(height: 96)
+                    ScrollView { inEffectRows(inEffect) }.frame(height: Space.scaled(96))
                 } else {
                     inEffectRows(inEffect)
                 }
@@ -849,12 +849,12 @@ struct RuleEditor: View {
             ForEach(Array(rules.enumerated()), id: \.element.id) { i, rule in
                 if i > 0 { Hairline() }
                 ListRow(
-                    selected: false, cornerRadius: 8, hPadding: 10, vPadding: 7,
+                    selected: false, cornerRadius: 8, hPadding: Space.s10, vPadding: Space.scaled(7),
                     action: { openExisting(rule) }
                 ) { _, _ in
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    HStack(alignment: .firstTextBaseline, spacing: Space.s8) {
                         Chip(text: rule.disposition.label, tone: rule.disposition.tone, filled: true)
-                        VStack(alignment: .leading, spacing: 2) {
+                        VStack(alignment: .leading, spacing: Space.s2) {
                             Text(rule.want_text.isEmpty ? "no description" : rule.want_text)
                                 .font(Typo.rowSub)
                                 .foregroundStyle(

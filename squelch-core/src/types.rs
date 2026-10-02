@@ -224,6 +224,18 @@ pub struct AttentionUpdate {
     #[serde(flatten)]
     pub update: Update,
     pub status: AttentionStatus,
+    /// When the mail ARRIVED, which is what a mail list dates and sorts by.
+    /// `surfaced_at` is when Passband first listed it, and for anything that
+    /// came in through a backfill the two are days apart. Optional on the wire
+    /// so an older client's decode and an older daemon's rows both still work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub received_at: Option<DateTime<Utc>>,
+    /// Where the sitrep files this mail: `eyes`, `auth`, `calendar`,
+    /// `shipments`, `billing`, `receipts`, `reading` or `noise`. A label for
+    /// the mail list, so a row says which zone holds it; absent when the mail
+    /// has no triage decision yet, and on the legacy band listing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<String>,
     pub surfaced_at: Option<DateTime<Utc>>,
     pub resolved_at: Option<DateTime<Utc>>,
     /// A PENDING reminder: when the user asked to see this again, `None` when
@@ -933,6 +945,18 @@ pub struct UnsubscribeRecord {
     /// User's resolution of a repeat offender: "blocked" | "dismissed", or
     /// `None` while the request is still outstanding.
     pub resolution: Option<String>,
+    /// Where an AUTOMATIC unsubscribe stands: running | done | needs_you |
+    /// opened. `None` on a legacy row, where the client opened the link itself
+    /// and there was never a job to report on.
+    pub status: Option<String>,
+    /// The page to send the user to when `status` is `needs_you`: the ORIGINAL
+    /// link, never a post-redirect hop (see `unsub_job`). `None` otherwise.
+    pub status_url: Option<String>,
+    /// Why a job needs the user: choose_topics | needs_browser | unclear |
+    /// link_error. `None` unless `status` is `needs_you`.
+    pub status_reason: Option<String>,
+    /// When `status` last changed.
+    pub status_at: Option<DateTime<Utc>>,
 }
 
 str_enum! {

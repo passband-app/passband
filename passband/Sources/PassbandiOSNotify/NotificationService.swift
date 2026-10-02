@@ -135,9 +135,9 @@ final class NotificationService: UNNotificationServiceExtension {
         return mutable
     }
 
-    /// How many obligations are overdue or due by end of today, for the mailbox
-    /// this push came from — the same `NeedToday.count` the app's own sitrep
-    /// headline is built from, over the same standing band.
+    /// How many rows the For-your-eyes band holds, for the mailbox this push
+    /// came from: the same `NeedToday.count` the app's own badge writer uses,
+    /// over the same standing band.
     ///
     /// `peek=true` IS LOAD-BEARING AND NOT AN OPTIMIZATION. A plain read of this
     /// band STAMPS every row it returns as surfaced (see the daemon's updates

@@ -36,7 +36,7 @@ struct ScheduledRow: View {
         // onHover BEFORE onOpen, as SentRow does it: the click moves the
         // cursor to this row first.
         ListRow(
-            selected: selected, cornerRadius: 8, hPadding: 11, vPadding: 6,
+            selected: selected, cornerRadius: 8, hPadding: Space.scaled(11), vPadding: Space.s6,
             onHoverChange: { if $0 { onHover() } },
             action: {
                 onHover()

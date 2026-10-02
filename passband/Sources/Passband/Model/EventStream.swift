@@ -324,6 +324,7 @@ final class EventStream {
         req.httpMethod = "GET"
         req.setValue("Bearer \(settings.apiToken)", forHTTPHeaderField: "Authorization")
         req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        req.identifyClient()
         req.setValue("no-store", forHTTPHeaderField: "Cache-Control")
         req.cachePolicy = .reloadIgnoringLocalCacheData
         req.timeoutInterval = Self.inactivityTimeout

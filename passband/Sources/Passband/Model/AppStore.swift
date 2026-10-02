@@ -673,6 +673,8 @@ final class AppStore {
     /// The reader drives the motion (see ThreadViewer.rewind), as it does
     /// every other one.
     var walkRewind: WalkRewind?
+    /// An undo is being fired; the next waits for it (see `fireUndo`).
+    @ObservationIgnored private var undoBusy = false
     /// True while an email is leaving and ANOTHER is about to take its place
     /// (done + next, remind + next). Only then does RootView lay its
     /// reader-coloured floor under the flight; on a departure that closes the
@@ -713,7 +715,9 @@ final class AppStore {
     /// the reader to play it backwards. Only while the walk is still on the
     /// email the step landed on; anywhere else the undo is just an undo.
     func rewindWalk(_ r: WalkRewind) -> Bool {
-        guard walk != nil, threadId == r.from,
+        // Settled, or the reader could not play it and the tally would drop
+        // for a step that never moved.
+        guard walk != nil, threadId == r.from, threadFlight == .settled, walkRewind == nil,
             threadQueue.contains(where: { $0.thread_id == r.back })
         else { return false }
         switch r.step {
@@ -5633,7 +5637,8 @@ final class AppStore {
             kind: kind, messageId: messageId, label: label, rewind: rewind, revert: revert)
         // Let the guided undo lesson wait for the learner.
         let held =
-            RehearsalMode.isEnabled && tour.active && messageId == 1 && tour.practiceStep == .done
+            RehearsalMode.isEnabled && tour.active && kind == .done && messageId == 1
+            && tour.practiceStep == .done
         if !held { entry.expiresAt = entry.createdAt.addingTimeInterval(Self.undoTTL) }
         undos.append(entry)
         let id = entry.id
@@ -5647,6 +5652,20 @@ final class AppStore {
 
     /// Undo the given (or most recent) queued action.
     func fireUndo(_ id: UUID? = nil) async {
+        // One at a time: `u u` on two walk steps has to walk back the first
+        // before the second can find the reader where its step landed.
+        while undoBusy { try? await Task.sleep(for: .milliseconds(16)) }
+        undoBusy = true
+        defer { undoBusy = false }
+        // A walk step still moving (an E's email in flight, a rewind not yet
+        // played) has not landed, and its own undo may not even exist yet.
+        // Wait for it, so `u` takes the step that just happened and finds the
+        // reader where that step put it. Bounded: a slow daemon holds the
+        // flight, and the undo should not wait on it forever.
+        let deadline = Date().addingTimeInterval(1.5)
+        while walk != nil, walkRewind != nil || threadFlight != .settled, Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(16))
+        }
         let e = epoch
         let entry: PendingUndo?
         if let id {

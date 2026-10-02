@@ -51,8 +51,16 @@ struct Google {
     raw: Option<String>,
     /// A full sync whose pages never end.
     endless: bool,
+    /// Answer this calendar's every events call with this status and body.
+    fail_calendar: HashMap<String, (u16, Value)>,
+    /// Answer this page (by index) of every full read with this status.
+    fail_page: Option<(usize, u16)>,
+    /// Hold this page (by index) of every full read this long before answering.
+    delay_page: Option<(usize, StdDuration)>,
     /// (calendar id, query) of every events request, in order.
     requests: Vec<(String, HashMap<String, String>)>,
+    /// The query of every `calendarList` request, in order.
+    list_requests: Vec<HashMap<String, String>>,
     /// The bearer of every request.
     bearers: Vec<String>,
 }
@@ -66,9 +74,14 @@ fn bearer(headers: &axum::http::HeaderMap) -> String {
         .to_string()
 }
 
-async fn list_route(State(g): State<Fake>, headers: axum::http::HeaderMap) -> Response {
+async fn list_route(
+    State(g): State<Fake>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
+) -> Response {
     let mut g = g.lock().unwrap();
     g.bearers.push(bearer(&headers));
+    g.list_requests.push(q);
     if let Some(status) = g.list_status {
         let body =
             json!({"error": {"code": status, "errors": [{"reason": "insufficientPermissions"}]}});
@@ -83,9 +96,31 @@ async fn events_route(
     Query(q): Query<HashMap<String, String>>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    let mut g = g.lock().unwrap();
-    g.bearers.push(bearer(&headers));
-    g.requests.push((calendar.clone(), q.clone()));
+    // The answer is decided under the lock; a delay is served after it is
+    // dropped, so a held request does not stall the test reading the fake.
+    let (delay, response) = {
+        let mut g = g.lock().unwrap();
+        g.bearers.push(bearer(&headers));
+        g.requests.push((calendar.clone(), q.clone()));
+        let page: usize = q.get("pageToken").and_then(|p| p.parse().ok()).unwrap_or(0);
+        let full = !q.contains_key("syncToken");
+        let delay = g
+            .delay_page
+            .filter(|(n, _)| full && *n == page)
+            .map(|(_, d)| d);
+        (delay, answer(&g, &calendar, &q))
+    };
+    if let Some(delay) = delay {
+        tokio::time::sleep(delay).await;
+    }
+    response
+}
+
+fn answer(g: &Google, calendar: &str, q: &HashMap<String, String>) -> Response {
+    let calendar = calendar.to_string();
+    if let Some((status, body)) = g.fail_calendar.get(&calendar) {
+        return (StatusCode::from_u16(*status).unwrap(), Json(body.clone())).into_response();
+    }
     if let Some((status, body)) = &g.fail {
         return (StatusCode::from_u16(*status).unwrap(), Json(body.clone())).into_response();
     }
@@ -107,6 +142,11 @@ async fn events_route(
         return Json(body).into_response();
     }
     let n: usize = q.get("pageToken").and_then(|p| p.parse().ok()).unwrap_or(0);
+    if let Some((page, status)) = g.fail_page
+        && page == n
+    {
+        return (StatusCode::from_u16(status).unwrap(), Json(json!({}))).into_response();
+    }
     if g.endless {
         body["items"] = json!([timed(
             &format!("endless-{n}"),
@@ -319,8 +359,8 @@ async fn refresh(app: &axum::Router) -> (StatusCode, Value) {
 }
 
 /// A committed triage decision carrying one `event` record, the way
-/// production makes a ghost. Returns nothing: the ghost is found by title.
-fn seed_ghost(store: &SqliteStore, account: i64, gmail: &str, title: &str, start: String) {
+/// production makes a ghost. Returns the message's id.
+fn seed_ghost(store: &SqliteStore, account: i64, gmail: &str, title: &str, start: String) -> i64 {
     let id = store
         .upsert_message(&NewMessage {
             received_at: Utc::now() - Duration::minutes(5),
@@ -393,6 +433,7 @@ fn seed_ghost(store: &SqliteStore, account: i64, gmail: &str, title: &str, start
             .unwrap(),
         AgentCommitOutcome::Applied
     );
+    id
 }
 
 fn sorted_keys(v: &Value) -> Vec<String> {
@@ -431,7 +472,7 @@ async fn a_first_sync_reads_the_window_in_full_and_serves_every_field() {
     eprintln!("calendar, granted and never synced: {}", before["calendar"]);
     assert_eq!(
         before["calendar"],
-        json!({"granted": true, "synced_at": null, "error": null})
+        json!({"granted": true, "synced_at": null, "error": null, "truncated": false})
     );
 
     assert_eq!(w.pass().await, PassOutcome::Synced);
@@ -527,8 +568,13 @@ async fn a_first_sync_reads_the_window_in_full_and_serves_every_field() {
 
     let status = &body["calendar"];
     eprintln!("calendar, synced: {status}");
+    assert_eq!(
+        sorted_keys(status),
+        ["error", "granted", "synced_at", "truncated"]
+    );
     assert_eq!(status["granted"], true);
     assert_eq!(status["error"], Value::Null);
+    assert_eq!(status["truncated"], false);
     let synced = DateTime::parse_from_rfc3339(status["synced_at"].as_str().unwrap()).unwrap();
     assert!((Utc::now() - synced.with_timezone(&Utc)).num_seconds() < 60);
 }
@@ -692,12 +738,13 @@ async fn an_event_that_moves_out_of_the_window_is_removed() {
     assert_eq!(w.pass().await, PassOutcome::Synced);
     assert_eq!(w.pass().await, PassOutcome::Synced);
     assert!(w.events().await.is_empty());
-    let count: Vec<_> = w
+    let (count, _) = w
         .store
         .list_calendar_events(
             w.acct,
             (Utc::now() - Duration::days(60)).fixed_offset(),
             (Utc::now() + Duration::days(700)).fixed_offset(),
+            Utc::now(),
         )
         .unwrap();
     assert!(count.is_empty(), "not kept outside the window either");
@@ -1094,7 +1141,7 @@ async fn without_a_grant_nothing_is_called_or_served_and_the_status_says_so() {
     eprintln!("calendar, not granted: {}", body["calendar"]);
     assert_eq!(
         body["calendar"],
-        json!({"granted": false, "synced_at": null, "error": null})
+        json!({"granted": false, "synced_at": null, "error": null, "truncated": false})
     );
     assert_eq!(body["events"], json!([]));
 }
@@ -1306,12 +1353,16 @@ async fn events_are_scoped_to_their_account() {
             acct,
             (Utc::now() - Duration::days(40)).fixed_offset(),
             (Utc::now() + Duration::days(359)).fixed_offset(),
+            Utc::now(),
         )
     };
-    assert_eq!(wide(w.acct).unwrap().len(), 1);
-    assert!(wide(other).unwrap().is_empty());
+    assert_eq!(wide(w.acct).unwrap().0.len(), 1);
+    assert!(wide(other).unwrap().0.is_empty());
     assert!(w.store.calendar_calendars(other).unwrap().is_empty());
-    assert_eq!(w.store.calendar_status(other).unwrap(), (None, None));
+    assert_eq!(
+        w.store.calendar_status(other).unwrap(),
+        squelch_core::gcal::CalendarStatus::default()
+    );
     // The other account's door, granted with a token of its own, serves none.
     let path = cred_path("isolated-other");
     write_grant(&path, GRANTED);
@@ -1473,11 +1524,14 @@ async fn a_ghost_names_the_real_event_it_duplicates_and_near_misses_name_none() 
 
 // --- the agent door ----------------------------------------------------------
 
-/// Calendar data is human-door only: no agent route serves an event, its
-/// title, organizer or link, and the refresh has no agent twin.
+/// Calendar data is human-door only. After a sync, every `/client/agent/*`
+/// route there is (thread, search, feed, records of every kind, a triage
+/// decision) answers 200 with JSON for real mail, and none of them carries an
+/// event's title, place, organizer, link or calendar name.
 #[tokio::test]
 async fn nothing_from_the_calendar_reaches_the_agent_door() {
-    let w = world("agent", GRANTED).await;
+    let w = world("agent", GRANTED_WITH_LIST).await;
+    let team = "team@group.calendar.google.com";
     let mut event = timed(
         "e",
         "Secret offsite planning",
@@ -1486,52 +1540,604 @@ async fn nothing_from_the_calendar_reaches_the_agent_door() {
     );
     event["organizer"] = json!({"email": "organizer-secret@example.com"});
     event["location"] = json!("Room Zanzibar");
-    w.google().full.insert(PRIMARY.into(), vec![vec![event]]);
+    {
+        let mut g = w.google();
+        g.list = vec![
+            list_entry("me@example.com", "Me", true, true),
+            list_entry(team, "Covert Team Calendar", true, false),
+        ];
+        g.full.insert(PRIMARY.into(), vec![vec![event]]);
+        g.full.insert(
+            team.into(),
+            vec![vec![timed(
+                "t",
+                "Another hidden thing",
+                minute(Utc::now() + Duration::days(3)),
+                30,
+            )]],
+        );
+    }
     assert_eq!(w.pass().await, PassOutcome::Synced);
-    assert_eq!(w.events().await.len(), 1, "the human door has it");
-    // Some mail, so the agent listings have something to serve.
+    assert_eq!(w.events().await.len(), 2, "the human door has them");
+    // Mail the agent routes do serve: a plain message, and a triaged one
+    // (a ghost of its own, so the records and decision routes have content).
     w.store
         .upsert_message(&msg(w.acct, "m1", "t1", "Hello", "planning notes"))
         .unwrap();
-
-    for (method, uri) in [
-        ("GET", "/client/agent/timeline"),
-        ("POST", "/client/agent/timeline/refresh"),
-        ("GET", "/client/agent/calendar"),
-        ("GET", "/client/agent/events"),
-        ("GET", "/mcp/timeline"),
+    let triaged = seed_ghost(
+        &w.store,
+        w.acct,
+        "g1",
+        "Dinner plans",
+        rfc(minute(Utc::now() + Duration::days(4))),
+    );
+    let mut uris = vec![
+        // A triaged thread, the kind the agent door serves.
+        "/client/agent/thread/t-g1".to_string(),
+        "/client/agent/feed".to_string(),
+        "/client/agent/search?q=planning".to_string(),
+        "/client/agent/search?q=offsite".to_string(),
+        "/client/agent/search?q=Zanzibar".to_string(),
+        format!("/client/agent/triage/{triaged}"),
+    ];
+    for kind in [
+        "bills",
+        "receipts",
+        "calendar",
+        "banking",
+        "shipments",
+        "marketing",
     ] {
-        let resp = w.app.clone().oneshot(authed(method, uri)).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{method} {uri}");
+        uris.push(format!("/client/agent/records?kind={kind}"));
     }
-    for uri in [
-        "/client/agent/feed",
-        "/client/agent/records?kind=calendar",
-        "/client/agent/search?q=offsite",
-        "/client/agent/search?q=Zanzibar",
-    ] {
+    for uri in &uris {
         let resp = w.app.clone().oneshot(authed("GET", uri)).await.unwrap();
-        let status = resp.status();
-        let text = String::from_utf8_lossy(
-            &http_body_util::BodyExt::collect(resp.into_body())
-                .await
-                .unwrap()
-                .to_bytes(),
-        )
-        .to_string();
-        assert!(
-            status.is_success() || status.is_client_error(),
-            "{uri}: {status}"
-        );
+        assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+        let bytes = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        serde_json::from_slice::<Value>(&bytes).unwrap_or_else(|e| panic!("{uri}: not JSON: {e}"));
+        let text = String::from_utf8_lossy(&bytes);
         for secret in [
             "Secret offsite",
+            "Another hidden thing",
             "organizer-secret",
             "Zanzibar",
             "google.com/calendar",
+            "Covert Team Calendar",
             "html_link",
             "calendar_name",
         ] {
             assert!(!text.contains(secret), "{uri} serves {secret}: {text}");
         }
     }
+}
+
+// --- review fixes: shutdown, sweeps, per-calendar failure, request shape ------
+
+/// Two timed events stored by a first full read, at fixed starts.
+async fn two_stored(w: &World) -> DateTime<Utc> {
+    let start = minute(Utc::now() + Duration::days(3));
+    w.google().full.insert(
+        PRIMARY.into(),
+        vec![vec![
+            timed("a", "Kept A", start, 30),
+            timed("b", "Kept B", start + Duration::hours(1), 30),
+        ]],
+    );
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    assert_eq!(w.titles().await, ["Kept A", "Kept B"]);
+    start
+}
+
+fn primary_row(w: &World) -> squelch_core::gcal::StoredCalendar {
+    w.store
+        .calendar_calendars(w.acct)
+        .unwrap()
+        .into_iter()
+        .find(|c| c.calendar_id == PRIMARY)
+        .unwrap()
+}
+
+/// SHUTDOWN DOES NOT WAIT FOR GOOGLE. A full read whose second page Google
+/// holds for ten seconds: shutdown is signalled while it is held, `run()`
+/// returns within a second, and the cut-off read swept nothing (the event
+/// the first page left out is still stored) and recorded nothing.
+#[tokio::test]
+async fn shutdown_interrupts_a_pass_in_flight_and_leaves_the_store_as_it_was() {
+    let w = world("shutdown", GRANTED).await;
+    let start = two_stored(&w).await;
+    let before = primary_row(&w);
+    {
+        let mut g = w.google();
+        // No incremental answer: the token is 410, and the pass reads in full.
+        g.full.insert(
+            PRIMARY.into(),
+            vec![
+                vec![timed("a", "Kept A", start, 30)],
+                vec![timed("c", "Never arrives", start + Duration::hours(2), 30)],
+            ],
+        );
+        g.delay_page = Some((1, StdDuration::from_secs(10)));
+        g.requests.clear();
+    }
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let sync = CalendarSync::with_api_base(w.store.clone(), w.acct, w.creds.clone(), &w.base)
+        .unwrap()
+        .with_test_timing(StdDuration::from_millis(30));
+    let task = tokio::spawn(sync.run(shutdown));
+    let mut waited = 0;
+    while !w
+        .google()
+        .requests
+        .iter()
+        .any(|(_, q)| q.get("pageToken").is_some_and(|p| p == "1"))
+    {
+        assert!(waited < 200, "the held page was never asked for");
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
+        waited += 1;
+    }
+    tokio::time::sleep(StdDuration::from_millis(100)).await;
+    let signalled = std::time::Instant::now();
+    stop.send(true).unwrap();
+    tokio::time::timeout(StdDuration::from_secs(5), task)
+        .await
+        .expect("run() still waiting on Google 5s after shutdown")
+        .unwrap()
+        .unwrap();
+    let took = signalled.elapsed();
+    eprintln!("run() returned {took:?} after shutdown was signalled");
+    assert!(took < StdDuration::from_secs(1), "{took:?}");
+    assert_eq!(w.titles().await, ["Kept A", "Kept B"], "no partial sweep");
+    let after = primary_row(&w);
+    assert_eq!(after.synced_at, before.synced_at, "no finish was recorded");
+    assert_eq!(after.full_synced_at, before.full_synced_at);
+}
+
+/// THE DAILY FULL READ SWEEPS ONLY WHAT A WHOLE READ DID NOT SEE. Page 2 of
+/// a full re-read fails: every row stored before it is still there, and the
+/// sync token is the one the last good read left.
+#[tokio::test]
+async fn a_full_read_whose_later_page_fails_sweeps_nothing_and_keeps_the_token() {
+    let w = world("sweep-fail", GRANTED).await;
+    let start = two_stored(&w).await;
+    let before = primary_row(&w);
+    assert_eq!(before.sync_token.as_deref(), Some("tok-primary-1"));
+    {
+        let mut g = w.google();
+        g.full.insert(
+            PRIMARY.into(),
+            vec![
+                vec![timed("a", "Kept A", start, 30)],
+                vec![timed("c", "Never arrives", start + Duration::hours(2), 30)],
+            ],
+        );
+        g.fail_page = Some((1, 500));
+        g.requests.clear();
+    }
+    // A day later: the token is kept, but the read is the daily full one.
+    let later = Utc::now() + Duration::hours(25);
+    assert_eq!(
+        w.sync.pass(later).await,
+        PassOutcome::Failed(CalendarErrorKind::Unavailable)
+    );
+    {
+        let g = w.google();
+        assert!(g.requests[0].1.contains_key("timeMin"), "a full read");
+        assert_eq!(g.requests.len(), 2, "page 2 was asked for and failed");
+    }
+    assert_eq!(w.titles().await, ["Kept A", "Kept B"], "nothing swept");
+    let after = primary_row(&w);
+    assert_eq!(after.sync_token.as_deref(), Some("tok-primary-1"));
+    assert_eq!(after.full_synced_at, before.full_synced_at);
+}
+
+/// The same for a full re-read that is cut off at the 40-page cap.
+#[tokio::test]
+async fn a_full_read_cut_off_at_the_page_cap_sweeps_nothing_and_keeps_the_token() {
+    let w = world("sweep-cap", GRANTED).await;
+    two_stored(&w).await;
+    let before = primary_row(&w);
+    {
+        let mut g = w.google();
+        g.endless = true;
+        g.requests.clear();
+    }
+    let later = Utc::now() + Duration::hours(25);
+    assert_eq!(
+        w.sync.pass(later).await,
+        PassOutcome::Failed(CalendarErrorKind::Unavailable)
+    );
+    assert_eq!(w.google().requests.len(), 40, "stopped at the page cap");
+    let titles = w.titles().await;
+    assert!(
+        titles.contains(&"Kept A".to_string()) && titles.contains(&"Kept B".to_string()),
+        "nothing swept: {titles:?}"
+    );
+    let after = primary_row(&w);
+    assert_eq!(after.sync_token.as_deref(), Some("tok-primary-1"));
+    assert_eq!(after.full_synced_at, before.full_synced_at);
+}
+
+/// ONE BROKEN SHARED CALENDAR IS NOT THE ACCOUNT FAILING. A secondary
+/// calendar answering 403 forever: every pass still reads the primary and
+/// comes out `Synced` (so the loop keeps its cadence), `calendar.error` stays
+/// null, and the broken calendar is retried on its own doubling schedule.
+#[tokio::test]
+async fn a_secondary_calendar_failing_forever_holds_back_nothing() {
+    let w = world("secondary", GRANTED_WITH_LIST).await;
+    let team = "team@group.calendar.google.com";
+    let start = minute(Utc::now() + Duration::days(2));
+    {
+        let mut g = w.google();
+        g.list = vec![
+            list_entry("me@example.com", "Me", true, true),
+            list_entry(team, "Team", true, false),
+        ];
+        g.full
+            .insert(PRIMARY.into(), vec![vec![timed("mine", "Mine", start, 30)]]);
+        g.fail_calendar.insert(
+            team.into(),
+            (
+                403,
+                json!({"error": {"code": 403, "errors": [{"reason": "forbidden"}]}}),
+            ),
+        );
+    }
+    // The production pacing: a calendar's own backoff starts at a minute.
+    let sync =
+        CalendarSync::with_api_base(w.store.clone(), w.acct, w.creds.clone(), &w.base).unwrap();
+    let t0 = Utc::now();
+    let reads = |w: &World, cal: &str| w.google().requests.iter().filter(|(c, _)| c == cal).count();
+    let mut team_reads = Vec::new();
+    for (i, at) in [0, 30, 61, 90, 150, 182].into_iter().enumerate() {
+        let before = reads(&w, PRIMARY);
+        assert_eq!(
+            sync.pass(t0 + Duration::seconds(at)).await,
+            PassOutcome::Synced,
+            "pass {i}"
+        );
+        assert!(
+            reads(&w, PRIMARY) > before,
+            "pass {i} did not read the primary"
+        );
+        team_reads.push(reads(&w, team));
+        let status = w.timeline().await["calendar"].clone();
+        assert_eq!(status["error"], Value::Null, "pass {i}: {status}");
+        assert_eq!(status["granted"], true);
+        assert!(status["synced_at"].is_string(), "pass {i}: {status}");
+    }
+    // Read at 0 (fails, retry at 60), skipped at 30, read at 61 (fails
+    // again, retry at 61+120=181), skipped at 90 and 150, read at 182.
+    assert_eq!(team_reads, [1, 1, 2, 2, 2, 3]);
+    let team_row = w
+        .store
+        .calendar_calendars(w.acct)
+        .unwrap()
+        .into_iter()
+        .find(|c| c.calendar_id == team)
+        .unwrap();
+    assert_eq!(team_row.last_error_kind, Some(CalendarErrorKind::Auth));
+    assert_eq!(team_row.failures, 3);
+    assert_eq!(w.titles().await, ["Mine"]);
+
+    // The primary failing is still the account's error.
+    w.google()
+        .fail_calendar
+        .insert(PRIMARY.into(), (500, json!({})));
+    assert_eq!(
+        sync.pass(t0 + Duration::seconds(400)).await,
+        PassOutcome::Failed(CalendarErrorKind::Unavailable)
+    );
+    assert_eq!(w.timeline().await["calendar"]["error"], "unavailable");
+}
+
+/// A quota answer from a SECONDARY calendar still backs the whole loop off:
+/// the limit is per user.
+#[tokio::test]
+async fn a_quota_answer_from_any_calendar_fails_the_pass() {
+    let w = world("secondary-quota", GRANTED_WITH_LIST).await;
+    let team = "team@group.calendar.google.com";
+    {
+        let mut g = w.google();
+        g.list = vec![
+            list_entry("me@example.com", "Me", true, true),
+            list_entry(team, "Team", true, false),
+        ];
+        g.fail_calendar.insert(team.into(), (429, json!({})));
+    }
+    assert_eq!(
+        w.pass().await,
+        PassOutcome::Failed(CalendarErrorKind::Quota)
+    );
+    assert_eq!(
+        w.timeline().await["calendar"]["error"],
+        Value::Null,
+        "the primary is fine; the loop backs off without an account error"
+    );
+}
+
+/// ASK GOOGLE FOR LESS. Every events request, the first full one, a later
+/// page of it and an incremental one, carries `maxAttendees=1` and the same
+/// `fields` mask; the calendar list carries its own mask.
+#[tokio::test]
+async fn every_request_names_the_fields_it_reads_and_one_attendee() {
+    use squelch_core::gcal::client::{EVENTS_FIELDS, LIST_FIELDS};
+    let w = world("fields", GRANTED_WITH_LIST).await;
+    let start = minute(Utc::now() + Duration::days(2));
+    {
+        let mut g = w.google();
+        g.list = vec![list_entry("me@example.com", "Me", true, true)];
+        g.full.insert(
+            PRIMARY.into(),
+            vec![
+                vec![timed("p0", "Page one", start, 30)],
+                vec![timed("p1", "Page two", start + Duration::hours(1), 30)],
+            ],
+        );
+        g.changes.insert(
+            PRIMARY.into(),
+            HashMap::from([(
+                "tok-primary-1".to_string(),
+                (vec![], "tok-primary-2".to_string()),
+            )]),
+        );
+    }
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    let g = w.google();
+    let kinds: Vec<_> = g
+        .requests
+        .iter()
+        .map(|(_, q)| (q.contains_key("syncToken"), q.get("pageToken").cloned()))
+        .collect();
+    assert_eq!(
+        kinds,
+        [(false, None), (false, Some("1".into())), (true, None)],
+        "first, paged, incremental"
+    );
+    for (_, query) in &g.requests {
+        assert_eq!(query["maxAttendees"], "1", "{query:?}");
+        assert_eq!(query["fields"], EVENTS_FIELDS, "{query:?}");
+        assert_eq!(query["singleEvents"], "true");
+        assert_eq!(query["maxResults"], "250");
+    }
+    for field in [
+        "nextPageToken",
+        "nextSyncToken",
+        "attendees(self,responseStatus)",
+    ] {
+        assert!(EVENTS_FIELDS.contains(field), "{field}");
+    }
+    assert!(!EVENTS_FIELDS.contains("description"));
+    assert_eq!(g.list_requests.len(), 2);
+    for query in &g.list_requests {
+        assert_eq!(query["fields"], LIST_FIELDS, "{query:?}");
+    }
+}
+
+/// With `maxAttendees=1` an invitation comes back with the user's entry
+/// alone (`attendeesOmitted`), and the user's answer still reads from it.
+#[tokio::test]
+async fn the_users_answer_reads_from_the_lone_attendee_google_sends() {
+    let w = world("one-attendee", GRANTED).await;
+    let mut invite = timed(
+        "inv",
+        "Big all-hands",
+        minute(Utc::now() + Duration::days(2)),
+        60,
+    );
+    invite["attendeesOmitted"] = json!(true);
+    invite["attendees"] = json!([{"email": "me@example.com", "self": true,
+                                  "responseStatus": "accepted"}]);
+    w.google().full.insert(PRIMARY.into(), vec![vec![invite]]);
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    assert_eq!(w.events().await[0]["self_response"], "accepted");
+}
+
+/// An all-day event whose start names a zone (Google does, on a recurring
+/// all-day series) is served with no zone.
+#[tokio::test]
+async fn an_all_day_event_is_served_with_no_zone_even_when_google_names_one() {
+    let w = world("allday-zone", GRANTED).await;
+    let day = (Utc::now() + Duration::days(4)).date_naive();
+    let mut series = all_day("series_1", "Holiday", day, 1);
+    series["start"]["timeZone"] = json!("America/New_York");
+    w.google().full.insert(PRIMARY.into(), vec![vec![series]]);
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    assert_eq!(w.events().await[0]["start_timezone"], Value::Null);
+}
+
+/// An events item for the cap tests: `minutes` from `now`.
+fn row_at(id: String, now: DateTime<Utc>, minutes: i64) -> squelch_core::gcal::EventItem {
+    let start = minute(now + Duration::minutes(minutes));
+    squelch_core::gcal::EventItem::Upsert(Box::new(squelch_core::gcal::EventRow {
+        event_id: id,
+        ical_uid: None,
+        tentative: false,
+        summary: Some("Event".into()),
+        location: None,
+        start: squelch_core::triage::ghost::EventTime::parse(&rfc(start)).unwrap(),
+        end: None,
+        start_timezone: None,
+        organizer_email: None,
+        self_response: None,
+        transparent: false,
+        html_link: None,
+        updated_at: None,
+    }))
+}
+
+/// THE PER-CALENDAR CAP KEEPS WHAT IS NEAREST NOW. A calendar past 5,000
+/// events, arriving farthest-future first (Google's order is undefined): the
+/// farthest are dropped whichever page brought them, the near ones (past and
+/// future) are all kept, and the timeline says `truncated`. A full read that
+/// fits clears the mark.
+#[tokio::test]
+async fn the_per_calendar_cap_keeps_the_events_nearest_now_and_says_so() {
+    let w = world("percal-cap", GRANTED).await;
+    // A row for the primary calendar, as a pass makes.
+    w.google().full.insert(PRIMARY.into(), vec![vec![]]);
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    let now = Utc::now();
+    let cap = squelch_core::gcal::MAX_EVENTS_PER_CALENDAR;
+    // 100 far-future events first (days out), then `cap` near ones spread
+    // from 10 days back to 10 days ahead, in pages of 250.
+    let mut items: Vec<_> = (0..100)
+        .map(|i| row_at(format!("far-{i}"), now, 60 * 24 * (200 + i)))
+        .collect();
+    items.extend((0..cap).map(|i| {
+        let minutes = (i - cap / 2) * (60 * 24 * 10) / (cap / 2);
+        row_at(format!("near-{i}"), now, minutes)
+    }));
+    let mut dropped = 0;
+    for page in items.chunks(250) {
+        dropped += w
+            .store
+            .calendar_apply_page(w.acct, PRIMARY, page, now)
+            .unwrap()
+            .dropped;
+    }
+    assert_eq!(dropped, 100);
+    let (stored, _) = w
+        .store
+        .list_calendar_events_capped(
+            w.acct,
+            (now - Duration::days(40)).fixed_offset(),
+            (now + Duration::days(400)).fixed_offset(),
+            now,
+            usize::MAX,
+        )
+        .unwrap();
+    assert_eq!(stored.len() as i64, cap);
+    assert!(
+        stored.iter().all(|e| e.row.event_id.starts_with("near-")),
+        "a far-future event was kept over a near one"
+    );
+    assert_eq!(w.timeline().await["calendar"]["truncated"], true);
+
+    // A full read that fits clears the mark.
+    let seen = std::collections::HashSet::new();
+    w.store
+        .calendar_finish_sync(w.acct, PRIMARY, Some("t"), now, Some((&seen, false)))
+        .unwrap();
+    let body = w.timeline().await;
+    assert_eq!(body["calendar"]["truncated"], false);
+}
+
+/// THE LISTING CAP KEEPS WHAT IS NEAREST NOW, AFTER THE RANGE. More stored
+/// events in range than one listing serves: the listing holds the ones
+/// nearest now (none of the farthest), in start order, and says it cut; rows
+/// outside the range never count against the cap.
+#[tokio::test]
+async fn the_listing_cap_counts_rows_in_range_and_keeps_the_nearest() {
+    let w = world("list-cap", GRANTED_WITH_LIST).await;
+    let team = "team@group.calendar.google.com";
+    w.google().list = vec![
+        list_entry("me@example.com", "Me", true, true),
+        list_entry(team, "Team", true, false),
+    ];
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    let now = Utc::now();
+    // Out of the requested range but inside the listing's padded SQL bound:
+    // 1,500 events just before `from`.
+    let before: Vec<_> = (0..1500)
+        .map(|i| row_at(format!("old-{i}"), now, -60 * 24 * 10 - 60 - i))
+        .collect();
+    // In range: 3,000 per calendar, the team's farther out.
+    let primary: Vec<_> = (0..3000)
+        .map(|i| row_at(format!("p-{i}"), now, 10 + i))
+        .collect();
+    let teams: Vec<_> = (0..3000)
+        .map(|i| row_at(format!("t-{i}"), now, 6000 + i))
+        .collect();
+    for page in before.chunks(500).chain(primary.chunks(500)) {
+        w.store
+            .calendar_apply_page(w.acct, PRIMARY, page, now)
+            .unwrap();
+    }
+    for page in teams.chunks(500) {
+        w.store
+            .calendar_apply_page(w.acct, team, page, now)
+            .unwrap();
+    }
+    let from = (now - Duration::days(10)).fixed_offset();
+    let to = (now + Duration::days(30)).fixed_offset();
+    let (listed, cut) = w.store.list_calendar_events(w.acct, from, to, now).unwrap();
+    assert!(cut);
+    assert_eq!(listed.len(), 5000);
+    let ids: std::collections::HashSet<_> =
+        listed.iter().map(|e| e.row.event_id.as_str()).collect();
+    assert!(ids.contains("p-0") && ids.contains("p-2999") && ids.contains("t-1999"));
+    assert!(
+        !ids.contains("t-2000") && !ids.contains("t-2999"),
+        "the farthest go"
+    );
+    assert!(!ids.iter().any(|id| id.starts_with("old-")));
+    assert!(
+        listed
+            .windows(2)
+            .all(|p| p[0].row.start.to_string() <= p[1].row.start.to_string()),
+        "served in start order"
+    );
+    // Through the door: the same cut, said.
+    let uri = format!(
+        "/client/timeline?from={}&to={}",
+        q(from.to_utc()),
+        q(to.to_utc())
+    );
+    let body = get(&w.app, &uri).await;
+    assert_eq!(body["events"].as_array().unwrap().len(), 5000);
+    assert_eq!(body["calendar"]["truncated"], true);
+    // A range that holds fewer than the cap is not cut.
+    let narrow = (now + Duration::days(1)).fixed_offset();
+    let (listed, cut) = w
+        .store
+        .list_calendar_events(w.acct, from, narrow, now)
+        .unwrap();
+    assert!(!cut);
+    assert!(
+        !listed.is_empty() && listed.len() < 1500,
+        "{}",
+        listed.len()
+    );
+}
+
+/// A kick that lands during a quota backoff does not start a second pass the
+/// moment the backoff ends: the pass after the backoff is followed by the
+/// usual interval, not another pass at once.
+#[tokio::test]
+async fn a_kick_during_a_quota_backoff_leaves_no_extra_pass_behind() {
+    let w = world("quota-kick", GRANTED).await;
+    w.google().fail = Some((429, json!({})));
+    let tick = StdDuration::from_millis(600);
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let sync = CalendarSync::with_api_base(w.store.clone(), w.acct, w.creds.clone(), &w.base)
+        .unwrap()
+        .with_test_timing(tick);
+    let kick = sync.kick_handle();
+    let task = tokio::spawn(sync.run(shutdown));
+    let mut waited = 0;
+    while w.google().requests.is_empty() {
+        assert!(waited < 100);
+        tokio::time::sleep(StdDuration::from_millis(10)).await;
+        waited += 1;
+    }
+    let first = std::time::Instant::now();
+    // In the backoff: a kick, and Google recovers.
+    tokio::time::sleep(StdDuration::from_millis(100)).await;
+    kick.notify_one();
+    {
+        let mut g = w.google();
+        g.fail = None;
+        g.full.insert(PRIMARY.into(), vec![vec![]]);
+    }
+    // The pass after the backoff (one full read) lands at ~600ms; the next
+    // is due a tick later, at ~1200ms. Look in between.
+    tokio::time::sleep(StdDuration::from_millis(950).saturating_sub(first.elapsed())).await;
+    let seen = w.google().requests.len();
+    stop.send(true).unwrap();
+    task.await.unwrap().unwrap();
+    assert_eq!(seen, 2, "the quota pass and one pass after it, no more");
 }

@@ -814,33 +814,71 @@ Read only (slice B). Nothing writes to a Google Calendar.
   scope was granted; at most 25, the primary first. A calendar that stops
   being shown loses its events at the next pass. Recurring events are read as
   their instances (`singleEvents`).
+- **What is asked for.** Every `events.list` request, the first full one, its
+  later pages and every incremental one alike (Google: "Each list request
+  should use the same set of query parameters, including the initial
+  request"), carries `maxAttendees=1`, so an invitation with any number of
+  guests comes back with the user's own entry alone, and a `fields` mask
+  naming only what the daemon reads: the paging and sync tokens, the
+  calendar's title and zone, and of each event its id, status, iCal id,
+  title, place, start, end, organizer address, the attendee entry's `self`
+  and `responseStatus`, transparency, link and update time. A description,
+  attachments, conference data and the other guests are never sent, so an
+  invitation anyone can send cannot bloat a page past the body cap.
+  `calendarList.list` carries a mask of its own.
 - **Window.** 30 days back to 400 days ahead. The first read of a calendar is
   bounded by the window; later reads use Google's sync token, which Google
   refuses beside `timeMin`/`timeMax`, so changed events outside the window are
   dropped on arrival. A full read is repeated daily, because a sync token never
   carries an event that moves into the window as it slides. A 410 forgets the
-  token and reads in full in the same pass.
+  token and reads in full in the same pass. A full read deletes stored events
+  it did not see only when it reached Google's last page: a read cut short (a
+  failed page, the page cap, shutdown) deletes nothing and keeps the old token.
 - **Loop.** Its own task in `squelchd`, started whether or not calendar is
   granted: without a grant it calls nothing and looks again each minute. With
-  one it reads every 5 minutes and backs off from 1 to 30 minutes on errors.
-  It never holds the store across a call to Google, and no calendar failure
-  reaches Gmail's health.
+  one it reads every 5 minutes. It never holds the store across a call to
+  Google, and no calendar failure reaches Gmail's health.
+- **Failures are per calendar.** The whole loop backs off (1 to 30 minutes)
+  only when the credential fails, when the primary calendar fails, or when
+  Google answers with a quota limit (per user, so the rest of that pass is
+  skipped too). Any other calendar that fails (a shared calendar answering 403
+  or 404 forever) records its error and its own retry time on its row and
+  backs off on its own, from 1 minute doubling to 30, while the others keep
+  the 5-minute cadence. A kick that arrives during a quota backoff is
+  dropped, not saved for the moment the backoff ends.
+- **Shutdown.** A pass in flight is raced against the shutdown signal, so the
+  loop stops within moments rather than after each request's 30-second
+  timeout in turn; `squelchd` also waits at most 5 seconds for it and then
+  aborts it. Each page is its own transaction, so what an interrupted pass
+  leaves is consistent: the calendar it was reading keeps its old token and
+  rows.
 - **Bounds.** Titles and places laundered like a ghost's (200 characters, a
   meeting link without its query); an organizer only when it is an address; a
-  link only to a Google page over https; 5000 events per calendar; 40 pages of
-  250 per calendar per pass, past which the calendar is reported unavailable.
+  link only to a Google page over https; 40 pages of 250 per calendar per
+  pass, past which the calendar is reported unavailable. At most 5000 events
+  per calendar: Google's order is undefined here, so past the cap the events
+  farthest from now by start are dropped (far-future ones first), whichever
+  page brought them, and the calendar is marked truncated until a full read
+  fits. An all-day event has no zone, even when Google names one on its start.
 - **Tables.** `calendar_calendars` (which calendars are read, sync token, last
-  sync, last full sync, last error kind) and `calendar_events` (one row per
-  event, keyed by account, calendar and event id, indexed on start). Starts and
-  ends use the ghosts' text form and convention: an all-day `end` is the
-  inclusive last day (Google's exclusive `end.date` minus one), and none for a
-  one-day event. A cancelled event is deleted.
+  sync, last full sync, last error kind, failures in a row, retry time, the
+  truncated mark) and `calendar_events` (one row per event, keyed by account,
+  calendar and event id, indexed on start). Starts and ends use the ghosts'
+  text form and convention: an all-day `end` is the inclusive last day
+  (Google's exclusive `end.date` minus one), and none for a one-day event. A
+  cancelled event is deleted.
 - **Endpoints.** `GET /client/timeline` adds `events` (by start, the ghosts'
-  `[from, to)` rule on the start) and `calendar {granted, synced_at, error}`,
-  where `error` is `auth`, `quota` or `unavailable`. Events are served only
-  while calendar is granted. Declined events are served; the client hides
-  them. `POST /client/timeline/refresh` starts a pass, at most once per account
-  per 30 seconds (202 either way, `kicked` says which).
+  `[from, to)` rule on the start) and `calendar {granted, synced_at, error,
+  truncated}`. `error` is `auth`, `quota` or `unavailable`, and reflects the
+  credential and the PRIMARY calendar only: a secondary calendar's failure is
+  not an account error. `synced_at` is the oldest last read among the primary
+  and the secondary calendars not currently failing. One listing serves at
+  most 5000 events, counted after the range test and kept nearest now;
+  `truncated` is true when the listing cut or a calendar holds fewer events
+  than Google has. Events are served only while calendar is granted. Declined
+  events are served; the client hides them. `POST /client/timeline/refresh`
+  starts a pass, at most once per account per 30 seconds (202 either way,
+  `kicked` says which).
 - **Match rule.** A ghost carries `matched_event {calendar_id, id}` when a real
   event starts at the same instant (or on the same date, both all-day) and the
   titles are equal after lowercasing and collapsing whitespace, or one contains

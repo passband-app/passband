@@ -7,8 +7,17 @@
 //!   `orderBy`, `q`, `iCalUID` or the extended-property filters, so the window
 //!   bounds only the first (full) request; an incremental page can carry any
 //!   event, and the caller filters to the window.
-//! - Every request of one sync uses the same other parameters
-//!   (`singleEvents`, `maxResults`), the first included.
+//! - "Each list request should use the same set of query parameters,
+//!   including the initial request": `singleEvents`, `maxResults`,
+//!   `maxAttendees` and `fields` go on every request, full and incremental.
+//! - `maxAttendees`: "If there are more than the specified number of
+//!   attendees, only the participant is returned." At 1, an invitation with
+//!   any number of guests comes back carrying the user's own entry alone,
+//!   which is all [`super::read_event`] reads (its `self` and
+//!   `responseStatus`).
+//! - `fields` (partial response) names only what the daemon reads, so an
+//!   invitation anyone can send cannot fill a page with its description and
+//!   guest list, and a bloated page does not reach [`BODY_CAP`].
 //! - `nextSyncToken` arrives on the LAST page only; every earlier page carries
 //!   `nextPageToken`.
 //! - 410 Gone means the sync token is invalid: clear it and sync in full.
@@ -34,6 +43,23 @@ const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub const EVENTS_PAGE_SIZE: u32 = 250;
 /// Calendars per `calendarList` page: Google's maximum.
 const LIST_PAGE_SIZE: u32 = 250;
+
+/// Attendees per event: Google then returns only the user's own entry.
+pub const MAX_ATTENDEES: u32 = 1;
+
+/// The `events.list` partial response: the page's paging tokens and the
+/// calendar's own title and zone, and of each event exactly what
+/// [`super::read_event`] reads. Anything else an event carries (its
+/// description, attachments, conference data, the other guests) is never
+/// sent.
+pub const EVENTS_FIELDS: &str = "nextPageToken,nextSyncToken,summary,timeZone,\
+items(id,status,iCalUID,summary,location,start,end,organizer/email,\
+attendees(self,responseStatus),transparency,htmlLink,updated)";
+
+/// The `calendarList.list` partial response: what
+/// [`super::read_calendar_entry`] reads.
+pub const LIST_FIELDS: &str = "nextPageToken,\
+items(id,summary,summaryOverride,primary,selected,deleted,hidden,timeZone)";
 
 /// The most bytes read from one response. 250 events of the largest shape
 /// Google sends stay far below it.
@@ -145,6 +171,7 @@ impl CalendarApi {
         {
             let mut q = url.query_pairs_mut();
             q.append_pair("maxResults", &LIST_PAGE_SIZE.to_string());
+            q.append_pair("fields", LIST_FIELDS);
             if let Some(page) = page_token {
                 q.append_pair("pageToken", page);
             }
@@ -171,6 +198,8 @@ impl CalendarApi {
             let mut q = url.query_pairs_mut();
             q.append_pair("singleEvents", "true");
             q.append_pair("maxResults", &EVENTS_PAGE_SIZE.to_string());
+            q.append_pair("maxAttendees", &MAX_ATTENDEES.to_string());
+            q.append_pair("fields", EVENTS_FIELDS);
             match query {
                 EventsQuery::Full { time_min, time_max } => {
                     q.append_pair("timeMin", &time_min.to_rfc3339());

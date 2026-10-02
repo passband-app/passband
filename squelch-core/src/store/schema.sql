@@ -1753,7 +1753,10 @@ END;
 -- incremental sync; `full_synced_at` is the last full read of the window, which
 -- is repeated daily because a sync token never carries an event that moved
 -- INTO the window as it slides. `last_error_kind` is `auth` / `quota` /
--- `unavailable`, cleared by the next good read.
+-- `unavailable`, cleared by the next good read. `failures` counts reads that
+-- failed in a row and `retry_at` is when a SECONDARY calendar is tried again,
+-- so one broken shared calendar backs off on its own. `truncated` says the
+-- per-calendar event cap dropped events (the farthest from now).
 CREATE TABLE IF NOT EXISTS calendar_calendars (
     account_id      INTEGER NOT NULL,
     calendar_id     TEXT NOT NULL,
@@ -1765,6 +1768,9 @@ CREATE TABLE IF NOT EXISTS calendar_calendars (
     synced_at       TEXT,
     full_synced_at  TEXT,
     last_error_kind TEXT,
+    failures        INTEGER NOT NULL DEFAULT 0,
+    retry_at        TEXT,
+    truncated       INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(account_id, calendar_id)
 );
 -- The events of the synced window (a month back, 400 days ahead), recurring

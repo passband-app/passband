@@ -617,6 +617,23 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // the honest reading, which is also the column default: no backfill.
     add_column_if_missing(conn, "drafts", "bcc_addr", "TEXT NOT NULL DEFAULT ''")?;
 
+    // Per-calendar failure state and the cap's mark, added after the calendar
+    // tables first existed. The defaults read as "never failed, not cut",
+    // which a store that had never recorded either is: no backfill.
+    add_column_if_missing(
+        conn,
+        "calendar_calendars",
+        "failures",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(conn, "calendar_calendars", "retry_at", "TEXT")?;
+    add_column_if_missing(
+        conn,
+        "calendar_calendars",
+        "truncated",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+
     // STRANDED FAN-OUTS. A group send settles its recipients from a background
     // task, and no task survives the process. So any recipient still 'pending'
     // when the store opens belongs to a batch that died — a restart, a crash, a

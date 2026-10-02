@@ -8,8 +8,24 @@
 //! writes are serialized ([`crate::credentials`]). Every failure here (no
 //! grant, a dead token, 403, 5xx, a timeout, a body that does not parse, a
 //! calendar too large to page through) is recorded as a kind on the
-//! calendar's row and backs THIS loop off; nothing reaches the mail engine's
-//! metrics, so `gmail.connected` on `/client/stats` cannot move.
+//! calendar's row; nothing reaches the mail engine's metrics, so
+//! `gmail.connected` on `/client/stats` cannot move.
+//!
+//! WHO BACKS OFF. The whole loop backs off only when the credential fails,
+//! when the PRIMARY calendar fails, or when Google answers with a quota
+//! limit (a per-user limit: reading the other calendars would only be
+//! refused too). A SECONDARY calendar that fails (a shared calendar that
+//! answers 404 or 403 forever) backs off on its own row (`retry_at`, doubling
+//! to [`BACKOFF_CAP`]) while the others keep their 5-minute cadence, and its
+//! failure is not served as the account's error.
+//!
+//! SHUTDOWN INTERRUPTS A PASS. A pass is raced against the shutdown watch, so
+//! a Google that has stopped answering cannot hold the daemon's exit for each
+//! request's timeout in turn. What an interrupted pass leaves is consistent:
+//! every page was its own transaction, and a calendar whose read was cut off
+//! keeps its old sync token and rows (no sweep runs without the last page).
+//! A token refresh already running on a blocking thread finishes on its own,
+//! bounded by its HTTP timeout.
 //!
 //! ALWAYS STARTED, granted or not. Without a grant it idles and looks again
 //! every [`IDLE_RECHECK`], because a grant arrives under a running daemon on
@@ -29,6 +45,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use futures::FutureExt;
 use tokio::sync::{Notify, watch};
 
 use super::client::{API_BASE, CalendarApi, CallError, EventsQuery};
@@ -74,14 +91,31 @@ fn next_backoff(current: Option<Duration>, base: Duration) -> Duration {
     }
 }
 
+/// One secondary calendar's wait after a failure, from how many reads of it
+/// had already failed in a row: the base, doubling to the cap.
+fn calendar_backoff(failures_before: u32, base: Duration) -> Duration {
+    let cap = BACKOFF_CAP.max(base);
+    base.checked_mul(1u32 << failures_before.min(16))
+        .map_or(cap, |d| d.min(cap))
+}
+
+/// Resolves once shutdown is asked for (or its sender is gone, which `wait`
+/// also reads as a stop).
+async fn stopped(shutdown: &mut watch::Receiver<bool>) {
+    let _ = shutdown.wait_for(|stop| *stop).await;
+}
+
 /// What one pass came to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PassOutcome {
     /// Calendar is not granted: nothing was called.
     NotGranted,
-    /// Every calendar was read.
+    /// The credential and the primary calendar were read, and Google set no
+    /// quota limit. A secondary calendar may have failed: that is on its own
+    /// row, with its own retry time.
     Synced,
-    /// At least one read failed; the worst kind.
+    /// The credential or the primary calendar failed, or Google answered
+    /// with a quota limit: the loop backs off.
     Failed(CalendarErrorKind),
 }
 
@@ -180,7 +214,13 @@ impl CalendarSync {
         }
         let mut backoff: Option<Duration> = None;
         loop {
-            let outcome = self.pass(Utc::now()).await;
+            let outcome = tokio::select! {
+                outcome = self.pass(Utc::now()) => outcome,
+                () = stopped(&mut shutdown) => {
+                    eprintln!("squelch: calendar sync: pass interrupted by shutdown");
+                    return Ok(());
+                }
+            };
             let (delay, quota) = match outcome {
                 PassOutcome::NotGranted => {
                     backoff = None;
@@ -223,11 +263,18 @@ impl CalendarSync {
                 self.kick.notified().await
             }
         };
-        tokio::select! {
+        let stop = tokio::select! {
             _ = tokio::time::sleep(delay) => false,
             _ = kicked => false,
             changed = shutdown.changed() => changed.is_err() || *shutdown.borrow(),
+        };
+        if ignore_kick {
+            // A kick that arrived during the quota backoff found no waiter
+            // and left a permit; taken now, so the pass after the backoff is
+            // not followed by a second one at once.
+            let _ = self.kick.notified().now_or_never();
         }
+        stop
     }
 
     /// Run a store call off the async threads: the store's one connection is
@@ -244,12 +291,18 @@ impl CalendarSync {
             .map_err(|e| CoreError::Other(anyhow::anyhow!("calendar store task: {e}")))?
     }
 
-    /// Record a failure kind on a calendar's row. A store error here is
-    /// logged and dropped: the pass has already failed.
-    async fn record(&self, calendar_id: &str, kind: CalendarErrorKind) {
+    /// Record a failure kind on a calendar's row, and when it may be read
+    /// again (None: on the loop's schedule). A store error here is logged and
+    /// dropped: the read has already failed.
+    async fn record(
+        &self,
+        calendar_id: &str,
+        kind: CalendarErrorKind,
+        retry_at: Option<DateTime<Utc>>,
+    ) {
         let id = calendar_id.to_string();
         if let Err(e) = self
-            .db(move |s, a| s.calendar_record_error(a, &id, kind))
+            .db(move |s, a| s.calendar_record_error(a, &id, kind, retry_at))
             .await
         {
             eprintln!("squelch: calendar sync could not record a failure: {e}");
@@ -267,7 +320,7 @@ impl CalendarSync {
                     "squelch: calendar sync: no usable calendar token ({})",
                     kind.as_str()
                 );
-                self.record(PRIMARY, kind).await;
+                self.record(PRIMARY, kind, None).await;
                 return PassOutcome::Failed(kind);
             }
         };
@@ -275,7 +328,7 @@ impl CalendarSync {
         let calendars = match self.calendars_to_read(&token, access.list_granted).await {
             Ok(calendars) => calendars,
             Err(kind) => {
-                self.record(PRIMARY, kind).await;
+                self.record(PRIMARY, kind, None).await;
                 return PassOutcome::Failed(kind);
             }
         };
@@ -295,26 +348,44 @@ impl CalendarSync {
             }
         };
         let window = window(now);
-        let mut worst: Option<CalendarErrorKind> = None;
+        // Only the primary calendar's failure, or a quota answer from any,
+        // is the pass failing; see the module doc.
+        let mut failed: Option<CalendarErrorKind> = None;
         for (index, meta) in calendars.iter().enumerate() {
             let Some(row) = stored.iter().find(|c| c.calendar_id == meta.calendar_id) else {
                 continue;
             };
-            match self.sync_calendar(row, &token, window, now).await {
-                Ok(()) => {}
-                Err(kind) => {
-                    // The position in this pass, never the id: a calendar id
-                    // is usually an email address.
-                    eprintln!(
-                        "squelch: calendar sync: calendar {index} failed ({})",
-                        kind.as_str()
-                    );
-                    self.record(&meta.calendar_id, kind).await;
-                    worst = worst.max(Some(kind));
-                }
+            let primary = row.calendar_id == PRIMARY;
+            // A secondary calendar that failed waits out its own backoff.
+            if !primary && row.retry_at.is_some_and(|at| now < at) {
+                continue;
+            }
+            let Err(kind) = self.sync_calendar(row, &token, window, now).await else {
+                continue;
+            };
+            // The position in this pass, never the id: a calendar id is
+            // usually an email address.
+            eprintln!(
+                "squelch: calendar sync: calendar {index} failed ({})",
+                kind.as_str()
+            );
+            let quota = kind == CalendarErrorKind::Quota;
+            // The primary calendar and a quota answer go on the loop's own
+            // backoff; any other secondary failure gets one of its own.
+            let retry_at = (!primary && !quota).then(|| {
+                let wait = calendar_backoff(row.failures, self.timing.backoff_base);
+                chrono::Duration::from_std(wait).map_or(now, |wait| now + wait)
+            });
+            self.record(&meta.calendar_id, kind, retry_at).await;
+            if primary || quota {
+                failed = failed.max(Some(kind));
+            }
+            if quota {
+                // A per-user limit: the rest would be refused too.
+                break;
             }
         }
-        worst.map_or(PassOutcome::Synced, PassOutcome::Failed)
+        failed.map_or(PassOutcome::Synced, PassOutcome::Failed)
     }
 
     /// The calendars to read: the primary one alone without the list scope;
@@ -437,6 +508,7 @@ impl CalendarSync {
                 },
             };
             let mut seen: HashSet<String> = HashSet::new();
+            let mut cut = false;
             let mut page_token: Option<String> = None;
             let mut gone = false;
             for _ in 0..MAX_PAGES {
@@ -486,12 +558,13 @@ impl CalendarSync {
                     .filter_map(|item| read_event(item, zone.as_deref(), window))
                     .collect();
                 let cal = id.clone();
-                let stored = self
-                    .db(move |s, a| s.calendar_apply_page(a, &cal, &items))
+                let applied = self
+                    .db(move |s, a| s.calendar_apply_page(a, &cal, &items, now))
                     .await
                     .map_err(store_err)?;
+                cut |= applied.dropped > 0;
                 if full {
-                    seen.extend(stored);
+                    seen.extend(applied.stored);
                 }
                 if let Some(next) = page.next_page_token {
                     page_token = Some(next);
@@ -506,7 +579,7 @@ impl CalendarSync {
                         &cal,
                         sync_token.as_deref(),
                         now,
-                        full.then_some(&seen),
+                        full.then_some((&seen, cut)),
                     )
                 })
                 .await
@@ -537,6 +610,16 @@ mod tests {
             d = Some(next);
         }
         assert_eq!(seen, [60, 120, 240, 480, 960, 1800, 1800, 1800]);
+    }
+
+    #[test]
+    fn a_calendars_own_backoff_doubles_from_the_base_to_its_cap() {
+        let base = Duration::from_secs(60);
+        let seen: Vec<_> = [0, 1, 2, 5, 6, 40, u32::MAX]
+            .into_iter()
+            .map(|n| calendar_backoff(n, base).as_secs())
+            .collect();
+        assert_eq!(seen, [60, 120, 240, 1800, 1800, 1800, 1800]);
     }
 
     #[test]

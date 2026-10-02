@@ -413,6 +413,9 @@ fn other_err(msg: String) -> squelch_core::CoreError {
     squelch_core::CoreError::Other(anyhow::anyhow!(msg))
 }
 
+/// How long shutdown waits for the calendar sync loop before aborting it.
+const CALENDAR_STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
 fn build_runtime() -> Result<tokio::runtime::Runtime, squelch_core::CoreError> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -2007,6 +2010,12 @@ fn cmd_serve(
 
     let backend = config.credential_backend;
     let creds_path = config.resolve_credentials_path();
+    // A writer that died between its temp write and its rename left a temp
+    // file holding a token; every write sweeps them too, but a daemon that
+    // never refreshes would otherwise keep one forever.
+    if backend == squelch_core::config::CredentialBackend::File {
+        squelch_core::credentials::remove_stale_temp_files(&creds_path);
+    }
 
     // Manual-refresh signal: `POST /client/refresh` fires it, the poll loop
     // wakes early.
@@ -2595,11 +2604,22 @@ fn cmd_serve(
                 Err(e) => eprintln!("squelchd: shipment poller task join error: {e}"),
             }
         }
-        if let Some(handle) = calendar_handle {
-            match handle.await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => eprintln!("squelchd: calendar sync ended with error: {e}"),
-                Err(e) => eprintln!("squelchd: calendar sync task join error: {e}"),
+        // Bounded: the loop stops a pass in flight on the shutdown signal,
+        // and this is the backstop if anything in it ever stops listening.
+        // Its writes are each their own transaction, so aborting it leaves
+        // the store consistent; it holds nothing the mail engine needs.
+        if let Some(mut handle) = calendar_handle {
+            match tokio::time::timeout(CALENDAR_STOP_GRACE, &mut handle).await {
+                Ok(Ok(Ok(()))) => {}
+                Ok(Ok(Err(e))) => eprintln!("squelchd: calendar sync ended with error: {e}"),
+                Ok(Err(e)) => eprintln!("squelchd: calendar sync task join error: {e}"),
+                Err(_) => {
+                    eprintln!(
+                        "squelchd: calendar sync did not stop within {}s; aborting it",
+                        CALENDAR_STOP_GRACE.as_secs()
+                    );
+                    handle.abort();
+                }
             }
         }
         if scheduled_handle.await.is_err() {

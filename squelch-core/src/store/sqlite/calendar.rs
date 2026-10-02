@@ -15,15 +15,16 @@
 use super::ghosts::{in_range, listing_order, sort_key};
 use super::*;
 use crate::gcal::{
-    CalendarErrorKind, CalendarMeta, EventItem, EventRow, MAX_EVENTS_PER_CALENDAR, PRIMARY,
-    SelfResponse, StoredCalendar, SyncedEvent,
+    CalendarErrorKind, CalendarMeta, CalendarStatus, EventItem, EventRow, MAX_EVENTS_PER_CALENDAR,
+    PRIMARY, PageApplied, SelfResponse, StoredCalendar, SyncedEvent,
 };
 use crate::triage::ghost::EventTime;
 use chrono::FixedOffset;
 use std::collections::HashSet;
 
-/// Events one timeline listing returns at most.
-const LIST_CAP: i64 = 5000;
+/// Events one timeline listing returns at most: the ones NEAREST now, and the
+/// listing says when it cut.
+pub const LIST_CAP: usize = 5000;
 
 /// Delete every event of a calendar and forget how far it was synced, so the
 /// next time it is read it is read in full.
@@ -34,7 +35,7 @@ fn forget_calendar(tx: &Connection, account: AccountId, calendar_id: &str) -> Re
     )?;
     tx.execute(
         "UPDATE calendar_calendars SET sync_token=NULL, synced_at=NULL, full_synced_at=NULL,
-                last_error_kind=NULL
+                last_error_kind=NULL, failures=0, retry_at=NULL, truncated=0
          WHERE account_id=?1 AND calendar_id=?2",
         params![account, calendar_id],
     )?;
@@ -47,7 +48,7 @@ impl SqliteStore {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
             "SELECT calendar_id,summary,is_primary,selected,time_zone,sync_token,synced_at,
-                    full_synced_at,last_error_kind
+                    full_synced_at,last_error_kind,failures,retry_at,truncated
              FROM calendar_calendars WHERE account_id=?1
              ORDER BY is_primary DESC, calendar_id",
         )?;
@@ -64,6 +65,9 @@ impl SqliteStore {
                     synced_at: dt_opt(r, 6)?,
                     full_synced_at: dt_opt(r, 7)?,
                     last_error_kind: kind.as_deref().and_then(CalendarErrorKind::parse),
+                    failures: r.get::<_, i64>(9)?.clamp(0, i64::from(u32::MAX)) as u32,
+                    retry_at: dt_opt(r, 10)?,
+                    truncated: r.get(11)?,
                 })
             })?
             .collect::<std::result::Result<_, _>>()?;
@@ -140,70 +144,87 @@ impl SqliteStore {
         Ok(())
     }
 
-    /// Apply one events page in ONE transaction: upserts and removals. A new
-    /// event is stored only while the calendar holds fewer than
-    /// [`MAX_EVENTS_PER_CALENDAR`]; one already stored always updates.
-    /// Returns the ids now stored from this page (a full sync's "seen" set).
+    /// Apply one events page in ONE transaction: upserts and removals, then
+    /// the per-calendar cap. Past [`MAX_EVENTS_PER_CALENDAR`] the events
+    /// FARTHEST from `now` by start are dropped (on a tie the later one, so
+    /// the future goes before the past), whichever page brought them, and the
+    /// calendar is marked truncated. Google's page order is undefined here,
+    /// so a cap that kept whatever came first could keep next year and drop
+    /// tomorrow.
     pub fn calendar_apply_page(
         &self,
         account: AccountId,
         calendar_id: &str,
         items: &[EventItem],
-    ) -> Result<Vec<String>> {
+        now: DateTime<Utc>,
+    ) -> Result<PageApplied> {
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
-        let mut count: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM calendar_events WHERE account_id=?1 AND calendar_id=?2",
-            params![account, calendar_id],
-            |r| r.get(0),
-        )?;
         let mut stored = Vec::new();
         for item in items {
             match item {
                 EventItem::Remove(id) => {
-                    count -= tx.execute(
+                    tx.execute(
                         "DELETE FROM calendar_events WHERE account_id=?1 AND calendar_id=?2 AND event_id=?3",
                         params![account, calendar_id, id],
-                    )? as i64;
+                    )?;
                 }
                 EventItem::Upsert(row) => {
-                    let exists: bool = tx.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM calendar_events
-                         WHERE account_id=?1 AND calendar_id=?2 AND event_id=?3)",
-                        params![account, calendar_id, row.event_id],
-                        |r| r.get(0),
-                    )?;
-                    if !exists && count >= MAX_EVENTS_PER_CALENDAR {
-                        continue;
-                    }
                     upsert_event(&tx, account, calendar_id, row)?;
-                    if !exists {
-                        count += 1;
-                    }
                     stored.push(row.event_id.clone());
                 }
             }
         }
+        let count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM calendar_events WHERE account_id=?1 AND calendar_id=?2",
+            params![account, calendar_id],
+            |r| r.get(0),
+        )?;
+        let excess = count - MAX_EVENTS_PER_CALENDAR;
+        let mut dropped = 0;
+        if excess > 0 {
+            let now_key = sort_key(&EventTime::At(now.fixed_offset()));
+            dropped = tx.execute(
+                "DELETE FROM calendar_events WHERE account_id=?1 AND calendar_id=?2 AND event_id IN (
+                     SELECT event_id FROM calendar_events WHERE account_id=?1 AND calendar_id=?2
+                     ORDER BY ABS(julianday(start_sort) - julianday(?3)) DESC,
+                              start_sort DESC, event_id DESC
+                     LIMIT ?4)",
+                params![account, calendar_id, now_key, excess],
+            )?;
+            tx.execute(
+                "UPDATE calendar_calendars SET truncated=1 WHERE account_id=?1 AND calendar_id=?2",
+                params![account, calendar_id],
+            )?;
+        }
         tx.commit()?;
-        Ok(stored)
+        Ok(PageApplied { stored, dropped })
     }
 
     /// A pass over one calendar finished: record its new sync token and the
-    /// time, and clear its error. After a FULL sync, `seen` is every id it
-    /// stored, and any other stored event is deleted (it was deleted at
-    /// Google, or left the window, while no token was carrying changes).
+    /// time, and clear its error and failure count. After a FULL sync, `seen`
+    /// is every id it stored, and any other stored event is deleted (it was
+    /// deleted at Google, or left the window, while no token was carrying
+    /// changes); `cut` is whether the cap dropped events during that read,
+    /// which is the calendar's truncated mark from now on. (An incremental
+    /// read that drops events marks it as it applies the page, and only a
+    /// full read that fits clears it.)
+    ///
+    /// Called ONLY when the read reached Google's last page. A read cut short
+    /// (a failed page, the page cap, shutdown) never gets here, so it never
+    /// sweeps on a partial `seen` and keeps the old token.
     pub fn calendar_finish_sync(
         &self,
         account: AccountId,
         calendar_id: &str,
         sync_token: Option<&str>,
         at: DateTime<Utc>,
-        seen: Option<&HashSet<String>>,
+        seen: Option<(&HashSet<String>, bool)>,
     ) -> Result<()> {
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
         let at = at.to_rfc3339();
-        if let Some(seen) = seen {
+        if let Some((seen, cut)) = seen {
             let stored: Vec<String> = {
                 let mut stmt = tx.prepare(
                     "SELECT event_id FROM calendar_events WHERE account_id=?1 AND calendar_id=?2",
@@ -218,12 +239,14 @@ impl SqliteStore {
                 )?;
             }
             tx.execute(
-                "UPDATE calendar_calendars SET full_synced_at=?3 WHERE account_id=?1 AND calendar_id=?2",
-                params![account, calendar_id, at],
+                "UPDATE calendar_calendars SET full_synced_at=?3, truncated=?4
+                 WHERE account_id=?1 AND calendar_id=?2",
+                params![account, calendar_id, at, cut],
             )?;
         }
         tx.execute(
-            "UPDATE calendar_calendars SET sync_token=?3, synced_at=?4, last_error_kind=NULL
+            "UPDATE calendar_calendars SET sync_token=?3, synced_at=?4, last_error_kind=NULL,
+                    failures=0, retry_at=NULL
              WHERE account_id=?1 AND calendar_id=?2",
             params![account, calendar_id, sync_token, at],
         )?;
@@ -243,93 +266,152 @@ impl SqliteStore {
         Ok(())
     }
 
-    /// Record why reading a calendar failed. The events stay as they were.
-    /// A failure before any calendar is known (the token, the list) is
-    /// recorded on the primary calendar, creating its row if need be, so the
-    /// timeline can say so.
+    /// Record why reading a calendar failed: its kind, one more failure in a
+    /// row, and `retry_at`, when the loop may read it again (None: on the
+    /// loop's own schedule). The events stay as they were. A failure before
+    /// any calendar is known (the token, the list) is recorded on the primary
+    /// calendar, creating its row if need be, so the timeline can say so.
     pub fn calendar_record_error(
         &self,
         account: AccountId,
         calendar_id: &str,
         kind: CalendarErrorKind,
+        retry_at: Option<DateTime<Utc>>,
     ) -> Result<()> {
         let conn = self.lock()?;
+        let retry_at = retry_at.map(|at| at.to_rfc3339());
         if calendar_id == PRIMARY {
             conn.execute(
-                "INSERT INTO calendar_calendars(account_id,calendar_id,is_primary,selected,last_error_kind)
-                 VALUES(?1,?2,1,1,?3)
-                 ON CONFLICT(account_id,calendar_id) DO UPDATE SET last_error_kind=excluded.last_error_kind",
-                params![account, PRIMARY, kind.as_str()],
+                "INSERT INTO calendar_calendars(account_id,calendar_id,is_primary,selected,last_error_kind,
+                                                failures,retry_at)
+                 VALUES(?1,?2,1,1,?3,1,?4)
+                 ON CONFLICT(account_id,calendar_id) DO UPDATE SET
+                    last_error_kind=excluded.last_error_kind,
+                    failures=failures+1, retry_at=excluded.retry_at",
+                params![account, PRIMARY, kind.as_str(), retry_at],
             )?;
         } else {
             conn.execute(
-                "UPDATE calendar_calendars SET last_error_kind=?3 WHERE account_id=?1 AND calendar_id=?2",
-                params![account, calendar_id, kind.as_str()],
+                "UPDATE calendar_calendars SET last_error_kind=?3, failures=failures+1, retry_at=?4
+                 WHERE account_id=?1 AND calendar_id=?2",
+                params![account, calendar_id, kind.as_str(), retry_at],
             )?;
         }
         Ok(())
     }
 
-    /// The timeline's `calendar` status: when every read calendar was last
-    /// synced (the OLDEST of them, None while any has never synced or none
-    /// exists), and the worst current error among them (auth, then quota,
-    /// then unavailable).
-    pub fn calendar_status(
-        &self,
-        account: AccountId,
-    ) -> Result<(Option<DateTime<Utc>>, Option<CalendarErrorKind>)> {
+    /// The timeline's `calendar` status ([`CalendarStatus`]). The error is
+    /// the PRIMARY row's, which is also where a credential failure is
+    /// recorded: one shared calendar that cannot be read is not the account
+    /// failing. `synced_at` is the oldest read among the selected calendars
+    /// the timeline can trust (the primary, and every secondary not currently
+    /// failing), None while any of those has never been read or none exists,
+    /// so a broken shared calendar does not make the whole timeline read as
+    /// never synced. `truncated` is any selected calendar's cap mark.
+    pub fn calendar_status(&self, account: AccountId) -> Result<CalendarStatus> {
         let calendars = self.calendar_calendars(account)?;
         let selected: Vec<_> = calendars.iter().filter(|c| c.selected).collect();
-        let synced_at = if selected.is_empty() {
+        let trusted: Vec<_> = selected
+            .iter()
+            .filter(|c| c.is_primary || c.last_error_kind.is_none())
+            .collect();
+        let synced_at = if trusted.is_empty() {
             None
         } else {
-            selected
+            trusted
                 .iter()
                 .map(|c| c.synced_at)
                 .collect::<Option<Vec<_>>>()
                 .and_then(|all| all.into_iter().min())
         };
-        let error = selected.iter().filter_map(|c| c.last_error_kind).max();
-        Ok((synced_at, error))
+        let error = selected
+            .iter()
+            .find(|c| c.calendar_id == PRIMARY)
+            .and_then(|c| c.last_error_kind);
+        Ok(CalendarStatus {
+            synced_at,
+            error,
+            truncated: selected.iter().any(|c| c.truncated),
+        })
     }
 
     /// Stored events of selected calendars whose start falls in `[from, to)`,
     /// by the ghosts' rule ([`in_range`]: an instant compares as an instant, a
     /// date by date), ordered by start in `from`'s offset, then the primary
-    /// calendar first. At most [`LIST_CAP`].
+    /// calendar first. At most [`LIST_CAP`], and when there are more, the
+    /// ones whose start is NEAREST `now`; the `bool` says the listing cut.
     pub fn list_calendar_events(
         &self,
         account: AccountId,
         from: DateTime<FixedOffset>,
         to: DateTime<FixedOffset>,
-    ) -> Result<Vec<SyncedEvent>> {
+        now: DateTime<Utc>,
+    ) -> Result<(Vec<SyncedEvent>, bool)> {
+        self.list_calendar_events_capped(account, from, to, now, LIST_CAP)
+    }
+
+    /// [`Self::list_calendar_events`] with the cap given.
+    pub fn list_calendar_events_capped(
+        &self,
+        account: AccountId,
+        from: DateTime<FixedOffset>,
+        to: DateTime<FixedOffset>,
+        now: DateTime<Utc>,
+        cap: usize,
+    ) -> Result<(Vec<SyncedEvent>, bool)> {
         if to <= from {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), false));
         }
         let conn = self.lock()?;
+        // The SQL bound is padded, because a date's sort key is its midnight
+        // in UTC while `in_range` reads the date in `from`'s offset; the
+        // exact range test runs on each row below, BEFORE the cap counts it.
         let pad = chrono::Duration::days(2);
         let low = sort_key(&EventTime::At(from - pad));
         let high = sort_key(&EventTime::At(to + pad));
-        let mut stmt = conn.prepare(&format!(
-            "SELECT e.calendar_id,c.summary,e.event_id,e.ical_uid,e.status,e.summary,e.location,
-                    e.starts_at,e.ends_at,e.start_timezone,e.organizer_email,e.self_response,
-                    e.transparent,e.html_link,e.updated_at,c.is_primary
-             FROM calendar_events e
-             JOIN calendar_calendars c ON c.account_id=e.account_id AND c.calendar_id=e.calendar_id
-             WHERE e.account_id=?1 AND c.selected=1 AND e.start_sort>=?2 AND e.start_sort<=?3
-             ORDER BY e.start_sort, c.is_primary DESC, e.calendar_id, e.event_id
-             LIMIT {LIST_CAP}"
-        ))?;
-        let rows = stmt
-            .query_map(params![account, low, high], |r| {
-                let status: String = r.get(4)?;
+        // Read outward from now: forward from it and backward from it, each
+        // side stopping once it has more in-range rows than the cap, so the
+        // nearest `cap` are among what was read and nothing more is.
+        let split = sort_key(&EventTime::At(now.fixed_offset())).clamp(low.clone(), high.clone());
+        let select = |cond: &str, order: &str| {
+            format!(
+                "SELECT e.calendar_id,c.summary,e.event_id,e.ical_uid,e.status,e.summary,e.location,
+                        e.starts_at,e.ends_at,e.start_timezone,e.organizer_email,e.self_response,
+                        e.transparent,e.html_link,e.updated_at,c.is_primary
+                 FROM calendar_events e
+                 JOIN calendar_calendars c ON c.account_id=e.account_id AND c.calendar_id=e.calendar_id
+                 WHERE e.account_id=?1 AND c.selected=1 AND {cond}
+                 ORDER BY e.start_sort {order}, c.is_primary DESC, e.calendar_id, e.event_id"
+            )
+        };
+        let mut near: Vec<(bool, SyncedEvent)> = Vec::new();
+        for (sql, lo, hi) in [
+            (
+                select("e.start_sort>=?2 AND e.start_sort<=?3", "ASC"),
+                &split,
+                &high,
+            ),
+            (
+                select("e.start_sort>=?2 AND e.start_sort<?3", "DESC"),
+                &low,
+                &split,
+            ),
+        ] {
+            let mut stmt = conn.prepare(&sql)?;
+            let mut rows = stmt.query(params![account, lo, hi])?;
+            let mut taken = 0;
+            while taken <= cap {
+                let Some(r) = rows.next()? else { break };
                 let starts_at: String = r.get(7)?;
+                let Some(start) = EventTime::parse(&starts_at).filter(|s| in_range(s, from, to))
+                else {
+                    continue;
+                };
+                let status: String = r.get(4)?;
                 let ends_at: Option<String> = r.get(8)?;
                 let response: Option<String> = r.get(11)?;
-                let primary: bool = r.get(15)?;
-                Ok((
-                    EventTime::parse(&starts_at),
-                    primary,
+                near.push((
+                    r.get(15)?,
                     SyncedEvent {
                         calendar_id: r.get(0)?,
                         calendar_name: r.get(1)?,
@@ -339,9 +421,7 @@ impl SqliteStore {
                             tentative: status == "tentative",
                             summary: r.get(5)?,
                             location: r.get(6)?,
-                            // Replaced below; a row whose start does not
-                            // parse is dropped there.
-                            start: EventTime::Date(chrono::NaiveDate::MIN),
+                            start,
                             end: ends_at.as_deref().and_then(EventTime::parse),
                             start_timezone: r.get(9)?,
                             organizer_email: r.get(10)?,
@@ -351,19 +431,21 @@ impl SqliteStore {
                             updated_at: r.get(14)?,
                         },
                     },
-                ))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        let mut listed: Vec<(bool, SyncedEvent)> = rows
-            .into_iter()
-            .filter_map(|(start, primary, mut event)| {
-                let start = start.filter(|s| in_range(s, from, to))?;
-                event.row.start = start;
-                Some((primary, event))
-            })
-            .collect();
+                ));
+                taken += 1;
+            }
+        }
+        let truncated = near.len() > cap;
+        if truncated {
+            let distance = |e: &SyncedEvent| {
+                let at = listing_order(&e.row.start, &chrono::FixedOffset::east_opt(0).unwrap());
+                (at - now).abs()
+            };
+            near.sort_by_key(|(_, e)| distance(e));
+            near.truncate(cap);
+        }
         let offset = *from.offset();
-        listed.sort_by(|(pa, a), (pb, b)| {
+        near.sort_by(|(pa, a), (pb, b)| {
             (
                 listing_order(&a.row.start, &offset),
                 !pa,
@@ -377,7 +459,7 @@ impl SqliteStore {
                     &b.row.event_id,
                 ))
         });
-        Ok(listed.into_iter().map(|(_, e)| e).collect())
+        Ok((near.into_iter().map(|(_, e)| e).collect(), truncated))
     }
 }
 

@@ -712,7 +712,8 @@ fn unique_temp_path(path: &Path) -> PathBuf {
 }
 
 /// THE ONE READ-MODIFY-WRITE of the credentials file, under a process-wide
-/// lock held across the read, the change, the temp write and the rename.
+/// lock AND a cross-process file lock, both held across the read, the change,
+/// the temp write and the rename.
 ///
 /// Hosted keeps one token in the Read and Write slots and the calendar
 /// resolver reads the same Read slot, so three refreshers come due at the
@@ -723,6 +724,13 @@ fn unique_temp_path(path: &Path) -> PathBuf {
 /// until the credential is reinstalled. The lock covers local file work only:
 /// no caller holds it across a network call (a refresh happens before
 /// `persist` is called).
+///
+/// The in-process mutex alone does not cover `squelchd auth` run beside a
+/// running daemon (self-host): the daemon reads the file, auth renames its
+/// new file into place, the daemon renames its stale copy over it, and the
+/// slot auth just wrote is gone after auth printed success. The file lock
+/// ([`CredentialsFileLock`]) closes that. The mutex is still taken first so
+/// this process's own writers queue on it rather than polling the file lock.
 fn update_credentials_file(
     path: &Path,
     identity: Option<&AgeIdentity>,
@@ -733,11 +741,145 @@ fn update_credentials_file(
     // real file is only ever replaced by a rename. So poison is not a reason
     // to stop persisting tokens.
     let _held = FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    update_credentials_file_locked(path, identity, change, CREDENTIALS_LOCK_WAIT)
+}
+
+/// The read-modify-write under the cross-process lock alone. Separate from
+/// [`update_credentials_file`] so a test can stand two threads in for two
+/// processes, with no shared mutex between them.
+fn update_credentials_file_locked(
+    path: &Path,
+    identity: Option<&AgeIdentity>,
+    change: impl FnOnce(&mut CredentialsFile),
+    wait: Duration,
+) -> Result<()> {
+    let _locked = CredentialsFileLock::acquire(path, wait)?;
+    remove_stale_temp_files(path);
     let mut file = CredentialsFile::read(path, identity)?;
     #[cfg(test)]
     test_pause(path);
     change(&mut file);
     file.write(path, identity)
+}
+
+/// How long a write waits for another process's hold on the credentials file
+/// before it gives up. A writer holds it for a read, a seal and a rename, so
+/// milliseconds; ten seconds of contention means the other process is stuck,
+/// and the write fails with a credential error, which every caller already
+/// handles (a refresh that cannot persist reports it, `squelchd auth` exits
+/// non-zero), rather than blocking a thread forever.
+const CREDENTIALS_LOCK_WAIT: Duration = Duration::from_secs(10);
+
+/// An advisory exclusive lock on `<credentials file>.lock`, held while it
+/// lives. A separate file because the credentials file itself is REPLACED by
+/// every write (a rename), so a lock on it would be a lock on a file that is
+/// about to stop being the credentials file. Owner-only, like the file it
+/// guards, though it never holds anything.
+///
+/// `std`'s file locks: `flock` on unix, `LockFileEx` on Windows, released when
+/// the handle closes, including when the process dies, so a crash never
+/// leaves it held. Where the platform has no file locks the acquire is a
+/// no-op (the in-process mutex still serializes this process's writers).
+struct CredentialsFileLock {
+    _file: Option<std::fs::File>,
+}
+
+impl CredentialsFileLock {
+    fn acquire(path: &Path, wait: Duration) -> Result<Self> {
+        let lock_path = lock_path(path);
+        if let Some(parent) = lock_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| CoreError::Credential(format!("creating credentials dir: {e}")))?;
+        }
+        let mut opts = std::fs::OpenOptions::new();
+        opts.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let file = opts
+            .open(&lock_path)
+            .map_err(|e| CoreError::Credential(format!("opening credentials lock file: {e}")))?;
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(Self { _file: Some(file) }),
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(CoreError::Credential(format!(
+                            "the credentials file is locked by another process ({} held for over \
+                             {}s); not written",
+                            lock_path.display(),
+                            wait.as_secs()
+                        )));
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(std::fs::TryLockError::Error(e))
+                    if e.kind() == std::io::ErrorKind::Unsupported =>
+                {
+                    return Ok(Self { _file: None });
+                }
+                Err(std::fs::TryLockError::Error(e)) => {
+                    return Err(CoreError::Credential(format!(
+                        "locking the credentials file: {e}"
+                    )));
+                }
+            }
+        }
+    }
+}
+
+/// `credentials.json.lock`, beside the file it guards.
+fn lock_path(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".lock");
+    path.with_file_name(name)
+}
+
+/// How old a stray temp file must be before it is removed: no write takes a
+/// minute between its temp write and its rename.
+const STALE_TEMP_AGE: Duration = Duration::from_secs(60);
+
+/// Remove `<credentials file>.tmp.*` files older than a minute. A process
+/// that died between writing its temp file and renaming it left one behind,
+/// and it holds a token (sealed on hosted, plaintext on a self-host file
+/// backend) that nothing would ever clean up, since every write has a temp
+/// name of its own. Called at daemon start and before every write (a
+/// directory listing, so cheap), and best effort: a file that cannot be read
+/// or removed is left.
+pub fn remove_stale_temp_files(path: &Path) {
+    let Some(name) = path.file_name() else {
+        return;
+    };
+    let mut prefix = name.to_os_string();
+    prefix.push(".tmp.");
+    let prefix = prefix.to_string_lossy().into_owned();
+    let dir = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with(&prefix) {
+            continue;
+        }
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|at| now.duration_since(at).ok())
+            .is_some_and(|age| age > STALE_TEMP_AGE);
+        if old {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// TEST HOOK: widen the read-to-rename window for a file whose name asks for
@@ -2524,11 +2666,12 @@ mod tests {
             .filter_map(|e| e.ok())
             .filter(|e| {
                 let name = e.file_name().to_string_lossy().to_string();
-                name.starts_with(&stem) && name != stem
+                name.starts_with(&stem) && name != stem && name != format!("{stem}.lock")
             })
             .count();
         assert_eq!(strays, 0, "temp files left beside the credentials file");
         std::fs::remove_file(&path).ok();
+        std::fs::remove_file(lock_path(&path)).ok();
     }
 
     #[test]
@@ -2563,5 +2706,185 @@ mod tests {
                     .starts_with("credentials.json.tmp.")
             );
         }
+    }
+
+    // --- the cross-process lock ----------------------------------------------
+
+    /// Two threads standing in for two PROCESSES (a daemon refreshing and
+    /// `squelchd auth` writing a new slot): they go through the file lock
+    /// alone, with no in-process mutex between them, each rewriting its own
+    /// slot. With the read-to-rename window widened, an unlocked pair loses
+    /// one side's update almost every round; under the file lock neither
+    /// loses any.
+    #[test]
+    fn the_file_lock_alone_keeps_two_processes_from_losing_an_update() {
+        const ROUNDS: usize = 15;
+        let path = tmp_path(&format!("{RACE_PAUSE_MARKER}-xproc"));
+        let token = |access: String| StoredToken {
+            access_token: access,
+            refresh_token: Some("r".into()),
+            expires_at: None,
+            scopes: None,
+        };
+        let sides = [
+            ("you@x.com", CredentialKind::Read),
+            ("you@x.com", CredentialKind::Calendar),
+        ];
+        std::thread::scope(|scope| {
+            for (side, (email, kind)) in sides.iter().enumerate() {
+                let path = &path;
+                scope.spawn(move || {
+                    for round in 0..ROUNDS {
+                        update_credentials_file_locked(
+                            path,
+                            None,
+                            |file| {
+                                // Each round, the slot must still hold this
+                                // side's previous write: nothing lost it.
+                                if round > 0 {
+                                    assert_eq!(
+                                        file.slots[&kind.slot_key(email)].access_token,
+                                        format!("s{side}-r{}", round - 1),
+                                        "side {side} lost its round {} update",
+                                        round - 1
+                                    );
+                                }
+                                file.slots.insert(
+                                    kind.slot_key(email),
+                                    token(format!("s{side}-r{round}")),
+                                );
+                            },
+                            Duration::from_secs(10),
+                        )
+                        .unwrap();
+                        // Let the other side in between rounds.
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                });
+            }
+        });
+        let file = CredentialsFile::read(&path, None).unwrap();
+        for (side, (email, kind)) in sides.iter().enumerate() {
+            assert_eq!(
+                file.slots[&kind.slot_key(email)].access_token,
+                format!("s{side}-r{}", ROUNDS - 1)
+            );
+        }
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(lock_path(&path)).ok();
+    }
+
+    /// Held elsewhere for longer than the wait: the write gives up with a
+    /// credential error after the wait, the file is untouched, and once the
+    /// holder lets go the next write goes through. The lock file is
+    /// owner-only.
+    #[test]
+    fn a_held_lock_fails_the_write_after_a_bounded_wait() {
+        let path = tmp_path("held-lock");
+        let token = |access: &str| StoredToken {
+            access_token: access.into(),
+            refresh_token: Some("r".into()),
+            expires_at: None,
+            scopes: None,
+        };
+        store_token_file_with(
+            &path,
+            "you@x.com",
+            CredentialKind::Read,
+            &token("first"),
+            None,
+        )
+        .unwrap();
+        let held = CredentialsFileLock::acquire(&path, Duration::ZERO).unwrap();
+        let started = std::time::Instant::now();
+        let err = update_credentials_file_locked(
+            &path,
+            None,
+            |file| {
+                file.slots
+                    .insert(CredentialKind::Read.slot_key("you@x.com"), token("second"));
+            },
+            Duration::from_millis(300),
+        )
+        .unwrap_err();
+        let waited = started.elapsed();
+        assert!(
+            err.to_string().contains("locked by another process"),
+            "{err}"
+        );
+        assert!(waited >= Duration::from_millis(300), "{waited:?}");
+        assert!(waited < Duration::from_secs(3), "{waited:?}");
+        assert_eq!(
+            load_token_file_with(&path, "you@x.com", CredentialKind::Read, None)
+                .unwrap()
+                .access_token,
+            "first"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(lock_path(&path))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        drop(held);
+        store_token_file_with(
+            &path,
+            "you@x.com",
+            CredentialKind::Read,
+            &token("third"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            load_token_file_with(&path, "you@x.com", CredentialKind::Read, None)
+                .unwrap()
+                .access_token,
+            "third"
+        );
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(lock_path(&path)).ok();
+    }
+
+    /// A temp file a crashed writer left behind is removed by the next write
+    /// once it is over a minute old; a fresh one (a write in flight) and
+    /// another file's temp are left alone.
+    #[test]
+    fn a_stale_temp_file_is_removed_and_a_fresh_one_is_not() {
+        let dir = std::env::temp_dir().join(format!(
+            "squelch-cred-strays-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("credentials.json");
+        let stale = dir.join("credentials.json.tmp.4242.0");
+        let fresh = dir.join("credentials.json.tmp.4242.1");
+        let other = dir.join("other.json.tmp.4242.0");
+        for f in [&stale, &fresh, &other] {
+            std::fs::write(f, b"token").unwrap();
+        }
+        let old = std::time::SystemTime::now() - Duration::from_secs(120);
+        for f in [&stale, &other] {
+            std::fs::File::options()
+                .write(true)
+                .open(f)
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+        }
+        let token = StoredToken {
+            access_token: "a".into(),
+            refresh_token: None,
+            expires_at: None,
+            scopes: None,
+        };
+        store_token_file_with(&path, "you@x.com", CredentialKind::Read, &token, None).unwrap();
+        assert!(!stale.exists(), "the stale temp file is gone");
+        assert!(fresh.exists(), "a fresh temp file may be a write in flight");
+        assert!(other.exists(), "another file's temp is not this one's");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

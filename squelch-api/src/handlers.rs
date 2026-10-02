@@ -1913,7 +1913,12 @@ fn ghost_view(
 /// answer is no).
 ///
 /// `{ "ghosts": [...], "events": [...], "calendar": {granted, synced_at,
-/// error} }`. Events are served only while calendar is granted. Each ghost
+/// error, truncated} }`. Events are served only while calendar is granted.
+/// `error` is the credential's or the PRIMARY calendar's (a shared calendar
+/// that cannot be read is not an account error). `truncated` is true when
+/// the listing hit its cap (it keeps the events nearest now) or a calendar
+/// holds fewer events than Google has (its own cap, likewise nearest now).
+/// Each ghost
 /// carries `matched_event` (`{calendar_id, id}` or null): a real event at the
 /// same start whose title matches ([`squelch_core::gcal::ghost_matches`]),
 /// computed here for display de-duplication and never stored.
@@ -1945,13 +1950,14 @@ pub async fn get_timeline(
         Some(calendar) => calendar.granted().await,
         None => false,
     };
-    let (ghosts, events, (synced_at, error)) = store_call(&state, move |store, account_id| {
+    let (ghosts, events, status) = store_call(&state, move |store, account_id| {
         let ghosts = store.list_ghost_events(account_id, from, to)?;
         if !granted {
-            return Ok((ghosts, Vec::new(), (None, None)));
+            return Ok((ghosts, Vec::new(), Default::default()));
         }
-        let events = store.list_calendar_events(account_id, from, to)?;
-        let status = store.calendar_status(account_id)?;
+        let (events, cut) = store.list_calendar_events(account_id, from, to, now)?;
+        let mut status: squelch_core::gcal::CalendarStatus = store.calendar_status(account_id)?;
+        status.truncated |= cut;
         Ok((ghosts, events, status))
     })
     .await?;
@@ -1984,8 +1990,9 @@ pub async fn get_timeline(
             "events": events,
             "calendar": {
                 "granted": granted,
-                "synced_at": synced_at.map(|at| at.to_rfc3339()),
-                "error": error.map(|kind| kind.as_str()),
+                "synced_at": status.synced_at.map(|at| at.to_rfc3339()),
+                "error": status.error.map(|kind| kind.as_str()),
+                "truncated": status.truncated,
             },
         })),
     ))

@@ -341,7 +341,7 @@ async fn timeline_serves_every_field_with_the_right_end_tier() {
     assert_eq!(body["events"], json!([]));
     assert_eq!(
         body["calendar"],
-        json!({"granted": false, "synced_at": null, "error": null})
+        json!({"granted": false, "synced_at": null, "error": null, "truncated": false})
     );
     assert!(s["id"].as_i64().unwrap() > 0);
     assert_eq!(s["kind"], "ticket");

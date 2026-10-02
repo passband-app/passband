@@ -16,7 +16,9 @@
 //! other people, so its text is laundered like a ghost's (control, bidi and
 //! invisible characters out, 200 characters at most, a meeting link without
 //! its query), and the number of calendars and of events per calendar is
-//! capped.
+//! capped. Google is asked for less in the first place: a `fields` mask names
+//! only what [`read_event`] reads, and `maxAttendees=1` leaves out every guest
+//! but the user ([`client`]).
 
 pub mod client;
 pub mod sync;
@@ -34,8 +36,11 @@ pub const WINDOW_AHEAD_DAYS: i64 = 400;
 /// Calendars read in one pass at most, the primary one first.
 pub const MAX_CALENDARS: usize = 25;
 
-/// Events stored per calendar at most. A new event past it is not stored
-/// until room frees up; an event already stored keeps updating.
+/// Events stored per calendar at most. `events.list` has no defined order
+/// without `orderBy` (which a sync token refuses), so a calendar past it keeps
+/// the events NEAREST the present, by start: the farthest are dropped, which
+/// in a window of a month back and 400 days ahead means far-future events go
+/// first. The calendar is then marked truncated until a full read fits.
 pub const MAX_EVENTS_PER_CALENDAR: i64 = 5000;
 
 /// The stored id of the user's primary calendar, whatever Google calls it.
@@ -102,6 +107,26 @@ pub struct StoredCalendar {
     pub synced_at: Option<DateTime<Utc>>,
     pub full_synced_at: Option<DateTime<Utc>>,
     pub last_error_kind: Option<CalendarErrorKind>,
+    /// Reads of this calendar that failed in a row, and when a SECONDARY
+    /// calendar may be tried again: one broken shared calendar backs off on
+    /// its own and never holds back the others.
+    pub failures: u32,
+    pub retry_at: Option<DateTime<Utc>>,
+    /// Events were dropped at [`MAX_EVENTS_PER_CALENDAR`].
+    pub truncated: bool,
+}
+
+/// The timeline's `calendar` status, from the stored rows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CalendarStatus {
+    /// When the calendars the timeline can trust were last read: the oldest
+    /// among the primary and every secondary calendar not currently failing.
+    pub synced_at: Option<DateTime<Utc>>,
+    /// The credential's or the PRIMARY calendar's failure. A secondary
+    /// calendar's failure is not an account error and is not served.
+    pub error: Option<CalendarErrorKind>,
+    /// Some calendar holds fewer events than Google has in the window.
+    pub truncated: bool,
 }
 
 /// The user's answer to an invitation, from the attendee entry marked `self`.
@@ -172,6 +197,15 @@ pub enum EventItem {
     /// Cancelled, outside the window, or with no usable start: whatever is
     /// stored under this id goes.
     Remove(String),
+}
+
+/// What applying one events page did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PageApplied {
+    /// The ids upserted from this page (a full read's "seen" set).
+    pub stored: Vec<String>,
+    /// Events the per-calendar cap dropped while applying it.
+    pub dropped: usize,
 }
 
 /// One stored event as the timeline serves it, with its calendar's name.
@@ -283,10 +317,13 @@ pub fn read_event(
         .get("start")
         .and_then(|s| s.get("timeZone"))
         .and_then(Value::as_str);
+    // A date has no zone, whatever Google attaches to it: it sends `timeZone`
+    // on the start of a recurring all-day series, and serving it would make
+    // the client place a date-only event at a clock time.
     let start_timezone = match (start_zone, start.has_clock()) {
-        (Some(zone), _) => ghost::iana_zone(zone),
+        (_, false) => None,
+        (Some(zone), true) => ghost::iana_zone(zone),
         (None, true) => calendar_zone.and_then(ghost::iana_zone),
-        (None, false) => None,
     };
     let self_response = item
         .get("attendees")
@@ -650,6 +687,32 @@ mod tests {
         assert_eq!(row.start_timezone, None, "a date has no zone");
         assert_eq!(row.self_response, None, "no attendees: the user's own");
         assert!(!row.transparent);
+        // Google names a zone on a recurring all-day series' start; a date
+        // still has none.
+        let series = upsert(json!({
+            "id": "series_20261005",
+            "start": {"date": "2026-10-05", "timeZone": "America/New_York"},
+            "end": {"date": "2026-10-06", "timeZone": "America/New_York"}
+        }));
+        assert_eq!(series.start_timezone, None, "a date has no zone");
+    }
+
+    /// With `maxAttendees=1` Google sends only the user's own entry when an
+    /// event has more guests: the answer still reads from it.
+    #[test]
+    fn the_users_answer_reads_from_a_lone_attendee_entry() {
+        let row = upsert(json!({
+            "id": "e", "start": {"dateTime": "2026-10-05T09:00:00Z"},
+            "attendeesOmitted": true,
+            "attendees": [{"self": true, "responseStatus": "declined"}]
+        }));
+        assert_eq!(row.self_response, Some(SelfResponse::Declined));
+        // One entry that is someone else's: no answer of the user's.
+        let other = upsert(json!({
+            "id": "e2", "start": {"dateTime": "2026-10-05T09:00:00Z"},
+            "attendees": [{"email": "a@example.com", "responseStatus": "accepted"}]
+        }));
+        assert_eq!(other.self_response, None);
     }
 
     #[test]

@@ -612,3 +612,65 @@ it. That move is what the guard below exists for.
   list knows.
 - `needs_you` sends the user to the ORIGINAL link, not a post-redirect hop that may
   depend on this job's cookies.
+
+## 8. Google Calendar (read only)
+
+**Invariant.** Calendar data (event titles, places, organizers, links, calendar
+names) is human-door data: served on `GET /client/timeline` and nowhere else, never
+in a log line, never in a triage prompt. Nothing calendar-related is on `/mcp` or
+`/client/agent/*`. The daemon only reads calendars; nothing writes to one.
+
+**Enforcement.**
+- **Two tables, one reader.** `calendar_calendars` and `calendar_events`
+  (`squelch-core/src/store/sqlite/calendar.rs`) are written only by the sync loop
+  (`squelch-core/src/gcal/sync.rs`) and read only by `handlers.rs:get_timeline`.
+  Every query is scoped by `account_id`. A log line names a calendar by its
+  position in the pass, never its id, which is usually an address.
+- **Laundered and capped** (`gcal/mod.rs:read_event`). A shared calendar is written
+  by other people, so its text is treated like mail: titles and places lose control,
+  bidi and invisible characters and stop at 200 characters, a meeting link loses
+  its query, an organizer is kept only when it is an address, ids are bounded. At
+  most 25 calendars, 5000 events per calendar (the nearest to now kept), 40 pages of
+  250 per calendar per pass, 8 MB per response, one listing of 5000. Google is asked
+  for less in the first place: a `fields` mask names only what is read, and
+  `maxAttendees=1` leaves out every guest but the user, so an invitation anyone can
+  send never delivers its description or guest list to the daemon.
+- **`html_link` is an allow-list** (`gcal/mod.rs:google_link`): https, a host that is
+  `google.com` or ends in `.google.com`, no userinfo, at most 2048 characters.
+  Anything else is dropped, because the client opens it.
+- **No redirects, no bodies in errors** (`gcal/client.rs`). The client refuses
+  redirects (every request carries a bearer token) and reduces a failure to its
+  kind (`auth`, `quota`, `unavailable`).
+- **Calendar failures stay out of Gmail.** The loop is its own task; no failure of
+  it touches Gmail health or sync.
+
+**The token is the union; the slot is the boundary.** Self-host
+`squelchd auth --calendar` stores its token in its own credential slot
+(`CredentialKind::Calendar`). Google unions grants per Cloud project and the consent
+asks with `include_granted_scopes`, so that token carries EVERYTHING this OAuth
+client was granted for the account, Gmail scopes included (`gmail.modify` and
+`gmail.send` if `squelchd auth --write` was ever run). Asking for less cannot
+narrow it; only a separate Cloud project could. What keeps calendar code away from
+mail is the slot and the code paths: the calendar loop loads only the Calendar slot
+(or, without one, the Read slot when it records `calendar.events`) and only calls
+the Calendar API, and no mail path loads the Calendar slot. Hosted is unchanged: the
+control plane seals ONE token into the Read and Write slots, as before, and a
+calendar grant adds `calendar.events` and `calendarlist.readonly` to that one token.
+
+**Credentials file writes.** The calendar resolver is a third writer of the
+credentials file beside the Gmail Read and Write stores, so every write goes
+through one read-modify-write (`credentials.rs:update_credentials_file`) under a
+process-wide mutex and an advisory lock on `<credentials file>.lock` (owner-only),
+which also covers `squelchd auth` run beside a running daemon. A writer waits at
+most 10 seconds for the lock and then fails like any other credential write. Each
+write has its own temp name; temp files a crashed writer left are removed after a
+minute.
+
+**What a maintainer must not break.**
+- Do not add a calendar route to the agent door or MCP, or put calendar text in a
+  triage prompt, without a decision recorded in docs/CALENDAR.md §10.
+- Do not log an event's title, place, organizer, attendee, link or a calendar id.
+- Do not let a mail path load the Calendar slot, or the calendar loop load the
+  Write slot: the token in either can do more than its job.
+- Do not loosen `google_link` or drop the `fields` mask or `maxAttendees`.
+- Do not write the credentials file except through `update_credentials_file`.

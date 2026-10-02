@@ -190,6 +190,11 @@ struct SitrepZoneCache: Sendable {
     var banking: [BankingRecord] = []
     var receipts: [Receipt] = []
     var reading: [ReadingSender] = []
+    /// Whether the reading fetch has ANSWERED for this account. An empty
+    /// `reading` means "nothing to read" only once it has; before that it
+    /// means nobody has asked yet, and the quiet board must not take the one
+    /// for the other.
+    var readingLoaded = false
 }
 
 /// The search panel's state, held OUT of the panel: SwiftUI discards a view's
@@ -581,6 +586,9 @@ final class AppStore {
     /// the observed struct: it is a TTL stamp, and stamping it invalidated
     /// every zone view once per pass whether or not a row had changed.
     @ObservationIgnored private var zonesLoadedAt: Date?
+    /// The last pass missed a zone and its one early retry is spent or
+    /// pending — see `performZoneRefresh`.
+    @ObservationIgnored private var zoneRetryOwed = false
 
     // MARK: surfaces
     var sideView: SideView = .none
@@ -874,7 +882,7 @@ final class AppStore {
 
     // MARK: account switching
 
-    /// Bumped ONCE per account switch. Every async writer of account-scoped
+    /// Bumped on every account switch. Every async writer of account-scoped
     /// state captures it before its first await and refuses to write once it
     /// no longer matches: a request built against account A's daemon can land
     /// after B is live, and message ids are per-daemon SQLite ints — so a
@@ -1670,7 +1678,12 @@ final class AppStore {
         assistant.clear()
 
         // (7) The world itself, in one synchronous pass so no frame is
-        //     ever painted showing a mix of two mailboxes.
+        //     ever painted showing a mix of two mailboxes. Fenced AGAIN
+        //     first, as `enterPractice` does: a refresh that started while
+        //     the drafts settled carries step (3)'s epoch and the old
+        //     daemon's rows, and would write them into the world wiped here.
+        epoch &+= 1
+        SitrepPoller.shared.stop()
         wipeAccountState()
         wipeAccountCaches()
 
@@ -1732,9 +1745,21 @@ final class AppStore {
         // never heard of.
         UnsubscribeJobs.shared.reset()
         sitrep = SitrepData()
+        // Its own line since the stats left SitrepData. The old daemon's
+        // stats over the new mailbox's empty bands read as "all clear": the
+        // quiet board played for a mailbox that had not answered yet, and a
+        // draft save took the old daemon's capabilities for the new one's.
+        stats = nil
         fyeHeadline = nil
         fyeHeadlineKey = nil
         zones = SitrepZoneCache()
+        // AND THE TTL STAMP, which no longer rides inside the struct above.
+        // Left standing, it vouches for the rows just thrown away: the new
+        // account's first refreshes are skipped as "still fresh", and the
+        // zone cards cannot ask for themselves because an empty rail is
+        // never mounted.
+        zonesLoadedAt = nil
+        zoneRetryOwed = false
         // The parked refresh tasks go too, not just their results: a joiner
         // arriving after the switch would otherwise wait on — and adopt the
         // silence of — a pass that has already been disowned.
@@ -1850,6 +1875,10 @@ final class AppStore {
         // compile, so no platform fence.
         WebFramePool.shared.wipeAll()
         ImageWarmer.shared.resetForSwitch()
+        // The clear chime is earned by clearing a board, and what armed it
+        // was the other mailbox's. Left armed, switching from a busy account
+        // to a quiet one plays it for mail nobody handled.
+        QuietBoard.shared.armed = false
         // AuthDecisions.reload() is NOT here — see switchAccount step (8).
     }
 
@@ -2267,6 +2296,7 @@ final class AppStore {
         // mid-pass cannot show half of each mailbox; a failing endpoint (nil
         // rows) leaves its own zone's last good rows rather than blanking the
         // column.
+        var missed = false
         await withTaskGroup(of: ZoneAnswer.self) { group in
             group.addTask {
                 .shipments(try? await APIClient.shared.getShipments(includeDelivered: true))
@@ -2286,7 +2316,9 @@ final class AppStore {
                 // 45 seconds ago.
                 switch answer {
                 case .shipments(let rows?): if rows != zones.shipments { zones.shipments = rows }
-                case .reading(let rows?): if rows != zones.reading { zones.reading = rows }
+                case .reading(let rows?):
+                    if rows != zones.reading { zones.reading = rows }
+                    if !zones.readingLoaded { zones.readingLoaded = true }
                 case .records(let feed?):
                     // Derived off the feed ONCE, off the main actor would be
                     // better still; the three walks are over up to a thousand
@@ -2297,12 +2329,29 @@ final class AppStore {
                     if receipts != zones.receipts { zones.receipts = receipts }
                     if banking != zones.banking { zones.banking = banking }
                     if calendar != zones.calendar { zones.calendar = calendar }
-                case .shipments, .reading, .records: break
+                case .shipments, .reading, .records: missed = true
                 }
             }
         }
         guard e == epoch else { return }
-        zonesLoadedAt = Date()
+        // A PASS WITH A FAILED FETCH EARNS ONE EARLY RETRY. That zone kept
+        // its old rows, and stamping over it made one dropped request a
+        // 45-second hole: on a mailbox just switched to, an empty Reading
+        // zone that every later tick declined to ask about again. So the
+        // first miss clears the stamp and the next poll tick asks again.
+        //
+        // ONE, not one per tick: the poller awaits this pass inside its pull,
+        // so an endpoint that fails every time would otherwise be asked every
+        // ten seconds forever (the records feed is a thousand rows), and one
+        // that times out would hold every pull for the length of the timeout.
+        // A second miss in a row goes back to the ordinary cadence.
+        if missed, !zoneRetryOwed {
+            zoneRetryOwed = true
+            zonesLoadedAt = nil
+        } else {
+            zoneRetryOwed = missed
+            zonesLoadedAt = Date()
+        }
 
         HeroCache.shared.preload(zones.reading.map(\.latestThreadId))
         warmZoneThreads()

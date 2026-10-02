@@ -280,8 +280,12 @@ struct SitrepView: View {
 
     /// Clear AND nothing to read: the board with nothing on it at all, which
     /// is what the quiet board's scene plays behind. Mail in either zone
-    /// fades it away.
-    private var quiet: Bool { isClear && readingSenders.isEmpty }
+    /// fades it away. "Nothing to read" has to be an ANSWER: the stats land
+    /// a round trip before the reading feed does, and in that gap a mailbox
+    /// with only reading mail looked quiet, scene, chime and all.
+    private var quiet: Bool {
+        isClear && store.zones.readingLoaded && readingSenders.isEmpty
+    }
 
     /// Every records card would only say it has nothing. Four cards of "No
     /// receipts today." is a dashboard of absences, so the rail steps aside.

@@ -28,9 +28,12 @@
 //! the agent and sends the person's browser HERE to log in, with one opaque
 //! `external_auth_id`. `GET /agent/auth` takes that and nothing else, runs the
 //! app hop's identity-only Google round trip, finds the tenant from the mailbox
-//! Google names, and only then tells WorkOS who it was (see [`crate::workos`]),
-//! sending the browser on to the URL WorkOS answers with. A Google account with
-//! no mailbox here is told so after Google, and WorkOS is never called for it.
+//! Google names, shows a confirmation page of our own (the link can be mailed to
+//! a victim, so the person is asked in plain words before anything is granted),
+//! and only on `POST /agent/confirm` tells WorkOS who it was (see
+//! [`crate::workos`]), sending the browser on to the URL WorkOS answers with. A
+//! Google account with no mailbox here is told so after Google, and WorkOS is
+//! never called for it.
 //!
 //! WHY THE REVERSE LOOKUP IS NOT AN ORACLE, which is the question the console
 //! hop's design raises: its key is an address GOOGLE VERIFIED on this request,
@@ -1243,8 +1246,25 @@ pub async fn oauth_callback(
         // The AGENT login forks with the app login it is built on: identity
         // only, nothing provisioned, no invite. The `external_auth_id` it
         // hands on comes out of the SESSION, which is the only place it lives.
+        // THE CONFIRMATION PAGE is the one answer from this callback that
+        // SETS a cookie rather than clearing it: it hands the browser a fresh
+        // flow cookie for the session it just parked.
         SessionKind::Agent { external_auth_id } => {
-            return done(agent_login(&state, code, session.pkce_verifier, &external_auth_id).await);
+            return match agent_login(&state, code, session.pkce_verifier, external_auth_id).await {
+                Ok(page) => page,
+                Err(refusal) => done(refusal),
+            };
+        }
+        // A CONFIRMATION is answered by `POST /agent/confirm` and never by a
+        // Google callback. Reaching here needs its CSRF token in `state`, so it
+        // is not a path anybody walks by accident; refused all the same, and
+        // the parked identity is gone with the session.
+        SessionKind::AgentConfirm { .. } => {
+            tracing::warn!(
+                outcome = "kind_refused",
+                "a confirmation came back as a callback"
+            );
+            return done(refused_session_for(&state, voice));
         }
     };
 
@@ -1969,33 +1989,43 @@ async fn app_login(state: &ControlState, code: String, pkce_verifier: String) ->
 }
 
 /// The agent login's half of the callback: prove who is signed in, find the
-/// tenant THAT MAILBOX owns, tell WorkOS who it was, and send the browser where
-/// WorkOS says.
+/// tenant THAT MAILBOX owns, and ASK THE PERSON before anything is sent to
+/// WorkOS.
 ///
-/// THE ORDER IS THE SAFETY PROPERTY. WorkOS is called LAST, and only once a
-/// Google-verified mailbox has been matched to an ACTIVE tenant here: what
-/// AuthKit is told becomes the access token's `email` claim, and that claim is
-/// what a tenant daemon holds against its own account before it serves a byte
-/// of mail. So a Google account with no mailbox here never reaches WorkOS, and
-/// the address sent is never anything the browser supplied.
+/// `Ok` is the confirmation page, which carries a FRESH flow cookie and must
+/// not have it cleared; `Err` is a terminal answer, which the callback clears
+/// the cookie on like every other.
 ///
-/// WHAT IS SENT. `user.id` is the verified address, trimmed and lowercased, so
-/// one mailbox is one AuthKit user whatever case Google answers in. `user.email`
-/// is the address AS THE TENANT RECORD STORES IT, re-read by label here rather
-/// than carried from the lookup, so the claim a daemon compares is exactly the
-/// account this control plane provisioned.
+/// WORKOS IS NOT CALLED HERE ANY MORE, and that is the fix for a confirmed
+/// consent-phishing path: the `/agent/auth?external_auth_id=` link can be
+/// mailed to somebody by whoever started the authorization, Google's chooser
+/// asks a returning user nothing, and AuthKit's own screen names the agent with
+/// whatever name its builder registered. So the verified result is parked
+/// server-side under a new session (see [`SessionKind::AgentConfirm`]) and a
+/// page of OURS says, in plain words, what is about to happen and when not to
+/// let it. Only `POST /agent/confirm` ([`agent_confirm`]) spends it.
+///
+/// THE ORDER IS STILL THE SAFETY PROPERTY. A Google account with no active
+/// tenant here gets the no-mailbox page and nothing is parked, so WorkOS can
+/// never hear about it.
+///
+/// WHAT WILL BE SENT is decided here, once. `user.id` is the verified address,
+/// trimmed and lowercased, so one mailbox is one AuthKit user whatever case
+/// Google answers in. `user.email` is the address AS THE TENANT RECORD STORES
+/// IT, re-read by label rather than carried from the lookup, so the claim a
+/// daemon compares is exactly the account this control plane provisioned.
 async fn agent_login(
     state: &ControlState,
     code: String,
     pkce_verifier: String,
-    external_auth_id: &str,
-) -> Response {
-    let Some(workos) = state.workos() else {
+    external_auth_id: String,
+) -> Result<Response, Response> {
+    if state.workos().is_none() {
         // The route that opens these sessions is unmounted without WorkOS, so
         // only a config that changed under a live session lands here.
         tracing::error!("agent login callback with WorkOS not configured");
-        return agent_unavailable();
-    };
+        return Err(agent_unavailable());
+    }
 
     let account_email = match oauth::verify_identity(&endpoints(state), code, pkce_verifier).await {
         Ok(email) => email,
@@ -2003,7 +2033,7 @@ async fn agent_login(
             // PRIVACY: the error type, which is written to carry no code, no
             // token, and no provider body.
             tracing::info!(error = %e, "agent login did not complete at Google");
-            return agent_refused();
+            return Err(agent_refused());
         }
     };
 
@@ -2015,11 +2045,11 @@ async fn agent_login(
         // Google, and WorkOS is never called: see [`AGENT_NO_TENANT`].
         Ok(None) => {
             tracing::info!(outcome = "no_tenant", "agent login refused");
-            return agent_no_tenant();
+            return Err(agent_no_tenant());
         }
         Err(e) => {
             tracing::error!(error = %e, "agent tenant lookup failed");
-            return agent_unavailable();
+            return Err(agent_unavailable());
         }
     };
     let stored_email = match state.store().active_tenant_email(&label).await {
@@ -2027,18 +2057,177 @@ async fn agent_login(
         // Torn down between the two reads: the same answer as never existing.
         Ok(None) => {
             tracing::info!(outcome = "no_tenant", label = %label, "agent login refused");
-            return agent_no_tenant();
+            return Err(agent_no_tenant());
         }
         Err(e) => {
             tracing::error!(error = %e, label = %label, "agent tenant lookup failed");
-            return agent_unavailable();
+            return Err(agent_unavailable());
         }
     };
-
     let user_id = account_email.trim().to_lowercase();
+
+    // A FRESH session id and a fresh CSRF token. The id the browser carried to
+    // Google was handed out before anybody had authenticated; the one that
+    // holds a verified identity is minted after.
+    let (sid, csrf) = match (random_token(), random_token()) {
+        (Ok(a), Ok(b)) => (a, b),
+        _ => {
+            tracing::error!("the system random source failed");
+            return Err(agent_unavailable());
+        }
+    };
+    let inserted = state.sessions().insert(
+        sid.clone(),
+        SessionKind::AgentConfirm {
+            external_auth_id,
+            stored_email: stored_email.clone(),
+            user_id,
+        },
+        // The `state` slot holds the form's CSRF token: the same role it plays
+        // for Google, one hop later.
+        csrf.clone(),
+        // No verifier: the authorization code it protected has been spent.
+        String::new(),
+        label.clone(),
+        Instant::now(),
+    );
+    if let Err(InsertError::Full) = inserted {
+        tracing::warn!(sessions = state.live_sessions(), "session table full");
+        return Err(agent_unavailable());
+    }
+
+    let claim = SessionClaim {
+        sid,
+        label: String::new(),
+        invite: None,
+        app: false,
+        reconnect: false,
+        // A marker for refusal copy, as before. Nothing the POST does is
+        // decided by the cookie beyond WHICH session it names.
+        agent: true,
+        iat: chrono::Utc::now().timestamp(),
+    };
+    let cookie_value = cookie::sign(&state.config().cookie_key, &claim);
+
+    // PRIVACY: an outcome and the label. Never the mailbox, the id, or the
+    // token.
+    tracing::info!(outcome = "confirm_shown", label = %label, "agent login awaiting confirmation");
+
+    // The page names a mailbox and carries a live CSRF token, so it is
+    // uncacheable and referer-free (the shell sets both; `no_store` restates
+    // them so the property does not hang on the shell), and unframeable
+    // (`frame-ancestors 'none'` and `X-Frame-Options: DENY`), which is what
+    // keeps the Continue button from being clickjacked.
+    let mut page = no_store(pages::agent_confirm(
+        &stored_email,
+        &csrf,
+        state.config().is_insecure(),
+    ));
+    if let Ok(value) = header::HeaderValue::from_str(&cookie::set_cookie(
+        &cookie_value,
+        !state.config().is_insecure(),
+    )) {
+        // REPLACES the pre-Google cookie: same name, same path.
+        page.headers_mut().append(header::SET_COOKIE, value);
+    }
+    Ok(page)
+}
+
+/// `POST /agent/confirm` — the person's answer on the confirmation page.
+///
+/// FIVE GATES, IN THIS ORDER, and every refusal is the agent flow's
+/// unverifiable-session page with no WorkOS call:
+///
+/// 1. SAME ORIGIN, by exactly the discipline the admin POSTs use
+///    ([`crate::admin::same_origin`]: `Origin` when it names something,
+///    `Sec-Fetch-Site` when it does not). The flow cookie is `SameSite=Lax`, so
+///    a cross-site POST already arrives without it; this is the second lock,
+///    and the one that also covers the sibling `passband.app` names Lax
+///    considers same-site.
+/// 2. A flow cookie with a valid MAC. It decides nothing but WHICH session.
+/// 3. ONE-SHOT: the session is TAKEN, atomically, before anything else is
+///    asked of it, so a replay, a double click, or a second tab finds nothing.
+///    A take that finds nothing is "expired" (absent and expired are one
+///    answer, as everywhere in the table).
+/// 4. The KIND is held to [`SessionKind::AgentConfirm`]: a console, app,
+///    reconnect, or pre-Google agent session is refused, so no other flow can
+///    reach WorkOS through here.
+/// 5. The form's CSRF token, compared constant time against the one this
+///    session was minted with.
+///
+/// Then the decision: `continue` completes at WorkOS, `cancel` shows the
+/// nothing-was-connected page, and anything else (including no decision at
+/// all) is refused. The session is gone in every case.
+pub async fn agent_confirm(
+    State(state): State<ControlState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Some(workos) = state.workos() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let secure = !state.config().is_insecure();
+    let done = |resp: Response| with_cleared_cookie(resp, secure);
+
+    if !crate::admin::same_origin(&state, &headers) {
+        tracing::warn!(outcome = "cross_site_refused", "agent confirmation refused");
+        return done(agent_session_refused());
+    }
+
+    let claim = headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(cookie::from_header)
+        .and_then(|v| {
+            cookie::verify(
+                &state.config().cookie_key,
+                v,
+                chrono::Utc::now().timestamp(),
+            )
+        });
+    let Some(claim) = claim else {
+        tracing::info!(outcome = "no_session", "agent confirmation refused");
+        return done(agent_session_refused());
+    };
+
+    // Bound in its own statement so the session lock is released at once.
+    let session = state.sessions().take(&claim.sid, Instant::now());
+    let Some(session) = session else {
+        tracing::info!(outcome = "expired", "agent confirmation refused");
+        return done(agent_session_refused());
+    };
+    let SessionKind::AgentConfirm {
+        external_auth_id,
+        stored_email,
+        user_id,
+    } = session.kind
+    else {
+        tracing::warn!(outcome = "kind_refused", "agent confirmation refused");
+        return done(agent_session_refused());
+    };
+    let label = session.label;
+
+    let csrf = field(&body, "csrf");
+    if csrf.is_empty() || !squelch_httpauth::ct_eq(csrf.as_bytes(), session.state.as_bytes()) {
+        tracing::warn!(outcome = "csrf_refused", label = %label, "agent confirmation refused");
+        return done(agent_session_refused());
+    }
+
+    match field(&body, "decision").as_str() {
+        "continue" => {}
+        "cancel" => {
+            tracing::info!(outcome = "cancelled", label = %label, "agent confirmation");
+            return done(agent_cancelled());
+        }
+        _ => {
+            tracing::warn!(outcome = "no_decision", label = %label, "agent confirmation refused");
+            return done(agent_session_refused());
+        }
+    }
+
     let destination = match workos
         .complete(
-            external_auth_id,
+            &external_auth_id,
             &user_id,
             &stored_email,
             state.config().is_insecure(),
@@ -2046,17 +2235,25 @@ async fn agent_login(
         .await
     {
         Ok(url) => url,
+        // AuthKit no longer knows this authorization (spent or expired). Trying
+        // again in this browser can never work, so the page says to start over
+        // from the agent rather than "try again in a few minutes".
+        Err(crate::workos::WorkosError::Refused) => {
+            tracing::info!(outcome = "workos_refused", label = %label, "agent login: WorkOS completion refused");
+            return done(agent_expired());
+        }
         Err(e) => {
             // PRIVACY: the error category and the label. Never the key, the
             // external_auth_id, the address, or anything WorkOS said.
             tracing::warn!(error = %e, label = %label, "agent login: WorkOS completion failed");
-            return agent_unavailable();
+            return done(agent_unavailable());
         }
     };
 
     // PRIVACY: the label and the redirect's HOST. Never its path or query,
     // which carry AuthKit's own state.
     tracing::info!(
+        outcome = "confirmed",
         label = %label,
         redirect_host = destination.host_str().unwrap_or_default(),
         "agent login complete"
@@ -2066,12 +2263,44 @@ async fn agent_login(
         // Unreachable for a parsed URL (it serializes as ASCII); a refusal
         // rather than a panic all the same.
         tracing::error!(label = %label, "the agent redirect would not fit in a header");
-        return agent_unavailable();
+        return done(agent_unavailable());
     };
-    // FOUND, as the console login's hand-back is. The URL carries AuthKit's
-    // state for this authorization, so nothing may cache it and it must not
-    // ride out as a referer.
-    no_store((StatusCode::FOUND, [(header::LOCATION, location)]).into_response())
+    // SEE OTHER, the POST-to-GET answer this crate gives after `POST /signup`:
+    // the browser must GET AuthKit's URL, never re-POST the form to it. The URL
+    // carries AuthKit's state, so nothing may cache it and it must not ride out
+    // as a referer.
+    done(no_store(
+        (StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response(),
+    ))
+}
+
+/// The agent flow's unverifiable-session page: every refusal on
+/// `POST /agent/confirm`, in the same words the callback uses.
+fn agent_session_refused() -> Response {
+    pages::console_problem(
+        StatusCode::BAD_REQUEST,
+        CONSOLE_REFUSED_HEADING,
+        AGENT_SESSION_REFUSED,
+    )
+}
+
+/// What Cancel answers. `200`: the person chose this, nothing failed.
+fn agent_cancelled() -> Response {
+    pages::console_problem(
+        StatusCode::OK,
+        "Nothing was connected",
+        "No agent can read your mail from this. You can close this page.",
+    )
+}
+
+/// What a completion WorkOS REFUSED gets: the authorization AuthKit was holding
+/// is spent or expired, so the only way forward is the agent.
+fn agent_expired() -> Response {
+    pages::console_problem(
+        StatusCode::BAD_REQUEST,
+        "This connection request has expired",
+        "Nothing was connected. Go back to your agent and start connecting again.",
+    )
 }
 
 /// The agent login's no-mailbox page. No link: the only way back into this
@@ -2288,7 +2517,7 @@ impl Voice {
             SessionKind::Console => Voice::Console(label.to_string()),
             SessionKind::App => Voice::App,
             SessionKind::Reconnect => Voice::Reconnect,
-            SessionKind::Agent { .. } => Voice::Agent,
+            SessionKind::Agent { .. } | SessionKind::AgentConfirm { .. } => Voice::Agent,
         }
     }
 }

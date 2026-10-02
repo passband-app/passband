@@ -69,7 +69,7 @@ The admin POSTs take a `SameSite=Strict` session cookie AND a same-origin
 buttons. An `Origin` of `null` names nothing, so it is decided by
 `Sec-Fetch-Site`, which no page can write.
 
-## The agent door: WorkOS AuthKit login (`/agent/auth`)
+## The agent door: WorkOS AuthKit login (`/agent/auth`, `/agent/confirm`)
 
 Agents reach a hosted tenant's `/mcp` with an OAuth access token issued by
 **WorkOS AuthKit**, running in "Standalone Connect" mode: AuthKit is the
@@ -81,8 +81,9 @@ agent    ── OAuth authorize ──► AuthKit
 browser  ── GET /agent/auth?external_auth_id=<opaque> ──► 302 to Google (identity only)
          ── Google consent ──►
          ── GET /oauth/callback ──► mailbox Google names → its ACTIVE tenant here
-                                    POST https://api.workos.com/authkit/oauth2/complete
-                                    302 to the redirect_uri WorkOS answers with
+                                    200 OUR confirmation page (fresh cookie, CSRF token)
+         ── POST /agent/confirm ──► POST https://api.workos.com/authkit/oauth2/complete
+                                    303 to the redirect_uri WorkOS answers with
          ── AuthKit consent ──► token for the agent
 ```
 
@@ -94,23 +95,48 @@ browser  ── GET /agent/auth?external_auth_id=<opaque> ──► 302 to Googl
 - **Not an oracle.** Every well-formed id gets the same 302 to Google. Nothing
   is looked up until Google has authenticated somebody, so whether a mailbox
   exists is a question only its owner can ask.
+- **A page of ours asks first.** The `/agent/auth` link can be mailed to a
+  victim by whoever started the authorization, Google's chooser asks a
+  returning user nothing, and AuthKit's consent screen names the agent with
+  whatever name its builder registered. So the callback does NOT call WorkOS:
+  it parks the verified result (the id, the tenant, the stored address, the
+  verified address) server-side under a FRESH session id and cookie, for five
+  minutes, one-shot, inside the same bounded session table, and renders a
+  confirmation page naming the mailbox: an AI agent is asking to read this
+  mail, continue only if you started this yourself on this device, close it if
+  somebody sent you the link, and the next screen's agent name is chosen by
+  whoever built it. Unframeable, uncacheable, no script.
+- **`POST /agent/confirm`** is the answer. It requires a same-origin
+  `Origin`/`Sec-Fetch-Site` (the admin POSTs' check), the flow cookie, an
+  atomic one-shot take of a confirmation session (any other kind is refused),
+  and the form's CSRF token (constant time). Continue completes at WorkOS;
+  Cancel discards the state and says nothing was connected. It rides the
+  callback's rate-limit bucket, as the second half of a consent already given.
+  Its page's CSP widens `form-action` to `https:`, because Chrome applies
+  `form-action` to the redirect a form submission gets and the AuthKit host is
+  not configured here.
 - **WorkOS is called last.** Only once the Google-verified mailbox matches an
-  active tenant. A Google account with no mailbox here gets a plain "no Passband
-  mailbox" page and WorkOS hears nothing. The completion sends
+  active tenant and its owner has pressed Continue. A Google account with no
+  mailbox here gets a plain "no Passband mailbox" page, nothing is parked, and
+  WorkOS hears nothing. The completion sends
   `{"external_auth_id", "user": {"id": <verified address, lowercased>, "email":
   <the address as the tenant record stores it>}}` with `Authorization: Bearer
   <key>` and a 10 second budget. That `email` becomes the token's `email` claim,
   which is what a tenant daemon holds against its own account before serving
   anything.
-- **The redirect is checked.** The browser is sent (302, `no-store`,
+- **The redirect is checked.** The browser is sent (303, `no-store`,
   `no-referrer`) to WorkOS's `redirect_uri` only if it is an absolute `https`
-  URL with a host and no userinfo (`http` too, on a plain-http local run). Any
-  non-2xx, a timeout, unreadable JSON, or any other URL is one "try again" page
-  that repeats nothing WorkOS said.
-- It shares the login hops' rate-limit bucket and session ceiling.
+  URL with a host and no userinfo (`http` too, on a plain-http local run). A
+  4xx other than 401/403 (a spent or expired `external_auth_id`) gets "this
+  connection request has expired, start again from your agent", since a retry
+  here can never work; 401/403, 429, 5xx, a timeout, unreadable JSON, or any
+  other URL is one "try again" page. Neither repeats anything WorkOS said.
+- `/agent/auth` shares the login hops' rate-limit bucket; both stages count
+  against the session table's login ceiling.
 
 **Setup.** Set `SQUELCH_CONTROL_WORKOS_API_KEY` in the `control` service's
-Railway variables; unset, `/agent/auth` is not mounted at all (404). In the WorkOS
+Railway variables; unset, neither `/agent/auth` nor `/agent/confirm` is mounted
+(404). In the WorkOS
 dashboard, under *Connect* → *Configuration*, set the **Login URI** to
 `https://<control origin>/agent/auth` (today `https://signup.passband.app/agent/auth`).
 The `control` service deploys itself from `main`: merge the change, set the

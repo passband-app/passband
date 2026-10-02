@@ -50,17 +50,18 @@ const MAX_REDIRECT_LEN: usize = 4096;
 
 #[derive(Debug, thiserror::Error)]
 pub enum WorkosError {
-    /// WorkOS could not be reached, timed out, or answered something that is
-    /// not the JSON we know.
+    /// WorkOS could not be reached, timed out, answered with its own failure
+    /// (5xx, or its rate limit), or answered something that is not the JSON we
+    /// know. Worth trying again.
     #[error("WorkOS could not be reached or answered unreadably")]
     Unreachable,
     /// 401/403. A deployment misconfiguration worth shouting about: no agent
     /// connects to anything until the key is fixed.
     #[error("WorkOS refused our API key")]
     Unauthorized,
-    /// Any other non-success status: most often an `external_auth_id` that is
-    /// unknown, spent, or expired at AuthKit, which is the agent's flow to
-    /// restart, not ours.
+    /// Any other 4xx: most often an `external_auth_id` that is unknown, spent,
+    /// or expired at AuthKit. Retrying in the same browser can never work; the
+    /// agent's flow has to start again.
     #[error("WorkOS refused to complete the login")]
     Refused,
     /// A 2xx whose `redirect_uri` is not one this service will send a browser
@@ -156,6 +157,11 @@ impl WorkosClient {
         match resp.status().as_u16() {
             200..=299 => {}
             401 | 403 => return Err(WorkosError::Unauthorized),
+            // WorkOS's own trouble, and its rate limit: the same request can
+            // succeed in a minute, so these say "try again".
+            429 | 500..=599 => return Err(WorkosError::Unreachable),
+            // Everything else is AuthKit refusing THIS authorization, which a
+            // retry of the same id will not change.
             _ => return Err(WorkosError::Refused),
         }
         let body = read_capped(resp).await?;

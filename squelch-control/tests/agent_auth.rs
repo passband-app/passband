@@ -199,6 +199,8 @@ struct Harness {
     /// the session table.
     state: ControlState,
     rec: Shared,
+    /// This deployment's own origin: what a same-origin POST says it is from.
+    public_url: String,
 }
 
 impl Harness {
@@ -255,6 +257,7 @@ impl Harness {
             app: router(state.clone()),
             state,
             rec,
+            public_url: public_url.to_string(),
         }
     }
 
@@ -307,6 +310,78 @@ impl Harness {
         self.finish(&consent, &cookie).await
     }
 
+    /// A form POST with whatever cookie and origin headers the test chooses.
+    async fn post(
+        &self,
+        uri: &str,
+        cookie: Option<&str>,
+        origin: Option<&str>,
+        body: String,
+    ) -> (StatusCode, HeaderMap, String) {
+        let mut req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+        if let Some(c) = cookie {
+            req = req.header(header::COOKIE, c);
+        }
+        if let Some(o) = origin {
+            req = req.header(header::ORIGIN, o);
+        }
+        let resp = self
+            .app
+            .clone()
+            .oneshot(req.body(axum::body::Body::from(body)).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let body = String::from_utf8_lossy(&to_bytes(resp.into_body(), 1 << 20).await.unwrap())
+            .to_string();
+        (status, headers, body)
+    }
+
+    /// Walk the agent hop through Google to the confirmation page, and return
+    /// `(fresh cookie pair, csrf token, page body)`.
+    async fn reach_confirm(&self) -> (String, String, String) {
+        let (status, headers, body) = self.run_agent().await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let cookie = headers
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .find(|c| c.starts_with("passband_signup=") && !c.contains("Max-Age=0"))
+            .expect("the confirmation sets a fresh flow cookie")
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        (cookie, csrf_of(&body), body)
+    }
+
+    /// Press a button on the confirmation page, from this origin.
+    async fn decide(
+        &self,
+        cookie: &str,
+        csrf: &str,
+        decision: &str,
+    ) -> (StatusCode, HeaderMap, String) {
+        let origin = self.public_url.clone();
+        self.post(
+            "/agent/confirm",
+            Some(cookie),
+            Some(&origin),
+            format!("csrf={csrf}&decision={decision}"),
+        )
+        .await
+    }
+
+    /// The whole flow: Google, the confirmation page, Continue.
+    async fn run_agent_through(&self) -> (StatusCode, HeaderMap, String) {
+        let (cookie, csrf, _) = self.reach_confirm().await;
+        self.decide(&cookie, &csrf, "continue").await
+    }
+
     fn completions(&self) -> Vec<(String, Value)> {
         self.rec.lock().unwrap().completions.clone()
     }
@@ -319,6 +394,14 @@ fn query_param(url: &str, name: &str) -> String {
         .find(|(k, _)| k == name)
         .map(|(_, v)| v.into_owned())
         .unwrap_or_default()
+}
+
+/// The CSRF token on a confirmation page. Base64url, so it needs no decoding.
+fn csrf_of(body: &str) -> String {
+    let (_, rest) = body
+        .split_once(r#"name="csrf" value=""#)
+        .expect("a csrf field");
+    rest.split('"').next().unwrap().to_string()
 }
 
 /// The decoded JSON payload of a `passband_signup=<value>` cookie pair.
@@ -469,8 +552,9 @@ async fn a_well_formed_id_starts_the_google_hop_with_the_id_held_server_side() {
 #[tokio::test]
 async fn an_agent_login_completes_at_workos_and_follows_its_redirect() {
     let h = Harness::new().await;
-    let (status, headers, body) = h.run_agent().await;
-    assert_eq!(status, StatusCode::FOUND, "{body}");
+    let (status, headers, body) = h.run_agent_through().await;
+    // 303: the answer to a POST is a GET of AuthKit's URL.
+    assert_eq!(status, StatusCode::SEE_OTHER, "{body}");
     assert_eq!(headers[header::LOCATION].to_str().unwrap(), REDIRECT);
     assert_eq!(headers[header::CACHE_CONTROL], "no-store, no-cache");
     assert_eq!(headers[header::REFERRER_POLICY], "no-referrer");
@@ -531,22 +615,48 @@ async fn an_unvouched_google_answer_never_reaches_workos() {
     }
 }
 
-/// EVERY WORKOS FAILURE IS ONE PAGE: a refusal, an outage, an unreadable
-/// answer, and a `redirect_uri` that is not an absolute https URL. No browser
-/// is sent anywhere, and nothing WorkOS said reaches the page.
+/// EVERY WORKOS FAILURE IS A PAGE OF OURS, in one of two words: AuthKit
+/// refusing THIS authorization (a 4xx other than 401/403: a spent or expired
+/// `external_auth_id`) says the request expired and to start again from the
+/// agent, because trying again here can never work; everything else (a key
+/// problem, an outage, an unreadable answer, a `redirect_uri` that is not an
+/// absolute https URL) says try again. No browser is sent anywhere, and nothing
+/// WorkOS said reaches the page.
 #[tokio::test]
-async fn every_workos_failure_is_the_unavailable_page() {
+async fn every_workos_failure_is_one_of_our_pages() {
     let redirect = |uri: &str| json!({ "redirect_uri": uri, "note": WORKOS_MARKER }).to_string();
     // A REFUSAL THAT STILL CARRIES A PLAUSIBLE URL. The non-2xx cases answer
     // with a perfectly acceptable https `redirect_uri`, so what is under test
     // is that the STATUS decides, not whether the body happens to parse.
     let refused_with_redirect =
         || json!({ "redirect_uri": REDIRECT, "message": WORKOS_MARKER }).to_string();
+    // Answers that mean "this authorization is gone": the EXPIRED page.
+    for (name, status) in [("400", 400), ("404", 404), ("409", 409)] {
+        let h = Harness::new().await;
+        h.rec.lock().unwrap().workos_answer = Some((status, refused_with_redirect()));
+        let (got, headers, body) = h.run_agent_through().await;
+        assert_eq!(got, StatusCode::BAD_REQUEST, "{name}: {body}");
+        assert!(headers.get(header::LOCATION).is_none(), "{name}");
+        let seen = visible(&body);
+        assert!(seen.contains("has expired"), "{name}: {body}");
+        assert!(seen.contains("start connecting again"), "{name}: {body}");
+        assert!(
+            !seen.contains("try again in a few minutes"),
+            "{name}: {body}"
+        );
+        assert!(!body.contains(WORKOS_MARKER), "{name}: {body}");
+        assert!(!seen.contains('\u{2014}'), "{name}: no em dashes");
+        assert!(set_cookies(&headers).contains("Max-Age=0"), "{name}");
+        assert_eq!(h.completions().len(), 1, "{name}: one attempt, no retry");
+    }
+
+    // Everything else: the UNAVAILABLE page.
     let cases: Vec<(&str, u16, String)> = vec![
-        ("400", 400, refused_with_redirect()),
         ("401", 401, refused_with_redirect()),
-        ("404", 404, refused_with_redirect()),
+        ("403", 403, refused_with_redirect()),
+        ("429", 429, refused_with_redirect()),
         ("500", 500, refused_with_redirect()),
+        ("503", 503, refused_with_redirect()),
         ("malformed json", 200, format!("{{not json {WORKOS_MARKER}")),
         (
             "no redirect_uri",
@@ -567,10 +677,11 @@ async fn every_workos_failure_is_the_unavailable_page() {
         let h = Harness::new().await;
         h.rec.lock().unwrap().workos_answer = Some((status, answer));
 
-        let (got, headers, body) = h.run_agent().await;
+        let (got, headers, body) = h.run_agent_through().await;
         assert_eq!(got, StatusCode::BAD_GATEWAY, "{name}: {body}");
         assert!(headers.get(header::LOCATION).is_none(), "{name}");
         assert!(body.contains("try again"), "{name}: {body}");
+        assert!(!body.contains("has expired"), "{name}: {body}");
         assert!(!body.contains(WORKOS_MARKER), "{name}: {body}");
         assert!(!body.contains("evil.test"), "{name}: {body}");
         assert!(!body.contains("javascript"), "{name}: {body}");
@@ -585,8 +696,9 @@ async fn every_workos_failure_is_the_unavailable_page() {
 async fn a_slow_workos_is_the_unavailable_page() {
     let h = Harness::new().await;
     h.rec.lock().unwrap().workos_delay = Some(Duration::from_secs(12));
+    let (cookie, csrf, _) = h.reach_confirm().await;
     let started = Instant::now();
-    let (status, headers, body) = h.run_agent().await;
+    let (status, headers, body) = h.decide(&cookie, &csrf, "continue").await;
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
     assert!(headers.get(header::LOCATION).is_none());
     // The ten-second budget, not the stub's twelve.
@@ -604,19 +716,19 @@ async fn an_insecure_dev_run_follows_a_plain_http_redirect() {
     let h = Harness::build(true, "http://127.0.0.1:8852").await;
     let local = "http://127.0.0.1:9999/oauth2/authorize?x=1";
     h.rec.lock().unwrap().workos_answer = Some((200, json!({ "redirect_uri": local }).to_string()));
-    let (status, headers, body) = h.run_agent().await;
-    assert_eq!(status, StatusCode::FOUND, "{body}");
+    let (status, headers, body) = h.run_agent_through().await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "{body}");
     assert_eq!(headers[header::LOCATION].to_str().unwrap(), local);
 }
 
-/// One-shot, like every callback: a replay finds nothing and WorkOS is not
-/// asked twice.
+/// One-shot, like every callback: a replay finds nothing, no second
+/// confirmation is parked, and WorkOS hears nothing.
 #[tokio::test]
 async fn a_replayed_agent_callback_finds_nothing() {
     let h = Harness::new().await;
     let (consent, cookie) = h.start_agent().await;
     let (first, _, _) = h.finish(&consent, &cookie).await;
-    assert_eq!(first, StatusCode::FOUND);
+    assert_eq!(first, StatusCode::OK);
     let (second, headers, body) = h.finish(&consent, &cookie).await;
     assert_eq!(second, StatusCode::BAD_REQUEST, "{body}");
     assert!(headers.get(header::LOCATION).is_none());
@@ -624,7 +736,8 @@ async fn a_replayed_agent_callback_finds_nothing() {
     let seen = visible(&body);
     assert!(seen.contains("Go back to your agent"), "{body}");
     assert!(!seen.contains(r#"href="/""#), "{body}");
-    assert_eq!(h.completions().len(), 1);
+    assert!(h.completions().is_empty());
+    assert_eq!(h.state.live_sessions(), 1, "only the first confirmation");
 }
 
 // ---- the kinds cannot be crossed ---------------------------------------------
@@ -733,4 +846,244 @@ async fn the_agent_hop_shares_the_login_budget() {
         }
     }
     assert_eq!(refused, 5, "the shared bucket holds one stated capacity");
+}
+
+// ---- the confirmation step ----------------------------------------------------
+
+/// THE CALLBACK NO LONGER TALKS TO WORKOS. It renders OUR page, naming the
+/// mailbox, with zero completions made; parks the verified result under a
+/// FRESH session id and cookie; and the page is uncacheable, unframeable, and
+/// free of em dashes.
+#[tokio::test]
+async fn the_callback_shows_a_confirmation_and_tells_workos_nothing() {
+    let h = Harness::new().await;
+    let (consent, pre_google) = h.start_agent().await;
+    let (status, headers, body) = h.finish(&consent, &pre_google).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        h.completions().is_empty(),
+        "WorkOS was called before the person agreed"
+    );
+
+    let seen = visible(&body);
+    // The mailbox as the record stores it, so the person sees WHICH account.
+    assert!(
+        seen.contains(&format!("<strong>{STORED}</strong>")),
+        "{body}"
+    );
+    assert!(
+        seen.contains("An AI agent is asking to read the mail in"),
+        "{body}"
+    );
+    assert!(
+        seen.contains("If someone sent you a link to this page, close it."),
+        "{body}"
+    );
+    assert!(seen.contains("chosen by whoever built it"), "{body}");
+    assert!(seen.contains(r#"action="/agent/confirm""#), "{body}");
+    assert!(seen.contains(r#"value="continue""#), "{body}");
+    assert!(seen.contains(r#"value="cancel""#), "{body}");
+    assert!(!seen.contains('\u{2014}'), "no em dashes");
+    assert!(!seen.contains("<script"), "no javascript");
+    assert!(
+        !body.contains(EXTERNAL_AUTH_ID),
+        "the id is not on the page"
+    );
+
+    assert_eq!(headers[header::CACHE_CONTROL], "no-store, no-cache");
+    assert_eq!(headers[header::REFERRER_POLICY], "no-referrer");
+    assert_eq!(headers[header::X_FRAME_OPTIONS], "DENY");
+    let csp = headers[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
+    assert!(csp.contains("frame-ancestors 'none'"), "{csp}");
+    assert!(csp.contains("default-src 'none'"), "{csp}");
+
+    // A FRESH session: the cookie names a different id from the one that went
+    // to Google, the old one is gone, and the new one holds the verified result.
+    let (cookie, csrf, _) = {
+        let fresh = headers
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap().to_string())
+            .find(|c| c.starts_with("passband_signup=") && !c.contains("Max-Age=0"))
+            .expect("a fresh cookie");
+        assert!(
+            !set_cookies(&headers).contains("passband_signup=; "),
+            "the fresh cookie must not be cleared in the same answer"
+        );
+        (
+            fresh.split(';').next().unwrap().to_string(),
+            csrf_of(&body),
+            (),
+        )
+    };
+    let old_sid = cookie_payload(&pre_google)["sid"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let new_sid = cookie_payload(&cookie)["sid"].as_str().unwrap().to_string();
+    assert_ne!(old_sid, new_sid);
+    assert!(!cookie.contains(EXTERNAL_AUTH_ID));
+    assert_eq!(h.state.live_sessions(), 1);
+    let parked = h
+        .state
+        .sessions()
+        .take(&new_sid, Instant::now())
+        .expect("the parked confirmation");
+    assert_eq!(
+        parked.kind,
+        SessionKind::AgentConfirm {
+            external_auth_id: EXTERNAL_AUTH_ID.into(),
+            stored_email: STORED.into(),
+            user_id: "ada@example.com".into(),
+        }
+    );
+    assert_eq!(parked.state, csrf, "the form's token is the session's");
+    assert_eq!(parked.label, LABEL);
+}
+
+/// A REPLAYED Continue finds nothing: the first completed, the second is
+/// refused, and WorkOS was asked exactly once.
+#[tokio::test]
+async fn a_replayed_confirmation_is_refused() {
+    let h = Harness::new().await;
+    let (cookie, csrf, _) = h.reach_confirm().await;
+    let (first, _, _) = h.decide(&cookie, &csrf, "continue").await;
+    assert_eq!(first, StatusCode::SEE_OTHER);
+    let (second, headers, body) = h.decide(&cookie, &csrf, "continue").await;
+    assert_eq!(second, StatusCode::BAD_REQUEST, "{body}");
+    assert!(headers.get(header::LOCATION).is_none());
+    assert!(visible(&body).contains("Go back to your agent"), "{body}");
+    assert_eq!(h.completions().len(), 1, "still exactly one completion");
+}
+
+/// Every way a POST can fail to be THIS browser pressing THIS page's button is
+/// refused, and WorkOS hears nothing: a wrong token, no token, no cookie,
+/// another kind's cookie, and a cross-site origin.
+#[tokio::test]
+async fn a_confirmation_that_is_not_ours_is_refused() {
+    // Each case gets a harness of its own, so one case's refusal (which spends
+    // the session) cannot be what makes the next one fail.
+    for case in [
+        "wrong token",
+        "no token",
+        "no cookie",
+        "cross-site",
+        "app cookie",
+        "pre-google cookie",
+    ] {
+        let h = Harness::new().await;
+        let (cookie, csrf, _) = h.reach_confirm().await;
+        let origin = h.public_url.clone();
+        let (status, headers, body) = match case {
+            "wrong token" => {
+                let wrong = format!("{}A", &csrf[..csrf.len() - 1]);
+                let wrong = if wrong == csrf {
+                    format!("{}B", &csrf[..csrf.len() - 1])
+                } else {
+                    wrong
+                };
+                h.decide(&cookie, &wrong, "continue").await
+            }
+            "no token" => {
+                h.post(
+                    "/agent/confirm",
+                    Some(&cookie),
+                    Some(&origin),
+                    "decision=continue".into(),
+                )
+                .await
+            }
+            "no cookie" => {
+                h.post(
+                    "/agent/confirm",
+                    None,
+                    Some(&origin),
+                    format!("csrf={csrf}&decision=continue"),
+                )
+                .await
+            }
+            "cross-site" => {
+                h.post(
+                    "/agent/confirm",
+                    Some(&cookie),
+                    Some("https://evil.test"),
+                    format!("csrf={csrf}&decision=continue"),
+                )
+                .await
+            }
+            "app cookie" => {
+                // A real, live APP session's cookie, with the right token for
+                // the confirmation that is also live.
+                let (_, app_cookie) = h.start("/app/auth").await;
+                h.decide(&app_cookie, &csrf, "continue").await
+            }
+            "pre-google cookie" => {
+                // A live agent session that has NOT been through Google.
+                let (_, early) = h.start_agent().await;
+                h.decide(&early, &csrf, "continue").await
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{case}: {body}");
+        assert!(headers.get(header::LOCATION).is_none(), "{case}");
+        assert!(
+            visible(&body).contains("Nothing was connected"),
+            "{case}: {body}"
+        );
+        assert!(h.completions().is_empty(), "{case}: WorkOS was called");
+    }
+}
+
+/// CANCEL DISCARDS the parked result: a "nothing was connected" page, no
+/// completion, and a Continue pressed afterwards finds nothing.
+#[tokio::test]
+async fn cancel_discards_the_pending_state() {
+    let h = Harness::new().await;
+    let (cookie, csrf, _) = h.reach_confirm().await;
+    let (status, headers, body) = h.decide(&cookie, &csrf, "cancel").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(headers.get(header::LOCATION).is_none());
+    let seen = visible(&body);
+    assert!(seen.contains("Nothing was connected"), "{body}");
+    assert!(!seen.contains('\u{2014}'), "no em dashes");
+    assert!(set_cookies(&headers).contains("Max-Age=0"));
+    assert_eq!(h.state.live_sessions(), 0, "the state is gone");
+
+    let (later, _, body) = h.decide(&cookie, &csrf, "continue").await;
+    assert_eq!(later, StatusCode::BAD_REQUEST, "{body}");
+    assert!(h.completions().is_empty());
+}
+
+/// A confirmation left past its five minutes is gone. Driven through the
+/// clock the session table already takes: a sweep "five minutes and a second
+/// from now" drops it, and Continue then finds nothing.
+#[tokio::test]
+async fn an_expired_confirmation_is_refused() {
+    let h = Harness::new().await;
+    let (cookie, csrf, _) = h.reach_confirm().await;
+    let later =
+        Instant::now() + squelch_control::sessions::AGENT_CONFIRM_TTL + Duration::from_secs(1);
+    assert_eq!(
+        h.state.sessions().sweep(later),
+        1,
+        "the confirmation expired"
+    );
+    let (status, _, body) = h.decide(&cookie, &csrf, "continue").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(h.completions().is_empty());
+}
+
+/// With WorkOS unconfigured the confirm route does not exist either.
+#[tokio::test]
+async fn the_confirm_route_does_not_exist_without_workos() {
+    let h = Harness::build(false, "https://signup.passband.test").await;
+    let (status, _, _) = h
+        .post(
+            "/agent/confirm",
+            None,
+            Some("https://signup.passband.test"),
+            "csrf=x&decision=continue".into(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }

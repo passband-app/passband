@@ -36,6 +36,13 @@ use std::time::{Duration, Instant};
 /// consent screen. Matches [`crate::cookie::COOKIE_TTL_SECS`].
 pub const SESSION_TTL: Duration = Duration::from_secs(10 * 60);
 
+/// How long a CONFIRMED agent login waits for its person to press Continue.
+/// Shorter than [`SESSION_TTL`] because nothing about it involves Google any
+/// more: it is one page with two buttons, read by somebody who has just signed
+/// in, and every minute it lives is a minute a verified identity sits waiting
+/// for a click.
+pub const AGENT_CONFIRM_TTL: Duration = Duration::from_secs(5 * 60);
+
 /// The only form of a session id allowed to touch the control store: lowercase
 /// hex SHA-256.
 ///
@@ -134,6 +141,35 @@ pub enum SessionKind {
     /// gained. The cookie carries a bare marker instead, for refusal copy only:
     /// see [`crate::cookie::SessionClaim::agent`].
     Agent { external_auth_id: String },
+    /// An agent login that has CLEARED GOOGLE and is waiting on its person.
+    ///
+    /// THE CONFIRMATION STEP exists because the agent hop's link can be handed
+    /// to somebody: an attacker who registers an OAuth client under a name of
+    /// their choosing ("Claude") can start an authorization aimed at a
+    /// victim's tenant and mail the victim our `/agent/auth?external_auth_id=`
+    /// link. Google's account chooser asks nothing of somebody who has signed
+    /// in before, so without a page of ours in between, one "Allow" on
+    /// AuthKit's screen handed the attacker a token for the victim's mail.
+    /// This kind is what the callback parks INSTEAD of calling WorkOS, and only
+    /// `POST /agent/confirm` spends it.
+    ///
+    /// UNDER A FRESH SESSION ID with a fresh cookie, never the pre-Google one:
+    /// the id that went out before anybody authenticated is not the id that
+    /// holds a verified identity. The entry's `state` is the form's one-shot
+    /// CSRF token, its `pkce_verifier` is empty (the code was spent), and its
+    /// `label` is the tenant the mailbox owns. It lives [`AGENT_CONFIRM_TTL`].
+    ///
+    /// Everything WorkOS will be told rides here, decided once on the callback
+    /// from Google's verified answer and the tenant record:
+    AgentConfirm {
+        /// AuthKit's handle, carried over from the [`SessionKind::Agent`]
+        /// session this replaced.
+        external_auth_id: String,
+        /// The mailbox as the tenant record stores it: `user.email`.
+        stored_email: String,
+        /// Google's verified address, trimmed and lowercased: `user.id`.
+        user_id: String,
+    },
 }
 
 impl std::fmt::Debug for SessionKind {
@@ -150,6 +186,8 @@ impl std::fmt::Debug for SessionKind {
                 .debug_struct("Agent")
                 .field("external_auth_id", &"<redacted>")
                 .finish(),
+            // Every field is an identity or AuthKit's handle.
+            SessionKind::AgentConfirm { .. } => f.write_str("AgentConfirm { <redacted> }"),
         }
     }
 }
@@ -167,7 +205,18 @@ impl SessionKind {
             SessionKind::Console
             | SessionKind::App
             | SessionKind::Reconnect
-            | SessionKind::Agent { .. } => None,
+            | SessionKind::Agent { .. }
+            | SessionKind::AgentConfirm { .. } => None,
+        }
+    }
+
+    /// How long a session of this kind lives. Every hop through Google gets
+    /// [`SESSION_TTL`]; the confirmation page alone gets the shorter
+    /// [`AGENT_CONFIRM_TTL`].
+    pub fn ttl(&self) -> Duration {
+        match self {
+            SessionKind::AgentConfirm { .. } => AGENT_CONFIRM_TTL,
+            _ => SESSION_TTL,
         }
     }
 
@@ -193,6 +242,7 @@ impl SessionKind {
                 | SessionKind::App
                 | SessionKind::Reconnect
                 | SessionKind::Agent { .. }
+                | SessionKind::AgentConfirm { .. }
         )
     }
 }
@@ -280,7 +330,7 @@ impl SessionStore {
         // Expired is the same answer as absent. The entry is gone either way:
         // an expired session that stayed would be a slot an attacker could
         // keep probing.
-        (now.saturating_duration_since(session.created) <= SESSION_TTL).then_some(session)
+        (now.saturating_duration_since(session.created) <= session.kind.ttl()).then_some(session)
     }
 
     /// Drop every expired session. Called on insert and by the background
@@ -288,7 +338,7 @@ impl SessionStore {
     pub fn sweep(&mut self, now: Instant) -> usize {
         let before = self.sessions.len();
         self.sessions
-            .retain(|_, s| now.saturating_duration_since(s.created) <= SESSION_TTL);
+            .retain(|_, s| now.saturating_duration_since(s.created) <= s.kind.ttl());
         before - self.sessions.len()
     }
 
@@ -411,6 +461,47 @@ mod tests {
         let taken = s.take("agent", now).expect("live");
         assert_eq!(taken.kind, kind);
         assert_eq!(taken.label, "");
+    }
+
+    /// A confirmation lives FIVE minutes, not ten, and an agent login still
+    /// waiting on Google keeps its ten. Asserted through the clock this table
+    /// already takes as an argument.
+    #[test]
+    fn a_confirmation_expires_sooner_than_a_google_hop() {
+        let mut s = SessionStore::new();
+        let now = Instant::now();
+        let confirm = SessionKind::AgentConfirm {
+            external_auth_id: "01J3X4Y5Z6A7B8C9D0E1F2G3H4".into(),
+            stored_email: "ada@example.com".into(),
+            user_id: "ada@example.com".into(),
+        };
+        assert!(
+            confirm.is_identity(),
+            "it spends the stranger-openable pool"
+        );
+        let printed = format!("{confirm:?}");
+        assert!(!printed.contains("ada@"), "{printed}");
+        assert!(!printed.contains("01J3X4"), "{printed}");
+        let agent = SessionKind::Agent {
+            external_auth_id: "01J3X4Y5Z6A7B8C9D0E1F2G3H4".into(),
+        };
+        for (sid, kind) in [("c1", &confirm), ("c2", &confirm), ("a1", &agent)] {
+            s.insert(
+                sid.into(),
+                kind.clone(),
+                "csrf".into(),
+                String::new(),
+                "ada".into(),
+                now,
+            )
+            .unwrap();
+        }
+        // Inside five minutes it is live.
+        assert!(s.take("c1", now + AGENT_CONFIRM_TTL).is_some());
+        // One second past, it is gone, while the Google hop is not.
+        let later = now + AGENT_CONFIRM_TTL + Duration::from_secs(1);
+        assert!(s.take("c2", later).is_none());
+        assert!(s.take("a1", later).is_some());
     }
 
     #[test]

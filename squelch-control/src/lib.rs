@@ -91,6 +91,8 @@ use axum::{
 /// - `GET /oauth/callback` is the most generous. Refusing it destroys a consent
 ///   the user has ALREADY granted at Google, which they cannot grant twice
 ///   without walking the whole flow again. All three flows come back through it.
+///   `POST /agent/confirm` (mounted with WorkOS) shares this bucket for the
+///   same reason: it is the agent login's second half, after Google.
 /// - `POST /waitlist` is small. It is a stranger-facing WRITE, a person joins
 ///   once, and everything above the budget is rows of junk for an operator to
 ///   read past; a real submitter who is refused loses one retry, because the
@@ -161,8 +163,21 @@ pub fn router(state: ControlState) -> Router {
         ))
         .with_state(state.clone());
 
-    let callback = Router::new()
-        .route("/oauth/callback", get(handlers::oauth_callback))
+    // `POST /agent/confirm` rides the CALLBACK's bucket, for the callback's
+    // reason: it is the second half of a flow whose Google consent has ALREADY
+    // been given, so refusing it costs a person something they have to walk
+    // the whole flow again to get back. It opens no session (it can only spend
+    // one the callback parked, under a cookie and a CSRF token a stranger does
+    // not have), so it is not the cheap-to-loop thing the login bucket
+    // rations. Mounted only with WorkOS configured, like `/agent/auth`.
+    let mut callback = Router::new().route("/oauth/callback", get(handlers::oauth_callback));
+    if state.config().workos.is_some() {
+        callback = callback.route(
+            "/agent/confirm",
+            post(handlers::agent_confirm).layer(DefaultBodyLimit::max(handlers::MAX_BODY)),
+        );
+    }
+    let callback = callback
         .layer(middleware::from_fn_with_state(
             state.clone(),
             ratelimit::limit_callback,

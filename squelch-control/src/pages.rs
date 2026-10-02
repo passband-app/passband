@@ -944,6 +944,68 @@ pub fn app_no_tenant(heading: &str, detail: &str) -> Response {
     )
 }
 
+/// The CSP of the agent confirmation page: [`CSP`] with `form-action` widened
+/// to any https origin, and nothing else changed (`frame-ancestors 'none'`
+/// included, which is what stops the Continue button being clickjacked).
+///
+/// WIDENED BECAUSE OF THE REDIRECT, for the reason [`CSP`] already names
+/// accounts.google.com: Chrome enforces `form-action` against where a form
+/// submission is REDIRECTED, and `POST /agent/confirm` answers with a 303 to
+/// the AuthKit URL WorkOS returned. That host is the tenant fleet's issuer,
+/// which this service is not configured with, so it cannot be named; under
+/// `form-action 'self'` the press would silently do nothing. What the
+/// widening does not open: the form's own `action` is a fixed same-origin path
+/// with nothing interpolated, and the redirect target was already held to an
+/// absolute https URL before it was sent (see
+/// [`crate::workos::acceptable_redirect`]).
+const CSP_AGENT_CONFIRM: &str = "default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; form-action 'self' https:; frame-ancestors 'none'; base-uri 'none'";
+
+/// The same, on a plain-http local run, where the redirect may be plain http.
+const CSP_AGENT_CONFIRM_INSECURE: &str = "default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; form-action 'self' https: http:; frame-ancestors 'none'; base-uri 'none'";
+
+/// The agent login's confirmation page: the one page of OURS between Google and
+/// AuthKit's consent screen.
+///
+/// IT EXISTS BECAUSE THE LINK CAN BE SENT. Whoever starts an agent's
+/// authorization can mail somebody else the `/agent/auth` link; Google's
+/// chooser asks a returning user nothing, and AuthKit's screen names the agent
+/// with whatever its builder registered. So this page says, before anything is
+/// sent anywhere, what is about to be granted, to which mailbox (escaped: a
+/// person with several Google accounts must see WHICH one), and when to walk
+/// away. Short, because a long warning is a warning nobody reads.
+///
+/// ONE FORM, TWO BUTTONS. Continue is first, so it is what Enter presses, and
+/// Cancel is quiet. Both carry the one-shot CSRF token; the server takes the
+/// pending state either way, so Cancel really does discard it.
+pub fn agent_confirm(mailbox: &str, csrf: &str, allow_http: bool) -> Response {
+    let mut resp = page(
+        StatusCode::OK,
+        "Connect an AI agent?",
+        &format!(
+            r#"<h1>Connect an AI agent to your mail?</h1>
+<p class="lead">An AI agent is asking to read the mail in <strong>{mailbox}</strong>.</p>
+<p>Only continue if you just started connecting an agent yourself, on this device. If someone sent you a link to this page, close it.</p>
+<p class="hint">The next screen names the agent. That name is chosen by whoever built it, so it does not prove who they are.</p>
+<form method="post" action="/agent/confirm"><input type="hidden" name="csrf" value="{csrf}">
+<button type="submit" name="decision" value="continue">Continue <span class="arrow" aria-hidden="true">→</span></button>
+<button type="submit" name="decision" value="cancel" class="quiet">Cancel</button>
+</form>"#,
+            mailbox = escape_html(mailbox),
+            csrf = escape_html(csrf),
+        ),
+    );
+    let csp = if allow_http {
+        CSP_AGENT_CONFIRM_INSECURE
+    } else {
+        CSP_AGENT_CONFIRM
+    };
+    resp.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        header::HeaderValue::from_static(csp),
+    );
+    resp
+}
+
 /// The admin door: one field, and nothing that describes what is behind it.
 ///
 /// Anybody can ask for `/admin`, so this page says as little as a page can. It
@@ -1550,6 +1612,38 @@ pub fn problem(status: StatusCode, heading: &str, detail: &str) -> Response {
 mod tests {
     use super::*;
     use axum::body::to_bytes;
+
+    /// The mailbox is ESCAPED on the confirmation page (the store holds
+    /// whatever Google verified, and this is the line where it meets HTML),
+    /// the page is unframeable and uncacheable, and it has no em dash.
+    #[tokio::test]
+    async fn the_agent_confirmation_escapes_the_mailbox_and_cannot_be_framed() {
+        let r = agent_confirm(r#"a"<b>&'c@example.com"#, "tok\"en", false);
+        assert_eq!(r.status(), StatusCode::OK);
+        let h = r.headers().clone();
+        let csp = h[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
+        assert!(csp.contains("frame-ancestors 'none'"), "{csp}");
+        assert!(csp.contains("form-action 'self' https:"), "{csp}");
+        assert!(!csp.contains("http:;"), "{csp}");
+        assert_eq!(h[header::X_FRAME_OPTIONS], "DENY");
+        assert_eq!(h[header::CACHE_CONTROL], "no-store, no-cache");
+        assert_eq!(h[header::REFERRER_POLICY], "no-referrer");
+        let body = body_of(r).await;
+        assert!(
+            body.contains("a&quot;&lt;b&gt;&amp;&#39;c@example.com"),
+            "{body}"
+        );
+        assert!(!body.contains("<b>"), "{body}");
+        assert!(body.contains(r#"value="tok&quot;en""#), "{body}");
+        assert!(!body.contains('\u{2014}'), "{body}");
+        // Plain http is admitted to form-action only on an insecure run.
+        let insecure = agent_confirm("a@example.com", "t", true);
+        let csp = insecure.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(csp.contains("https: http:"), "{csp}");
+    }
 
     async fn body_of(r: Response) -> String {
         String::from_utf8(to_bytes(r.into_body(), 1 << 20).await.unwrap().to_vec()).unwrap()

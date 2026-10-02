@@ -185,6 +185,13 @@ actor RehearsalAPI {
             data = try practiceDraft(body, id: existing?.id)
         case ("GET", "/client/sent"):
             data = try json(["items": []])
+        // The practice stats never claim a timeline, so the calendar page is
+        // not reachable here; these answer anyway, empty, so nothing that
+        // asks can crash the lesson.
+        case ("GET", "/client/timeline"):
+            data = try json(["ghosts": []])
+        case ("POST", "/client/timeline/refresh"):
+            data = try json(["triggered": false])
         case ("GET", "/client/invites"):
             data = try json(["can_share": false])
         case ("GET", "/client/tracking-config"):

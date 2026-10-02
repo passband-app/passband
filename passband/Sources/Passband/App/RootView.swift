@@ -267,6 +267,17 @@ private struct ShellWatchers: View {
             }
             // Connection starts onboarding before the shell is revealed.
             // Refreshes can still resume a pending live summary.
+            // THE CALENDAR GRANT, heard wherever the user is: the card and
+            // the "waiting for Google" line go away and the real events load.
+            .onChange(of: store.calendarGranted) { _, granted in
+                if granted { store.calendarGrantArrived() }
+            }
+            // The gate closing (developer mode off, an older daemon) takes an
+            // open calendar page with it, rather than leaving a page up that
+            // the rail no longer has a door to.
+            .onChange(of: store.calendarPageAvailable) { _, available in
+                if !available, store.activeView == .calendar { store.setView(.sitrep) }
+            }
             .onChange(of: store.lastRefresh) { old, new in
                 if old == nil, new != nil {
                     store.tour.maybeStart()
@@ -572,6 +583,9 @@ struct MainShell: View {
     private var routedBody: some View {
         switch store.activeView {
         case .sitrep: SitrepView()
+        // `route(to:)` never lands here with the gate closed; the shell's
+        // watcher sends an open page back to the sitrep if it closes.
+        case .calendar: RoutedHost(view: .calendar) { CalendarPage() }
         case .emails: EmailsView()
         case .auth: RoutedHost(view: .auth) { AuthView() }
         case .rules: RoutedHost(view: .rules) { RulesView() }
@@ -609,6 +623,20 @@ struct MainShell: View {
         var bindings: [KeyBinding] = MainView.mainViews.enumerated().map { index, view in
             KeyBinding("\(index + 1)", "go to \(view.rawValue)") { store.setView(view) }
         }
+        // ⇧C OPENS THE CALENDAR, off the digits so nothing renumbers. EXACT
+        // CASE, so a bare `c` (compose) is untouched; the shifted letter used
+        // to reach compose only through the dispatcher's case fold, and now
+        // means this instead wherever the page is offered. DECLINING, and the
+        // gate is asked at key time rather than here: reading it in this body
+        // would make the whole shell a reader of the stats poll. With the gate
+        // closed, and while a sign-in code is on screen (whose modal copies on
+        // `c`, and so on ⇧C through the fold), the key passes on as before.
+        bindings.append(
+            KeyBinding(declining: "C", "go to calendar", exactCase: true) {
+                guard store.calendarPageAvailable, store.authQueue.isEmpty else { return false }
+                store.setView(.calendar)
+                return true
+            })
         bindings.append(
             KeyBinding("[", "back", meta: true, allowInInput: true) { store.goBack() })
         bindings.append(
@@ -668,6 +696,7 @@ struct RoutedHost<Content: View>: View {
     /// in user-facing copy, which this app does not do.)
     private var heading: (title: String, subtitle: String?) {
         switch view {
+        case .calendar: ("Calendar", "agenda")
         case .rules: ("Rules", "sender rules")
         case .groups: ("Groups", "named audiences")
         default: (view.label, nil)

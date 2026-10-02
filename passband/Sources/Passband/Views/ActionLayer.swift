@@ -83,7 +83,9 @@ struct ActionLayer: View {
                 SchedulePalette(slot: slot) { store.schedulePicker = nil }
             }
             if store.askBarOpen { AskBar { store.askBarOpen = false } }
-            if store.shortcutsOpen { ShortcutsOverlay { store.shortcutsOpen = false } }
+            if store.shortcutsOpen {
+                ShortcutsOverlay(calendar: store.calendarPageAvailable) { store.shortcutsOpen = false }
+            }
             // Above everything else in this layer, because it is shown at most
             // once per version at a moment nothing else has been raised yet, and
             // a modal that can end up UNDER something has to be dismissed twice
@@ -95,6 +97,9 @@ struct ActionLayer: View {
             // behind whatever else happened to be open.
             if let days = store.retriageAsk { RetriageConfirm(days: days) }
             if let ask = store.reconnectAsk { ReconnectAccountPrompt(ask: ask) }
+            // The calendar connect card: same slot and same reasoning as the
+            // reconnect prompt above, which it is built like.
+            if let ask = store.calendarConnectAsk { CalendarConnectCard(ask: ask) }
             // LAST, and it outranks even the card above: that one is a greeting
             // the user can dismiss, this one is the app being unavailable while
             // a re-triage rewrites what every other overlay here is about.
@@ -291,6 +296,9 @@ struct ActionLayer: View {
 /// Keyboard-shortcuts help ('?'). Curated and grouped by hand rather than
 /// dumped from the keymap registry, which carries per-context duplicates.
 struct ShortcutsOverlay: View {
+    /// Whether the Calendar page is offered, so its key is listed only where
+    /// it does something.
+    var calendar = false
     let onClose: () -> Void
 
     private struct Group: Identifiable {
@@ -362,6 +370,28 @@ struct ShortcutsOverlay: View {
             ]),
     ]
 
+    /// The fixed list, plus ⇧C under Navigate and the page's own keys when
+    /// the calendar is offered, so neither is advertised where it does nothing.
+    private var groups: [Group] {
+        guard calendar else { return Self.groups }
+        var out = Self.groups.map { group in
+            guard group.title == "Navigate" else { return group }
+            var g = group
+            g.items.insert((["⇧C"], "calendar"), at: 1)
+            return g
+        }
+        out.insert(
+            Group(
+                title: "Calendar",
+                items: [
+                    (["j", "k"], "move selection"),
+                    (["Enter"], "open the mail behind it"),
+                    (["y"], "going (again: not going)"),
+                    (["x"], "dismiss"),
+                ]), at: 2)
+        return out
+    }
+
     var body: some View {
         OverlayScrim(onDismiss: onClose) {
             ModalCard(width: 620) {
@@ -373,7 +403,7 @@ struct ShortcutsOverlay: View {
                     columns: [GridItem(.flexible(), spacing: Space.scaled(22)), GridItem(.flexible())],
                     alignment: .leading, spacing: Space.scaled(18)
                 ) {
-                    ForEach(Self.groups) { group in
+                    ForEach(groups) { group in
                         VStack(alignment: .leading, spacing: Space.scaled(5)) {
                             Text(group.title)
                                 .font(Typo.sectionLabel)

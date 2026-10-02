@@ -112,6 +112,11 @@ enum Analytics {
         "invite_sent", "invite_nudge_accepted", "invite_nudge_dismissed",
         "ios_nudge_closed",
         "group_created", "group_updated", "group_deleted",
+        // The calendar page (developer mode only, for now): opened, the
+        // connect card's two answers, and the user's word on a ghost. Bools
+        // and a closed state word; never a title, a place or an address.
+        "calendar_opened", "calendar_connect_clicked", "calendar_connect_dismissed",
+        "calendar_ghost_marked",
         // Derived, never captured by a call site: see `milestones`.
         "milestone", "catchup_completed",
     ]
@@ -173,7 +178,11 @@ enum Analytics {
             // Listed by hand, so a new case must land here too or its undo
             // trips the debug assert.
             "archive", "done", "label", "ruleDelete", "groupDelete", "remind", "send",
-            "draftDelete", "schedule", "scheduledCancel",
+            "draftDelete", "schedule", "scheduledCancel", "ghostDismiss",
+            // calendar_ghost_marked states: the PATCH's own words, plus
+            // "cleared" for the null that takes the mark off. "calendar" (the
+            // page, and thread_opened's source from it) is a MainView.
+            "going", "dismissed", "cleared",
             // group_* modes — how an audience is addressed. "individual" is the
             // only one that is not also a header name.
             "to", "bcc", "individual",

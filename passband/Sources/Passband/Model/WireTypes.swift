@@ -1063,6 +1063,25 @@ struct StoreStats: Codable, Sendable, Hashable {
     /// rather than offered as a 404 on the click. See
     /// `AppStore.scheduledSendAvailable`.
     var scheduled_send: Bool?
+    /// Whether `GET /client/timeline` and `PATCH /client/timeline/ghosts/{id}`
+    /// exist. ABSENT on an older daemon, which 404s both, and absence reads as
+    /// no: the calendar page is not offered at all (`AppStore.calendarPageAvailable`).
+    var timeline: Bool?
+    /// Whether this mailbox has granted Google Calendar, and how to grant it.
+    /// ABSENT on a daemon too old to have the grant path, and absence reads as
+    /// "do not know", never as "not granted": with no way to connect there is
+    /// nothing true to ask, so no connect card or banner is drawn.
+    var calendar: CalendarAccess?
+}
+
+/// The calendar grant off /client/stats. Exactly one of the two ways to
+/// connect is set on a daemon that has the grant path: a link on hosted (the
+/// control plane's consent, with the account pinned), a shell command on
+/// self-host. Both nil is possible while granted, and harmless.
+struct CalendarAccess: Codable, Sendable, Hashable {
+    var granted: Bool
+    var connect_url: String?
+    var connect_command: String?
 }
 
 /// The 30-day re-walk the daemon falls back to when Gmail's history cursor
@@ -1134,6 +1153,197 @@ struct GmailHealth: Codable, Sendable, Hashable {
     /// not a link anything can offer. Nil is therefore the self-host branch, not
     /// an error.
     var reconnect_url: String?
+}
+
+// MARK: - calendar timeline
+
+/// What `GET /client/timeline` answers: the ghosts Passband derived from mail
+/// and, once the read-only calendar sync has landed on the daemon, the user's
+/// real events beside them.
+///
+/// EVERY ROW DECODES ALONE. One ghost a newer daemon shapes differently must
+/// cost that ghost, not the page: the page is somebody's week, and a decode
+/// error would blank all of it. `events` and `calendar` are ABSENT on a daemon
+/// that has ghosts but no calendar sync, and that is the normal state today.
+struct TimelineFeed: Codable, Sendable, Hashable {
+    var ghosts: [TimelineGhost]
+    var events: [TimelineEvent]?
+    var calendar: TimelineCalendarStatus?
+
+    init(
+        ghosts: [TimelineGhost] = [], events: [TimelineEvent]? = nil,
+        calendar: TimelineCalendarStatus? = nil
+    ) {
+        self.ghosts = ghosts
+        self.events = events
+        self.calendar = calendar
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        ghosts = (try c.decodeIfPresent([OneRow<TimelineGhost>].self, forKey: .ghosts) ?? [])
+            .compactMap(\.value)
+        events = try c.decodeIfPresent([OneRow<TimelineEvent>].self, forKey: .events)?
+            .compactMap(\.value)
+        calendar = try? c.decodeIfPresent(TimelineCalendarStatus.self, forKey: .calendar)
+    }
+
+    /// A row that may fail to decode without failing its array.
+    private struct OneRow<T: Decodable>: Decodable {
+        let value: T?
+        init(from decoder: Decoder) throws { value = try? T(from: decoder) }
+    }
+}
+
+/// `kind` on a ghost: what sort of thing the mail described.
+enum GhostKind: String, LenientRawEnum {
+    case other, ticket, travel, reservation, invite, proposal
+    static var unknownFallback: GhostKind { .other }
+}
+
+/// How far the user is already in. `committed` means they bought, booked,
+/// registered or accepted; it is certain and carries no likelihood.
+enum GhostCommitment: String, LenientRawEnum {
+    case unknown, committed, invited, proposed
+    static var unknownFallback: GhostCommitment { .unknown }
+}
+
+/// The served state: the user's word (`going`, `dismissed`) over the mail's
+/// (`cancelled`) over the clock (`expired`).
+enum GhostState: String, LenientRawEnum {
+    case ghost, going, dismissed, cancelled, expired
+    static var unknownFallback: GhostState { .ghost }
+}
+
+/// What the mail says, apart from the user's word: a ghost can be `going`
+/// and also `cancelled` here, and the page must say both.
+enum GhostMailState: String, LenientRawEnum {
+    case live, cancelled
+    static var unknownFallback: GhostMailState { .live }
+}
+
+/// Which tier produced the resolved end. Only `stated` and `user` are facts.
+enum GhostEndSource: String, LenientRawEnum {
+    case stated, user, history, model
+    case defaulted = "default"
+    static var unknownFallback: GhostEndSource { .defaulted }
+}
+
+/// The likelihood band. Three of them, never a number.
+enum GhostBand: String, LenientRawEnum {
+    case likely, maybe, unlikely
+    /// A band this client does not know is drawn as the middle one: shown,
+    /// but not planned around.
+    static var unknownFallback: GhostBand { .maybe }
+}
+
+/// What one source message did to the ghost.
+enum GhostSourceRole: String, LenientRawEnum {
+    case created, updated, cancelled, agreed
+    static var unknownFallback: GhostSourceRole { .updated }
+}
+
+struct GhostEstimate: Codable, Sendable, Hashable {
+    var minutes: Int
+    /// The model's own words for why. Model text, so the page quotes it and
+    /// says whose it is rather than speaking it in Passband's voice.
+    var basis: String?
+}
+
+struct GhostLikelihood: Codable, Sendable, Hashable {
+    var band: GhostBand
+    /// Model text, like `GhostEstimate.basis`.
+    var reason: String?
+}
+
+struct GhostSource: Codable, Sendable, Hashable {
+    var message_id: Int
+    var thread_id: String
+    var role: GhostSourceRole
+}
+
+/// The real event a ghost duplicates, by the daemon's display match. Display
+/// de-duplication only: it says draw the event, not the ghost.
+struct GhostMatchedEvent: Codable, Sendable, Hashable {
+    var calendar_id: String
+    var id: String
+}
+
+/// One ghost as `ghost_view` serves it (squelch-api handlers.rs). `start` and
+/// `end` are `YYYY-MM-DD` for a date-only ghost and RFC3339 with an offset
+/// otherwise. Optional where a daemon of this wave could omit the key.
+struct TimelineGhost: Codable, Sendable, Hashable, Identifiable {
+    var id: Int
+    var kind: GhostKind
+    var title: String
+    var start: String
+    var start_timezone: String?
+    var all_day: Bool
+    var end: String?
+    var end_estimated: Bool?
+    var end_source: GhostEndSource?
+    var estimate: GhostEstimate?
+    var location: String?
+    var commitment: GhostCommitment
+    var state: GhostState
+    var mail_state: GhostMailState?
+    /// False for a ghost made from mail that did not pass authentication.
+    /// Nil (an older shape) draws no mark rather than guessing either way.
+    var verified: Bool?
+    var likelihood: GhostLikelihood?
+    var sources: [GhostSource]
+    /// Slice B. Absent until the daemon syncs real events.
+    var matched_event: GhostMatchedEvent?
+}
+
+enum TimelineEventStatus: String, LenientRawEnum {
+    case confirmed, tentative
+    static var unknownFallback: TimelineEventStatus { .confirmed }
+}
+
+enum TimelineSelfResponse: String, LenientRawEnum {
+    case accepted, declined, tentative
+    case needsAction = "needs_action"
+    static var unknownFallback: TimelineSelfResponse { .needsAction }
+}
+
+/// One real event off the user's Google Calendar (read-only sync). `id` is
+/// unique only within its calendar.
+struct TimelineEvent: Codable, Sendable, Hashable, Identifiable {
+    var id: String
+    var calendar_id: String
+    var calendar_name: String?
+    /// Google allows an event with no title.
+    var title: String?
+    var start: String
+    var end: String?
+    var all_day: Bool
+    var start_timezone: String?
+    var location: String?
+    var status: TimelineEventStatus?
+    /// Nil when the user is not an attendee (their own event).
+    var self_response: TimelineSelfResponse?
+    /// False when the event is marked free.
+    var busy: Bool?
+    var organizer: String?
+    var html_link: String?
+}
+
+enum TimelineSyncError: String, LenientRawEnum {
+    case auth, quota, unavailable
+    static var unknownFallback: TimelineSyncError { .unavailable }
+}
+
+struct TimelineCalendarStatus: Codable, Sendable, Hashable {
+    var granted: Bool
+    var synced_at: String?
+    var error: TimelineSyncError?
+}
+
+/// `PATCH /client/timeline/ghosts/{id}` answers this.
+struct GhostPatchResult: Codable, Sendable, Hashable {
+    var updated: Bool
+    var id: Int
 }
 
 // MARK: - invites

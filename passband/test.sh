@@ -39,6 +39,17 @@ run_suite calendar-visibility \
   Sources/Passband/Lib/CalendarVisibility.swift \
   Tests/CalendarVisibilityTests.swift
 
+# The calendar page's arithmetic against the wire it reads: which rows are
+# drawn, which day they land on in the user's zone, their order, how solid
+# each is, what folds away, every time string, and the gate. Each is only ever
+# wrong on somebody's screen at the wrong hour, so it is pinned to a fixture
+# week rather than reasoned about.
+run_suite agenda \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Agenda.swift \
+  Tests/AgendaTests.swift
+
 # The real poller against a cancellation-oblivious transport: mailbox switches
 # must detach old requests before the next mailbox starts warming.
 run_suite sitrep-poller \

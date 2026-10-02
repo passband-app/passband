@@ -112,7 +112,7 @@ actor APIClient {
 
     // MARK: - request plumbing
 
-    private enum Method: String { case GET, POST, PUT, DELETE }
+    private enum Method: String { case GET, POST, PUT, PATCH, DELETE }
 
     private func buildRequest(
         path: String,
@@ -504,6 +504,45 @@ actor APIClient {
     func getCalendar(hours: Int? = nil) async throws -> [CalendarUpdate] {
         if RehearsalMode.isEnabled { return try await get("/client/calendar") }
         return try await getFeed(destination: "records", limit: 1000).calendar
+    }
+
+    // MARK: - calendar timeline
+
+    /// `GET /client/timeline`. Only `from` is sent: it is local midnight
+    /// yesterday in the user's own offset, which is both the window's start
+    /// (so last night's party, still running, comes back) and the zone the
+    /// daemon judges `expired` in, so a date-only ghost lasts to the end of
+    /// the USER's day. `to` is the daemon's default span from there.
+    func getTimeline(from: Date) async throws -> TimelineFeed {
+        try await get("/client/timeline", query: ["from": Self.rfc3339Local(from)])
+    }
+
+    /// `POST /client/timeline/refresh`: ask the calendar sync to run now. A
+    /// daemon without the sync answers 404 and one inside its throttle 202;
+    /// both are fine, so the caller ignores the outcome.
+    func refreshTimeline() async throws {
+        try await postNoContent("/client/timeline/refresh")
+    }
+
+    /// `PATCH /client/timeline/ghosts/{id}`. nil CLEARS the user's mark, which
+    /// is an explicit JSON `null` on the wire: the shared encoder drops nil
+    /// optionals, and a dropped key here means "leave it alone".
+    func setGhostState(_ id: Int, _ state: GhostState?) async throws -> GhostPatchResult {
+        let value: Any = state.map(\.rawValue) ?? NSNull()
+        let body = try JSONSerialization.data(withJSONObject: ["state": value])
+        let req = try buildRequest(
+            path: "/client/timeline/ghosts/\(id)", method: .PATCH, query: [:], body: body,
+            timeout: Self.requestTimeout)
+        let (data, _) = try await perform(req)
+        return try decode(GhostPatchResult.self, from: data)
+    }
+
+    /// RFC3339 in the user's current offset, seconds precision: "2026-10-04T00:00:00-07:00".
+    nonisolated static func rfc3339Local(_ date: Date) -> String {
+        let f = ISO8601DateFormatter()
+        f.timeZone = .current
+        f.formatOptions = [.withInternetDateTime]
+        return f.string(from: date)
     }
 
     func getBanking() async throws -> [BankingRecord] {

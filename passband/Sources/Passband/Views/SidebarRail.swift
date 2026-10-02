@@ -1,5 +1,6 @@
 // SIDEBAR — the slim icon rail: Sitrep / Emails / Auth / Rules / Groups on the
-// 1..5 keys; Share + Usage + Settings sit below a divider, out of that sequence
+// 1..5 keys, with Calendar second when it is offered (⇧C, off the digits; see
+// `MainView.railViews`); Share + Usage + Settings sit below a divider, out of that sequence
 // so adding one never renumbers it. Share is the odd one there: it opens a sheet
 // rather than routing, so it carries no selector (see `shareButton`). ONE long-lived pane behind the icons is the selector,
 // moved by GEOMETRY not identity: per-icon glass drags the glyph along and
@@ -106,9 +107,10 @@ struct SidebarRail: View {
                 // beside it rather than on its line — the rail is what the bar
                 // runs above, so an icon level with the title would be an icon
                 // sitting in the bar.
-                ForEach(Array(MainView.mainViews.enumerated()), id: \.element) { index, view in
+                ForEach(MainView.railViews(calendar: store.calendarPageAvailable), id: \.view) { row in
+                    let view = row.view
                     RailButton(
-                        view: view, keyNumber: index + 1, active: store.activeView == view,
+                        view: view, keyHint: row.key, active: store.activeView == view,
                         showRings: view == .auth, onSlot: { slots[view] = $0 })
                 }
 
@@ -123,7 +125,7 @@ struct SidebarRail: View {
 
                 ForEach(MainView.bottomViews, id: \.self) { view in
                     RailButton(
-                        view: view, keyNumber: nil, active: store.activeView == view,
+                        view: view, keyHint: nil, active: store.activeView == view,
                         showRings: false, onSlot: { slots[view] = $0 })
                 }
 
@@ -314,7 +316,8 @@ private struct RailEdge: Shape {
 private struct RailButton: View {
     @Environment(AppStore.self) private var store
     let view: MainView
-    let keyNumber: Int?
+    /// The key the tooltip teaches: a digit, ⇧C, or nothing.
+    let keyHint: String?
     let active: Bool
     let showRings: Bool
     /// Where this icon landed, in the rail's space, so the rail can park the
@@ -365,7 +368,7 @@ private struct RailButton: View {
                 .frame(width: SidebarRail.iconWidth, height: SidebarRail.iconHeight)
         }
         .onHover { hovering = $0 }
-        .help(keyNumber.map { "\(view.label) · \($0)" } ?? view.label)
+        .help(keyHint.map { "\(view.label) · \($0)" } ?? view.label)
         .accessibilityLabel(view.label)
         .accessibilityHint(RehearsalMode.isEnabled ? "Available after onboarding." : "")
         .modifier(PracticeRailFeedback(attempts: deniedAttempts))

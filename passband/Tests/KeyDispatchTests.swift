@@ -40,6 +40,7 @@ struct KeyDispatchTests {
         aHoldIsReleasedWhateverShiftDid()
         aCancelledHoldSaysSo()
         aHoldOutlivesTheSurfaceThatStartedIt()
+        theCalendarKeyTakesShiftCOnlyWhenOffered()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -182,6 +183,35 @@ struct KeyDispatchTests {
     /// most of why they exist — so the helper bakes it in.
     static func chord(_ key: String, _ tag: String) -> KeyBinding {
         KeyBinding(key, tag, meta: true, allowInInput: true) { ran.append(tag) }
+    }
+
+    // MARK: - the calendar's key
+
+    /// ⇧C, as RootView binds it: EXACT CASE, DECLINING, in the GLOBAL set. The
+    /// exact pass reaches global before the fold reaches the surface, so while
+    /// the page is offered ⇧C opens it over a surface's `c` (compose, which
+    /// ⇧C used to reach through the fold). With the gate closed it is asked,
+    /// declines, and the fold hands ⇧C to `c` exactly as before.
+    static func theCalendarKeyTakesShiftCOnlyWhenOffered() {
+        let registry = KeyRegistry.shared
+        var offered = true
+        let global = registry.register(
+            .global,
+            box: KeyRegistry.BindingsBox([
+                KeyBinding(declining: "C", "calendar", exactCase: true) {
+                    ran.append("calendar")
+                    return offered
+                }
+            ]))
+        stage([[verb("c", "compose")]]) {
+            equal(press("C"), ["calendar"], "shift+c opens the calendar over a surface's c")
+            equal(press("c"), ["compose"], "plain c still composes")
+            offered = false
+            equal(press("C"), ["calendar", "compose"],
+                  "gate closed: asked, declines, and shift+c folds to c as it did before")
+            equal(press("C", editing: true), [], "a capital C typed into a field is just typed")
+        }
+        registry.unregister(global)
     }
 
     /// A declining binding: records that it was ASKED, then holds or passes.

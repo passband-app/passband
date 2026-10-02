@@ -35,10 +35,12 @@ enum OpenSource: String, Sendable {
     case sitrep, sitrepCard = "sitrep_card", reading, emails, search, browse
     case assistant, deeperSearch = "deeper_search", groups, notification
     case reply, reader, tour
+    /// A ghost's "mail behind it" on the calendar page.
+    case calendar
 }
 
 enum MainView: String, Sendable, Hashable, CaseIterable {
-    case sitrep, emails, auth, rules, groups, usage, settings, process
+    case sitrep, calendar, emails, auth, rules, groups, usage, settings, process
 
     /// The TOP rail group — also the 1..N number-key mapping, taken from
     /// POSITION in this array. Usage/Settings are excluded so that adding one
@@ -55,9 +57,26 @@ enum MainView: String, Sendable, Hashable, CaseIterable {
     /// The BOTTOM rail group, pinned below a divider.
     static let bottomViews: [MainView] = [.usage, .settings]
 
+    /// THE TOP RAIL AS DRAWN, which is `mainViews` plus whatever sits in it
+    /// without a digit. Calendar is the one such: second on the rail (under
+    /// Sitrep, above Emails) and in the Go menu, but OFF the numbering, so
+    /// showing it renumbers nothing and the bare digits keep landing where
+    /// they always have. Its key is ⇧C. `key` is the hint the rail's tooltip
+    /// prints; the digit bindings themselves are still built from `mainViews`
+    /// alone (RootView.globalBindings).
+    ///
+    /// `calendar` is `AppStore.calendarPageAvailable`, passed in so the rail
+    /// and the menu ask the gate the same way and hide it together.
+    static func railViews(calendar: Bool) -> [(view: MainView, key: String)] {
+        var rows = mainViews.enumerated().map { (view: $0.element, key: "\($0.offset + 1)") }
+        if calendar { rows.insert((view: .calendar, key: "⇧C"), at: 1) }
+        return rows
+    }
+
     var label: String {
         switch self {
         case .sitrep: "Sitrep"
+        case .calendar: "Calendar"
         case .emails: "Emails"
         case .auth: "Auth"
         case .rules: "Rules"
@@ -71,6 +90,7 @@ enum MainView: String, Sendable, Hashable, CaseIterable {
     var symbol: String {
         switch self {
         case .sitrep: "gauge.with.dots.needle.33percent"
+        case .calendar: "calendar"
         case .emails: "envelope"
         case .auth: "key"
         case .rules: "slider.horizontal.3"
@@ -300,7 +320,7 @@ struct RefreshError: Equatable, Sendable {
 /// `AppStore.cancelScheduledRow`).
 enum UndoKind: Sendable {
     case archive, done, label, ruleDelete, groupDelete, remind, send, draftDelete, schedule,
-        scheduledCancel
+        scheduledCancel, ghostDismiss
 
     /// Whether firing this undo changes anything the sitrep shows, and so
     /// whether `fireUndo` un-hides a resolved id and pulls the poller. The two
@@ -310,7 +330,7 @@ enum UndoKind: Sendable {
     var touchesSitrep: Bool {
         switch self {
         case .archive, .done, .label, .ruleDelete, .groupDelete, .remind: true
-        case .send, .draftDelete, .schedule, .scheduledCancel: false
+        case .send, .draftDelete, .schedule, .scheduledCancel, .ghostDismiss: false
         }
     }
 }
@@ -577,6 +597,23 @@ final class AppStore {
 
     // MARK: sitrep zones — see SitrepZoneCache
     var zones = SitrepZoneCache()
+
+    // MARK: calendar page, see Model/CalendarStore.swift
+    /// The last timeline that landed, held here for the reason the zones are:
+    /// the page is unmounted every time you leave it, and coming back should
+    /// paint the agenda it had rather than a loading line. Replaced only by a
+    /// newer answer; a failed reload keeps it.
+    var calendarFeed: TimelineFeed?
+    /// A load has finished at least once (success or failure) for this
+    /// account, so an empty feed can be told from one still on its way.
+    var calendarLoaded = false
+    /// The connect card, while it is up. Its own property, apart from the
+    /// feed: `modalOverlayOpen` reads it, and the whole shell reads that.
+    var calendarConnectAsk: CalendarConnectAsk?
+    /// When Connect was last pressed: the page says it is waiting for Google
+    /// until the grant shows up on the stats poll or the consent session has
+    /// certainly died (`CalendarGate.connectWaitWindow`).
+    var calendarConnectWaitingSince: Date?
     /// When the last full zone refresh COMPLETED. nil = never loaded. OUT of
     /// the observed struct: it is a TTL stamp, and stamping it invalidated
     /// every zone view once per pass whether or not a row had changed.
@@ -1735,6 +1772,10 @@ final class AppStore {
         fyeHeadline = nil
         fyeHeadlineKey = nil
         zones = SitrepZoneCache()
+        calendarFeed = nil
+        calendarLoaded = false
+        calendarConnectAsk = nil
+        calendarConnectWaitingSince = nil
         // The parked refresh tasks go too, not just their results: a joiner
         // arriving after the switch would otherwise wait on — and adopt the
         // silence of — a pass that has already been disowned.
@@ -1876,6 +1917,9 @@ final class AppStore {
     /// the previous one — assigning `activeView` directly would inherit whatever
     /// the last click set and slide the rail for a keyboard route.
     private func route(to view: MainView, viaPointer: Bool = false) {
+        // A route to a calendar page that is not offered (the gate, a history
+        // entry from before it closed) lands on the sitrep instead.
+        let view = view == .calendar && !calendarPageAvailable ? .sitrep : view
         // On change only: the repeat-press no-op in setView re-routes to the
         // same view, and that is not a navigation worth an event.
         if view != activeView { Analytics.screen(view.rawValue) }
@@ -1885,6 +1929,7 @@ final class AppStore {
 
     func setView(_ view: MainView, viaPointer: Bool = false) {
         guard !RehearsalMode.isEnabled || view == .sitrep else { return }
+        guard view != .calendar || calendarPageAvailable else { return }
         // Navigating ANYWHERE dismisses an open thread viewer: the rail is visible
         // beside it, so a click there means "leave this email", not "change the
         // page underneath the overlay". Through closeThread() so the reader's
@@ -2210,7 +2255,7 @@ final class AppStore {
             || ruleEditor != nil
             || groupEditor != nil
             || !authQueue.isEmpty || retriage != nil || retriageAsk != nil
-            || reconnectAsk != nil
+            || reconnectAsk != nil || calendarConnectAsk != nil
             || tour.wantsBlur || whatsNew.active
     }
 

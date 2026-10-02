@@ -53,6 +53,20 @@ impl Prices {
     }
 }
 
+impl Prices {
+    /// USD for one call as production's cache would have served it: the
+    /// prefix (this call's cache reads plus writes) priced at
+    /// `hit * cache_read + (1 - hit) * cache_write_1h`, everything else as
+    /// billed. Removes the cold-cache penalty a short eval run pays.
+    pub fn projected_cost(&self, usage: &Usage, hit: f64) -> f64 {
+        let prefix = (usage.cache_read_input_tokens + usage.cache_creation_input_tokens) as f64;
+        (usage.input_tokens as f64 * self.input
+            + usage.output_tokens as f64 * self.output
+            + prefix * (hit * self.cache_read + (1.0 - hit) * self.cache_write_1h))
+            / 1_000_000.0
+    }
+}
+
 /// First-party Claude list prices. A gateway-qualified id
 /// (`anthropic/claude-...`) prices as its bare id.
 pub fn builtin(model: &str) -> Option<Prices> {
@@ -89,6 +103,34 @@ mod tests {
         assert_eq!(haiku.cache_read, 0.1);
         assert_eq!(builtin("claude-sonnet-5").unwrap().cache_read, 0.2);
         assert!(builtin("gpt-unknown").is_none());
+    }
+
+    /// Opus 5.5, 2000 uncached + 6000 prefix + 500 out. At hit 0.9 the
+    /// prefix costs 0.9*0.20 + 0.1*8 = 0.98/MTok; at 0.5, 0.10 + 4 = 4.10.
+    #[test]
+    fn projection_prices_the_prefix_at_the_hit_rate() {
+        let prices = builtin("claude-opus-5-5").unwrap();
+        let usage = Usage {
+            input_tokens: 2_000,
+            output_tokens: 500,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 6_000,
+            cache_creation: None,
+        };
+        // 2000*4 + 500*20 + 6000*0.98 = 8000 + 10000 + 5880 = 23880 / 1e6
+        assert!((prices.projected_cost(&usage, 0.9) - 0.023_88).abs() < 1e-12);
+        // 8000 + 10000 + 6000*4.10 = 42600 / 1e6
+        assert!((prices.projected_cost(&usage, 0.5) - 0.042_6).abs() < 1e-12);
+        // Where the prefix came from does not matter, only its size.
+        let warm = Usage {
+            cache_read_input_tokens: 6_000,
+            cache_creation_input_tokens: 0,
+            ..usage
+        };
+        assert_eq!(
+            prices.projected_cost(&warm, 0.9),
+            prices.projected_cost(&usage, 0.9)
+        );
     }
 
     #[test]

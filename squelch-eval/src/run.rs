@@ -124,6 +124,12 @@ pub const CANDIDATES_TEMPLATE: &str = r#"# squelch-eval candidates: one table pe
 # provider = "anthropic"
 # model = "claude-opus-5-5"
 # api_key_env = "ANTHROPIC_API_KEY"
+# effort = "xhigh"               # mirrors the daemon's stage2 default
+#
+# [candidate.haiku]
+# provider = "anthropic"
+# model = "claude-haiku-4-5"     # no effort line: Haiku 4.5 has no effort support and sending the field is a 400
+# api_key_env = "ANTHROPIC_API_KEY"
 #
 # [candidate.sonnet-low]
 # provider = "anthropic"
@@ -287,6 +293,10 @@ pub struct ResultRow {
     pub tool_calls: usize,
     pub latency_s: f64,
     pub grade: BTreeMap<String, f64>,
+    /// [`crate::score::SCORER_VERSION`] that wrote `grade`; 0 for rows from
+    /// before the scorer existed. `report` re-scores regardless.
+    #[serde(default)]
+    pub scorer_version: u32,
 }
 
 /// One infrastructure failure in `errors.jsonl`: never scored, retried.
@@ -363,6 +373,8 @@ pub struct RunOptions {
     pub yes: bool,
     /// First infra retry waits about this long, doubling, jittered.
     pub backoff: Duration,
+    /// Stop scheduling once this run directory's observed spend reaches it.
+    pub max_usd: Option<f64>,
 }
 
 #[derive(Debug, Default)]
@@ -374,6 +386,8 @@ pub struct RunSummary {
     pub failed: usize,
     pub infra_errors: usize,
     pub unfinished: usize,
+    /// Observed spend in this run directory, all sessions, when priced.
+    pub spent_usd: Option<f64>,
 }
 
 pub fn run_dir(dataset: &Path, name: &str, effort: Option<&str>) -> PathBuf {
@@ -480,6 +494,8 @@ struct PairOutcome {
     errors: Vec<ErrorRow>,
     row: Option<ResultRow>,
     abort: Option<String>,
+    /// Never started: the budget was reached first.
+    skipped: bool,
 }
 
 struct Shared<'a> {
@@ -493,7 +509,78 @@ struct Shared<'a> {
     effort: Option<String>,
     traces: PathBuf,
     backoff: Duration,
+    /// Set when the budget is reached; pairs not yet started return at once.
+    stop: std::sync::atomic::AtomicBool,
 }
+
+/// Observed spend already recorded in a run directory: every call on every
+/// row and every failed attempt, at `prices`.
+pub fn recorded_spend(dir: &Path, prices: &Prices) -> f64 {
+    [RESULTS_FILE, ERRORS_FILE]
+        .iter()
+        .filter_map(|file| std::fs::read_to_string(dir.join(file)).ok())
+        .flat_map(|text| {
+            text.lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .collect::<Vec<_>>()
+        })
+        .flat_map(|line| {
+            serde_json::from_value::<Vec<Usage>>(line["calls"].clone()).unwrap_or_default()
+        })
+        .map(|call| prices.cost(&call))
+        .sum()
+}
+
+/// One progress line: counts, spend, elapsed and a naive eta.
+pub struct Progress {
+    pub total: usize,
+    pub finished: usize,
+    pub ok: usize,
+    pub failed: usize,
+    pub infra_errors: usize,
+    pub spent: Option<f64>,
+    pub elapsed: Duration,
+}
+
+/// `1h02m03s`, `2m05s`, `45s`.
+pub fn clock(duration: Duration) -> String {
+    let secs = duration.as_secs();
+    match (secs / 3600, secs / 60 % 60, secs % 60) {
+        (0, 0, s) => format!("{s}s"),
+        (0, m, s) => format!("{m}m{s:02}s"),
+        (h, m, s) => format!("{h}h{m:02}m{s:02}s"),
+    }
+}
+
+impl Progress {
+    pub fn line(&self) -> String {
+        let eta = if self.finished == 0 {
+            "eta unknown".to_owned()
+        } else {
+            let left = self.total.saturating_sub(self.finished) as f64;
+            let per = self.elapsed.as_secs_f64() / self.finished as f64;
+            format!("eta {}", clock(Duration::from_secs_f64(per * left)))
+        };
+        let spent = self
+            .spent
+            .map(|usd| format!(", ${usd:.4} so far"))
+            .unwrap_or_default();
+        format!(
+            "squelch-eval: {}/{} done, {} ok, {} failed, {} infra errors{spent}, {} elapsed, {eta}",
+            self.finished,
+            self.total,
+            self.ok,
+            self.failed,
+            self.infra_errors,
+            clock(self.elapsed)
+        )
+    }
+}
+
+/// Every this many finished pairs, a progress line.
+pub const PROGRESS_EVERY: usize = 25;
+/// And at least this often while pairs run.
+pub const PROGRESS_INTERVAL: Duration = Duration::from_secs(30);
 
 pub async fn run(options: &RunOptions) -> Result<RunSummary> {
     let all = read_cases(&options.dataset.join(CASES_FILE))?;
@@ -548,6 +635,21 @@ pub async fn run(options: &RunOptions) -> Result<RunSummary> {
     if pending.is_empty() {
         return Ok(summary);
     }
+    let prices = options.candidate.prices();
+    let mut spent = prices.as_ref().map(|prices| recorded_spend(&dir, prices));
+    if let Some(max) = options.max_usd {
+        let Some(already) = spent else {
+            bail!(
+                "--max-usd needs a price for {}; add input and output to its candidates.toml table",
+                options.candidate.model
+            );
+        };
+        if already >= max {
+            bail!(
+                "this run directory has already spent ${already:.4} of the ${max:.4} budget; raise --max-usd to continue"
+            );
+        }
+    }
     let url = options.candidate.url();
     #[cfg(test)]
     if !is_loopback(&url) {
@@ -600,6 +702,7 @@ pub async fn run(options: &RunOptions) -> Result<RunSummary> {
         effort,
         traces,
         backoff: options.backoff,
+        stop: std::sync::atomic::AtomicBool::new(false),
     };
     let mut outcomes = futures::stream::iter(
         pending
@@ -609,8 +712,45 @@ pub async fn run(options: &RunOptions) -> Result<RunSummary> {
     .buffer_unordered(options.concurrency.max(1));
     let mut abort = None;
     let mut finished = 0;
-    while let Some(outcome) = outcomes.next().await {
+    let mut skipped = 0;
+    let mut budget_hit = false;
+    let clock_started = Instant::now();
+    let mut ticker = tokio::time::interval(PROGRESS_INTERVAL);
+    ticker.tick().await;
+    let progress = |finished, summary: &RunSummary, spent| Progress {
+        total: pending.len(),
+        finished,
+        ok: summary.ok,
+        failed: summary.failed,
+        infra_errors: summary.infra_errors,
+        spent,
+        elapsed: clock_started.elapsed(),
+    };
+    loop {
+        let outcome = tokio::select! {
+            outcome = outcomes.next() => match outcome {
+                Some(outcome) => outcome,
+                None => break,
+            },
+            _ = ticker.tick() => {
+                eprintln!("{}", progress(finished, &summary, spent).line());
+                continue;
+            }
+        };
+        if outcome.skipped {
+            skipped += 1;
+            continue;
+        }
         finished += 1;
+        if let (Some(prices), Some(total)) = (&prices, spent.as_mut()) {
+            *total += outcome
+                .errors
+                .iter()
+                .flat_map(|e| &e.calls)
+                .chain(outcome.row.iter().flat_map(|r| &r.calls))
+                .map(|call| prices.cost(call))
+                .sum::<f64>();
+        }
         for error in &outcome.errors {
             append_line(&dir.join(ERRORS_FILE), error)?;
             summary.infra_errors += 1;
@@ -626,6 +766,17 @@ pub async fn run(options: &RunOptions) -> Result<RunSummary> {
             }
             None => summary.unfinished += 1,
         }
+        if finished % PROGRESS_EVERY == 0 {
+            eprintln!("{}", progress(finished, &summary, spent).line());
+        }
+        if let (Some(max), Some(total)) = (options.max_usd, spent)
+            && total >= max
+            && !budget_hit
+        {
+            // In-flight pairs finish and are recorded; nothing new starts.
+            budget_hit = true;
+            shared.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         if outcome.abort.is_some() {
             abort = outcome.abort;
             break;
@@ -633,11 +784,23 @@ pub async fn run(options: &RunOptions) -> Result<RunSummary> {
     }
     drop(outcomes);
     summary.unfinished += pending.len() - finished;
+    summary.spent_usd = spent;
     meta["finished_at"] = json!(Utc::now());
     meta["aborted"] = json!(abort);
+    meta["max_usd"] = json!(options.max_usd);
+    meta["stopped_at_budget"] = json!(budget_hit);
     crate::private_write(&run_file, serde_json::to_string_pretty(&meta)?.as_bytes())?;
     if let Some(reason) = abort {
         bail!("{reason}");
+    }
+    if budget_hit {
+        bail!(
+            "budget reached: ${:.4} of ${:.4} spent in this run directory; {} of {} pairs were not started and are left for resume",
+            spent.unwrap_or(0.0),
+            options.max_usd.unwrap_or(0.0),
+            skipped,
+            pending.len()
+        );
     }
     Ok(summary)
 }
@@ -647,7 +810,12 @@ async fn run_pair(shared: &Shared<'_>, case: &Case, weight: f64, rep: u32) -> Pa
         errors: Vec::new(),
         row: None,
         abort: None,
+        skipped: false,
     };
+    if shared.stop.load(std::sync::atomic::Ordering::SeqCst) {
+        outcome.skipped = true;
+        return outcome;
+    }
     let mut prepared = case.context.clone();
     prepare_initial_context(&mut prepared.initial, &shared.config.context);
     let user_message = first_user_message(&prepared).unwrap_or_default();
@@ -726,6 +894,7 @@ async fn run_pair(shared: &Shared<'_>, case: &Case, weight: f64, rep: u32) -> Pa
             tool_calls,
             latency_s,
             grade: BTreeMap::new(),
+            scorer_version: crate::score::SCORER_VERSION,
         };
         match result {
             Ok(run) => {
@@ -791,79 +960,9 @@ mod tests {
     use super::*;
     use crate::case::GoldMeta;
     use crate::export::{ExportOptions, export};
-    use crate::fixture::{self, Fixture};
-    use std::collections::{HashMap, VecDeque};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
-
-    #[derive(Clone)]
-    enum Reply {
-        Valid,
-        Invalid,
-        Status(u16),
-        ReadThread(String),
-    }
-
-    /// An OpenAI-wire provider on a loopback port. Each case (found by the
-    /// `message_id` in the user message) follows its own script, then answers
-    /// with a valid decision.
-    #[derive(Default)]
-    struct Mock {
-        scripts: Mutex<HashMap<i64, VecDeque<Reply>>>,
-        calls: AtomicUsize,
-    }
-
-    async fn provider(
-        axum::extract::State(mock): axum::extract::State<Arc<Mock>>,
-        axum::Json(request): axum::Json<Value>,
-    ) -> (axum::http::StatusCode, axum::Json<Value>) {
-        mock.calls.fetch_add(1, Ordering::SeqCst);
-        let user = request["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|m| m["role"] == "user")
-            .unwrap()["content"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        let id = serde_json::from_str::<Value>(&user).unwrap()["context"]["message_id"]
-            .as_i64()
-            .unwrap();
-        let reply = mock
-            .scripts
-            .lock()
-            .unwrap()
-            .get_mut(&id)
-            .and_then(VecDeque::pop_front)
-            .unwrap_or(Reply::Valid);
-        let step = match reply {
-            Reply::Status(code) => {
-                return (
-                    axum::http::StatusCode::from_u16(code).unwrap(),
-                    axum::Json(json!({"error": {"type": "mock_error"}})),
-                );
-            }
-            Reply::Valid => {
-                json!({"step": "finish", "decision": fixture::gold(id, "candidate", true)})
-            }
-            Reply::Invalid => {
-                let mut decision = fixture::gold(id, "candidate", true);
-                decision.attention.relevant_message_ids = vec![999_999];
-                json!({"step": "finish", "decision": decision})
-            }
-            Reply::ReadThread(thread) => json!({"step": "read_evidence",
-                "requests": [{"tool": "read_thread", "thread_id": thread}]}),
-        };
-        (
-            axum::http::StatusCode::OK,
-            axum::Json(json!({
-                "choices": [{"message": {"content": json!({"result": step}).to_string()}, "finish_reason": "stop"}],
-                "usage": {"prompt_tokens": 12, "completion_tokens": 8,
-                    "prompt_tokens_details": {"cached_tokens": 2}}
-            })),
-        )
-    }
+    use crate::fixture::{self, Fixture, Mock, Reply};
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
 
     struct Harness {
         fixture: Fixture,
@@ -894,12 +993,7 @@ mod tests {
                 .unwrap()
                 .insert(fixture.ids[name], replies.into());
         }
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}/", listener.local_addr().unwrap());
-        let app = axum::Router::new()
-            .route("/", axum::routing::post(provider))
-            .with_state(mock.clone());
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (url, server) = fixture::serve(mock.clone()).await;
         Harness {
             fixture,
             dataset: outcome.dir,
@@ -910,30 +1004,7 @@ mod tests {
     }
 
     fn options(h: &Harness) -> RunOptions {
-        RunOptions {
-            dataset: h.dataset.clone(),
-            candidate_name: "mock".into(),
-            candidate: Candidate {
-                provider: Provider::Openai,
-                model: "mock-model".into(),
-                url: Some(h.url.clone()),
-                api_key_env: None,
-                effort: None,
-                input: Some(1.0),
-                output: Some(2.0),
-                cache_read: None,
-                cache_write_5m: None,
-                cache_write_1h: None,
-            },
-            reps: 1,
-            concurrency: 2,
-            sample: None,
-            fidelity: FidelityFilter::Reconstructed,
-            cases: Vec::new(),
-            effort: None,
-            yes: true,
-            backoff: Duration::from_millis(1),
-        }
+        fixture::run_options(&h.dataset, &h.url)
     }
 
     fn rows(h: &Harness) -> Vec<ResultRow> {
@@ -1126,6 +1197,90 @@ mod tests {
         assert_eq!(errors[0].class, "config");
         assert!(rows(&h).is_empty());
         assert_eq!(h.mock.calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// One call at the mock's usage (10 uncached, 2 cached, 8 out) and the
+    /// mock candidate's prices ($1 in, $2 out, $0.10 cache read per MTok).
+    const CALL_USD: f64 = 26.2e-6;
+
+    #[tokio::test]
+    async fn a_budget_stops_new_work_and_survives_resume() {
+        let h = harness(vec![]).await;
+        let mut capped = options(&h);
+        capped.concurrency = 1;
+        capped.max_usd = Some(2.5 * CALL_USD);
+        let error = run(&capped).await.unwrap_err().to_string();
+        assert!(error.contains("budget reached"), "{error}");
+        assert!(error.contains("1 of 4 pairs were not started"), "{error}");
+        // The pair that crossed the line was recorded; nothing after it ran.
+        assert_eq!(rows(&h).len(), 3);
+        assert_eq!(h.mock.calls.load(Ordering::SeqCst), 3);
+        let dir = run_dir(&h.dataset, "mock", None);
+        let spent = recorded_spend(&dir, &capped.candidate.prices().unwrap());
+        assert!((spent - 3.0 * CALL_USD).abs() < 1e-12);
+        let meta: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(RUN_FILE)).unwrap()).unwrap();
+        assert_eq!(meta["stopped_at_budget"], true);
+        // A resume counts what was already spent: no fresh allowance.
+        let again = run(&capped).await.unwrap_err().to_string();
+        assert!(again.contains("already spent"), "{again}");
+        assert_eq!(h.mock.calls.load(Ordering::SeqCst), 3);
+        let mut raised = capped;
+        raised.max_usd = Some(1.0);
+        let done = run(&raised).await.unwrap();
+        assert_eq!((done.already_done, done.ok), (3, 1));
+        assert!((done.spent_usd.unwrap() - 4.0 * CALL_USD).abs() < 1e-12);
+    }
+
+    #[tokio::test]
+    async fn a_budget_needs_a_price_and_counts_failed_attempts() {
+        let h = harness(vec![(
+            "A",
+            vec![
+                Reply::ReadThread("t1".into()),
+                Reply::Status(500),
+                Reply::Valid,
+            ],
+        )])
+        .await;
+        let mut unpriced = options(&h);
+        unpriced.candidate.input = None;
+        unpriced.candidate.output = None;
+        unpriced.max_usd = Some(1.0);
+        let error = run(&unpriced).await.unwrap_err().to_string();
+        assert!(error.contains("--max-usd needs a price"), "{error}");
+        assert_eq!(h.mock.calls.load(Ordering::SeqCst), 0);
+        let summary = run(&options(&h)).await.unwrap();
+        // Four scored calls plus the call A's failed attempt paid for.
+        assert!((summary.spent_usd.unwrap() - 5.0 * CALL_USD).abs() < 1e-12);
+        let dir = run_dir(&h.dataset, "mock", None);
+        let prices = options(&h).candidate.prices().unwrap();
+        assert!((recorded_spend(&dir, &prices) - 5.0 * CALL_USD).abs() < 1e-12);
+    }
+
+    #[test]
+    fn progress_lines_count_spend_and_eta() {
+        let mut progress = Progress {
+            total: 200,
+            finished: 50,
+            ok: 48,
+            failed: 1,
+            infra_errors: 2,
+            spent: Some(0.1234),
+            elapsed: Duration::from_secs(65),
+        };
+        assert_eq!(
+            progress.line(),
+            "squelch-eval: 50/200 done, 48 ok, 1 failed, 2 infra errors, $0.1234 so far, 1m05s elapsed, eta 3m15s"
+        );
+        progress.spent = None;
+        progress.finished = 0;
+        assert_eq!(
+            progress.line(),
+            "squelch-eval: 0/200 done, 48 ok, 1 failed, 2 infra errors, 1m05s elapsed, eta unknown"
+        );
+        assert_eq!(clock(Duration::from_secs(3723)), "1h02m03s");
+        assert_eq!(clock(Duration::from_secs(9)), "9s");
     }
 
     #[tokio::test]
@@ -1371,7 +1526,9 @@ mod tests {
             .join("\n");
         std::fs::write(&path, uncommented).unwrap();
         let candidates = load_candidates(&root).unwrap();
-        assert_eq!(candidates.len(), 3);
+        assert_eq!(candidates.len(), 4);
+        assert_eq!(candidates["production"].effort.as_deref(), Some("xhigh"));
+        assert_eq!(candidates["haiku"].effort, None);
         assert_eq!(
             candidates["production"].prices(),
             builtin("claude-opus-5-5")

@@ -3,6 +3,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use squelch_eval::export::{ExportOptions, export, resolve_dataset, sample, show};
+use squelch_eval::report::{ReportOptions, Verdict, adjudicate, report};
 use squelch_eval::run::{FidelityFilter, RunOptions, init, load_candidates, run};
 use std::path::PathBuf;
 
@@ -60,6 +61,47 @@ enum Command {
         /// Consent to the paid calls the run prints before starting.
         #[arg(long)]
         yes: bool,
+        /// Stop starting new cases once this run's observed spend (USD,
+        /// earlier sessions included) reaches this. Needs a priced model.
+        #[arg(long)]
+        max_usd: Option<f64>,
+    },
+    /// Score runs against gold and compare them.
+    Report {
+        /// Run directory names under <dataset>/runs (default: all).
+        runs: Vec<String>,
+        #[arg(long)]
+        dataset: Option<PathBuf>,
+        /// Report paired deltas against this run.
+        #[arg(long)]
+        baseline: Option<String>,
+        /// List this run's disagreements with gold, highest harm first.
+        #[arg(long)]
+        diff: Option<String>,
+        /// Prefix cache hit share for projected cost (default: the manifest's).
+        #[arg(long)]
+        cache_hit: Option<f64>,
+        /// Also write the report as markdown. It can name senders and subjects.
+        #[arg(long)]
+        md: Option<PathBuf>,
+        /// Allow --md inside a git repository.
+        #[arg(long)]
+        allow_repo_path: bool,
+        #[arg(long, default_value_t = squelch_eval::report::DEFAULT_SEED)]
+        seed: u64,
+    },
+    /// Record a ruling on one field of one case.
+    Adjudicate {
+        case_id: i64,
+        #[arg(long)]
+        field: String,
+        #[arg(long, value_enum)]
+        verdict: Verdict,
+        /// The run whose value is being ruled on.
+        #[arg(long)]
+        run: String,
+        #[arg(long)]
+        dataset: Option<PathBuf>,
     },
     /// Pretty-print one case.
     Show {
@@ -93,6 +135,11 @@ async fn main() -> Result<()> {
             };
             let outcome = export(&options)?;
             println!("{}", serde_json::to_string_pretty(&outcome.manifest)?);
+            let gold = &outcome.manifest["gold_validation"];
+            println!(
+                "gold validation: {} valid, {} invalid with no tools (marked suspect), {} invalid citing tool-fetched evidence",
+                gold["valid"], gold["invalid_no_tools"], gold["invalid_with_tools"]
+            );
             println!(
                 "{} cases written to {}",
                 outcome.cases,
@@ -118,6 +165,7 @@ async fn main() -> Result<()> {
             cases,
             effort,
             yes,
+            max_usd,
         } => {
             let candidates = load_candidates(&root)?;
             let Some(config) = candidates.get(&candidate).cloned() else {
@@ -139,6 +187,7 @@ async fn main() -> Result<()> {
                 effort,
                 yes,
                 backoff: std::time::Duration::from_secs(2),
+                max_usd,
             })
             .await?;
             println!(
@@ -150,6 +199,45 @@ async fn main() -> Result<()> {
                 summary.already_done,
                 summary.dir.display()
             );
+        }
+        Command::Report {
+            runs,
+            dataset,
+            baseline,
+            diff,
+            cache_hit,
+            md,
+            allow_repo_path,
+            seed,
+        } => {
+            if let Some(hit) = cache_hit
+                && !(0.0..=1.0).contains(&hit)
+            {
+                anyhow::bail!("--cache-hit is a share between 0 and 1");
+            }
+            let dataset = resolve_dataset(&root, dataset.as_deref())?;
+            let options = ReportOptions {
+                runs,
+                baseline,
+                diff,
+                cache_hit,
+                seed,
+            };
+            print!(
+                "{}",
+                report(&dataset, &options, md.as_deref(), allow_repo_path)?
+            );
+        }
+        Command::Adjudicate {
+            case_id,
+            field,
+            verdict,
+            run,
+            dataset,
+        } => {
+            let dataset = resolve_dataset(&root, dataset.as_deref())?;
+            let ruling = adjudicate(&dataset, case_id, &field, verdict, &run)?;
+            println!("{}", serde_json::to_string(&ruling)?);
         }
         Command::Show { case_id, dataset } => {
             let dataset = resolve_dataset(&root, dataset.as_deref())?;

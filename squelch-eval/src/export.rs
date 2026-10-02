@@ -136,6 +136,77 @@ pub struct Built {
     /// Per case: the same, shaped as the gold run's prompt version shaped it.
     pub gold_shape_bytes: Vec<usize>,
     pub bytes_per_token_median: BTreeMap<String, f64>,
+    pub gold_validation: GoldValidation,
+}
+
+/// How many golds validate against their own rebuilt context.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct GoldValidation {
+    pub valid: usize,
+    /// No tool call, so the context is all the gold run saw: the rebuild is
+    /// provably off, and the case is suspect.
+    pub invalid_no_tools: usize,
+    /// The gold run read evidence the initial context does not hold.
+    pub invalid_with_tools: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GoldCheck {
+    Valid,
+    InvalidNoTools(String),
+    InvalidWithTools(String),
+}
+
+/// Validate the gold decision against the case's own context, exactly as
+/// `run_agent` would validate a candidate that said the same thing on its
+/// first turn: `validate_decision` at the case's clock, plus the action-id
+/// rule (every id the gold reuses must be one the context offers).
+pub fn check_gold(case: &Case) -> GoldCheck {
+    let sources: std::collections::BTreeSet<i64> =
+        case.context.source_message_ids.iter().copied().collect();
+    let result = squelch_core::triage::agent::validate_decision(
+        &case.gold,
+        &sources,
+        &case.context.thread_revisions,
+        &case.context.rule_ids,
+        case.as_of,
+    )
+    .and_then(|()| {
+        let offered: std::collections::BTreeSet<&str> =
+            case.context.initial["attention"]["actions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|action| action["id"].as_str())
+                .collect();
+        if case
+            .gold
+            .attention
+            .actions
+            .iter()
+            .filter_map(|action| action.id.as_deref())
+            .any(|id| !offered.contains(id))
+        {
+            return Err("unknown_or_duplicate_attention_action_id".into());
+        }
+        // The initial context offers no other thread's attention.
+        if case
+            .gold
+            .related_updates
+            .iter()
+            .any(|update| update.attention.actions.iter().any(|a| a.id.is_some()))
+        {
+            return Err("related_attention_not_in_context".into());
+        }
+        Ok(())
+    });
+    match result {
+        Ok(()) => GoldCheck::Valid,
+        // Without a tool call the evidence never grows past the initial
+        // context, repair turns or not.
+        Err(error) if case.gold_meta.tool_calls == 0 => GoldCheck::InvalidNoTools(error),
+        Err(error) => GoldCheck::InvalidWithTools(error),
+    }
 }
 
 pub fn build_cases(
@@ -300,12 +371,31 @@ pub fn build_cases(
             }
         }
     }
+    let mut gold_validation = GoldValidation::default();
+    for case in &mut cases {
+        match check_gold(case) {
+            GoldCheck::Valid => gold_validation.valid += 1,
+            GoldCheck::InvalidNoTools(error) => {
+                gold_validation.invalid_no_tools += 1;
+                case.fidelity = Fidelity::Suspect;
+                case.fidelity_notes.push(format!(
+                    "gold does not validate against its rebuilt context ({error}) though its run used no tools: the reconstruction is off"
+                ));
+            }
+            GoldCheck::InvalidWithTools(error) => {
+                gold_validation.invalid_with_tools += 1;
+                case.fidelity_notes
+                    .push(format!("gold cites tool-fetched evidence ({error})"));
+            }
+        }
+    }
     Ok(Built {
         cases,
         skipped,
         prepared_bytes,
         gold_shape_bytes,
         bytes_per_token_median: medians,
+        gold_validation,
     })
 }
 
@@ -534,6 +624,7 @@ fn manifest(
         },
         "skipped": built.skipped,
         "bytes_per_token_median": built.bytes_per_token_median,
+        "gold_validation": built.gold_validation,
         "production_cache_hit": production_cache_hit(&built.cases),
         "snapshot": snapshot_notes,
         "audit": audit,
@@ -866,6 +957,83 @@ mod tests {
             notes.contains(&format!("message {} has 2 applied runs", fixture.ids["F"])),
             "{notes}"
         );
+    }
+
+    /// A carried-forward action keeps the id production assigned, so the
+    /// gold that reuses it validates against its own rebuilt context.
+    #[test]
+    fn carried_forward_actions_keep_their_real_id() {
+        let (fixture, real) = fixture::carry_forward();
+        let outcome = export(&ExportOptions {
+            db: fixture.db.clone(),
+            out: fixture.dir.join("evals"),
+            name: "carry".into(),
+        })
+        .unwrap();
+        let cases = crate::case::read_cases(&outcome.dir.join(CASES_FILE)).unwrap();
+        let i = case(&cases, &fixture, "I");
+        assert_eq!(
+            i.gold.attention.actions[0].id.as_deref(),
+            Some(real.as_str())
+        );
+        assert_eq!(
+            i.context.initial["attention"]["actions"][0]["id"],
+            json!(real)
+        );
+        assert_eq!(check_gold(i), GoldCheck::Valid);
+        assert_ne!(i.fidelity, Fidelity::Suspect, "{:?}", i.fidelity_notes);
+        assert_eq!(
+            outcome.manifest["gold_validation"],
+            json!({"valid": 2, "invalid_no_tools": 1, "invalid_with_tools": 0})
+        );
+        let j = case(&cases, &fixture, "J");
+        assert_eq!(j.fidelity, Fidelity::Suspect);
+        assert!(
+            j.fidelity_notes
+                .iter()
+                .any(|n| n.contains("invalid_attention_evidence_or_factors"))
+        );
+    }
+
+    /// A gold citing what its context does not hold: suspect when its run
+    /// used no tools, only noted when it did.
+    #[test]
+    fn gold_that_fails_its_own_context_is_judged_by_its_tools() {
+        let (fixture, _, cases, manifest) = exported();
+        assert_eq!(
+            manifest["gold_validation"],
+            json!({"valid": 5, "invalid_no_tools": 0, "invalid_with_tools": 0})
+        );
+        let mut b = case(&cases, &fixture, "B").clone();
+        assert_eq!(check_gold(&b), GoldCheck::Valid);
+        b.gold.attention.evidence[0].message_id = fixture.ids["E"];
+        assert!(
+            matches!(check_gold(&b), GoldCheck::InvalidNoTools(e) if e == "invalid_attention_evidence_or_factors")
+        );
+        b.gold_meta.tool_calls = 1;
+        assert!(matches!(check_gold(&b), GoldCheck::InvalidWithTools(_)));
+        let mut c = case(&cases, &fixture, "C").clone();
+        c.gold.attention.actions[0].id = Some("invented".into());
+        assert_eq!(
+            check_gold(&c),
+            GoldCheck::InvalidNoTools("unknown_or_duplicate_attention_action_id".into())
+        );
+        // A revisit is judged at the case's clock: after T is valid even
+        // though the wall clock has passed it; before T is not.
+        let mut later = case(&cases, &fixture, "B").clone();
+        later.gold.revisit = Some(squelch_core::triage::decision::RevisitRequest {
+            at: later.as_of + chrono::Duration::days(1),
+            reason: "check the delivery".into(),
+        });
+        assert_eq!(check_gold(&later), GoldCheck::Valid);
+        later.gold.revisit.as_mut().unwrap().at = later.as_of - chrono::Duration::days(1);
+        assert!(
+            matches!(check_gold(&later), GoldCheck::InvalidNoTools(e) if e == "revisit_must_be_in_the_future")
+        );
+        // The id B's context does offer is accepted.
+        let mut reuse = case(&cases, &fixture, "B").clone();
+        reuse.gold.attention.actions[0].id = Some(format!("act-{}-0", fixture.ids["A"]));
+        assert_eq!(check_gold(&reuse), GoldCheck::Valid);
     }
 
     #[test]

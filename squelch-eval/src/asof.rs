@@ -86,22 +86,18 @@ pub struct Timeline {
 }
 
 impl Timeline {
-    pub fn from_decisions<'a>(rows: impl IntoIterator<Item = &'a DecisionRow>) -> Self {
+    /// `committed` is each thread's current `agent_thread_attention`, whose
+    /// actions carry the ids production assigned at commit.
+    pub fn from_decisions<'a>(
+        rows: impl IntoIterator<Item = &'a DecisionRow>,
+        committed: &HashMap<String, ThreadAttentionDecision>,
+    ) -> Self {
         let mut timeline = Self::default();
         for row in rows {
             if row.access_only {
                 continue;
             }
             let mut push = |thread: &str, attention: &ThreadAttentionDecision| {
-                let mut attention = attention.clone();
-                // Production assigns an id to each new action at commit, and
-                // the next run sees it. The stored decision keeps null, so
-                // give it a stable stand-in.
-                for (index, action) in attention.actions.iter_mut().enumerate() {
-                    if action.id.is_none() {
-                        action.id = Some(format!("act-{}-{index}", row.message_id));
-                    }
-                }
                 timeline
                     .threads
                     .entry(thread.to_owned())
@@ -109,7 +105,7 @@ impl Timeline {
                     .push(TimelineEntry {
                         at: row.decided_at,
                         source_message_id: row.message_id,
-                        attention,
+                        attention: attention.clone(),
                     });
             };
             push(&row.thread_id, &row.decision.attention);
@@ -117,8 +113,9 @@ impl Timeline {
                 push(&update.thread_id, &update.attention);
             }
         }
-        for entries in timeline.threads.values_mut() {
+        for (thread, entries) in timeline.threads.iter_mut() {
             entries.sort_by_key(|entry| (entry.at, entry.source_message_id));
+            recover_action_ids(entries, committed.get(thread));
         }
         timeline
     }
@@ -150,6 +147,109 @@ impl Timeline {
     /// 0 for a thread that has none: the count of entries.
     pub fn revision_as_of(&self, thread: &str, t: DateTime<Utc>, target: i64) -> i64 {
         self.before(thread, t, target).len() as i64
+    }
+}
+
+/// Give each new action (stored with a null id) the id production assigned
+/// it at commit, which the next run was shown. Stored decisions keep null,
+/// but the ids are recoverable:
+/// - the thread's LATEST entry: the committed attention holds its actions in
+///   order with their ids (commit assigns them positionally), when it is the
+///   same list of actions;
+/// - an EARLIER entry: ids the next entry references that no entry up to
+///   this one already carried were assigned to this entry's new actions;
+///   matched by (kind, description), then by order within a kind, then by
+///   order. The next entry may be a case's own gold: only id strings are
+///   taken from it, which production showed the model anyway.
+///
+/// Whatever stays unknown gets a stand-in, `act-<message>-<index>`.
+fn recover_action_ids(entries: &mut [TimelineEntry], committed: Option<&ThreadAttentionDecision>) {
+    use squelch_core::triage::decision::AttentionAction;
+    let mut known: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let last = entries.len().saturating_sub(1);
+    for k in 0..entries.len() {
+        known.extend(
+            entries[k]
+                .attention
+                .actions
+                .iter()
+                .filter_map(|a| a.id.clone()),
+        );
+        let slots: Vec<usize> = entries[k]
+            .attention
+            .actions
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.id.is_none())
+            .map(|(index, _)| index)
+            .collect();
+        if slots.is_empty() {
+            continue;
+        }
+        let same_list = |committed: &ThreadAttentionDecision| {
+            committed.actions.len() == entries[k].attention.actions.len()
+                && committed
+                    .actions
+                    .iter()
+                    .zip(&entries[k].attention.actions)
+                    .all(|(c, e)| {
+                        c.kind == e.kind
+                            && c.description == e.description
+                            && (e.id.is_none() || e.id == c.id)
+                    })
+        };
+        let mut found: Vec<(usize, String)> = Vec::new();
+        if k == last {
+            if let Some(committed) = committed.filter(|c| same_list(c)) {
+                for &slot in &slots {
+                    if let Some(id) = committed.actions[slot].id.clone() {
+                        found.push((slot, id));
+                    }
+                }
+            }
+        } else {
+            let candidates: Vec<&AttentionAction> = entries[k + 1]
+                .attention
+                .actions
+                .iter()
+                .filter(|a| a.id.as_ref().is_some_and(|id| !known.contains(id)))
+                .collect();
+            let mut used = vec![false; candidates.len()];
+            let mut open: Vec<usize> = slots.clone();
+            let actions = entries[k].attention.actions.clone();
+            type Match = fn(&AttentionAction, &AttentionAction) -> bool;
+            let passes: [Match; 3] = [
+                |a, c| a.kind == c.kind && a.description == c.description,
+                |a, c| a.kind == c.kind,
+                |_, _| true,
+            ];
+            for pass in passes {
+                open.retain(|&slot| {
+                    let position = candidates
+                        .iter()
+                        .enumerate()
+                        .position(|(i, c)| !used[i] && pass(&actions[slot], c));
+                    match position {
+                        Some(i) => {
+                            used[i] = true;
+                            found.push((slot, candidates[i].id.clone().expect("candidate id")));
+                            false
+                        }
+                        None => true,
+                    }
+                });
+            }
+        }
+        let message = entries[k].source_message_id;
+        for (slot, id) in found {
+            known.insert(id.clone());
+            entries[k].attention.actions[slot].id = Some(id);
+        }
+        for (index, action) in entries[k].attention.actions.iter_mut().enumerate() {
+            if action.id.is_none() {
+                action.id = Some(format!("act-{message}-{index}"));
+            }
+        }
     }
 }
 
@@ -234,7 +334,19 @@ impl AsOfData {
             );
         }
         data.undecodable_decisions.sort_unstable();
-        data.timeline = Timeline::from_decisions(data.decisions.values());
+        let mut committed = HashMap::new();
+        let mut stmt =
+            conn.prepare("SELECT thread_id,attention_json FROM agent_thread_attention")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (thread, json) = row?;
+            if let Ok(attention) = serde_json::from_str::<ThreadAttentionDecision>(&json) {
+                committed.insert(thread, attention);
+            }
+        }
+        data.timeline = Timeline::from_decisions(data.decisions.values(), &committed);
         let mut stmt = conn.prepare("SELECT id,received_at FROM messages")?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
@@ -800,7 +912,7 @@ mod tests {
             related,
             spam,
         ];
-        let timeline = Timeline::from_decisions(&rows);
+        let timeline = Timeline::from_decisions(&rows, &HashMap::new());
         let summary = |at, target| {
             timeline
                 .attention_as_of("x", t(at), target)
@@ -816,6 +928,76 @@ mod tests {
         assert_eq!(summary(6, 2).as_deref(), Some("from 9 via related update"));
         assert_eq!(timeline.revision_as_of("x", t(6), 2), 2);
         assert_eq!(timeline.revision_as_of("other", t(6), 0), 1);
+    }
+
+    /// Ids come from the next entry (by kind and description, then kind,
+    /// then order) and, for the thread's last entry, from the committed
+    /// attention; only what nothing reveals gets a stand-in.
+    #[test]
+    fn action_ids_are_recovered_not_invented() {
+        use squelch_core::triage::decision::{ActionKind, AttentionAction};
+        let action = |id: Option<&str>, kind, description: &str| AttentionAction {
+            id: id.map(str::to_owned),
+            kind,
+            description: description.into(),
+            ..Default::default()
+        };
+        let mut first = row(1, "x", 1, "first");
+        first.decision.attention.actions = vec![
+            action(None, ActionKind::Pay, "pay rent"),
+            action(None, ActionKind::Pay, "pay water"),
+            action(None, ActionKind::Other, "unreferenced"),
+            action(None, ActionKind::Reply, "reply to Ann"),
+        ];
+        // Description decides between the two Pay actions; kind alone
+        // decides the reworded Reply, even past an earlier unmatched slot.
+        let mut second = row(2, "x", 2, "second");
+        second.decision.attention.actions = vec![
+            action(Some("real-reply"), ActionKind::Reply, "answer Ann"),
+            action(Some("real-water"), ActionKind::Pay, "pay water"),
+            action(Some("real-rent"), ActionKind::Pay, "pay rent"),
+            action(None, ActionKind::Decide, "sign the lease"),
+        ];
+        // An id already known (real-rent) is never handed out again; the
+        // re-kinded new id goes by order.
+        let mut third = row(3, "x", 3, "third");
+        third.decision.attention.actions = vec![
+            action(Some("real-rent"), ActionKind::Pay, "pay rent"),
+            action(Some("real-sign"), ActionKind::Other, "lease signature"),
+            action(None, ActionKind::Attend, "viewing"),
+        ];
+        let mut committed_attention = third.decision.attention.clone();
+        committed_attention.actions[2].id = Some("real-attend".into());
+        let committed = HashMap::from([("x".to_owned(), committed_attention)]);
+        let timeline = Timeline::from_decisions(&[first, second, third], &committed);
+        let ids = |at| {
+            timeline
+                .attention_as_of("x", t(at), 0)
+                .unwrap()
+                .actions
+                .into_iter()
+                .map(|a| a.id.unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(2),
+            vec!["real-rent", "real-water", "act-1-2", "real-reply"]
+        );
+        assert_eq!(
+            ids(3),
+            vec!["real-reply", "real-water", "real-rent", "real-sign"]
+        );
+        assert_eq!(ids(4), vec!["real-rent", "real-sign", "real-attend"]);
+        // A committed row that is not this entry's action list is not used.
+        let mut stale = committed["x"].clone();
+        stale.actions[2].description = "something else".into();
+        let rows = [row(9, "y", 1, "only")];
+        let mut only = rows[0].clone();
+        only.decision.attention = committed["x"].clone();
+        only.decision.attention.actions[2].id = None;
+        let other = Timeline::from_decisions(&[only], &HashMap::from([("y".to_owned(), stale)]));
+        let attention = other.attention_as_of("y", t(2), 0).unwrap();
+        assert_eq!(attention.actions[2].id.as_deref(), Some("act-9-2"));
     }
 
     #[test]

@@ -1318,7 +1318,9 @@ impl SqliteStore {
         // MINs it to 0, and the mail vanished from this page for good. Every
         // message one tenant ever sent from the composer was missing here
         // while the mail it sent from Gmail listed. `OWN_MAIL` is the same
-        // answer the attention surfaces use for "the user wrote this".
+        // answer the attention surfaces use for "the user wrote this", and
+        // like every other use of it, it keeps the spam folder out: a From-me
+        // spam row with no auth verdict is not something the user sent.
         let mut stmt = conn.prepare(concat!(
             "SELECT m.id, m.thread_id, COALESCE(m.to_addrs, ''), m.subject, m.snippet,
                     m.received_at,
@@ -1328,6 +1330,7 @@ impl SqliteStore {
                     COALESCE(m.cc_addrs, ''), COALESCE(m.bcc_addrs, '')
              FROM messages m
              WHERE m.account_id = ?1
+               AND m.is_spam = 0
                AND ",
             own_mail_sql!(),
             "
@@ -1411,7 +1414,6 @@ impl SqliteStore {
                AND m.id < ?2
                AND m.body_html IS NOT NULL
                AND m.is_sent = 0
-               AND m.is_spam = 0
                AND t.sensitivity = 'normal'
              ORDER BY m.id DESC
              LIMIT ?3",

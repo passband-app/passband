@@ -1126,7 +1126,8 @@ fn sent_listing_is_account_scoped_and_reads_missing_recipients_as_empty() {
 /// send echo writes the row as sent, then Gmail's label-filtered INBOX history
 /// serves the same message and the sticky `MIN` pins `is_sent` to 0. The row is
 /// still the user's own mail and still belongs here. A forged From-the-user
-/// that crossed Gmail's inbound edge (`auth_pass` set) does not.
+/// that crossed Gmail's inbound edge (`auth_pass` set) does not, and neither
+/// does a From-the-user row in the spam folder.
 #[test]
 fn sent_listing_keeps_a_send_an_inbox_sighting_demoted() {
     let (store, acct) = store();
@@ -1151,12 +1152,18 @@ fn sent_listing_keeps_a_send_an_inbox_sighting_demoted() {
         .received_at(now + chrono::Duration::seconds(1))
         .seed(&store);
 
+    triaged(acct, "g-spam-me", "t-spam-me")
+        .from("me@example.com")
+        .is_spam(true)
+        .received_at(now + chrono::Duration::seconds(2))
+        .seed(&store);
+
     let rows = store.sent_listing(acct, 50, 0).unwrap();
     let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
     assert_eq!(
         ids,
         vec![echoed],
-        "the demoted send lists; the forgery does not"
+        "the demoted send lists; the forgery and the spam row do not"
     );
     assert_eq!(rows[0].to, "alice@friends.com");
 }

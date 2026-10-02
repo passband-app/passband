@@ -173,7 +173,7 @@ enum Analytics {
             // Listed by hand, so a new case must land here too or its undo
             // trips the debug assert.
             "archive", "done", "label", "ruleDelete", "groupDelete", "remind", "send",
-            "draftDelete", "schedule", "scheduledCancel",
+            "draftDelete", "schedule", "scheduledCancel", "skip",
             // group_* modes — how an audience is addressed. "individual" is the
             // only one that is not also a header name.
             "to", "bcc", "individual",

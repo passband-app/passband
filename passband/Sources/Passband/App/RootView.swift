@@ -280,9 +280,10 @@ private struct ShellWatchers: View {
 struct MainShell: View {
     /// The readers on screen: the open thread, plus the one it is turning
     /// away from while an S is in flight (behind it, so it is drawn first).
+    /// An undone S turns the other way, with the outgoing card on top.
     private func readerSlots(_ threadId: String) -> [String] {
-        guard let out = store.skipTurn?.outgoing, out != threadId else { return [threadId] }
-        return [out, threadId]
+        guard let turn = store.skipTurn, turn.outgoing != threadId else { return [threadId] }
+        return turn.reversed ? [threadId, turn.outgoing] : [turn.outgoing, threadId]
     }
 
     @Environment(AppStore.self) private var store
@@ -447,17 +448,27 @@ struct MainShell: View {
                                 ThreadViewer(
                                     threadId: id,
                                     turn: turn.map { t in
-                                        outgoing
+                                        // The card underneath recedes and dims;
+                                        // the one on top slides the full width.
+                                        // Forward, the top card is arriving;
+                                        // reversed, it is the one leaving.
+                                        let under = t.reversed ? 1 - t.progress : t.progress
+                                        let raised = outgoing == t.reversed
+                                        return raised
                                             ? .init(
-                                                cardSlide: -0.3 * t.progress,
-                                                cardOpacity: 1 - 0.55 * t.progress,
-                                                headerOpacity: t.outgoingHeader,
-                                                incoming: false)
-                                            : .init(
-                                                cardSlide: 1 - t.progress,
+                                                cardSlide: t.reversed ? t.progress : 1 - t.progress,
                                                 cardOpacity: 1,
-                                                headerOpacity: t.incomingHeader,
-                                                incoming: true)
+                                                headerOpacity: outgoing
+                                                    ? t.outgoingHeader : t.incomingHeader,
+                                                incoming: !outgoing,
+                                                raised: true)
+                                            : .init(
+                                                cardSlide: -0.3 * under,
+                                                cardOpacity: 1 - 0.55 * under,
+                                                headerOpacity: outgoing
+                                                    ? t.outgoingHeader : t.incomingHeader,
+                                                incoming: !outgoing,
+                                                raised: false)
                                     })
                                 .offset(outgoing ? .zero : flight.offset(in: geo.size))
                                 .opacity(outgoing ? 1 : flight.opacity)
@@ -759,8 +770,10 @@ extension AppStore.ThreadFlight {
         case .settled: .zero
         case .departing: CGSize(width: 0, height: -window.height)
         case .departingDown: CGSize(width: 0, height: window.height)
+        case .departingTrailing: CGSize(width: window.width, height: 0)
         case .entering(.bottom): CGSize(width: 0, height: window.height)
         case .entering(.trailing): CGSize(width: window.width, height: 0)
+        case .entering(.top): CGSize(width: 0, height: -window.height)
         }
     }
 
@@ -774,7 +787,7 @@ extension AppStore.ThreadFlight {
     /// departure or an arrival, and it says so here once.
     var isDeparting: Bool {
         switch self {
-        case .departing, .departingDown: true
+        case .departing, .departingDown, .departingTrailing: true
         case .settled, .entering: false
         }
     }

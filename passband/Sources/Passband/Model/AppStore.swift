@@ -305,7 +305,7 @@ struct RefreshError: Equatable, Sendable {
 /// `AppStore.cancelScheduledRow`).
 enum UndoKind: Sendable {
     case archive, done, label, ruleDelete, groupDelete, remind, send, draftDelete, schedule,
-        scheduledCancel
+        scheduledCancel, skip
 
     /// Whether firing this undo changes anything the sitrep shows, and so
     /// whether `fireUndo` un-hides a resolved id and pulls the poller. The two
@@ -315,9 +315,27 @@ enum UndoKind: Sendable {
     var touchesSitrep: Bool {
         switch self {
         case .archive, .done, .label, .ruleDelete, .groupDelete, .remind: true
-        case .send, .draftDelete, .schedule, .scheduledCancel: false
+        case .send, .draftDelete, .schedule, .scheduledCancel, .skip: false
         }
     }
+}
+
+/// One step of a Space walk, kept on its undo so the undo can walk it back:
+/// the email the step left comes back the way it went, and the one it landed
+/// on goes back the way it came.
+struct WalkRewind: Sendable, Equatable {
+    enum Step: Sendable, Equatable {
+        /// E: `back` flew out the top and `from` came in from `arrivedFrom`.
+        case done(arrivedFrom: AppStore.ThreadEdge)
+        /// S: `back` receded left while `from` slid in over it.
+        case skip
+    }
+    /// The email the step left.
+    let back: String
+    /// The email it landed on, which has to still be the one on screen.
+    let from: String
+    let step: Step
+    let id = UUID()
 }
 
 /// A queued undo. `revert` is the exact inverse call to fire on `u`/toast-click;
@@ -333,6 +351,8 @@ struct PendingUndo: Identifiable, Sendable {
     /// When the chip leaves on its own, for its countdown. nil for the one
     /// the tour holds open until the learner presses `u`.
     var expiresAt: Date?
+    /// Set for a Space walk's E and S: what to play backwards on undo.
+    var rewind: WalkRewind?
     var revert: @Sendable () async throws -> Void
 }
 
@@ -644,8 +664,15 @@ final class AppStore {
         var progress: CGFloat = 0
         var outgoingHeader: Double = 1
         var incomingHeader: Double = 0
+        /// An undone S: the outgoing card slides back off to the right, ON TOP,
+        /// and the incoming one comes forward from where it receded.
+        var reversed = false
     }
     var skipTurn: SkipTurn?
+    /// An undo asking the reader on `from` to play a walk step backwards.
+    /// The reader drives the motion (see ThreadViewer.rewind), as it does
+    /// every other one.
+    var walkRewind: WalkRewind?
     /// True while an email is leaving and ANOTHER is about to take its place
     /// (done + next, remind + next). Only then does RootView lay its
     /// reader-coloured floor under the flight; on a departure that closes the
@@ -680,6 +707,27 @@ final class AppStore {
         walkFinished = WalkSummary(
             done: finished.done, skipped: finished.skipped,
             duration: Date().timeIntervalSince(finished.startedAt))
+    }
+
+    /// An undo of a walk's E or S: take the step back off the tally and ask
+    /// the reader to play it backwards. Only while the walk is still on the
+    /// email the step landed on; anywhere else the undo is just an undo.
+    func rewindWalk(_ r: WalkRewind) -> Bool {
+        guard walk != nil, threadId == r.from,
+            threadQueue.contains(where: { $0.thread_id == r.back })
+        else { return false }
+        switch r.step {
+        case .done: walk?.done = max(0, (walk?.done ?? 0) - 1)
+        case .skip: walk?.skipped = max(0, (walk?.skipped ?? 0) - 1)
+        }
+        walkRewind = r
+        return true
+    }
+
+    /// A skip's undo is nothing but the way back, so it goes when the walk
+    /// does rather than sitting on screen as a key that does nothing.
+    private func dropSkipUndos() {
+        undos.removeAll { $0.kind == .skip }
     }
     var readingMail = false
     var readingStack: Bool {
@@ -740,6 +788,8 @@ final class AppStore {
         /// Lifted out through the top: the email you just finished.
         case departing
         case departingDown
+        /// An undone same-sender done: back out the edge it came in from.
+        case departingTrailing
         /// Parked one window outside the frame, waiting to be walked in.
         case entering(ThreadEdge)
     }
@@ -750,6 +800,8 @@ final class AppStore {
     enum ThreadEdge: Sendable, Equatable {
         case bottom
         case trailing
+        /// Only an undone done: the email comes back down the way it left.
+        case top
     }
     /// What that thread IS, once it has landed — written by the viewer. nil
     /// while a thread is loading. READ IT THROUGH `currentThreadSummary`: this
@@ -2146,6 +2198,7 @@ final class AppStore {
         // and a walk carried into it would celebrate mail it never held.
         if walk != nil, queue.map(\.thread_id) != threadQueue.map(\.thread_id) {
             walk = nil
+            dropSkipUndos()
         }
         self.threadQueue = queue
         self.readingMail = readingMail
@@ -2193,6 +2246,8 @@ final class AppStore {
         // Every way out of the reader ends a Space walk; only `finishWalk`
         // turns one into a celebration, and it reads the walk before this.
         walk = nil
+        dropSkipUndos()
+        walkRewind = nil
         skipTurn = nil
         flightContinues = false
         // The preview lives in the reader's slot, so every way out of the
@@ -5571,10 +5626,11 @@ final class AppStore {
 
     @discardableResult
     func pushUndo(
-        kind: UndoKind, messageId: Int, label: String,
+        kind: UndoKind, messageId: Int, label: String, rewind: WalkRewind? = nil,
         revert: @escaping @Sendable () async throws -> Void
     ) -> UUID {
-        var entry = PendingUndo(kind: kind, messageId: messageId, label: label, revert: revert)
+        var entry = PendingUndo(
+            kind: kind, messageId: messageId, label: label, rewind: rewind, revert: revert)
         // Let the guided undo lesson wait for the learner.
         let held =
             RehearsalMode.isEnabled && tour.active && messageId == 1 && tour.practiceStep == .done
@@ -5617,7 +5673,11 @@ final class AppStore {
                 // up to a TTL away; reopen it there too so the undo shows now.
                 reopenInMail(entry.messageId)
             }
-            pushToast("undone: \(entry.label)", .info)
+            // A walk step that walks back says so by moving; a toast on top of
+            // the email returning would be the same news twice. A skip that
+            // cannot walk back (the walk has moved on) changed nothing at all.
+            let rewound = entry.rewind.map(rewindWalk) ?? false
+            if !rewound && entry.kind != .skip { pushToast("undone: \(entry.label)", .info) }
             Analytics.capture("undo_fired", ["kind": String(describing: entry.kind)])
             // The bands dropped the row optimistically and the next poll is up
             // to 10s out — pull now, or the undo reads as broken on the sitrep.

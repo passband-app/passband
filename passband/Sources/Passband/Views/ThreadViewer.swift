@@ -29,9 +29,11 @@ struct ThreadViewer: View {
         var cardOpacity: Double
         /// The subject bar does not slide; it fades out and back in.
         var headerOpacity: Double
-        /// The one arriving: it is the reader keys go to, and it draws its own
-        /// page under the card so it covers the one it slides over.
+        /// The one arriving: it is the reader keys go to.
         var incoming: Bool
+        /// The card on top, which draws its own page under it so it covers
+        /// the one it slides over. The arriving one, except on an undone S.
+        var raised: Bool
     }
 
     @Environment(AppStore.self) private var store
@@ -290,6 +292,13 @@ struct ThreadViewer: View {
         // The outgoing side of a turn is on its way out: it must not answer a
         // key meant for the email arriving over it.
         .keyBindings(.thread, turn?.incoming == false ? [] : bindings)
+        // An undone walk step, addressed to the reader it landed on.
+        .onChange(of: store.walkRewind) { _, r in
+            // Not the card a turn is leaving behind; the one arriving takes
+            // it, and settles the turn first.
+            guard let r, r.from == threadId, turn?.incoming != false else { return }
+            Task { await rewind(r) }
+        }
         // THE PHONE'S `e`. Done is the verb this reader exists to end on, and
         // until now the only way to say it on a phone was to back out and swipe
         // the row you had just been reading — leave the thread, find it again,
@@ -437,7 +446,7 @@ struct ThreadViewer: View {
                     // the arriving card: a scale or a 3D tilt would
                     // re-rasterise every web frame in the column per frame.
                     .background {
-                        if turn?.incoming == true {
+                        if turn?.raised == true {
                             ReaderBackdrop()
                                 .shadow(color: .black.opacity(0.28), radius: 24, x: -8)
                         }
@@ -1974,9 +1983,9 @@ struct ThreadViewer: View {
     /// notification) has no row, so it resolves the newest message directly.
     /// There is no undo chip on that path: undo restores a row to a band, and
     /// this one never came from one.
-    private func resolveOpenThread(via: Actions.Via) async {
+    private func resolveOpenThread(via: Actions.Via, rewind: WalkRewind? = nil) async {
         if let row = store.threadQueue.first(where: { $0.thread_id == threadId }) {
-            await Actions.done(row, via: via, on: .reader)
+            await Actions.done(row, via: via, on: .reader, rewind: rewind)
             return
         }
         guard let newest else { return }
@@ -2064,12 +2073,23 @@ struct ThreadViewer: View {
         // not something to walk a reader onto.
         let next = store.nextQueuedThread
         let onward = acrossSenders && next == nil ? store.nextReadingSender : nil
+        var edge: AppStore.ThreadEdge?
+        if let cur, let next {
+            edge = (store.readingStack || sameSender(next, queue[cur])) ? .trailing : .bottom
+        }
+        // On a walk the undo plays this step backwards. Not on the last email:
+        // that one ends the walk, and there is nothing left to walk back in.
+        var rewind: WalkRewind?
+        if store.walk != nil, let next, let edge {
+            rewind = WalkRewind(
+                back: threadId, from: next.thread_id, step: .done(arrivedFrom: edge))
+        }
 
         // Another email takes this one's place: the floor goes down under the
         // flight so nothing behind the reader flashes through the gap.
         store.flightContinues = next != nil || onward != nil
         let liftedAt = liftOff(leavingSender: onward != nil)
-        await resolveOpenThread(via: .key)
+        await resolveOpenThread(via: .key, rewind: rewind)
         await flightOut(since: liftedAt)
         // Counted once the email is truly gone from this reader, not for a
         // done that was overtaken (Esc mid-flight).
@@ -2080,7 +2100,7 @@ struct ThreadViewer: View {
         // reader must not haul the next thread back onto a page nobody is on.
         guard store.threadId == threadId else { return }
 
-        guard let cur, let next else {
+        guard let next, let edge else {
             // Nothing behind it — an empty queue, or the end of one: the reader
             // leaves with the email rather than snapping back to show an empty
             // one. The end of a Space walk is the bottom of the list, which
@@ -2088,8 +2108,6 @@ struct ThreadViewer: View {
             if let onward { await walkIn(onward) } else { leaveAtEnd() }
             return
         }
-        let edge: AppStore.ThreadEdge =
-            (store.readingStack || sameSender(next, queue[cur])) ? .trailing : .bottom
         // Mounted OFF SCREEN, unanimated, and walked in on the next frame. The
         // sleep is the whole reason this works: an offset that is set and
         // cleared inside one update has never been drawn, so there is nothing
@@ -2133,6 +2151,16 @@ struct ThreadViewer: View {
         // The open FIRST (it settles any turn), then this turn: both land in
         // the same render, so the new reader's first frame is at the edge.
         if inQueue, let next = store.nextQueuedThread {
+            // On a walk a skip gets an undo like a done does, and all it
+            // undoes is the step: the email never left the board, so the way
+            // back is the whole of it. Pushed BEFORE the open, which would
+            // otherwise be the reader on `next` asking for it.
+            if store.walk != nil, let row = queue.first(where: { $0.thread_id == outgoing }) {
+                store.pushUndo(
+                    kind: .skip, messageId: row.id, label: "skipped \(row.sender)",
+                    rewind: WalkRewind(back: outgoing, from: next.thread_id, step: .skip)
+                ) {}
+            }
             store.openThread(
                 next.thread_id, queue: queue, readingMail: store.readingMail, from: .reader)
             store.skipTurn = AppStore.SkipTurn(outgoing: outgoing)
@@ -2150,8 +2178,14 @@ struct ThreadViewer: View {
             leaveAtEnd()
             return
         }
-        // One frame with the new reader mounted at the right edge, so the
-        // animation has somewhere to move it FROM (see `doneAndNext`).
+        await playTurn(outgoing: outgoing)
+    }
+
+    /// The page turn itself, either way: `skipTurn` is already set with its
+    /// new reader mounted, and this moves both cards and clears it.
+    private func playTurn(outgoing: String) async {
+        // One frame with the new reader mounted at its edge, so the animation
+        // has somewhere to move it FROM (see `doneAndNext`).
         try? await Task.sleep(for: .milliseconds(30))
         guard store.skipTurn?.outgoing == outgoing else { return }
         // A little spring on the arrival: it lands, not just stops. With
@@ -2167,6 +2201,38 @@ struct ThreadViewer: View {
         withAnimation(.easeIn(duration: 0.18).delay(0.14)) { store.skipTurn?.incomingHeader = 1 }
         try? await Task.sleep(for: .milliseconds(460))
         if store.skipTurn?.outgoing == outgoing { store.skipTurn = nil }
+    }
+
+    /// `u` on a walk step: the step, backwards. A done's email comes back
+    /// down through the top it left by while this one goes back out the edge
+    /// it came in from; a skip's page turn runs in reverse. The undo itself
+    /// (the email reopened on the server) has already landed.
+    private func rewind(_ r: WalkRewind) async {
+        store.walkRewind = nil
+        store.settleSkipTurn()
+        guard store.threadId == threadId, store.threadFlight == .settled else { return }
+        let queue = store.threadQueue
+        switch r.step {
+        case .skip:
+            store.openThread(
+                r.back, queue: queue, readingMail: store.readingMail, from: .reader)
+            store.skipTurn = AppStore.SkipTurn(outgoing: threadId, reversed: true)
+            await playTurn(outgoing: threadId)
+        case .done(let arrivedFrom):
+            store.flightContinues = true
+            withAnimation(Motion.depart) {
+                store.threadFlight =
+                    arrivedFrom == .trailing ? .departingTrailing : .departingDown
+            }
+            try? await Task.sleep(for: Motion.departTime)
+            guard store.threadId == threadId else { return }
+            store.openThread(
+                r.back, queue: queue, entering: .top, readingMail: store.readingMail,
+                from: .reader)
+            try? await Task.sleep(for: .milliseconds(30))
+            guard store.threadId == r.back else { return }
+            withAnimation(Motion.deckCard) { store.threadFlight = .settled }
+        }
     }
 
     /// The tail of `doneAndNext`, for `h`: the reminder is already set (the

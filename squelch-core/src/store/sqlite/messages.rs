@@ -1414,6 +1414,7 @@ impl SqliteStore {
                AND m.id < ?2
                AND m.body_html IS NOT NULL
                AND m.is_sent = 0
+               AND m.is_spam = 0
                AND t.sensitivity = 'normal'
              ORDER BY m.id DESC
              LIMIT ?3",

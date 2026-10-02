@@ -27,7 +27,7 @@ enum ShareOrigin: String, Sendable, Hashable {
 }
 
 enum MainView: String, Sendable, Hashable, CaseIterable {
-    case sitrep, emails, auth, rules, groups, usage, settings, process
+    case sitrep, emails, auth, rules, groups, usage, settings, process, discovery
 
     /// The TOP rail group — also the 1..N number-key mapping, taken from
     /// POSITION in this array. Usage/Settings are excluded so that adding one
@@ -42,6 +42,10 @@ enum MainView: String, Sendable, Hashable, CaseIterable {
     /// back the window it was spending (see Views/AuditView.swift).
     static let mainViews: [MainView] = [.sitrep, .emails, .auth, .rules, .groups]
     /// The BOTTOM rail group, pinned below a divider.
+    ///
+    /// `discovery` is in neither group: its one door is the ring, alone above
+    /// the divider, and it takes no number key because nobody should need to
+    /// reach a field guide faster than by looking at it.
     static let bottomViews: [MainView] = [.usage, .settings]
 
     var label: String {
@@ -54,6 +58,7 @@ enum MainView: String, Sendable, Hashable, CaseIterable {
         case .usage: "Usage"
         case .settings: "Settings"
         case .process: "Process"
+        case .discovery: "Ways through your mail"
         }
     }
 
@@ -67,6 +72,8 @@ enum MainView: String, Sendable, Hashable, CaseIterable {
         case .usage: "waveform.path.ecg"
         case .settings: "gearshape"
         case .process: "checkmark.seal"
+        // Never drawn: the rail draws the discovery ring in its place.
+        case .discovery: "circle.dashed"
         }
     }
 }

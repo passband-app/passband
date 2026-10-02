@@ -1,7 +1,7 @@
-// EVERY WORD THE DISCOVERY RING SAYS, in one place: the eight sets' names and
-// lines, their keys, and the found moment. The raw values on `FeatureSet` are
-// persisted and leave the machine, so the names a person reads live here and
-// are free to change.
+// EVERY WORD THE DISCOVERY PAGE AND RING SAY, in one place: the eight sets'
+// names and lines, their keys, the page's headings and the found moment. The
+// raw values on `FeatureSet` are persisted and leave the machine, so the names
+// a person reads live here and are free to change.
 //
 // THE TOUR'S VOICE. Calm, plain, warm, second person, short. GOOD NEWS ONLY:
 // a line says what a set gives you, never how many are left or what you have
@@ -10,7 +10,7 @@
 import SwiftUI
 
 extension FeatureSet {
-    /// What the menu and the moment call the set.
+    /// What the page and the moment call the set.
     var title: String {
         switch self {
         case .clear: "The basics"
@@ -24,7 +24,7 @@ extension FeatureSet {
         }
     }
 
-    /// The menu's one line. An invitation for somebody who has not tried it,
+    /// The row's one line. An invitation for somebody who has not tried it,
     /// and still true for somebody who has.
     var line: String {
         switch self {
@@ -39,7 +39,7 @@ extension FeatureSet {
         }
     }
 
-    /// The keys that reach the set, as the keycaps show them. A HOLD is its
+    /// The keys that reach the set, as the row's keycaps show them. A HOLD is its
     /// own cap label rather than a second cap, so "hold e" reads as one key.
     var keys: [String] {
         switch self {
@@ -100,22 +100,39 @@ extension FeatureSet {
         }
     }
 
-    /// The state in words, for VoiceOver and the tile's tag. Unseen is not
-    /// "locked" or "not found": it is something new to try.
+    /// The state in words, for VoiceOver. Unseen is not "locked" or "not
+    /// found": it is something new to try.
     func stateWords(_ state: SetState) -> String {
         switch state {
         case .unseen: "new to try"
-        case .found: "found"
-        case .kept: "a habit"
+        case .found: "unlocked"
+        case .kept: "unlocked, and a habit"
         }
     }
 }
 
-/// The menu's own words.
+/// The page's own words.
 enum DiscoveryCopy {
+    /// The header bar, in the routed pages' title + small caps pairing.
+    static let pageTitle = "Discover"
+    static let pageSubtitle = "ways through your mail"
+
     static let eyebrow = "WAYS THROUGH YOUR MAIL"
     static let headline = "More than one way through."
-    static let subline = "Each of these is ready whenever you are. Try whichever looks good."
+    /// Says the order out loud, so the column reads as everyday first rather
+    /// than as a queue: nothing here is owed.
+    static let subline = "The everyday ones come first. Try whichever looks good, whenever you like."
+
+    /// Everything unlocked: the top section has gone, and the page says so
+    /// calmly rather than throwing a party.
+    static let completeHeadline = "You know every way through."
+    static let completeSubline = "All of it is yours now, and it stays here for whenever you want a reminder."
+
+    /// The owner's word, verbatim. Do not restyle it into "Found".
+    static let unlockedHeading = "Unlocked"
+    static let keptTag = "A HABIT"
+    static let freshTag = "JUST UNLOCKED"
+
     static let momentEyebrow = "SOMETHING NEW"
     static let ringLabel = "Ways through your mail"
 }

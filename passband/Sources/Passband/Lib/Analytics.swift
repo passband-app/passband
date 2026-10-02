@@ -111,10 +111,11 @@ enum Analytics {
         "invite_sent", "invite_nudge_accepted", "invite_nudge_dismissed",
         "ios_nudge_closed",
         "group_created", "group_updated", "group_deleted",
-        // Discovery: which feature sets get found, which get kept, and whether
-        // anybody opens the menu that shows them. `full` only: this is the
-        // "which actions are used" layer, not whether the product works.
-        "feature_found", "feature_kept", "discovery_opened",
+        // Discovery: which feature sets get found and which get kept. `full`
+        // only: this is the "which actions are used" layer, not whether the
+        // product works. Whether anybody visits the page is its `$screen`
+        // (`discovery`, a MainView), so it has no event of its own.
+        "feature_found", "feature_kept",
     ]
 
     /// The counter events that ride at `minimal`: anonymous counts and
@@ -207,8 +208,8 @@ enum Analytics {
             // list readable as the vocabulary of THIS event.
             "rail", "settings", "nudge",
             // feature_found / feature_kept sets: `FeatureSet`'s raw values, the
-            // ring's eight slices. Listed by hand like the undo kinds, so a new
-            // set must land here too or its find trips the debug assert.
+            // discovery page's eight rows. Listed by hand like the undo kinds,
+            // so a new set must land here too or its find trips the debug assert.
             "clear", "flow", "later", "teach", "find", "read", "glance", "write",
         ])
 

@@ -153,6 +153,7 @@
 		5A8A0E6E45A1AF07A426F4A1 /* AttachmentPreviewiOS.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1CE9442DCA54FF7863D7C5 /* AttachmentPreviewiOS.swift */; };
 		5AB209F662F02A1426CD72C0 /* ProcessMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3484EC544E0909F3D7A88E26 /* ProcessMode.swift */; };
 		5B202D84CFC2EA02FC66A6F4 /* ClearBand.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E1FEEC087CEB684B1D4F861 /* ClearBand.swift */; };
+		5CC8021A039E6E6FECDBA9C7 /* DiscoveryPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45C0FCA7E149F837CF8E31E7 /* DiscoveryPage.swift */; };
 		5CE1E70309CEFF44F81AD969 /* Notifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = B13A2C48EBA35F12689998E3 /* Notifier.swift */; };
 		5E97CFE91AD528DBE39CB91A /* QuickLookUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 48410833F8D7B524FBDD2FB2 /* QuickLookUI.framework */; };
 		5F421A4FF82900BB9033520E /* Sparkle.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 82CD5D3AEF359995F968DB53 /* Sparkle.framework */; };
@@ -243,7 +244,6 @@
 		8DD946F7BC6990641C19ACC1 /* ProcessView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 639F5C0DB9AE5A1AE8DF69A1 /* ProcessView.swift */; };
 		8E1F8DB308ED83F7376BE9B5 /* GroupsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CC257E1C6D252919F11B337 /* GroupsView.swift */; };
 		8E4141BFBB745019FB5C7D4D /* GmailDisconnectedBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = C756C9A9A4570C1AFFE7003E /* GmailDisconnectedBanner.swift */; };
-		8EE320DEC3DA40029C5A9AF3 /* DiscoveryMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = 183805B9644E6651F2AC861E /* DiscoveryMenu.swift */; };
 		8F44A5CA660648245344105C /* ScheduledRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2BB67D1D24C9D40DD0649549 /* ScheduledRow.swift */; };
 		903D181BC549637A0AEEB564 /* EmailWebCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3BFBFFBE499370A5F88E2540 /* EmailWebCore.swift */; };
 		91072B199B1161CD7D310819 /* PhosphorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C6A02D8A42FF0B05E18ED65 /* PhosphorView.swift */; };
@@ -487,7 +487,6 @@
 		163BEF63DE1359294AD2ADD8 /* Prefs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Prefs.swift; sourceTree = "<group>"; };
 		168312D5219614E1F658480C /* Resources */ = {isa = PBXFileReference; lastKnownFileType = folder; name = Resources; path = Sources/Passband/Resources; sourceTree = SOURCE_ROOT; };
 		17A72FA204008ACE31765EA1 /* ImageTrim.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageTrim.swift; sourceTree = "<group>"; };
-		183805B9644E6651F2AC861E /* DiscoveryMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiscoveryMenu.swift; sourceTree = "<group>"; };
 		1964D381D25BBC803E490328 /* ReleaseNotes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReleaseNotes.swift; sourceTree = "<group>"; };
 		1A47FA6986F50A4E81628452 /* AuthCodeModal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthCodeModal.swift; sourceTree = "<group>"; };
 		1A74374DEAEE21CDF9A5067D /* Loadable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Loadable.swift; sourceTree = "<group>"; };
@@ -535,6 +534,7 @@
 		40EDDA2423A09A989C77CAED /* AuthLabels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthLabels.swift; sourceTree = "<group>"; };
 		41BFA30FC9B1A10CD0FB94E3 /* ComposeAttach.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposeAttach.swift; sourceTree = "<group>"; };
 		449EBE20D26F590B99D2AA0A /* DraftsList.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DraftsList.swift; sourceTree = "<group>"; };
+		45C0FCA7E149F837CF8E31E7 /* DiscoveryPage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiscoveryPage.swift; sourceTree = "<group>"; };
 		47122181AE7D49894917581E /* Passband.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Passband.entitlements; sourceTree = "<group>"; };
 		4790C4215581BF7E3B715753 /* Tombstones.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tombstones.swift; sourceTree = "<group>"; };
 		48410833F8D7B524FBDD2FB2 /* QuickLookUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuickLookUI.framework; path = System/Library/Frameworks/QuickLookUI.framework; sourceTree = SDKROOT; };
@@ -1102,7 +1102,7 @@
 				DDF32512609F483B40A30B49 /* Vignettes */,
 				8A5B932C525F604FE718F360 /* DiscoveryCopy.swift */,
 				9FC443D7A43C9C271CEEBAAE /* DiscoveryLayer.swift */,
-				183805B9644E6651F2AC861E /* DiscoveryMenu.swift */,
+				45C0FCA7E149F837CF8E31E7 /* DiscoveryPage.swift */,
 				1E94694876B177EDC61B17D1 /* DiscoveryRing.swift */,
 				AE6B51048D30C983368C0E4A /* DiscoveryVignette.swift */,
 			);
@@ -1336,7 +1336,7 @@
 				42BE9C43CB9B2603A4557A2C /* DiscoveryCopy.swift in Sources */,
 				CD3533062FC4604164E59532 /* DiscoveryLayer.swift in Sources */,
 				C2D978B3BBEDF55A323C1697 /* DiscoveryLedger.swift in Sources */,
-				8EE320DEC3DA40029C5A9AF3 /* DiscoveryMenu.swift in Sources */,
+				5CC8021A039E6E6FECDBA9C7 /* DiscoveryPage.swift in Sources */,
 				BD78505C627B58CCD7331B34 /* DiscoveryRing.swift in Sources */,
 				368A2EB40D31D3A6433B580C /* DiscoveryVignette.swift in Sources */,
 				2530ADC217749D5FEEFFA4D9 /* DraftSaver.swift in Sources */,

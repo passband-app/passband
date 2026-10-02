@@ -1,5 +1,5 @@
 // WHAT SOMEBODY HAS FOUND IN THE APP, and whether it stuck. The tracking half
-// of discovery; the ring and the menu that read it live elsewhere.
+// of discovery; the ring and the page that read it live elsewhere.
 //
 // Eight feature sets, each a handful of moves. A set is unseen, then FOUND the
 // first time any of its moves happens on real mail, then KEPT once its moves
@@ -16,11 +16,13 @@
 
 import Foundation
 
-/// The ring, in ring order. The raw values are persisted AND leave the machine
-/// as `feature_found`/`feature_kept` properties, so a rename is a migration and
-/// an Analytics vocabulary change, not a refactor.
+/// The eight sets, MOST UNIVERSAL FIRST: case order is the discovery page's
+/// order, each one more niche than the last, and nothing else reads it. The
+/// raw values are persisted AND leave the machine as `feature_found` /
+/// `feature_kept` properties, so a rename is a migration and an Analytics
+/// vocabulary change, not a refactor; a reorder is neither.
 enum FeatureSet: String, CaseIterable, Sendable, Codable {
-    case clear, flow, later, teach, find, read, glance, write
+    case clear, flow, later, find, teach, glance, read, write
 }
 
 /// One thing a person did that counts toward a set. Raw values are persisted
@@ -92,7 +94,7 @@ struct DiscoveryLedger: Equatable, Sendable {
     /// Every time a move happened, kept for contextual hints later ("you have
     /// set 40 reminders"). Nothing reads it yet.
     private(set) var moveCounts: [Move: Int] = [:]
-    /// Found and not yet looked at in the menu. Drives the ring's "new" glow.
+    /// Found and not yet looked at on the page. Drives the ring's "new" glow.
     private(set) var fresh: Set<FeatureSet> = []
     /// The day key of the last celebration, so a busy first day is one
     /// moment, not eight.
@@ -144,7 +146,7 @@ struct DiscoveryLedger: Equatable, Sendable {
         if !wasFresh { fresh.remove(move.set) }
     }
 
-    /// The menu was opened: nothing is fresh any more.
+    /// The page was visited: nothing is fresh any more.
     mutating func acknowledge() { fresh.removeAll() }
 
     /// Practice mail never counts: an `e` on a fixture email teaches the hand,
@@ -210,7 +212,7 @@ struct DiscoveryLedger: Equatable, Sendable {
     }
 
     /// The sets an override spelled `:fresh`: found, and glowing on the ring
-    /// as if the menu had not been opened since.
+    /// as if the page had not been visited since.
     static func parseFreshOverride(_ spec: String) -> Set<FeatureSet> {
         Set(overrideEntries(spec).filter { $0.word == "fresh" }.map(\.set))
     }

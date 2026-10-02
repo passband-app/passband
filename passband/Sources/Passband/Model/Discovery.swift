@@ -79,7 +79,7 @@ final class Discovery {
 
     func state(of set: FeatureSet) -> SetState { ledger.state(of: set) }
 
-    /// The menu was opened: nothing glows any more.
+    /// The page was visited: nothing glows any more.
     func acknowledge() {
         guard !ledger.fresh.isEmpty else { return }
         ledger.acknowledge()

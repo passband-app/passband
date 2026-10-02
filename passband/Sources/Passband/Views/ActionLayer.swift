@@ -54,10 +54,9 @@ struct ActionLayer: View {
                 .transition(.opacity)
             }
 
-            // THE DISCOVERY RING'S MENU AND FOUND MOMENT. Above the toasts and
-            // the tray, under every palette and modal below: a rule editor
-            // raised over an open menu has to cover it, and the moment only
-            // ever arrives when none of them is up.
+            // THE DISCOVERY RING'S FOUND MOMENT. Above the toasts and the
+            // tray, under every palette and modal below: the moment only ever
+            // arrives when none of them is up, and one raised over it covers it.
             DiscoveryLayer()
 
             if let request = store.ruleEditor {

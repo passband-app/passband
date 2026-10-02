@@ -1,9 +1,9 @@
 // SIDEBAR — the slim icon rail: Sitrep / Emails / Auth / Rules / Groups on the
 // 1..5 keys; Usage and Settings sit below a divider, out of that sequence so
 // adding one never renumbers it. The discovery ring sits just ABOVE that
-// divider, alone after the spacer: it opens a menu rather than routing, so it
-// carries no selector (see DiscoveryRailButton). ONE long-lived pane behind the icons is the selector,
-// moved by GEOMETRY not identity: per-icon glass drags the glyph along and
+// divider, alone after the spacer: a real destination with no number key, its
+// RailButton drawing the ring where the others draw a symbol. ONE long-lived
+// pane behind the icons is the selector, moved by GEOMETRY not identity: per-icon glass drags the glyph along and
 // swallows clicks, and a GlassEffectContainer would hoist the pane over it.
 
 import SwiftUI
@@ -109,11 +109,15 @@ struct SidebarRail: View {
                 // WAYS THROUGH YOUR MAIL: the discovery ring, alone between the
                 // spacer and the divider. It is about how you use the five
                 // destinations above, not about your account like the group
-                // below, so it sits on the line between them. Its tile is
-                // RailButton's 44x36 with the same wash (see
-                // DiscoveryRailButton); the divider's own vertical padding is
-                // the gap under it, the same gap the bottom group gets above.
-                DiscoveryRailButton()
+                // below, so it sits on the line between them. A RailButton
+                // like any other, so the selector parks on it when its page
+                // is up; the divider's own vertical padding is the gap under
+                // it, the same gap the bottom group gets above.
+                RailButton(
+                    view: .discovery, keyNumber: nil, active: store.activeView == .discovery,
+                    showRings: false, onSlot: { slots[.discovery] = $0 }
+                ) { _ in DiscoveryRailGlyph() }
+                .accessibilityValue(DiscoveryRailGlyph.spokenValue)
 
                 Rectangle()
                     .fill(Palette.hairline)
@@ -264,7 +268,10 @@ private struct RailEdge: Shape {
     }
 }
 
-private struct RailButton: View {
+/// One rail tile. The glyph is a parameter, an SF Symbol for every
+/// destination but discovery, which draws its ring: everything else about a
+/// tile (the target, the wash, the slot, the refusal) is the same thing.
+private struct RailButton<Icon: View>: View {
     @Environment(AppStore.self) private var store
     let view: MainView
     let keyNumber: Int?
@@ -273,6 +280,8 @@ private struct RailButton: View {
     /// Where this icon landed, in the rail's space, so the rail can park the
     /// selector on it.
     let onSlot: (CGRect) -> Void
+    /// The glyph, given whether the tile is the active one.
+    @ViewBuilder let icon: (Bool) -> Icon
 
     @State private var hovering = false
     @State private var deniedAttempts = 0
@@ -286,9 +295,7 @@ private struct RailButton: View {
             store.setView(view, viaPointer: true)
         } label: {
             ZStack {
-                Image(systemName: view.symbol)
-                    .font(.system(size: 17, weight: active ? .semibold : .regular))
-                    .foregroundStyle(active ? Palette.accent : Palette.inkDim)
+                icon(active)
                     .frame(width: SidebarRail.iconWidth, height: SidebarRail.iconHeight)
                     // The rail's selector is placed from this. Nothing about the
                     // glyph changes with selection except weight and colour, so
@@ -325,9 +332,29 @@ private struct RailButton: View {
     }
 }
 
+extension RailButton where Icon == RailSymbol {
+    init(view: MainView, keyNumber: Int?, active: Bool, showRings: Bool, onSlot: @escaping (CGRect) -> Void) {
+        self.init(
+            view: view, keyNumber: keyNumber, active: active, showRings: showRings, onSlot: onSlot
+        ) { RailSymbol(symbol: view.symbol, active: $0) }
+    }
+}
+
+/// The ordinary tile glyph. Nothing about it changes with selection except
+/// weight and colour.
+private struct RailSymbol: View {
+    let symbol: String
+    let active: Bool
+
+    var body: some View {
+        Image(systemName: symbol)
+            .font(.system(size: 17, weight: active ? .semibold : .regular))
+            .foregroundStyle(active ? Palette.accent : Palette.inkDim)
+    }
+}
+
 /// Keep practice navigation recognizable and responsive without leaving the
 /// lesson. With Reduce Motion the same refusal is a short, stationary outline.
-/// Not private: the discovery ring (DiscoveryRailButton) refuses the same way.
 struct PracticeRailFeedback: ViewModifier {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let attempts: Int

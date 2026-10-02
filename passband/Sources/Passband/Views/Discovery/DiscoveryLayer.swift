@@ -1,97 +1,115 @@
-// THE DISCOVERY RING'S WIRING: the rail button, the menu's mount and keys, and
-// the found moment's timing. The pictures are DiscoveryRing / DiscoveryMenu /
-// DiscoveryVignette, which take every input as a parameter; this file is the
-// only one that reads the store, the ledger and the window.
+// THE DISCOVERY RING'S WIRING: the ring's glyph on the rail, the routed page
+// that reads the store, and the found moment's timing. The pictures are
+// DiscoveryRing / DiscoveryPage / DiscoveryVignette, which take every input as
+// a parameter; this file is the only one that reads the store, the ledger and
+// the window.
 //
 // MAC ONLY in v1, like the rest of the folder (see project.yml's iOS excludes).
 
+import AppKit
 import SwiftUI
 
 /// What is on screen. Separate from `Discovery` on purpose: the ledger is the
-/// model and crosses to iOS; whether a menu is open is this shell's business.
+/// model and crosses to iOS; where the moment sits is this shell's business.
 @MainActor
 @Observable
 final class DiscoveryPresenter {
     static let shared = DiscoveryPresenter()
 
-    /// `PASSBAND_DISCOVERY_OPEN=1` opens the menu at launch, the same posture
+    /// `PASSBAND_DISCOVERY_OPEN=1` opens the page at launch, the same posture
     /// as `PASSBAND_FORCE_TOUR`: a launch environment nobody sets by accident.
-    /// The menu still waits for the shell (no practice inbox, no tour).
-    var menuOpen = ProcessInfo.processInfo.environment["PASSBAND_DISCOVERY_OPEN"] == "1"
+    /// It still waits for the shell (no practice inbox, no tour).
+    var openAtLaunch = ProcessInfo.processInfo.environment["PASSBAND_DISCOVERY_OPEN"] == "1"
     /// The found moment on screen, if any.
     var moment: FeatureSet?
-    /// Where the ring sits in `tourSpace`, so the menu and the moment can grow
-    /// out of it.
+    /// Where the ring sits in `tourSpace`, so the moment can speak from it.
     var ringFrame: CGRect = .zero
-
-    func openMenu() {
-        moment = nil
-        menuOpen = true
-    }
-
-    func closeMenu() { menuOpen = false }
 }
 
-// MARK: - the rail button
+// MARK: - the ring on the rail
 
-/// The ring on the rail, just above the bottom group's divider. Borrows
-/// `RailButton`'s 44x36 tile and hover wash, but takes no selector pane,
-/// reports no slot and routes nowhere: it opens a menu.
+/// The ring as the rail's icon for `.discovery`. The tile, the selector pane,
+/// the hover wash and the practice refusal are all `RailButton`'s; this is
+/// only the glyph, plus the frame the found moment is placed from.
 ///
 /// ALWAYS THERE, practice inbox included, and it never retires: all kept is a
-/// resting state, not a farewell, and the menu still opens from it. During the
-/// tour it refuses like every other rail tile (`PracticeRailFeedback`), so the
-/// rail stays one consistent, inert thing while the lesson runs.
-struct DiscoveryRailButton: View {
+/// resting state, not a farewell.
+struct DiscoveryRailGlyph: View {
     @Environment(\.controlActiveState) private var activeState
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var hovering = false
-    @State private var deniedAttempts = 0
 
     private var discovery: Discovery { Discovery.shared }
-    private var presenter: DiscoveryPresenter { DiscoveryPresenter.shared }
 
     var body: some View {
-        Button {
-            guard !RehearsalMode.isEnabled else {
-                deniedAttempts += 1
-                return
+        DiscoveryRing(
+            progress: DiscoveryProgress(discovery.state(of:), fresh: discovery.ledger.fresh),
+            diameter: 24,
+            breathing: activeState == .key && !reduceMotion)
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(tourSpace)) } action: {
+                DiscoveryPresenter.shared.ringFrame = $0
             }
-            presenter.menuOpen ? presenter.closeMenu() : presenter.openMenu()
-        } label: {
-            DiscoveryRing(
-                states: FeatureSet.ringStates(discovery.state(of:)),
-                fresh: discovery.ledger.fresh,
-                diameter: 24,
-                breathing: activeState == .key && !reduceMotion)
-                .frame(width: SidebarRail.iconWidth, height: SidebarRail.iconHeight)
-                // The whole tile is the target: the ring is mostly hole.
-                .contentShape(Rectangle())
+    }
+
+    /// For VoiceOver on the rail tile: the ring's progress in words.
+    @MainActor static var spokenValue: String {
+        let discovery = Discovery.shared
+        return DiscoveryProgress(discovery.state(of:), fresh: discovery.ledger.fresh).spoken
+    }
+}
+
+// MARK: - the page
+
+/// The routed page: the store-reading shell around `DiscoveryPage`.
+struct DiscoveryView: View {
+    @Environment(AppStore.self) private var store
+    @Environment(\.controlActiveState) private var activeState
+
+    /// What was fresh when the page opened. Taken in `init`, before the first
+    /// frame, because arriving is what clears it in the ledger and the first
+    /// frame has to put fresh rows in their OLD place for the arrival to read.
+    @State private var arrivedFresh: Set<FeatureSet>
+    @State private var settled: Bool
+
+    private var discovery: Discovery { Discovery.shared }
+
+    init() {
+        let fresh = Discovery.shared.ledger.fresh
+        _arrivedFresh = State(initialValue: fresh)
+        // Reduce Motion: already settled, so nothing travels. Read from the
+        // workspace because the environment is not available yet in init.
+        let still = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        _settled = State(initialValue: fresh.isEmpty || still)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            RoutedHeader(title: DiscoveryCopy.pageTitle, subtitle: DiscoveryCopy.pageSubtitle)
+            DiscoveryPage(
+                state: discovery.state(of:), fresh: arrivedFresh,
+                live: activeState == .key, settled: settled)
         }
-        .buttonStyle(.plain)
-        .background {
-            RoundedRectangle(cornerRadius: SidebarRail.selectorRadius, style: .continuous)
-                .fill(Palette.hairline.opacity(hovering || presenter.menuOpen ? 0.7 : 0))
-                .frame(width: SidebarRail.iconWidth, height: SidebarRail.iconHeight)
+        // Esc leaves, as on Usage: a full routed page needs an exit other
+        // than the rail.
+        .keyContext(.modal)
+        .keyBindings(.modal, [
+            KeyBinding("Escape", "back to sitrep") { store.setView(.sitrep) }
+        ])
+        .task {
+            // Visiting is the acknowledgement, whoever routed here (the ring,
+            // the moment, `PASSBAND_DISCOVERY_OPEN`): the glow has done its job.
+            discovery.acknowledge()
+            guard !settled else { return }
+            // THE ARRIVAL. Long enough for the page to be seen with the row
+            // in its old place, then it settles into Unlocked.
+            do { try await Task.sleep(for: .milliseconds(700)) } catch { return }
+            withAnimation(.spring(response: 0.75, dampingFraction: 0.86)) { settled = true }
         }
-        .onHover { hovering = $0 }
-        .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(tourSpace)) } action: {
-            presenter.ringFrame = $0
-        }
-        .help(DiscoveryCopy.ringLabel)
-        .accessibilityLabel(DiscoveryCopy.ringLabel)
-        .accessibilityValue(FeatureSet.ringDescription(discovery.state(of:)))
-        .accessibilityHint(
-            RehearsalMode.isEnabled
-                ? "Available after onboarding."
-                : discovery.ledger.fresh.isEmpty ? "" : "Something new was found.")
-        .modifier(PracticeRailFeedback(attempts: deniedAttempts))
     }
 }
 
 // MARK: - the layer
 
-/// The menu and the moment, mounted in ActionLayer under its modal palettes.
+/// The found moment, mounted in ActionLayer under its modal palettes.
 struct DiscoveryLayer: View {
     @Environment(AppStore.self) private var store
     @Environment(\.controlActiveState) private var activeState
@@ -114,18 +132,16 @@ struct DiscoveryLayer: View {
                 if let set = presenter.moment {
                     momentCard(set, ring: ring, in: geo.size)
                 }
-                if showsMenu {
-                    menu(ring: ring, in: geo.size)
-                }
             }
             .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
         }
-        .animation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.42, dampingFraction: 0.86), value: showsMenu)
         .animation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.5, dampingFraction: 0.84), value: presenter.moment)
-        // LEAVING THE PAGE CLOSES THE MENU. The digits are global and keep
-        // firing from under it, and a menu left floating over a page nobody
-        // opened it from reads as stuck.
-        .onChange(of: store.activeView) { _, _ in presenter.closeMenu() }
+        // THE MOMENT IS THE BOARD'S. It only arrives on the sitrep, and a
+        // route away (the page included) takes it with it rather than leaving
+        // it floating over a page it was not about.
+        .onChange(of: store.activeView) { _, view in
+            if view != .sitrep { presenter.moment = nil }
+        }
         // THE WAIT FOR REST. Re-keyed on everything that can break it, so a
         // reader opening during the settle cancels the sleep and the moment
         // waits for the next quiet stretch.
@@ -135,9 +151,13 @@ struct DiscoveryLayer: View {
             presenter.moment = set
             discovery.celebrationShown()
         }
+        // `PASSBAND_DISCOVERY_OPEN`, once the shell is the real one.
+        .task(id: store.tour.active) {
+            guard presenter.openAtLaunch, !RehearsalMode.isEnabled, !store.tour.active else { return }
+            presenter.openAtLaunch = false
+            store.setView(.discovery)
+        }
     }
-
-    private var showsMenu: Bool { presenter.menuOpen && !RehearsalMode.isEnabled && !store.tour.active }
 
     /// AT REST: the board on screen and nothing in flight over it. Undo chips
     /// count as in flight: the find that earned a moment is very often an `e`,
@@ -146,7 +166,7 @@ struct DiscoveryLayer: View {
         store.activeView == .sitrep && store.threadId == nil && store.scheduledPreviewRow == nil
             && !store.composeOpen && !store.modalOverlayOpen && !store.tour.active
             && !store.sideView.isOpen && !store.shareSheetOpen && !store.addAccountSheetOpen
-            && store.undos.isEmpty && !presenter.menuOpen && presenter.moment == nil
+            && store.undos.isEmpty && presenter.moment == nil
             && !RehearsalMode.isEnabled && activeState == .key
     }
 
@@ -155,89 +175,26 @@ struct DiscoveryLayer: View {
         var atRest: Bool
     }
 
-    // MARK: menu
-
-    private func menu(ring: CGRect, in size: CGSize) -> some View {
-        let leading = SidebarRail.railWidth + 10
-        let columns = size.width - leading - 16 >= DiscoveryMenu.width(columns: 4) ? 4 : 2
-        return ZStack(alignment: .topLeading) {
-            // A light dim, no blur: the board stays legible behind the card.
-            Rectangle()
-                .fill(.black.opacity(0.12))
-                .ignoresSafeArea()
-                .contentShape(Rectangle())
-                .onTapGesture { presenter.closeMenu() }
-                .transition(.opacity)
-
-            DiscoveryMenuAnchor(ring: ring, leading: leading, area: size) {
-                let card = DiscoveryMenu(
-                    state: discovery.state(of:), fresh: discovery.ledger.fresh,
-                    live: activeState == .key, columns: columns,
-                    onClose: { presenter.closeMenu() })
-                // The card at its own height when the window has it; a scroll
-                // only when it does not. A bare ScrollView would always take
-                // the whole cap and pin the card to the top of the window.
-                ViewThatFits(in: .vertical) {
-                    card
-                    ScrollView(.vertical) { card }
-                        .scrollIndicators(.never)
-                }
-            }
-            .transition(
-                .scale(scale: 0.92, anchor: .bottomLeading).combined(with: .opacity))
-        }
-        .keyContext(.modal)
-        .keyBindings(.modal, [
-            KeyBinding("Escape", "close ways through your mail") { presenter.closeMenu() }
-        ])
-        .onAppear {
-            // Opening is the acknowledgement, whoever opened it (the ring, or
-            // `PASSBAND_DISCOVERY_OPEN`): the glow has done its job.
-            discovery.acknowledge()
-            Analytics.capture("discovery_opened")
-        }
-    }
-
     // MARK: moment
 
     private func momentCard(_ set: FeatureSet, ring: CGRect, in size: CGSize) -> some View {
-        DiscoveryMomentHost(set: set, live: activeState == .key, hold: Self.momentHold) {
+        // Read out here, not in the guides: they are Sendable closures, and
+        // the rail's width is main-actor state.
+        let leading = SidebarRail.railWidth + 10
+        return DiscoveryMomentHost(set: set, live: activeState == .key, hold: Self.momentHold) {
             presenter.moment = nil
         } open: {
-            presenter.openMenu()
+            presenter.moment = nil
+            store.setView(.discovery, viaPointer: true)
         }
         // Beside the ring, centred on it, so it reads as the ring speaking.
-        .alignmentGuide(.leading) { _ in -(SidebarRail.railWidth + 10) }
+        .alignmentGuide(.leading) { _ in -leading }
         .alignmentGuide(.top) { d in -(max(16, min(size.height - d.height - 16, ring.midY - d.height / 2))) }
         .transition(
             .asymmetric(
                 insertion: .scale(scale: 0.9, anchor: .leading).combined(with: .opacity)
                     .combined(with: .offset(x: -14)),
                 removal: .opacity))
-    }
-}
-
-/// The menu card placed beside the rail with its bottom at the ring's bottom,
-/// pushed up only as far as it must be to fit, and capped to the window's
-/// height (the ScrollView inside takes over below that).
-private struct DiscoveryMenuAnchor<Content: View>: View {
-    let ring: CGRect
-    let leading: CGFloat
-    let area: CGSize
-    @ViewBuilder var content: Content
-
-    @State private var height: CGFloat = 0
-
-    var body: some View {
-        let margin: CGFloat = 16
-        let cap = max(200, area.height - 2 * margin)
-        let bottom = ring == .zero ? area.height - margin : min(area.height - margin, ring.maxY + 8)
-        let top = max(margin, bottom - min(height, cap))
-        content
-            .frame(maxHeight: cap)
-            .fixedSize(horizontal: true, vertical: false)
-            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
-            .offset(x: leading, y: top)
     }
 }
 

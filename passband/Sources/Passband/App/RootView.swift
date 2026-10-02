@@ -524,6 +524,7 @@ struct MainShell: View {
         case .usage: UsageView()
         case .settings: SettingsView()
         case .process: RoutedHost(view: .process) { ProcessView() }
+        case .discovery: DiscoveryView()
         }
     }
 

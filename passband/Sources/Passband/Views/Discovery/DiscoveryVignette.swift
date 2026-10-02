@@ -1,5 +1,5 @@
 // THE VIGNETTES — one small looping picture per feature set, in the discovery
-// menu's tiles and in the found moment. Each one DEMONSTRATES its gesture: not
+// page's rows and in the found moment. Each one DEMONSTRATES its gesture: not
 // a screenshot, not a video, an abstract little night screen where mail moves
 // the way the keys move it.
 //
@@ -7,9 +7,9 @@
 //
 //   CANVAS. 168 x 96 design units (7:4). Draw in those units only; the stage
 //   scales the context to whatever size it is given, so a vignette is the same
-//   picture in a 178pt tile, a 98pt moment and under window zoom. Keep 8 units
+//   picture in a page row, a 98pt moment and under window zoom. Keep 8 units
 //   clear at every edge, and the bottom-left 72 x 24 clear of anything that
-//   matters: the menu tile's FOUND / A HABIT tag sits there.
+//   matters: it is kept for a state tag over the picture.
 //
 //   GROUND. Always night, in BOTH themes: `VignetteInk.groundTop` to
 //   `groundBottom`, top to bottom, with an even 0.5pt `edge` border. It is a
@@ -412,7 +412,7 @@ enum PlaceholderVignette: VignetteScene {
                 design: depth, opacity: [0.32, 0.2, 0.1][depth], scale: [1, 0.93, 0.86][depth])
         }
         let center = CGPoint(x: 126, y: 48)
-        var halo = ctx
+        let halo = ctx
         halo.fill(
             Path(ellipseIn: CGRect(x: center.x - 22, y: center.y - 22, width: 44, height: 44)),
             with: .radialGradient(

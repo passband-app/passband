@@ -188,6 +188,8 @@ impl App {
 
         let since = Utc::now() - Duration::days(LOOKBACK_DAYS);
         let query = AgentInventoryQuery {
+            before: None,
+            limit: None,
             since,
             min_importance: None,
             status: None,
@@ -213,6 +215,8 @@ impl App {
         let inventory = self.store.human_agent_updates(
             self.account,
             &AgentInventoryQuery {
+                before: None,
+                limit: None,
                 band: None,
                 ..query
             },
@@ -539,6 +543,8 @@ mod tests {
             .human_agent_updates(
                 account,
                 &AgentInventoryQuery {
+                    before: None,
+                    limit: None,
                     since: Utc::now() - Duration::days(LOOKBACK_DAYS),
                     min_importance: None,
                     status: None,

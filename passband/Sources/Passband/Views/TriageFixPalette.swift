@@ -37,7 +37,7 @@ struct TriageFixPalette: View {
             OverlayScrim(alignment: .top, topInset: 110, onDismiss: onClose) {
                 GlassEffectContainer(spacing: 8) {
                     palette
-                        .frame(width: 560)
+                        .frame(width: Typo.measure(560))
                         .passbandGlass(
                             .pane, cornerRadius: 20, tint: Palette.glassTintStrong,
                             id: "palette", in: paletteGlass)
@@ -66,23 +66,23 @@ struct TriageFixPalette: View {
     }
 
     private var header: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: Space.s8) {
             Image(systemName: "wand.and.sparkles")
-                .font(.system(size: 12, weight: .semibold))
+                .font(Typo.ui(12, weight: .semibold))
                 .foregroundStyle(Palette.accent)
             Text("Fix triage")
-                .font(.system(size: 13, weight: .semibold))
+                .font(Typo.ui(13, weight: .semibold))
                 .foregroundStyle(Palette.ink)
             Text(target.subject)
                 .font(Typo.micro)
                 .foregroundStyle(Palette.inkFaintest)
                 .lineLimit(1)
                 .help("\(target.sender) — \(target.subject)")
-            Spacer(minLength: 4)
+            Spacer(minLength: Space.s4)
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 14)
-        .padding(.bottom, 8)
+        .padding(.horizontal, Space.s16)
+        .padding(.top, Space.s14)
+        .padding(.bottom, Space.s8)
     }
 
     /// Display only the current authoritative decision, never legacy tiers.
@@ -93,21 +93,21 @@ struct TriageFixPalette: View {
                 .replacingOccurrences(of: "_", with: " "))
                 .font(Typo.micro)
                 .foregroundStyle(Palette.inkDim)
-                .padding(.horizontal, 16)
-                .padding(.bottom, 8)
+                .padding(.horizontal, Space.s16)
+                .padding(.bottom, Space.s8)
         }
     }
 
     private var input: some View {
         TextField("Change placement, kind, or agent access…", text: $query)
             .textFieldStyle(.plain)
-            .font(.system(size: 15))
+            .font(Typo.ui(15))
             .foregroundStyle(Palette.ink)
             .focused($focused)
             .autocorrectionDisabled()
             .disabled(busy)
-            .padding(.horizontal, 16)
-            .padding(.bottom, 12)
+            .padding(.horizontal, Space.s16)
+            .padding(.bottom, Space.s12)
             .onChange(of: query) { _, _ in selection = 0 }
     }
 
@@ -123,7 +123,7 @@ struct TriageFixPalette: View {
                         .foregroundStyle(Palette.inkFaintest)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(14)
+                        .padding(Space.s14)
                     } else {
                         ForEach(Array(hits.enumerated()), id: \.element.id) { i, hit in
                             TargetRow(
@@ -135,10 +135,10 @@ struct TriageFixPalette: View {
                         }
                     }
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
+                .padding(.horizontal, Space.s8)
+                .padding(.vertical, Space.s6)
             }
-            .frame(maxHeight: 300)
+            .frame(maxHeight: Space.scaled(300))
             .onChange(of: selection) { _, i in
                 guard let hit = hits[safe: i] else { return }
                 withAnimation(.easeOut(duration: 0.1)) { proxy.scrollTo(hit.id, anchor: .center) }
@@ -147,7 +147,7 @@ struct TriageFixPalette: View {
     }
 
     private var footer: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: Space.s4) {
             // Three keycaps for three keys the phone does not have. There, the
             // rows are the pick, the tap is the apply, and pulling the sheet down
             // is the cancel — all of it already visible.
@@ -168,8 +168,8 @@ struct TriageFixPalette: View {
                 .font(Typo.micro)
                 .foregroundStyle(Palette.accent.opacity(0.8))
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.horizontal, Space.s16)
+        .padding(.vertical, Space.s10)
         .overlay(alignment: .top) { Hairline() }
     }
 
@@ -237,16 +237,16 @@ private struct TargetRow: View {
         // hoverFill off: the pointer MOVES the selection here, so the selection
         // fill is already following it — a hover wash under it would double up.
         ListRow(
-            selected: selected, tint: axisTone, hPadding: 10, vPadding: 7,
+            selected: selected, tint: axisTone, hPadding: Space.s10, vPadding: Space.scaled(7),
             hoverFill: false, onHoverChange: { if $0 { onHover() } }, action: onPick
         ) { _, _ in
-            HStack(spacing: 10) {
+            HStack(spacing: Space.s10) {
                 Chip(text: target.axis.chipLabel, tone: axisTone, filled: true)
-                    .frame(width: 68, alignment: .leading)
+                    .frame(width: Typo.measure(68), alignment: .leading)
                 Text(target.label)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(Typo.ui(13, weight: .medium))
                     .foregroundStyle(Palette.ink)
-                    .frame(width: 130, alignment: .leading)
+                    .frame(width: Typo.measure(130), alignment: .leading)
                 Text(target.hint)
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaint)

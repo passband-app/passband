@@ -167,6 +167,9 @@ struct DiscoveryLayer: View {
             && !store.composeOpen && !store.modalOverlayOpen && !store.tour.active
             && !store.sideView.isOpen && !store.shareSheetOpen && !store.addAccountSheetOpen
             && store.undos.isEmpty && presenter.moment == nil
+            // A finished walk has its own moment on the sitrep, and it is very
+            // often the thing that just found flow mode. One at a time.
+            && store.walkFinished == nil
             && !RehearsalMode.isEnabled && activeState == .key
     }
 

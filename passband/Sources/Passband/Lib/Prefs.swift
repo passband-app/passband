@@ -130,6 +130,7 @@ final class Prefs {
         static let lastSeenReleaseNotes = "passband.pref.lastSeenReleaseNotes"
         static let theme = "passband.pref.theme"
         static let zoom = "passband.pref.zoom"
+        static let density = "passband.pref.density"
         static let threadStyle = "passband.pref.threadStyle"
         static let searchIncludeRelated = "passband.pref.searchIncludeRelated"
         static let searchSort = "passband.pref.searchSort"
@@ -141,6 +142,7 @@ final class Prefs {
         static let assistantTransport = "passband.assistant.transport"
         static let searchLaneModel = "passband.search.lane.model"
         static let deeperSearch = "passband.search.deeper"
+        static let mailHiddenZones = "passband.pref.mailHiddenZones"
         static let telemetry = TelemetryLevel.prefKey
     }
 
@@ -154,6 +156,7 @@ final class Prefs {
             // night-first. A stored choice, including an explicit Auto, wins.
             Key.theme: ThemeChoice.dark.rawValue,
             Key.zoom: 1.0,
+            Key.density: Self.defaultDensity.rawValue,
             Key.threadStyle: ThreadStyleDefault.auto.rawValue,
             Key.searchIncludeRelated: false,
             Key.searchSort: SearchSortChoice.recent.rawValue,
@@ -170,6 +173,9 @@ final class Prefs {
         _lastSeenReleaseNotes = defaults.string(forKey: Key.lastSeenReleaseNotes)
         _theme = ThemeChoice(rawValue: defaults.string(forKey: Key.theme) ?? "") ?? .dark
         _zoom = Zoom.clamp(defaults.double(forKey: Key.zoom))
+        _density =
+            DensityChoice(rawValue: defaults.string(forKey: Key.density) ?? "")
+            ?? Self.defaultDensity
         _threadStyle =
             ThreadStyleDefault(rawValue: defaults.string(forKey: Key.threadStyle) ?? "") ?? .auto
         _searchIncludeRelated = defaults.bool(forKey: Key.searchIncludeRelated)
@@ -200,6 +206,7 @@ final class Prefs {
         _deeperSearch =
             DeeperSearchChoice(rawValue: defaults.string(forKey: Key.deeperSearch) ?? "")
             ?? .automatic
+        _mailHiddenZones = Set(defaults.stringArray(forKey: Key.mailHiddenZones) ?? [])
 
         // LAST, because it writes: the verdict above has to be PINNED on the
         // launch that reaches it, not re-derived on the next one. A seed lands
@@ -315,6 +322,32 @@ final class Prefs {
         set {
             _zoom = Zoom.clamp(newValue)
             defaults.set(_zoom, forKey: Key.zoom)
+        }
+    }
+
+    /// Compact is the default: it is the layout the app was drawn in, and
+    /// comfortable is the answer for whoever finds that too dense rather than
+    /// a change made to everybody. The phone offers no switch at all (see
+    /// AppearanceSection) until somebody has looked at the comfortable curve
+    /// on a real one.
+    private static let defaultDensity = DensityChoice.compact
+
+    /// How much room the interface gives each thing (see Lib/Density.swift).
+    /// `Space` and `Typo` read this on every access, so flipping it re-lays
+    /// out every view that takes its metrics from them.
+    private var _density: DensityChoice
+    var density: DensityChoice {
+        get { _density }
+        set {
+            guard newValue != _density else { return }
+            // BEFORE the value moves, so before any body can run against it:
+            // every measured email height on file was taken at the old padding
+            // and type, and a frame's body reads that file directly. Wiped
+            // from a view's `onChange` instead, the first layout after the
+            // flip had already painted at the stale heights.
+            FrameHeights.shared.wipeAll()
+            _density = newValue
+            defaults.set(newValue.rawValue, forKey: Key.density)
         }
     }
 
@@ -468,6 +501,19 @@ final class Prefs {
         set {
             _deeperSearch = newValue
             defaults.set(newValue.rawValue, forKey: Key.deeperSearch)
+        }
+    }
+
+    /// The sitrep zones the all-mail page's category picker has turned off,
+    /// as the wire's `placement` strings ("shipments", "noise", …). Remembered:
+    /// somebody who never wants shipping mail in their list wants that every
+    /// time they open it.
+    private var _mailHiddenZones: Set<String>
+    var mailHiddenZones: Set<String> {
+        get { _mailHiddenZones }
+        set {
+            _mailHiddenZones = newValue
+            defaults.set(newValue.sorted(), forKey: Key.mailHiddenZones)
         }
     }
 

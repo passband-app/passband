@@ -75,7 +75,7 @@ struct RootView: View {
         // the reason it will not pair.
         .overlay(alignment: .bottom) {
             UpdateAlert()
-                .padding(.bottom, 18)
+                .padding(.bottom, Space.scaled(18))
         }
         // ADD ACCOUNT — the same form as the gate, over a working app. Hung on
         // the whole shell rather than on any one surface: it is raised from
@@ -203,7 +203,7 @@ private struct PracticeVeil: ViewModifier {
             .allowsHitTesting(!veiled)
             .background {
                 if let text {
-                    VStack(spacing: 14) {
+                    VStack(spacing: Space.s14) {
                         ProgressView(text)
                             .foregroundStyle(Palette.inkDim)
                     }
@@ -217,7 +217,7 @@ private struct PracticeVeil: ViewModifier {
 
 private struct LoadingGate: View {
     var body: some View {
-        VStack(spacing: 14) {
+        VStack(spacing: Space.s14) {
             Text("passband")
                 .font(Typo.serif(34, weight: .medium))
                 .foregroundStyle(Palette.ink)
@@ -278,6 +278,13 @@ private struct ShellWatchers: View {
 }
 
 struct MainShell: View {
+    /// The readers on screen: the open thread, plus the one it is turning
+    /// away from while an S is in flight (behind it, so it is drawn first).
+    private func readerSlots(_ threadId: String) -> [String] {
+        guard let out = store.skipTurn?.outgoing, out != threadId else { return [threadId] }
+        return [out, threadId]
+    }
+
     @Environment(AppStore.self) private var store
     @Namespace private var shellGlass
 
@@ -418,10 +425,44 @@ struct MainShell: View {
                         // changes; the departure ran on the same main thread
                         // it was starving.
                         if let threadId = store.threadId {
-                            ThreadViewer(threadId: threadId)
-                                .id(threadId)
-                                .offset(flight.offset(in: geo.size))
-                                .opacity(flight.opacity)
+                            // THE GROUND THE EMAILS FLY OVER, and it does not
+                            // fly. Between one email leaving and the next
+                            // walking in there is a frame with no reader in
+                            // the window, and without this the sitrep under
+                            // it flashed through on every E and S. Only while
+                            // the flight CONTINUES: an exit that closes the
+                            // reader should reveal the sitrep as it goes.
+                            if store.skipTurn != nil || store.flightContinues {
+                                ReaderBackdrop()
+                                    .ignoresSafeArea()
+                            }
+                            // ONE READER, OR TWO FOR THE LENGTH OF AN S. A
+                            // ForEach keyed by thread id rather than an `.id`,
+                            // so the outgoing reader keeps its identity (and
+                            // its loaded mail) through the turn instead of
+                            // being rebuilt.
+                            ForEach(readerSlots(threadId), id: \.self) { id in
+                                let turn = store.skipTurn
+                                let outgoing = turn?.outgoing == id
+                                ThreadViewer(
+                                    threadId: id,
+                                    turn: turn.map { t in
+                                        outgoing
+                                            ? .init(
+                                                cardSlide: -0.3 * t.progress,
+                                                cardOpacity: 1 - 0.55 * t.progress,
+                                                headerOpacity: t.outgoingHeader,
+                                                incoming: false)
+                                            : .init(
+                                                cardSlide: 1 - t.progress,
+                                                cardOpacity: 1,
+                                                headerOpacity: t.incomingHeader,
+                                                incoming: true)
+                                    })
+                                .offset(outgoing ? .zero : flight.offset(in: geo.size))
+                                .opacity(outgoing ? 1 : flight.opacity)
+                                .allowsHitTesting(!outgoing)
+                            }
                         } else if let preview {
                             // No flight: a preview is opened and closed, never
                             // walked through.
@@ -431,6 +472,20 @@ struct MainShell: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipped()
+                    // THE SPACE WALK'S HINT, outside the flight: the emails fly
+                    // under it and it holds still, which is what lets it read
+                    // as part of the window rather than part of each email.
+                    .overlay(alignment: .bottomTrailing) {
+                        if store.walk != nil, store.threadId != nil {
+                            // S works on every email of a walk but a walk of
+                            // one, where there is nothing to skip to or past.
+                            WalkHint(canSkip: store.threadQueue.count > 1)
+                                .padding(.bottom, Space.scaled(18))
+                                .padding(.trailing, Space.s24)
+                                .transition(.opacity)
+                        }
+                    }
+                    .animation(.easeInOut(duration: 0.2), value: store.walk != nil)
 
                     if store.sideView.isOpen {
                         // Reserves the strip without taking clicks off the panel
@@ -663,10 +718,10 @@ struct RoutedHeader<Trailing: View>: View {
         // status dots, and baseline-aligning those to a text run drops them off
         // the bar's centre line. Only the title pair is baseline-aligned, which
         // is what sits the small caps on the title's foot.
-        HStack(spacing: 10) {
-            HStack(alignment: .firstTextBaseline, spacing: 7) {
+        HStack(spacing: Space.s10) {
+            HStack(alignment: .firstTextBaseline, spacing: Space.scaled(7)) {
                 Text(title)
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(Typo.ui(15, weight: .semibold))
                     .foregroundStyle(Palette.ink)
                 if let subtitle {
                     Text(subtitle)
@@ -675,10 +730,10 @@ struct RoutedHeader<Trailing: View>: View {
                         .textCase(.uppercase)
                 }
             }
-            Spacer(minLength: 8)
+            Spacer(minLength: Space.s8)
             trailing
         }
-        .padding(.horizontal, 22)
+        .padding(.horizontal, Space.scaled(22))
         // THE BAR'S HEIGHT, not this header's own padding: it sits in the window
         // strip beside the traffic lights, and the rail's top edge is cut to the
         // same line. A header that set its own height would break that join.

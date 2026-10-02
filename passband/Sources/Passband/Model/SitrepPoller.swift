@@ -175,6 +175,7 @@ final class SitrepPoller {
             // rode inside `SitrepData` this compare never once said "same".
             if next != store.sitrep { store.sitrep = next }
             if st != store.stats { store.stats = st }
+            noteCatchUp(st.catch_up)
             // THE BADGE IS REFRESHED EVEN WHEN NOTHING CHANGED, and this is the
             // second write point rather than an accident. `AppStore.sitrep`'s
             // didSet catches every CHANGE; it cannot catch a confirmation, and
@@ -308,5 +309,42 @@ final class SitrepPoller {
         await pull()
         try? await Task.sleep(for: .milliseconds(1600))
         await pull()
+    }
+}
+
+// MARK: - catch-up analytics
+
+extension SitrepPoller {
+    /// THE FIRST BACKFILL, END TO END. `catch_up` is on every stats poll while
+    /// the daemon is walking a known amount of mail; this remembers when it
+    /// first appeared and how big it got, and when it goes away (or reports
+    /// itself finished) sends one `catchup_completed` with the message count
+    /// and the minutes it took. Two ints, nothing about the mail. Persisted in
+    /// UserDefaults so a relaunch mid-backfill keeps the start, since a first
+    /// run is exactly when the app is most likely to be quit and reopened.
+    ///
+    /// Only the active mailbox's poller sees its stats, so a background
+    /// account's backfill is not measured; and a catch-up shorter than one
+    /// poll interval is never observed at all, which is fine: the number that
+    /// matters is how long a NEW install stares at "catching up".
+    func noteCatchUp(_ progress: CatchUpProgress?) {
+        let defaults = UserDefaults.standard
+        let startKey = "app.passband.analytics.catchup.startedAt"
+        let totalKey = "app.passband.analytics.catchup.total"
+        if let progress, progress.total > 0, progress.done < progress.total {
+            if defaults.double(forKey: startKey) == 0 {
+                defaults.set(Date().timeIntervalSince1970, forKey: startKey)
+            }
+            defaults.set(max(progress.total, defaults.integer(forKey: totalKey)), forKey: totalKey)
+            return
+        }
+        let started = defaults.double(forKey: startKey)
+        guard started > 0 else { return }
+        let minutes = Int((Date().timeIntervalSince1970 - started) / 60)
+        Analytics.capture(
+            "catchup_completed",
+            ["messages": defaults.integer(forKey: totalKey), "minutes": max(0, minutes)])
+        defaults.removeObject(forKey: startKey)
+        defaults.removeObject(forKey: totalKey)
     }
 }

@@ -29,6 +29,8 @@ pub struct AgentMessage {
     pub subject: String,
     pub body: String,
     pub received_at: String,
+    /// Authored by the account, which is wider than the stored `is_sent`
+    /// column: it is also true of the user's own mail that landed in the inbox.
     pub is_sent: bool,
     pub is_spam: bool,
     pub status: String,
@@ -329,4 +331,13 @@ pub struct AgentInventoryQuery {
     pub pending_reminders: bool,
     pub spam: crate::store::SpamScope,
     pub ranking: crate::triage::agent_config::RankingConfig,
+    /// KEYSET PAGING for the mail list's infinite scroll: only mail that
+    /// arrived strictly before this (received_at, id), in the listing's own
+    /// newest-first order. Unlike an offset it does not shift when new mail
+    /// lands at the head between two pages.
+    pub before: Option<(DateTime<Utc>, i64)>,
+    /// Stop after this many rows. Honoured only where the listing's order is
+    /// the SQL order (no standing-band or reminder re-sort), so the first N
+    /// produced are the first N served.
+    pub limit: Option<usize>,
 }

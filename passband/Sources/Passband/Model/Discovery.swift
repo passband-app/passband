@@ -16,14 +16,11 @@
 // `passband.discovery.ledger`. Two Macs fill two rings, which is the honest
 // answer to "what has this person found on this machine".
 //
-// FLOW IS NOT WIRED YET. The Space walk is being rebuilt on another branch, and
-// its two hooks land when the branches meet:
+// FLOW'S TWO MOVES live in AppStore, beside the walk they describe:
 //
-//   * `.walkDeep` when a walk's `done + skipped` reaches 3: far enough in that
-//     it was a walk and not a stray Space.
+//   * `.walkDeep` when a walk's `done + skipped` reaches 3 (`walk`'s didSet):
+//     far enough in that it was a walk and not a stray Space.
 //   * `.walkFinished` in `AppStore.finishWalk()`: the walk run to its end.
-//
-// Until then `flow` can only be seen through `PASSBAND_DISCOVERY`.
 
 import Foundation
 import Observation

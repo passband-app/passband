@@ -297,6 +297,8 @@ actor APIClient {
                 "band": params.band?.rawValue,
                 "limit": params.limit.map(String.init),
                 "cursor": params.cursor,
+                "before": params.before,
+                "before_id": params.beforeId.map(String.init),
                 "peek": peek ? "true" : nil,
                 "reminders": params.remindersPending ? "pending" : nil,
                 "spam": params.spamOnly ? "only" : nil,
@@ -609,6 +611,22 @@ actor APIClient {
         let answer: RuleSuggestion = try await get(
             "/client/rules/suggest", query: ["sender": sender])
         return answer.suggestion
+    }
+
+    /// The sitrep's headline: one sentence about what the For-your-eyes band is
+    /// about. `today` is the owner's local date, because "due tomorrow" is a
+    /// question about THEIR calendar and the daemon runs in UTC. A daemon too
+    /// old for the route 404s, which the caller reads as none.
+    /// `fresh` asks for ANOTHER line (the owner clicked the headline), skipping
+    /// the daemon's cache; `previous` is the line on screen, so it is not the
+    /// one that comes back.
+    func fyeHeadline(today: String, fresh: Bool = false, previous: String? = nil) async throws
+        -> FyeHeadline
+    {
+        var query = ["today": today]
+        if fresh { query["fresh"] = "true" }
+        if let previous { query["previous"] = previous }
+        return try await get("/client/v2/fye/headline", query: query)
     }
 
     @discardableResult

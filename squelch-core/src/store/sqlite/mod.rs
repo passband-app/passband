@@ -8,6 +8,50 @@
 //! below, as inherent methods that block delegates to. A trait impl cannot be
 //! split across files, which is why the delegations exist.
 
+/// AUTHORED BY THIS ACCOUNT, as SQL over a `messages m` row: the stored sent
+/// copy, OR a copy in the inbound listing that the account's own mailbox wrote.
+///
+/// Stored `messages.is_sent` alone is not that. It is a VISIBILITY flag, sticky
+/// to 0, and the sync engine lets the INBOX sighting win whenever a message
+/// carries both labels: mail to oneself, a self-Cc, and any sent message a mail
+/// client re-labels INBOX (a "remind me if nobody replies" does exactly that).
+/// Read as inbound, the user's own question becomes an inquiry FROM a known
+/// contact, and the model has filed "reply to <the user>" in FYE on a real
+/// mailbox. So every "is this inbound mail the user might owe something on"
+/// the agent-triage store asks is asked of this, never of the bare column:
+/// the user's own mail is evidence about a thread and is not shown back to
+/// them.
+///
+/// THE FROM ADDRESS IS NOT ENOUGH, because anybody can type it. What this arm
+/// asserts to the model is "the user said this", which resolves obligations
+/// silently, so a forged `From: <the user>` must not earn it. `auth_pass IS
+/// NULL` is the test: a copy the mailbox wrote never crossed the provider's
+/// inbound SMTP edge and carries no delivery verdict, while mail delivered
+/// from outside is stamped with one, pass or fail (see `extract_auth_pass`).
+/// A PASS is excluded with the failures on purpose. Mail that really was sent
+/// on the domain's authority and then DELIVERED is a contact form or a scanner
+/// using the owner's address, and that is inbound mail with someone else's
+/// words in it. The gate inherits that parser's documented residue, in the
+/// OPPOSITE direction: NULL is that parser's cautious answer for its own
+/// consumer and the trusting one here, so every case it declines to judge
+/// (POP-fetched or imported mail, rows older than the column) reads as own.
+/// On a provider it cannot read at all (every verdict NULL) this is the bare
+/// address match the reader's `authored_by_account` (`messages.rs`) has
+/// always been.
+///
+/// The COALESCE matters: a missing account row makes the comparison NULL,
+/// which a `NOT` would read as "exclude" and a `bool` column read would reject.
+///
+/// A macro and not only a `const` so static SQL can `concat!` it, and declared
+/// ahead of the modules so every one of them can.
+macro_rules! own_mail_sql {
+    () => {
+        "(m.is_sent=1 OR COALESCE(m.auth_pass IS NULL AND trim(m.from_addr)!='' AND \
+         lower(trim(m.from_addr))=(SELECT lower(trim(email)) FROM accounts WHERE id=m.account_id),0))"
+    };
+}
+const OWN_MAIL: &str = own_mail_sql!();
+
 pub(crate) mod agent_budget;
 mod agent_deliveries;
 mod agent_triage;

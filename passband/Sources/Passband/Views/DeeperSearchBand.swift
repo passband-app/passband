@@ -47,11 +47,11 @@ struct DeeperSearchBand: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: Space.s8) {
             header
             content
         }
-        .padding(10)
+        .padding(Space.s10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -61,8 +61,8 @@ struct DeeperSearchBand: View {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .strokeBorder(Palette.hairline, lineWidth: 0.75)
         )
-        .padding(.horizontal, expanded ? 0 : 14)
-        .padding(.bottom, expanded ? 0 : 8)
+        .padding(.horizontal, expanded ? 0 : Space.s14)
+        .padding(.bottom, expanded ? 0 : Space.s8)
         // STRUCTURE ONLY, for AskBar's reason: rows arriving is a change worth
         // animating, text growing inside one at token rate is a smear.
         .animation(.smooth(duration: 0.25), value: session.transcript.count)
@@ -71,9 +71,9 @@ struct DeeperSearchBand: View {
     // MARK: - chrome
 
     private var header: some View {
-        HStack(spacing: 7) {
+        HStack(spacing: Space.scaled(7)) {
             Image(systemName: "sparkles")
-                .font(.system(size: 11, weight: .semibold))
+                .font(Typo.ui(11, weight: .semibold))
                 .foregroundStyle(Palette.accent)
             Text("Deeper search")
                 .font(Typo.row)
@@ -85,10 +85,10 @@ struct DeeperSearchBand: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
-            Spacer(minLength: 4)
+            Spacer(minLength: Space.s4)
             if session.isPaused {
                 Image(systemName: "pause.circle")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(Typo.ui(11, weight: .semibold))
                     .foregroundStyle(Palette.inkFaint)
                     .help("Held where it was. It picks up from there, nothing is lost.")
             }
@@ -98,9 +98,9 @@ struct DeeperSearchBand: View {
             if search.laneStarted && !session.transcript.isEmpty {
                 Button { store.openSearchLaneInChat() } label: {
                     Image(systemName: "arrow.up.left.and.arrow.down.right")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(Typo.ui(10, weight: .semibold))
                         .foregroundStyle(Palette.inkFaint)
-                        .frame(width: 18, height: 18)
+                        .frame(width: Space.scaled(18), height: Space.scaled(18))
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -126,7 +126,7 @@ struct DeeperSearchBand: View {
             if session.running, let tool = latestTool {
                 ToolChipRow(tool: tool)
             } else if session.running {
-                HStack(spacing: 8) {
+                HStack(spacing: Space.s8) {
                     ProgressView().controlSize(.mini)
                     Text("reading your mail…")
                         .font(Typo.micro)
@@ -142,12 +142,12 @@ struct DeeperSearchBand: View {
                     // `openThread` collapses it as every path into the reader
                     // must. What survives the click is the search, not the
                     // layout it was being read in.
-                    store.openThread(threadId)
+                    store.openThread(threadId, from: .deeperSearch)
                 }
             }
             if let line = answerLine, !line.isEmpty {
                 Text(line)
-                    .font(.system(size: 13))
+                    .font(Typo.row)
                     .foregroundStyle(Palette.ink)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
@@ -164,11 +164,11 @@ struct DeeperSearchBand: View {
     /// this is pressed.
     @ViewBuilder
     private var offer: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: Space.s8) {
             Text("Read the mail itself and answer this?")
                 .font(Typo.micro)
                 .foregroundStyle(Palette.inkFaint)
-            Spacer(minLength: 4)
+            Spacer(minLength: Space.s4)
             if let trigger = offeredTrigger {
                 Button("ask the agent") { store.startDeeperSearch(trigger: trigger) }
                     .buttonStyle(.glass)

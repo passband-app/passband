@@ -26,10 +26,10 @@ import SwiftUI
 
 struct SpamNotice: View {
     var body: some View {
-        HStack(alignment: .top, spacing: 9) {
+        HStack(alignment: .top, spacing: Space.scaled(9)) {
             Image(systemName: "tray.and.arrow.down")
                 .foregroundStyle(Palette.inkFaint)
-                .font(.system(size: 12, weight: .medium))
+                .font(Typo.ui(12, weight: .medium))
                 .padding(.top, 1)
 
             // TWO SENTENCES, and the second one is the one that matters. The
@@ -47,8 +47,8 @@ struct SpamNotice: View {
 
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 13)
-        .padding(.vertical, 9)
+        .padding(.horizontal, Space.scaled(13))
+        .padding(.vertical, Space.scaled(9))
         // Outline, no fill. Every filled card in this app is filled in a
         // SEMANTIC colour (warnSoft, dangerSoft, lockSoft) and means something
         // is wrong or sealed; a neutral fill would be the only one of its kind,

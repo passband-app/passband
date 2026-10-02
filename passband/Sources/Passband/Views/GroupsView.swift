@@ -74,8 +74,8 @@ struct GroupsView: View {
     }
 
     private var empty: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 4) {
+        VStack(alignment: .leading, spacing: Space.s8) {
+            HStack(spacing: Space.s4) {
                 Text("no groups yet. press").font(Typo.rowSub)
                 Kbd("n")
                 Text("to make one.").font(Typo.rowSub)
@@ -86,11 +86,11 @@ struct GroupsView: View {
             .font(Typo.micro)
             .foregroundStyle(Palette.inkFaintest)
             .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: 420, alignment: .leading)
+            .frame(maxWidth: Typo.measure(420), alignment: .leading)
         }
         .foregroundStyle(Palette.inkFaintest)
-        .padding(.horizontal, 22)
-        .padding(.vertical, 24)
+        .padding(.horizontal, Space.scaled(22))
+        .padding(.vertical, Space.s24)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
@@ -109,22 +109,22 @@ struct GroupsView: View {
                         .id(group.id)
                     }
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 10)
+                .padding(.horizontal, Space.s10)
+                .padding(.vertical, Space.s10)
 
                 // A mailbox with one group leaves this column almost entirely
                 // empty, and an empty column reads as something failing to load
                 // rather than as a list with one thing in it. One quiet line
                 // under the list says which it is.
                 if groups.count < 3 {
-                    HStack(spacing: 4) {
+                    HStack(spacing: Space.s4) {
                         Text("press").font(Typo.micro)
                         Kbd("n")
                         Text("for another").font(Typo.micro)
                     }
                     .foregroundStyle(Palette.inkFaintest)
-                    .padding(.horizontal, 16)
-                    .padding(.top, 2)
+                    .padding(.horizontal, Space.s16)
+                    .padding(.top, Space.s2)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
@@ -133,7 +133,7 @@ struct GroupsView: View {
                 withAnimation(Motion.scrollFollow) { proxy.scrollTo(group.id, anchor: .center) }
             }
         }
-        .frame(width: 250)
+        .frame(width: Typo.measure(250))
     }
 
     // MARK: - right column
@@ -142,13 +142,13 @@ struct GroupsView: View {
     private var detailColumn: some View {
         if let group = selected {
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: Space.scaled(18)) {
                     detailHeader(group)
                     membersSection(group)
                     historySection
                 }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 14)
+                .padding(.horizontal, Space.s20)
+                .padding(.vertical, Space.s14)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -158,8 +158,8 @@ struct GroupsView: View {
     }
 
     private func detailHeader(_ group: SendGroup) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: Space.s6) {
+            HStack(spacing: Space.s8) {
                 Text(group.name)
                     .font(Typo.sectionLabel)
                     .foregroundStyle(Palette.ink)
@@ -187,10 +187,10 @@ struct GroupsView: View {
 
     @ViewBuilder
     private func membersSection(_ group: SendGroup) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: Space.s8) {
             SectionHead("\(group.member_count) \(group.member_count == 1 ? "person" : "people")")
             if let members = detail.value?.members, !members.isEmpty {
-                FlowLine(spacing: 5) {
+                FlowLine(spacing: Space.scaled(5)) {
                     ForEach(members) { member in
                         MemberChip(member: member)
                     }
@@ -205,7 +205,7 @@ struct GroupsView: View {
 
     @ViewBuilder
     private var historySection: some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: Space.s8) {
             SectionHead("sent to this group")
             // TWO SOURCES, ONE QUESTION. The list unions sends made THROUGH the
             // group with mail matched to its membership afterwards, and the
@@ -228,7 +228,7 @@ struct GroupsView: View {
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaintest)
                     .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: 420, alignment: .leading)
+                    .frame(maxWidth: Typo.measure(420), alignment: .leading)
             } else {
                 VStack(spacing: 1) {
                     ForEach(history.value ?? []) { entry in
@@ -320,7 +320,7 @@ struct GroupsView: View {
     /// is inert rather than dead-ending in an empty reader.
     private func open(_ entry: GroupHistoryEntry) {
         guard let threadId = entry.thread_id else { return }
-        store.openThread(threadId)
+        store.openThread(threadId, from: .groups)
     }
 
     private func load() async {
@@ -386,19 +386,19 @@ private struct GroupRow: View {
     let onEdit: () -> Void
 
     var body: some View {
-        ListRow(selected: selected, cornerRadius: 8, hPadding: 10, vPadding: 7, action: onSelect) {
+        ListRow(selected: selected, cornerRadius: 8, hPadding: Space.s10, vPadding: Space.scaled(7), action: onSelect) {
             _, _ in
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
+            VStack(alignment: .leading, spacing: Space.scaled(3)) {
+                HStack(spacing: Space.s6) {
                     Image(systemName: group.mode.symbol)
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(Typo.ui(9, weight: .semibold))
                         .foregroundStyle(group.mode.tone)
-                        .frame(width: 12)
+                        .frame(width: Space.s12)
                     Text(group.name)
                         .font(Typo.row)
                         .foregroundStyle(Palette.ink)
                         .lineLimit(1)
-                    Spacer(minLength: 6)
+                    Spacer(minLength: Space.s6)
                     Text("\(group.member_count)")
                         .font(Typo.num(10))
                         .foregroundStyle(Palette.inkFaintest)
@@ -419,7 +419,7 @@ private struct MemberChip: View {
     let member: GroupMember
 
     var body: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: Space.scaled(5)) {
             Avatar(sender: member.addr, size: 16)
             // Contact strings are email-derived: rendered as Text only, never as
             // markup.
@@ -428,8 +428,8 @@ private struct MemberChip: View {
                 .foregroundStyle(Palette.inkDim)
                 .lineLimit(1)
         }
-        .padding(.horizontal, 7)
-        .padding(.vertical, 3)
+        .padding(.horizontal, Space.scaled(7))
+        .padding(.vertical, Space.scaled(3))
         .background(
             Capsule(style: .continuous).fill(Palette.accentSoft.opacity(0.5))
         )
@@ -459,10 +459,10 @@ private struct GroupHistoryRow: View {
 
 
     var body: some View {
-        ListRow(selected: false, cornerRadius: 8, hPadding: 10, vPadding: 7, action: onOpen) {
+        ListRow(selected: false, cornerRadius: 8, hPadding: Space.s10, vPadding: Space.scaled(7), action: onOpen) {
             _, _ in
-            HStack(spacing: 10) {
-                VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: Space.s10) {
+                VStack(alignment: .leading, spacing: Space.s2) {
                     Text(entry.subject.isEmpty ? "(no subject)" : entry.subject)
                         .font(Typo.row)
                         .foregroundStyle(Palette.ink)
@@ -480,7 +480,7 @@ private struct GroupHistoryRow: View {
                             .lineLimit(1)
                     }
                 }
-                Spacer(minLength: 8)
+                Spacer(minLength: Space.s8)
                 // A PARTLY DELIVERED FAN-OUT gets the loudest thing on the row.
                 // Eleven investors got the update and one did not, and the only
                 // outcome worse than that is not being told.
@@ -498,8 +498,8 @@ private struct GroupHistoryRow: View {
                 }
 
                 if entry.opens > 0 {
-                    HStack(spacing: 3) {
-                        Image(systemName: "eye").font(.system(size: 8))
+                    HStack(spacing: Space.scaled(3)) {
+                        Image(systemName: "eye").font(Typo.ui(8))
                         Text("\(entry.opens)").font(Typo.num(10))
                     }
                     .foregroundStyle(Palette.inkFaintest)
@@ -507,7 +507,7 @@ private struct GroupHistoryRow: View {
                 Text(Fmt.relAge(entry.sent_at))
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaintest)
-                    .frame(width: 56, alignment: .trailing)
+                    .frame(width: Typo.measure(56), alignment: .trailing)
             }
         }
     }

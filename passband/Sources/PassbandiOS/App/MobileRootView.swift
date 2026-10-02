@@ -31,13 +31,6 @@
 // the triage palette are all state on AppStore, and this shell mounts the same
 // views off the same flags. Nothing below owns a flag of its own — every one of
 // them is written by the verbs in Model/Actions.swift.
-//
-// THE PROCESS DECK IS DESKTOP-ONLY. `p` opens a card deck on the Mac, where it
-// floats over a board you can still see; a phone had to give it the whole screen,
-// which made it a mode rather than a pass — and a mode you enter from a tab bar,
-// leave through a full-screen cover, and cannot see your mail behind. The phone
-// works the same queue through the surfaces it already has, so `processModeOpen`
-// is now a flag no phone code writes or reads.
 
 import SwiftUI
 

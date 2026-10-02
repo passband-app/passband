@@ -104,7 +104,7 @@ enum Analytics {
         "thread_opened", "thread_live_arrival", "undo_fired", "assistant_asked",
         "search_deeper_started",
         "triage_corrected", "triage_digest", "rule_created", "rule_deleted",
-        "process_completed", "notification_opened", "sealed_revealed",
+        "notification_opened", "sealed_revealed",
         "shipment_cleared",
         "connect_succeeded", "connection_lost", "connection_restored",
         "account_added",
@@ -132,7 +132,7 @@ enum Analytics {
         "thread_live_arrival",
         "undo_fired", "assistant_asked",
         "triage_corrected", "triage_digest", "rule_created", "rule_deleted",
-        "process_completed", "notification_opened", "sealed_revealed",
+        "notification_opened", "sealed_revealed",
         "connect_succeeded", "connection_lost", "connection_restored",
         "account_added",
         // Onboarding carries where it started from and the practice step it

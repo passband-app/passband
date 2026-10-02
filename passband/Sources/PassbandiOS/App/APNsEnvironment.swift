@@ -4,10 +4,10 @@
 // production one. The daemon cannot tell them apart by looking, so the app says
 // which when it registers (PushRegistration).
 //
-// The answer comes from how the build was SIGNED, never from `#if DEBUG`. A
-// Release configuration run from Xcode under development signing still gets a
-// sandbox token, and guessing from the configuration is exactly the mistake
-// that sent every push to the wrong place.
+// The answer comes from how the build was SIGNED, never from `#if DEBUG`. The
+// configuration only says what a build was meant to be; the profile it was
+// installed under says what APNs will actually hand it, and guessing from the
+// configuration is exactly the mistake that sent every push to the wrong place.
 //
 // Foundation only, and kept that way so test.sh can compile it on the Mac.
 // App target ONLY: `current` reads `Bundle.main`, which inside the

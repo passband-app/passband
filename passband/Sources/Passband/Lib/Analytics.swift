@@ -71,6 +71,7 @@ enum Analytics {
     /// the app delegate; every other entry point is safe to call regardless.
     static func start() {
         guard let client else { return }
+        _ = installDay  // stamp the install on the first launch that can report
         let nc = NotificationCenter.default
         nc.addObserver(
             forName: Platform.didBecomeActiveNotification, object: nil, queue: nil
@@ -103,13 +104,16 @@ enum Analytics {
         "thread_opened", "thread_live_arrival", "undo_fired", "assistant_asked",
         "search_deeper_started",
         "triage_corrected", "triage_digest", "rule_created", "rule_deleted",
-        "process_completed", "notification_opened", "sealed_revealed",
+        "notification_opened", "sealed_revealed",
         "shipment_cleared",
         "connect_succeeded", "connection_lost", "connection_restored",
         "account_added",
         "tour_started", "tour_completed", "tour_skipped", "whats_new_shown",
         "invite_sent", "invite_nudge_accepted", "invite_nudge_dismissed",
+        "ios_nudge_closed",
         "group_created", "group_updated", "group_deleted",
+        // Derived, never captured by a call site: see `milestones`.
+        "milestone", "catchup_completed",
     ]
 
     /// The counter events that ride at `minimal`: anonymous counts and
@@ -128,7 +132,7 @@ enum Analytics {
         "thread_live_arrival",
         "undo_fired", "assistant_asked",
         "triage_corrected", "triage_digest", "rule_created", "rule_deleted",
-        "process_completed", "notification_opened", "sealed_revealed",
+        "notification_opened", "sealed_revealed",
         "connect_succeeded", "connection_lost", "connection_restored",
         "account_added",
         // Onboarding carries where it started from and the practice step it
@@ -142,11 +146,18 @@ enum Analytics {
         // many did not, and whether the one-time ask was taken up. No address
         // is anywhere near this, at any level.
         "invite_sent", "invite_nudge_accepted", "invite_nudge_dismissed",
+        // The TestFlight ask closing, with one bool: whether the link was
+        // copied. A QR scan leaves no trace, so this is a floor on uptake.
+        "ios_nudge_closed",
         // Send groups carry a mode and a member COUNT. Whether people organize
         // their correspondents into audiences at all, and which shape they
         // reach for, is the "does the product work" question for this feature;
         // who is in one is not measured anywhere, at any level.
         "group_created", "group_updated", "group_deleted",
+        // The funnel: one event per install per first-time, and the first
+        // backfill's size and duration. Both are the most "does the product
+        // work" numbers there are, and neither carries a behavioral detail.
+        "milestone", "catchup_completed",
     ]
 
     /// The closed set of STRING property values allowed off the machine.
@@ -198,6 +209,23 @@ enum Analytics {
             // makes the duplicate free, and naming it here is what keeps this
             // list readable as the vocabulary of THIS event.
             "rail", "settings", "nudge",
+            // thread_opened sources (OpenSource): WHICH SURFACE the reader was
+            // entered from. "sitrep", "emails", "groups" are MainViews above,
+            // "reading" a triage kind, "reply" a compose kind; the rest are
+            // named here. "reader" is the walk from one queued thread to the
+            // next, which is an open the reader made, not the person.
+            "sitrep_card", "search", "browse", "assistant", "deeper_search",
+            "notification", "reader", "tour",
+            // Verb origins (Via): how the verb was INPUT, and (Surface) which
+            // page it was input on. "process", "sitrep", "emails" are
+            // MainViews; "archive"/"done" already exist as undo kinds.
+            "key", "click", "swipe", "assistant",
+            // milestone kinds: the first time this install did each thing.
+            "first_connect", "first_triage", "first_open", "first_action",
+            "first_send", "first_rule", "first_ask", "first_search",
+            // identify: the person-level enums. TelemetryLevel raw values and
+            // ThreadStyleDefault raw values, nothing else.
+            "full", "minimal", "none", "auto", "classic", "bubbles",
         ])
 
     /// The funnel events that describe onboarding rather than happen inside
@@ -246,6 +274,86 @@ enum Analytics {
             safe["practice"] = true
         }
         client?.capture(event, properties: safe)
+        noteMilestone(event, safe)
+    }
+
+    // MARK: - milestones
+
+    /// The funnel, derived rather than captured: the FIRST time an install
+    /// does each of these, one `milestone` event goes out with the kind and
+    /// how many days after install it happened. Derived inside `capture` so
+    /// a call site cannot forget it and a refactor cannot move it: the table
+    /// is the whole definition.
+    ///
+    /// Each entry is the event that proves the milestone and a predicate on
+    /// its (already vocabulary-checked) properties. `compose_send` is a send
+    /// only when it went; `rule_created` is a first rule only when it was not
+    /// an edit of one.
+    private static let milestones:
+        [(event: String, kind: String, when: @Sendable ([String: Any]) -> Bool)] =
+        [
+            ("connect_succeeded", "first_connect", { _ in true }),
+            ("triage_digest", "first_triage", { ($0["total"] as? Int ?? 0) > 0 }),
+            ("thread_opened", "first_open", { _ in true }),
+            ("email_done", "first_action", { _ in true }),
+            ("email_archived", "first_action", { _ in true }),
+            ("compose_send", "first_send", { $0["outcome"] as? String == "sent" }),
+            ("rule_created", "first_rule", { !($0["edit"] as? Bool ?? false) }),
+            ("assistant_asked", "first_ask", { _ in true }),
+            ("search_deeper_started", "first_search", { _ in true }),
+        ]
+
+    private static func noteMilestone(_ event: String, _ props: [String: Any]) {
+        // The practice inbox is not the product working, and its events carry
+        // `practice: true` for the same reason.
+        guard !RehearsalMode.isEnabled else { return }
+        for m in milestones where m.event == event && m.when(props) {
+            let key = "app.passband.analytics.milestone.\(m.kind)"
+            let defaults = UserDefaults.standard
+            guard !defaults.bool(forKey: key) else { continue }
+            defaults.set(true, forKey: key)
+            client?.capture("milestone", properties: ["kind": m.kind, "day": installDay])
+        }
+    }
+
+    /// Whole days since this install first ran with analytics on. Stamped
+    /// the first time it is read, so it counts from the first launch that
+    /// could have sent anything.
+    private static var installDay: Int {
+        let key = "app.passband.analytics.installedAt"
+        let defaults = UserDefaults.standard
+        var at = defaults.double(forKey: key)
+        if at == 0 {
+            at = Date().timeIntervalSince1970
+            defaults.set(at, forKey: key)
+        }
+        return max(0, Int((Date().timeIntervalSince1970 - at) / 86400))
+    }
+
+    /// Whether this install was paired through a hosted link: the one string
+    /// bypass in this file (`adopt`) is also the one way to know.
+    static var isHosted: Bool { UserDefaults.standard.bool(forKey: adoptedKey) }
+
+    /// Person properties, sent as a `$set` so PostHog can cohort installs
+    /// without a join: hosted or self-run, how many mailboxes, which platform
+    /// (the envelope already carries it), which telemetry level, which thread
+    /// style. Every value goes through the same closed-vocabulary check as an
+    /// event property, so a String here is an enum's raw value or nothing.
+    /// Rides at `minimal`: a cohort is not a behavior.
+    static func identify(_ properties: [String: Any]) {
+        guard level != .none else { return }
+        var safe: [String: Any] = ["hosted": isHosted, "telemetry_level": level.rawValue]
+        for (key, value) in properties {
+            switch value {
+            case is Bool, is Int, is Double:
+                safe[key] = value
+            case let s as String where allowedStrings.contains(s):
+                safe[key] = s
+            default:
+                assertionFailure("analytics: person value outside vocabulary for \(key)")
+            }
+        }
+        client?.capture("$set", properties: ["$set": safe])
     }
 
     /// At-most-daily events, for periodic snapshot counters like

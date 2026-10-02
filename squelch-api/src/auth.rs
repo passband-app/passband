@@ -27,6 +27,7 @@ use axum::{
     middleware::Next,
     response::Response,
 };
+use squelch_core::store::{CLIENT_HEADER, ClientTag};
 use squelch_httpauth::{ct_eq, parse_bearer};
 
 use crate::state::ApiState;
@@ -46,7 +47,15 @@ pub(crate) const DEVICE_AUTH_CONCURRENCY: usize = 4;
 /// problem rather than a verdict on the credential; it is deliberately NOT
 /// folded into "no", so a broken store cannot look like a wrong token in the
 /// logs the operator reads next.
-async fn authenticates(state: &ApiState, presented: String) -> Result<bool, StatusCode> {
+///
+/// `client` is what the request said it is ([`CLIENT_HEADER`]), recorded on the
+/// device token's row when that token is good. It plays no part in the verdict,
+/// and the master token has no row to record it on.
+async fn authenticates(
+    state: &ApiState,
+    presented: String,
+    client: Option<ClientTag>,
+) -> Result<bool, StatusCode> {
     // The master token is a process-local string compare: no store round trip,
     // so the operator's way in survives a store that is misbehaving.
     if let Some(master) = state.master_token()
@@ -69,10 +78,12 @@ async fn authenticates(state: &ApiState, presented: String) -> Result<bool, Stat
     // the very next request, and there is no invalidation scheme that is cheaper
     // to get right than a hash lookup on a UNIQUE index.
     let store = state.store.clone();
-    let verified = tokio::task::spawn_blocking(move || store.verify_device_token(&presented))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let verified = tokio::task::spawn_blocking(move || {
+        store.verify_device_token_from(&presented, client.as_ref())
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(verified.is_some())
 }
 
@@ -91,8 +102,16 @@ pub async fn require_bearer(
         // `req` ends here, before `next.run` takes it.
         .map(str::to_string)
         .ok_or(StatusCode::UNAUTHORIZED)?;
+    // Parsed BEFORE the token is known to be good, which is safe because
+    // nothing is done with it until it is: an unparseable or absent header is
+    // `None`, and `None` changes neither the answer nor the store.
+    let client = req
+        .headers()
+        .get(CLIENT_HEADER)
+        .and_then(|h| h.to_str().ok())
+        .and_then(ClientTag::parse);
 
-    if authenticates(&state, presented).await? {
+    if authenticates(&state, presented, client).await? {
         Ok(next.run(req).await)
     } else {
         Err(StatusCode::UNAUTHORIZED)
@@ -204,6 +223,42 @@ mod tests {
             StatusCode::UNAUTHORIZED,
             "revocation bites on the next request"
         );
+    }
+
+    /// The header reaches the row, and only a header worth keeping does: this
+    /// is the wiring between the middleware and the store, whose own tests
+    /// cover the throttle and the parse.
+    #[tokio::test]
+    async fn a_named_client_is_recorded_on_its_token() {
+        let (store, acct, state) = fixture("");
+        let issued = store.issue_device_token(acct, "laptop").unwrap();
+        let request = |client: Option<&'static str>| {
+            let mut req = Request::builder()
+                .uri("/gated")
+                .header(header::AUTHORIZATION, format!("Bearer {}", issued.token));
+            if let Some(client) = client {
+                req = req.header(CLIENT_HEADER, client);
+            }
+            req.body(Body::empty()).unwrap()
+        };
+        let send = async |client| {
+            app_with(state.clone())
+                .oneshot(request(client))
+                .await
+                .unwrap()
+                .status()
+        };
+
+        // Garbage authenticates like any other request and records nothing.
+        assert_eq!(send(Some("windows/9000")).await, StatusCode::OK);
+        assert_eq!(send(None).await, StatusCode::OK);
+        assert!(store.client_versions_seen(acct).unwrap().is_empty());
+
+        assert_eq!(send(Some("macos/0.0.12")).await, StatusCode::OK);
+        let seen = store.client_versions_seen(acct).unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].platform.as_str(), "macos");
+        assert_eq!(seen[0].version, "0.0.12");
     }
 
     /// A door with no `SQUELCH_API_TOKEN` still SERVES; it just has nothing to

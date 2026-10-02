@@ -1838,6 +1838,9 @@ async fn gather_store_metrics(
         // A COUNT, never a listing: the exported gauge is unlabelled, so no
         // device name can reach an unauthenticated scrape even in principle.
         let devices_paired = store.count_client_devices(account_id)?;
+        // Platform and version only, already folded: two phones on one build
+        // are one entry, and nothing that names a device comes back.
+        let clients = store.client_versions_seen(account_id)?;
         Ok::<_, squelch_core::CoreError>(squelch_core::metrics::StoreSnapshot {
             llm_cost_usd: squelch_core::metrics::estimate_cost_usd(&llm, &config),
             stats,
@@ -1845,6 +1848,7 @@ async fn gather_store_metrics(
             db_bytes,
             wal_bytes,
             devices_paired,
+            clients,
             triage_jobs: store.triage_job_counts(account_id)?,
             retriage: store.retriage_progress(account_id)?,
         })

@@ -71,7 +71,7 @@ struct AskBar: View {
                     }
                     inputRow
                 }
-                .frame(width: 620)
+                .frame(width: Typo.measure(620))
                 .passbandGlass(
                     .pane, cornerRadius: 20, tint: Palette.glassTintStrong,
                     id: "askbar", in: askGlass)
@@ -99,9 +99,9 @@ struct AskBar: View {
     // MARK: - chrome
 
     private var header: some View {
-        HStack(spacing: 7) {
+        HStack(spacing: Space.scaled(7)) {
             Image(systemName: "sparkles")
-                .font(.system(size: 11, weight: .semibold))
+                .font(Typo.ui(11, weight: .semibold))
                 .foregroundStyle(Palette.accent)
             Text("ask your inbox")
                 .font(Typo.sectionLabel)
@@ -118,8 +118,8 @@ struct AskBar: View {
                     .foregroundStyle(Palette.inkDim)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                    .frame(maxWidth: 230, alignment: .leading)
-                    .padding(.horizontal, 7).padding(.vertical, 2)
+                    .frame(maxWidth: Typo.measure(230), alignment: .leading)
+                    .padding(.horizontal, Space.scaled(7)).padding(.vertical, Space.s2)
                     .background(Capsule().fill(Palette.hairline))
                     .help(
                         session.running
@@ -132,7 +132,7 @@ struct AskBar: View {
                     store.newAskChat()
                     focused = true
                 } label: {
-                    HStack(spacing: 4) {
+                    HStack(spacing: Space.s4) {
                         Text("new chat").font(Typo.micro)
                         Kbd("⌘⇧K")
                     }
@@ -142,15 +142,15 @@ struct AskBar: View {
             }
             Kbd("esc")
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 13)
-        .padding(.bottom, 8)
+        .padding(.horizontal, Space.s16)
+        .padding(.top, Space.scaled(13))
+        .padding(.bottom, Space.s8)
     }
 
     private var canSubmit: Bool { !question.trimmed.isEmpty && !session.running }
 
     private var inputRow: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: Space.s8) {
             // Never disabled: a long answer is exactly when somebody types their
             // next question. Only SUBMIT waits for the turn to finish.
             TextField(
@@ -159,19 +159,19 @@ struct AskBar: View {
                 text: $question
             )
             .textFieldStyle(.plain)
-            .font(.system(size: 16))
+            .font(Typo.ui(16))
             .foregroundStyle(Palette.ink)
             .focused($focused)
             .onSubmit(submit)
             Image(systemName: "return")
-                .font(.system(size: 11, weight: .semibold))
+                .font(Typo.ui(11, weight: .semibold))
                 .foregroundStyle(canSubmit ? Palette.accent : Palette.inkFaintest)
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, Space.s16)
         // With a log above, the divider replaces the header as the top
         // neighbor and the row needs its own breathing room.
-        .padding(.top, session.transcript.isEmpty ? 0 : 12)
-        .padding(.bottom, 13)
+        .padding(.top, session.transcript.isEmpty ? 0 : Space.s12)
+        .padding(.bottom, Space.scaled(13))
     }
 
     private func submit() {
@@ -191,7 +191,7 @@ struct AskBar: View {
     private var tray: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) {
+                LazyVStack(alignment: .leading, spacing: Space.s10) {
                     ForEach(session.transcript) { item in
                         row(item).frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -202,8 +202,8 @@ struct AskBar: View {
                     }
                     Color.clear.frame(height: 1).id(Self.bottomAnchor)
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
+                .padding(.horizontal, Space.s16)
+                .padding(.vertical, Space.s12)
             }
             .frame(maxHeight: 440)
             // MOUNT AT THE BOTTOM. Both follows below are onChange, and neither
@@ -263,7 +263,7 @@ struct AskBar: View {
             userRow(item.text)
         case .assistant:
             Text(assistantText(item))
-                .font(.system(size: 14))
+                .font(Typo.ui(14))
                 .foregroundStyle(Palette.ink)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
@@ -289,12 +289,12 @@ struct AskBar: View {
         HStack(spacing: 0) {
             Spacer(minLength: 56)
             Text(text)
-                .font(.system(size: 13))
+                .font(Typo.row)
                 .foregroundStyle(Palette.ink)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
+                .padding(.horizontal, Space.s10)
+                .padding(.vertical, Space.s6)
                 .background(
                     RoundedRectangle(cornerRadius: 11, style: .continuous)
                         .fill(Palette.accentSoft)
@@ -303,7 +303,7 @@ struct AskBar: View {
     }
 
     private var workingRow: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: Space.s8) {
             ProgressView().controlSize(.mini)
             Text("working…")
                 .font(Typo.rowSub)
@@ -312,9 +312,9 @@ struct AskBar: View {
     }
 
     private var parkedRow: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: Space.s8) {
             Image(systemName: "hand.raised")
-                .font(.system(size: 10, weight: .semibold))
+                .font(Typo.ui(10, weight: .semibold))
                 .foregroundStyle(Palette.inkFaint)
             Text("waiting for your confirmation above")
                 .font(Typo.micro)
@@ -336,13 +336,13 @@ struct AskBar: View {
     // MARK: - confirm card
 
     private func actionCard(_ action: PendingAction) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: Space.s8) {
+            HStack(spacing: Space.s6) {
                 Image(systemName: action.tool.symbol)
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(Typo.ui(11, weight: .semibold))
                     .foregroundStyle(Palette.accent)
                 Text(Self.cardTitle(action))
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(Typo.ui(12, weight: .semibold))
                     .foregroundStyle(Palette.ink)
             }
             // WHO AND WHAT, FROM THE DAEMON. A send names its target inside the
@@ -370,7 +370,7 @@ struct AskBar: View {
             case .pending:
                 cardButtons(action)
             case .running:
-                HStack(spacing: 6) {
+                HStack(spacing: Space.s6) {
                     ProgressView().controlSize(.mini)
                     Text("working…").font(Typo.micro).foregroundStyle(Palette.inkFaint)
                 }
@@ -382,7 +382,7 @@ struct AskBar: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(10)
+        .padding(Space.s10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -395,7 +395,7 @@ struct AskBar: View {
     }
 
     private func cardButtons(_ action: PendingAction) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: Space.s8) {
             Button("Confirm") { session.resolve(action.id, .approved) }
                 .buttonStyle(.glassProminent)
                 .tint(Palette.accent)
@@ -419,7 +419,7 @@ struct AskBar: View {
     }
 
     private func sendPreview(_ action: PendingAction) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: Space.s6) {
             // ON A REPLY THE RECIPIENT IS THE PARENT'S SENDER, read back from
             // the daemon before this card was parked. The placeholder is the
             // last resort, not the normal case: the whole point of the tap is
@@ -438,14 +438,14 @@ struct AskBar: View {
                     ?? (action.replyToMessageId != nil ? ComposeCopy.derivedSubject : "(none)"))
             ScrollView {
                 Text(Self.markdown(action.body ?? ""))
-                    .font(.system(size: 13))
+                    .font(Typo.row)
                     .foregroundStyle(Palette.ink)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(maxHeight: 140)
-            .padding(8)
+            .frame(maxHeight: Space.scaled(140))
+            .padding(Space.s8)
             .background(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(Palette.canvas.opacity(0.6))
@@ -497,7 +497,7 @@ struct AskBar: View {
     /// citation here: open the thread, close the bar.
     private func emailCards(_ cards: [EmailCard]) -> some View {
         EmailCardList(cards: cards) { threadId in
-            store.openThread(threadId)
+            store.openThread(threadId, from: .assistant)
             onClose()
         }
     }
@@ -507,17 +507,17 @@ struct AskBar: View {
     @ViewBuilder
     private func citations(_ cites: [ToolCitation]) -> some View {
         if !cites.isEmpty {
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: Space.s4) {
                 Text("sources")
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaintest)
                     .textCase(.uppercase)
                 ForEach(cites) { citation in
                     Button {
-                        store.openThread(citation.threadId)
+                        store.openThread(citation.threadId, from: .assistant)
                         onClose()
                     } label: {
-                        HStack(spacing: 7) {
+                        HStack(spacing: Space.scaled(7)) {
                             Avatar(sender: citation.sender, size: 16)
                             Text(citation.sender)
                                 .font(Typo.micro)
@@ -527,13 +527,13 @@ struct AskBar: View {
                                 .font(Typo.micro)
                                 .foregroundStyle(Palette.inkFaintest)
                                 .lineLimit(1)
-                            Spacer(minLength: 4)
+                            Spacer(minLength: Space.s4)
                             Image(systemName: "arrow.up.right")
-                                .font(.system(size: 9, weight: .semibold))
+                                .font(Typo.ui(9, weight: .semibold))
                                 .foregroundStyle(Palette.accent)
                         }
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 5)
+                        .padding(.horizontal, Space.scaled(9))
+                        .padding(.vertical, Space.scaled(5))
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(RecordRowStyle())

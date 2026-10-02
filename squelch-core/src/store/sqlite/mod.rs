@@ -8,6 +8,50 @@
 //! below, as inherent methods that block delegates to. A trait impl cannot be
 //! split across files, which is why the delegations exist.
 
+/// AUTHORED BY THIS ACCOUNT, as SQL over a `messages m` row: the stored sent
+/// copy, OR a copy in the inbound listing that the account's own mailbox wrote.
+///
+/// Stored `messages.is_sent` alone is not that. It is a VISIBILITY flag, sticky
+/// to 0, and the sync engine lets the INBOX sighting win whenever a message
+/// carries both labels: mail to oneself, a self-Cc, and any sent message a mail
+/// client re-labels INBOX (a "remind me if nobody replies" does exactly that).
+/// Read as inbound, the user's own question becomes an inquiry FROM a known
+/// contact, and the model has filed "reply to <the user>" in FYE on a real
+/// mailbox. So every "is this inbound mail the user might owe something on"
+/// the agent-triage store asks is asked of this, never of the bare column:
+/// the user's own mail is evidence about a thread and is not shown back to
+/// them.
+///
+/// THE FROM ADDRESS IS NOT ENOUGH, because anybody can type it. What this arm
+/// asserts to the model is "the user said this", which resolves obligations
+/// silently, so a forged `From: <the user>` must not earn it. `auth_pass IS
+/// NULL` is the test: a copy the mailbox wrote never crossed the provider's
+/// inbound SMTP edge and carries no delivery verdict, while mail delivered
+/// from outside is stamped with one, pass or fail (see `extract_auth_pass`).
+/// A PASS is excluded with the failures on purpose. Mail that really was sent
+/// on the domain's authority and then DELIVERED is a contact form or a scanner
+/// using the owner's address, and that is inbound mail with someone else's
+/// words in it. The gate inherits that parser's documented residue, in the
+/// OPPOSITE direction: NULL is that parser's cautious answer for its own
+/// consumer and the trusting one here, so every case it declines to judge
+/// (POP-fetched or imported mail, rows older than the column) reads as own.
+/// On a provider it cannot read at all (every verdict NULL) this is the bare
+/// address match the reader's `authored_by_account` (`messages.rs`) has
+/// always been.
+///
+/// The COALESCE matters: a missing account row makes the comparison NULL,
+/// which a `NOT` would read as "exclude" and a `bool` column read would reject.
+///
+/// A macro and not only a `const` so static SQL can `concat!` it, and declared
+/// ahead of the modules so every one of them can.
+macro_rules! own_mail_sql {
+    () => {
+        "(m.is_sent=1 OR COALESCE(m.auth_pass IS NULL AND trim(m.from_addr)!='' AND \
+         lower(trim(m.from_addr))=(SELECT lower(trim(email)) FROM accounts WHERE id=m.account_id),0))"
+    };
+}
+const OWN_MAIL: &str = own_mail_sql!();
+
 pub(crate) mod agent_budget;
 mod agent_deliveries;
 mod agent_triage;
@@ -46,15 +90,16 @@ use crate::error::{CoreError, Result};
 // The ledger's stored lane/decision strings ARE the metric labels; see `notify`.
 use crate::metrics::{NotifyDecision, NotifyLane};
 use crate::store::{
-    AttachmentBytes, BankingApplied, BlankBodyScan, ContactEntry, Device, DeviceToken, Draft,
-    DraftFields, DraftKey, ExtractQueued, FtsQuery, HealScope, InboxUnread, IssuedDeviceToken,
-    LeggedHit, MailActivityDay, MarketingApplied, MarketingOffer, MessageMissingRecipients,
-    MessageOpen, MessageUnsub, MintedPairingCode, MissingVector, NewAuditEntry, NewEvent,
-    NewNotifyDecision, NotifyDecisionRow, RevisitQueued, SPAM_SYNCED_AT_KEY, SealedBody,
-    SealedMessage, SearchDiagnostics, SearchFilter, SearchSort, SeedVerdict, SenderDigestRow,
-    SenderEntry, SenderHistory, SentMessage, SitrepBand, SpamScope, Stage1Applied, Stage1Queued,
-    Stage2Applied, Stage2CapOverrides, Stage2Queued, Stage2Usage, Stage2UsageDay, Store, SyncState,
-    TermDf, ThreadSibling, TrackedMessage, TriageDebug, TriagedMessage, UsageTokens,
+    AttachmentBytes, BankingApplied, BlankBodyScan, ClientPlatform, ClientSeen, ClientTag,
+    ContactEntry, Device, DeviceToken, Draft, DraftFields, DraftKey, ExtractQueued, FtsQuery,
+    HealScope, InboxUnread, IssuedDeviceToken, LeggedHit, MailActivityDay, MarketingApplied,
+    MarketingOffer, MessageMissingRecipients, MessageOpen, MessageUnsub, MintedPairingCode,
+    MissingVector, NewAuditEntry, NewEvent, NewNotifyDecision, NotifyDecisionRow, RevisitQueued,
+    SPAM_SYNCED_AT_KEY, SealedBody, SealedMessage, SearchDiagnostics, SearchFilter, SearchSort,
+    SeedVerdict, SenderDigestRow, SenderEntry, SenderHistory, SentMessage, SitrepBand, SpamScope,
+    Stage1Applied, Stage1Queued, Stage2Applied, Stage2CapOverrides, Stage2Queued, Stage2Usage,
+    Stage2UsageDay, Store, SyncState, TermDf, ThreadSibling, TrackedMessage, TriageDebug,
+    TriagedMessage, UsageTokens,
 };
 use crate::types::{
     AccountId, AttachmentInfo, AttentionStatus, AttentionUpdate, AuditEntry, BandCounts, Banking,
@@ -1119,6 +1164,48 @@ impl Store for SqliteStore {
 
     fn list_unsubscribes(&self, account_id: AccountId) -> Result<Vec<UnsubscribeRecord>> {
         self.list_unsubscribes(account_id)
+    }
+
+    fn begin_unsubscribe_job(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+        source_message_id: Option<i64>,
+        url: &str,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        self.begin_unsubscribe_job(account_id, sender, source_message_id, url, now)
+    }
+
+    fn finish_unsubscribe_job(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+        status: &str,
+        method: &str,
+        reason: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        self.finish_unsubscribe_job(account_id, sender, status, method, reason, now)
+    }
+
+    fn mark_unsubscribe_opened(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+        now: DateTime<Utc>,
+    ) -> Result<bool> {
+        self.mark_unsubscribe_opened(account_id, sender, now)
+    }
+
+    fn reap_unsubscribe_jobs(
+        &self,
+        account_id: AccountId,
+        live: &[String],
+        stale_before: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<usize> {
+        self.reap_unsubscribe_jobs(account_id, live, stale_before, now)
     }
 
     fn set_unsubscribe_resolution(

@@ -90,12 +90,16 @@ enum Reading {
     ///
     /// `content` holds the ids triage judged to be content rather than
     /// promotion; those senders sort first, newest-first within each half, and
-    /// the cap applies after, so a busy week of promotions never pushes the
+    /// any cap applies after, so a busy week of promotions never pushes the
     /// reading off the board. Only for `contentWindow`: an unread essay from
     /// last month should not sit above today's mail forever.
+    ///
+    /// UNCAPPED BY DEFAULT. This used to stop at 24 senders, which made the
+    /// zone's count top out at 24 and dropped the rest with no way to reach
+    /// them. The zone folds instead (`ReadingZone.collapsed`).
     static func derive(
         updates: [AttentionUpdate], rules: [SenderRule], content: Set<Int> = [],
-        now: Date = Date(), limit: Int = 24
+        now: Date = Date(), limit: Int = .max
     ) -> [ReadingSender] {
         let freshSince = now.timeIntervalSince1970 - contentWindow
         let groups = Dictionary(grouping: updates) { SenderID.address($0.sender) }

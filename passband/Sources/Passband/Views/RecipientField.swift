@@ -51,11 +51,16 @@
 // send ceremony never learn pills exist. An external write (a draft restore)
 // re-parses.
 //
-// The keymaps register into the pane's "modal" context: the suggestion set
-// (arrows / Enter / Tab / Esc) mounts ONLY while a list is showing — within a
-// context the latest-registered set wins, so an open list eats Enter before
-// the pane's Enter-to-review sees it. The always-mounted set carries only
-// Backspace, declining whenever there is fragment text to edit normally.
+// The keymaps register into the HOST'S context, read from the environment
+// (`\.keyContext`): "modal" in the pane composer, "thread" in the reader's
+// inline reply. Naming "modal" here was the bug that made a reply's pills
+// undeletable: the reader gates every modal binding, so Backspace, and the
+// whole suggestion set with it, registered where no key would ever look. The
+// suggestion set (arrows / Enter / Tab / Esc) mounts ONLY while a list is
+// showing — within a context the latest-registered set wins, so an open list
+// eats Enter before the pane's Enter-to-review sees it. The always-mounted set
+// carries only Backspace, declining whenever there is fragment text to edit
+// normally.
 
 import SwiftUI
 
@@ -116,6 +121,9 @@ struct RecipientField<F: Hashable>: View {
     /// as a form.
     var inline = false
 
+    /// The key layer this field was mounted in, which is where its keymaps go.
+    @Environment(\.keyContext) private var keyContext
+
     /// Committed recipients — the pills.
     @State private var pills: [String] = []
     /// The live fragment being typed after the pills.
@@ -137,7 +145,7 @@ struct RecipientField<F: Hashable>: View {
     private var suggestionCount: Int { groupHits.count + hits.count }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: Space.s4) {
             if inline {
                 // The whole header LINE takes the drop, label included: on a
                 // card the line is the field.
@@ -150,8 +158,8 @@ struct RecipientField<F: Hashable>: View {
                     .animation(.easeOut(duration: 0.12), value: dropTargeted)
                     .modifier(dropWell)
             } else {
-                VStack(alignment: .leading, spacing: 5) {
-                    HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: Space.scaled(5)) {
+                    HStack(spacing: Space.s8) {
                         FieldLabel(label)
                         Spacer(minLength: 0)
                         accessory
@@ -172,7 +180,7 @@ struct RecipientField<F: Hashable>: View {
                     .modifier(InlineFieldTuck(active: inline))
             }
         }
-        .keyBindings(.modal, fieldBindings)
+        .keyBindings(keyContext, fieldBindings)
         .task(id: searchFragment) { await refresh() }
         .onAppear { parse(text) }
         // External writes only (a draft restore): our own writes round-trip to
@@ -194,7 +202,7 @@ struct RecipientField<F: Hashable>: View {
     // MARK: - send line
 
     private var pillRow: some View {
-        FlowLine(spacing: 5) {
+        FlowLine(spacing: Space.scaled(5)) {
             ForEach(Array(pills.enumerated()), id: \.offset) { i, addr in
                 RecipientPill(
                     addr: addr, selected: i == selectedPill,
@@ -211,7 +219,7 @@ struct RecipientField<F: Hashable>: View {
                 // Narrower on a header line: the line shares its width with
                 // the groups/cc/bcc accessory, and at 120 the caret dropped to
                 // a line of its own beside plenty of room.
-                .frame(minWidth: inline ? 72 : 120)
+                .frame(minWidth: Space.scaled(inline ? 72 : 120))
                 // Commit-on-separator runs off onChange, not a custom Binding
                 // setter: handing a method reference into Binding(get:set:)
                 // trips an IRGen crash in Swift 6.3 (isolation thunk), and this
@@ -341,13 +349,13 @@ struct RecipientField<F: Hashable>: View {
                 Button {
                     acceptGroup(group)
                 } label: {
-                    HStack(spacing: 8) {
+                    HStack(spacing: Space.s8) {
                         Image(systemName: group.mode.symbol)
-                            .font(.system(size: 9, weight: .semibold))
+                            .font(Typo.ui(9, weight: .semibold))
                             .foregroundStyle(group.mode.tone)
-                            .frame(width: 12)
+                            .frame(width: Space.scaled(12))
                         Text(group.name)
-                            .font(.system(size: 11, weight: .medium))
+                            .font(Typo.ui(11, weight: .medium))
                             .foregroundStyle(Palette.ink)
                             .lineLimit(1)
                         // The mode is said in the MENU, not only after picking:
@@ -358,13 +366,13 @@ struct RecipientField<F: Hashable>: View {
                             .font(Typo.micro)
                             .foregroundStyle(Palette.inkFaintest)
                             .lineLimit(1)
-                        Spacer(minLength: 8)
+                        Spacer(minLength: Space.s8)
                         Text("\(group.member_count)")
                             .font(Typo.num(10))
                             .foregroundStyle(Palette.inkFaintest)
                     }
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 5)
+                    .padding(.horizontal, Space.scaled(9))
+                    .padding(.vertical, Space.scaled(5))
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
                 }
@@ -375,18 +383,18 @@ struct RecipientField<F: Hashable>: View {
                 )
             }
             if !groupHits.isEmpty && !hits.isEmpty {
-                Divider().overlay(Palette.hairline).padding(.vertical, 2)
+                Divider().overlay(Palette.hairline).padding(.vertical, Space.s2)
             }
             ForEach(Array(hits.enumerated()), id: \.element.id) { i, hit in
                 Button {
                     accept(hit)
                 } label: {
-                    HStack(spacing: 8) {
+                    HStack(spacing: Space.s8) {
                         // Contact strings are email-derived: rendered as Text
                         // only, never as markup.
                         if let name = hit.display_name, !name.isEmpty {
                             Text(name)
-                                .font(.system(size: 11, weight: .medium))
+                                .font(Typo.ui(11, weight: .medium))
                                 .foregroundStyle(Palette.ink)
                                 .lineLimit(1)
                         }
@@ -396,13 +404,13 @@ struct RecipientField<F: Hashable>: View {
                                 i + groupHits.count == index ? Palette.ink : Palette.inkDim
                             )
                             .lineLimit(1)
-                        Spacer(minLength: 8)
+                        Spacer(minLength: Space.s8)
                         Text("\(hit.sent_count)×")
                             .font(Typo.num(10))
                             .foregroundStyle(Palette.inkFaintest)
                     }
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 5)
+                    .padding(.horizontal, Space.scaled(9))
+                    .padding(.vertical, Space.scaled(5))
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
                 }
@@ -412,7 +420,7 @@ struct RecipientField<F: Hashable>: View {
                         .fill(i + groupHits.count == index ? Palette.accentSoft : .clear)
                 )
             }
-            HStack(spacing: 4) {
+            HStack(spacing: Space.s4) {
                 Kbd("↑↓")
                 Text("pick ·").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
                 Kbd("enter")
@@ -420,10 +428,10 @@ struct RecipientField<F: Hashable>: View {
                 Kbd("esc")
                 Text("dismiss").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
             }
-            .padding(.horizontal, 9)
-            .padding(.top, 4)
+            .padding(.horizontal, Space.scaled(9))
+            .padding(.top, Space.s4)
         }
-        .padding(4)
+        .padding(Space.s4)
         .background(
             RoundedRectangle(cornerRadius: 9, style: .continuous)
                 .fill(Palette.canvas.opacity(0.85))
@@ -433,7 +441,7 @@ struct RecipientField<F: Hashable>: View {
                 .strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
         // Mounts WITH the list, so these register after everything else and win
         // exactly while there is a list to drive.
-        .keyBindings(.modal, suggestionBindings)
+        .keyBindings(keyContext, suggestionBindings)
     }
 
     // MARK: - keymaps
@@ -640,16 +648,16 @@ private struct RecipientPill: View {
     /// The pill's content, minus the capsule: what the Button presses and what
     /// the drag carries as its image.
     private var face: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: Space.scaled(5)) {
                 if group != nil {
-                    Image(systemName: "person.2.fill").font(.system(size: 8, weight: .semibold))
+                    Image(systemName: "person.2.fill").font(Typo.ui(8, weight: .semibold))
                 } else if unresolved {
                     Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 8, weight: .semibold))
+                        .font(Typo.ui(8, weight: .semibold))
                 }
                 // Email-derived string: Text only, never markup.
                 Text(label)
-                    .font(group == nil ? Typo.mono(11) : .system(size: 11, weight: .medium))
+                    .font(group == nil ? Typo.mono(11) : Typo.ui(11, weight: .medium))
                     .lineLimit(1)
                 if let group {
                     // The count is the whole point of a fan-out pill: one pill
@@ -662,8 +670,8 @@ private struct RecipientPill: View {
                 }
             }
             .foregroundStyle(unresolved ? Palette.danger : Palette.ink)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
+            .padding(.horizontal, Space.s8)
+            .padding(.vertical, Space.scaled(3))
             .contentShape(Capsule())
     }
 
@@ -1095,7 +1103,7 @@ struct RecipientFields<F: Hashable>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: inline ? 0 : 8) {
+        VStack(alignment: .leading, spacing: inline ? 0 : Space.s8) {
             ForEach(RecipientSlot.allCases.filter(shown), id: \.self) { slot in
                 // On a card the lines are ruled apart; stacked wells have
                 // their own edges.
@@ -1154,7 +1162,7 @@ struct RecipientFields<F: Hashable>: View {
     /// The unfold labels, in the block's own micro voice. Lit while their field
     /// is up, so the row doubles as a statement of what this message carries.
     private var toggles: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: Space.s8) {
             toAccessory
             ForEach(Self.optional, id: \.self) { slot in
                 Button(slot.label) { toggle(slot) }
@@ -1223,17 +1231,17 @@ struct InlineFieldRow<Content: View>: View {
                 .frame(width: InlineFieldMetrics.label, alignment: .leading)
                 .padding(.top, InlineFieldMetrics.labelDrop)
             content
-                .font(.system(size: 13))
+                .font(Typo.ui(13))
                 .foregroundStyle(Palette.ink)
                 .frame(maxWidth: .infinity, alignment: .leading)
             if let accessory {
                 accessory
                     .padding(.top, InlineFieldMetrics.labelDrop)
-                    .padding(.leading, 8)
+                    .padding(.leading, Space.s8)
             }
         }
         .padding(.horizontal, InlineFieldMetrics.inset)
-        .padding(.vertical, 9)
+        .padding(.vertical, Space.scaled(9))
     }
 }
 
@@ -1247,18 +1255,26 @@ struct InlineFieldTuck: ViewModifier {
             content
                 .padding(.leading, InlineFieldMetrics.inset + InlineFieldMetrics.label)
                 .padding(.trailing, InlineFieldMetrics.inset)
-                .padding(.bottom, 8)
+                .padding(.bottom, Space.s8)
         } else {
             content
         }
     }
 }
 
+/// Computed, all three: they follow the density setting, and a `static let`
+/// would have frozen at whichever density was live when a composer first
+/// opened.
+@MainActor
 enum InlineFieldMetrics {
     /// The card's side inset. The body editor lines its text up on the same
     /// edge.
-    static let inset: CGFloat = 12
-    static let label: CGFloat = 58
-    /// Drops the micro label onto the 13pt value's text line.
-    static let labelDrop: CGFloat = 3
+    static var inset: CGFloat { Space.s12 }
+    /// The label column: holds the widest label ("subject") in the micro
+    /// voice, so it widens with the type.
+    static var label: CGFloat { Typo.measure(58) }
+    /// Drops the micro label onto the 13pt value's text line. Derived from
+    /// the two type sizes rather than scaled as spacing: it is the gap between
+    /// their first lines, and the type curve is what moves that.
+    static var labelDrop: CGFloat { Typo.size(13) - Typo.size(10) }
 }

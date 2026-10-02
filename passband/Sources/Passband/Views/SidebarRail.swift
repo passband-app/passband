@@ -26,6 +26,12 @@ struct SidebarRail: View {
     @State private var shareDeniedAttempts = 0
     @State private var accountDeniedAttempts = 0
 
+    /// THE TILE AND THE RAIL HOLD STILL ACROSS DENSITY. The glyphs grow with
+    /// the type and the gaps between tiles open with the ladder, but a 17pt
+    /// symbol already sits in a 44x36 tile with room to spare, and the rail's
+    /// width is spoken for by every surface that insets past it (the reader,
+    /// the expanded composer, the tour). Comfortable is about room between
+    /// things; the rail was never where the crowding was.
     static let railWidth: CGFloat = 60
     static let iconWidth: CGFloat = 44
     static let iconHeight: CGFloat = 36
@@ -94,7 +100,7 @@ struct SidebarRail: View {
     }
 
     private var railStack: some View {
-            VStack(spacing: 6) {
+            VStack(spacing: Space.s6) {
                 // NO TOP SPACER: the clearance is the top bar's, applied to the
                 // whole stack below. The first icon starts UNDER the page header
                 // beside it rather than on its line — the rail is what the bar
@@ -106,12 +112,12 @@ struct SidebarRail: View {
                         showRings: view == .auth, onSlot: { slots[view] = $0 })
                 }
 
-                Spacer(minLength: 8)
+                Spacer(minLength: Space.s8)
 
                 Rectangle()
                     .fill(Palette.hairline)
                     .frame(width: 22, height: 0.5)
-                    .padding(.vertical, 4)
+                    .padding(.vertical, Space.s4)
 
                 shareButton
 
@@ -131,8 +137,8 @@ struct SidebarRail: View {
             // stack goes to the corner: Sitrep sits the same gutter from the top
             // as the tiles sit from the rail's sides, and nothing above it
             // reads as a margin waiting for buttons that are not there.
-            .padding(.top, WindowState.shared.isFullscreen ? Self.sideGutter : TopBar.height + 10)
-            .padding(.bottom, 10)
+            .padding(.top, WindowState.shared.isFullscreen ? Self.sideGutter : TopBar.height + Space.s10)
+            .padding(.bottom, Space.s10)
             .frame(width: Self.railWidth)
             .frame(maxHeight: .infinity)
             .ignoresSafeArea(edges: .top)
@@ -162,7 +168,7 @@ struct SidebarRail: View {
                 store.openShareSheet(from: .rail)
             } label: {
                 Image(systemName: "gift")
-                    .font(.system(size: 16, weight: .regular))
+                    .font(Typo.ui(16))
                     .foregroundStyle(Palette.inkDim)
                     .frame(width: Self.iconWidth, height: Self.iconHeight)
                     // THE WHOLE TILE IS THE TARGET, for the reason RailButton
@@ -238,7 +244,7 @@ struct SidebarRail: View {
 
     private var accountMark: some View {
         Text(AccountManager.shared.active?.initial ?? "?")
-            .font(.system(size: 13, weight: .semibold))
+            .font(Typo.ui(13, weight: .semibold))
             .foregroundStyle(Palette.accent)
             .frame(width: 26, height: 26)
             .background(Circle().fill(Palette.accentSoft))
@@ -328,7 +334,7 @@ private struct RailButton: View {
         } label: {
             ZStack {
                 Image(systemName: view.symbol)
-                    .font(.system(size: 17, weight: active ? .semibold : .regular))
+                    .font(Typo.ui(17, weight: active ? .semibold : .regular))
                     .foregroundStyle(active ? Palette.accent : Palette.inkDim)
                     .frame(width: SidebarRail.iconWidth, height: SidebarRail.iconHeight)
                     // The rail's selector is placed from this. Nothing about the
@@ -419,7 +425,7 @@ private struct AuthDecisionBadge: View {
         let count = count
         if count > 0 {
             Text(count > 9 ? "9+" : "\(count)")
-                .font(.system(size: 9, weight: .bold).monospacedDigit())
+                .font(Typo.num(9, weight: .bold))
                 .foregroundStyle(.white)
                 .padding(.horizontal, 4)
                 .frame(minWidth: 15, minHeight: 15)

@@ -34,8 +34,25 @@ struct ActionLayer: View {
                     Spacer(minLength: 0)
                 }
             }
-            .padding(.leading, 74)
-            .padding(.bottom, 18)
+            .padding(.leading, SidebarRail.railWidth + Space.s14)
+            .padding(.bottom, Space.scaled(18))
+
+            // AUTOMATIC UNSUBSCRIBES, bottom-right of the sitrep: the toasts'
+            // opposite corner, so a job and an undo chip never fight for one.
+            // Sitrep only, with no reader or composer over it: `u` leaves the
+            // reader on purpose, and this is where the user lands.
+            if showsUnsubscribeTray {
+                VStack(spacing: 0) {
+                    Spacer(minLength: 0)
+                    HStack(spacing: 0) {
+                        Spacer(minLength: 0)
+                        UnsubscribeTray().fixedSize()
+                    }
+                }
+                .padding(.trailing, Space.scaled(18))
+                .padding(.bottom, Space.scaled(18))
+                .transition(.opacity)
+            }
 
             if let request = store.ruleEditor {
                 // Keyed by the request: a click on an in-effect rule swaps the
@@ -102,11 +119,16 @@ struct ActionLayer: View {
         .background { ViolationScanKeeper(scan: scanViolations) }
     }
 
+    private var showsUnsubscribeTray: Bool {
+        store.activeView == .sitrep && store.threadId == nil && !store.composeOpen
+            && !UnsubscribeJobs.shared.items.isEmpty
+    }
+
     // MARK: - toasts
 
     private var toastStack: some View {
         GlassEffectContainer(spacing: 10) {
-            VStack(alignment: .leading, spacing: 7) {
+            VStack(alignment: .leading, spacing: Space.scaled(7)) {
                 // Sender strings are email-derived: rendered as Text only,
                 // never as markup.
                 if let prompt = blockPrompt {
@@ -119,8 +141,8 @@ struct ActionLayer: View {
                         Text(toast.text)
                             .font(Typo.rowSub)
                             .foregroundStyle(tone(toast.tone))
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 7)
+                            .padding(.horizontal, Space.s12)
+                            .padding(.vertical, Space.scaled(7))
                     }
                     .buttonStyle(.plain)
                     .background(
@@ -135,7 +157,7 @@ struct ActionLayer: View {
                         RoundedRectangle(cornerRadius: 1)
                             .fill(tone(toast.tone))
                             .frame(width: 2)
-                            .padding(.vertical, 6)
+                            .padding(.vertical, Space.s6)
                     }
                     .transition(.move(edge: .leading).combined(with: .opacity))
                 }
@@ -143,19 +165,19 @@ struct ActionLayer: View {
                     Button {
                         Task { await store.fireUndo(undo.id) }
                     } label: {
-                        HStack(spacing: 14) {
+                        HStack(spacing: Space.s14) {
                             Text(undo.label)
                                 .font(Typo.rowSub)
                                 .foregroundStyle(Palette.ink)
-                            HStack(spacing: 4) {
+                            HStack(spacing: Space.s4) {
                                 Kbd("u")
                                 Text("undo")
                                     .font(Typo.micro)
                                     .foregroundStyle(Palette.inkFaintest)
                             }
                         }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 7)
+                        .padding(.horizontal, Space.s12)
+                        .padding(.vertical, Space.scaled(7))
                     }
                     .buttonStyle(.plain)
                     .glassEffect(
@@ -166,7 +188,7 @@ struct ActionLayer: View {
                         RoundedRectangle(cornerRadius: 1)
                             .fill(Palette.warn)
                             .frame(width: 2)
-                            .padding(.vertical, 6)
+                            .padding(.vertical, Space.s6)
                     }
                     .transition(.move(edge: .leading).combined(with: .opacity))
                     .tourTarget(.undoToast)
@@ -188,7 +210,7 @@ struct ActionLayer: View {
     // MARK: - unsubscribe violations
 
     private func violationPrompt(_ record: UnsubscribeRecord) -> some View {
-        VStack(alignment: .leading, spacing: 9) {
+        VStack(alignment: .leading, spacing: Space.scaled(9)) {
             Text(
                 "\(SenderCache.resolved(record.sender).displayName) is ignoring your unsubscribe — "
                     + "\(record.violation_count) email\(record.violation_count == 1 ? "" : "s") "
@@ -197,9 +219,9 @@ struct ActionLayer: View {
             .font(Typo.rowSub)
             .foregroundStyle(Palette.ink)
             .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: 360, alignment: .leading)
+            .frame(maxWidth: Typo.measure(360), alignment: .leading)
 
-            HStack(spacing: 8) {
+            HStack(spacing: Space.s8) {
                 Button("Block sender") { Task { await block(record) } }
                     .buttonStyle(.glassProminent)
                     .tint(Palette.danger)
@@ -210,13 +232,17 @@ struct ActionLayer: View {
             }
             .controlSize(.small)
         }
-        .padding(13)
+        .padding(Space.scaled(13))
         .passbandGlass(.pane, cornerRadius: 14, tint: Palette.dangerSoft)
         .transition(.move(edge: .leading).combined(with: .opacity))
     }
 
     private func scanViolations() async {
+        let gen = UnsubscribeJobs.shared.generation
         guard let rows = try? await APIClient.shared.getUnsubscribes() else { return }
+        // The same rows carry automatic-unsubscribe jobs: a `needs_you` left
+        // from before a relaunch reaches the tray through this fetch.
+        UnsubscribeJobs.shared.absorb(rows, generation: gen)
         // Surface one at a time: a stack of these is a nag, not a prompt.
         let next = rows.first {
             $0.violation_count > 0 && $0.resolution == nil && !acted.contains($0.sender)
@@ -296,6 +322,7 @@ struct ShortcutsOverlay: View {
                 (["c"], "new message"),
                 (["e", "d"], "done, and close the reader"),
                 (["E", "D"], "done, and open the next email"),
+                (["S"], "skip to the next email, leave this one"),
                 (["h"], "remind + next"),
                 (["u"], "unsubscribe from this sender"),
                 (["t"], "new rule for this sender"),
@@ -340,22 +367,22 @@ struct ShortcutsOverlay: View {
                     .foregroundStyle(Palette.ink)
 
                 LazyVGrid(
-                    columns: [GridItem(.flexible(), spacing: 22), GridItem(.flexible())],
-                    alignment: .leading, spacing: 18
+                    columns: [GridItem(.flexible(), spacing: Space.scaled(22)), GridItem(.flexible())],
+                    alignment: .leading, spacing: Space.scaled(18)
                 ) {
                     ForEach(Self.groups) { group in
-                        VStack(alignment: .leading, spacing: 5) {
+                        VStack(alignment: .leading, spacing: Space.scaled(5)) {
                             Text(group.title)
                                 .font(Typo.sectionLabel)
                                 .foregroundStyle(Palette.accent)
                                 .textCase(.uppercase)
-                                .padding(.bottom, 2)
+                                .padding(.bottom, Space.s2)
                             ForEach(group.items, id: \.desc) { item in
-                                HStack(spacing: 6) {
+                                HStack(spacing: Space.s6) {
                                     Text(item.desc)
                                         .font(Typo.micro)
                                         .foregroundStyle(Palette.inkDim)
-                                    Spacer(minLength: 8)
+                                    Spacer(minLength: Space.s8)
                                     ForEach(item.keys, id: \.self) { Kbd($0) }
                                 }
                             }
@@ -363,7 +390,7 @@ struct ShortcutsOverlay: View {
                     }
                 }
 
-                HStack(spacing: 4) {
+                HStack(spacing: Space.s4) {
                     Spacer()
                     Kbd("?")
                     Text("or").font(Typo.micro).foregroundStyle(Palette.inkFaintest)

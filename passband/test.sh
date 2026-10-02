@@ -14,6 +14,12 @@ cd "$(dirname "$0")"
 BUILD=build/tests
 mkdir -p "$BUILD"
 
+# The analytics vocabulary is closed at RUNTIME (an unlisted event asserts in
+# a debug build and is dropped in release), and nothing else at build time
+# knows that. This is the check; see the script's header for the history.
+echo "==> analytics-lint"
+python3 ./analytics-lint.py
+
 run_suite() {
   local name="$1"
   shift
@@ -66,6 +72,7 @@ run_suite credential-probe \
   Sources/Passband/Model/WireTypes.swift \
   Sources/Passband/Model/APIError.swift \
   Sources/Passband/Model/APIClient.swift \
+  Sources/Passband/Lib/ClientIdentity.swift \
   Sources/Passband/Lib/TriageTargets.swift \
   Sources/Passband/Assistant/JSONValue.swift \
   Tests/CredentialProbeTests.swift
@@ -74,6 +81,16 @@ run_suite anthropic-stream \
   Sources/Passband/Assistant/JSONValue.swift \
   Sources/Passband/Assistant/AnthropicStream.swift \
   Tests/AnthropicStreamTests.swift
+
+# What the app tells its daemon it is. The daemon drops anything that is not
+# <platform>/<dotted digits>, so the client must never build anything else.
+# The plist is linked in as the binary's Info.plist so the suite can read a
+# bundle version the way the app does; a bare test binary has none.
+run_suite client-identity \
+  Sources/Passband/Lib/ClientIdentity.swift \
+  Tests/ClientIdentityTests.swift \
+  -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist \
+  -Xlinker Tests/ClientIdentityTests.plist
 
 # Pairing pulls in Sessions.swift only because it builds its own URLSession
 # there; nothing in this suite makes a request. Same payoff as above: the code
@@ -221,6 +238,14 @@ run_suite share-nudge \
   Sources/Passband/Lib/Platform.swift \
   Sources/Passband/Lib/ShareNudge.swift \
   Tests/ShareNudgeTests.swift
+
+# When the iPhone ask fires: two days in, never to somebody whose mailbox has
+# seen the phone app, never on a daemon that has not said, and once.
+run_suite testflight-nudge \
+  Sources/Passband/Lib/Platform.swift \
+  Sources/Passband/Lib/ShareNudge.swift \
+  Sources/Passband/Lib/TestFlightNudge.swift \
+  Tests/TestFlightNudgeTests.swift
 
 # What "remind me…" resolves to. Foundation only, and every date computed
 # through an injected now/calendar — which is the whole reason it is testable:
@@ -400,6 +425,13 @@ run_suite settings-search \
   Sources/Passband/Lib/SettingsSearch.swift \
   Tests/SettingsSearchTests.swift
 
+# The density curves: compact is the identity (which is what makes moving a
+# literal onto a token safe), comfortable never shrinks anything, and neither
+# curve folds two steps of the ladder onto one size.
+run_suite density \
+  Sources/Passband/Lib/Density.swift \
+  Tests/DensityTests.swift
+
 # The search field's `from:` operator: when the sender menu is open and what
 # accepting a sender does to the text. Pure string work, Foundation only.
 run_suite from-operator \
@@ -448,3 +480,24 @@ run_suite reading \
   Sources/Passband/Lib/SenderIdentity.swift \
   Sources/Passband/Lib/Reading.swift \
   Tests/ReadingTests.swift
+
+# The all-mail list: lenses and the category picker, day headings and the
+# ranking inside them, the poll's head merging into the scrolled pages, and
+# the arrival stamp an older daemon does not send.
+run_suite mail-list \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Format.swift \
+  Sources/Passband/Lib/AsyncMemo.swift \
+  Sources/Passband/Lib/SenderIdentity.swift \
+  Sources/Passband/Lib/MailList.swift \
+  Tests/MailListTests.swift
+
+# The Reading card's logo extraction: which heroes are a mark on a flat field,
+# where the mark is, and which images must be left whole. CoreGraphics only,
+# over banners built pixel by pixel. ImageFill rides along for the colour type
+# the background is reported in.
+run_suite image-trim \
+  Sources/Passband/Lib/ImageFill.swift \
+  Sources/Passband/Lib/ImageTrim.swift \
+  Tests/ImageTrimTests.swift

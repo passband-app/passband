@@ -88,14 +88,14 @@ private struct ContactCard: View {
     @State private var copied = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: Space.s12) {
             header
             Hairline()
             history
             Hairline()
             actions
         }
-        .padding(14)
+        .padding(Space.s14)
         .frame(width: 320, alignment: .leading)
         .task(id: who.address) { await load() }
     }
@@ -116,15 +116,15 @@ private struct ContactCard: View {
     // MARK: - who
 
     private var header: some View {
-        HStack(alignment: .top, spacing: 11) {
+        HStack(alignment: .top, spacing: Space.scaled(11)) {
             Avatar(sender: who.sender, size: 40)
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: Space.scaled(3)) {
                 Text(name)
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(Typo.ui(15, weight: .semibold))
                     .foregroundStyle(Palette.ink)
                     .lineLimit(2)
                     .textSelection(.enabled)
-                HStack(spacing: 5) {
+                HStack(spacing: Space.scaled(5)) {
                     Text(who.address)
                         .font(Typo.rowSub)
                         .foregroundStyle(Palette.inkDim)
@@ -133,7 +133,7 @@ private struct ContactCard: View {
                         .textSelection(.enabled)
                     Button(action: copyAddress) {
                         Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(Typo.ui(10, weight: .semibold))
                     }
                     .buttonStyle(.textAction)
                     .help(copied ? "Copied" : "Copy email address")
@@ -147,7 +147,7 @@ private struct ContactCard: View {
     @ViewBuilder
     private var badges: some View {
         if let p = person, p.is_self || p.known_contact {
-            HStack(spacing: 5) {
+            HStack(spacing: Space.scaled(5)) {
                 if p.is_self {
                     Chip(text: "you", tone: Palette.accent)
                 } else if p.known_contact {
@@ -157,7 +157,7 @@ private struct ContactCard: View {
                         .help("You've written to them, so their mail is always signal")
                 }
             }
-            .padding(.top, 3)
+            .padding(.top, Space.scaled(3))
         }
     }
 
@@ -167,13 +167,13 @@ private struct ContactCard: View {
     private var history: some View {
         switch phase {
         case .loading:
-            HStack(spacing: 8) {
+            HStack(spacing: Space.s8) {
                 ProgressView().controlSize(.small)
                 Text("Reading your history with them")
                     .font(Typo.rowSub)
                     .foregroundStyle(Palette.inkFaint)
             }
-            .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
+            .frame(maxWidth: .infinity, minHeight: Space.scaled(36), alignment: .leading)
         case .unavailable:
             Text("No history available for this address.")
                 .font(Typo.rowSub)
@@ -185,7 +185,7 @@ private struct ContactCard: View {
 
     @ViewBuilder
     private func loaded(_ p: PersonCard) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: Space.s8) {
             if p.received == nil && p.sent == nil {
                 Text("No mail with them yet.")
                     .font(Typo.rowSub)
@@ -217,11 +217,11 @@ private struct ContactCard: View {
 
     /// One labelled line. The label column is fixed so the values line up.
     private func fact(_ label: String, _ value: String, detail: String? = nil) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
+        HStack(alignment: .firstTextBaseline, spacing: Space.s10) {
             Text(label)
                 .font(Typo.rowSub)
                 .foregroundStyle(Palette.inkFaint)
-                .frame(width: 66, alignment: .leading)
+                .frame(width: Typo.measure(66), alignment: .leading)
             VStack(alignment: .leading, spacing: 1) {
                 Text(value)
                     .font(Typo.rowSub)
@@ -240,13 +240,13 @@ private struct ContactCard: View {
     /// when it is wider than the address, because "all of fund.com is muted"
     /// is a different fact from "Ann is muted".
     private func ruleFact(_ rule: PersonCard.Rule) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
+        HStack(alignment: .firstTextBaseline, spacing: Space.s10) {
             Text("Rule")
                 .font(Typo.rowSub)
                 .foregroundStyle(Palette.inkFaint)
-                .frame(width: 66, alignment: .leading)
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 5) {
+                .frame(width: Typo.measure(66), alignment: .leading)
+            VStack(alignment: .leading, spacing: Space.s2) {
+                HStack(spacing: Space.scaled(5)) {
                     Chip(text: rule.disposition.label, tone: tone(rule.disposition))
                     if rule.match_pattern.lowercased() != who.address.lowercased() {
                         Text(rule.match_pattern)
@@ -269,24 +269,24 @@ private struct ContactCard: View {
     }
 
     private func recent(_ threads: [PersonCard.RecentThread]) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: Space.s4) {
             Text("Recent")
                 .font(Typo.sectionLabel)
                 .foregroundStyle(Palette.inkFaint)
                 .textCase(.uppercase)
-                .padding(.top, 4)
+                .padding(.top, Space.s4)
             ForEach(threads) { t in
                 let here = t.thread_id == store.threadId
                 Button {
                     dismiss()
-                    store.openThread(t.thread_id)
+                    store.openThread(t.thread_id, from: .reader)
                 } label: {
-                    HStack(spacing: 8) {
+                    HStack(spacing: Space.s8) {
                         Text(t.subject.isEmpty ? "(no subject)" : t.subject)
                             .font(Typo.rowSub)
                             .lineLimit(1)
                             .truncationMode(.tail)
-                        Spacer(minLength: 8)
+                        Spacer(minLength: Space.s8)
                         Text(here ? "open" : shortAge(t.last_at))
                             .font(Typo.num(10))
                             .foregroundStyle(Palette.inkFaintest)
@@ -302,7 +302,7 @@ private struct ContactCard: View {
     // MARK: - acting on them
 
     private var actions: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: Space.s14) {
             Button {
                 dismiss()
                 store.openCompose(ComposeState(to: who.address))

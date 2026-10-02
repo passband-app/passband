@@ -20,6 +20,8 @@
 //     daemon is rolled (hosted) or pulled as an image (self-host), and a note
 //     nobody can locate is a note nobody trusts
 
+import Foundation
+
 /// A dotted release version, ordered by component. Failable rather than
 /// lenient: a stamp that does not parse is not a version this code should
 /// silently rank, and every caller already has an honest answer for nil.
@@ -70,14 +72,38 @@ enum ReleaseSurface: String, CaseIterable, Sendable {
     }
 }
 
+/// The animation a headliner's page plays in the What's New walk. A KEY, not a
+/// drawing: this file stays free of SwiftUI, and the card maps each case to
+/// its scene (Views/Vignette/ReleaseVignettes.swift). The markdown ignores it.
+enum ReleaseVignette: String, CaseIterable, Sendable {
+    case mailList, flow, unsubscribe, clearStack
+}
+
 /// One bullet in a release.
 struct ReleaseItem: Sendable {
     let surface: ReleaseSurface
     let text: String
+    /// The line under a headliner's title on its page of the walk: how to use
+    /// the thing, in one sentence. A key written in backticks is set as a key.
+    let detail: String?
+    /// An SF Symbol makes this item a HEADLINER: the What's New card gives it
+    /// a page of its own in the walk (and a tile, once the release is an older
+    /// one). The author picks them, a few per release, because no rule can
+    /// tell the feature people updated for from the fix they will never
+    /// notice. The markdown ignores it.
+    let symbol: String?
+    /// The picture on that page. Without one the page draws the symbol.
+    let vignette: ReleaseVignette?
 
-    init(_ surface: ReleaseSurface, _ text: String) {
+    init(
+        _ surface: ReleaseSurface, _ text: String, detail: String? = nil, symbol: String? = nil,
+        vignette: ReleaseVignette? = nil
+    ) {
         self.surface = surface
         self.text = text
+        self.detail = detail
+        self.symbol = symbol
+        self.vignette = vignette
     }
 }
 
@@ -104,22 +130,150 @@ struct ReleaseNote: Identifiable, Sendable {
     func items(on surface: ReleaseSurface) -> [ReleaseItem] {
         items.filter { $0.surface == surface }
     }
+
+    var digest: ReleaseDigest { ReleaseDigest(self) }
+}
+
+/// One release arranged for READING rather than for the record. The table is
+/// written per surface because that is how the parts ship; read straight off it,
+/// the same feature appears twice ("Schedule an email for later" on the Mac and
+/// again on the phone) and "Bug fixes" weighs as much as the headline. This is
+/// the card's arrangement, and it lives here, next to the table and free of
+/// SwiftUI, so the test suite can hold it to that.
+struct ReleaseDigest: Sendable {
+    struct Headliner: Sendable, Identifiable {
+        let text: String
+        /// The page's second line, when the table wrote one.
+        let detail: String?
+        let symbol: String
+        /// The page's animation, when the table named one.
+        let vignette: ReleaseVignette?
+        /// Every surface the same words landed on, in surface order.
+        let surfaces: [ReleaseSurface]
+        var id: String { text }
+    }
+
+    struct Section: Sendable, Identifiable {
+        let surface: ReleaseSurface
+        /// The specific items, in authored order.
+        let items: [String]
+        /// The catch-alls ("Bug fixes"), said once in a footnote instead.
+        let extras: [String]
+        var id: ReleaseSurface { surface }
+    }
+
+    let headliners: [Headliner]
+    /// Surfaces with anything left to say, in surface order.
+    let sections: [Section]
+
+    /// Filler every release carries. True, but not news: the card says it once,
+    /// quietly, after the things that are.
+    static let catchAlls: Set<String> = ["bug fixes", "ui improvements", "visual improvements"]
+
+    init(_ note: ReleaseNote) {
+        // A headliner claims its words on EVERY surface, symbol or not, so a
+        // feature that shipped on two surfaces is one tile tagged with both.
+        var headliners: [Headliner] = []
+        for item in note.items {
+            guard let symbol = item.symbol else { continue }
+            let key = Self.key(item.text)
+            guard !headliners.contains(where: { Self.key($0.text) == key }) else { continue }
+            let surfaces = ReleaseSurface.allCases.filter { surface in
+                note.items(on: surface).contains { Self.key($0.text) == key }
+            }
+            headliners.append(
+                Headliner(
+                    text: item.text, detail: item.detail, symbol: symbol, vignette: item.vignette,
+                    surfaces: surfaces))
+        }
+        let claimed = Set(headliners.map { Self.key($0.text) })
+
+        self.headliners = headliners
+        self.sections = ReleaseSurface.allCases.compactMap { surface in
+            let left = note.items(on: surface).map(\.text).filter { !claimed.contains(Self.key($0)) }
+            let items = left.filter { !Self.catchAlls.contains(Self.key($0)) }
+            let extras = left.filter { Self.catchAlls.contains(Self.key($0)) }
+            guard !items.isEmpty || !extras.isEmpty else { return nil }
+            return Section(surface: surface, items: items, extras: extras)
+        }
+    }
+
+    /// "Plus UI improvements and bug fixes." Mid-sentence, so every word is
+    /// lowered except an acronym: "UI" survives, the table's "Bug Fixes" does not.
+    static func footnote(_ extras: [String]) -> String? {
+        guard !extras.isEmpty else { return nil }
+        let words = extras.map { text in
+            text.split(separator: " ").map { word in
+                word.count > 1 && word.allSatisfy(\.isUppercase) ? String(word) : word.lowercased()
+            }.joined(separator: " ")
+        }
+        let joined =
+            words.count == 1
+            ? words[0]
+            : words.dropLast().joined(separator: ", ") + " and " + words.last!
+        return "Plus \(joined)."
+    }
+
+    /// What makes two lines "the same words": case, edge whitespace and
+    /// trailing punctuation do not count.
+    static func key(_ text: String) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters)).lowercased()
+    }
 }
 
 enum ReleaseNotes {
     /// THE TABLE. Newest first, and the only place a release note is written.
     static let all: [ReleaseNote] = [
         ReleaseNote(
+            version: "0.0.12",
+            date: "2026-10-01",
+            headline: "Philipp's Update",
+            items: [
+                ReleaseItem(
+                    .app, "\"All Mail\" overhaul",
+                    detail: "Subjects, dates, day headings, filters",
+                    symbol: "list.bullet.rectangle", vignette: .mailList),
+                ReleaseItem(
+                    .app, "Flow mode",
+                    detail: "Press `space` and clear your inbox faster",
+                    symbol: "wind", vignette: .flow),
+                ReleaseItem(
+                    .app, "Zero-effort Unsubscribe",
+                    detail: "Pressing `u` handles 98% of unsubscribing",
+                    symbol: "minus.circle", vignette: .unsubscribe),
+                ReleaseItem(
+                    .app, "Clear a stack",
+                    detail: "Hold `e` to clear every email in a Reading stack",
+                    symbol: "square.stack.3d.up", vignette: .clearStack),
+                ReleaseItem(.app, "Reading puts articles above promotions"),
+                ReleaseItem(.app, "Better logos in Reading cards"),
+                ReleaseItem(.app, "j and k wrap around on the sitrep. Arrow keys work on Rules and Groups"),
+                ReleaseItem(.app, "Backspace removes a recipient in a reply"),
+                ReleaseItem(.app, "Name an account Personal, Work or anything else"),
+                ReleaseItem(.app, "Click a sender to view their sender profile"),
+                ReleaseItem(.app, "Bug fixes"),
+                ReleaseItem(.ios, "All mail has day headings and filters, and finished mail stays visible"),
+                ReleaseItem(.ios, "Reading puts articles above promotions"),
+                ReleaseItem(.ios, "Reading shows every sender, folded after 8"),
+                ReleaseItem(.ios, "Name an account Personal, Work or anything else"),
+                ReleaseItem(.ios, "Bug fixes"),
+                ReleaseItem(.daemon, "Unsubscribes for you"),
+                ReleaseItem(.daemon, "Triage sorts Reading into articles and promotions"),
+                ReleaseItem(.daemon, "Writes the sitrep headline, and only ever good news"),
+                ReleaseItem(.daemon, "Cards carry the sender's real name"),
+                ReleaseItem(.daemon, "Bug fixes"),
+            ]),
+        ReleaseNote(
             version: "0.0.11",
             date: "2026-09-29",
             headline: "Ethan's Update",
             items: [
-                ReleaseItem(.app, "Schedule an email for later"),
+                ReleaseItem(.app, "Schedule an email for later", symbol: "clock.badge"),
                 ReleaseItem(.app, "Better draft email UI"),
                 ReleaseItem(.app, "Forwards are kept as drafts too"),
-                ReleaseItem(.app, "Click a sender to see their contact card"),
+                ReleaseItem(.app, "Click a sender to see their contact card", symbol: "person.crop.circle"),
                 ReleaseItem(.app, "To, Cc and Bcc show in the reader"),
-                ReleaseItem(.app, "Opening an email is instant"),
+                ReleaseItem(.app, "Opening an email is instant", symbol: "bolt"),
                 ReleaseItem(.app, "Click a rule to edit it. A half-written rule survives Esc"),
                 ReleaseItem(.app, "Drag a recipient from To to Cc or Bcc"),
                 ReleaseItem(.app, "Space opens the first thing that needs you"),
@@ -132,7 +286,7 @@ enum ReleaseNotes {
                 ReleaseItem(.ios, "Wide emails fit the screen"),
                 ReleaseItem(.ios, "One chip for autopay bills"),
                 ReleaseItem(.daemon, "Scheduled emails wait in the daemon and send on time"),
-                ReleaseItem(.daemon, "Triage runs on Opus 5.5"),
+                ReleaseItem(.daemon, "Triage runs on Opus 5.5", symbol: "sparkles"),
                 ReleaseItem(.daemon, "New accounts get triaged while the first sync is still running"),
                 ReleaseItem(.daemon, "Suggests a rule for a sender from how you treat their mail"),
                 ReleaseItem(.daemon, "Contact details for the contact card"),
@@ -148,14 +302,14 @@ enum ReleaseNotes {
                 ReleaseItem(.app, "Search experience tuning"),
                 ReleaseItem(.app, "Bug Fixes"),
                 ReleaseItem(.ios, "New intro"),
-                ReleaseItem(.ios, "Attach files to emails"),
-                ReleaseItem(.ios, "Undo send for 5s"),
+                ReleaseItem(.ios, "Attach files to emails", symbol: "paperclip"),
+                ReleaseItem(.ios, "Undo send for 5s", symbol: "arrow.uturn.backward"),
                 ReleaseItem(.ios, "Search remembers recent searches and finds partial matches"),
                 ReleaseItem(.ios, "\"Newsletters\" is now named \"Reading\""),
-                ReleaseItem(.ios, "Chat-style emails are bubbles"),
+                ReleaseItem(.ios, "Chat-style emails are bubbles", symbol: "bubble.left.and.bubble.right"),
                 ReleaseItem(.ios, "Notifications show a readable name and your login code"),
                 ReleaseItem(.ios, "Tapping a login-code notification opens your codes"),
-                ReleaseItem(.ios, "Settings overhaul"),
+                ReleaseItem(.ios, "Settings overhaul", symbol: "gearshape"),
             ]),
         ReleaseNote(
             version: "0.0.8",
@@ -163,10 +317,10 @@ enum ReleaseNotes {
             headline: "Biggest update by far. Now we're a real product?",
             items: [
                 ReleaseItem(.app, "Rebuilt onboarding"),
-                ReleaseItem(.app, "Attach files to emails"),
-                ReleaseItem(.app, "Undo send for 5s"),
+                ReleaseItem(.app, "Attach files to emails", symbol: "paperclip"),
+                ReleaseItem(.app, "Undo send for 5s", symbol: "arrow.uturn.backward"),
                 ReleaseItem(.app, "New email composer"),
-                ReleaseItem(.app, "Completely overhauled search functionality"),
+                ReleaseItem(.app, "Completely overhauled search functionality", symbol: "magnifyingglass"),
                 ReleaseItem(.app, "Automatic agentic search"),
                 ReleaseItem(.app, "\"Newsletters\" is now named \"Reading\""),
                 ReleaseItem(.app, "Better reading experience"),
@@ -174,7 +328,7 @@ enum ReleaseNotes {
                 ReleaseItem(.app, "Better package tracking"),
                 ReleaseItem(.app, "Zoom with Cmd+, Cmd- and Cmd-0"),
                 ReleaseItem(.app, "Audit log is moved to settings"),
-                ReleaseItem(.daemon, "Rebuilt triage from the ground up"),
+                ReleaseItem(.daemon, "Rebuilt triage from the ground up", symbol: "wand.and.stars"),
                 ReleaseItem(.daemon, "Instant notifications for important emails only"),
                 ReleaseItem(.daemon, "For Your Eyes is ranked with importance AND recency"),
                 ReleaseItem(.daemon, "Shipments record the item name, merchant and order numbers"),

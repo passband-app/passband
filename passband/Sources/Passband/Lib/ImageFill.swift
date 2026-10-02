@@ -48,11 +48,41 @@ enum ImageFill {
         var r = 0, g = 0, b = 0, n = 0
     }
 
+    /// The two neutral stages a mark with no background of its own is set on:
+    /// the dark one for light ink, the light one for dark ink.
+    private static let darkStage = RGB(hex: 0x26_31_3C)
+    private static let lightStage = RGB(hex: 0xE9_F1_F9)
+
+    /// The stage for art that is INK ON TRANSPARENCY: whichever neutral its
+    /// opaque pixels stand out against. Never the ink's own colour — that is
+    /// the one fill guaranteed to hide it.
+    nonisolated static func stageRGB(_ image: CGImage) -> RGB? {
+        guard let px = samples(image) else { return nil }
+        var sum = 0.0
+        var n = 0
+        var i = 0
+        while i + 3 < px.count {
+            defer { i += 4 }
+            let a = Int(px[i + 3])
+            if a < 128 { continue }
+            sum += luminance(straighten(px[i], a), straighten(px[i + 1], a), straighten(px[i + 2], a))
+            n += 1
+        }
+        guard n > 0 else { return nil }
+        return sum / Double(n) > 150 ? darkStage : lightStage
+    }
+
     /// DOMINANT colour, not the average: heroes are mostly white margin, so an
     /// average washes out to near-white. 16x16 downsample, skip transparent /
     /// near-white / near-black, then the biggest 3-bit bucket's true average.
     nonisolated static func dominantRGB(_ image: CGImage) -> RGB? {
         guard let px = samples(image) else { return nil }
+
+        // A QUARTER of it transparent means the opaque part is a mark, and a
+        // mark's dominant colour is the mark: a grey wordmark got a grey
+        // square and vanished into it. Contrast, not a match.
+        let clear = stride(from: 3, to: px.count, by: 4).reduce(0) { $0 + (px[$1] < 128 ? 1 : 0) }
+        if clear * 4 >= side * side { return stageRGB(image) }
 
         var buckets: [Int: Bucket] = [:]
         var ar = 0, ag = 0, ab = 0, an = 0
@@ -98,8 +128,8 @@ enum ImageFill {
         // would vanish against the card. Stage it on its OPPOSITE instead, and
         // mirror that for an all-black mark so it never sits on near-black.
         let lum = (0.299 * Double(ar) + 0.587 * Double(ag) + 0.114 * Double(ab)) / Double(an)
-        if lum > 225 { return RGB(hex: 0x26_31_3C) }
-        if lum < 30 { return RGB(hex: 0xE9_F1_F9) }
+        if lum > 225 { return darkStage }
+        if lum < 30 { return lightStage }
         return RGB(sum: ar, ag, ab, over: an)
     }
 
@@ -108,7 +138,7 @@ enum ImageFill {
     }
 
     /// Undo premultiplication for one channel.
-    private static func straighten(_ value: UInt8, _ alpha: Int) -> Int {
+    static func straighten(_ value: UInt8, _ alpha: Int) -> Int {
         guard alpha > 0, alpha < 255 else { return Int(value) }
         return min(255, Int(value) * 255 / alpha)
     }

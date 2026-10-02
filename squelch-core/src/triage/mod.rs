@@ -14,6 +14,7 @@ pub mod deadline;
 pub mod decision;
 pub mod events;
 pub mod extract;
+pub mod fye_headline;
 pub mod llm;
 pub mod login_code;
 pub mod money;
@@ -31,6 +32,7 @@ pub mod shipment;
 pub mod stage1_llm;
 pub mod stage2;
 pub(crate) mod text;
+pub mod unsub_page;
 
 pub use calendar::{CalendarInfo, CalendarKind, detect_calendar};
 pub use deadline::DeadlineHit;

@@ -111,7 +111,7 @@ struct InlineReply: View {
     var body: some View {
         if let compose, let parent {
             VStack(alignment: .leading, spacing: 0) {
-                VStack(alignment: .leading, spacing: 9) {
+                VStack(alignment: .leading, spacing: Space.scaled(9)) {
                     headerLine(compose, parent: parent)
                     if editingRecipients {
                         recipientEditor(compose)
@@ -126,8 +126,8 @@ struct InlineReply: View {
                     }
                 }
                 .padding(.horizontal, Self.gutter)
-                .padding(.top, 12)
-                .padding(.bottom, 10)
+                .padding(.top, Space.s12)
+                .padding(.bottom, Space.s10)
                 // Anywhere on the composer, same as the pane: see
                 // `composeDropTarget`.
                 .composeDropTarget(.inlineReply, targeted: $dropTargeted)
@@ -228,19 +228,19 @@ struct InlineReply: View {
     // MARK: - panes
 
     private func headerLine(_ compose: ComposeState, parent: ClientMessage) -> some View {
-        HStack(spacing: 5) {
+        HStack(spacing: Space.scaled(5)) {
             // THE WHOLE "replying to <who>" PHRASE IS THE DISCLOSURE, chevron
             // and all: the thing you want to change is the thing you click.
             Button {
                 editingRecipients.toggle()
                 if editingRecipients { focusedField = .to }
             } label: {
-                HStack(spacing: 5) {
+                HStack(spacing: Space.scaled(5)) {
                     Image(
                         systemName: editingRecipients
                             ? "chevron.down" : "chevron.right"
                     )
-                    .font(.system(size: 8, weight: .semibold))
+                    .font(Typo.ui(8, weight: .semibold))
                     .foregroundStyle(Palette.inkFaintest)
                     Text(compose.replyAll ? "replying to all" : "replying to")
                         .font(Typo.micro)
@@ -249,7 +249,7 @@ struct InlineReply: View {
                     // rendered as Text only, never as markup, and never
                     // interpolated into a localized literal.
                     Text(headerTarget(compose, parent: parent))
-                        .font(.system(size: 11, weight: .medium))
+                        .font(Typo.ui(11, weight: .medium))
                         .foregroundStyle(Palette.inkDim)
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -267,7 +267,7 @@ struct InlineReply: View {
                 .foregroundStyle(Palette.inkFaintest)
                 .lineLimit(1)
                 .truncationMode(.tail)
-            Spacer(minLength: 8)
+            Spacer(minLength: Space.s8)
             // The tracker switch is DESKTOP ONLY, same as the pane. This
             // header is one line in a reader column on a phone, already
             // carrying the recipients door and the subject; a switch nobody
@@ -326,7 +326,7 @@ struct InlineReply: View {
                 // The one field with nothing to seed it says why it is empty,
                 // rather than reading as a value that got lost.
                 placeholder: { $0 == .bcc ? "nobody is blind-copied" : nil })
-                .padding(.bottom, 2)
+                .padding(.bottom, Space.s2)
         } else {
             Text("deriving recipients…")
                 .font(Typo.micro)
@@ -356,7 +356,7 @@ struct InlineReply: View {
             onDropHover: { dropTargeted = $0 }
         )
         .frame(height: Self.editorHeight)
-        .padding(8)
+        .padding(Space.s8)
         .background(
             RoundedRectangle(cornerRadius: 9, style: .continuous)
                 .fill(Palette.canvas.opacity(0.65))
@@ -373,13 +373,13 @@ struct InlineReply: View {
     /// narrower and the mail beside it is inset 18, so the reply lines up with
     /// the message it answers rather than sitting proud of it.
     #if os(macOS)
-        private static let gutter: CGFloat = 22
-        private static let editorHeight: CGFloat = 150
+        private static var gutter: CGFloat { Space.scaled(22) }
+        private static var editorHeight: CGFloat { Space.scaled(150) }
     #else
-        private static let gutter: CGFloat = 18
+        private static var gutter: CGFloat { Space.scaled(18) }
         /// Short enough that a couple of lines of the email survive above a
         /// raised keyboard. The editor scrolls itself past that.
-        private static let editorHeight: CGFloat = 104
+        private static var editorHeight: CGFloat { Space.scaled(104) }
     #endif
 
     #if os(macOS)
@@ -401,7 +401,7 @@ struct InlineReply: View {
         /// a reply reads the same wherever it started.
         @ViewBuilder
         private func actionBar(_ compose: ComposeState) -> some View {
-            HStack(spacing: 8) {
+            HStack(spacing: Space.s8) {
                 Spacer()
                 Button(ComposeLabels.dismiss) { store.closeInlineReply() }
                     .buttonStyle(.glass)
@@ -418,7 +418,7 @@ struct InlineReply: View {
                     .tint(Palette.accent)
             }
             .padding(.horizontal, Self.gutter)
-            .padding(.bottom, 10)
+            .padding(.bottom, Space.s10)
         }
     #endif
 

@@ -372,3 +372,142 @@ async fn rate_limit_returns_429_past_the_per_minute_budget() {
     let resp = reqwest::get(format!("{relay}/healthz")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 }
+
+/// The push-only bearer, end to end. With both tokens configured the push
+/// token pushes and can NOT drain, the full token does both, and a wrong one
+/// does neither. A refused drain must also delete nothing: a cursor is an ack,
+/// and a 401 that still acked would be the hole by another name.
+#[tokio::test]
+async fn the_push_token_pushes_and_cannot_drain_opens() {
+    const FULL: &str = "0123456789abcdef0123456789abcdef";
+    const PUSH_ONLY: &str = "fedcba9876543210fedcba9876543210";
+    const OPEN: &str = "aaaaAAAA1111-_bb";
+
+    let (apns, mock) = spawn_mock().await;
+    let mut cfg = config(Some(apns), Some(FULL.into()));
+    cfg.push_token = Some(PUSH_ONLY.into());
+    let relay = spawn_relay(cfg).await;
+    let client = reqwest::Client::new();
+    let body = json!({ "device_tokens": [LIVE], "event_id": 1 });
+
+    let push_with = |bearer: &'static str| {
+        client
+            .post(format!("{relay}/v1/push"))
+            .header("authorization", format!("Bearer {bearer}"))
+            .json(&body)
+            .send()
+    };
+    let drain_with = |bearer: &'static str| {
+        client
+            .get(format!("{relay}/v1/opens?cursor=1000000"))
+            .header("authorization", format!("Bearer {bearer}"))
+            .send()
+    };
+
+    // One buffered open to steal, if the split leaked.
+    let pixel = client
+        .get(format!("{relay}/t/{OPEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(pixel.status(), StatusCode::OK);
+
+    // The push-only bearer reaches APNs.
+    assert_eq!(push_with(PUSH_ONLY).await.unwrap().status(), StatusCode::OK);
+    assert_eq!(mock.seen.lock().unwrap().len(), 1);
+
+    // ...and is a bare 401 at the drain, with nothing in the body.
+    let resp = drain_with(PUSH_ONLY).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert!(resp.bytes().await.unwrap().is_empty());
+
+    // A wrong bearer gets neither route.
+    let wrong = "0000000000000000000000000000000000000000";
+    assert_eq!(
+        push_with(wrong).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        drain_with(wrong).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(mock.seen.lock().unwrap().len(), 1, "a 401 reached APNs");
+
+    // The full bearer still does both. The refused drains above presented a
+    // cursor past everything and acked nothing: the open is still here.
+    assert_eq!(push_with(FULL).await.unwrap().status(), StatusCode::OK);
+    assert_eq!(mock.seen.lock().unwrap().len(), 2);
+    let resp = client
+        .get(format!("{relay}/v1/opens"))
+        .header("authorization", format!("Bearer {FULL}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let opens: Value = resp.json().await.unwrap();
+    assert_eq!(opens["opens"].as_array().unwrap().len(), 1);
+    assert_eq!(opens["opens"][0]["token"], OPEN);
+}
+
+/// Without a push token, a value that WOULD be one is just a wrong bearer on
+/// both routes: an unset variable adds no door.
+#[tokio::test]
+async fn without_a_push_token_only_the_full_bearer_gets_in() {
+    const FULL: &str = "0123456789abcdef0123456789abcdef";
+    let (apns, mock) = spawn_mock().await;
+    let relay = spawn_relay(config(Some(apns), Some(FULL.into()))).await;
+    let client = reqwest::Client::new();
+    let body = json!({ "device_tokens": [LIVE], "event_id": 1 });
+
+    for (bearer, want) in [
+        ("fedcba9876543210fedcba9876543210", StatusCode::UNAUTHORIZED),
+        (FULL, StatusCode::OK),
+    ] {
+        let resp = client
+            .post(format!("{relay}/v1/push"))
+            .header("authorization", format!("Bearer {bearer}"))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), want, "push");
+        let resp = client
+            .get(format!("{relay}/v1/opens"))
+            .header("authorization", format!("Bearer {bearer}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), want, "opens");
+    }
+    assert_eq!(mock.seen.lock().unwrap().len(), 1);
+}
+
+/// The push-only bearer's junk is still outside the limiter: a flood of wrong
+/// guesses on /v1/push spends nothing, and the push token keeps its budget.
+#[tokio::test]
+async fn the_push_token_keeps_auth_outside_the_rate_limit() {
+    const FULL: &str = "0123456789abcdef0123456789abcdef";
+    const PUSH_ONLY: &str = "fedcba9876543210fedcba9876543210";
+    let (apns, mock) = spawn_mock().await;
+    let mut cfg = config(Some(apns), Some(FULL.into()));
+    cfg.push_token = Some(PUSH_ONLY.into());
+    let relay = spawn_relay(cfg).await;
+    let client = reqwest::Client::new();
+    let body = json!({ "device_tokens": [LIVE], "event_id": 1 });
+    let url = format!("{relay}/v1/push");
+
+    let budget = squelch_relay::ratelimit::REQUESTS_PER_MINUTE as usize;
+    for i in 0..budget + 1 {
+        let resp = client.post(&url).json(&body).send().await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "junk request {i}");
+    }
+    let resp = client
+        .post(&url)
+        .header("authorization", format!("Bearer {PUSH_ONLY}"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(mock.seen.lock().unwrap().len(), 1);
+}

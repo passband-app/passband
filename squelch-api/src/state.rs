@@ -552,10 +552,9 @@ impl ApiState {
         self.tracking_base_url = base_url
             .map(|u| u.trim().trim_end_matches('/').to_string())
             .filter(|u| !u.is_empty())
-            .filter(|u| {
-                let lower = u.to_ascii_lowercase();
-                lower.starts_with("http://") || lower.starts_with("https://")
-            })
+            // The shared predicate: the opens-poller gate and the startup
+            // posture report apply the same rule, so all three agree.
+            .filter(|u| squelch_core::tracking::is_mintable_base_url(u))
             .map(|u| Arc::from(u.as_str()));
         self
     }

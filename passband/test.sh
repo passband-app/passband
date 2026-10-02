@@ -480,6 +480,14 @@ run_suite triage-targets \
   Sources/Passband/Lib/TriageTargets.swift \
   Tests/TriageTargetsTests.swift
 
+# Which APNs environment a push registration declares. A token is valid in one
+# environment only, and the wrong answer fails silently on somebody's lock
+# screen, so the signing rule is asserted against synthetic profiles. iOS
+# source, but Foundation only, which is why it compiles here.
+run_suite apns-environment \
+  Sources/PassbandiOS/App/APNsEnvironment.swift \
+  Tests/APNsEnvironmentTests.swift
+
 run_suite capability-probe \
   Sources/Passband/Model/APIError.swift \
   Tests/CapabilityProbeTests.swift

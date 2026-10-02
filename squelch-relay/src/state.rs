@@ -85,6 +85,12 @@ impl RelayState {
         self.inner.config.auth_token.as_deref()
     }
 
+    /// The push-only bearer, accepted by `POST /v1/push` and never by
+    /// `GET /v1/opens`. `None` when unset, which is the relay as it always was.
+    pub fn push_token(&self) -> Option<&str> {
+        self.inner.config.push_token.as_deref()
+    }
+
     /// Charge one push against `ip`'s bucket. False means "over the limit".
     /// Poisoning is RECOVERED, not propagated: the guarded value is a token
     /// bucket with no invariant a panic could corrupt, and `.expect()` would

@@ -266,7 +266,7 @@ const TOK_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 fn upsert_device_is_idempotent_and_refreshes_liveness() {
     let (store, acct) = store();
 
-    let first = store.upsert_device(acct, TOK_A, "ios", None).unwrap();
+    let first = store.upsert_device(acct, TOK_A, "ios", None, None).unwrap();
     assert_eq!(first.token, TOK_A);
     assert_eq!(first.platform, "ios");
     assert_eq!(first.account_id, acct);
@@ -274,14 +274,14 @@ fn upsert_device_is_idempotent_and_refreshes_liveness() {
     // Same token again: same row id, `created_at` preserved (first sight is a
     // fact), `last_registered_at` moved forward.
     std::thread::sleep(std::time::Duration::from_millis(5));
-    let again = store.upsert_device(acct, TOK_A, "ios", None).unwrap();
+    let again = store.upsert_device(acct, TOK_A, "ios", None, None).unwrap();
     assert_eq!(again.id, first.id, "a re-register must not fork a row");
     assert_eq!(again.created_at, first.created_at);
     assert!(again.last_registered_at >= first.last_registered_at);
     assert_eq!(store.list_devices(acct).unwrap().len(), 1);
 
     // A distinct token is a distinct device.
-    store.upsert_device(acct, TOK_B, "ios", None).unwrap();
+    store.upsert_device(acct, TOK_B, "ios", None, None).unwrap();
     let all = store.list_devices(acct).unwrap();
     assert_eq!(all.len(), 2);
     assert_eq!(all[0].id, first.id, "listed oldest-first");
@@ -295,11 +295,11 @@ fn a_cross_account_token_collision_is_refused_not_rebound() {
     let (store, acct) = store();
     let other = store.ensure_account("other@example.com").unwrap();
 
-    let a = store.upsert_device(acct, TOK_A, "ios", None).unwrap();
+    let a = store.upsert_device(acct, TOK_A, "ios", None, None).unwrap();
     assert!(store.list_devices(other).unwrap().is_empty());
 
     let err = store
-        .upsert_device(other, TOK_A, "macos", None)
+        .upsert_device(other, TOK_A, "macos", None, None)
         .expect_err("another account must not be able to adopt this token");
     assert!(
         matches!(err, CoreError::InvalidInput(ref m) if !m.contains(TOK_A)),
@@ -317,8 +317,77 @@ fn a_cross_account_token_collision_is_refused_not_rebound() {
     assert!(store.list_devices(other).unwrap().is_empty());
 
     // The owner can still re-register it, of course.
-    let refreshed = store.upsert_device(acct, TOK_A, "ios", None).unwrap();
+    let refreshed = store.upsert_device(acct, TOK_A, "ios", None, None).unwrap();
     assert_eq!(refreshed.id, a.id);
+}
+
+/// A token's APNs environment round-trips through both reads, and a
+/// re-registration WITHOUT one keeps what is stored: the environment is a fact
+/// about the token, so an older build that never sends the field must not
+/// erase what a newer build declared. A different `Some` does replace it.
+#[test]
+fn device_environment_round_trips_and_survives_a_silent_reregister() {
+    let (store, acct) = store();
+
+    let d = store
+        .upsert_device(acct, TOK_A, "ios", None, Some("sandbox"))
+        .unwrap();
+    assert_eq!(d.environment.as_deref(), Some("sandbox"));
+    assert_eq!(
+        store.list_devices(acct).unwrap()[0].environment.as_deref(),
+        Some("sandbox")
+    );
+
+    // Same token, field absent (an older build): KEPT, while `tag` still
+    // follows its overwrite rule in the same statement.
+    let again = store
+        .upsert_device(acct, TOK_A, "ios", Some("t1"), None)
+        .unwrap();
+    assert_eq!(again.id, d.id);
+    assert_eq!(again.environment.as_deref(), Some("sandbox"));
+    assert_eq!(again.tag.as_deref(), Some("t1"));
+
+    // Same token, a different declared value: REPLACED.
+    let moved = store
+        .upsert_device(acct, TOK_A, "ios", Some("t1"), Some("production"))
+        .unwrap();
+    assert_eq!(moved.environment.as_deref(), Some("production"));
+    assert_eq!(
+        store.list_devices(acct).unwrap()[0].environment.as_deref(),
+        Some("production")
+    );
+
+    // A device that never said reads back None.
+    let quiet = store.upsert_device(acct, TOK_B, "ios", None, None).unwrap();
+    assert_eq!(quiet.environment, None);
+}
+
+/// A row written before the column existed reads back `None` once the
+/// migration has added it: NOT backfilled, so the pusher falls back to its
+/// configured environment for exactly the rows that always used it.
+#[test]
+fn a_pre_migration_device_reads_back_with_no_environment() {
+    let (store, acct) = store();
+    {
+        let conn = store.lock().unwrap();
+        // Rewind the table to its pre-column shape, with a row in it.
+        conn.execute_batch("ALTER TABLE devices DROP COLUMN environment")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO devices(account_id, token, platform, tag, created_at, last_registered_at)
+             VALUES(?1, ?2, 'ios', NULL, '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z')",
+            rusqlite::params![acct, TOK_A],
+        )
+        .unwrap();
+        super::super::migrate::migrate(&conn).unwrap();
+    }
+    let all = store.list_devices(acct).unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].token, TOK_A);
+    assert_eq!(
+        all[0].environment, None,
+        "pre-existing rows are not backfilled"
+    );
 }
 
 /// Delete-by-token is the shape both the human door's DELETE and the pusher's
@@ -327,8 +396,8 @@ fn a_cross_account_token_collision_is_refused_not_rebound() {
 fn delete_device_by_token_is_scoped_and_idempotent() {
     let (store, acct) = store();
     let other = store.ensure_account("other@example.com").unwrap();
-    store.upsert_device(acct, TOK_A, "ios", None).unwrap();
-    store.upsert_device(acct, TOK_B, "ios", None).unwrap();
+    store.upsert_device(acct, TOK_A, "ios", None, None).unwrap();
+    store.upsert_device(acct, TOK_B, "ios", None, None).unwrap();
 
     // Another account cannot delete this account's device.
     assert!(!store.delete_device_by_token(other, TOK_A).unwrap());
@@ -346,6 +415,137 @@ fn delete_device_by_token_is_scoped_and_idempotent() {
         !store
             .delete_device_by_token(acct, "ffff0000ffff0000")
             .unwrap()
+    );
+}
+
+// ---- THE PER-ACCOUNT DEVICE CAP ------------------------------------------
+
+use super::super::events::MAX_DEVICES_PER_ACCOUNT as CAP;
+
+/// A distinct, token-shaped value per index.
+fn cap_token(i: usize) -> String {
+    format!("{i:064x}")
+}
+
+/// Pin a row's `last_registered_at`, so "oldest" is a fact of the test and not
+/// of how fast the clock ticks between upserts.
+fn age_device(store: &SqliteStore, account: i64, token: &str, at: &str) {
+    let conn = store.lock().unwrap();
+    let n = conn
+        .execute(
+            "UPDATE devices SET last_registered_at = ?3 WHERE account_id = ?1 AND token = ?2",
+            rusqlite::params![account, token, at],
+        )
+        .unwrap();
+    assert_eq!(n, 1);
+}
+
+/// Going over the cap EVICTS the least recently registered rows rather than
+/// refusing the new one, and never the row just written.
+#[test]
+fn registering_past_the_cap_evicts_the_stalest_rows() {
+    let (store, acct) = store();
+    for i in 0..CAP + 3 {
+        store
+            .upsert_device(acct, &cap_token(i), "ios", None, None)
+            .unwrap();
+        // Strictly increasing ages by construction: token 0 is the stalest.
+        age_device(
+            &store,
+            acct,
+            &cap_token(i),
+            &format!("2026-09-01T00:00:{:02}Z", i),
+        );
+    }
+    let left: Vec<String> = store
+        .list_devices(acct)
+        .unwrap()
+        .into_iter()
+        .map(|d| d.token)
+        .collect();
+    assert_eq!(left.len(), CAP);
+    for gone in 0..3 {
+        assert!(!left.contains(&cap_token(gone)), "token {gone} survived");
+    }
+    for kept in 3..CAP + 3 {
+        assert!(left.contains(&cap_token(kept)), "token {kept} was evicted");
+    }
+}
+
+/// Re-registering an old token refreshes it, so a live phone that foregrounds
+/// survives the next eviction and the next-stalest row goes instead. Ages are
+/// compared PARSED: the refreshed row's offset spelling would collate before
+/// the others as text, and must not.
+#[test]
+fn a_reregistered_token_survives_the_next_eviction() {
+    let (store, acct) = store();
+    for i in 0..CAP {
+        store
+            .upsert_device(acct, &cap_token(i), "ios", None, None)
+            .unwrap();
+        age_device(
+            &store,
+            acct,
+            &cap_token(i),
+            &format!("2026-09-01T00:00:{:02}Z", i),
+        );
+    }
+    // Token 0 foregrounds: a real refresh through the upsert.
+    store
+        .upsert_device(acct, &cap_token(0), "ios", None, None)
+        .unwrap();
+    // Then pin it to an instant that is LATER than every other row but whose
+    // text sorts FIRST ("2026-08-..." with a +offset still means September 1).
+    age_device(&store, acct, &cap_token(0), "2026-08-31T23:00:59-01:00");
+
+    store
+        .upsert_device(acct, &cap_token(CAP), "ios", None, None)
+        .unwrap();
+    let left: Vec<String> = store
+        .list_devices(acct)
+        .unwrap()
+        .into_iter()
+        .map(|d| d.token)
+        .collect();
+    assert_eq!(left.len(), CAP);
+    assert!(
+        left.contains(&cap_token(0)),
+        "the refreshed token was evicted"
+    );
+    assert!(
+        !left.contains(&cap_token(1)),
+        "the next-stalest token should have gone"
+    );
+    assert!(
+        left.contains(&cap_token(CAP)),
+        "the new row must never be evicted"
+    );
+}
+
+/// The cap is PER ACCOUNT: another account's rows are neither counted toward
+/// this one's cap nor evicted by it.
+#[test]
+fn the_device_cap_never_counts_or_evicts_another_account() {
+    let (store, acct) = store();
+    let other = store.ensure_account("other@example.com").unwrap();
+    // The other account's rows are the STALEST in the database.
+    for i in 0..CAP {
+        let token = format!("{:064x}", 0xf000 + i);
+        store
+            .upsert_device(other, &token, "ios", None, None)
+            .unwrap();
+        age_device(&store, other, &token, "2020-01-01T00:00:00Z");
+    }
+    for i in 0..CAP + 2 {
+        store
+            .upsert_device(acct, &cap_token(i), "ios", None, None)
+            .unwrap();
+    }
+    assert_eq!(store.list_devices(acct).unwrap().len(), CAP);
+    assert_eq!(
+        store.list_devices(other).unwrap().len(),
+        CAP,
+        "another account's rows were evicted"
     );
 }
 

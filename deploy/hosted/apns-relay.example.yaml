@@ -1,0 +1,153 @@
+# The APNs relay's PUSH-ONLY bearer, which every tenant daemon pushes with.
+#
+# DO NOT apply this file as it stands, and do not commit a filled-in copy. The
+# value is created on the relay and piped straight into the Secret, so it never
+# reaches a file, an argument list or a terminal.
+#
+# ## What goes in it
+#
+# The relay's SQUELCH_RELAY_PUSH_TOKEN. NEVER its SQUELCH_RELAY_AUTH_TOKEN.
+#
+# The relay takes two bearers. The full one (SQUELCH_RELAY_AUTH_TOKEN) opens
+# POST /v1/push AND GET /v1/opens, the drain of the read-tracking buffer, which
+# is ONE global queue: presenting a cursor deletes every row at or below it,
+# whoever those rows belong to. The push-only one opens POST /v1/push and gets a
+# 401 at /v1/opens. The full token stays with self-hosted daemons and the
+# operator. Tenants get the push token, so a compromised tenant pod cannot read,
+# delete, or (by replaying the open tokens it read to the public pixel) forge
+# anybody's opens.
+#
+# A Secret created from the FULL auth token before the push token existed
+# (an earlier revision of this file said to) MUST BE REPLACED before the
+# SQUELCH_WARDEN_RELAY_* keys in 15-warden-config.yaml are uncommented. Follow
+# "Rotation" below with the push token as the new value.
+#
+# ## Creating it
+#
+# 1. Mint the push token on the relay. This redeploys the `squelch` service
+#    (the relay); with the variable set, the relay logs `push_token=true` on its
+#    `serving` line. A `serving` line with no `push_token` field is a relay
+#    build that predates the variable and ignores it (the relay deploys from
+#    `main`, so merge first). The value goes in on stdin, never as an argument:
+#
+#        openssl rand -hex 32 | tr -d '\n' \
+#          | railway variable set -s squelch SQUELCH_RELAY_PUSH_TOKEN --stdin
+#
+# 2. Once that deploy is live, read it back from Railway (JSON: the table view
+#    truncates) and pipe it straight into the Secret:
+#
+#        railway variable list -s squelch --json \
+#          | jq -r '.SQUELCH_RELAY_PUSH_TOKEN // empty' | tr -d '\n' \
+#          | kubectl -n tenants create secret generic apns-relay \
+#              --from-file=token=/dev/stdin
+#
+#    Then CHECK IT, without printing it. A variable that was never set makes
+#    an unguarded `jq -r` print the word `null`, and a failed `railway` prints
+#    nothing; either gives a Secret every tenant 401s on. The length tells:
+#
+#        kubectl -n tenants get secret apns-relay -o jsonpath='{.data.token}' \
+#          | base64 -d | wc -c        # 64
+#
+#    The `tr -d '\n'` is load-bearing. `jq -r` ends its output with a newline
+#    and `--from-file` keeps every byte, so without it the Secret holds the
+#    token plus a newline. A newline is not legal inside an HTTP header value,
+#    so a bearer carrying one is a request that cannot be sent; today's daemon
+#    happens to trim its environment, and the Secret should not depend on that.
+#
+# Create the Secret BEFORE the warden keys are uncommented. If it is missing
+# when they land, see "A Secret that was missing" below: nothing will pick it
+# up on its own.
+#
+# ## How it reaches a pod
+#
+# The relay (https://relay.squelch.sh, the `squelch` service on Railway) holds
+# the APNs signing key. A daemon never talks to Apple: it POSTs a ping for a
+# device token it already holds, with this bearer, and the relay signs and
+# forwards it. The warden injects it into every tenant pod as
+# SQUELCH_RELAY_TOKEN, by reference, and only when SQUELCH_WARDEN_RELAY_URL is
+# set (15-warden-config.yaml). The reference is optional: with this Secret
+# missing, every tenant still boots, pushes with no bearer, gets a 401, logs it
+# and backs off. Mail is untouched; only the push is missing.
+#
+# ## The blast radius, stated plainly
+#
+# Every hosted tenant pod holds this ONE value. There is no per-tenant key and
+# nothing scopes one tenant away from another. Anyone holding it can:
+#
+# - Send pings to any device token they ALREADY hold. The bearer reveals no
+#   device token. But the caller chooses the ping's `event_id` (up to 256 bytes)
+#   and `collapse_id`, and both reach the device. "Content-free" describes what
+#   OUR daemon sends; a malicious caller can put 256 bytes of its choosing in
+#   front of an app that holds the token, and can collapse away a real ping.
+# - Spend the relay's shared rate limit: 120 requests a minute per client IP,
+#   in memory. Hosted tenants plausibly share one egress IP, so one tenant
+#   flooding /v1/push can 429 every other tenant's pushes.
+#
+# It can NOT read or drain /v1/opens. That takes the full auth token, which
+# stays with self-hosted daemons and the operator only.
+#
+# That is less than a mailbox credential and more than nothing, and it lives in
+# every tenant pod the same way the Google OAuth client does: custody hosted
+# already admits to, on our own infrastructure.
+#
+# ## Rotation, and a Secret that was missing
+#
+# NEVER `kubectl rollout restart` the tenant Deployments to make them read a new
+# value. It restarts every tenant at once, and it records a `kubectl-rollout`
+# field manager on each Deployment. The warden's drift check
+# (squelch-warden/src/drift.rs, `foreign_managers`) treats any manager that is
+# not the warden as foreign, and the roller then skips that tenant ("needs a
+# person (another field manager…)") on every roll until somebody runs
+# `squelch-control reconcile <label>` for it, one mailbox blip each. The whole
+# fleet, frozen out of releases by one command. ROLLOUT.md, "The five things
+# that actually bite", item 1.
+#
+# Change the Secret's NAME instead, which changes the rendered pod, so the
+# roller delivers it one tenant per tick:
+#
+# 1. Mint the new value on the relay (step 1 above). Note that this REPLACES
+#    the push token the relay accepts, so tenants still on the old value 401
+#    until they roll: pushes stop, mail does not, and see "Failure recovery".
+# 2. Create it under a NEW name, `apns-relay-2` (step 2 above, new name).
+# 3. Set SQUELCH_WARDEN_RELAY_SECRET_NAME: "apns-relay-2" in
+#    15-warden-config.yaml, then apply it and restart the serving WARDEN in the
+#    same minute (SETUP.md §8). The warden is not a tenant, and restarting it
+#    is how it rereads its config:
+#        kubectl apply -f deploy/hosted/15-warden-config.yaml
+#        kubectl -n warden rollout restart deploy/squelch-warden
+# 4. Let the roller converge. Delete the old Secret only after every tenant
+#    reports current (`squelch-control drift <label>`).
+#
+# The same procedure fixes a Secret that was MISSING when the warden keys were
+# uncommented. A secretKeyRef is resolved once, at container start, and
+# creating the Secret afterwards does not change the render, so nothing
+# restarts the pods and every tenant goes on 401ing. Create it under a new name
+# and point SQUELCH_WARDEN_RELAY_SECRET_NAME at it.
+#
+# ## Failure recovery, both directions
+#
+# - While the relay refuses a tenant (a 401 from a missing or stale Secret) its
+#   pusher's cursor holds. When the bearer is fixed, every notify-eligible event
+#   since the refusal began is pushed AT ONCE: a burst of stale notifications on
+#   that tenant's phones.
+# - A per-token APNs 400 is the opposite. A wrong topic (because
+#   SQUELCH_WARDEN_RELAY_TOPIC was left unset and the relay defaulted to the Mac
+#   bundle id) or a token in the wrong APNs environment is counted as REJECTED
+#   and the event is written off, NOT queued. Until the topic is right, those
+#   notifications are lost for good.
+# - Rows APNs rejects are kept, not deleted (a 400 is also what configuration
+#   drift looks like). So `squelchd_apns_push_results_total{outcome="rejected"}`
+#   can tick steadily from one stale development-build token on one tenant; an
+#   alert on it should compare against `outcome="delivered"`, not fire on > 0.
+#
+# The Secret's NAME is `SQUELCH_WARDEN_RELAY_SECRET_NAME` on the warden
+# (default `apns-relay`); the data key is fixed at `token`.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: apns-relay
+  namespace: tenants
+type: Opaque
+stringData:
+  # The relay's SQUELCH_RELAY_PUSH_TOKEN, verbatim. Never SQUELCH_RELAY_AUTH_TOKEN.
+  token: REPLACE_ME

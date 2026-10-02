@@ -17,6 +17,7 @@ use axum::{
     routing::post,
 };
 use serde_json::{Value, json};
+use squelch_core::metrics::{SyncMetrics, render};
 use squelch_core::push::{CURSOR_KEY, Pusher};
 use squelch_core::store::{NewEvent, SqliteStore, Store};
 use squelch_core::types::{EventKind, Tier};
@@ -25,6 +26,7 @@ use tokio::sync::{broadcast, watch};
 
 const DEV_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1";
 const DEV_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2";
+const DEV_C: &str = "ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc3";
 
 /// Content planted in every event so a leak onto the wire is greppable.
 const SENDER: &str = "cfo@acme-example.com";
@@ -47,9 +49,19 @@ struct Relay {
     dead: Arc<Mutex<Vec<String>>>,
     /// Tokens APNs is throttling: reported back as `429 TooManyRequests`.
     throttled: Arc<Mutex<Vec<String>>>,
+    /// Per-token APNs status overrides, checked FIRST: `(token, status)`. How
+    /// the permanent-rejection and 403 cases are staged.
+    statuses: Arc<Mutex<Vec<(String, u16)>>>,
     /// When set, answer `307` pointing at this absolute URL — a relay trying to
     /// walk the pusher (and its bearer) somewhere else.
     redirect_to: Arc<Mutex<Option<String>>>,
+    /// When set, fail at the RELAY hop with this HTTP status every request
+    /// whose body names this `environment`: how one bucket of a multi-request
+    /// fan-out is failed while the others succeed.
+    fail_env: Arc<Mutex<Option<(String, u16)>>>,
+    /// Per-token `(status, reason)` overrides, checked before `statuses`: how
+    /// a specific APNs reason such as `IdleTimeout` is staged.
+    reasons: Arc<Mutex<Vec<(String, u16, String)>>>,
 }
 
 impl Relay {
@@ -58,6 +70,19 @@ impl Relay {
     }
     fn count(&self) -> usize {
         self.seen.lock().unwrap().len()
+    }
+    /// How many requests carried `event_id` for `token`, whatever the relay
+    /// answered: the number of times the pusher tried to push it there.
+    fn pushes_of(&self, token: &str, event_id: i64) -> usize {
+        self.bodies()
+            .iter()
+            .filter(|b| {
+                b["event_id"] == json!(event_id)
+                    && b["device_tokens"]
+                        .as_array()
+                        .is_some_and(|t| t.iter().any(|t| t == token))
+            })
+            .count()
     }
 }
 
@@ -74,6 +99,11 @@ async fn push(State(relay): State<Relay>, headers: HeaderMap, body: Bytes) -> Re
     if relay.fail.load(Ordering::SeqCst) {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
+    if let Some((env, status)) = relay.fail_env.lock().unwrap().clone()
+        && parsed["environment"].as_str() == Some(env.as_str())
+    {
+        return StatusCode::from_u16(status).unwrap().into_response();
+    }
 
     // A hostile/misconfigured relay bouncing the token-bearing POST elsewhere.
     // 307 preserves method AND body, which is exactly what makes it dangerous.
@@ -86,6 +116,8 @@ async fn push(State(relay): State<Relay>, headers: HeaderMap, body: Bytes) -> Re
     }
 
     let dead = relay.dead.lock().unwrap().clone();
+    let statuses = relay.statuses.lock().unwrap().clone();
+    let reasons = relay.reasons.lock().unwrap().clone();
     let throttled = relay.throttled.lock().unwrap().clone();
     let apns_down = relay.apns_down.load(Ordering::SeqCst);
     let tokens = parsed["device_tokens"]
@@ -96,7 +128,11 @@ async fn push(State(relay): State<Relay>, headers: HeaderMap, body: Bytes) -> Re
         .iter()
         .filter_map(|t| t.as_str())
         .map(|t| {
-            if dead.iter().any(|d| d == t) {
+            if let Some((_, status, reason)) = reasons.iter().find(|(d, _, _)| d == t) {
+                json!({ "token": t, "status": status, "reason": reason })
+            } else if let Some((_, status)) = statuses.iter().find(|(d, _)| d == t) {
+                json!({ "token": t, "status": status, "reason": "Staged" })
+            } else if dead.iter().any(|d| d == t) {
                 json!({ "token": t, "status": 410, "reason": "Unregistered" })
             } else if apns_down {
                 json!({ "token": t, "status": 0, "reason": "unreachable" })
@@ -183,13 +219,19 @@ impl Harness {
 
     fn register(&self, token: &str) {
         self.store
-            .upsert_device(self.acct, token, "ios", None)
+            .upsert_device(self.acct, token, "ios", None, None)
             .unwrap();
     }
 
     fn register_tagged(&self, token: &str, tag: &str) {
         self.store
-            .upsert_device(self.acct, token, "ios", Some(tag))
+            .upsert_device(self.acct, token, "ios", Some(tag), None)
+            .unwrap();
+    }
+
+    fn register_in(&self, token: &str, tag: Option<&str>, environment: &str) {
+        self.store
+            .upsert_device(self.acct, token, "ios", tag, Some(environment))
             .unwrap();
     }
 
@@ -236,6 +278,35 @@ fn start_with_auth(
     relay_token: Option<&str>,
     seed: impl FnOnce(&SqliteStore, i64),
 ) -> Harness {
+    start_configured(base_url, relay_token, None, None, seed)
+}
+
+/// [`start`] with a configured FALLBACK environment
+/// (`[pusher] environment` / `SQUELCH_RELAY_APNS_ENV`).
+fn start_with_env(
+    base_url: &str,
+    environment: Option<&str>,
+    seed: impl FnOnce(&SqliteStore, i64),
+) -> Harness {
+    start_configured(base_url, None, environment, None, seed)
+}
+
+/// [`start`] reporting into the given metrics registry, as `squelchd` wires it.
+fn start_with_metrics(
+    base_url: &str,
+    metrics: Arc<SyncMetrics>,
+    seed: impl FnOnce(&SqliteStore, i64),
+) -> Harness {
+    start_configured(base_url, None, None, Some(metrics), seed)
+}
+
+fn start_configured(
+    base_url: &str,
+    relay_token: Option<&str>,
+    environment: Option<&str>,
+    metrics: Option<Arc<SyncMetrics>>,
+    seed: impl FnOnce(&SqliteStore, i64),
+) -> Harness {
     let store = Arc::new(SqliteStore::open_in_memory().unwrap());
     let acct = store.ensure_account("me@example.com").unwrap();
     let (events, _) = broadcast::channel::<i64>(256);
@@ -243,8 +314,12 @@ fn start_with_auth(
     seed(&store, acct);
 
     let (shutdown, shutdown_rx) = watch::channel(false);
-    let pusher = Pusher::for_test(store.clone() as Arc<dyn Store>, acct, base_url)
-        .with_relay_auth(relay_token);
+    let mut pusher = Pusher::for_test(store.clone() as Arc<dyn Store>, acct, base_url)
+        .with_relay_auth(relay_token)
+        .with_environment(environment);
+    if let Some(metrics) = metrics {
+        pusher = pusher.with_metrics(metrics);
+    }
     let handle = tokio::spawn(pusher.run(events.subscribe(), shutdown_rx));
     Harness {
         store,
@@ -375,6 +450,253 @@ async fn each_tag_gets_its_own_request() {
             (format!("acct-b:{id}"), DEV_B.to_string()),
         ]
     );
+
+    h.stop().await;
+}
+
+/// A token's environment is the TOKEN's: a dev build registered `sandbox` on a
+/// daemon with no configured environment must reach the sandbox host, not the
+/// relay's production default, where APNs would reject it.
+#[tokio::test]
+async fn a_sandbox_device_sends_sandbox_with_nothing_configured() {
+    let (base, relay) = spawn_relay().await;
+    let h = start(&base, |_, _| {});
+    h.register_in(DEV_A, None, "sandbox");
+    wait_for("the initial cursor", Duration::from_secs(2), || {
+        h.cursor().is_some()
+    })
+    .await;
+
+    h.emit(1);
+    wait_for("the push", Duration::from_secs(5), || relay.count() == 1).await;
+    let body = relay.bodies().remove(0);
+    assert_eq!(body["environment"], json!("sandbox"));
+    assert_eq!(body["device_tokens"], json!([DEV_A]));
+
+    h.stop().await;
+}
+
+/// One mailbox, one tag, two builds: the Xcode build's sandbox token and the
+/// TestFlight build's production token cannot share a request, because a
+/// request names one APNs host. Two requests, each carrying its own.
+#[tokio::test]
+async fn one_tag_in_two_environments_is_two_requests() {
+    let (base, relay) = spawn_relay().await;
+    let h = start(&base, |_, _| {});
+    h.register_in(DEV_A, Some("acct-a"), "sandbox");
+    h.register_in(DEV_B, Some("acct-a"), "production");
+    wait_for("the initial cursor", Duration::from_secs(2), || {
+        h.cursor().is_some()
+    })
+    .await;
+
+    let id = h.emit(1);
+    wait_for("both requests", Duration::from_secs(5), || {
+        relay.count() == 2
+    })
+    .await;
+    let mut seen: Vec<(String, String, String)> = relay
+        .bodies()
+        .iter()
+        .map(|b| {
+            assert_eq!(b["device_tokens"].as_array().unwrap().len(), 1);
+            (
+                b["device_tokens"][0].as_str().unwrap().to_string(),
+                b["environment"].as_str().unwrap().to_string(),
+                b["event_id"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    seen.sort();
+    assert_eq!(
+        seen,
+        vec![
+            (
+                DEV_A.to_string(),
+                "sandbox".to_string(),
+                format!("acct-a:{id}")
+            ),
+            (
+                DEV_B.to_string(),
+                "production".to_string(),
+                format!("acct-a:{id}")
+            ),
+        ]
+    );
+
+    h.stop().await;
+}
+
+/// The configured environment is the FALLBACK, not an override: a device that
+/// declared its own keeps it, and only a device that never said gets the
+/// configured one.
+#[tokio::test]
+async fn a_devices_own_environment_beats_the_configured_one() {
+    let (base, relay) = spawn_relay().await;
+    let h = start_with_env(&base, Some("production"), |_, _| {});
+    h.register_in(DEV_A, None, "sandbox");
+    h.register(DEV_B); // legacy row: no environment
+    wait_for("the initial cursor", Duration::from_secs(2), || {
+        h.cursor().is_some()
+    })
+    .await;
+
+    h.emit(1);
+    wait_for("both requests", Duration::from_secs(5), || {
+        relay.count() == 2
+    })
+    .await;
+    let mut seen: Vec<(String, String)> = relay
+        .bodies()
+        .iter()
+        .map(|b| {
+            (
+                b["device_tokens"][0].as_str().unwrap().to_string(),
+                b["environment"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    seen.sort();
+    assert_eq!(
+        seen,
+        vec![
+            (DEV_A.to_string(), "sandbox".to_string()),
+            (DEV_B.to_string(), "production".to_string()),
+        ]
+    );
+
+    h.stop().await;
+}
+
+/// A device that never declared one, on a pusher with none configured: the
+/// field is OMITTED, not nulled, and the relay applies its own default.
+#[tokio::test]
+async fn an_undeclared_device_omits_the_environment_when_none_is_configured() {
+    let (base, relay) = spawn_relay().await;
+    let h = start(&base, |_, _| {});
+    h.register(DEV_A);
+    wait_for("the initial cursor", Duration::from_secs(2), || {
+        h.cursor().is_some()
+    })
+    .await;
+
+    h.emit(1);
+    wait_for("the push", Duration::from_secs(5), || relay.count() == 1).await;
+    let body = relay.bodies().remove(0);
+    assert!(
+        body.as_object().unwrap().get("environment").is_none(),
+        "no environment anywhere must mean no field: {body}"
+    );
+
+    h.stop().await;
+}
+
+/// A PERMANENT rejection must not wedge the pusher. Every token answering 400
+/// (`BadDeviceToken`, a sandbox token sent to production) advances the cursor:
+/// retrying the same request cannot help, and holding would stall this daemon
+/// forever. The row is NOT deleted, because a 400 is also what config drift
+/// looks like, and deleting on it would unregister every phone.
+#[tokio::test]
+async fn every_token_rejected_advances_the_cursor_and_keeps_the_rows() {
+    let (base, relay) = spawn_relay().await;
+    relay
+        .statuses
+        .lock()
+        .unwrap()
+        .extend([(DEV_A.to_string(), 400), (DEV_B.to_string(), 400)]);
+
+    let h = start(&base, |_, _| {});
+    h.register(DEV_A);
+    h.register(DEV_B);
+    wait_for("the initial cursor", Duration::from_secs(2), || {
+        h.cursor() == Some(0)
+    })
+    .await;
+
+    let id = h.emit(1);
+    wait_for(
+        "the cursor past the rejected event",
+        Duration::from_secs(5),
+        || h.cursor() == Some(id),
+    )
+    .await;
+    // Room to retry before believing it did not.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(relay.count(), 1, "a rejected event must not be retried");
+    assert_eq!(h.devices().len(), 2, "a 400 is not a 410: rows stay");
+
+    h.stop().await;
+}
+
+/// Rejected plus RETRYABLE with nothing delivered still holds: the status-0
+/// token may land on a retry, so the event is not history yet.
+#[tokio::test]
+async fn a_rejection_beside_a_retryable_failure_holds_the_cursor() {
+    let (base, relay) = spawn_relay().await;
+    relay
+        .statuses
+        .lock()
+        .unwrap()
+        .extend([(DEV_A.to_string(), 400), (DEV_B.to_string(), 0)]);
+
+    let h = start(&base, |_, _| {});
+    h.register(DEV_A);
+    h.register(DEV_B);
+    wait_for("the initial cursor", Duration::from_secs(2), || {
+        h.cursor() == Some(0)
+    })
+    .await;
+
+    h.emit(1);
+    wait_for("the failed attempt", Duration::from_secs(5), || {
+        relay.count() >= 1
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        h.cursor(),
+        Some(0),
+        "nothing landed and something can retry"
+    );
+    assert_eq!(h.devices().len(), 2);
+
+    h.stop().await;
+}
+
+/// 403 is a 4xx that is NOT permanent for the token: it is the relay's own
+/// provider token being bad, which an operator fixes. It holds the cursor
+/// rather than writing the event off.
+#[tokio::test]
+async fn a_403_holds_the_cursor() {
+    let (base, relay) = spawn_relay().await;
+    relay
+        .statuses
+        .lock()
+        .unwrap()
+        .push((DEV_A.to_string(), 403));
+
+    let h = start(&base, |_, _| {});
+    h.register(DEV_A);
+    wait_for("the initial cursor", Duration::from_secs(2), || {
+        h.cursor() == Some(0)
+    })
+    .await;
+
+    let id = h.emit(1);
+    wait_for("the failed attempt", Duration::from_secs(5), || {
+        relay.count() >= 1
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(h.cursor(), Some(0), "a 403 must not advance the cursor");
+    assert_eq!(h.devices().len(), 1);
+
+    // The operator fixes the provider token; the retry lands.
+    relay.statuses.lock().unwrap().clear();
+    wait_for("the retry to land", Duration::from_secs(20), || {
+        h.cursor() == Some(id)
+    })
+    .await;
 
     h.stop().await;
 }
@@ -700,7 +1022,7 @@ async fn a_cold_start_joins_at_the_head() {
                 .unwrap()
                 .unwrap();
         }
-        store.upsert_device(acct, DEV_A, "ios", None).unwrap();
+        store.upsert_device(acct, DEV_A, "ios", None, None).unwrap();
     });
 
     wait_for("the head cursor", Duration::from_secs(2), || {
@@ -750,7 +1072,7 @@ async fn the_relay_bearer_is_presented_when_configured() {
     let acct = store.ensure_account("me@example.com").unwrap();
     let (events, _) = broadcast::channel::<i64>(256);
     store.attach_event_notifier(events.clone()).unwrap();
-    store.upsert_device(acct, DEV_A, "ios", None).unwrap();
+    store.upsert_device(acct, DEV_A, "ios", None, None).unwrap();
 
     let (shutdown, shutdown_rx) = watch::channel(false);
     let pusher = Pusher::for_test(store.clone() as Arc<dyn Store>, acct, &base)
@@ -834,7 +1156,9 @@ async fn an_opened_queued_arrival_is_skipped_before_relay_dispatch() {
         store
             .acknowledge_agent_message(account, message, chrono::Utc::now())
             .unwrap();
-        store.upsert_device(account, DEV_A, "ios", None).unwrap();
+        store
+            .upsert_device(account, DEV_A, "ios", None, None)
+            .unwrap();
         store
             .set_sync_state(
                 account,
@@ -859,5 +1183,224 @@ async fn an_opened_queued_arrival_is_skipped_before_relay_dispatch() {
     })
     .await;
     assert_eq!(relay.bodies()[0]["event_id"], json!(fresh));
+    h.stop().await;
+}
+
+// ---- a relay failure partway through a fan-out ------------------------------
+
+/// THE RULE: an event that reached anybody is never re-pushed. Bucket A
+/// (sandbox) delivers, then bucket B's request is refused at the relay hop
+/// (the relay 400s an environment it will not serve). Before this rule the
+/// whole outcome was thrown away and A was re-pushed the same event every
+/// backoff period, forever. Now the cursor moves past it, A got it ONCE, and
+/// the next event still reaches A.
+#[tokio::test]
+async fn a_later_relay_failure_after_a_delivery_advances_and_never_repushes() {
+    let (base, relay) = spawn_relay().await;
+    *relay.fail_env.lock().unwrap() = Some(("production".to_string(), 400));
+
+    let h = start(&base, |_, _| {});
+    // Registration order is bucket order: A's request goes out first.
+    h.register_in(DEV_A, None, "sandbox");
+    h.register_in(DEV_B, None, "production");
+    wait_for("the initial cursor", Duration::from_secs(2), || {
+        h.cursor() == Some(0)
+    })
+    .await;
+
+    let first = h.emit(1);
+    wait_for(
+        "the cursor past the partly delivered event",
+        Duration::from_secs(5),
+        || h.cursor() == Some(first),
+    )
+    .await;
+    assert_eq!(relay.pushes_of(DEV_A, first), 1);
+    assert_eq!(
+        relay.pushes_of(DEV_B, first),
+        1,
+        "B's request was attempted"
+    );
+
+    // The pusher backed off (the relay just failed); the NEXT event still
+    // reaches A once it comes back around, and is the next thing it sends.
+    let second = h.emit(2);
+    wait_for("the next event at A", Duration::from_secs(20), || {
+        relay.pushes_of(DEV_A, second) == 1
+    })
+    .await;
+    wait_for(
+        "the cursor past the next event",
+        Duration::from_secs(5),
+        || h.cursor() == Some(second),
+    )
+    .await;
+    // Across the whole retry window the first event went to A exactly once.
+    assert_eq!(
+        relay.pushes_of(DEV_A, first),
+        1,
+        "a delivered event was pushed again"
+    );
+    assert_eq!(relay.pushes_of(DEV_B, first), 1, "nor is B retried for it");
+    assert_eq!(h.devices().len(), 2, "a relay failure deletes nothing");
+
+    h.stop().await;
+}
+
+/// The FIRST request failing at the relay hop delivered nothing, so nothing
+/// rules out a retry: the cursor holds and the event lands once the relay
+/// recovers, with each device getting it once.
+#[tokio::test]
+async fn a_first_request_relay_failure_holds_the_cursor_and_retries() {
+    let (base, relay) = spawn_relay().await;
+    *relay.fail_env.lock().unwrap() = Some(("production".to_string(), 503));
+
+    let h = start(&base, |_, _| {});
+    // B (production) is the FIRST bucket this time, so the fan-out stops
+    // before A's request is ever sent.
+    h.register_in(DEV_B, None, "production");
+    h.register_in(DEV_A, None, "sandbox");
+    wait_for("the initial cursor", Duration::from_secs(2), || {
+        h.cursor() == Some(0)
+    })
+    .await;
+
+    let id = h.emit(1);
+    wait_for("the failed attempt", Duration::from_secs(5), || {
+        relay.count() >= 1
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(h.cursor(), Some(0), "nothing landed: the cursor must hold");
+    assert_eq!(
+        relay.pushes_of(DEV_A, id),
+        0,
+        "the fan-out stops at the failure"
+    );
+
+    *relay.fail_env.lock().unwrap() = None;
+    wait_for("the retry to land", Duration::from_secs(20), || {
+        h.cursor() == Some(id)
+    })
+    .await;
+    assert_eq!(relay.pushes_of(DEV_A, id), 1);
+    assert!(
+        relay.pushes_of(DEV_B, id) >= 2,
+        "B was retried, not dropped"
+    );
+
+    h.stop().await;
+}
+
+/// A 410 seen before the relay hop failed is still definitive: the dead row is
+/// deleted even though the event as a whole is held for retry.
+#[tokio::test]
+async fn a_410_before_a_relay_failure_still_deletes_the_row() {
+    let (base, relay) = spawn_relay().await;
+    relay.dead.lock().unwrap().push(DEV_A.to_string());
+    *relay.fail_env.lock().unwrap() = Some(("production".to_string(), 500));
+
+    let h = start(&base, |_, _| {});
+    h.register_in(DEV_A, None, "sandbox");
+    h.register_in(DEV_B, None, "production");
+    wait_for("the initial cursor", Duration::from_secs(2), || {
+        h.cursor() == Some(0)
+    })
+    .await;
+
+    h.emit(1);
+    wait_for("the dead row to go", Duration::from_secs(5), || {
+        h.devices() == vec![DEV_B.to_string()]
+    })
+    .await;
+    // Nobody took the event, so it is held for the retry.
+    assert_eq!(h.cursor(), Some(0));
+
+    h.stop().await;
+}
+
+/// `400 IdleTimeout` is APNs closing an idle connection, not a verdict on the
+/// token: unlike every other 400 it HOLDS the cursor and the retry lands.
+#[tokio::test]
+async fn a_400_idle_timeout_holds_the_cursor_and_retries() {
+    let (base, relay) = spawn_relay().await;
+    relay
+        .reasons
+        .lock()
+        .unwrap()
+        .push((DEV_A.to_string(), 400, "IdleTimeout".to_string()));
+
+    let h = start(&base, |_, _| {});
+    h.register(DEV_A);
+    wait_for("the initial cursor", Duration::from_secs(2), || {
+        h.cursor() == Some(0)
+    })
+    .await;
+
+    let id = h.emit(1);
+    wait_for("the failed attempt", Duration::from_secs(5), || {
+        relay.count() >= 1
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        h.cursor(),
+        Some(0),
+        "IdleTimeout must not write the event off"
+    );
+    assert_eq!(h.devices().len(), 1, "and must not delete the row");
+
+    relay.reasons.lock().unwrap().clear();
+    wait_for("the retry to land", Duration::from_secs(20), || {
+        h.cursor() == Some(id)
+    })
+    .await;
+
+    h.stop().await;
+}
+
+/// The pusher counts every per-token result into the registry it was handed,
+/// by outcome. A daemon whose pushes all fail must be VISIBLE on the dashboard.
+#[tokio::test]
+async fn per_token_results_are_counted_into_the_metrics() {
+    let (base, relay) = spawn_relay().await;
+    relay
+        .statuses
+        .lock()
+        .unwrap()
+        .push((DEV_B.to_string(), 400));
+    relay.dead.lock().unwrap().push(DEV_C.to_string());
+
+    let metrics = SyncMetrics::new();
+    let h = start_with_metrics(&base, metrics.clone(), |_, _| {});
+    h.register(DEV_A);
+    h.register(DEV_B);
+    h.register(DEV_C);
+    wait_for("the initial cursor", Duration::from_secs(2), || {
+        h.cursor() == Some(0)
+    })
+    .await;
+
+    let id = h.emit(1);
+    wait_for("the cursor", Duration::from_secs(5), || {
+        h.cursor() == Some(id)
+    })
+    .await;
+
+    let text = render(&metrics, None);
+    for (outcome, n) in [
+        ("delivered", 1),
+        ("rejected", 1),
+        ("dead", 1),
+        ("failed", 0),
+    ] {
+        let line = format!("squelchd_apns_push_results_total{{outcome=\"{outcome}\"}} {n}\n");
+        assert!(
+            text.contains(&line),
+            "missing `{}` in the exposition",
+            line.trim()
+        );
+    }
+
     h.stop().await;
 }

@@ -1055,6 +1055,13 @@ CREATE TABLE IF NOT EXISTS devices (
     -- for anything registered before the field existed, and for the macOS
     -- client, which never asks a daemon to push at all.
     tag                TEXT,
+    -- The APNs environment this token was minted in, as the client declared it:
+    -- `production` (TestFlight / App Store) or `sandbox` (Xcode dev builds,
+    -- simulators). It is a property of the TOKEN, not of the daemon: a token
+    -- sent to the wrong environment is rejected by APNs, so ONE global switch
+    -- cannot serve a mixed fleet. NULL = the client did not say, and the pusher
+    -- falls back to its configured environment (then the relay's default).
+    environment        TEXT,
     created_at         TEXT NOT NULL,
     last_registered_at TEXT NOT NULL
 );

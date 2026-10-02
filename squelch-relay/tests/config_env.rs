@@ -20,6 +20,7 @@ fn config_reads_the_environment() {
         "SQUELCH_RELAY_APNS_TOPICS",
         "SQUELCH_RELAY_APNS_ENV",
         "SQUELCH_RELAY_AUTH_TOKEN",
+        "SQUELCH_RELAY_PUSH_TOKEN",
         "SQUELCH_RELAY_ALLOW_ANONYMOUS",
         "SQUELCH_RELAY_APNS_URL_OVERRIDE",
         "SQUELCH_RELAY_DB_PATH",
@@ -85,12 +86,31 @@ fn config_reads_the_environment() {
     assert!(Config::from_env().is_err(), "unparseable opt-out");
     set("SQUELCH_RELAY_ALLOW_ANONYMOUS", "1");
 
+    // A push-only bearer on an open relay gates nothing, and with no full
+    // bearer there is nothing for it to be narrower than.
+    set(
+        "SQUELCH_RELAY_PUSH_TOKEN",
+        "fedcba9876543210fedcba9876543210",
+    );
+    let err = Config::from_env().unwrap_err().to_string();
+    assert!(err.contains("SQUELCH_RELAY_PUSH_TOKEN"), "{err}");
+    assert!(err.contains("SQUELCH_RELAY_ALLOW_ANONYMOUS"), "{err}");
+    assert!(!err.contains("fedcba9876543210"), "{err}");
+    unsafe { std::env::remove_var("SQUELCH_RELAY_ALLOW_ANONYMOUS") };
+    assert!(
+        Config::from_env().is_err(),
+        "a push token without a full token must not boot"
+    );
+    unsafe { std::env::remove_var("SQUELCH_RELAY_PUSH_TOKEN") };
+    set("SQUELCH_RELAY_ALLOW_ANONYMOUS", "1");
+
     let cfg = Config::from_env().unwrap();
     assert_eq!(cfg.bind.to_string(), squelch_relay::config::DEFAULT_BIND);
     assert_eq!(cfg.apns_topics, vec![TOPIC, BETA_TOPIC]);
     assert_eq!(cfg.resolve_topic(None), Some(TOPIC));
     assert_eq!(cfg.apns_env, Environment::Production);
     assert!(cfg.auth_token.is_none());
+    assert!(cfg.push_token.is_none());
     assert!(cfg.apns_url_override.is_none());
     // Unset means the open buffer lives in memory.
     assert!(cfg.db_path.is_none());
@@ -139,6 +159,44 @@ fn config_reads_the_environment() {
     let dbg = format!("{cfg:?}");
     assert!(!dbg.contains(BEARER));
     assert!(!dbg.contains("PRIVATE KEY"));
+    // Unset, the push-only bearer is absent, which is the relay as it was.
+    assert!(cfg.push_token.is_none());
+
+    // The push-only bearer: validated like the full one, refused when equal
+    // to it, and redacted the same way.
+    const PUSH_ONLY: &str = "fedcba9876543210fedcba9876543210";
+    set("SQUELCH_RELAY_PUSH_TOKEN", "short");
+    let err = Config::from_env().unwrap_err().to_string();
+    assert!(
+        err.starts_with("SQUELCH_RELAY_PUSH_TOKEN must be at least"),
+        "{err}"
+    );
+    // A wrapped paste: an interior newline can never ride in a header.
+    set(
+        "SQUELCH_RELAY_PUSH_TOKEN",
+        "fedcba9876543210fedcba9876543210\nfedcba98",
+    );
+    let err = Config::from_env().unwrap_err().to_string();
+    assert!(
+        err.starts_with("SQUELCH_RELAY_PUSH_TOKEN contains whitespace"),
+        "{err}"
+    );
+    set("SQUELCH_RELAY_PUSH_TOKEN", &format!("  {BEARER} "));
+    let err = Config::from_env().unwrap_err().to_string();
+    assert!(
+        err.contains("SQUELCH_RELAY_PUSH_TOKEN is equal to SQUELCH_RELAY_AUTH_TOKEN"),
+        "{err}"
+    );
+    assert!(!err.contains(BEARER), "{err}");
+    set("SQUELCH_RELAY_PUSH_TOKEN", PUSH_ONLY);
+    let cfg = Config::from_env().unwrap();
+    assert_eq!(cfg.push_token.as_deref(), Some(PUSH_ONLY));
+    assert_eq!(cfg.auth_token.as_deref(), Some(BEARER));
+    let dbg = format!("{cfg:?}");
+    assert!(!dbg.contains(PUSH_ONLY), "{dbg}");
+    assert!(!dbg.contains(BEARER), "{dbg}");
+    RelayState::new(cfg).unwrap();
+    unsafe { std::env::remove_var("SQUELCH_RELAY_PUSH_TOKEN") };
 
     set("SQUELCH_RELAY_APNS_ENV", "staging");
     assert!(Config::from_env().is_err());

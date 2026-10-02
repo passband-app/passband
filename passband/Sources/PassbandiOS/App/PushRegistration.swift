@@ -10,6 +10,13 @@
 // collision `Notifier` prefixes its request identifiers against). The tag is a
 // locally-minted UUID that names nothing about the mailbox, so the blind relay
 // and APNs both stay blind while carrying it.
+//
+// It also carries the APNs ENVIRONMENT the token was minted in. A token is
+// valid in exactly one of sandbox and production, and ONLY THE BUILD KNOWS
+// WHICH: an Xcode or Simulator install and a TestFlight install of the same app
+// hold tokens for different APNs hosts, and a daemon that guessed one host for
+// every device pushed into the void for the rest (APNsEnvironment.swift). When
+// the build cannot tell, the field is left out and the daemon's default stands.
 
 import Foundation
 import UIKit
@@ -123,14 +130,13 @@ final class PushRegistration {
 
     private func register(token: String, tag: UUID, with settings: ConnectionSettings) async {
         // Registration is idempotent and retried whenever the app foregrounds.
-        await post(
-            "/client/devices",
-            body: [
-                "token": token,
-                "platform": "ios",
-                "tag": tag.uuidString,
-            ],
-            with: settings)
+        var body = [
+            "token": token,
+            "platform": "ios",
+            "tag": tag.uuidString,
+        ]
+        if let env = APNsEnvironment.current { body["environment"] = env.rawValue }
+        await post("/client/devices", body: body, with: settings)
     }
 
     /// POST one authenticated JSON body to the human door. Neither the daemon

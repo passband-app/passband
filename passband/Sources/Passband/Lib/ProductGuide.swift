@@ -467,7 +467,7 @@ enum ProductGuide {
         Deeper search is the same agent working inside search. See the search topic.
 
         Connecting an outside agent (Settings > Agents):
-        - Passband has an MCP endpoint that Claude Code, Claude Desktop, Codex, Cursor or OpenClaw can connect to. The pane shows the address and a copyable setup snippet for each.
+        - Passband has an MCP endpoint (Agent MCP) that Claude, OpenClaw, Hermes Agent, ChatGPT, Claude Code, Codex, Cursor, VS Code or Claude Desktop can connect to. The pane shows the address, a button that adds it where the agent has an install link (Claude, Cursor, VS Code) or copies the setup otherwise, and the setup snippet for each.
         - Such an agent can read ranked updates and whole threads, search mail, list bills, deadlines and packages, and set sender rules. It cannot send, archive, label or delete, cannot see login codes, and cannot change anything in Gmail.
         - Hosted Passband does not offer this yet. A self-hosted daemon does.
         """

@@ -68,30 +68,48 @@ enum AgentDoorAuth: Equatable, Sendable {
 ///   Claude       claude.com/docs/connectors/custom/remote-mcp (custom connector)
 ///   OpenClaw     docs.openclaw.ai/cli/mcp/registry (add --auth oauth) and
 ///                docs.openclaw.ai/cli/mcp/transports (mcp login)
+///   Hermes Agent hermes-agent.nousresearch.com/docs/user-guide/features/mcp and
+///                .../docs/reference/mcp-config-reference (mcp_servers, auth:
+///                oauth, mcp login, mcp test, /reload-mcp)
+///   ChatGPT      developers.openai.com/api/docs/guides/custom-mcp-server (web
+///                only; Plugins, Add custom MCP server; no prefilled link)
+///   VS Code      code.visualstudio.com/docs/copilot/reference/mcp-configuration
+///                (servers, type http) and .../guides/mcp-developer-guide
+///                (the vscode:mcp/install link)
+/// And the install links, in `action(endpoint:auth:)`:
+///   Claude       claude.com/docs/connectors/building/directory-vs-custom
+///   Cursor       cursor.com/docs/context/mcp/install-links
 enum AgentKind: String, CaseIterable, Identifiable, Sendable {
-    case openClaw, claudeCode, codex, cursor, claudeDesktop, claude, other
+    case claude, openClaw, hermes, chatGPT, claudeCode, codex, cursor, vsCode, claudeDesktop, other
 
-    /// The agents worth offering at a given door, in chip order.
+    /// The agents worth offering at a given door, in chip order. The first is
+    /// the one the pane opens on.
     ///
-    /// The open door keeps the list it always had. A Claude connector is
-    /// reached from Anthropic's servers, not this machine, so it cannot see a
-    /// loopback or tailnet address and is not offered there.
+    /// Claude and ChatGPT reach a server from their makers' machines, not
+    /// this one, so they cannot see a loopback or tailnet address and are
+    /// offered only at the sign-in door, which is a public one.
     ///
     /// The sign-in door drops Claude Desktop's mcp-remote bridge for the
     /// connector, which is Claude's own route to a remote server with OAuth
     /// and works in claude.ai and the apps alike.
     static func shown(for auth: AgentDoorAuth) -> [AgentKind] {
         switch auth {
-        case .none: [.openClaw, .claudeCode, .codex, .cursor, .claudeDesktop, .other]
-        case .signIn: [.openClaw, .claudeCode, .codex, .cursor, .claude, .other]
+        case .none: [.openClaw, .hermes, .claudeCode, .codex, .cursor, .vsCode, .claudeDesktop, .other]
+        case .signIn: [.claude, .openClaw, .hermes, .chatGPT, .claudeCode, .codex, .cursor, .vsCode, .other]
         }
     }
+
+    /// The chip a door opens on.
+    static func defaultChoice(for auth: AgentDoorAuth) -> AgentKind { shown(for: auth)[0] }
 
     var id: String { rawValue }
 
     var name: String {
         switch self {
         case .openClaw: "OpenClaw"
+        case .hermes: "Hermes Agent"
+        case .chatGPT: "ChatGPT"
+        case .vsCode: "VS Code"
         case .claudeCode: "Claude Code"
         case .codex: "Codex"
         case .cursor: "Cursor"
@@ -104,6 +122,9 @@ enum AgentKind: String, CaseIterable, Identifiable, Sendable {
     var symbol: String {
         switch self {
         case .openClaw: "pawprint"
+        case .hermes: "paperplane"
+        case .chatGPT: "message"
+        case .vsCode: "curlybraces"
         case .claudeCode: "terminal"
         case .codex: "chevron.left.forwardslash.chevron.right"
         case .cursor: "cursorarrow.rays"
@@ -117,7 +138,9 @@ enum AgentKind: String, CaseIterable, Identifiable, Sendable {
     func instruction(for auth: AgentDoorAuth) -> String {
         switch (self, auth) {
         case (.claude, _), (.claudeDesktop, .signIn):
-            "In Claude, open Customize, then Connectors, and choose Add custom connector. Paste this address and select Add. On a Team or Enterprise plan, an owner adds it under Organization settings first, then each member connects."
+            "Add to Claude opens Claude's Add custom connector dialog with Passband filled in. Check it and select Add. To do it by hand, open Customize, then Connectors, and paste this address. On a Team or Enterprise plan, an owner adds it under Organization settings first, then each member connects."
+        case (.hermes, .signIn):
+            "Add this to ~/.hermes/config.yaml, inside mcp_servers if you already have one. Sign in from a terminal, then run /reload-mcp in Hermes."
         default: instruction
         }
     }
@@ -132,6 +155,11 @@ enum AgentKind: String, CaseIterable, Identifiable, Sendable {
         case .claudeDesktop:
             "Add this to claude_desktop_config.json (Settings, Developer, Edit Config), then restart Claude. It needs Node for npx."
         case .claude: instruction(for: .signIn)
+        case .hermes:
+            "Add this to ~/.hermes/config.yaml, inside mcp_servers if you already have one, then run /reload-mcp in Hermes."
+        case .chatGPT:
+            "On chatgpt.com, open Plugins, select the plus button and choose Add custom MCP server. Paste this address as the Server URL, choose OAuth, and select Create as a plugin. Then install it from your personal plugins. In a workspace, an admin can turn custom servers off."
+        case .vsCode: "Add this to .vscode/mcp.json in one project, or run MCP: Add Server from the Command Palette."
         case .other: "Most MCP clients take a streamable HTTP server in this shape."
         }
     }
@@ -146,7 +174,8 @@ enum AgentKind: String, CaseIterable, Identifiable, Sendable {
         case .openClaw: return "openclaw mcp login passband"
         case .claudeCode: return "claude mcp login passband"
         case .codex: return "codex mcp login passband"
-        case .cursor, .claudeDesktop, .claude, .other: return nil
+        case .hermes: return "hermes mcp login passband"
+        case .cursor, .vsCode, .claudeDesktop, .claude, .chatGPT, .other: return nil
         }
     }
 
@@ -156,6 +185,7 @@ enum AgentKind: String, CaseIterable, Identifiable, Sendable {
         case .openClaw: "openclaw mcp doctor passband --probe"
         case .claudeCode: "claude mcp list"
         case .codex: "codex mcp list"
+        case .hermes: "hermes mcp test passband"
         default: nil
         }
     }
@@ -165,9 +195,114 @@ enum AgentKind: String, CaseIterable, Identifiable, Sendable {
     var isCommand: Bool {
         switch self {
         case .openClaw, .claudeCode, .codex: true
-        case .cursor, .claudeDesktop, .claude, .other: false
+        case .hermes, .cursor, .vsCode, .claudeDesktop, .claude, .chatGPT, .other: false
         }
     }
+
+    /// Whether `snippet` is the address alone (a form field takes it) rather
+    /// than a command or a config fragment.
+    func snippetIsAddress(auth: AgentDoorAuth) -> Bool {
+        switch self {
+        case .claude, .chatGPT: true
+        case .claudeDesktop: auth == .signIn
+        default: false
+        }
+    }
+
+    /// Whether the agent's install link opens a desktop app. A phone has no
+    /// Cursor or VS Code to open, and a custom scheme nothing claims does
+    /// nothing at all, so the phone gets the copy button instead.
+    var installOpensDesktopApp: Bool {
+        switch self {
+        case .cursor, .vsCode: true
+        default: false
+        }
+    }
+
+    /// The one button under the instruction: the agent's own install link
+    /// where its docs give one, otherwise a copy of the snippet. A link that
+    /// only prefills is still the person's to confirm in the agent.
+    func action(endpoint url: String, auth: AgentDoorAuth) -> AgentAction {
+        switch self {
+        case .claude where auth == .signIn:
+            return AgentAction(
+                label: "Add to Claude", note: nil,
+                kind: .open(Self.claudeInstallLink(endpoint: url)))
+        case .cursor:
+            return AgentAction(
+                label: "Add to Cursor", note: "opens Cursor and asks it to add Passband",
+                kind: .open(Self.cursorInstallLink(endpoint: url)))
+        case .vsCode:
+            return AgentAction(
+                label: "Add to VS Code", note: "opens VS Code and asks it to add Passband",
+                kind: .open(Self.vsCodeInstallLink(endpoint: url)))
+        case .chatGPT:
+            // ChatGPT has no prefilled link, so the next best thing is the
+            // address on the pasteboard and the page it gets pasted into.
+            return AgentAction(
+                label: "Copy and open ChatGPT", note: "copies this address and opens ChatGPT Plugins",
+                kind: .copyAndOpen(Self.chatGPTPlugins))
+        default:
+            return copyAction(auth: auth)
+        }
+    }
+
+    /// The copy fallback, which is also what a phone gets for an agent whose
+    /// link opens a desktop app.
+    func copyAction(auth: AgentDoorAuth) -> AgentAction {
+        let label =
+            isCommand ? "Copy command" : snippetIsAddress(auth: auth) ? "Copy address" : "Copy config"
+        return AgentAction(label: label, note: nil, kind: .copy)
+    }
+
+    /// `encodeURIComponent`: everything but A-Z a-z 0-9 and -_.!~*'() is
+    /// percent-encoded, which is what the Claude, Cursor and VS Code link
+    /// docs each say to apply.
+    nonisolated static func encodeURIComponent(_ text: String) -> String {
+        var allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+        allowed.insert(charactersIn: "-_.!~*'()")
+        return text.addingPercentEncoding(withAllowedCharacters: allowed) ?? text
+    }
+
+    /// Compact JSON with keys in a fixed order and slashes left alone, the
+    /// shape `JSON.stringify` gives for these flat objects.
+    nonisolated static func compactJSON(_ object: [String: String]) -> String {
+        let data =
+            (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]))
+            ?? Data()
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// Claude's Add custom connector dialog, prefilled. The person reviews
+    /// the values in claude.ai and confirms; nothing is added by the link.
+    nonisolated static func claudeInstallLink(endpoint url: String) -> URL {
+        URL(
+            string: "https://claude.ai/customize/connectors?modal=add-custom-connector&connectorName=Passband&connectorUrl="
+                + encodeURIComponent(url))!
+    }
+
+    /// Cursor's MCP install deeplink. The config is the value that would sit
+    /// under the server's name in mcp.json, base64 encoded. Built the way
+    /// Cursor's own link generator builds it: `+` in the base64 becomes
+    /// `%2B` first, then the whole value is URI-component encoded.
+    nonisolated static func cursorInstallLink(endpoint url: String) -> URL {
+        let config = Data(compactJSON(["url": url]).utf8).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "%2B")
+        return URL(
+            string: "cursor://anysphere.cursor-deeplink/mcp/install?name=passband&config="
+                + encodeURIComponent(config))!
+    }
+
+    /// VS Code's MCP install link: the `--add-mcp` object, stringified and
+    /// URI-component encoded, as the whole query.
+    nonisolated static func vsCodeInstallLink(endpoint url: String) -> URL {
+        URL(
+            string: "vscode:mcp/install?"
+                + encodeURIComponent(compactJSON(["name": "passband", "type": "http", "url": url])))!
+    }
+
+    /// Where a custom MCP server is added in ChatGPT, on the web.
+    nonisolated static let chatGPTPlugins = URL(string: "https://chatgpt.com/plugins")!
 
     /// What to paste for this door. At the sign-in door it is the address and
     /// nothing else: no header, no key, no placeholder for one.
@@ -178,16 +313,20 @@ enum AgentKind: String, CaseIterable, Identifiable, Sendable {
             // `--auth oauth` saves the server as OAuth so `mcp login` can sign
             // it in; `add` skips its probe while authorization is pending.
             return "openclaw mcp add passband --url \(url) --transport streamable-http --auth oauth"
-        case .claude:
+        case .claude, .chatGPT:
             // A custom connector takes the address in a form field, so the
             // address is the whole snippet.
             return url
+        case .hermes:
+            // The open door's block plus the line that makes Hermes run the
+            // OAuth flow for it.
+            return snippet(endpoint: url) + "\n    auth: oauth"
         case .claudeDesktop:
             // Not offered at this door (see `shown(for:)`), but if asked, the
             // connector form is still the honest answer rather than a bridge
             // config that would have to carry the sign-in itself.
             return url
-        case .claudeCode, .codex, .cursor, .other:
+        case .claudeCode, .codex, .cursor, .vsCode, .other:
             // Already the address alone; each signs in on the 401.
             return snippet(endpoint: url)
         }
@@ -226,8 +365,22 @@ enum AgentKind: String, CaseIterable, Identifiable, Sendable {
                   }
                 }
                 """
-        case .claude:
+        case .claude, .chatGPT:
             return url
+        case .hermes:
+            return """
+                mcp_servers:
+                  passband:
+                    url: "\(url)"
+                """
+        case .vsCode:
+            return """
+                {
+                  "servers": {
+                    "passband": { "type": "http", "url": "\(url)" }
+                  }
+                }
+                """
         case .other:
             return """
                 {
@@ -238,6 +391,23 @@ enum AgentKind: String, CaseIterable, Identifiable, Sendable {
                 """
         }
     }
+}
+
+/// What the button under an agent's instruction does.
+struct AgentAction: Equatable, Sendable {
+    enum Kind: Equatable, Sendable {
+        /// Open the agent's install link.
+        case open(URL)
+        /// Put the snippet on the pasteboard, then open where it is pasted.
+        case copyAndOpen(URL)
+        /// Put the snippet on the pasteboard.
+        case copy
+    }
+
+    let label: String
+    /// A few words beside the button on what it does, for a link.
+    let note: String?
+    let kind: Kind
 }
 
 @MainActor

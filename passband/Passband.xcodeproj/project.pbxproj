@@ -195,6 +195,7 @@
 		6EF807512CEAE33F5C47C13D /* AgentsSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B934097D54904EB956A1B16 /* AgentsSection.swift */; };
 		6F3982A3598CCC296C35C2E6 /* WireTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C9F46E8DA615783DD2BEAF6 /* WireTypes.swift */; };
 		6FFB126258C28AC3F2E63D01 /* Motion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30406C6A67318CD0CE71C1FF /* Motion.swift */; };
+		707E663684046514E8323EDA /* AgentLogos.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5761C492A32E10F5740236EA /* AgentLogos.xcassets */; };
 		7212E886802DBD6F6E869BD0 /* MainWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00D13052ED3A4D60224B1B18 /* MainWindow.swift */; };
 		72B7AEAB358D6173A2E762D5 /* DraftsList.swift in Sources */ = {isa = PBXBuildFile; fileRef = 449EBE20D26F590B99D2AA0A /* DraftsList.swift */; };
 		72CE3BD39D4FA8820AFBE15C /* MobileSearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F82499FD36351898E386644C /* MobileSearchView.swift */; };
@@ -243,6 +244,7 @@
 		855A54E7930F797CE7533FBF /* AssistantKey.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBA1338A4CA4B001850F8140 /* AssistantKey.swift */; };
 		855CB19B7AB6123C95C74025 /* TriageTargets.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74A0D0F666787312F4991788 /* TriageTargets.swift */; };
 		856AC67B9A7F90BF5B3D18B9 /* ComposeAttach.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41BFA30FC9B1A10CD0FB94E3 /* ComposeAttach.swift */; };
+		8579F5BCB496F5202CB72F42 /* AgentLogos.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5761C492A32E10F5740236EA /* AgentLogos.xcassets */; };
 		8584D208439539843BAE4481 /* AgentTools.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1E7DFB379AF677D44E393FF /* AgentTools.swift */; };
 		85A1CC563396C7890FB07C1F /* HTMLImg.swift in Sources */ = {isa = PBXBuildFile; fileRef = 579ABC2B7707848B4AED6F18 /* HTMLImg.swift */; };
 		85A261179BDC0C4F5BEB9F4A /* MailCSP.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10C0C8780CCB9C6BAB2709C /* MailCSP.swift */; };
@@ -576,6 +578,7 @@
 		5512C13F456F49B6DF7B182B /* Pairing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Pairing.swift; sourceTree = "<group>"; };
 		57180C4CAEA47A9008DE2513 /* SquelchRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SquelchRenderer.swift; sourceTree = "<group>"; };
 		5742B0429B8EF9B69ABDEB27 /* NotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationService.swift; sourceTree = "<group>"; };
+		5761C492A32E10F5740236EA /* AgentLogos.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = AgentLogos.xcassets; sourceTree = "<group>"; };
 		579ABC2B7707848B4AED6F18 /* HTMLImg.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HTMLImg.swift; sourceTree = "<group>"; };
 		582A0094F147273BA003C4B6 /* ImageWarmer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageWarmer.swift; sourceTree = "<group>"; };
 		5883BA424612265657845246 /* Format.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Format.swift; sourceTree = "<group>"; };
@@ -1107,6 +1110,7 @@
 				4800BF974871EC3DC431AF40 /* Model */,
 				72CD4B7404FF3C44F18A87A6 /* Resources */,
 				01658E921375653A5AF4F1EC /* Views */,
+				5761C492A32E10F5740236EA /* AgentLogos.xcassets */,
 				AA0B7AAD2A9613E110AB776F /* Info.plist */,
 				47122181AE7D49894917581E /* Passband.entitlements */,
 				168312D5219614E1F658480C /* Resources */,
@@ -1286,6 +1290,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				8579F5BCB496F5202CB72F42 /* AgentLogos.xcassets in Resources */,
 				422855E95AB668EF2EC537B1 /* Brand in Resources */,
 				A6F7ADCEE7CF788F562C7C3E /* Passband.icon in Resources */,
 				911E2DC6E6549AECE86FFBAA /* Sounds in Resources */,
@@ -1298,6 +1303,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				707E663684046514E8323EDA /* AgentLogos.xcassets in Resources */,
 				96BF6FD479D7FDC147BC6C84 /* Passband.icon in Resources */,
 				334AB5C57D2B2C941C5EEA02 /* Resources in Resources */,
 			);

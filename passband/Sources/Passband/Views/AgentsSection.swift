@@ -1,5 +1,5 @@
-// Settings' Agents pane: connecting an agent the human already runs (OpenClaw,
-// Claude Code, Codex…) to this mailbox over MCP.
+// Settings' Agents pane: connecting an agent the human already runs (Claude,
+// OpenClaw, Hermes Agent, Codex…) to this mailbox over MCP.
 //
 // Three cards, in the order somebody needs them: WHERE the door is and whether
 // it is open, HOW to point a given agent at it, and WHAT the agent gets once it
@@ -19,16 +19,20 @@ import SwiftUI
 struct AgentsSection: View {
     @Environment(AppStore.self) private var store
     @State private var connect = AgentConnect.shared
-    @State private var agent: AgentKind = .openClaw
+    /// The chip somebody picked, nil until they pick one.
+    @State private var agent: AgentKind?
 
     private var endpoint: String? { AgentConnect.endpoint(serverURL: store.settings?.serverURL) }
     private var status: AgentDoorStatus { connect.status(for: endpoint) }
     private var auth: AgentDoorAuth { status.auth }
     private var agents: [AgentKind] { AgentKind.shown(for: auth) }
-    /// The chosen agent, or the first one this door offers when the choice is
-    /// not on its list (Claude Desktop picked, then the door turned out to be
-    /// the sign-in one).
-    private var shownAgent: AgentKind { agents.contains(agent) ? agent : agents[0] }
+    /// The chosen agent, or the first one this door offers when nothing is
+    /// chosen yet or the choice is not on its list (Claude Desktop picked,
+    /// then the door turned out to be the sign-in one).
+    private var shownAgent: AgentKind {
+        if let agent, agents.contains(agent) { return agent }
+        return AgentKind.defaultChoice(for: auth)
+    }
     /// A hosted mailbox (see `HostedServer`), whose owner cannot touch the
     /// daemon, so the self-host remedies are never offered to them.
     private var hosted: Bool { HostedServer.isHosted(url: store.settings?.serverURL ?? "") }
@@ -146,14 +150,18 @@ struct AgentsSection: View {
 
     private func setupCard(_ endpoint: String) -> some View {
         let agent = shownAgent
-        return SectionCard(label: "Set it up", note: agent.name) {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: Typo.measure(142)), spacing: Space.s8)], spacing: Space.s8) {
+        let snippet = agent.snippet(endpoint: endpoint, auth: auth)
+        return SectionCard(label: "Set it up") {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: Typo.measure(110)), spacing: Space.s8)], spacing: Space.s8) {
                 ForEach(agents) { kind in
-                    agentChip(kind)
+                    agentTile(kind)
                 }
             }
+            AgentActionRow(agent: agent, action: action(agent, endpoint: endpoint), snippet: snippet)
+                .id(agent)
+                .padding(.top, Space.s4)
             SettingsHint(agent.instruction(for: auth))
-            CodeBlock(text: agent.snippet(endpoint: endpoint, auth: auth))
+            CodeBlock(text: snippet)
             if let signIn = agent.signIn(for: auth) {
                 followUp("then sign in with", signIn)
             }
@@ -161,6 +169,15 @@ struct AgentsSection: View {
                 followUp("then check with", check)
             }
         }
+    }
+
+    /// The agent's button. A phone has no Cursor or VS Code to open, so an
+    /// install link into one becomes the copy button there.
+    private func action(_ agent: AgentKind, endpoint: String) -> AgentAction {
+        #if os(iOS)
+            if agent.installOpensDesktopApp { return agent.copyAction(auth: auth) }
+        #endif
+        return agent.action(endpoint: endpoint, auth: auth)
     }
 
     private func followUp(_ label: String, _ command: String) -> some View {
@@ -175,34 +192,36 @@ struct AgentsSection: View {
         }
     }
 
-    private func agentChip(_ kind: AgentKind) -> some View {
+    /// One agent: its own mark over its name. The selected one carries the
+    /// accent on its whole outline, never one edge of it.
+    private func agentTile(_ kind: AgentKind) -> some View {
         let active = kind == shownAgent
         return Button {
             withAnimation(Motion.disclose) { agent = kind }
         } label: {
-            HStack(spacing: Space.scaled(7)) {
-                Image(systemName: kind.symbol)
-                    .font(Typo.ui(11, weight: .medium))
-                    .frame(width: Space.s14)
+            VStack(spacing: Space.s6) {
+                AgentMark(kind: kind, size: Space.scaled(26))
                 Text(kind.name)
-                    .font(Typo.ui(12, weight: .medium))
+                    .font(Typo.ui(11, weight: .medium))
                     .lineLimit(1)
-                Spacer(minLength: 0)
+                    .minimumScaleFactor(0.85)
             }
             .foregroundStyle(active ? Palette.accent : Palette.inkDim)
-            .padding(.horizontal, Space.s10)
-            .padding(.vertical, Space.scaled(7))
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, Space.s10)
+            .padding(.horizontal, Space.s6)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .background(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
                 .fill(active ? Palette.accentSoft : Palette.canvas.opacity(0.5))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .strokeBorder(active ? Palette.accent.opacity(0.4) : Palette.hairline, lineWidth: 0.75)
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .strokeBorder(active ? Palette.accent.opacity(0.5) : Palette.hairline, lineWidth: active ? 1 : 0.75)
         )
+        .accessibilityLabel(kind.name)
         .accessibilityAddTraits(active ? .isSelected : [])
     }
 
@@ -259,6 +278,228 @@ struct AgentsSection: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// The head of the setup card: the agent's mark and name, a few words on what
+/// its button does, and the button itself in the agent's own colours. A copy
+/// reads "Copied" for the confirmation window, like the icon in the code block.
+private struct AgentActionRow: View {
+    let agent: AgentKind
+    let action: AgentAction
+    let snippet: String
+    @State private var copied = false
+
+    var body: some View {
+        // Side by side where there is room; the button drops under the name
+        // on a phone rather than squeezing it.
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: Space.s12) {
+                identity
+                Spacer(minLength: Space.s8)
+                button
+            }
+            VStack(alignment: .leading, spacing: Space.s10) {
+                identity
+                button
+            }
+        }
+    }
+
+    private var identity: some View {
+        HStack(spacing: Space.s10) {
+            AgentMark(kind: agent, size: Space.scaled(32))
+            VStack(alignment: .leading, spacing: Space.s2) {
+                Text(agent.name)
+                    .font(Typo.zoneTitle)
+                    .foregroundStyle(Palette.ink)
+                if let note = action.note {
+                    Text(note)
+                        .font(Typo.micro)
+                        .foregroundStyle(Palette.inkFaint)
+                }
+            }
+            .fixedSize(horizontal: true, vertical: false)
+        }
+    }
+
+    @ViewBuilder private var button: some View {
+        let title = copied ? "Copied" : action.label
+        if let brand = agent.brand.button {
+            Button { run() } label: {
+                HStack(spacing: Space.s6) {
+                    // Only a variant of the mark its maker made for this
+                    // background goes on the button; the mark is never tinted.
+                    if let mark = brand.mark, AgentMark.hasAsset(mark) {
+                        Image(mark)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: Space.s14, height: Space.s14)
+                    }
+                    Text(title)
+                }
+            }
+            .buttonStyle(BrandButtonStyle(fill: brand.fill, ink: brand.ink))
+        } else {
+            Button(title) { run() }
+                .buttonStyle(.glassProminent)
+                .tint(Palette.accent)
+        }
+    }
+
+    private func run() {
+        switch action.kind {
+        // Not `Opener.open`, which hands the OS http(s) only: these links are
+        // built here from the mailbox's own address, never taken from mail,
+        // and two of them are the agents' own schemes.
+        case .open(let url):
+            _ = Platform.open(url)
+        case .copyAndOpen(let url):
+            Clip.copy(snippet, flashing: $copied)
+            _ = Platform.open(url)
+        case .copy:
+            Clip.copy(snippet, flashing: $copied)
+        }
+    }
+}
+
+/// How an agent looks here: its maker's own mark, from AgentLogos.xcassets,
+/// and its maker's colour for the button. Where no official mark could be
+/// had, the pane's SF Symbol stands in, on a tile in the maker's colour when
+/// it has one. Where each mark and colour comes from is noted below. The marks
+/// are the makers' files as published, never redrawn or recoloured.
+struct AgentBrand {
+    /// `AgentLogo/<name>` in AgentLogos.xcassets.
+    let logo: String?
+    /// The colour of the tile behind the stand-in symbol, when there is no mark.
+    let symbolTile: Color?
+    let button: ButtonBrand?
+
+    struct ButtonBrand {
+        let fill: Color
+        let ink: Color
+        /// A version of the mark made for `fill`, when the maker publishes one.
+        let mark: String?
+    }
+}
+
+extension AgentKind {
+    var brand: AgentBrand {
+        // Anthropic press kit (anthropic.com/press-kit): Claude Spark in Clay
+        // 0xD97757, Slate 0x151514 for type. Clay is too light for white
+        // type, so the button's label is Slate.
+        let claude = AgentBrand.ButtonBrand(fill: Color(hex: 0xD97757), ink: Color(hex: 0x151514), mark: nil)
+        // OpenAI's black. openai.com/brand refuses automated reads, so its
+        // mark could not be fetched from the source and is not drawn here.
+        let openAI = AgentBrand.ButtonBrand(fill: Color(hex: 0x000000), ink: .white, mark: nil)
+        switch self {
+        case .claude, .claudeCode, .claudeDesktop:
+            return AgentBrand(logo: "AgentLogo/claude", symbolTile: nil, button: claude)
+        case .openClaw:
+            // OpenClaw's own app (apps/ios/Sources/Design/OpenClawBrand.swift):
+            // the accent fill it keeps dark enough for white content.
+            return AgentBrand(
+                logo: "AgentLogo/openclaw", symbolTile: nil,
+                button: .init(fill: Color(light: 0xB73833, dark: 0xC63E38), ink: .white, mark: nil))
+        case .hermes:
+            // The Hermes Agent docs site's primary (website/src/css/custom.css):
+            // deep amber in light, gold in dark, which takes dark type.
+            return AgentBrand(
+                logo: "AgentLogo/hermes", symbolTile: nil,
+                button: .init(
+                    fill: Color(light: 0x8B6508, dark: 0xFFD700),
+                    ink: Color(light: Color.white, dark: Color(hex: 0x14142A)), mark: nil))
+        case .chatGPT, .codex:
+            return AgentBrand(logo: nil, symbolTile: Color(hex: 0x000000), button: openAI)
+        case .cursor:
+            // Cursor's own "Add to Cursor" badge (cursor.com/deeplink/
+            // mcp-install-dark.svg): black at 90%, white type, the light cube.
+            return AgentBrand(
+                logo: "AgentLogo/cursor", symbolTile: nil,
+                button: .init(fill: Color.black.opacity(0.9), ink: .white, mark: "AgentLogo/cursor-on-dark"))
+        case .vsCode:
+            // code.visualstudio.com/brand: 0x007ACC, and the white icon is the
+            // one for blue backgrounds.
+            return AgentBrand(
+                logo: "AgentLogo/vscode", symbolTile: nil,
+                button: .init(fill: Color(hex: 0x007ACC), ink: .white, mark: "AgentLogo/vscode-on-blue"))
+        case .other:
+            // No maker to speak for, so the house accent.
+            return AgentBrand(
+                logo: nil, symbolTile: nil, button: .init(fill: Palette.accent, ink: .white, mark: nil))
+        }
+    }
+}
+
+/// An agent's mark at a given size, with clear space inside the frame, or its
+/// stand-in symbol.
+struct AgentMark: View {
+    let kind: AgentKind
+    let size: CGFloat
+
+    static func hasAsset(_ name: String) -> Bool {
+        #if os(macOS)
+            NSImage(named: name) != nil
+        #else
+            UIImage(named: name) != nil
+        #endif
+    }
+
+    var body: some View {
+        let brand = kind.brand
+        Group {
+            if let logo = brand.logo, Self.hasAsset(logo) {
+                Image(logo)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: size * 0.8, height: size * 0.8)
+            } else if let tile = brand.symbolTile {
+                Image(systemName: kind.symbol)
+                    .font(.system(size: size * 0.4, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: size * 0.8, height: size * 0.8)
+                    .background(
+                        RoundedRectangle(cornerRadius: size * 0.2, style: .continuous).fill(tile)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: size * 0.2, style: .continuous)
+                            .strokeBorder(Palette.hairline, lineWidth: 0.75)
+                    )
+            } else {
+                Image(systemName: kind.symbol)
+                    .font(.system(size: size * 0.5, weight: .medium))
+            }
+        }
+        .frame(width: size, height: size)
+        .accessibilityHidden(true)
+    }
+}
+
+/// A button in an agent's own colours. The house's press and hover feel: a
+/// light wash over the fill on hover, a dip in opacity on press, and a hairline
+/// all the way round so black reads on a dark window.
+private struct BrandButtonStyle: ButtonStyle {
+    let fill: Color
+    let ink: Color
+    @State private var hovering = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+        return configuration.label
+            .font(Typo.ui(12, weight: .semibold))
+            .foregroundStyle(ink)
+            .padding(.horizontal, Space.s12)
+            .padding(.vertical, Space.scaled(7))
+            .background(
+                ZStack {
+                    shape.fill(fill)
+                    shape.fill(Color.white.opacity(hovering ? 0.1 : 0))
+                }
+            )
+            .overlay(shape.strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
+            .opacity(configuration.isPressed ? 0.8 : 1)
+            .contentShape(shape)
+            .onHover { hovering = $0 }
     }
 }
 

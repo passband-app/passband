@@ -9777,6 +9777,80 @@ async fn senders_autocomplete_ranks_prefix_then_volume_and_hides_spam_and_sent()
 }
 
 #[tokio::test]
+async fn sender_domains_roll_up_by_host_for_the_rule_editor() {
+    // WIRE CONTRACT: GET /client/sender-domains?q= returns a flat array of
+    // {domain, sender_count, msg_count, last_received_at}, a host that starts
+    // with the fragment first, then by volume; an empty or absent fragment
+    // lists the busiest hosts, the limit is capped, the response is no-store.
+    let Harness { app, .. } = harness(|store, acct| {
+        let seed = |gmail: &str, from: &str| {
+            let mut m = msg(acct, gmail, gmail, "hello", "body");
+            m.from_addr = from.to_string();
+            m
+        };
+        for (gmail, from) in [
+            ("g1", "receipts@stripe.com"),
+            ("g2", "support@stripe.com"),
+            ("g3", "news@e.stripe.com"),
+            ("g4", "dan@example.com"),
+        ] {
+            store.upsert_message(&seed(gmail, from)).unwrap();
+        }
+        let mut spam = seed("g5", "winner@stripe-lottery.example");
+        spam.is_spam = true;
+        store.upsert_message(&spam).unwrap();
+    });
+
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", "/client/sender-domains?q=stripe"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-store"
+    );
+    let items = body_json(resp).await;
+    let domains: Vec<&str> = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["domain"].as_str().unwrap())
+        .collect();
+    assert_eq!(domains, vec!["stripe.com", "e.stripe.com"]);
+    assert_eq!(items[0]["sender_count"], 2);
+    assert_eq!(items[0]["msg_count"], 2);
+    assert!(items[0]["last_received_at"].is_string());
+
+    for uri in ["/client/sender-domains?q=", "/client/sender-domains"] {
+        let resp = app.clone().oneshot(authed("GET", uri)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+        let items = body_json(resp).await;
+        assert_eq!(items.as_array().unwrap().len(), 3, "{uri}");
+        assert_eq!(items[0]["domain"], "stripe.com", "{uri}");
+    }
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", "/client/sender-domains?limit=1"))
+        .await
+        .unwrap();
+    assert_eq!(body_json(resp).await.as_array().unwrap().len(), 1);
+
+    // No token, no directory.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/client/sender-domains?q=stripe")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn person_card_reports_one_address_without_its_sealed_mail() {
     // WIRE CONTRACT: GET /client/person?addr= returns {addr, display_name?,
     // is_self, known_contact, received?, sent?, rule?, groups, recent_threads}.

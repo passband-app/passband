@@ -162,6 +162,22 @@ pub struct SenderEntry {
     pub last_received_at: DateTime<Utc>,
 }
 
+/// The sender directory rolled up by host (`/client/sender-domains`): everyone
+/// at one domain who has written to the account, as the rule editor's `*@`
+/// suggestion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SenderDomainEntry {
+    /// The host exactly as the addresses carry it (`e.stripe.com` is not
+    /// `stripe.com`), because a rule's glob matches the whole address and
+    /// `*@stripe.com` would not cover the subdomain.
+    pub domain: String,
+    /// Directory rows at this host.
+    pub sender_count: i64,
+    /// The sum of those rows' `msg_count`, with the same sealed caveat.
+    pub msg_count: i64,
+    pub last_received_at: DateTime<Utc>,
+}
+
 /// A fully-triaged message committed in one transaction by
 /// [`Store::ingest_message`]: message row and triage row together, so a sealed
 /// message is never observable as normal mail (docs/SECURITY.md §4).
@@ -1935,6 +1951,17 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
         q: &str,
         limit: u32,
     ) -> Result<Vec<SenderEntry>>;
+
+    /// HUMAN-DOOR ONLY (`/client/sender-domains`): the sender directory rolled
+    /// up by host and ranked for a typed fragment of one, for the rule
+    /// editor's `*@` suggestions. MUST NOT be reachable from MCP, like
+    /// `search_senders`.
+    fn search_sender_domains(
+        &self,
+        account_id: AccountId,
+        q: &str,
+        limit: u32,
+    ) -> Result<Vec<SenderDomainEntry>>;
 
     /// Read the sync cursor for a mailbox key, if one has been persisted.
     fn sync_state(&self, account_id: AccountId, mailbox: &str) -> Result<Option<SyncState>>;

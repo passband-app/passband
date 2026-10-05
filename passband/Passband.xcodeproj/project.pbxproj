@@ -35,6 +35,7 @@
 		0ED6DA0EF049E4B8C3349A60 /* DeeperSearch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8418478A0084D45C077A9305 /* DeeperSearch.swift */; };
 		0FE1B2AACB4D13002E0F5381 /* GroupEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8FF235DC1DB2B57F7C06220 /* GroupEditor.swift */; };
 		10EC2ECDCCD06D1869F5DFF7 /* FindInThread.swift in Sources */ = {isa = PBXBuildFile; fileRef = 151C06F2A835787B0FDEDB24 /* FindInThread.swift */; };
+		1110EA912E038CFAD6F52EF2 /* FixtureStage.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6F208E8684B478A0998C7E2 /* FixtureStage.swift */; };
 		113F529E6DD425BDAC1B02CB /* ScheduledRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2BB67D1D24C9D40DD0649549 /* ScheduledRow.swift */; };
 		120F38E19705221A8EAA5ECF /* SidePanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 992EA99CCF93A2EA929D6E3B /* SidePanel.swift */; };
 		126B9D58B8378EDF351CDE33 /* Zoom.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49ABACAD4FE96A07B2F2C669 /* Zoom.swift */; };
@@ -705,6 +706,7 @@
 		E61AF9A237CA524B89126810 /* MobileSitrepView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileSitrepView.swift; sourceTree = "<group>"; };
 		E645BA6EC9A8686D95460095 /* SubjectText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubjectText.swift; sourceTree = "<group>"; };
 		E6D39F14D1F28EEB5D9E86FE /* AuditView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuditView.swift; sourceTree = "<group>"; };
+		E6F208E8684B478A0998C7E2 /* FixtureStage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FixtureStage.swift; sourceTree = "<group>"; };
 		E8D7384FAFC16891C369CFA8 /* UsageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageView.swift; sourceTree = "<group>"; };
 		E949BF41848E8F43B63C7AB7 /* AnthropicStream.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnthropicStream.swift; sourceTree = "<group>"; };
 		E997CF317C418C15B614D02A /* AdCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdCard.swift; sourceTree = "<group>"; };
@@ -1009,6 +1011,7 @@
 		744ED416969AD10D145F844F /* Lib */ = {
 			isa = PBXGroup;
 			children = (
+				E6F208E8684B478A0998C7E2 /* FixtureStage.swift */,
 				1DBFA0EDE4D57FC2CB095671 /* Haptics.swift */,
 				9BEFFF28230357ABC4413CD4 /* IntroHaptics.swift */,
 			);
@@ -1580,6 +1583,7 @@
 				D52ECED560FD5574D03D0A08 /* EventStream.swift in Sources */,
 				DA0FBF25FA4A102FBC273EA3 /* FindBar.swift in Sources */,
 				E93B57DD5D448858473180D5 /* FindInThread.swift in Sources */,
+				1110EA912E038CFAD6F52EF2 /* FixtureStage.swift in Sources */,
 				CDD154C0CEFB4D530E29DD34 /* Format.swift in Sources */,
 				D573F38D0D9CD3402667A0F2 /* FrameMeasurer.swift in Sources */,
 				B16F0BC548D1406ED477C2D8 /* FromOperator.swift in Sources */,

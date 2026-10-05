@@ -91,6 +91,9 @@ struct MobileRootView: View {
             // email the reader opens — the reader is here now, so this is worth
             // the same as it is on the Mac.
             EmailWebView.warmProcess()
+            #if DEBUG
+                if FixtureStage.on { return await FixtureStage.boot(store) }
+            #endif
             await store.loadSettings()
         }
         .onChange(of: store.accountActionsBlocked) { _, blocked in
@@ -137,8 +140,21 @@ private struct MobileLoadingGate: View {
 
 private struct MobileShell: View {
     @Environment(AppStore.self) private var store
-    @State private var tab: MobileTab = .sitrep
+    @State private var tab: MobileTab = MobileShell.openingTab
     @State private var showAuth = false
+
+    /// Sitrep, always, outside a debug build staged for a screenshot.
+    private static var openingTab: MobileTab {
+        #if DEBUG
+            switch FixtureStage.tab {
+            case "records": return .records
+            case "mail": return .mail
+            case "search": return .search
+            default: break
+            }
+        #endif
+        return .sitrep
+    }
 
     // No `@Bindable` shadow here: every modal below is presented off a derived
     // Binding that funnels dismissal through the store's own close verb, so
@@ -235,7 +251,15 @@ private struct MobileShell: View {
         // put a second card shape around a card.
         .overlay {
             if let request = store.ruleEditor {
-                RuleEditor(request: request) { store.closeRuleEditor() }
+                // The draft and the identity the Mac's action layer passes:
+                // without the first a half-written rule is lost to a tap off
+                // the card, and without the second a request swapped under an
+                // open card inherits the last one's fields.
+                RuleEditor(
+                    request: request,
+                    draft: request.draftKey.flatMap { store.ruleDrafts[$0] }
+                ) { store.closeRuleEditor() }
+                .id(request.id)
             }
         }
         .overlay {
@@ -248,6 +272,14 @@ private struct MobileShell: View {
         .sheet(isPresented: triageFixOpen) {
             if let target = store.triageFix {
                 TriageFixPalette(target: target) { store.closeTriageFix() }
+            }
+        }
+        // `h`. The same palette and the same `store.remindTarget`, as a sheet
+        // for the reason the triage palette is one: it autofocuses a field.
+        .sheet(isPresented: remindOpen) {
+            if let target = store.remindTarget {
+                RemindPalette(target: target) { store.closeRemind() }
+                    .presentationDragIndicator(.visible)
             }
         }
         // SHARE PASSBAND, off the same `store.shareSheetOpen` the Mac's shell
@@ -338,6 +370,12 @@ private struct MobileShell: View {
         Binding(
             get: { store.triageFix != nil },
             set: { if !$0 { store.closeTriageFix() } })
+    }
+
+    private var remindOpen: Binding<Bool> {
+        Binding(
+            get: { store.remindTarget != nil },
+            set: { if !$0 { store.closeRemind() } })
     }
 
     /// Same contract for the composer: the store owns whether it is open, and a

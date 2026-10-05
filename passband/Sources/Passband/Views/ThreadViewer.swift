@@ -324,6 +324,35 @@ struct ThreadViewer: View {
         // the back button it sits opposite rather than like a label.
         #if !os(macOS)
             .toolbar {
+                // THE VERBS THAT ARE KEYS ON THE MAC AND NOTHING ELSE: reply
+                // all is Enter, forward is `f`, remind is `h`, and a phone has
+                // none of the three. A menu and not three more words in the
+                // header's row, which already scrolls sideways to hold what it
+                // has. Declared before the checkmark so done keeps the corner.
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Button { openReply() } label: {
+                            Label("Reply", systemImage: "arrowshape.turn.up.left")
+                        }
+                        .disabled(store.inlineReply != nil)
+                        Button { openReplyAll() } label: {
+                            Label("Reply all", systemImage: "arrowshape.turn.up.left.2")
+                        }
+                        .disabled(store.inlineReply != nil)
+                        Button { forwardFromBar() } label: {
+                            Label("Forward", systemImage: "arrowshape.turn.up.right")
+                        }
+                        Divider()
+                        Button { remindFromBar() } label: {
+                            Label("Remind me", systemImage: "bell")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .foregroundStyle(Palette.accent)
+                    }
+                    .disabled(thread == nil)
+                    .accessibilityLabel("More")
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { Task { await doneFromBar() } } label: {
                         Image(systemName: "checkmark")
@@ -2134,6 +2163,29 @@ struct ThreadViewer: View {
             // that moved in.
             guard store.threadId == threadId else { return }
             store.closeThread()
+        }
+    #endif
+
+    #if !os(macOS)
+        /// The menu's Forward: `f`, on the message the reader is on.
+        private func forwardFromBar() {
+            guard let m = messages[safe: index] ?? newest else { return }
+            store.openComposeForward(message: m, fallbackSubject: thread?.subject ?? "")
+        }
+
+        /// The menu's Remind: `h`, on the same message the key aims at. Once
+        /// the reminder lands the mail is dealt with, so the reader leaves the
+        /// way the checkmark leaves.
+        private func remindFromBar() {
+            guard let thread, let m = remindable else { return }
+            store.openRemind(
+                RemindTarget(
+                    messageId: m.id, sender: m.from_addr, subject: thread.subject,
+                    remindAt: store.update(id: m.id)?.remind_at,
+                    onScheduled: {
+                        guard store.threadId == threadId else { return }
+                        store.closeThread()
+                    }))
         }
     #endif
 

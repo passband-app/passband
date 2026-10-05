@@ -278,6 +278,7 @@ private struct ShellWatchers: View {
 }
 
 struct MainShell: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// The readers on screen: the open thread, plus the one it is turning
     /// away from while an S is in flight (behind it, so it is drawn first).
     private func readerSlots(_ threadId: String) -> [String] {
@@ -335,6 +336,13 @@ struct MainShell: View {
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // DISCOVER COMES OUT OF THE RAIL: it slides in from the left,
+                // where its ring is, and back the same way on Esc. Keyed on
+                // the one bool, so no other page change is animated; clipped,
+                // so the page arrives from under the rail, not across it.
+                .clipped()
+                .animation(
+                    reduceMotion ? nil : .smooth(duration: 0.34), value: store.activeView == .discovery)
                 // INVISIBLE UNDER A SETTLED READER, and still mounted. The
                 // reader is opaque and covers the page, but a covered page is
                 // still composited — six glass cards re-sampling whatever is
@@ -579,7 +587,9 @@ struct MainShell: View {
         case .usage: UsageView()
         case .settings: SettingsView()
         case .process: RoutedHost(view: .process) { ProcessView() }
-        case .discovery: DiscoveryView()
+        case .discovery:
+            DiscoveryView()
+                .transition(reduceMotion ? .opacity : .move(edge: .leading).combined(with: .opacity))
         }
     }
 

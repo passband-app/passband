@@ -1645,6 +1645,7 @@ export function App() {
           <a href="/about">About</a>
           <a href="/self-host">Self-host</a>
           <a href="/trust">Trust</a>
+          <a href="/mcp-vs-superhuman">vs Superhuman</a>
           <a href="/privacy">Privacy</a>
           <a href="/terms">Terms</a>
           <a href="https://github.com/passband-app/passband">GitHub</a>

@@ -31,6 +31,7 @@
 //! on each row, and the batch's `detail` with the status each row had.
 
 use super::agent_triage::{list_items, reading_items};
+use super::attention::open_ledger_since;
 use super::reading_senders::{SenderMeasurer, busiest_senders, sender_key};
 use super::*;
 use crate::store::agent_triage::AgentListQuery;
@@ -56,6 +57,51 @@ pub struct SmartDoneScan {
     /// The sender scores step 1 measured, reused by step 3. See
     /// [`SqliteStore::smart_done_apply`] for why that is safe.
     pub sender_scores: SenderScores,
+    /// When step 1 read the store. A sender whose mail was OPENED after this
+    /// has a score that is out of date in the one direction that matters.
+    pub scanned_at: Option<DateTime<Utc>>,
+}
+
+/// How far back an undo is remembered. A row comes back into Reading's
+/// thirty-day window at most thirty days after it arrived, so ninety covers
+/// every row an undone batch could still offer, with room.
+const UNDO_MEMORY_DAYS: i64 = 90;
+
+/// The newest open on one sender's mail, for the stale-score check. Seeks the
+/// sender index like every per-sender read here.
+const SENDER_LAST_OPEN_SQL: &str = "SELECT MAX(t.opened_at)
+     FROM messages m INDEXED BY idx_messages_from_nocase
+     JOIN triage t ON t.message_id = m.id
+     WHERE m.account_id = ?1 AND m.from_addr = ?2 COLLATE NOCASE";
+
+/// Every row id an undo gave back, from this account's batches undone since
+/// `since`. One indexed read of a handful of small rows.
+fn given_back(
+    conn: &Connection,
+    account_id: AccountId,
+    since: DateTime<Utc>,
+) -> Result<HashSet<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT detail FROM smart_done_batches
+         WHERE account_id = ?1 AND undone_at IS NOT NULL AND undone_at >= ?2",
+    )?;
+    let details = stmt
+        .query_map(params![account_id, since.to_rfc3339()], |r| {
+            r.get::<_, String>(0)
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(details
+        .iter()
+        .filter_map(|detail| serde_json::from_str::<serde_json::Value>(detail).ok())
+        .flat_map(|detail| {
+            detail["reopened"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|id| id.as_i64())
+        })
+        .collect())
 }
 
 /// One open Reading row as the judgement left it.
@@ -99,7 +145,7 @@ const ROW_STATE_SQL: &str = concat!(
 /// predicates repeat what the scan just established, so that this statement
 /// alone can never resolve a row that is already done or one that is kept
 /// close.
-const MARK_DONE_SQL: &str = concat!(
+pub(super) const MARK_DONE_SQL: &str = concat!(
     "UPDATE triage AS t
      SET status = 'done', resolved_at = ?1, resolved_by = ?2
      WHERE t.account_id = ?3 AND t.message_id = ?4
@@ -113,24 +159,25 @@ const MARK_DONE_SQL: &str = concat!(
 
 /// Judge every open Reading row from the store as it is right now.
 ///
-/// `known_scores` is step 1's measurement when step 3 is calling; `None`
-/// measures. Everything ELSE is always read fresh: the feed, each row's own
-/// state, FYE membership, and who the owner said to leave alone.
+/// `earlier` is step 1's result when step 3 is calling; `None` measures the
+/// senders. Everything ELSE is always read fresh: the feed, each row's own
+/// state, FYE membership, what an undo gave back, and who the owner said to
+/// leave alone.
 fn scan(
     conn: &Connection,
     account_id: AccountId,
     now: DateTime<Utc>,
     inventory: &AgentListQuery,
     feed_limit: usize,
-    known_scores: Option<&SenderScores>,
+    earlier: Option<&SmartDoneScan>,
 ) -> Result<(Vec<Scanned>, SenderScores)> {
     let items = reading_items(conn, account_id, feed_limit, inventory, now)?;
     let mut measurer = SenderMeasurer::new(conn, account_id, now)?;
 
     // SCORES for the senders the purge list would show, and no others: a
     // sender past its cap was never shown a score to be swept for.
-    let scores = match known_scores {
-        Some(scores) => scores.clone(),
+    let mut scores = match earlier {
+        Some(scan) => scan.sender_scores.clone(),
         None => {
             let (_, groups) = busiest_senders(&items);
             let mut scores = SenderScores::new();
@@ -149,6 +196,44 @@ fn scan(
         .into_iter()
         .map(|item| item.thread_id)
         .collect();
+
+    // A SCORE FROM BEFORE AN OPEN IS NOT REUSED. Opening mail is the one
+    // thing the owner can do during a model call that LOWERS a sender's
+    // score, and a sender at 77 with one more open may be a sender at 72. So
+    // any sender whose mail was opened after step 1 read the store is
+    // unscored for this press: nothing of theirs goes as `ignored_sender`.
+    // Asked only of senders whose reused score could sweep anything.
+    if let Some(scanned_at) = earlier.and_then(|scan| scan.scanned_at) {
+        let mut last_open = conn.prepare(SENDER_LAST_OPEN_SQL)?;
+        for (sender, score) in scores.iter_mut() {
+            if score.is_none_or(|s| s < crate::triage::smart_done::SMART_DONE_SENDER_SCORE) {
+                continue;
+            }
+            let opened: Option<String> =
+                last_open.query_row(params![account_id, sender], |r| r.get(0))?;
+            // A stamp that will not parse cannot be shown to be older.
+            let stale = opened.is_some_and(|at| {
+                DateTime::parse_from_rfc3339(&at)
+                    .map_or(true, |at| at.with_timezone(&Utc) > scanned_at)
+            });
+            if stale {
+                *score = None;
+            }
+        }
+    }
+
+    // WHAT AN UNDO GAVE BACK. The owner looked at a sweep and said no; the
+    // same rows are not offered up again by the next press.
+    let given_back = given_back(
+        conn,
+        account_id,
+        now - chrono::Duration::days(UNDO_MEMORY_DAYS),
+    )?;
+
+    // WHEN OPENS BEGAN TO BE RECORDED. Mail from before it has no open on
+    // record because none could have been, which `stale_promo` must not read
+    // as the owner never opening it.
+    let open_ledger = open_ledger_since(conn, account_id)?;
 
     let mut state = conn.prepare(ROW_STATE_SQL)?;
     let mut protected: HashMap<String, bool> = HashMap::new();
@@ -190,11 +275,14 @@ fn scan(
         };
         let facts = RowFacts {
             decision: &item.decision,
+            thread_attention: Some(&item.attention),
             received_at,
             opened,
             sealed,
             reminder,
             in_fye: fye_threads.contains(&item.thread_id),
+            given_back: given_back.contains(&item.message_id),
+            before_open_ledger: received_at < open_ledger,
             sender_protected,
             sender_score: scores.get(&sender).copied().flatten(),
         };
@@ -224,6 +312,7 @@ impl SqliteStore {
         let conn = self.lock()?;
         let (rows, sender_scores) = scan(&conn, account_id, now, inventory, feed_limit, None)?;
         Ok(SmartDoneScan {
+            scanned_at: Some(now),
             asks: rows
                 .into_iter()
                 .filter_map(|row| {
@@ -255,8 +344,10 @@ impl SqliteStore {
     /// any way that matters, and everything a score is allowed to DO is still
     /// gated by what is re-read. A sender kept, written to or put under a rule
     /// in the meantime is protected by a fresh probe. A row opened in the
-    /// meantime is no longer the sender sweep's to take. A sender that step 1
-    /// did not score has no score and is not swept. Measuring twice bought
+    /// meantime is no longer the sender sweep's to take, and a sender ANY of
+    /// whose mail was opened in the meantime is treated as unscored, since an
+    /// open is the one thing that lowers a score. A sender that step 1 did
+    /// not score has no score and is not swept. Measuring twice bought
     /// none of that and held the store mutex for a second sweep of up to a
     /// hundred senders' mail.
     pub fn smart_done_apply(
@@ -276,7 +367,7 @@ impl SqliteStore {
             now,
             inventory,
             feed_limit,
-            Some(&scan_result.sender_scores),
+            Some(scan_result),
         )?;
         let picks: Vec<(Scanned, ClearReason)> = rows
             .into_iter()
@@ -348,7 +439,8 @@ impl SqliteStore {
     /// they put it.
     ///
     /// `None` for a batch this account does not have (unknown and another
-    /// account's are the same answer). `Some(0)` for one already undone.
+    /// account's are the same answer). `Some(0)` for one already undone. An
+    /// error, with nothing changed, for a batch whose record cannot be read.
     pub fn smart_done_undo(
         &self,
         account_id: AccountId,
@@ -371,8 +463,23 @@ impl SqliteStore {
         if undone_at.is_some() {
             return Ok(Some(0));
         }
+        // A RECORD THAT CANNOT BE READ IS NOT THROWN AWAY BY TRYING. The
+        // list in `detail` is the only way to this batch's rows, so if it is
+        // not there the answer is an error and NOTHING is touched: the batch
+        // stays un-undone and its rows stay tagged, to be undone once
+        // whatever is wrong with the row is put right. Stamping it undone
+        // with nothing reopened would strand those rows as done for good.
+        let unreadable = || {
+            CoreError::Other(anyhow::anyhow!(
+                "smart done batch {batch_id} has no readable record of what it took"
+            ))
+        };
+        let mut detail: serde_json::Value =
+            serde_json::from_str(&detail).map_err(|_| unreadable())?;
+        let rows = detail["rows"].as_array().cloned().ok_or_else(unreadable)?;
+
         let tag = batch_tag(batch_id);
-        let mut reopened = 0usize;
+        let mut given_back = Vec::new();
         {
             let mut restore = tx.prepare(
                 "UPDATE triage
@@ -385,8 +492,7 @@ impl SqliteStore {
             // each, so a row a person has taken over is skipped, but the tag
             // is never SEARCHED for: that would walk every done row the
             // account has, under the store mutex, to find a few dozen.
-            let detail: serde_json::Value = serde_json::from_str(&detail).unwrap_or_default();
-            for row in detail["rows"].as_array().into_iter().flatten() {
+            for row in &rows {
                 let Some(id) = row["id"].as_i64() else {
                     continue;
                 };
@@ -395,12 +501,20 @@ impl SqliteStore {
                     Some("new") => "new",
                     _ => "open",
                 };
-                reopened += restore.execute(params![was, account_id, id, tag])?;
+                if restore.execute(params![was, account_id, id, tag])? > 0 {
+                    given_back.push(id);
+                }
             }
         }
+        let reopened = given_back.len();
+        // REMEMBERED: these are the rows the owner said no about. The next
+        // press reads this list and leaves them alone (`given_back`). A row
+        // the owner had already taken over is not on it; they dealt with
+        // that one themselves.
+        detail["reopened"] = serde_json::json!(given_back);
         tx.execute(
-            "UPDATE smart_done_batches SET undone_at = ?1 WHERE id = ?2",
-            params![now.to_rfc3339(), batch_id],
+            "UPDATE smart_done_batches SET undone_at = ?1, detail = ?2 WHERE id = ?3",
+            params![now.to_rfc3339(), detail.to_string(), batch_id],
         )?;
         tx.commit()?;
         Ok(Some(reopened))

@@ -695,6 +695,9 @@ CREATE TABLE IF NOT EXISTS reading_sender_keeps (
 -- the membership; `detail` is JSON carrying each cleared message with the
 -- reason it went and the status it had, so an undo restores exactly that.
 -- `undone_at` is stamped by the first undo and makes every later one a no-op.
+-- That undo also writes `reopened` into `detail`: the ids it gave back. Smart
+-- done reads those (for batches undone in the last 90 days) and never takes
+-- such a row again, because an undo is the owner saying "not those".
 CREATE TABLE IF NOT EXISTS smart_done_batches (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id  INTEGER NOT NULL,
@@ -703,6 +706,9 @@ CREATE TABLE IF NOT EXISTS smart_done_batches (
     cleared     INTEGER NOT NULL,
     detail      TEXT NOT NULL
 );
+-- For the one read that is not by id: an account's recently undone batches.
+CREATE INDEX IF NOT EXISTS idx_smart_done_batches_undone
+    ON smart_done_batches(account_id, undone_at);
 
 -- AUTH-MAIL SHREDDER (retention). One row per message the retention pass moved
 -- to Gmail Trash, so the "N shredded" figure is a real ledger and a message can

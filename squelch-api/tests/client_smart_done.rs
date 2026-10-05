@@ -38,6 +38,17 @@ fn reading(
         received_at: Utc::now() - Duration::days(days_ago),
         ..msg(acct, key, key, SUBJECT, BODY)
     };
+    // An open ledger older than any mail here, as an established mailbox
+    // has. (On a brand-new account every old promotion predates the ledger,
+    // and "never opened" means nothing for it.) A test about a young ledger
+    // sets its own afterwards.
+    store
+        .set_app_setting(
+            acct,
+            "opened_ledger_since",
+            &(Utc::now() - Duration::days(400)).to_rfc3339(),
+        )
+        .unwrap();
     let id = store.upsert_message(&message).unwrap();
     store
         .set_triage(
@@ -815,4 +826,19 @@ async fn a_young_ledger_reports_no_rate_and_no_score() {
     let s = senders(&h).await;
     assert_eq!(s["signals"]["per_month"], 16.0);
     assert_eq!(s["score"], 60, "55 ignored and 5 for sixteen a month");
+}
+
+/// On a new account the backfill arrived before any open could be recorded.
+/// Those promotions are not "never opened", and a press leaves them.
+#[tokio::test]
+async fn a_new_accounts_backfilled_promotions_are_not_swept_as_stale() {
+    let h = harness(|_, _| {});
+    let old = reading(&h.store, h.acct, "a", 20, "Autumn sale", |_| {});
+    // The ledger began with the account, a moment ago.
+    h.store
+        .set_app_setting(h.acct, "opened_ledger_since", &Utc::now().to_rfc3339())
+        .unwrap();
+    let body = press(&h).await;
+    assert_eq!(body["cleared"], 0);
+    assert_eq!(open_in_reading(&h).await, [old]);
 }

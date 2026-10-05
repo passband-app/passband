@@ -504,10 +504,14 @@ fn a_score_from_the_scan_does_not_outrank_what_the_owner_did_since() {
         store
             .acknowledge_agent_message(acct, first, Utc::now())
             .unwrap();
+        // An open since the scan means the scan's score is out of date, and
+        // opening mail is exactly what lowers it. The sender is treated as
+        // unscored for this press: neither of the two goes.
         let outcome = store
             .smart_done_apply(acct, Utc::now(), &inventory, 200, &scan, &none)
             .unwrap();
-        assert_eq!(outcome.cleared, [(second, ClearReason::IgnoredSender)]);
+        assert!(outcome.cleared.is_empty(), "{:?}", outcome.cleared);
+        assert_eq!(row(&store, second).0, "new");
         assert_eq!(row(&store, first).0, "new");
     }
     // Kept the sender while the model was thinking.
@@ -662,4 +666,398 @@ fn dwell_reported_before_an_auth_decision_reaches_no_statistic() {
     assert_eq!(s.clicks, 0);
     // And no other sender picked it up.
     assert_eq!(read.senders.len(), 1);
+}
+
+// ---- final review ---------------------------------------------------------
+
+use crate::triage::decision::{AttentionAction, SupportedTime};
+
+fn evidence(id: i64) -> Vec<EvidenceRef> {
+    vec![EvidenceRef {
+        message_id: id,
+        location: "body".into(),
+    }]
+}
+
+fn stated(value: impl Into<String>, timezone: Option<&str>) -> Option<SupportedTime> {
+    Some(SupportedTime {
+        value: value.into(),
+        timezone: timezone.map(str::to_string),
+        ..Default::default()
+    })
+}
+
+fn gala(start: impl Into<String>, timezone: Option<&str>) -> RecordProposal {
+    RecordProposal::Event {
+        title: "Gala".into(),
+        start: stated(start, timezone),
+        location: None,
+        evidence: vec![],
+    }
+}
+
+/// The triage agent writes a timed event as a LOCAL time with a zone name
+/// beside it (`2026-10-10T19:00:00`, no offset): three in four of the event
+/// starts in a real store. An event still ahead in that shape must protect
+/// the row exactly as an RFC3339 one does, and a start nobody can parse must
+/// leave the row alone rather than count as no date at all.
+#[test]
+fn an_upcoming_event_protects_however_its_time_is_written() {
+    let (store, acct) = store();
+    old_ledgers(&store, acct);
+    let ahead = Utc::now() + Duration::days(5);
+    let control = promo(&store, acct, "control", 20);
+    let mut kept = Vec::new();
+    let shapes = [
+        ("seconds", ahead.format("%Y-%m-%dT%H:%M:%S").to_string()),
+        ("minutes", ahead.format("%Y-%m-%dT%H:%M").to_string()),
+        ("offset", ahead.to_rfc3339()),
+        ("words", "next Friday evening".to_string()),
+    ];
+    for (name, start) in shapes {
+        // A three-week-old unopened promotion for it...
+        let id = mail(&store, acct, name, &format!("{name}@shop.example"), 20);
+        let value = start.clone();
+        into_reading_with(&store, acct, id, move |d| {
+            d.records = vec![gala(value, Some("America/Los_Angeles"))];
+        });
+        kept.push(id);
+        // ...and an essay about it, which would otherwise go to the model.
+        let essay = mail(
+            &store,
+            acct,
+            &format!("{name}-essay"),
+            "essays@x.example",
+            5,
+        );
+        into_reading_with(&store, acct, essay, move |d| {
+            content(d);
+            d.summary = "Join us for the gala on the 10th".into();
+            d.records = vec![gala(start, Some("America/Los_Angeles"))];
+        });
+        kept.push(essay);
+    }
+    let scan = store
+        .smart_done_scan(
+            acct,
+            Utc::now(),
+            &crate::store::agent_triage::AgentListQuery::default(),
+            200,
+        )
+        .unwrap();
+    assert!(
+        scan.asks.is_empty(),
+        "none is the model's to judge: {:?}",
+        scan.asks
+    );
+    let verdicts: Vec<_> = kept
+        .iter()
+        .map(|id| (*id, ClearReason::EventPassed))
+        .collect();
+    let outcome = apply(&store, acct, &verdicts);
+    assert_eq!(outcome.cleared, [(control, ClearReason::StalePromo)]);
+    // And the event is still on the Calendar side of the house.
+    let records = store.agent_records(acct, 100).unwrap();
+    assert_eq!(
+        records.len(),
+        kept.len(),
+        "every one still listed as a record"
+    );
+}
+
+/// A naive timestamp that HAS passed is evidence too.
+#[test]
+fn a_timed_event_that_has_passed_clears_in_the_agents_own_time_format() {
+    let (store, acct) = store();
+    old_ledgers(&store, acct);
+    let id = mail(&store, acct, "gala", "gala@events.example", 9);
+    let start = (Utc::now() - Duration::days(4))
+        .format("%Y-%m-%dT%H:%M:%S")
+        .to_string();
+    into_reading_with(&store, acct, id, move |d| {
+        content(d);
+        d.records = vec![gala(start, Some("Europe/Berlin"))];
+    });
+    assert_eq!(
+        apply(&store, acct, &[]).cleared,
+        [(id, ClearReason::EventPassed)]
+    );
+}
+
+/// An open action with a date ahead, or a revisit the agent asked for, is the
+/// mail saying it is not finished. Neither is ever a reason to clear.
+#[test]
+fn an_open_action_or_a_pending_revisit_keeps_a_row() {
+    let (store, acct) = store();
+    old_ledgers(&store, acct);
+    let control = promo(&store, acct, "control", 20);
+    let due = mail(&store, acct, "rsvp", "rsvp@shop.example", 20);
+    into_reading_with(&store, acct, due, move |d| {
+        d.attention = ThreadAttentionDecision {
+            relevant_message_ids: vec![due],
+            evidence: evidence(due),
+            actions: vec![AttentionAction {
+                description: "Register before the deadline".into(),
+                due: stated(
+                    (Utc::now() + Duration::days(6))
+                        .format("%Y-%m-%d")
+                        .to_string(),
+                    None,
+                ),
+                evidence: evidence(due),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+    });
+    let revisit = mail(&store, acct, "revisit", "later@shop.example", 20);
+    into_reading_with(&store, acct, revisit, |d| {
+        d.revisit = Some(crate::triage::decision::RevisitRequest {
+            at: Utc::now() + Duration::days(3),
+            reason: "See whether the sale was extended".into(),
+        });
+    });
+    // A RESOLVED action, and one whose date has gone by, protect nothing.
+    let settled = mail(&store, acct, "settled", "settled@shop.example", 20);
+    into_reading_with(&store, acct, settled, move |d| {
+        d.attention = ThreadAttentionDecision {
+            relevant_message_ids: vec![settled],
+            evidence: evidence(settled),
+            actions: vec![
+                AttentionAction {
+                    description: "Done already".into(),
+                    resolved: true,
+                    due: stated(
+                        (Utc::now() + Duration::days(6))
+                            .format("%Y-%m-%d")
+                            .to_string(),
+                        None,
+                    ),
+                    evidence: evidence(settled),
+                    ..Default::default()
+                },
+                AttentionAction {
+                    description: "Missed".into(),
+                    due: stated(
+                        (Utc::now() - Duration::days(6))
+                            .format("%Y-%m-%d")
+                            .to_string(),
+                        None,
+                    ),
+                    evidence: evidence(settled),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+    });
+    let mut cleared = apply(&store, acct, &[]).cleared;
+    cleared.sort();
+    assert_eq!(
+        cleared,
+        [
+            (control, ClearReason::StalePromo),
+            (settled, ClearReason::StalePromo)
+        ]
+    );
+    assert_eq!(row(&store, due).0, "new");
+    assert_eq!(row(&store, revisit).0, "new");
+}
+
+/// An undo is the owner saying "not those". The next press must not take the
+/// same rows again.
+#[test]
+fn rows_an_undo_gave_back_are_not_taken_again() {
+    let (store, acct) = store();
+    old_ledgers(&store, acct);
+    let a = promo(&store, acct, "a", 20);
+    let b = promo(&store, acct, "b", 20);
+    let batch = apply(&store, acct, &[]).batch_id.unwrap();
+    // The owner re-does one by hand before undoing: that one was not given
+    // back, so nothing is remembered about it.
+    store
+        .set_attention_status(acct, b, AttentionStatus::Done)
+        .unwrap();
+    assert_eq!(
+        store.smart_done_undo(acct, batch, Utc::now()).unwrap(),
+        Some(1)
+    );
+    let later = promo(&store, acct, "later", 20);
+    let again = apply(&store, acct, &[(a, ClearReason::Expired)]);
+    assert_eq!(again.cleared, [(later, ClearReason::StalePromo)]);
+    assert_eq!(row(&store, a).0, "new");
+}
+
+/// A batch whose record cannot be read is not thrown away by trying.
+#[test]
+fn a_batch_whose_detail_cannot_be_read_is_not_marked_undone() {
+    let (store, acct) = store();
+    old_ledgers(&store, acct);
+    let id = promo(&store, acct, "a", 20);
+    let batch = apply(&store, acct, &[]).batch_id.unwrap();
+    let tag = Some(format!("smart_done:{batch}"));
+    let undone_at = |store: &SqliteStore| -> Option<String> {
+        store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT undone_at FROM smart_done_batches WHERE id = ?1",
+                [batch],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    for broken in ["{\"by_reason\":{}}", "not json", "{\"rows\":\"none\"}"] {
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE smart_done_batches SET detail = ?1 WHERE id = ?2",
+                params![broken, batch],
+            )
+            .unwrap();
+        assert!(
+            store.smart_done_undo(acct, batch, Utc::now()).is_err(),
+            "{broken}"
+        );
+        assert_eq!(undone_at(&store), None, "{broken}");
+        assert_eq!(row(&store, id), ("done".into(), true, tag.clone()));
+    }
+    // Repaired, it undoes as it always would have.
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE smart_done_batches SET detail = ?1 WHERE id = ?2",
+            params![
+                serde_json::json!({"rows": [{"id": id, "reason": "stale_promo", "was": "new"}]})
+                    .to_string(),
+                batch
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        store.smart_done_undo(acct, batch, Utc::now()).unwrap(),
+        Some(1)
+    );
+}
+
+/// "Never opened" says nothing about mail that arrived before opens were
+/// recorded. On a new account the whole backfill is such mail.
+#[test]
+fn a_promotion_from_before_the_open_ledger_is_not_stale() {
+    let (store, acct) = store();
+    // The ledger began three weeks ago.
+    let ledger = (Utc::now() - Duration::days(21)).to_rfc3339();
+    store
+        .set_app_setting(acct, OPEN_LEDGER_SINCE_KEY, &ledger)
+        .unwrap();
+    store
+        .set_app_setting(acct, DWELL_LEDGER_SINCE_KEY, &ledger)
+        .unwrap();
+    let backfilled = promo(&store, acct, "backfilled", 25);
+    let since = promo(&store, acct, "since", 20);
+    let outcome = apply(&store, acct, &[]);
+    assert_eq!(outcome.cleared, [(since, ClearReason::StalePromo)]);
+    assert_eq!(row(&store, backfilled).0, "new");
+}
+
+/// The rule suggester's digest hands SUBJECTS to a model. Auth and restricted
+/// mail must not be in it, by the decision and not the retired column.
+#[test]
+fn the_rule_digest_leaves_out_auth_and_restricted_mail() {
+    let (store, acct) = store();
+    let plain = triaged(acct, "plain", "plain")
+        .from(NEWS)
+        .subject("Autumn issue")
+        .seed(&store);
+    decide(&store, acct, plain, |_| {});
+    for (name, seal) in sealings() {
+        let id = triaged(acct, name, name)
+            .from(NEWS)
+            .subject(&format!("Your code is 123456 ({name})"))
+            .seed(&store);
+        decide(&store, acct, id, seal);
+        assert_eq!(sensitivity(&store, id), "normal");
+    }
+    let subjects: Vec<String> = store
+        .sender_rule_digest(acct, NEWS, 10)
+        .unwrap()
+        .into_iter()
+        .map(|r| r.subject)
+        .collect();
+    assert_eq!(subjects, ["Autumn issue"]);
+}
+
+// ---- each sealed clause, on its own ---------------------------------------
+
+/// A decision that restricts access, on a row whose access STATE says
+/// allowed: the decision clause alone has to catch it.
+#[test]
+fn a_restricting_decision_seals_even_when_the_state_says_allowed() {
+    let (store, acct) = store();
+    old_ledgers(&store, acct);
+    let open = mail(&store, acct, "open", NEWS, 1);
+    into_reading(&store, acct, open);
+    let id = mail(&store, acct, "restricted", NEWS, 2);
+    decide(&store, acct, id, |d| d.external_access.restricted = true);
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE agent_message_state SET access = 'allowed' WHERE message_id = ?1",
+            [id],
+        )
+        .unwrap();
+    store.record_message_attention(acct, id, 4_000, 1).unwrap();
+    assert_eq!(stored_attention(&store, id), (0, 0));
+    assert_eq!(sender(&senders(&store, acct), NEWS).signals.received, 1);
+}
+
+/// A person's "restrict this" correction, with the decision and the state
+/// left saying otherwise: the correction clause alone has to catch it.
+#[test]
+fn a_restricting_correction_seals_on_its_own() {
+    let (store, acct) = store();
+    old_ledgers(&store, acct);
+    let open = mail(&store, acct, "open", NEWS, 1);
+    into_reading(&store, acct, open);
+    let id = mail(&store, acct, "corrected", NEWS, 2);
+    decide(&store, acct, id, |_| {});
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO agent_triage_corrections
+                 (account_id, message_id, field, value_json, source_revision, revision, updated_at)
+             VALUES (?1, ?2, 'external_access', 'true', 1, 1, ?3)",
+            params![acct, id, Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+    store.record_message_attention(acct, id, 4_000, 1).unwrap();
+    assert_eq!(stored_attention(&store, id), (0, 0));
+    assert_eq!(sender(&senders(&store, acct), NEWS).signals.received, 1);
+}
+
+/// The write statement refuses kept-close mail by itself, whatever the scan
+/// in front of it concluded.
+#[test]
+fn the_done_statement_alone_refuses_kept_close_mail() {
+    use super::super::smart_done::MARK_DONE_SQL;
+    let (store, acct) = store();
+    let plain = mail(&store, acct, "plain", NEWS, 20);
+    into_reading(&store, acct, plain);
+    let code = mail(&store, acct, "code", NEWS, 20);
+    into_reading_with(&store, acct, code, |d| d.auth.kinds = vec![AuthKind::Otp]);
+    let conn = store.lock().unwrap();
+    let mark = |id: i64| {
+        conn.execute(
+            MARK_DONE_SQL,
+            params![Utc::now().to_rfc3339(), "smart_done:1", acct, id],
+        )
+        .unwrap()
+    };
+    assert_eq!(mark(code), 0);
+    assert_eq!(mark(plain), 1);
+    assert_eq!(mark(plain), 0, "and never a row that is already done");
 }

@@ -605,7 +605,17 @@ pub fn validate_decision(
     if !attention(&decision.attention) {
         return fail("invalid_attention_evidence_or_factors");
     }
-    if !decision.ends.as_ref().is_none_or(&supported_time) {
+    // `ends` is read by ONE consumer (smart done), through the one parser
+    // it uses, so it is validated with that parser and not the stricter
+    // closure above: the agent writes a stated time as a local time with no
+    // offset, and refusing that would cost a turn for a value the reader
+    // understands. (The closure stays as it is for `due` and `attention_at`,
+    // whose other readers parse only what it accepts.)
+    if !decision
+        .ends
+        .as_ref()
+        .is_none_or(|time| sources.contains(&time.source_message_id) && time.stated().is_some())
+    {
         return fail("invalid_ends_time");
     }
     for update in &decision.related_updates {
@@ -1247,6 +1257,17 @@ mod tests {
         let none = BTreeMap::new();
         let rules: [i64; 0] = [];
         assert_eq!(validate_decision(&dated, &sources, &none, &rules), Ok(()));
+        // The agent writes a stated time as a LOCAL time with no offset, the
+        // way it writes event starts. That is a valid `ends`.
+        for naive in ["2026-10-31T23:59:00", "2026-10-31T23:59"] {
+            let mut timed = dated.clone();
+            timed.ends.as_mut().unwrap().value = naive.into();
+            assert_eq!(
+                validate_decision(&timed, &sources, &none, &rules),
+                Ok(()),
+                "{naive}"
+            );
+        }
         // One that is not a date, or cites a message nobody read, is not.
         let mut vague = dated.clone();
         vague.ends.as_mut().unwrap().value = "end of the month".into();

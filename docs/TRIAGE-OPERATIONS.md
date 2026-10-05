@@ -318,8 +318,11 @@ timestamp of a report is kept, and only the owner's own client can write them.
 - `unsubscribed` is the sender's row in the unsubscribe ledger; `status` is
   `browser` for a row with no job status.
 - Opens, dwell and clicks are recorded by Passband clients only. Mail read
-  elsewhere looks ignored here, so the scores lean high; the list suggests and
-  never acts.
+  elsewhere looks ignored here, so the scores lean high. This list only
+  suggests. Smart done (below) does act on the score: a sender at 75 or more
+  has their unopened open Reading mail marked done. That is why 75 needs a
+  second signal on top of "never opened", why the sweep is undoable, and why
+  someone who reads a newsletter in another client should keep that sender.
 
 - `kept_at` is when the owner last chose to keep the sender (below), or `null`.
 
@@ -397,14 +400,29 @@ Never cleared, whatever else is true:
 - mail whose decision carries a bill, receipt, delivery or financial update:
   `done` is one status for every inventory, so clearing it from Reading would
   take it off Billing or Shipping too. An event record does not protect;
+- a row an earlier smart done took and the owner undid. An undo records the
+  ids it gave back on the batch, and for 90 days no press takes them again;
 - mail received in the last 24 hours.
 
-Then the stored dates are read: every event `start` and `ends`. A date that was
-already over when the mail arrived is not evidence and is ignored (a wrong year,
-or a recap of something past), as is one that does not parse. If any remaining
-date is still ahead, and is within 90 days of the mail's arrival, the mail is
-still live and nothing below takes it. A date further out than 90 days ("valid
-until 2099") does not keep a row alive.
+Then the stored dates are read. Times are read in the four shapes the triage
+agent writes: a timestamp with an offset, a local date and time with no offset
+(`2026-10-10T19:00:00` or `2026-10-10T19:00`, which is most timed events), and
+a bare date. With no timezone database, a local time or a bare date is taken to
+be over at its last occurrence anywhere on Earth (12 hours behind UTC), which
+can only make a row wait longer.
+
+- Evidence dates are every event `start` and `ends`. One that was already over
+  when the mail arrived is ignored (a wrong year, or a recap of something past).
+- Holds are an unresolved action's `due` (on the decision or on the thread's
+  current attention) and the decision's `revisit.at`. They can keep a row and
+  are never a reason to clear one.
+- A date that is present and cannot be read ("next Friday evening"; event starts
+  are not format-checked at triage) counts as still ahead. The row is left alone
+  and the model is not asked about it.
+
+If any of those is still ahead, and is within 90 days of the mail's arrival, the
+mail is still live and nothing below takes it. A date further out than 90 days
+("valid until 2099") does not keep a row alive.
 
 Each cleared message has exactly one reason, first match:
 
@@ -415,8 +433,10 @@ Each cleared message has exactly one reason, first match:
    owner never opened this message. On a ledger under 14 days old no sender has
    a score, so this takes nothing.
 4. `stale_promo`: a promotion (the decision's `reading_kind`, else promotional
-   and not editorial kinds), received 14 or more days ago, never opened. Content
-   is never stale.
+   and not editorial kinds), received 14 or more days ago, never opened, and
+   received at or after the open ledger began. Mail from before the ledger (the
+   whole backfill of a new account) has no open on record because none could
+   be recorded, so it is never stale. Content is never stale.
 5. Rows none of those took, whose decision has no usable date, are put to a
    model once. It answers `expired`, or `offer_ended` / `event_passed` when it
    can tell which.
@@ -439,10 +459,13 @@ The model pass (`[smart_done]`, default `claude-sonnet-5` at low effort):
   the prompt. A summary is prose about the mail and often names the sender, so
   that is a statement about fields, not about every word. A row with no
   summary, and restricted or auth mail, is not asked about.
-- Its yes is checked. An `expired` answer counts only for a row whose own
-  summary says when (a digit, a month or weekday, today, tomorrow, this week
-  and the like). If 10 or more rows were asked and more than 80% come back
-  expired, the whole pass is discarded and reported as `skipped_failed`. A
+- Its yes is checked. An `expired` answer counts only for a row whose summary,
+  as the model was shown it (the first 220 characters), says when: a month or
+  weekday name, today, tomorrow, this week and the like, or a number written as
+  a date or time (`10/15`, `2026-10-15`, `15th`, `5pm`, `17:00`). A bare number
+  ("20% off", "3 new articles") is not a date. If 10 or more rows were asked and
+  half or more come back expired, the whole pass is discarded and reported as
+  `skipped_failed`. A
   verdict is applied only if the row's stored summary is still the one that was
   sent (compared by fingerprint under the write's lock), so a message
   re-triaged during the call is left alone.
@@ -459,7 +482,9 @@ lock, the model is asked with it released, and the write re-reads and re-judges
 every row in one transaction, so a row the owner opened, reminded, resolved or
 kept in the meantime is judged as it now is. The sender scores measured by the
 first read are reused by the write instead of being measured twice; who the
-owner said to leave alone, and each row's own state, are always read again.
+owner said to leave alone, and each row's own state, are always read again. A
+sender any of whose mail was opened after the first read is treated as unscored
+for that press, since an open is what lowers a score.
 
 One press at a time per account: a press that arrives while another is running
 answers `429` without touching the store.
@@ -472,12 +497,30 @@ count.
 reopens the rows that are still done and still stamped with that batch, each to
 the status it had (`new` or `open`), clearing their `resolved_at` and
 `resolved_by`. Rows a person has touched since are left as
-they are. A second undo answers `0`. An unknown batch, or another account's, is
-`404`. Audited as `reading.smart_done_undo`.
+they are. The ids it reopened are recorded on the batch, and smart done does not
+take those rows again. A second undo answers `0`. An unknown batch, or another
+account's, is `404`. A batch whose record cannot be read answers `500` and is
+left as it was, not marked undone, so it can still be undone once repaired.
+Audited as `reading.smart_done_undo`.
+
+Known limits:
+
+- The one-press-at-a-time guard is released when the request ends. A client that
+  disconnects while the first locked read is still running frees it before that
+  read finishes.
+- `GET /client/v2/reading/senders` has no throttle; each call measures up to 100
+  senders under the store mutex.
+- The stale-score check reads a sender's newest open over their whole history
+  through the sender index, not just the 90-day window.
+- The per-sender resolve (unsubscribe, mute) matches the sender with
+  `LOWER(TRIM(from_addr))`, which the sender index cannot serve.
+- An event record has only a start, so a multi-day event is over a day after it
+  begins.
 
 The triage decision carries an optional `ends` for Reading mail (prompt version
 `agent-triage-v6`): when the offer, sale or event the message is about ends,
-only when the message states it. Decisions stored before it read as `null`. The
+only when the message states it. It is validated with the same parser smart done
+reads it with, so a local time with no offset is accepted. Decisions stored before it read as `null`. The
 prompt version is a label in each run's metadata; changing it re-triages
 nothing.
 

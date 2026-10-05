@@ -17,7 +17,14 @@ use super::*;
 /// context. A row smart done resolved (`resolved_by` set) was not cleared by
 /// anybody, so it is reported as the open row it was until the owner says
 /// otherwise.
-pub(crate) const SENDER_RULE_DIGEST_SQL: &str = "SELECT m.subject, t.tier,
+///
+/// NOT KEPT-CLOSE MAIL, by `sealed_mail_sql!` and not by the retired
+/// `sensitivity` column this statement used to read alone: the subjects here
+/// go to a model, and a login code's subject ("Your code is 123456") is the
+/// one thing in the mailbox that must not. The strict form, so mail whose
+/// access is still unassessed stays out too.
+pub(crate) const SENDER_RULE_DIGEST_SQL: &str = concat!(
+    "SELECT m.subject, t.tier,
             CASE WHEN t.resolved_by IS NOT NULL THEN 'open' ELSE t.status END,
             t.opened_at IS NOT NULL, t.category
      FROM messages m INDEXED BY idx_messages_from_nocase
@@ -25,9 +32,11 @@ pub(crate) const SENDER_RULE_DIGEST_SQL: &str = "SELECT m.subject, t.tier,
      WHERE m.account_id = ?1
        AND m.from_addr = ?2 COLLATE NOCASE
        AND m.is_sent = 0 AND m.is_spam = 0
-       AND t.sensitivity = 'normal'
-     ORDER BY m.received_at DESC
-     LIMIT ?3";
+       AND NOT ",
+    sealed_mail_sql!(),
+    " ORDER BY m.received_at DESC
+     LIMIT ?3"
+);
 
 /// Validate a sender-rule write, on the path of every door. A FILTERED rule with
 /// an empty `want_text` is a contradiction (there is no standing instruction to

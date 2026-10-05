@@ -139,7 +139,7 @@ pub async fn classify_llm(
 ) -> std::result::Result<LlmOutcome<String>, ClassifyError> {
     match provider {
         Stage2Provider::Anthropic => classify_anthropic(http, url, api_key, req, false).await,
-        Stage2Provider::OpenAI => classify_openai(http, url, api_key, req).await,
+        Stage2Provider::OpenAI => classify_openai(http, url, api_key, req, None).await,
     }
 }
 
@@ -152,16 +152,25 @@ pub async fn classify_llm(
 /// `missing_agent_submission`, which the agent already spends a repair turn
 /// on; it still parses and validates every step before a decision can commit.
 /// Other classifiers and the OpenAI transport keep their strict JSON schemas.
+///
+/// `openai_reasoning_effort` forwards `req.effort` to an OpenAI-compatible
+/// provider as `reasoning_effort`. Off, that wire carries no effort at all,
+/// which is what it has always done: several open-weight models think until
+/// the token ceiling without it, and others reject the field.
 pub async fn classify_agent_step(
     http: &reqwest::Client,
     url: &str,
     api_key: &str,
     provider: Stage2Provider,
     req: &LlmRequest<'_>,
+    openai_reasoning_effort: bool,
 ) -> std::result::Result<LlmOutcome<String>, ClassifyError> {
     match provider {
         Stage2Provider::Anthropic => classify_anthropic(http, url, api_key, req, true).await,
-        Stage2Provider::OpenAI => classify_openai(http, url, api_key, req).await,
+        Stage2Provider::OpenAI => {
+            let effort = req.effort.filter(|_| openai_reasoning_effort);
+            classify_openai(http, url, api_key, req, effort).await
+        }
     }
 }
 
@@ -293,6 +302,11 @@ struct OpenAiRequest<'a> {
     messages: Vec<OpenAiMessage<'a>>,
     max_completion_tokens: u32,
     response_format: OpenAiResponseFormat,
+    /// Only the agent step sends this, and only when the operator opted in
+    /// ([`crate::triage::agent_config::AgentConfig::openai_reasoning_effort`]):
+    /// a model that does not take the field answers it with a 400.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'a str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -345,16 +359,32 @@ struct OpenAiUsage {
     prompt_tokens: u64,
     #[serde(default)]
     completion_tokens: u64,
+    #[serde(default)]
+    prompt_tokens_details: Option<OpenAiPromptDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiPromptDetails {
+    #[serde(default)]
+    cached_tokens: u64,
 }
 
 impl OpenAiUsage {
+    /// OpenAI's `prompt_tokens` INCLUDES the cached prefix, reported again in
+    /// `prompt_tokens_details.cached_tokens`. Split it the Anthropic way, so
+    /// `input_tokens` is the uncached remainder everywhere and a cached read is
+    /// priced as one. The wire reports no cache writes; the ledger records zero.
     fn into_usage(self) -> Usage {
+        let cached = self
+            .prompt_tokens_details
+            .map(|details| details.cached_tokens)
+            .unwrap_or(0)
+            .min(self.prompt_tokens);
         Usage {
-            input_tokens: self.prompt_tokens,
+            input_tokens: self.prompt_tokens - cached,
             output_tokens: self.completion_tokens,
-            // OpenAI's wire has no prompt-cache split; the ledger records zero.
             cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
+            cache_read_input_tokens: cached,
             cache_creation: None,
         }
     }
@@ -551,6 +581,7 @@ async fn classify_openai(
     url: &str,
     api_key: &str,
     req: &LlmRequest<'_>,
+    reasoning_effort: Option<&str>,
 ) -> std::result::Result<LlmOutcome<String>, ClassifyError> {
     let max_completion_tokens = MAX_TOKENS;
 
@@ -575,6 +606,7 @@ async fn classify_openai(
                 schema: req.schema.clone(),
             },
         },
+        reasoning_effort,
     };
 
     let build = || {
@@ -865,6 +897,7 @@ mod tests {
                 "test",
                 Stage2Provider::Anthropic,
                 &req,
+                false,
             )
             .await
             .unwrap();
@@ -1025,15 +1058,42 @@ mod tests {
     }
 
     #[test]
-    fn openai_usage_leaves_cache_fields_zero() {
+    fn openai_usage_without_cache_details_is_all_uncached() {
         let u = OpenAiUsage {
             prompt_tokens: 42,
             completion_tokens: 7,
+            prompt_tokens_details: None,
         }
         .into_usage();
         assert_eq!(u.input_tokens, 42);
         assert_eq!(u.output_tokens, 7);
         assert_eq!(u.cache_creation_input_tokens, 0);
         assert_eq!(u.cache_read_input_tokens, 0);
+    }
+
+    /// Cached prompt tokens move out of `input_tokens` into the cache-read
+    /// field, so the total prompt (input + cache read) is unchanged and the
+    /// cached share is priced as a read.
+    #[test]
+    fn openai_cached_prompt_tokens_are_reported_as_cache_reads() {
+        let wire: OpenAiResponse = serde_json::from_value(serde_json::json!({
+            "choices": [],
+            "usage": {"prompt_tokens": 1000, "completion_tokens": 9,
+                "prompt_tokens_details": {"cached_tokens": 640, "audio_tokens": 0}}
+        }))
+        .unwrap();
+        let u = wire.usage.unwrap().into_usage();
+        assert_eq!(u.input_tokens, 360);
+        assert_eq!(u.cache_read_input_tokens, 640);
+        assert_eq!(u.input_tokens + u.cache_read_input_tokens, 1000);
+        assert_eq!(u.cache_creation_input_tokens, 0);
+        // A provider reporting more cached than prompt tokens cannot underflow.
+        let odd = OpenAiUsage {
+            prompt_tokens: 5,
+            completion_tokens: 0,
+            prompt_tokens_details: Some(OpenAiPromptDetails { cached_tokens: 9 }),
+        }
+        .into_usage();
+        assert_eq!((odd.input_tokens, odd.cache_read_input_tokens), (0, 5));
     }
 }

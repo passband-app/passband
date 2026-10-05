@@ -1,0 +1,36 @@
+[package]
+name = "squelch-eval"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "squelch_eval"
+path = "src/lib.rs"
+
+[[bin]]
+name = "squelch-eval"
+path = "src/bin/squelch-eval.rs"
+
+[dependencies]
+# The triage agent, its context builder and its evidence reader. Replaying
+# through the production functions is the point: an eval that rebuilt any of
+# them would measure its own copy.
+squelch-core = { path = "../squelch-core" }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+# Read-only access to the live daemon db (only for `VACUUM INTO`) and plain
+# SQL over the snapshot copy for the as-of timeline.
+rusqlite = { workspace = true }
+toml = { workspace = true }
+futures = { workspace = true }
+
+[dev-dependencies]
+# The mock provider for `run` tests, bound on a loopback port, the way
+# squelch-core tests the agent.
+axum = { version = "0.8" }

@@ -63,10 +63,7 @@ pub async fn run_agent(
         usage: Vec::new(),
         model_calls: 0,
     })?;
-    condense_initial_context(&mut context.initial, &config.context);
-    // Reserve half the context window for investigation results. Truncation is
-    // visible in the payload and never silently drops a message's identity.
-    bound_evidence_text(&mut context.initial, config.context.max_context_bytes / 2);
+    prepare_initial_context(&mut context.initial, &config.context);
     let mut usage = Vec::new();
     let mut model_calls = 0;
     let outcome = tokio::time::timeout(
@@ -108,6 +105,16 @@ async fn run_bounded(
     let mut revisions = context.thread_revisions.clone();
     let mut observed = ObservedDecisionContext::default();
     observed.observe(&context.initial, Some(&context.thread_id));
+    // The run's own clock: the snapshot stamps `now` when it is taken, so in
+    // production this is within the run's timeout of the wall clock, and a
+    // replay of an old snapshot judges its revisit against the time it shows.
+    let now = context
+        .initial
+        .get("now")
+        .and_then(Value::as_str)
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&chrono::Utc))
+        .unwrap_or_else(chrono::Utc::now);
     let mut history = Vec::<Value>::new();
     let mut tool_calls = 0;
     let mut reviews = 0;
@@ -138,6 +145,7 @@ async fn run_bounded(
             connection.api_key,
             connection.provider,
             &request,
+            config.agent.openai_reasoning_effort,
         )
         .await
         .map_err(|error| error.kind)?;
@@ -166,7 +174,7 @@ async fn run_bounded(
         };
         match step {
             AgentStep::Finish { decision } => {
-                match validate_decision(&decision, &sources, &revisions, &context.rule_ids)
+                match validate_decision(&decision, &sources, &revisions, &context.rule_ids, now)
                     .and_then(|()| observed.validate(&decision, &context.thread_id))
                 {
                     Ok(()) => {
@@ -247,6 +255,21 @@ async fn run_bounded(
         }
     }
     Err("agent_turn_budget_exhausted".into())
+}
+
+/// Everything [`run_agent`] does to the initial snapshot before the first
+/// model call: [`condense_initial_context`], then [`bound_initial_context`].
+/// Public so a caller can measure the user message a snapshot will produce.
+pub fn prepare_initial_context(initial: &mut Value, config: &super::agent_config::ContextConfig) {
+    condense_initial_context(initial, config);
+    bound_initial_context(initial, config);
+}
+
+/// Reserve half the context window for investigation results. Truncation is
+/// visible in the payload and never silently drops a message's identity.
+/// Public on its own for snapshots from before condensation existed.
+pub fn bound_initial_context(initial: &mut Value, config: &super::agent_config::ContextConfig) {
+    bound_evidence_text(initial, config.max_context_bytes / 2);
 }
 
 /// Condense the bodies of the initial snapshot: the target and the newest
@@ -532,11 +555,14 @@ impl ObservedDecisionContext {
     }
 }
 
+/// `now` is the run's clock (the snapshot's `now`), which a revisit must
+/// follow, so a replayed snapshot is judged against the time it shows.
 pub fn validate_decision(
     decision: &MessageDecision,
     sources: &BTreeSet<i64>,
     revisions: &BTreeMap<String, i64>,
     rule_ids: &[i64],
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), String> {
     let fail = |kind: &str| Err(kind.to_owned());
     if decision.kinds.is_empty()
@@ -632,11 +658,7 @@ pub fn validate_decision(
     {
         return fail("revisit_requires_reason");
     }
-    if decision
-        .revisit
-        .as_ref()
-        .is_some_and(|r| r.at <= chrono::Utc::now())
-    {
+    if decision.revisit.as_ref().is_some_and(|r| r.at <= now) {
         return fail("revisit_must_be_in_the_future");
     }
     Ok(())
@@ -1109,7 +1131,16 @@ mod tests {
             kinds: vec![AuthKind::LoginAlert],
             evidence: decision.attention.evidence.clone(),
         };
-        assert!(validate_decision(&decision, &BTreeSet::from([7]), &BTreeMap::new(), &[]).is_ok());
+        assert!(
+            validate_decision(
+                &decision,
+                &BTreeSet::from([7]),
+                &BTreeMap::new(),
+                &[],
+                chrono::Utc::now()
+            )
+            .is_ok()
+        );
         assert!(!decision.external_access.restricted);
     }
     #[test]
@@ -1120,17 +1151,131 @@ mod tests {
             reason: "Check later".into(),
         });
         assert_eq!(
-            validate_decision(&decision, &BTreeSet::from([7]), &BTreeMap::new(), &[]),
+            validate_decision(
+                &decision,
+                &BTreeSet::from([7]),
+                &BTreeMap::new(),
+                &[],
+                chrono::Utc::now()
+            ),
             Err("revisit_must_be_in_the_future".into())
         );
         decision.revisit.as_mut().unwrap().at = chrono::Utc::now() + chrono::Duration::hours(1);
-        assert!(validate_decision(&decision, &BTreeSet::from([7]), &BTreeMap::new(), &[]).is_ok());
+        assert!(
+            validate_decision(
+                &decision,
+                &BTreeSet::from([7]),
+                &BTreeMap::new(),
+                &[],
+                chrono::Utc::now()
+            )
+            .is_ok()
+        );
+    }
+    /// A replay shows the model a weeks-old `now`. A revisit after that `now`
+    /// is valid even though the wall clock has passed it; one before it still
+    /// buys a repair turn.
+    #[tokio::test]
+    async fn revisits_are_judged_against_the_snapshot_clock() {
+        use axum::{Router, routing::post};
+        use std::sync::{Arc, Mutex};
+        let then = chrono::Utc::now() - chrono::Duration::days(30);
+        let revisit = |at| {
+            let mut decision = valid();
+            decision.revisit = Some(RevisitRequest {
+                at,
+                reason: "Check the delivery".into(),
+            });
+            json!({"result": {"step": "finish", "decision": decision}})
+        };
+        for (at, turns) in [
+            (then + chrono::Duration::days(1), 1),
+            (then - chrono::Duration::days(1), 2),
+        ] {
+            let responses = Arc::new(Mutex::new(std::collections::VecDeque::from([
+                revisit(at),
+                json!({"result": {"step": "finish", "decision": valid()}}),
+            ])));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/", listener.local_addr().unwrap());
+            let app = Router::new()
+                .route("/", post(mock_provider))
+                .with_state(responses);
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let http = reqwest::Client::new();
+            let connection = AgentConnection {
+                http: &http,
+                url: &url,
+                api_key: "test",
+                provider: Stage2Provider::OpenAI,
+                model: "test",
+                effort: None,
+            };
+            let context = ContextSnapshot {
+                thread_id: "thread".into(),
+                initial: json!({"message":{"id":7,"thread_id":"thread"},"attention":null,
+                    "now": then.to_rfc3339()}),
+                source_message_ids: vec![7],
+                ..Default::default()
+            };
+            let run = run_agent(
+                connection,
+                &AgentTriageConfig::default(),
+                context,
+                &NoEvidence,
+            )
+            .await
+            .unwrap();
+            assert_eq!(run.model_turns, turns, "revisit at {at}");
+            assert_eq!(run.decision.revisit.is_some(), turns == 1);
+            server.abort();
+        }
+    }
+    #[test]
+    fn prepared_context_is_condensed_then_bounded() {
+        let quote = "\n\nOn Mon, Sep 28, 2026 Alice <a@example.com> wrote:\n> zebra";
+        let config = super::super::agent_config::ContextConfig {
+            max_context_bytes: 2_000,
+            ..Default::default()
+        };
+        // Under budget: condensation alone drops the quoted tail.
+        let short = json!({"message": {"id": 1, "body": format!("short{quote}")}});
+        let mut prepared = short.clone();
+        prepare_initial_context(&mut prepared, &config);
+        assert!(
+            !prepared["message"]["body"]
+                .as_str()
+                .unwrap()
+                .contains("zebra")
+        );
+        let mut bounded = short;
+        bound_initial_context(&mut bounded, &config);
+        assert!(
+            bounded["message"]["body"]
+                .as_str()
+                .unwrap()
+                .contains("zebra")
+        );
+        // Over budget: the result fits half the context window, visibly.
+        let mut long = json!({"message": {"id": 1, "body": "x".repeat(5_000)}});
+        prepare_initial_context(&mut long, &config);
+        assert_eq!(long["message"]["body_truncated"], true);
+        assert!(serde_json::to_vec(&long).unwrap().len() <= 1_000);
     }
     #[test]
     fn unknown_evidence_and_unfetched_updates_fail() {
         let mut decision = valid();
         decision.attention.relevant_message_ids = vec![8];
-        assert!(validate_decision(&decision, &BTreeSet::from([7]), &BTreeMap::new(), &[]).is_err());
+        assert!(
+            validate_decision(
+                &decision,
+                &BTreeSet::from([7]),
+                &BTreeMap::new(),
+                &[],
+                chrono::Utc::now()
+            )
+            .is_err()
+        );
         decision = valid();
         decision.related_updates.push(RelatedAttentionUpdate {
             thread_id: "other".into(),
@@ -1138,7 +1283,16 @@ mod tests {
             attention: decision.attention.clone(),
             evidence: decision.attention.evidence.clone(),
         });
-        assert!(validate_decision(&decision, &BTreeSet::from([7]), &BTreeMap::new(), &[]).is_err());
+        assert!(
+            validate_decision(
+                &decision,
+                &BTreeSet::from([7]),
+                &BTreeMap::new(),
+                &[],
+                chrono::Utc::now()
+            )
+            .is_err()
+        );
     }
     /// A shipping email that never prints its order number: the model finds
     /// the number in the sender's history and cites THAT message. Any message a
@@ -1166,9 +1320,24 @@ mod tests {
             ],
         });
         let fetched = BTreeSet::from([7, 3]);
-        assert!(validate_decision(&decision, &fetched, &BTreeMap::new(), &[]).is_ok());
+        assert!(
+            validate_decision(
+                &decision,
+                &fetched,
+                &BTreeMap::new(),
+                &[],
+                chrono::Utc::now()
+            )
+            .is_ok()
+        );
         assert_eq!(
-            validate_decision(&decision, &BTreeSet::from([7]), &BTreeMap::new(), &[]),
+            validate_decision(
+                &decision,
+                &BTreeSet::from([7]),
+                &BTreeMap::new(),
+                &[],
+                chrono::Utc::now()
+            ),
             Err("record_requires_evidence".into())
         );
         let delivery = &decision_schema()["properties"]["records"]["items"]["anyOf"][2];
@@ -1271,6 +1440,58 @@ mod tests {
             "choices": [{"message": {"content": content.as_str().map(str::to_owned).unwrap_or_else(|| content.to_string())}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 12, "completion_tokens": 8}
         }))
+    }
+
+    /// The OpenAI wire carries an effort only when the operator opted in.
+    #[tokio::test]
+    async fn openai_reasoning_effort_is_sent_only_when_configured() {
+        use axum::{Router, routing::post};
+        use std::sync::{Arc, Mutex};
+        for (opted_in, expected) in [(false, Value::Null), (true, json!("low"))] {
+            let seen = Arc::new(Mutex::new(Vec::<Value>::new()));
+            let record = seen.clone();
+            let app = Router::new().route(
+                "/",
+                post(move |axum::Json(request): axum::Json<Value>| {
+                    let record = record.clone();
+                    async move {
+                        record.lock().unwrap().push(request);
+                        let content = json!({"result": {"step": "finish", "decision": valid()}});
+                        axum::Json(json!({
+                            "choices": [{"message": {"content": content.to_string()}, "finish_reason": "stop"}],
+                            "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+                        }))
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let http = reqwest::Client::new();
+            let connection = AgentConnection {
+                http: &http,
+                url: &url,
+                api_key: "test",
+                provider: Stage2Provider::OpenAI,
+                model: "test",
+                effort: Some("low"),
+            };
+            let context = ContextSnapshot {
+                thread_id: "thread".into(),
+                initial: json!({"message":{"id":7,"thread_id":"thread"},"attention":null}),
+                source_message_ids: vec![7],
+                ..Default::default()
+            };
+            let mut config = AgentTriageConfig::default();
+            config.agent.openai_reasoning_effort = opted_in;
+            run_agent(connection, &config, context, &NoEvidence)
+                .await
+                .unwrap();
+            let requests = seen.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0]["reasoning_effort"], expected, "{opted_in}");
+            server.abort();
+        }
     }
 
     #[tokio::test]

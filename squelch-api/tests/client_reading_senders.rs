@@ -373,7 +373,7 @@ async fn senders_lists_each_open_reading_sender_with_its_evidence() {
             "received": 0, "opened": 0, "cleared_unopened": 0,
             "dwell_sample": 0, "median_dwell_ms": null, "clicks": 0,
             "read_sample": 0, "median_read_fraction": null, "median_words": null,
-            "per_month": 0.0
+            "per_month": null
         })
     );
     assert_eq!(s["score"], Value::Null);
@@ -491,7 +491,7 @@ async fn the_unsubscribe_representative_is_the_newest_mail_with_a_link() {
         m.list_unsub_one_click = true;
         m.auth_pass = Some(true);
     });
-    // HEADER, but the mail failed authentication: a link, never automatic.
+    // HEADER, but the mail failed authentication: no representative at all.
     let unverified = with("u1", "u@unverified.example", 1, &|m| {
         m.list_unsubscribe = Some("<https://unverified.example/u>".into());
         m.auth_pass = Some(false);
@@ -528,10 +528,10 @@ async fn the_unsubscribe_representative_is_the_newest_mail_with_a_link() {
         unsub("a@auto.example"),
         json!({"message_id": auto, "auto": true})
     );
-    assert_eq!(
-        unsub("u@unverified.example"),
-        json!({"message_id": unverified, "auto": false})
-    );
+    // Mail that FAILED authentication is not that sender's mail, and its
+    // link is not theirs to be sent to.
+    assert_eq!(unsub("u@unverified.example"), Value::Null);
+    let _ = unverified;
     assert_eq!(
         unsub("o@older.example"),
         json!({"message_id": older, "auto": false}),

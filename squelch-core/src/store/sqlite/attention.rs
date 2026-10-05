@@ -731,8 +731,8 @@ impl SqliteStore {
             return Ok(0);
         }
         let conn = self.lock()?;
-        // Already-done rows are left alone so their original resolved_at — and
-        // whatever resolved them — survives. This is an explicit human sweep.
+        // Already-done rows keep their original resolved_at. This is an
+        // explicit human sweep.
         let n = conn.execute(
             "UPDATE triage
              SET status = 'done', resolved_at = ?1, resolved_by = NULL
@@ -745,6 +745,24 @@ impl SqliteStore {
                      AND LOWER(TRIM(m.from_addr)) = ?3
                )",
             params![Utc::now().to_rfc3339(), account_id, sender],
+        )?;
+        // AND THE OWNER TAKES OVER what an automatic sweep had already
+        // resolved for this sender. Those rows are done either way; what
+        // changes is whose done it is. Left tagged, a later undo of that
+        // sweep would reopen mail from a sender the owner has just
+        // unsubscribed from or muted. Not counted in the return, which is
+        // the rows this call newly resolved.
+        conn.execute(
+            "UPDATE triage
+             SET resolved_by = NULL
+             WHERE account_id = ?1
+               AND status = 'done' AND resolved_by IS NOT NULL
+               AND message_id IN (
+                   SELECT m.id FROM messages m
+                   WHERE m.account_id = ?1
+                     AND LOWER(TRIM(m.from_addr)) = ?2
+               )",
+            params![account_id, sender],
         )?;
         Ok(n)
     }

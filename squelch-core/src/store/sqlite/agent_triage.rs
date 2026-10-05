@@ -1757,13 +1757,32 @@ impl AgentTriageStore for SqliteStore {
         let conn = self.lock()?;
         // One statement: the add and both ceilings are evaluated against the
         // stored row, so two reports racing through the mutex cannot both read
-        // the old total. The WHERE is all three refusals at once: another
-        // account's message, an id that does not exist, and a sealed row
-        // (`sensitivity='normal'`) each match nothing, and the call answers Ok
-        // for all of them without having looked to see which it was.
+        // the old total. The WHERE is every refusal at once: another
+        // account's message, an id that does not exist, and mail that is kept
+        // close each match nothing, and the call answers Ok for all of them
+        // without having looked to see which it was.
+        //
+        // "KEPT CLOSE" IS `known_sealed_mail_sql!`: auth mail and restricted
+        // mail by their stored decision, not only the retired `sensitivity`
+        // column, which nothing arriving today sets.
+        //
+        // THE LOOSER OF THE TWO MACROS, and the only place it is used. Mail
+        // whose assessment is still pending TAKES the report: it is being
+        // read right now, before triage has got to it, and a refused report
+        // cannot be had back. If it turns out to be a login code the count
+        // sits on a row every reader skips (`sealed_mail_sql!` has the
+        // argument, and the test that holds it).
         conn.execute(
-            "UPDATE triage SET dwell_ms=min(?1,dwell_ms+?2), link_clicks=min(?3,link_clicks+?4)
-             WHERE account_id=?5 AND message_id=?6 AND sensitivity='normal'",
+            concat!(
+                "UPDATE triage AS t
+                 SET dwell_ms=min(?1,dwell_ms+?2), link_clicks=min(?3,link_clicks+?4)
+                 WHERE t.account_id=?5 AND t.message_id=?6
+                   AND EXISTS(SELECT 1 FROM messages m
+                              WHERE m.account_id=t.account_id AND m.id=t.message_id
+                                AND NOT ",
+                known_sealed_mail_sql!(),
+                ")"
+            ),
             params![
                 MAX_DWELL_TOTAL_MS as i64,
                 dwell as i64,
@@ -2191,7 +2210,7 @@ fn apply_attention(
     )?;
     Ok(())
 }
-fn list_items(
+pub(super) fn list_items(
     conn: &Connection,
     account: AccountId,
     destination: &str,

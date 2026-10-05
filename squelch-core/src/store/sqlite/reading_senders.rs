@@ -31,9 +31,11 @@
 //!   says nothing about a sender.
 //! - NOT PROVIDER SPAM. Unopened by definition; it would make any sender whose
 //!   mail Gmail sometimes junks look ignored.
-//! - NOT SEALED MAIL (`sensitivity = 'normal'` only). A login code from a shop
-//!   is not that shop's newsletter, and nothing about restricted mail leaves
-//!   through a statistic.
+//! - NOT SEALED MAIL, by `sealed_mail_sql!`: auth mail, restricted mail, and
+//!   legacy sealed rows. A login code from a shop is not that shop's
+//!   newsletter, and nothing about restricted mail leaves through a statistic.
+//! - NOT MAIL THAT FAILED AUTHENTICATION. A forgery in a sender's name is not
+//!   that sender's mail (see `sender_mail_sql!`).
 //! - NEVER FURTHER BACK THAN THE OPEN LEDGER, for the reason
 //!   `SqliteStore::share_open_rate` spells out: mail that arrived before opens
 //!   were recorded divides a real denominator by an empty numerator.
@@ -75,6 +77,20 @@ pub const DWELL_SAMPLE_CAP: usize = 25;
 /// inbound, non-spam, non-sealed mail that is not the owner's own, received at
 /// or after `?3`. A macro so the three cannot drift apart, and so static SQL
 /// can `concat!` it.
+///
+/// "NON-SEALED" IS `sealed_mail_sql!`, the decision-based definition, never
+/// the retired `triage.sensitivity` column alone: a shop's login codes come
+/// from the address its newsletter does, are never opened in this client,
+/// and would otherwise count as ignored issues and tip the shop into a sweep.
+///
+/// AND NOT MAIL THAT FAILED AUTHENTICATION (`auth_pass IS NOT 0`). The sender
+/// here is the From address, and anyone can write one. A flood forged in a
+/// newsletter's name, cleared unopened as junk deserves, would otherwise
+/// become that newsletter's record, and the forgery's own link would become
+/// the place the owner is sent to unsubscribe. `NULL` STILL COUNTS: it means
+/// never checked (mail older than the column, or a provider whose verdict is
+/// unreadable), which is most of an established mailbox and is not evidence
+/// of forgery. Only a recorded failure is.
 macro_rules! sender_mail_sql {
     () => {
         concat!(
@@ -85,8 +101,10 @@ macro_rules! sender_mail_sql {
                 AND NOT ",
             own_mail_sql!(),
             " AND m.is_spam = 0
-                AND t.sensitivity = 'normal'
-                AND m.received_at >= ?3 "
+                AND m.auth_pass IS NOT 0
+                AND NOT ",
+            sealed_mail_sql!(),
+            " AND m.received_at >= ?3 "
         )
     };
 }
@@ -97,10 +115,15 @@ macro_rules! sender_mail_sql {
 /// is done and unopened too, but nobody decided that about it, and smart done
 /// itself reads this score to pick senders to sweep. Counted, each sweep would
 /// raise the score that justified it and the next one would take more.
+///
+/// AND IT MEANS DISMISSED, so not a row with a reminder pending
+/// (`remind_at IS NULL`). "Remind me Thursday" marks the thread done until
+/// Thursday; it is the owner saying they WANT this mail, the opposite of
+/// clearing it.
 pub(crate) const SENDER_COUNTS_SQL: &str = concat!(
     "SELECT COUNT(*), COUNT(t.opened_at),
             COALESCE(SUM(t.opened_at IS NULL AND t.status = 'done'
-                         AND t.resolved_by IS NULL), 0)",
+                         AND t.resolved_by IS NULL AND t.remind_at IS NULL), 0)",
     sender_mail_sql!()
 );
 
@@ -125,13 +148,18 @@ pub(crate) const SENDER_OPENS_SQL: &str = concat!(
       LIMIT ?4"
 );
 
-/// One sender's newest messages with the header half of what the unsubscribe
-/// classifier reads. No body: the handler fetches that, outside this lock,
-/// only for a candidate whose header named no link.
+/// The messages a sender's unsubscribe link may be read from, with the header
+/// half of what the classifier reads. No body: the handler fetches that,
+/// outside this lock, only for a candidate whose header named no link.
+///
+/// AUTHENTICATED MAIL FIRST, then newest. The shared universe above already
+/// drops mail that failed authentication; among what is left, a message the
+/// provider verified is the sender naming its own endpoint, and one never
+/// checked only probably is.
 pub(crate) const SENDER_UNSUB_CANDIDATES_SQL: &str = concat!(
     "SELECT m.id, m.list_unsubscribe, m.list_unsub_one_click, m.auth_pass",
     sender_mail_sql!(),
-    " ORDER BY m.received_at DESC, m.id DESC
+    " ORDER BY (m.auth_pass IS 1) DESC, m.received_at DESC, m.id DESC
       LIMIT ?4"
 );
 
@@ -375,10 +403,10 @@ impl<'c> SenderMeasurer<'c> {
         let attention = summarize_attention(&samples);
         let standing = self.standing(sender)?;
 
-        // The ACTUAL length, never the nominal ninety: a week-old ledger that
-        // saw seven mails saw thirty a month, not two. A day at least, so the
-        // first hours of a ledger cannot scale one mail into hundreds.
-        let covered_days = (self.covered.num_seconds() as f32 / 86_400.0).max(1.0);
+        // The ACTUAL length, never the nominal ninety: a ledger two weeks old
+        // that saw seven mails saw fifteen a month, not two. Too short a
+        // length gives no rate and no score at all (`sender_fatigue`).
+        let covered_days = self.covered.num_seconds() as f32 / 86_400.0;
         let signals = SenderSignals {
             received,
             opened,
@@ -389,7 +417,8 @@ impl<'c> SenderMeasurer<'c> {
             read_sample: attention.read_sample,
             median_read_fraction: attention.median_read_fraction,
             median_words: attention.median_words,
-            per_month: (received as f32 * 30.0 / covered_days * 10.0).round() / 10.0,
+            per_month: sender_fatigue::per_month(received, covered_days),
+            covered_days,
             known_contact: standing.known_contact,
             surface_rule: standing.surface_rule,
             kept_recently: standing.kept_recently,
@@ -515,7 +544,13 @@ impl SqliteStore {
         senders.sort_by(|a, b| {
             b.score
                 .cmp(&a.score)
-                .then_with(|| b.signals.per_month.total_cmp(&a.signals.per_month))
+                // No rate sorts below any rate.
+                .then_with(|| {
+                    b.signals
+                        .per_month
+                        .unwrap_or(-1.0)
+                        .total_cmp(&a.signals.per_month.unwrap_or(-1.0))
+                })
                 .then_with(|| a.sender.cmp(&b.sender))
         });
 

@@ -28,6 +28,25 @@ use serde::{Deserialize, Serialize};
 /// can tell "nothing against them" from "nothing known".
 pub const MIN_SAMPLE: u32 = 4;
 
+/// How many days of ledger a score needs. Opens are only recorded from the
+/// day the ledger starts, so on a ledger a day old EVERYTHING is unopened and
+/// a handful of mails cleared in one sitting reads as months of indifference.
+/// Under two weeks there is no pattern, only a first impression: no score,
+/// for anyone, and so nothing for smart done to sweep a sender on.
+pub const MIN_COVERED_DAYS: f32 = 14.0;
+
+/// How many days of ledger a monthly rate needs. Four mails in three hours is
+/// not "960 a month"; under a week the rate is not stated at all, and the
+/// volume term with it.
+pub const MIN_RATE_DAYS: f32 = 7.0;
+
+/// The monthly rate `received` mails in `covered_days` amount to, to one
+/// decimal, or `None` under [`MIN_RATE_DAYS`].
+pub fn per_month(received: u32, covered_days: f32) -> Option<f32> {
+    (covered_days >= MIN_RATE_DAYS)
+        .then(|| (received as f32 * 30.0 / covered_days * 10.0).round() / 10.0)
+}
+
 /// The sample size at which the ignore term reaches full weight. Four unopened
 /// mails are evidence; eight are a habit. Between the two the term is damped
 /// linearly so a brand-new subscription cannot outrank one ignored for months.
@@ -104,8 +123,11 @@ pub struct SenderSignals {
     pub median_read_fraction: Option<f32>,
     /// Median word count over `read_sample`.
     pub median_words: Option<u32>,
-    /// `received` scaled to thirty days.
-    pub per_month: f32,
+    /// `received` scaled to thirty days. `None` when the window is shorter
+    /// than [`MIN_RATE_DAYS`]: there is no monthly rate in three days of mail.
+    pub per_month: Option<f32>,
+    /// How many days of recorded opens the counts above actually cover.
+    pub covered_days: f32,
     /// The owner has written to this address.
     pub known_contact: bool,
     /// A rule with disposition `surface` governs the sender.
@@ -256,7 +278,9 @@ pub fn score(signals: &SenderSignals) -> (Option<u8>, Vec<Reason>) {
     if signals.kept_recently {
         return (Some(0), vec![Reason::KeptRecently]);
     }
-    if signals.received < MIN_SAMPLE {
+    // TOO FEW MAILS, OR TOO FEW DAYS. The second is the one a young ledger
+    // trips: plenty of mail, and no time for any of it to have been opened.
+    if signals.received < MIN_SAMPLE || signals.covered_days < MIN_COVERED_DAYS {
         return (None, vec![Reason::NotEnoughHistory]);
     }
 
@@ -352,21 +376,18 @@ pub fn score(signals: &SenderSignals) -> (Option<u8>, Vec<Reason>) {
     }
 
     // VOLUME: the same indifference costs more attention at twenty a month.
-    let volume = if signals.per_month >= 20.0 {
-        10.0
-    } else if signals.per_month >= 8.0 {
-        5.0
-    } else {
-        0.0
-    };
-    if volume > 0.0 {
-        total += volume;
-        parts.push((
-            volume,
-            Reason::HighVolume {
-                per_month: signals.per_month,
-            },
-        ));
+    if let Some(per_month) = signals.per_month {
+        let volume = if per_month >= 20.0 {
+            10.0
+        } else if per_month >= 8.0 {
+            5.0
+        } else {
+            0.0
+        };
+        if volume > 0.0 {
+            total += volume;
+            parts.push((volume, Reason::HighVolume { per_month }));
+        }
     }
 
     // Stable, so equal contributions keep the order they were weighed in.
@@ -384,6 +405,8 @@ mod tests {
         SenderSignals {
             received,
             opened,
+            // A ledger that has been running the whole window.
+            covered_days: 90.0,
             ..Default::default()
         }
     }
@@ -412,7 +435,7 @@ mod tests {
     fn a_known_contact_is_zero_whatever_else_is_true() {
         let mut s = base(40, 0);
         s.cleared_unopened = 40;
-        s.per_month = 40.0;
+        s.per_month = Some(40.0);
         s.known_contact = true;
         assert_eq!(score(&s), (Some(0), vec![Reason::KnownContact]));
         // Even with too little history: "no score" would leave the client free
@@ -420,6 +443,35 @@ mod tests {
         let mut few = base(1, 0);
         few.known_contact = true;
         assert_eq!(score(&few), (Some(0), vec![Reason::KnownContact]));
+    }
+
+    #[test]
+    fn a_young_ledger_has_no_score_whatever_the_counts() {
+        // Eight ignored, six cleared unopened, on thirty hours of ledger.
+        let mut s = base(8, 0);
+        s.cleared_unopened = 6;
+        s.covered_days = 1.25;
+        assert_eq!(score(&s), (None, vec![Reason::NotEnoughHistory]));
+        s.covered_days = 13.9;
+        assert_eq!(score(&s).0, None);
+        s.covered_days = 14.0;
+        assert_eq!(score(&s).0, Some(66), "55 + 15 * 6/8");
+        // The owner's own word still answers first.
+        s.covered_days = 1.0;
+        s.known_contact = true;
+        assert_eq!(score(&s), (Some(0), vec![Reason::KnownContact]));
+    }
+
+    #[test]
+    fn a_monthly_rate_needs_a_week_of_ledger() {
+        assert_eq!(per_month(4, 0.125), None, "four in three hours");
+        assert_eq!(per_month(8, 6.9), None);
+        assert_eq!(per_month(7, 7.0), Some(30.0));
+        assert_eq!(per_month(5, 10.0), Some(15.0));
+        // And with no rate there is no volume term and no reason for one.
+        let mut s = base(8, 8);
+        s.per_month = None;
+        assert_eq!(score(&s), (Some(0), vec![]));
     }
 
     #[test]
@@ -651,11 +703,11 @@ mod tests {
     #[test]
     fn volume_has_two_steps() {
         let mut s = base(10, 10);
-        s.per_month = 7.9;
+        s.per_month = Some(7.9);
         assert_eq!(score(&s).0, Some(0));
-        s.per_month = 8.0;
+        s.per_month = Some(8.0);
         assert_eq!(score(&s).0, Some(5));
-        s.per_month = 20.0;
+        s.per_month = Some(20.0);
         let (score, reasons) = super::score(&s);
         assert_eq!(score, Some(10));
         assert_eq!(reasons, vec![Reason::HighVolume { per_month: 20.0 }]);
@@ -667,7 +719,7 @@ mod tests {
         // cleared mail must not push past it.
         let mut s = base(8, 0);
         s.cleared_unopened = 80;
-        s.per_month = 30.0;
+        s.per_month = Some(30.0);
         assert_eq!(score(&s).0, Some(100));
     }
 
@@ -678,7 +730,7 @@ mod tests {
         s.dwell_sample = 5;
         s.read_sample = 5;
         s.median_read_fraction = Some(0.2);
-        s.per_month = 25.0;
+        s.per_month = Some(25.0);
         let (score, reasons) = score(&s);
         assert_eq!(score, Some(93), "55 + 15 + 8 + 5 + 10");
         assert_eq!(

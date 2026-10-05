@@ -11,7 +11,8 @@
 //!    have nothing stored that decides them, so the model can be asked.
 //! 2. The model pass, in the caller, with no lock held.
 //! 3. [`SqliteStore::smart_done_apply`], one lock and one transaction: SCAN
-//!    AGAIN and write. Nothing from step 1 is trusted here. Seconds have
+//!    AGAIN and write. Nothing step 1 saw about a ROW is trusted here (only
+//!    its sender scores are carried over; see that function). Seconds have
 //!    passed and the owner has been using the app: a row may have been opened,
 //!    reminded, resolved, or its sender kept. So every row is judged afresh
 //!    from the store as it is now, and a model verdict is honoured only for a
@@ -20,25 +21,41 @@
 //! WHICH ROWS are the Reading feed's own (`agent_triage::reading_items`) and
 //! which senders are scored is the purge list's own (`reading_senders`'s
 //! measurer and its cap), so smart done can never sweep a row the feed does
-//! not show or a sender for a score the list does not show.
+//! not show or a sender for a score the list does not show. That also sets
+//! its reach: open Reading mail from the feed's thirty-day window. Older mail
+//! is never swept, on purpose; the owner cannot see it there to check.
 //!
 //! MESSAGE-SCOPED, unlike a human done, which resolves the whole thread. A
 //! sweep that took a sibling it never judged could not say why, and could not
 //! give it back. What it takes is recorded twice over: `triage.resolved_by`
 //! on each row, and the batch's `detail` with the status each row had.
 
-use super::agent_triage::reading_items;
+use super::agent_triage::{list_items, reading_items};
 use super::reading_senders::{SenderMeasurer, busiest_senders, sender_key};
 use super::*;
 use crate::store::agent_triage::AgentListQuery;
 use crate::triage::smart_done::{
-    ClearReason, ModelRow, RowFacts, SMART_DONE_MODEL_ROWS, model_question, stored_reason,
+    ClearReason, ModelRow, RowFacts, SMART_DONE_MODEL_ROWS, Verdict, model_question, stored_reason,
+    summary_fingerprint,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// `triage.resolved_by` for the rows of one batch.
 fn batch_tag(batch_id: i64) -> String {
     format!("smart_done:{batch_id}")
+}
+
+/// Each measured sender's fatigue score, by lowercased address.
+pub type SenderScores = HashMap<String, Option<u8>>;
+
+/// What step 1 hands to step 3 across the model call.
+#[derive(Debug, Clone, Default)]
+pub struct SmartDoneScan {
+    /// The rows worth asking the model about, newest first, capped.
+    pub asks: Vec<ModelRow>,
+    /// The sender scores step 1 measured, reused by step 3. See
+    /// [`SqliteStore::smart_done_apply`] for why that is safe.
+    pub sender_scores: SenderScores,
 }
 
 /// One open Reading row as the judgement left it.
@@ -65,45 +82,82 @@ pub struct SmartDoneOutcome {
     pub senders: usize,
 }
 
+/// One row's own state, by primary key: (kept close, status, opened, a
+/// reminder pending or fired). "Kept close" is `sealed_mail_sql!`, the one
+/// definition, so auth and restricted mail is protected by its stored
+/// decision and not only by the retired `sensitivity` column.
+const ROW_STATE_SQL: &str = concat!(
+    "SELECT ",
+    sealed_mail_sql!(),
+    ", t.status, t.opened_at IS NOT NULL,
+            t.remind_at IS NOT NULL OR t.reminded_at IS NOT NULL
+     FROM triage t JOIN messages m ON m.account_id = t.account_id AND m.id = t.message_id
+     WHERE t.account_id = ?1 AND t.message_id = ?2"
+);
+
+/// The write: ONE ROW, by primary key, this message and no sibling. The
+/// predicates repeat what the scan just established, so that this statement
+/// alone can never resolve a row that is already done or one that is kept
+/// close.
+const MARK_DONE_SQL: &str = concat!(
+    "UPDATE triage AS t
+     SET status = 'done', resolved_at = ?1, resolved_by = ?2
+     WHERE t.account_id = ?3 AND t.message_id = ?4
+       AND t.status != 'done'
+       AND EXISTS(SELECT 1 FROM messages m
+                  WHERE m.account_id = t.account_id AND m.id = t.message_id
+                    AND NOT ",
+    sealed_mail_sql!(),
+    ")"
+);
+
 /// Judge every open Reading row from the store as it is right now.
+///
+/// `known_scores` is step 1's measurement when step 3 is calling; `None`
+/// measures. Everything ELSE is always read fresh: the feed, each row's own
+/// state, FYE membership, and who the owner said to leave alone.
 fn scan(
     conn: &Connection,
     account_id: AccountId,
     now: DateTime<Utc>,
     inventory: &AgentListQuery,
     feed_limit: usize,
-) -> Result<Vec<Scanned>> {
+    known_scores: Option<&SenderScores>,
+) -> Result<(Vec<Scanned>, SenderScores)> {
     let items = reading_items(conn, account_id, feed_limit, inventory, now)?;
     let mut measurer = SenderMeasurer::new(conn, account_id, now)?;
 
     // SCORES for the senders the purge list would show, and no others: a
     // sender past its cap was never shown a score to be swept for.
-    let (_, groups) = busiest_senders(&items);
-    let mut scores: HashMap<String, Option<u8>> = HashMap::new();
-    let mut protected: HashMap<String, bool> = HashMap::new();
-    for (sender, _, _) in &groups {
-        let measured = measurer.measure(sender)?;
-        protected.insert(
-            sender.clone(),
-            measured.signals.known_contact
-                || measured.signals.surface_rule
-                || measured.signals.kept_recently,
-        );
-        scores.insert(sender.clone(), measured.score);
-    }
+    let scores = match known_scores {
+        Some(scores) => scores.clone(),
+        None => {
+            let (_, groups) = busiest_senders(&items);
+            let mut scores = SenderScores::new();
+            for (sender, _, _) in &groups {
+                scores.insert(sender.clone(), measurer.measure(sender)?.score);
+            }
+            scores
+        }
+    };
 
-    // The row's own state, by primary key. A message with no triage row has
-    // no status to write and is skipped.
-    let mut state = conn.prepare(
-        "SELECT sensitivity != 'normal', status, opened_at IS NOT NULL,
-                remind_at IS NOT NULL OR reminded_at IS NOT NULL
-         FROM triage WHERE account_id = ?1 AND message_id = ?2",
-    )?;
+    // WHAT IS ON THE FYE BOARD, by the FYE listing's own function: the
+    // decision's attention, the owner's per-thread override, auth and own
+    // mail left out, reminders in. Asked once; a row whose thread is here is
+    // not smart done's to take.
+    let fye_threads: HashSet<String> = list_items(conn, account_id, "fye", now)?
+        .into_iter()
+        .map(|item| item.thread_id)
+        .collect();
+
+    let mut state = conn.prepare(ROW_STATE_SQL)?;
+    let mut protected: HashMap<String, bool> = HashMap::new();
     let mut out = Vec::with_capacity(items.len());
     for item in &items {
         let sender = sender_key(&item.from_addr);
-        // WHO THE OWNER SAID TO LEAVE ALONE is asked of every sender, capped
-        // or not: it is three small probes, and it is the guard.
+        // WHO THE OWNER SAID TO LEAVE ALONE is asked of every sender, scored
+        // or not, and asked NOW: it is three small probes, and it is the
+        // guard.
         let sender_protected = match protected.get(&sender) {
             Some(known) => *known,
             None => {
@@ -112,6 +166,7 @@ fn scan(
                 standing
             }
         };
+        // A message with no triage row has no status to write and is skipped.
         let Some((sealed, status, opened, reminder)) = state
             .query_row(params![account_id, item.message_id], |r| {
                 Ok((
@@ -139,6 +194,7 @@ fn scan(
             opened,
             sealed,
             reminder,
+            in_fye: fye_threads.contains(&item.thread_id),
             sender_protected,
             sender_score: scores.get(&sender).copied().flatten(),
         };
@@ -151,56 +207,86 @@ fn scan(
             sender,
         });
     }
-    Ok(out)
+    Ok((out, scores))
 }
 
 impl SqliteStore {
     /// Step 1: the rows worth asking the model about, newest first, at most
-    /// [`SMART_DONE_MODEL_ROWS`]. Read-only.
+    /// [`SMART_DONE_MODEL_ROWS`], and the sender scores measured on the way.
+    /// Read-only.
     pub fn smart_done_scan(
         &self,
         account_id: AccountId,
         now: DateTime<Utc>,
         inventory: &AgentListQuery,
         feed_limit: usize,
-    ) -> Result<Vec<ModelRow>> {
+    ) -> Result<SmartDoneScan> {
         let conn = self.lock()?;
-        Ok(scan(&conn, account_id, now, inventory, feed_limit)?
-            .into_iter()
-            .filter_map(|row| {
-                Some(ModelRow {
-                    message_id: row.message_id,
-                    summary: row.question?,
-                    received_at: row.received_at,
+        let (rows, sender_scores) = scan(&conn, account_id, now, inventory, feed_limit, None)?;
+        Ok(SmartDoneScan {
+            asks: rows
+                .into_iter()
+                .filter_map(|row| {
+                    Some(ModelRow {
+                        message_id: row.message_id,
+                        summary: row.question?,
+                        received_at: row.received_at,
+                    })
                 })
-            })
-            .take(SMART_DONE_MODEL_ROWS)
-            .collect())
+                .take(SMART_DONE_MODEL_ROWS)
+                .collect(),
+            sender_scores,
+        })
     }
 
-    /// Step 3: judge again and write, in one transaction. `verdicts` is what
-    /// the model said about the rows step 1 offered it; a verdict for a row
-    /// that is no longer askable (opened into a reminder, resolved, protected,
-    /// or decided by a stored fact in the meantime) is dropped.
+    /// Step 3: judge again and write, in one transaction.
+    ///
+    /// `verdicts` is what the model said about the rows step 1 offered it. A
+    /// verdict is honoured only for a row that is STILL askable (not opened
+    /// into a reminder, resolved, protected, or decided by a stored fact in
+    /// the meantime) and whose summary is STILL the one the model was shown:
+    /// a message re-triaged during the call keeps its id and changes its
+    /// summary, and a yes about the old text says nothing about the new.
+    ///
+    /// `scan` is step 1's result, and its SENDER SCORES ARE REUSED rather
+    /// than measured again. That is the one thing not re-read here, and it is
+    /// safe to leave: a score is a count over ninety days of a sender's mail,
+    /// so the seconds of a model call cannot move it across a threshold in
+    /// any way that matters, and everything a score is allowed to DO is still
+    /// gated by what is re-read. A sender kept, written to or put under a rule
+    /// in the meantime is protected by a fresh probe. A row opened in the
+    /// meantime is no longer the sender sweep's to take. A sender that step 1
+    /// did not score has no score and is not swept. Measuring twice bought
+    /// none of that and held the store mutex for a second sweep of up to a
+    /// hundred senders' mail.
     pub fn smart_done_apply(
         &self,
         account_id: AccountId,
         now: DateTime<Utc>,
         inventory: &AgentListQuery,
         feed_limit: usize,
-        verdicts: &HashMap<i64, ClearReason>,
+        scan_result: &SmartDoneScan,
+        verdicts: &HashMap<i64, Verdict>,
     ) -> Result<SmartDoneOutcome> {
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
-        let picks: Vec<(Scanned, ClearReason)> = scan(&tx, account_id, now, inventory, feed_limit)?
+        let (rows, _) = scan(
+            &tx,
+            account_id,
+            now,
+            inventory,
+            feed_limit,
+            Some(&scan_result.sender_scores),
+        )?;
+        let picks: Vec<(Scanned, ClearReason)> = rows
             .into_iter()
             .filter_map(|row| {
                 // A stored fact first; the model only for a row that is still
-                // one the model would be asked about.
+                // one the model would be asked about, about the same text.
                 let reason = row.reason.or_else(|| {
-                    row.question
-                        .as_ref()
-                        .and_then(|_| verdicts.get(&row.message_id).copied())
+                    let question = row.question.as_ref()?;
+                    let verdict = verdicts.get(&row.message_id)?;
+                    (verdict.summary == summary_fingerprint(question)).then_some(verdict.reason)
                 })?;
                 Some((row, reason))
             })
@@ -220,18 +306,9 @@ impl SqliteStore {
 
         let mut cleared = Vec::with_capacity(picks.len());
         let mut rows = Vec::with_capacity(picks.len());
-        let mut senders = std::collections::HashSet::new();
+        let mut senders = HashSet::new();
         {
-            // ONE ROW PER STATEMENT, by primary key: this message and no
-            // sibling. The predicates repeat what the scan just established,
-            // so that this statement alone can never resolve a row that is
-            // already done or one that is sealed.
-            let mut done = tx.prepare(
-                "UPDATE triage
-                 SET status = 'done', resolved_at = ?1, resolved_by = ?2
-                 WHERE account_id = ?3 AND message_id = ?4
-                   AND status != 'done' AND sensitivity = 'normal'",
-            )?;
+            let mut done = tx.prepare(MARK_DONE_SQL)?;
             for (row, reason) in picks {
                 if done.execute(params![stamp, tag, account_id, row.message_id])? == 0 {
                     continue;
@@ -303,6 +380,11 @@ impl SqliteStore {
                  WHERE account_id = ?2 AND message_id = ?3
                    AND status = 'done' AND resolved_by = ?4",
             )?;
+            // THE BATCH'S OWN LIST IS THE MEMBERSHIP, and every row on it is
+            // reached by primary key. The tag in `resolved_by` is checked on
+            // each, so a row a person has taken over is skipped, but the tag
+            // is never SEARCHED for: that would walk every done row the
+            // account has, under the store mutex, to find a few dozen.
             let detail: serde_json::Value = serde_json::from_str(&detail).unwrap_or_default();
             for row in detail["rows"].as_array().into_iter().flatten() {
                 let Some(id) = row["id"].as_i64() else {
@@ -316,15 +398,6 @@ impl SqliteStore {
                 reopened += restore.execute(params![was, account_id, id, tag])?;
             }
         }
-        // THE TAG IS THE MEMBERSHIP, the detail only remembers what each row
-        // was. Anything still wearing the tag (a detail that would not parse)
-        // is given back as open rather than stranded as done.
-        reopened += tx.execute(
-            "UPDATE triage
-             SET status = 'open', resolved_at = NULL, resolved_by = NULL
-             WHERE account_id = ?1 AND status = 'done' AND resolved_by = ?2",
-            params![account_id, tag],
-        )?;
         tx.execute(
             "UPDATE smart_done_batches SET undone_at = ?1 WHERE id = ?2",
             params![now.to_rfc3339(), batch_id],

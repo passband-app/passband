@@ -305,9 +305,14 @@ pub struct AttentionReport {
 ///   and stops reporting for the rest of the session. A 404 for one unknown
 ///   id (mail deleted on another device while it was on screen) would silence
 ///   every report after it.
-/// - A sealed row is accepted and never written. Answering it differently
-///   from a missing one would tell the caller which an id was; one status for
-///   written, sealed and missing alike says nothing.
+/// - Mail KNOWN to be kept close is accepted and never written: auth mail and
+///   restricted mail by their stored decision or assessment, and legacy
+///   sealed rows (`known_sealed_mail_sql!`, not the retired `sensitivity`
+///   column alone). Mail not yet assessed IS written; see that macro's
+///   sibling for why that is safe.
+///   Answering it differently from a missing id would tell the caller which
+///   an id was; one status for written, kept close and missing alike says
+///   nothing.
 ///
 /// A malformed body still gets the extractor's ordinary 4xx.
 ///
@@ -346,7 +351,8 @@ struct SignalsView {
     read_sample: u32,
     median_read_fraction: Option<f32>,
     median_words: Option<u32>,
-    per_month: f32,
+    /// `null` under a week of ledger: there is no monthly rate to state yet.
+    per_month: Option<f32>,
 }
 
 #[derive(Serialize)]
@@ -506,6 +512,18 @@ pub async fn reading_senders(
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(view)))
 }
 
+/// The longest address there is: 64 for the local part, `@`, 255 for the
+/// domain (RFC 5321).
+const MAX_SENDER_LEN: usize = 320;
+
+/// Unicode formatting characters that `char::is_control` does not cover and
+/// that have no business in an address: zero-width marks and the bidi
+/// embeddings, overrides and isolates, which make a stored string display as
+/// something other than what it is.
+fn is_format_control(c: char) -> bool {
+    matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}')
+}
+
 #[derive(Deserialize)]
 pub struct KeepSender {
     pub sender: String,
@@ -527,8 +545,20 @@ pub async fn keep_reading_sender(
 ) -> Result<impl IntoResponse, ApiError> {
     let sender = body.sender.trim().to_ascii_lowercase();
     // The bare address, as every list of senders hands it out. Anything else
-    // would be stored as a keep that can never match a sender.
-    if sender.is_empty() || !sender.contains('@') || sender.chars().any(char::is_whitespace) {
+    // would be stored as a keep that can never match a sender, and this
+    // string goes into a table and into the audit log, so it is bounded and
+    // printable before it goes anywhere: no longer than an address can be
+    // (RFC 5321's 320), no control or formatting characters (NUL, ESC, the
+    // bidi overrides), and exactly one address by the parser every outbound
+    // recipient already goes through.
+    let printable = !sender
+        .chars()
+        .any(|c| c.is_control() || c.is_whitespace() || is_format_control(c));
+    if sender.is_empty()
+        || sender.len() > MAX_SENDER_LEN
+        || !printable
+        || crate::gmail_write::parse_addr_list(&sender) != [sender.as_str()]
+    {
         return Err(ApiError::bad_request("sender must be an email address"));
     }
     let kept = sender.clone();
@@ -557,13 +587,37 @@ pub async fn keep_reading_sender(
 /// sweep ran on stored facts alone, which is a smaller sweep and never an
 /// error: `skipped_nothing_to_ask` (no undecided row has a summary),
 /// `skipped_unconfigured` (no key), `skipped_cap` (the day's passes are
-/// spent), `skipped_failed` (a refusal, a timeout, an error).
+/// spent), `skipped_failed` (a refusal, a timeout, an error, or an answer that
+/// called nearly every row expired and was thrown away whole).
 ///
 /// ONE AUDIT ROW for the batch, not one per message: the batch id is the
 /// target and everything it took can be read back from it.
+///
+/// ONE PRESS AT A TIME. Each press reads a hundred senders' mail under the
+/// store mutex and may hold a model call open for twenty seconds; a client
+/// that loops on the button would otherwise queue those back to back and
+/// starve sync. A press that arrives while another is running answers 429
+/// before it touches the store.
 pub async fn smart_done(State(state): State<ApiState>) -> Result<impl IntoResponse, ApiError> {
     use squelch_core::metrics::SMART_DONE_USAGE_CATEGORY;
     use squelch_core::triage::smart_done::{self as sd, ClearReason};
+    use std::sync::atomic::Ordering;
+
+    /// Clears the in-flight mark however the press ends, an error or a
+    /// dropped connection included.
+    struct Running(std::sync::Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for Running {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Release);
+        }
+    }
+    if state.smart_done_running.swap(true, Ordering::AcqRel) {
+        return Err(ApiError::new(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "a smart done is already running",
+        ));
+    }
+    let _running = Running(state.smart_done_running.clone());
 
     let limit = feed_limit(None);
     let now = Utc::now();
@@ -574,8 +628,8 @@ pub async fn smart_done(State(state): State<ApiState>) -> Result<impl IntoRespon
     let day = now.format("%Y-%m-%d").to_string();
     let scan_inventory = inventory.clone();
     let scan_day = day.clone();
-    let (asks, spent) = store_call(&state, move |store, account| {
-        let asks = store.smart_done_scan(account, now, &scan_inventory, limit)?;
+    let (scan, spent) = store_call(&state, move |store, account| {
+        let scan = store.smart_done_scan(account, now, &scan_inventory, limit)?;
         // The runaway guard, read from the same ledger the passes bill into.
         let spent: u64 = store
             .list_usage_by_category(account, 1)?
@@ -585,12 +639,12 @@ pub async fn smart_done(State(state): State<ApiState>) -> Result<impl IntoRespon
             .filter(|d| d.day == scan_day)
             .map(|d| d.calls)
             .sum();
-        Ok((asks, spent))
+        Ok((scan, spent))
     })
     .await?;
 
     let mut verdicts = std::collections::HashMap::new();
-    let model = if asks.is_empty() {
+    let model = if scan.asks.is_empty() {
         "skipped_nothing_to_ask"
     } else if let Some(client) = state.smart_done.clone() {
         // RESERVE before calling, as the headline does and for its reasons:
@@ -609,7 +663,7 @@ pub async fn smart_done(State(state): State<ApiState>) -> Result<impl IntoRespon
         if !reserved {
             "skipped_cap"
         } else {
-            let pass = sd::judge(&client, now, &asks).await;
+            let pass = sd::judge(&client, now, &scan.asks).await;
             // Billed on every outcome that reported usage, a refusal and a
             // garbled answer included.
             if let Some(u) = pass.usage {
@@ -641,7 +695,7 @@ pub async fn smart_done(State(state): State<ApiState>) -> Result<impl IntoRespon
     // A FRESH CLOCK for the write: the 24-hour floor and every "has passed"
     // are judged as of the moment the rows are taken, not of the press.
     let outcome = store_call(&state, move |store, account| {
-        store.smart_done_apply(account, Utc::now(), &inventory, limit, &verdicts)
+        store.smart_done_apply(account, Utc::now(), &inventory, limit, &scan, &verdicts)
     })
     .await?;
 

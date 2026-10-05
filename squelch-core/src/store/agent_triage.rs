@@ -316,14 +316,19 @@ pub trait AgentTriageStore: Send + Sync {
     /// the total. Both the report and the stored total are clamped; see
     /// [`MAX_DWELL_REPORT_MS`] and its neighbours for why.
     ///
-    /// A message that is NOT THERE and a SEALED one are both accepted and
-    /// both write nothing, so the answer never says which of the two an id
-    /// is, nor whether it is either. That is deliberately not what
+    /// A message that is NOT THERE and one KNOWN to be kept close (auth mail,
+    /// restricted mail, a legacy sealed row) are both accepted and both write
+    /// nothing, so the answer never says which of the two an id is, nor
+    /// whether it is either. Mail whose access assessment is still PENDING is
+    /// written: it is being read before triage reached it, and a refused
+    /// report is lost for good. Every reader of these columns leaves kept-
+    /// close mail out at read time, so a count on a row that later proves to
+    /// be a login code is never read. That is deliberately not what
     /// [`Self::acknowledge_agent_message`] does (it is `NotFound` for a
     /// missing id): see the `/attention` handler for why a 404 is not
-    /// available to this route. A sealed row is refused because a login code
+    /// available to this route. Such a row is refused because a login code
     /// has no reading behaviour worth keeping, and every statistic over these
-    /// columns excludes sealed mail, so a stamp there could only ever be a
+    /// columns excludes that mail, so a stamp there could only ever be a
     /// stored fact about restricted mail that nothing reads.
     ///
     /// Touches neither `opened_at` nor anything else in the `user_state`

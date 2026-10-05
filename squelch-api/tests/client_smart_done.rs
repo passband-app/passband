@@ -52,11 +52,25 @@ fn reading(
             None,
         )
         .unwrap();
+    commit(store, acct, id, summary, adjust);
+    id
+}
+
+/// Commit a triage decision for `id`, the way the worker does. Called again
+/// for the same message it is a re-triage: same id, new summary.
+fn commit(
+    store: &SqliteStore,
+    acct: i64,
+    id: i64,
+    summary: &str,
+    adjust: impl FnOnce(&mut MessageDecision),
+) {
     store.enqueue_agent_triage(acct, id, "test", false).unwrap();
     let job = store
         .claim_agent_job(acct, "triage", Utc::now(), 60)
         .unwrap()
         .unwrap();
+    assert_eq!(job.message_id, id);
     let context = store.load_agent_context(&job).unwrap();
     let mut decision = MessageDecision {
         kinds: vec![EmailKind::Promotional],
@@ -78,7 +92,6 @@ fn reading(
             .unwrap(),
         AgentCommitOutcome::Applied
     );
-    id
 }
 
 /// What the mock model saw, and how many times it was asked.
@@ -92,6 +105,15 @@ struct Seen {
 /// body, and runs `on_request` before answering so a test can change the
 /// store while the "model" is thinking.
 async fn model_mock(
+    results: Option<Value>,
+    on_request: impl Fn() + Send + Sync + 'static,
+) -> (String, Arc<Mutex<Seen>>) {
+    model_mock_after(std::time::Duration::ZERO, results, on_request).await
+}
+
+/// [`model_mock`] that thinks for `delay` before it answers.
+async fn model_mock_after(
+    delay: std::time::Duration,
     results: Option<Value>,
     on_request: impl Fn() + Send + Sync + 'static,
 ) -> (String, Arc<Mutex<Seen>>) {
@@ -142,6 +164,7 @@ async fn model_mock(
                 };
                 record.lock().unwrap().bodies.push(body);
                 on_request();
+                tokio::time::sleep(delay).await;
                 let (status, body) = match &reply {
                     Some(body) => ("200 OK", body.clone()),
                     None => ("500 Internal Server Error", "{}".to_string()),
@@ -232,7 +255,7 @@ async fn smart_done_clears_a_batch_reports_it_and_undo_gives_it_back() {
     let h = harness(|_, _| {});
     let stale_a = reading(&h.store, h.acct, "a", 20, "Autumn sale", |_| {});
     let stale_b = reading(&h.store, h.acct, "b", 21, "Winter sale", |_| {});
-    let ended = reading(&h.store, h.acct, "c", 3, "Sale to the 1st", |d| {
+    let ended = reading(&h.store, h.acct, "c", 8, "Sale to the 1st", |d| {
         d.ends = Some(SupportedTime {
             value: (Utc::now() - Duration::days(4))
                 .format("%Y-%m-%d")
@@ -334,13 +357,19 @@ async fn another_accounts_batch_cannot_be_undone() {
     let h = harness(|_, _| {});
     let other = h.store.ensure_account("other@example.com").unwrap();
     let theirs = reading(&h.store, other, "t", 20, "Their sale", |_| {});
+    let inventory = squelch_core::store::agent_triage::AgentListQuery::default();
+    let scan = h
+        .store
+        .smart_done_scan(other, Utc::now(), &inventory, 200)
+        .unwrap();
     let batch = h
         .store
         .smart_done_apply(
             other,
             Utc::now(),
-            &squelch_core::store::agent_triage::AgentListQuery::default(),
+            &inventory,
             200,
+            &scan,
             &Default::default(),
         )
         .unwrap()
@@ -604,4 +633,186 @@ async fn the_three_writes_are_behind_the_bearer() {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
     }
     assert!(h.store.list_audit(h.acct, 10).unwrap().is_empty());
+}
+
+// ---- review fixes ---------------------------------------------------------
+
+/// The prompt tells the model to answer expired only when the summary states
+/// a date. The daemon checks, because a summary is attacker-influenced text
+/// and one of them can talk the model into yes for every row.
+#[tokio::test]
+async fn a_yes_about_a_summary_that_states_no_date_is_ignored() {
+    let (url, _seen) = model_mock(
+        Some(json!([
+            {"index": 1, "expired": true, "kind": "offer_ended"},
+            {"index": 2, "expired": true, "kind": null},
+            {"index": 3, "expired": true, "kind": null},
+        ])),
+        || {},
+    )
+    .await;
+    let h = with_model(url);
+    let dated = reading(&h.store, h.acct, "a", 2, "Sale ended September 30", |_| {});
+    let essay = reading(&h.store, h.acct, "b", 3, "A long essay on walking", |d| {
+        d.kinds = vec![EmailKind::Editorial];
+        d.reading_kind = Some(ReadingKind::Content);
+    });
+    let undated = reading(&h.store, h.acct, "c", 4, "New boots are in stock", |_| {});
+    let body = press(&h).await;
+    assert_eq!(body["model"], "ok");
+    assert_eq!(body["message_ids"], json!([dated]));
+    assert_eq!(open_in_reading(&h).await, [essay, undated]);
+}
+
+/// Ten or more rows asked and nearly all of them "expired" is not a reading
+/// of the mail, it is a pass that went wrong. None of it is used.
+#[tokio::test]
+async fn a_pass_that_calls_nearly_everything_expired_is_discarded() {
+    let results: Vec<Value> = (1..=10)
+        .map(|i| json!({"index": i, "expired": i != 10, "kind": null}))
+        .collect();
+    let (url, _seen) = model_mock(Some(json!(results)), || {}).await;
+    let h = with_model(url);
+    let mut ids = Vec::new();
+    for i in 0..10 {
+        ids.push(reading(
+            &h.store,
+            h.acct,
+            &format!("r{i}"),
+            2,
+            &format!("Offer {i} ended on October 1"),
+            |_| {},
+        ));
+    }
+    let stale = reading(&h.store, h.acct, "stale", 20, "Old sale", |_| {});
+    let body = press(&h).await;
+    assert_eq!(body["model"], "skipped_failed");
+    assert_eq!(body["message_ids"], json!([stale]));
+    ids.sort();
+    assert_eq!(open_in_reading(&h).await, ids);
+    // The call still happened and is still billed.
+    let usage = h.store.list_usage_by_category(h.acct, 1).unwrap();
+    assert_eq!(usage[0].0, "smart_done");
+}
+
+/// One press at a time. A second one while the first is still waiting on the
+/// model is refused without touching the store.
+#[tokio::test]
+async fn a_second_press_while_one_is_running_is_refused() {
+    let (url, seen) = model_mock_after(
+        std::time::Duration::from_millis(400),
+        Some(json!([{"index": 1, "expired": false, "kind": null}])),
+        || {},
+    )
+    .await;
+    let h = with_model(url);
+    reading(&h.store, h.acct, "a", 2, "Sale ends October 30", |_| {});
+    let stale = reading(&h.store, h.acct, "b", 20, "Old sale", |_| {});
+    let post = || {
+        let app = h.app.clone();
+        async move {
+            app.oneshot(authed("POST", "/client/v2/reading/smart_done"))
+                .await
+                .unwrap()
+        }
+    };
+    let second = async {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        post().await
+    };
+    let (first, second) = tokio::join!(post(), second);
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(body_json(first).await["message_ids"], json!([stale]));
+    assert_eq!(seen.lock().unwrap().bodies.len(), 1, "one model call");
+    assert_eq!(audits(&h, "reading.smart_done").len(), 1);
+    // And the next press, once it is over, is served.
+    assert_eq!(post().await.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn the_keep_route_refuses_oversized_and_control_character_senders() {
+    let h = harness(|_, _| {});
+    let keep = |sender: String| {
+        let app = h.app.clone();
+        async move {
+            app.oneshot(authed_json(
+                "POST",
+                "/client/v2/reading/senders/keep",
+                json!({ "sender": sender }),
+            ))
+            .await
+            .unwrap()
+            .status()
+        }
+    };
+    let long = format!("{}@example.com", "a".repeat(320));
+    for bad in [
+        long,
+        "a\u{0}b@example.com".to_string(),
+        "a\u{1b}[31m@example.com".to_string(),
+        "a\u{202e}b@example.com".to_string(),
+        "@example.com".to_string(),
+        "someone@".to_string(),
+        "a@b@example.com".to_string(),
+    ] {
+        assert_eq!(keep(bad.clone()).await, StatusCode::BAD_REQUEST, "{bad:?}");
+    }
+    assert_eq!(
+        keep("news@example.com".into()).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(audits(&h, "reading.keep_sender").len(), 1);
+}
+
+/// Under a week of ledger there is no monthly rate to state, and under two
+/// there is no score.
+#[tokio::test]
+async fn a_young_ledger_reports_no_rate_and_no_score() {
+    let h = harness(|_, _| {});
+    let senders = |h: &Harness| {
+        let app = h.app.clone();
+        async move {
+            let response = app
+                .oneshot(authed("GET", "/client/v2/reading/senders"))
+                .await
+                .unwrap();
+            body_json(response).await["senders"][0].clone()
+        }
+    };
+    let set_ledger = |days: i64| {
+        h.store
+            .set_app_setting(
+                h.acct,
+                "opened_ledger_since",
+                &(Utc::now() - Duration::days(days)).to_rfc3339(),
+            )
+            .unwrap();
+    };
+    for i in 0..8 {
+        reading(
+            &h.store,
+            h.acct,
+            &format!("n{i}"),
+            1,
+            &format!("Issue {i}"),
+            |_| {},
+        );
+    }
+    set_ledger(3);
+    let s = senders(&h).await;
+    assert_eq!(s["signals"]["received"], 8);
+    assert_eq!(s["signals"]["per_month"], Value::Null);
+    assert_eq!(s["score"], Value::Null);
+    assert_eq!(s["reasons"], json!([{"code": "not_enough_history"}]));
+
+    set_ledger(10);
+    let s = senders(&h).await;
+    assert_eq!(s["signals"]["per_month"], 24.0, "a rate from a week on");
+    assert_eq!(s["score"], Value::Null, "and still no score");
+
+    set_ledger(15);
+    let s = senders(&h).await;
+    assert_eq!(s["signals"]["per_month"], 16.0);
+    assert_eq!(s["score"], 60, "55 ignored and 5 for sixteen a month");
 }

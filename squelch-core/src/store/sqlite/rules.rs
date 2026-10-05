@@ -11,8 +11,15 @@ use super::*;
 /// the NOCASE sender index plus a sort of one sender's mail is the cheap plan,
 /// and pinning it means a missing index is a loud prepare error, not a silent
 /// walk. `tests::attention::rule_digest_seeks_the_nocase_sender_index` pins it.
-pub(crate) const SENDER_RULE_DIGEST_SQL: &str =
-    "SELECT m.subject, t.tier, t.status, t.opened_at IS NOT NULL, t.category
+///
+/// `status` IS THE OWNER'S, NOT A SWEEP'S. The rule suggester reads `done` and
+/// unopened as "cleared without opening" and tells its model so in trusted
+/// context. A row smart done resolved (`resolved_by` set) was not cleared by
+/// anybody, so it is reported as the open row it was until the owner says
+/// otherwise.
+pub(crate) const SENDER_RULE_DIGEST_SQL: &str = "SELECT m.subject, t.tier,
+            CASE WHEN t.resolved_by IS NOT NULL THEN 'open' ELSE t.status END,
+            t.opened_at IS NOT NULL, t.category
      FROM messages m INDEXED BY idx_messages_from_nocase
      JOIN triage t ON t.message_id = m.id
      WHERE m.account_id = ?1

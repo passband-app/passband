@@ -191,6 +191,15 @@ fn reporting_attention_leaves_the_agent_user_state_fingerprint_alone() {
         .claim_agent_job(acct, "triage", Utc::now(), 60)
         .unwrap()
         .unwrap();
+    // A RE-triage: the mail was assessed as readable before.
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE agent_message_state SET access = 'allowed' WHERE message_id = ?1",
+            [id],
+        )
+        .unwrap();
     let before = store.load_agent_context(&job).unwrap();
 
     store.record_message_attention(acct, id, 42_000, 3).unwrap();
@@ -315,7 +324,8 @@ fn mail_from_before_the_open_ledger_is_not_received() {
     let s = sender(&read, NEWS);
     assert_eq!(s.signals.received, 5, "the three older mails predate it");
     assert_eq!(
-        s.signals.per_month, 15.0,
+        s.signals.per_month,
+        Some(15.0),
         "five in ten days, scaled by the days actually covered"
     );
 }
@@ -578,7 +588,8 @@ fn unsubscribe_candidates_are_the_newest_three_and_ignore_the_ledger_floor() {
                 .from(NEWS)
                 .received_at(Utc::now() - Duration::days(i + 1))
                 .list_unsubscribe(&format!("<https://letters.example/u/{i}>"), i == 0)
-                .auth_pass(Some(i == 0))
+                // One verified, the rest from before the verdict was kept.
+                .auth_pass((i == 0).then_some(true))
                 .seed(&store),
         );
     }
@@ -609,7 +620,7 @@ fn unsubscribe_candidates_are_the_newest_three_and_ignore_the_ledger_floor() {
     );
     assert!(first.list_unsub_one_click);
     assert_eq!(first.auth_pass, Some(true));
-    assert_eq!(s.unsub_candidates[1].auth_pass, Some(false));
+    assert_eq!(s.unsub_candidates[1].auth_pass, None);
     let asked = s.unsubscribed.as_ref().expect("the ledger row");
     assert_eq!(asked.status, None, "a browser row has no job status");
 }

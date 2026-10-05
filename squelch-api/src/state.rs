@@ -207,6 +207,9 @@ pub struct ApiState {
     /// of the daily cap the usage ledger cannot see, exactly as
     /// `fye_headline_attempts` is for the headline.
     pub(crate) smart_done_attempts: Arc<std::sync::Mutex<(String, u32)>>,
+    /// A smart done press is in flight. One at a time: the second answers
+    /// 429 without touching the store (see `triage::smart_done`).
+    pub(crate) smart_done_running: Arc<std::sync::atomic::AtomicBool>,
     /// The hosted assistant relay: forwards the Passband app's Anthropic-shaped
     /// streaming request to the gateway with a daemon-held credential. `None`
     /// (no gateway + assistant key configured, and every test harness) means
@@ -451,6 +454,7 @@ impl ApiState {
             fye_headline_attempts: Arc::new(std::sync::Mutex::new((String::new(), 0))),
             smart_done: None,
             smart_done_attempts: Arc::new(std::sync::Mutex::new((String::new(), 0))),
+            smart_done_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             assistant: None,
             sharing: None,
             shipment_poll: None,

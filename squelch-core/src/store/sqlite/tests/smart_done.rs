@@ -11,41 +11,60 @@ use crate::triage::decision::{
     EmailKind, MessageDecision, ReadingKind, RecordProposal, SupportedTime,
 };
 use crate::triage::sender_fatigue::Reason;
-use crate::triage::smart_done::{ClearReason, SMART_DONE_MODEL_ROWS};
+use crate::triage::smart_done::{ClearReason, SMART_DONE_MODEL_ROWS, Verdict};
 use chrono::Duration;
 use std::collections::HashMap;
 
-fn time(at: DateTime<Utc>) -> Option<SupportedTime> {
+pub(super) fn time(at: DateTime<Utc>) -> Option<SupportedTime> {
     Some(SupportedTime {
         value: at.format("%Y-%m-%d").to_string(),
         ..Default::default()
     })
 }
 
-fn content(d: &mut MessageDecision) {
+pub(super) fn content(d: &mut MessageDecision) {
     d.kinds = vec![EmailKind::Editorial];
     d.reading_kind = Some(ReadingKind::Content);
 }
 
-/// Press the button with whatever the model said.
-fn apply(
+/// Press the button with whatever the model said: scan, then apply, with
+/// each verdict being about the summary the scan would have sent.
+pub(super) fn apply(
     store: &SqliteStore,
     acct: AccountId,
     verdicts: &[(i64, ClearReason)],
 ) -> SmartDoneOutcome {
+    press(store, acct, verdicts, 200)
+}
+
+pub(super) fn press(
+    store: &SqliteStore,
+    acct: AccountId,
+    verdicts: &[(i64, ClearReason)],
+    feed_limit: usize,
+) -> SmartDoneOutcome {
+    let inventory = AgentListQuery::default();
+    let scan = store
+        .smart_done_scan(acct, Utc::now(), &inventory, feed_limit)
+        .unwrap();
+    let verdicts: HashMap<i64, Verdict> = verdicts
+        .iter()
+        .map(|(id, reason)| {
+            let sent = scan
+                .asks
+                .iter()
+                .find(|ask| ask.message_id == *id)
+                .map_or("never asked", |ask| ask.summary.as_str());
+            (*id, Verdict::about(*reason, sent))
+        })
+        .collect();
     store
-        .smart_done_apply(
-            acct,
-            Utc::now(),
-            &AgentListQuery::default(),
-            200,
-            &verdicts.iter().copied().collect::<HashMap<_, _>>(),
-        )
+        .smart_done_apply(acct, Utc::now(), &inventory, feed_limit, &scan, &verdicts)
         .unwrap()
 }
 
 /// (status, resolved_at is set, resolved_by) for one row.
-fn row(store: &SqliteStore, id: i64) -> (String, bool, Option<String>) {
+pub(super) fn row(store: &SqliteStore, id: i64) -> (String, bool, Option<String>) {
     store
         .lock()
         .unwrap()
@@ -58,7 +77,7 @@ fn row(store: &SqliteStore, id: i64) -> (String, bool, Option<String>) {
 }
 
 /// A Reading promotion from its own sender, `days_ago` old.
-fn promo(store: &SqliteStore, acct: AccountId, key: &str, days_ago: i64) -> i64 {
+pub(super) fn promo(store: &SqliteStore, acct: AccountId, key: &str, days_ago: i64) -> i64 {
     let id = mail(store, acct, key, &format!("{key}@shop.example"), days_ago);
     into_reading(store, acct, id);
     id
@@ -71,7 +90,7 @@ fn each_stored_reason_clears_its_own_row_with_provenance() {
     let (store, acct) = store();
     old_ledgers(&store, acct);
     let now = Utc::now();
-    let event = mail(&store, acct, "event", "a@events.example", 3);
+    let event = mail(&store, acct, "event", "a@events.example", 8);
     into_reading_with(&store, acct, event, |d| {
         d.records = vec![RecordProposal::Event {
             title: "Webinar".into(),
@@ -82,7 +101,7 @@ fn each_stored_reason_clears_its_own_row_with_provenance() {
         // An offer that has ended too: the event is first in the order.
         d.ends = time(now - Duration::days(5));
     });
-    let offer = mail(&store, acct, "offer", "b@offers.example", 3);
+    let offer = mail(&store, acct, "offer", "b@offers.example", 8);
     into_reading_with(&store, acct, offer, |d| {
         d.ends = time(now - Duration::days(5))
     });
@@ -172,12 +191,13 @@ fn only_the_message_is_resolved_never_its_thread() {
     assert_eq!(row(&store, sibling), ("new".into(), false, None));
 }
 
-/// The sender's score is the purge list's own score. Ten ignored mails in ten
-/// days, eight of them cleared unopened by hand, is 55 + 12 + 10.
+/// The sender's score is the purge list's own score. Eleven ignored mails in
+/// fifteen days, eight of them cleared unopened by hand, is 55 + 11 + 10.
 #[test]
 fn an_ignored_senders_open_mail_goes_and_the_sweep_does_not_feed_the_score() {
     let (store, acct) = store();
-    let ledger = (Utc::now() - Duration::days(10)).to_rfc3339();
+    // Fifteen days of ledger: enough for a score (fourteen is the floor).
+    let ledger = (Utc::now() - Duration::days(15)).to_rfc3339();
     store
         .set_app_setting(acct, OPEN_LEDGER_SINCE_KEY, &ledger)
         .unwrap();
@@ -299,15 +319,7 @@ fn a_sender_past_the_scoring_cap_is_still_protected() {
         .unwrap();
     let plain = promo(&store, acct, "plain", 20);
 
-    let outcome = store
-        .smart_done_apply(
-            acct,
-            Utc::now(),
-            &AgentListQuery::default(),
-            1000,
-            &HashMap::new(),
-        )
-        .unwrap();
+    let outcome = press(&store, acct, &[], 1000);
     assert_eq!(outcome.cleared, [(plain, ClearReason::StalePromo)]);
     assert_eq!(row(&store, kept).0, "new");
 }
@@ -350,7 +362,8 @@ fn the_scan_offers_only_undecided_rows_that_have_a_summary() {
 
     let asks = store
         .smart_done_scan(acct, now, &AgentListQuery::default(), 200)
-        .unwrap();
+        .unwrap()
+        .asks;
     assert_eq!(asks.len(), 1, "{asks:?}");
     assert_eq!(asks[0].message_id, ask);
     assert_eq!(asks[0].summary, "An issue");
@@ -373,7 +386,8 @@ fn the_scan_is_capped_newest_first() {
     }
     let asks = store
         .smart_done_scan(acct, Utc::now(), &AgentListQuery::default(), 200)
-        .unwrap();
+        .unwrap()
+        .asks;
     assert_eq!(
         asks.iter().map(|a| a.message_id).collect::<Vec<_>>(),
         ids[..SMART_DONE_MODEL_ROWS]

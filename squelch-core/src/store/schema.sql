@@ -345,10 +345,17 @@ CREATE TABLE IF NOT EXISTS triage (
     --
     -- The one writer today is smart done, which stamps
     -- `smart_done:<smart_done_batches.id>`. That stamp is what makes the batch
-    -- exactly undoable, and what keeps it out of every statistic that reads
-    -- `status = 'done'` as the owner deciding (the fatigue score's
-    -- `cleared_unopened` counts only rows where this is NULL: a sweep is not a
-    -- dismissal, and counting it would let the score feed itself).
+    -- undoable.
+    --
+    -- IT DOES NOT, BY ITSELF, KEEP A SWEEP OUT OF ANYTHING. A reader that
+    -- takes `status = 'done'` to mean the owner decided has to check this
+    -- column too, and only two do: the fatigue score's `cleared_unopened`
+    -- (`reading_senders::SENDER_COUNTS_SQL`), which smart done itself reads
+    -- and would otherwise feed, and the rule suggester's digest
+    -- (`rules::SENDER_RULE_DIGEST_SQL`). Everything else still sees a swept
+    -- row as plain done, the triage agent's context included (its
+    -- `user_state` fingerprint and its prompt treat any done as the owner's).
+    -- That one is deliberate for now; a new reader is not excused by it.
     --
     -- ANY LATER HUMAN STATUS WRITE CLEARS IT. A person who reopens or re-does
     -- a row has taken it over, and an undo of the batch must then leave it

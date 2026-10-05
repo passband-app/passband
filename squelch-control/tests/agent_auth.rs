@@ -1324,3 +1324,74 @@ async fn a_bad_press_during_the_completion_is_refused_and_disturbs_nothing() {
         assert_eq!(h.completions().len(), 1, "{bad}");
     }
 }
+
+/// A `POST /agent/confirm` request, built by hand so it can be driven from a
+/// task this test can abort (which is what a closed connection does to a
+/// handler).
+fn confirm_request(origin: &str, cookie: &str, csrf: &str) -> Request<axum::body::Body> {
+    Request::builder()
+        .method("POST")
+        .uri("/agent/confirm")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .header(header::ORIGIN, origin)
+        .header(header::COOKIE, cookie)
+        .body(axum::body::Body::from(format!(
+            "csrf={csrf}&decision=continue"
+        )))
+        .unwrap()
+}
+
+/// THE FIRST PRESS'S CLIENT GOES AWAY MID-CALL. A browser abandoning press 1
+/// for press 2 closes press 1's connection and its handler is dropped. The
+/// WorkOS call runs detached, so it still finishes and settles the marker, and
+/// press 2 gets press 1's 303. Exactly one completion.
+#[tokio::test]
+async fn a_first_press_whose_client_disconnects_still_settles() {
+    let h = Harness::new().await;
+    let (cookie, csrf, _) = h.reach_confirm().await;
+    h.rec.lock().unwrap().workos_delay = Some(Duration::from_millis(800));
+
+    let first = tokio::spawn(
+        h.app
+            .clone()
+            .oneshot(confirm_request(&h.public_url, &cookie, &csrf)),
+    );
+    until_workos_received(&h, 1).await;
+    // The connection closes: the handler future is dropped mid-await.
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+
+    let (status, headers, body) = h.decide(&cookie, &csrf, "continue").await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "{body}");
+    assert_eq!(headers[header::LOCATION].to_str().unwrap(), REDIRECT);
+    assert_eq!(h.completions().len(), 1, "exactly one completion");
+}
+
+/// A WAITING second press whose client goes away leaves nothing behind: the
+/// table holds exactly what it held, and the first press still completes.
+#[tokio::test]
+async fn a_disconnected_waiter_leaves_nothing_behind() {
+    let h = Harness::new().await;
+    let (cookie, csrf, _) = h.reach_confirm().await;
+    h.rec.lock().unwrap().workos_delay = Some(Duration::from_millis(800));
+
+    let first = h.decide(&cookie, &csrf, "continue");
+    let waiter = async {
+        until_workos_received(&h, 1).await;
+        let live = h.state.live_sessions();
+        let task = tokio::spawn(h.app.clone().oneshot(confirm_request(
+            &h.public_url,
+            &cookie,
+            &csrf,
+        )));
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(h.state.live_sessions(), live, "the waiter wrote nothing");
+    };
+    let ((status, headers, body), ()) = tokio::join!(first, waiter);
+    assert_eq!(status, StatusCode::SEE_OTHER, "{body}");
+    assert_eq!(headers[header::LOCATION].to_str().unwrap(), REDIRECT);
+    assert_eq!(h.completions().len(), 1);
+    assert_eq!(h.state.live_sessions(), 1, "only the done marker");
+}

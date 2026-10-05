@@ -30,7 +30,10 @@
 //! replayed, or a code that is delivered twice, finds nothing.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use tokio::sync::Notify;
 
 /// How long a session lives. The whole budget is one human reading one Google
 /// consent screen. Matches [`crate::cookie::COOKIE_TTL_SECS`].
@@ -354,6 +357,11 @@ pub enum InsertError {
 #[derive(Default)]
 pub struct SessionStore {
     sessions: HashMap<String, PendingSession>,
+    /// Rung by [`Self::mark`], so a press waiting on another press's WorkOS
+    /// answer wakes when it lands instead of polling this table. One for the
+    /// whole table: a wake is a cue to re-peek, never an answer, so a waiter
+    /// woken by somebody else's settle looks once and goes back to waiting.
+    settled: Arc<Notify>,
 }
 
 impl SessionStore {
@@ -430,15 +438,60 @@ impl SessionStore {
     /// which REPLACE the in-flight placeholder: an in-place change cannot grow
     /// the table, so unlike [`Self::insert`] it is not refused by a table that
     /// filled up while WorkOS was answering.
+    ///
+    /// Every call rings [`Self::notifier`], so anybody waiting on this sid
+    /// re-peeks.
     pub fn mark(&mut self, sid: &str, kind: SessionKind, now: Instant) -> bool {
-        match self.sessions.get_mut(sid) {
+        let marked = match self.sessions.get_mut(sid) {
             Some(entry) => {
                 entry.kind = kind;
                 entry.created = now;
                 true
             }
             None => false,
+        };
+        self.settled.notify_waiters();
+        marked
+    }
+
+    /// The bell [`Self::mark`] rings. Cloned out under the lock so it can be
+    /// awaited with the lock released.
+    pub fn notifier(&self) -> Arc<Notify> {
+        self.settled.clone()
+    }
+
+    /// TAKE a session and, under the SAME guard, put `next(&taken)` in its
+    /// place: same id, same `state` (the CSRF token), same label, a fresh
+    /// clock. ONE-SHOT exactly as [`Self::take`]: the entry is removed whatever
+    /// `next` says, and an expired one is `None` (and gone).
+    ///
+    /// For the agent confirmation, whose take and in-flight placeholder must
+    /// be one step: as two lock acquisitions, a second press arriving between
+    /// them would see neither the confirmation nor the placeholder and be
+    /// refused. `next` sees the taken entry so the caller can decide (kind,
+    /// token, decision) before anything is put back; `None` puts nothing back.
+    /// The replacement goes straight into the slot just vacated, so it cannot
+    /// be refused for room.
+    pub fn take_into(
+        &mut self,
+        sid: &str,
+        now: Instant,
+        next: impl FnOnce(&PendingSession) -> Option<SessionKind>,
+    ) -> Option<PendingSession> {
+        let taken = self.take(sid, now)?;
+        if let Some(kind) = next(&taken) {
+            self.sessions.insert(
+                sid.to_string(),
+                PendingSession {
+                    kind,
+                    state: taken.state.clone(),
+                    pkce_verifier: String::new(),
+                    label: taken.label.clone(),
+                    created: now,
+                },
+            );
         }
+        Some(taken)
     }
 
     /// Drop every expired session. Called on insert and by the background
@@ -705,6 +758,57 @@ mod tests {
             s.peek("d", now + AGENT_DONE_TTL + Duration::from_secs(1))
                 .is_none()
         );
+    }
+
+    /// THE TAKE AND THE PLACEHOLDER ARE ONE STEP: the moment `take_into`
+    /// returns the confirmation, the in-flight placeholder is already there
+    /// under the same id with the same token. There is no instant at which a
+    /// second press sees neither. When `next` declines, nothing is put back,
+    /// and either way the confirmation itself is gone (one-shot).
+    #[test]
+    fn take_into_leaves_no_gap_between_take_and_placeholder() {
+        let mut s = SessionStore::new();
+        let now = Instant::now();
+        s.insert(
+            "c".into(),
+            confirm_kind(),
+            "csrf".into(),
+            String::new(),
+            "ada".into(),
+            now,
+        )
+        .unwrap();
+        let taken = s
+            .take_into("c", now, |p| {
+                matches!(p.kind, SessionKind::AgentConfirm { .. })
+                    .then_some(SessionKind::AgentInFlight)
+            })
+            .expect("live");
+        assert_eq!(taken.kind, confirm_kind());
+        let placeholder = s.peek("c", now).expect("the placeholder is already there");
+        assert_eq!(placeholder.kind, SessionKind::AgentInFlight);
+        assert_eq!(placeholder.state, "csrf");
+        assert_eq!(placeholder.label, "ada");
+        assert_eq!(s.len(), 1);
+
+        // Declined: taken, nothing put back.
+        s.insert(
+            "d".into(),
+            confirm_kind(),
+            "csrf".into(),
+            String::new(),
+            "ada".into(),
+            now,
+        )
+        .unwrap();
+        assert!(s.take_into("d", now, |_| None).is_some());
+        assert!(s.peek("d", now).is_none());
+        // Absent: nothing to take, nothing put.
+        assert!(
+            s.take_into("nope", now, |_| Some(SessionKind::AgentInFlight))
+                .is_none()
+        );
+        assert!(s.peek("nope", now).is_none());
     }
 
     #[test]

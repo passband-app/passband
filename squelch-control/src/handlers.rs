@@ -1152,11 +1152,7 @@ pub async fn oauth_callback(
         ));
     }
 
-    let claim = headers
-        .get(header::COOKIE)
-        .and_then(|v| v.to_str().ok())
-        .and_then(cookie::from_header)
-        .and_then(|v| cookie::verify(&config.cookie_key, v, chrono::Utc::now().timestamp()));
+    let claim = flow_claim(&state, &headers);
 
     // Cookie missing, cookie forged, session expired, session already spent,
     // and `state` mismatched all end here with one message. Nothing about which
@@ -2217,18 +2213,7 @@ pub async fn agent_confirm_page(State(state): State<ControlState>, headers: Head
     if state.workos().is_none() {
         return StatusCode::NOT_FOUND.into_response();
     }
-    let claim = headers
-        .get(header::COOKIE)
-        .and_then(|v| v.to_str().ok())
-        .and_then(cookie::from_header)
-        .and_then(|v| {
-            cookie::verify(
-                &state.config().cookie_key,
-                v,
-                chrono::Utc::now().timestamp(),
-            )
-        });
-    let Some(claim) = claim else {
+    let Some(claim) = flow_claim(&state, &headers) else {
         return agent_session_refused();
     };
     // Copied out under the lock and released at once.
@@ -2267,8 +2252,10 @@ pub async fn agent_confirm_page(State(state): State<ControlState>, headers: Head
 ///    and the one that also covers the sibling `passband.app` names Lax
 ///    considers same-site.
 /// 2. A flow cookie with a valid MAC. It decides nothing but WHICH session.
-/// 3. ONE-SHOT: the session is TAKEN, atomically, before anything else is
-///    asked of it, so a replay, a double click, or a second tab finds nothing.
+/// 3. ONE-SHOT: the session is TAKEN, atomically, and in the same step
+///    replaced by the in-flight placeholder when this press will complete it
+///    (see [`sessions::SessionStore::take_into`]), so a replay or a second tab
+///    finds nothing to complete.
 ///    A take that finds nothing is "expired" (absent and expired are one
 ///    answer, as everywhere in the table).
 /// 4. The KIND is held to [`SessionKind::AgentConfirm`]: a console, app,
@@ -2290,9 +2277,9 @@ pub async fn agent_confirm(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let Some(workos) = state.workos() else {
+    if state.workos().is_none() {
         return StatusCode::NOT_FOUND.into_response();
-    };
+    }
     let secure = !state.config().is_insecure();
     let done = |resp: Response| with_cleared_cookie(resp, secure);
 
@@ -2301,20 +2288,14 @@ pub async fn agent_confirm(
         return done(agent_session_refused());
     }
 
-    let claim = headers
-        .get(header::COOKIE)
-        .and_then(|v| v.to_str().ok())
-        .and_then(cookie::from_header)
-        .and_then(|v| {
-            cookie::verify(
-                &state.config().cookie_key,
-                v,
-                chrono::Utc::now().timestamp(),
-            )
-        });
-    let Some(claim) = claim else {
+    let Some(claim) = flow_claim(&state, &headers) else {
         tracing::info!(outcome = "no_session", "agent confirmation refused");
         return done(agent_session_refused());
+    };
+    let csrf = field(&body, "csrf");
+    let decision = field(&body, "decision");
+    let is_token = |token: &str| {
+        !csrf.is_empty() && squelch_httpauth::ct_eq(csrf.as_bytes(), token.as_bytes())
     };
 
     // A DOUBLE CLICK, answered from the markers the first press leaves under
@@ -2328,11 +2309,7 @@ pub async fn agent_confirm(
     // WorkOS: the completion happens once, in the press that took the
     // confirmation.
     if let Some(marker) = agent_marker(&state, &claim.sid) {
-        let csrf = field(&body, "csrf");
-        let same_press = !csrf.is_empty()
-            && squelch_httpauth::ct_eq(csrf.as_bytes(), marker.token().as_bytes())
-            && field(&body, "decision") == "continue";
-        if !same_press {
+        if !(is_token(&marker.token) && decision == "continue") {
             tracing::warn!(outcome = "csrf_refused", "agent confirmation refused");
             return agent_session_refused();
         }
@@ -2340,14 +2317,27 @@ pub async fn agent_confirm(
             outcome = "confirmed_replay",
             "agent confirmation pressed twice"
         );
-        return match marker {
-            AgentMarker::InFlight(_) => await_first_press(&state, &claim.sid, done).await,
-            other => answer_from_marker(other, done),
+        return match marker.outcome {
+            None => await_first_press(&state, &claim.sid, done).await,
+            Some(outcome) => answer_from_outcome(outcome, done),
         };
     }
 
-    // Bound in its own statement so the session lock is released at once.
-    let session = state.sessions().take(&claim.sid, Instant::now());
+    // THE TAKE AND THE IN-FLIGHT PLACEHOLDER, AS ONE STEP under one guard
+    // (see [`sessions::SessionStore::take_into`]): the confirmation is taken
+    // and, only if this press is going to complete it (right kind, right
+    // token, `continue`), the placeholder goes into its slot before the lock
+    // is released. A second press can never land between the two and find
+    // neither. Every other press still takes the confirmation and puts
+    // nothing back, which is the one-shot rule.
+    let session = state
+        .sessions()
+        .take_into(&claim.sid, Instant::now(), |taken| {
+            (matches!(taken.kind, SessionKind::AgentConfirm { .. })
+                && is_token(&taken.state)
+                && decision == "continue")
+                .then_some(SessionKind::AgentInFlight)
+        });
     let Some(session) = session else {
         tracing::info!(outcome = "expired", "agent confirmation refused");
         return done(agent_session_refused());
@@ -2363,13 +2353,11 @@ pub async fn agent_confirm(
     };
     let label = session.label;
 
-    let csrf = field(&body, "csrf");
-    if csrf.is_empty() || !squelch_httpauth::ct_eq(csrf.as_bytes(), session.state.as_bytes()) {
+    if !is_token(&session.state) {
         tracing::warn!(outcome = "csrf_refused", label = %label, "agent confirmation refused");
         return done(agent_session_refused());
     }
-
-    match field(&body, "decision").as_str() {
+    match decision.as_str() {
         "continue" => {}
         "cancel" => {
             tracing::info!(outcome = "cancelled", label = %label, "agent confirmation");
@@ -2381,35 +2369,106 @@ pub async fn agent_confirm(
         }
     }
 
-    // THE IN-FLIGHT PLACEHOLDER, before WorkOS is asked: a second press that
-    // lands while this call is out finds it and waits for this press's answer
-    // instead of finding nothing. Same sid, same token. Best effort like the
-    // other markers: without one, a double click is refused as it was before.
-    if state
-        .sessions()
-        .insert(
-            claim.sid.clone(),
-            SessionKind::AgentInFlight,
-            session.state.clone(),
-            String::new(),
-            label.clone(),
-            Instant::now(),
-        )
-        .is_err()
-    {
-        tracing::warn!(
-            sessions = state.live_sessions(),
-            "no room for the in-flight marker"
-        );
-    }
-    // Replace the placeholder with what happened, for anybody waiting on it.
-    // `mark` changes the entry in place (it cannot be refused for room); if
-    // the placeholder never made it in, there is nobody to tell.
-    let settle = |kind: SessionKind| {
-        state.sessions().mark(&claim.sid, kind, Instant::now());
-    };
+    // THE COMPLETION RUNS DETACHED, as the reconnect job does: a browser that
+    // abandons this press for a second one closes this connection, and the
+    // server then drops this handler mid-await. If the WorkOS call lived in
+    // this future, it would be cancelled after WorkOS may already have spent
+    // AuthKit's handle, and nothing would ever settle the placeholder the
+    // second press is waiting on. The spawned task owns everything it needs
+    // and always settles (see [`complete_and_settle`]); this request only
+    // awaits its answer. A JoinError (the task panicked) is "try again": the
+    // task's settle guard has already written a failed marker.
+    let job = complete_and_settle(
+        state.clone(),
+        claim.sid.clone(),
+        external_auth_id,
+        user_id,
+        stored_email,
+        label,
+    );
+    let outcome = tokio::spawn(job)
+        .await
+        .unwrap_or(Outcome::Failed { expired: false });
+    answer_from_outcome(outcome, done)
+}
 
-    let destination = match workos
+/// What one completion came to. Also what a second press is answered with,
+/// read back from the marker it left.
+enum Outcome {
+    /// WorkOS answered with this validated URL.
+    Done(String),
+    /// It did not; `expired` is AuthKit refusing this authorization, as
+    /// opposed to WorkOS being unreachable or answering something unusable.
+    Failed { expired: bool },
+}
+
+impl Outcome {
+    /// The marker that stands for this outcome in the session table.
+    fn marker(&self) -> SessionKind {
+        match self {
+            Outcome::Done(redirect) => SessionKind::AgentDone {
+                redirect: redirect.clone(),
+            },
+            Outcome::Failed { expired } => SessionKind::AgentFailed { expired: *expired },
+        }
+    }
+}
+
+/// Writes a marker over the in-flight placeholder when it is DROPPED: the
+/// outcome it was given, or, if it was never given one, a failed marker.
+///
+/// DROP IS THE ONE THING THAT ALWAYS RUNS. A normal return drops it, and so
+/// does a panic unwinding through the task and a runtime cancelling the task
+/// at shutdown, so the placeholder a second press waits on is settled on every
+/// path out of [`complete_and_settle`], never left to time out.
+struct SettleOnDrop<F: FnMut(SessionKind)> {
+    settle: F,
+    outcome: Option<SessionKind>,
+}
+
+impl<F: FnMut(SessionKind)> SettleOnDrop<F> {
+    fn new(settle: F) -> Self {
+        Self {
+            settle,
+            outcome: None,
+        }
+    }
+}
+
+impl<F: FnMut(SessionKind)> Drop for SettleOnDrop<F> {
+    fn drop(&mut self) {
+        let kind = self
+            .outcome
+            .take()
+            .unwrap_or(SessionKind::AgentFailed { expired: false });
+        (self.settle)(kind);
+    }
+}
+
+/// The detached half of `POST /agent/confirm`: call WorkOS once, then settle
+/// the placeholder with what happened. Owns everything (a `ControlState`
+/// clone, the session id, the parked fields), so it outlives the request that
+/// spawned it.
+async fn complete_and_settle(
+    state: ControlState,
+    sid: String,
+    external_auth_id: String,
+    user_id: String,
+    stored_email: String,
+    label: String,
+) -> Outcome {
+    let settler = state.clone();
+    let mut guard = SettleOnDrop::new(move |kind| {
+        // `mark` rings the table's bell, so a waiting second press re-peeks.
+        settler.sessions().mark(&sid, kind, Instant::now());
+    });
+
+    let Some(workos) = state.workos() else {
+        // The route is unmounted without WorkOS; only a config that changed
+        // under a live session lands here. The guard settles it as failed.
+        return Outcome::Failed { expired: false };
+    };
+    let outcome = match workos
         .complete(
             &external_auth_id,
             &user_id,
@@ -2418,116 +2477,88 @@ pub async fn agent_confirm(
         )
         .await
     {
-        Ok(url) => url,
+        // The URL is about to become a `Location`; one that would not is a
+        // failure here rather than in every press that reads the marker.
+        Ok(url) if header::HeaderValue::from_str(url.as_str()).is_ok() => {
+            // PRIVACY: the label and the redirect's HOST. Never its path or
+            // query, which carry AuthKit's own state.
+            tracing::info!(
+                outcome = "confirmed",
+                label = %label,
+                redirect_host = url.host_str().unwrap_or_default(),
+                "agent login complete"
+            );
+            Outcome::Done(url.to_string())
+        }
+        Ok(_) => {
+            tracing::error!(label = %label, "the agent redirect would not fit in a header");
+            Outcome::Failed { expired: false }
+        }
         // AuthKit no longer knows this authorization (spent or expired). Trying
         // again in this browser can never work, so the page says to start over
         // from the agent rather than "try again in a few minutes".
         Err(crate::workos::WorkosError::Refused) => {
             tracing::info!(outcome = "workos_refused", label = %label, "agent login: WorkOS completion refused");
-            settle(SessionKind::AgentFailed { expired: true });
-            return done(agent_expired());
+            Outcome::Failed { expired: true }
         }
         Err(e) => {
             // PRIVACY: the error category and the label. Never the key, the
             // external_auth_id, the address, or anything WorkOS said.
             tracing::warn!(error = %e, label = %label, "agent login: WorkOS completion failed");
-            settle(SessionKind::AgentFailed { expired: false });
-            return done(agent_unavailable());
+            Outcome::Failed { expired: false }
         }
     };
-
-    // PRIVACY: the label and the redirect's HOST. Never its path or query,
-    // which carry AuthKit's own state.
-    tracing::info!(
-        outcome = "confirmed",
-        label = %label,
-        redirect_host = destination.host_str().unwrap_or_default(),
-        "agent login complete"
-    );
-
-    let Ok(location) = header::HeaderValue::from_str(destination.as_str()) else {
-        // Unreachable for a parsed URL (it serializes as ASCII); a refusal
-        // rather than a panic all the same.
-        tracing::error!(label = %label, "the agent redirect would not fit in a header");
-        settle(SessionKind::AgentFailed { expired: false });
-        return done(agent_unavailable());
-    };
-    // THE DONE MARKER, replacing the placeholder: the same sid and token now
-    // name the URL just validated, for a few seconds, so a second press
-    // (waiting already, or landing just after) gets this same answer.
-    settle(SessionKind::AgentDone {
-        redirect: destination.to_string(),
-    });
-
-    // SEE OTHER, the POST-to-GET answer this crate gives after `POST /signup`:
-    // the browser must GET AuthKit's URL, never re-POST the form to it. The URL
-    // carries AuthKit's state, so nothing may cache it and it must not ride out
-    // as a referer.
-    //
-    // THE COOKIE IS NOT CLEARED HERE, unlike every refusal: a browser that
-    // abandons this answer for a second press may or may not have applied its
-    // headers, and a second press without the cookie could not be matched to
-    // the marker. It names a session that is gone within seconds, and the next
-    // flow overwrites it.
-    no_store((StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response())
+    guard.outcome = Some(outcome.marker());
+    outcome
 }
 
-/// What a second press can find under its sid, copied out of the table so no
-/// lock is held across an await.
-enum AgentMarker {
-    /// The first press is talking to WorkOS. Holds the token.
-    InFlight(String),
-    /// It succeeded: the validated URL, and the token.
-    Done(String, String),
-    /// It failed: which page class (`true` is "expired"), and the token.
-    Failed(bool, String),
-}
-
-impl AgentMarker {
-    fn token(&self) -> &str {
-        match self {
-            AgentMarker::InFlight(t) | AgentMarker::Done(_, t) | AgentMarker::Failed(_, t) => t,
-        }
-    }
-}
-
-/// The marker under `sid`, if there is a live one. A PEEK: it never takes.
-fn agent_marker(state: &ControlState, sid: &str) -> Option<AgentMarker> {
-    state
-        .sessions()
-        .peek(sid, Instant::now())
-        .and_then(|s| match &s.kind {
-            SessionKind::AgentInFlight => Some(AgentMarker::InFlight(s.state.clone())),
-            SessionKind::AgentDone { redirect } => {
-                Some(AgentMarker::Done(redirect.clone(), s.state.clone()))
-            }
-            SessionKind::AgentFailed { expired } => {
-                Some(AgentMarker::Failed(*expired, s.state.clone()))
-            }
-            _ => None,
-        })
-}
-
-/// The answer a SETTLED marker stands for: the first press's 303 (cookie kept,
-/// for the reason the first press keeps it), or its failure page (cookie
-/// cleared, as the first press cleared it).
-fn answer_from_marker(marker: AgentMarker, done: impl Fn(Response) -> Response) -> Response {
-    match marker {
-        AgentMarker::Done(redirect, _) => match header::HeaderValue::from_str(&redirect) {
+/// The answer an outcome stands for, to the first press or any later one.
+///
+/// A 303 to AuthKit's URL, `no-store` and `no-referrer`. SEE OTHER, the
+/// POST-to-GET answer this crate gives after `POST /signup`: the browser must
+/// GET AuthKit's URL, never re-POST the form to it. THE COOKIE IS NOT CLEARED
+/// on it, unlike every refusal: a browser that abandons this answer for a
+/// second press may or may not have applied its headers, and a second press
+/// without the cookie could not be matched to the marker. It names a session
+/// that is gone within seconds, and the next flow overwrites it.
+///
+/// Or the failure page, with the cookie cleared.
+fn answer_from_outcome(outcome: Outcome, done: impl Fn(Response) -> Response) -> Response {
+    match outcome {
+        Outcome::Done(redirect) => match header::HeaderValue::from_str(&redirect) {
             Ok(location) => {
                 no_store((StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response())
             }
             Err(_) => done(agent_unavailable()),
         },
-        AgentMarker::Failed(true, _) => done(agent_expired()),
-        AgentMarker::Failed(false, _) => done(agent_unavailable()),
-        // Not settled; the caller waits instead of asking this.
-        AgentMarker::InFlight(_) => done(agent_session_refused()),
+        Outcome::Failed { expired: true } => done(agent_expired()),
+        Outcome::Failed { expired: false } => done(agent_unavailable()),
     }
 }
 
-/// How often a waiting second press looks at the table.
-const IN_FLIGHT_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+/// What a second press can find under its sid, copied out of the table so no
+/// lock is held across an await: the confirmation's token, and the outcome
+/// (`None` while the first press is still talking to WorkOS).
+struct AgentMarker {
+    token: String,
+    outcome: Option<Outcome>,
+}
+
+/// The marker under `sid`, if there is a live one. A PEEK: it never takes.
+fn agent_marker(state: &ControlState, sid: &str) -> Option<AgentMarker> {
+    state.sessions().peek(sid, Instant::now()).and_then(|s| {
+        let outcome = match &s.kind {
+            SessionKind::AgentInFlight => None,
+            SessionKind::AgentDone { redirect } => Some(Outcome::Done(redirect.clone())),
+            SessionKind::AgentFailed { expired } => Some(Outcome::Failed { expired: *expired }),
+            _ => return None,
+        };
+        Some(AgentMarker {
+            token: s.state.clone(),
+            outcome,
+        })
+    })
+}
 
 /// How long a second press waits for the first: just over the WorkOS budget,
 /// and under the placeholder's own life, so a first press that is merely slow
@@ -2537,37 +2568,70 @@ const IN_FLIGHT_WAIT: std::time::Duration =
 
 /// A second press, waiting for the first press's WorkOS answer.
 ///
-/// IT ONLY READS. Every look is a peek, no lock is held across the sleep, and
+/// NO POLLING. It registers on the table's bell ([`sessions::SessionStore::notifier`],
+/// rung by every `mark`) BEFORE it looks, so a settle that lands between the
+/// look and the wait still wakes it, and then sleeps until the bell or the
+/// deadline. A wake is only a cue: it re-peeks, and a wake for somebody else's
+/// session just goes round again.
+///
+/// IT ONLY READS. Every look is a peek, no lock is held across the wait, and
 /// it writes nothing, so it is cancellation-safe: a waiter whose client goes
-/// away is dropped mid-sleep and leaves nothing behind. It never calls WorkOS:
+/// away is dropped mid-wait and leaves nothing behind. It never calls WorkOS:
 /// it does not hold, and cannot reach, what a completion needs.
 ///
 /// NOT A WAY TO TIE UP THE SERVER. Only a request carrying this browser's
 /// signed cookie AND the confirmation's CSRF token gets here, only during the
 /// few seconds one completion is in flight for that session, and each wait is
-/// a sleeping task bounded by [`IN_FLIGHT_WAIT`] that holds no lock and no
+/// a parked task bounded by [`IN_FLIGHT_WAIT`] that holds no lock and no
 /// connection to anybody. The callback bucket meters how many of those one
 /// client can start, and somebody holding the cookie and the token can already
 /// do anything this page can.
 ///
 /// The outcome: the first press's 303 or failure page; if the placeholder
-/// vanishes (its first press was dropped and it expired) or the bound passes,
-/// the refusal or "try again", never a guess.
+/// vanishes or the bound passes, the refusal or "try again", never a guess.
 async fn await_first_press(
     state: &ControlState,
     sid: &str,
     done: impl Fn(Response) -> Response,
 ) -> Response {
-    let deadline = Instant::now() + IN_FLIGHT_WAIT;
+    let bell = state.sessions().notifier();
+    let deadline = tokio::time::Instant::now() + IN_FLIGHT_WAIT;
     loop {
-        tokio::time::sleep(IN_FLIGHT_POLL).await;
+        let rung = bell.notified();
+        tokio::pin!(rung);
+        // Registered BEFORE the look, so no settle can slip between them.
+        rung.as_mut().enable();
         match agent_marker(state, sid) {
-            Some(AgentMarker::InFlight(_)) if Instant::now() < deadline => continue,
-            Some(AgentMarker::InFlight(_)) => return done(agent_unavailable()),
-            Some(settled) => return answer_from_marker(settled, done),
+            Some(AgentMarker { outcome: None, .. }) => {}
+            Some(AgentMarker {
+                outcome: Some(outcome),
+                ..
+            }) => return answer_from_outcome(outcome, done),
             None => return done(agent_session_refused()),
         }
+        tokio::select! {
+            _ = &mut rung => {}
+            _ = tokio::time::sleep_until(deadline) => return done(agent_unavailable()),
+        }
     }
+}
+
+/// The flow cookie's claim, if the request carries one this deployment
+/// signed and it is inside its window. Says WHICH session; decides nothing
+/// else. One place for the extraction the callback and both confirmation
+/// routes share.
+fn flow_claim(state: &ControlState, headers: &HeaderMap) -> Option<SessionClaim> {
+    headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(cookie::from_header)
+        .and_then(|v| {
+            cookie::verify(
+                &state.config().cookie_key,
+                v,
+                chrono::Utc::now().timestamp(),
+            )
+        })
 }
 
 /// The agent flow's unverifiable-session page: every refusal on
@@ -3025,6 +3089,44 @@ mod tests {
         assert!(!is_code("with space"));
         assert!(!is_code("with\nnewline"));
         assert!(!is_code(&"a".repeat(MAX_CODE + 1)));
+    }
+
+    /// THE SETTLE ALWAYS RUNS: a guard given an outcome writes it; one that is
+    /// dropped without one (an early return, or a panic unwinding through the
+    /// completion task) writes a failed marker, so a waiting second press is
+    /// never left on a placeholder that nothing will settle.
+    #[test]
+    fn the_settle_guard_writes_on_every_way_out() {
+        use std::sync::{Arc, Mutex};
+        let written: Arc<Mutex<Vec<SessionKind>>> = Arc::default();
+        let sink = |w: &Arc<Mutex<Vec<SessionKind>>>| {
+            let w = w.clone();
+            move |k| w.lock().unwrap().push(k)
+        };
+
+        let mut given = SettleOnDrop::new(sink(&written));
+        given.outcome = Some(SessionKind::AgentDone {
+            redirect: "https://foo.authkit.app/x".into(),
+        });
+        drop(given);
+        drop(SettleOnDrop::new(sink(&written)));
+        let w2 = sink(&written);
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _guard = SettleOnDrop::new(w2);
+            panic!("mid-completion");
+        }));
+        assert!(panicked.is_err());
+
+        assert_eq!(
+            *written.lock().unwrap(),
+            vec![
+                SessionKind::AgentDone {
+                    redirect: "https://foo.authkit.app/x".into()
+                },
+                SessionKind::AgentFailed { expired: false },
+                SessionKind::AgentFailed { expired: false },
+            ]
+        );
     }
 
     #[test]

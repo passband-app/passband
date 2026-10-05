@@ -134,7 +134,11 @@ browser  ── GET /agent/auth?external_auth_id=<opaque> ──► 302 to Googl
   after, a done or failed marker answers the same way. The same 303, or the
   same class of failure page, and never a second WorkOS call. A wrong token or
   a Cancel in that window is refused without disturbing the first press, and
-  after the markers expire a replay is refused. The success answer does not clear the flow cookie, so that second
+  after the markers expire a replay is refused. The WorkOS call itself runs as
+  a detached task that always settles the placeholder (done, or failed, even
+  on a panic), so a first press whose browser closed its connection still
+  leaves the answer the second press is waiting for; the waiter wakes on that
+  settle rather than polling. The success answer does not clear the flow cookie, so that second
   press can still be matched. Both methods ride the callback's rate-limit
   bucket, as the second half of a consent already given, and a refresh must
   not meet a 429.

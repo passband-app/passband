@@ -1902,7 +1902,7 @@ impl AgentTriageStore for SqliteStore {
         // An audited automatic closure is model evidence, not a user's Done.
         // A later explicit completion has a newer resolved_at and is preserved.
         tx.execute(
-            "UPDATE triage SET status='open',resolved_at=NULL
+            "UPDATE triage SET status='open',resolved_at=NULL,resolved_by=NULL
              WHERE account_id=?1 AND status='done' AND EXISTS(
                  SELECT 1 FROM audit_log a
                  WHERE a.account_id=triage.account_id AND a.action='bill.auto_close'

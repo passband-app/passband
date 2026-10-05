@@ -195,6 +195,25 @@ impl RecordProposal {
         }
     }
 }
+impl MessageDecision {
+    /// Is this Reading message a PROMOTION rather than a piece to read? The
+    /// model's own `reading_kind` when it gave one. Decisions stored before
+    /// that field existed fall back to the kinds triage already gave them,
+    /// the same fallback the clients apply: content is editorial and not
+    /// promotional, so everything else is promotion only when it is
+    /// positively marked promotional. An older row with neither kind is
+    /// NEITHER here, which is the careful answer for a caller that clears
+    /// promotions.
+    pub fn is_reading_promotion(&self) -> bool {
+        match self.reading_kind {
+            Some(kind) => kind == ReadingKind::Promotion,
+            None => {
+                self.kinds.contains(&EmailKind::Promotional)
+                    && !self.kinds.contains(&EmailKind::Editorial)
+            }
+        }
+    }
+}
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct MessageDecision {
     pub kinds: Vec<EmailKind>,
@@ -204,6 +223,12 @@ pub struct MessageDecision {
     /// client falls back to `kinds`.
     #[serde(default)]
     pub reading_kind: Option<ReadingKind>,
+    /// When the offer, sale or event a Reading message is about ENDS, and only
+    /// when the message itself says so. What lets smart done clear an expired
+    /// promotion from a stored fact instead of a second model call. Defaults
+    /// for the reason `reading_kind` does: stored decisions predate it.
+    #[serde(default)]
+    pub ends: Option<SupportedTime>,
     pub summary: String,
     pub reason: String,
     pub auth: AuthAssessment,

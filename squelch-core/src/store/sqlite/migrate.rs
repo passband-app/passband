@@ -294,6 +294,10 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
         stamp_dwell_ledger_start(conn)?;
     }
     add_column_if_missing(conn, "triage", "link_clicks", "INTEGER NOT NULL DEFAULT 0")?;
+    // WHO RESOLVED A ROW, when it was not a person. NULL on every pre-existing
+    // row and NOT backfilled: nothing recorded it before, and guessing would
+    // hand an undo rows it never took.
+    add_column_if_missing(conn, "triage", "resolved_by", "TEXT")?;
 
     // AND THE SWEEP'S INDEX, HERE rather than in schema.sql, for the reason
     // spelled out at that file's `idx_triage_remind_at` note: it runs before this

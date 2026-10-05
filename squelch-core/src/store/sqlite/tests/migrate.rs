@@ -975,6 +975,34 @@ fn migrate_adds_attention_columns_and_dates_the_dwell_ledger_once() {
 }
 
 #[test]
+fn migrate_adds_resolved_by_null_to_a_preexisting_triage_table() {
+    // A `triage` table from before provenance, holding a row somebody (or
+    // something) resolved. The column lands NULL and is NOT backfilled: NULL
+    // means "a person, or a path older than this column", which is the only
+    // true thing to say about that row, and a guessed stamp would hand some
+    // batch's undo a row it never took.
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE triage(
+             message_id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL,
+             model_used TEXT, status TEXT NOT NULL DEFAULT 'new', resolved_at TEXT);
+         INSERT INTO triage(message_id, account_id, status, resolved_at)
+             VALUES (1, 1, 'done', '2026-01-01T00:00:00+00:00');",
+    )
+    .unwrap();
+    migrate(&conn).unwrap();
+    migrate(&conn).unwrap(); // idempotent
+    let (status, by): (String, Option<String>) = conn
+        .query_row(
+            "SELECT status, resolved_by FROM triage WHERE message_id=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((status.as_str(), by), ("done", None));
+}
+
+#[test]
 fn migrate_adds_notify_eligible_at_null_to_a_preexisting_triage_table() {
     // A `triage` table predating the notify-eligibility stamp. The column has
     // to land through the migration seam rather than schema.sql, because

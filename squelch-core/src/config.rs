@@ -394,6 +394,49 @@ impl Default for NotifyConfig {
     }
 }
 
+/// The model behind smart done's one question (`[smart_done]`): has what this
+/// Reading mail is about already expired? See [`crate::triage::smart_done`].
+///
+/// ITS OWN MODEL AND ITS OWN PRICES, the fourth pair in the ledger. It is not
+/// the notify model (too small to do date arithmetic over sixty summaries
+/// reliably) and not Stage-1's (far more than the question needs), so both
+/// cost estimators price its category off the two numbers here. Change the
+/// model and these prices move with it, or the estimate drifts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SmartDoneConfig {
+    /// The model asked. Default `claude-sonnet-5`, which the hosted gateway's
+    /// allow-list carries in both spellings (verified 2026-10-05; it does NOT
+    /// carry `claude-sonnet-5-5`). Qualified with the gateway's provider
+    /// prefix at call time, like every other model here. Env:
+    /// `SQUELCH_SMART_DONE_MODEL`.
+    pub model: String,
+    /// Reasoning depth, sent as `output_config.effort`. Default `low`: the
+    /// question is date arithmetic, and the owner is waiting on the answer.
+    /// Env: `SQUELCH_SMART_DONE_EFFORT` (`none`/`off` clears it, for a model
+    /// that rejects the field).
+    pub effort: Option<String>,
+    /// USD per million input tokens for `model`. Default 2.0, the list price
+    /// of `claude-sonnet-5` (Anthropic first-party API rates as of
+    /// 2026-09-25). Env: `SQUELCH_SMART_DONE_PRICE_IN_PER_MTOK`.
+    pub price_in_per_mtok: f64,
+    /// USD per million output tokens for `model`. Default 10.0, same source.
+    /// Env: `SQUELCH_SMART_DONE_PRICE_OUT_PER_MTOK`.
+    pub price_out_per_mtok: f64,
+}
+
+impl Default for SmartDoneConfig {
+    fn default() -> Self {
+        Self {
+            model: "claude-sonnet-5".to_string(),
+            effort: Some("low".to_string()),
+            // claude-sonnet-5 per-MTok (input / output).
+            price_in_per_mtok: 2.0,
+            price_out_per_mtok: 10.0,
+        }
+    }
+}
+
 /// Scheduled re-evaluation tunables. The serde-facing shape of
 /// [`crate::triage::revisit::RevisitConfig`], in plain numbers rather than
 /// `chrono::Duration`s, so it round-trips through TOML and env vars.
@@ -1722,6 +1765,8 @@ pub struct Config {
     /// first-sight freshness test, and the rescue ceiling a late verdict has to
     /// beat.
     pub notify: NotifyConfig,
+    /// Smart done's model pass: which model, at what effort, at what price.
+    pub smart_done: SmartDoneConfig,
     /// Scheduled re-evaluation: how often triage looks at its own past verdicts.
     pub revisit: RevisitPassConfig,
     /// APNs pusher: the blind relay's URL + bearer. Absent `relay_url` means the
@@ -1757,6 +1802,7 @@ impl Default for Config {
             sync: SyncConfig::default(),
             embed: EmbedConfig::default(),
             notify: NotifyConfig::default(),
+            smart_done: SmartDoneConfig::default(),
             revisit: RevisitPassConfig::default(),
             pusher: PusherConfig::default(),
             tracking: TrackingConfig::default(),
@@ -1950,6 +1996,16 @@ impl Config {
         env_override(
             "SQUELCH_NOTIFY_PRICE_OUT_PER_MTOK",
             &mut self.notify.price_out_per_mtok,
+        );
+        env_override("SQUELCH_SMART_DONE_MODEL", &mut self.smart_done.model);
+        env_override_effort("SQUELCH_SMART_DONE_EFFORT", &mut self.smart_done.effort);
+        env_override(
+            "SQUELCH_SMART_DONE_PRICE_IN_PER_MTOK",
+            &mut self.smart_done.price_in_per_mtok,
+        );
+        env_override(
+            "SQUELCH_SMART_DONE_PRICE_OUT_PER_MTOK",
+            &mut self.smart_done.price_out_per_mtok,
         );
         // Which embedding weights this daemon loads. An env var so a fleet-wide
         // pin can be moved without cutting a new image, and validated where
@@ -3568,6 +3624,48 @@ backfill_days = 90
         // not the notify threshold; they must not alias.
         assert_eq!(c.default_min_importance, 0);
         unsafe { std::env::remove_var("SQUELCH_NOTIFY_MIN_IMPORTANCE") }
+    }
+
+    /// `[smart_done]` reads from the file, and the env beats the file, with
+    /// `none` clearing an effort the configured model would reject.
+    #[test]
+    fn the_smart_done_section_reads_from_toml_and_env() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // A config that predates the section has the defaults.
+        let c: Config = toml::from_str("").unwrap();
+        assert_eq!(c.smart_done.model, "claude-sonnet-5");
+        let mut c: Config =
+            toml::from_str("[smart_done]\nmodel = \"from-the-file\"\nprice_in_per_mtok = 1.5\n")
+                .unwrap();
+        assert_eq!(c.smart_done.model, "from-the-file");
+        assert_eq!(c.smart_done.price_in_per_mtok, 1.5);
+        assert_eq!(
+            c.smart_done.price_out_per_mtok, 10.0,
+            "unnamed keys default"
+        );
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::set_var("SQUELCH_SMART_DONE_MODEL", "from-the-env");
+            std::env::set_var("SQUELCH_SMART_DONE_EFFORT", "none");
+            std::env::set_var("SQUELCH_SMART_DONE_PRICE_IN_PER_MTOK", "0.25");
+            std::env::set_var("SQUELCH_SMART_DONE_PRICE_OUT_PER_MTOK", "0.75");
+        }
+        c.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("SQUELCH_SMART_DONE_MODEL");
+            std::env::remove_var("SQUELCH_SMART_DONE_EFFORT");
+            std::env::remove_var("SQUELCH_SMART_DONE_PRICE_IN_PER_MTOK");
+            std::env::remove_var("SQUELCH_SMART_DONE_PRICE_OUT_PER_MTOK");
+        }
+        assert_eq!(c.smart_done.model, "from-the-env");
+        assert_eq!(c.smart_done.effort, None);
+        assert_eq!(
+            (
+                c.smart_done.price_in_per_mtok,
+                c.smart_done.price_out_per_mtok
+            ),
+            (0.25, 0.75)
+        );
     }
 
     /// THE FAST LANE'S DEFAULTS, asserted one by one because two of them are

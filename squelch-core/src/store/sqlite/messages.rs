@@ -458,7 +458,8 @@ impl SqliteStore {
             "UPDATE triage
                 SET stage1_model_used = NULL, model_used = NULL, needs_stage2 = 0,
                     extractor_model_used = NULL, retriage_at = ?3,
-                    status = 'new', surfaced_at = NULL, resolved_at = NULL
+                    status = 'new', surfaced_at = NULL, resolved_at = NULL,
+                    resolved_by = NULL
               WHERE account_id = ?1 AND message_id = ?2",
             params![account_id, message_id, now],
         )?;
@@ -1009,6 +1010,12 @@ impl SqliteStore {
                  status=CASE WHEN excluded.status='done' THEN 'done' ELSE triage.status END,
                  resolved_at=CASE WHEN excluded.status='done'
                      THEN excluded.resolved_at ELSE triage.resolved_at END,
+                 -- A re-ingest that resolves the row is its own resolution and
+                 -- replaces `resolved_at`, so whatever sweep had resolved it
+                 -- before no longer owns it. One that leaves the status alone
+                 -- leaves the provenance alone too.
+                 resolved_by=CASE WHEN excluded.status='done'
+                     THEN NULL ELSE triage.resolved_by END,
                  -- WRITTEN ONCE, ON FIRST INSERT, AND NEVER AGAIN — not even to
                  -- a fresher stamp, and not conditioned on `PROCESSED` like the
                  -- verdict columns. Notify eligibility is a fact about when we

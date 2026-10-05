@@ -381,6 +381,9 @@ struct SenderView {
     rule: Option<RuleView>,
     unsubscribe: Option<UnsubscribeView>,
     unsubscribed: Option<UnsubscribedView>,
+    /// When the owner last chose to keep this sender in the purge flow. Still
+    /// reported after it stops holding the score at zero.
+    kept_at: Option<chrono::DateTime<Utc>>,
     score: Option<u8>,
     reasons: Vec<squelch_core::triage::sender_fatigue::Reason>,
 }
@@ -487,6 +490,7 @@ pub async fn reading_senders(
                     status: u.status.unwrap_or_else(|| "browser".into()),
                     requested_at: u.requested_at,
                 }),
+                kept_at: sender.kept_at,
                 score: sender.score,
                 reasons: sender.reasons,
             });
@@ -500,6 +504,201 @@ pub async fn reading_senders(
     })
     .await?;
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(view)))
+}
+
+#[derive(Deserialize)]
+pub struct KeepSender {
+    pub sender: String,
+}
+
+/// POST /client/v2/reading/senders/keep: the owner looked at this sender in
+/// the purge flow and chose to stay subscribed. The sender then scores zero
+/// (`kept_recently`) and is never swept by smart done for
+/// [`squelch_core::triage::sender_fatigue::KEEP_QUIET_DAYS`], unless a later
+/// unsubscribe or squelch rule says otherwise.
+///
+/// AUDITED, unlike `/attention`: this is a decision the owner made about
+/// their mail, once, and "why did this sender stop coming up" is exactly what
+/// the audit log is for. The address is what was decided about, so it is the
+/// target.
+pub async fn keep_reading_sender(
+    State(state): State<ApiState>,
+    Json(body): Json<KeepSender>,
+) -> Result<impl IntoResponse, ApiError> {
+    let sender = body.sender.trim().to_ascii_lowercase();
+    // The bare address, as every list of senders hands it out. Anything else
+    // would be stored as a keep that can never match a sender.
+    if sender.is_empty() || !sender.contains('@') || sender.chars().any(char::is_whitespace) {
+        return Err(ApiError::bad_request("sender must be an email address"));
+    }
+    let kept = sender.clone();
+    store_call(&state, move |store, account| {
+        store.keep_reading_sender(account, &kept, Utc::now())
+    })
+    .await?;
+    crate::handlers::audit_action(&state, "reading.keep_sender", Some(sender), "kept").await;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// POST /client/v2/reading/smart_done: "I trust you to clean this out". Marks
+/// done, as one undoable batch, the open Reading mail that has expired or
+/// that the owner plainly does not want. What qualifies, and what is never
+/// touched, is [`squelch_core::triage::smart_done`]; this is the order it
+/// happens in, which is about the store mutex:
+///
+/// 1. One locked read finds the rows worth asking the model about.
+/// 2. THE MODEL IS ASKED WITH NO LOCK HELD. It can take twenty seconds, and
+///    sync shares that mutex.
+/// 3. One locked transaction judges every row AGAIN and writes. The owner was
+///    using the app during step 2, so nothing step 1 saw is trusted: a model
+///    verdict lands only on a row that is still open and still undecided.
+///
+/// `model` says what became of step 2. Every `skipped_*` value means the
+/// sweep ran on stored facts alone, which is a smaller sweep and never an
+/// error: `skipped_nothing_to_ask` (no undecided row has a summary),
+/// `skipped_unconfigured` (no key), `skipped_cap` (the day's passes are
+/// spent), `skipped_failed` (a refusal, a timeout, an error).
+///
+/// ONE AUDIT ROW for the batch, not one per message: the batch id is the
+/// target and everything it took can be read back from it.
+pub async fn smart_done(State(state): State<ApiState>) -> Result<impl IntoResponse, ApiError> {
+    use squelch_core::metrics::SMART_DONE_USAGE_CATEGORY;
+    use squelch_core::triage::smart_done::{self as sd, ClearReason};
+
+    let limit = feed_limit(None);
+    let now = Utc::now();
+    let inventory = squelch_core::store::agent_triage::AgentListQuery {
+        since: Some(default_feed_since(now)),
+        include_done: false,
+    };
+    let day = now.format("%Y-%m-%d").to_string();
+    let scan_inventory = inventory.clone();
+    let scan_day = day.clone();
+    let (asks, spent) = store_call(&state, move |store, account| {
+        let asks = store.smart_done_scan(account, now, &scan_inventory, limit)?;
+        // The runaway guard, read from the same ledger the passes bill into.
+        let spent: u64 = store
+            .list_usage_by_category(account, 1)?
+            .into_iter()
+            .filter(|(c, _)| c == SMART_DONE_USAGE_CATEGORY)
+            .flat_map(|(_, days)| days)
+            .filter(|d| d.day == scan_day)
+            .map(|d| d.calls)
+            .sum();
+        Ok((asks, spent))
+    })
+    .await?;
+
+    let mut verdicts = std::collections::HashMap::new();
+    let model = if asks.is_empty() {
+        "skipped_nothing_to_ask"
+    } else if let Some(client) = state.smart_done.clone() {
+        // RESERVE before calling, as the headline does and for its reasons:
+        // the ledger only learns of calls the provider reported usage for,
+        // and two presses at once would both read the same total.
+        let reserved = state.smart_done_attempts.lock().is_ok_and(|mut t| {
+            if t.0 != day {
+                *t = (day.clone(), 0);
+            }
+            if u64::from(t.1).max(spent) >= u64::from(sd::DAILY_CAP) {
+                return false;
+            }
+            t.1 += 1;
+            true
+        });
+        if !reserved {
+            "skipped_cap"
+        } else {
+            let pass = sd::judge(&client, now, &asks).await;
+            // Billed on every outcome that reported usage, a refusal and a
+            // garbled answer included.
+            if let Some(u) = pass.usage {
+                let bill_day = day.clone();
+                let _ = store_call(&state, move |store, account| {
+                    if let Err(e) = store.extract_bump_usage(
+                        account,
+                        &bill_day,
+                        SMART_DONE_USAGE_CATEGORY,
+                        u.into(),
+                    ) {
+                        eprintln!("squelch: smart done usage ledger bump failed ({e})");
+                    }
+                    Ok(())
+                })
+                .await;
+            }
+            if pass.answered {
+                verdicts = pass.verdicts;
+                "ok"
+            } else {
+                "skipped_failed"
+            }
+        }
+    } else {
+        "skipped_unconfigured"
+    };
+
+    // A FRESH CLOCK for the write: the 24-hour floor and every "has passed"
+    // are judged as of the moment the rows are taken, not of the press.
+    let outcome = store_call(&state, move |store, account| {
+        store.smart_done_apply(account, Utc::now(), &inventory, limit, &verdicts)
+    })
+    .await?;
+
+    let mut by_reason = serde_json::Map::new();
+    for reason in ClearReason::ALL {
+        let n = outcome.cleared.iter().filter(|(_, r)| *r == reason).count();
+        by_reason.insert(reason.as_str().into(), json!(n));
+    }
+    if let Some(batch) = outcome.batch_id {
+        crate::handlers::audit_action(
+            &state,
+            "reading.smart_done",
+            Some(batch.to_string()),
+            &outcome.cleared.len().to_string(),
+        )
+        .await;
+    }
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(json!({
+            "batch_id": outcome.batch_id.map(|id| id.to_string()),
+            "cleared": outcome.cleared.len(),
+            "senders": outcome.senders,
+            "by_reason": by_reason,
+            "message_ids": outcome.cleared.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            "model": model,
+        })),
+    ))
+}
+
+/// POST /client/v2/reading/smart_done/{batch_id}/undo: give a batch back.
+/// Reopens exactly the rows that batch took and that nobody has touched
+/// since, each to the status it had. A second undo reopens nothing and says
+/// `0`; a batch this account does not have is 404, whether it is unknown or
+/// somebody else's.
+pub async fn smart_done_undo(
+    State(state): State<ApiState>,
+    Path(batch_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    // The id is handed out as a string so the client never does arithmetic on
+    // it; one that is not a number names no batch.
+    let Ok(batch) = batch_id.parse::<i64>() else {
+        return Err(ApiError::not_found());
+    };
+    let reopened = store_call(&state, move |store, account| {
+        store.smart_done_undo(account, batch, Utc::now())
+    })
+    .await?
+    .ok_or_else(ApiError::not_found)?;
+    crate::handlers::audit_action(
+        &state,
+        "reading.smart_done_undo",
+        Some(batch.to_string()),
+        &reopened.to_string(),
+    )
+    .await;
+    Ok(Json(json!({ "reopened": reopened })))
 }
 
 pub async fn capabilities() -> impl IntoResponse {

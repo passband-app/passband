@@ -568,6 +568,10 @@ impl SqliteStore {
         let conn = self.lock()?;
         // Done stamps resolved_at; reopening clears it. Human actions also apply
         // to mail restricted from external agents.
+        //
+        // EITHER WAY `resolved_by` IS CLEARED, on every row the write touches:
+        // a person re-doing or reopening a row an automatic sweep resolved has
+        // taken it over, and that sweep's undo must no longer reach it.
         let resolved_at = match status {
             AttentionStatus::Done => Some(Utc::now().to_rfc3339()),
             _ => None,
@@ -588,7 +592,7 @@ impl SqliteStore {
         let n = match status {
             AttentionStatus::Done => conn.execute(
                 "UPDATE triage
-                 SET status = ?1, resolved_at = ?2, reminded_at = NULL
+                 SET status = ?1, resolved_at = ?2, resolved_by = NULL, reminded_at = NULL
                  WHERE account_id = ?3
                    AND (message_id = ?4 OR message_id IN (
                        SELECT sib.id FROM messages me
@@ -600,7 +604,7 @@ impl SqliteStore {
             )?,
             _ => conn.execute(
                 "UPDATE triage
-                 SET status = ?1, resolved_at = ?2
+                 SET status = ?1, resolved_at = ?2, resolved_by = NULL
                  WHERE account_id = ?3 AND message_id = ?4",
                 params![status.as_str(), resolved_at, account_id, message_id],
             )?,
@@ -650,7 +654,7 @@ impl SqliteStore {
         // parked until the new date.
         tx.execute(
             "UPDATE triage
-             SET status = 'done', resolved_at = ?1, reminded_at = NULL
+             SET status = 'done', resolved_at = ?1, resolved_by = NULL, reminded_at = NULL
              WHERE account_id = ?2
                AND (message_id = ?3 OR message_id IN (
                    SELECT sib.id FROM messages me
@@ -704,6 +708,7 @@ impl SqliteStore {
             "UPDATE triage
              SET status = 'open',
                  resolved_at = NULL,
+                 resolved_by = NULL,
                  reminded_at = remind_at,
                  remind_at = NULL
              WHERE account_id = ?1
@@ -730,7 +735,7 @@ impl SqliteStore {
         // whatever resolved them — survives. This is an explicit human sweep.
         let n = conn.execute(
             "UPDATE triage
-             SET status = 'done', resolved_at = ?1
+             SET status = 'done', resolved_at = ?1, resolved_by = NULL
              WHERE account_id = ?2
 
                AND status != 'done'

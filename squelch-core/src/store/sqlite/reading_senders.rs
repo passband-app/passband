@@ -49,7 +49,7 @@ use super::*;
 use crate::store::agent_triage::AgentListQuery;
 use crate::triage::rules::match_sender_rule;
 use crate::triage::sender_fatigue::{
-    self, OpenSample, Reason, SenderSignals, summarize_attention, word_count,
+    self, OpenSample, Reason, SenderSignals, keep_in_force, summarize_attention, word_count,
 };
 
 /// How far back a sender's statistics look, before the ledger floor shortens
@@ -92,9 +92,15 @@ macro_rules! sender_mail_sql {
 }
 
 /// Received, opened, and cleared without opening, for one sender.
+///
+/// "CLEARED" MEANS BY THE OWNER: `resolved_by IS NULL`. A row smart done swept
+/// is done and unopened too, but nobody decided that about it, and smart done
+/// itself reads this score to pick senders to sweep. Counted, each sweep would
+/// raise the score that justified it and the next one would take more.
 pub(crate) const SENDER_COUNTS_SQL: &str = concat!(
     "SELECT COUNT(*), COUNT(t.opened_at),
-            COALESCE(SUM(t.opened_at IS NULL AND t.status = 'done'), 0)",
+            COALESCE(SUM(t.opened_at IS NULL AND t.status = 'done'
+                         AND t.resolved_by IS NULL), 0)",
     sender_mail_sql!()
 );
 
@@ -167,6 +173,8 @@ pub struct ReadingSender {
     pub rule: Option<SenderRule>,
     pub unsub_candidates: Vec<UnsubCandidate>,
     pub unsubscribed: Option<SenderUnsubscribed>,
+    /// When the owner last chose to keep this sender, however long ago.
+    pub kept_at: Option<DateTime<Utc>>,
     pub score: Option<u8>,
     pub reasons: Vec<Reason>,
 }
@@ -185,6 +193,264 @@ pub struct ReadingSenders {
     pub senders: Vec<ReadingSender>,
 }
 
+/// Everything measured about one sender, by the ONE path that measures it.
+/// The purge list shows it and smart done acts on it, so the score a sender is
+/// swept for is always the score the owner was shown.
+#[derive(Debug, Clone)]
+pub(super) struct Measured {
+    pub signals: SenderSignals,
+    pub rule: Option<SenderRule>,
+    pub unsubscribed: Option<SenderUnsubscribed>,
+    pub kept_at: Option<DateTime<Utc>>,
+    pub score: Option<u8>,
+    pub reasons: Vec<Reason>,
+}
+
+/// The cheap half of [`Measured`]: who the owner has said to leave alone.
+/// Three small probes and no mail read, so it can be asked of every sender
+/// where the full measurement is capped at [`MAX_SENDERS`].
+#[derive(Debug, Clone)]
+pub(super) struct Standing {
+    pub rule: Option<SenderRule>,
+    pub unsubscribed: Option<SenderUnsubscribed>,
+    pub kept_at: Option<DateTime<Utc>>,
+    pub known_contact: bool,
+    pub surface_rule: bool,
+    pub kept_recently: bool,
+}
+
+impl Standing {
+    /// The owner writes to them, asked for their mail by rule, or chose to
+    /// keep them: never a purge suggestion and never swept.
+    pub(super) fn protected(&self) -> bool {
+        self.known_contact || self.surface_rule || self.kept_recently
+    }
+}
+
+/// The prepared statements and floors a run of sender measurements shares.
+/// Built once per store call, under the lock that call already holds.
+pub(super) struct SenderMeasurer<'c> {
+    conn: &'c Connection,
+    account_id: AccountId,
+    now: DateTime<Utc>,
+    rules: Vec<SenderRule>,
+    counts: rusqlite::Statement<'c>,
+    opens: rusqlite::Statement<'c>,
+    body: rusqlite::Statement<'c>,
+    unsubscribed: rusqlite::Statement<'c>,
+    kept: rusqlite::Statement<'c>,
+    pub(super) window_floor: DateTime<Utc>,
+    floor_text: String,
+    dwell_floor: DateTime<Utc>,
+    /// How long the statistics actually cover.
+    pub(super) covered: chrono::Duration,
+}
+
+impl<'c> SenderMeasurer<'c> {
+    pub(super) fn new(
+        conn: &'c Connection,
+        account_id: AccountId,
+        now: DateTime<Utc>,
+    ) -> Result<Self> {
+        // WHEN FROM. Whichever floor is later wins, as in `share_open_rate`.
+        let window_floor = now - chrono::Duration::days(STATS_WINDOW_DAYS);
+        let floor = window_floor.max(open_ledger_since(conn, account_id)?);
+        Ok(Self {
+            conn,
+            account_id,
+            now,
+            rules: list_sender_rules_conn(conn, account_id)?,
+            counts: conn.prepare(SENDER_COUNTS_SQL)?,
+            opens: conn.prepare(SENDER_OPENS_SQL)?,
+            body: conn.prepare(MESSAGE_BODY_SQL)?,
+            // Both stored lowercased by every writer, so each table's unique
+            // index serves its probe.
+            unsubscribed: conn.prepare(
+                "SELECT status, requested_at FROM unsubscribes
+                 WHERE account_id = ?1 AND sender_addr = ?2",
+            )?,
+            kept: conn.prepare(
+                "SELECT kept_at FROM reading_sender_keeps
+                 WHERE account_id = ?1 AND sender_addr = ?2",
+            )?,
+            window_floor,
+            floor_text: floor.to_rfc3339(),
+            dwell_floor: dwell_ledger_since(conn, account_id)?,
+            covered: (now - floor).max(chrono::Duration::zero()),
+        })
+    }
+
+    /// Who the owner has said to leave alone. `sender` is the lowercased bare
+    /// address.
+    pub(super) fn standing(&mut self, sender: &str) -> Result<Standing> {
+        let rule = match_sender_rule(sender, &self.rules).cloned();
+        let unsubscribed = self
+            .unsubscribed
+            .query_row(params![self.account_id, sender], |r| {
+                Ok(SenderUnsubscribed {
+                    status: r.get(0)?,
+                    requested_at: dt(r, 1)?,
+                })
+            })
+            .optional()?;
+        // A stamp that will not parse is no keep at all: the failure falls
+        // toward asking the owner again, never toward silently exempting.
+        let kept_at = self
+            .kept
+            .query_row(params![self.account_id, sender], |r| r.get::<_, String>(0))
+            .optional()?
+            .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+            .map(|at| at.with_timezone(&Utc));
+        let squelched_at = rule
+            .as_ref()
+            .filter(|r| r.disposition == Disposition::Squelch)
+            .map(|r| r.updated_at);
+        Ok(Standing {
+            known_contact: is_known_contact_conn(self.conn, self.account_id, sender)?,
+            surface_rule: rule
+                .as_ref()
+                .is_some_and(|r| r.disposition == Disposition::Surface),
+            kept_recently: kept_at.is_some_and(|at| {
+                keep_in_force(
+                    at,
+                    self.now,
+                    unsubscribed.as_ref().map(|u| u.requested_at),
+                    squelched_at,
+                )
+            }),
+            rule,
+            unsubscribed,
+            kept_at,
+        })
+    }
+
+    /// Count, sample and score one sender.
+    pub(super) fn measure(&mut self, sender: &str) -> Result<Measured> {
+        let (received, opened, cleared_unopened): (u32, u32, u32) = self
+            .counts
+            .query_row(params![self.account_id, sender, self.floor_text], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?;
+
+        // The dwell sample: opened where dwell could be reported. A stamp
+        // that will not parse is not evidence and is dropped, the same
+        // direction every ledger failure falls.
+        let opened_rows = self
+            .opens
+            .query_map(
+                params![
+                    self.account_id,
+                    sender,
+                    self.floor_text,
+                    DWELL_SAMPLE_CAP as i64
+                ],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, i64>(3)?,
+                    ))
+                },
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut samples = Vec::new();
+        for (id, opened_at, dwell_ms, link_clicks) in opened_rows {
+            let in_ledger = DateTime::parse_from_rfc3339(&opened_at)
+                .is_ok_and(|at| at.with_timezone(&Utc) >= self.dwell_floor);
+            if !in_ledger {
+                continue;
+            }
+            // Borrowed straight from the row: the body is counted, never
+            // copied out of SQLite.
+            let words = self.body.query_row(params![self.account_id, id], |r| {
+                Ok(word_count(r.get_ref(0)?.as_str().unwrap_or("")))
+            })?;
+            samples.push(OpenSample {
+                dwell_ms: dwell_ms.max(0) as u64,
+                link_clicks: link_clicks.clamp(0, i64::from(u32::MAX)) as u32,
+                words,
+            });
+        }
+        let attention = summarize_attention(&samples);
+        let standing = self.standing(sender)?;
+
+        // The ACTUAL length, never the nominal ninety: a week-old ledger that
+        // saw seven mails saw thirty a month, not two. A day at least, so the
+        // first hours of a ledger cannot scale one mail into hundreds.
+        let covered_days = (self.covered.num_seconds() as f32 / 86_400.0).max(1.0);
+        let signals = SenderSignals {
+            received,
+            opened,
+            cleared_unopened,
+            dwell_sample: attention.dwell_sample,
+            median_dwell_ms: attention.median_dwell_ms,
+            clicks: attention.clicks,
+            read_sample: attention.read_sample,
+            median_read_fraction: attention.median_read_fraction,
+            median_words: attention.median_words,
+            per_month: (received as f32 * 30.0 / covered_days * 10.0).round() / 10.0,
+            known_contact: standing.known_contact,
+            surface_rule: standing.surface_rule,
+            kept_recently: standing.kept_recently,
+        };
+        let (score, reasons) = sender_fatigue::score(&signals);
+        Ok(Measured {
+            signals,
+            rule: standing.rule,
+            unsubscribed: standing.unsubscribed,
+            kept_at: standing.kept_at,
+            score,
+            reasons,
+        })
+    }
+}
+
+/// One sender's open Reading mail: (lowercased address, the name on their
+/// newest named mail, their message ids newest first).
+pub(super) type SenderGroup = (String, Option<String>, Vec<i64>);
+
+/// The Reading feed's open items grouped by sender: (lowercased address, the
+/// name on their newest named mail, their message ids newest first), in order
+/// of each sender's newest mail. `total` is how many senders there are before
+/// the cap; what comes back is the [`MAX_SENDERS`] with the most open mail.
+///
+/// WHICH HUNDRED is decided here, before anything is measured, so the cap
+/// bounds the work and not just a response: the senders with the most open
+/// mail, since clearing Reading is what both callers are for. The sort is
+/// stable, so ties stay in order of newest mail.
+pub(super) fn busiest_senders(
+    items: &[crate::store::agent_triage::AgentListItem],
+) -> (usize, Vec<SenderGroup>) {
+    let mut groups: Vec<SenderGroup> = Vec::new();
+    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for item in items {
+        let sender = sender_key(&item.from_addr);
+        if sender.is_empty() {
+            continue;
+        }
+        let at = *index.entry(sender.clone()).or_insert_with(|| {
+            groups.push((sender, None, Vec::new()));
+            groups.len() - 1
+        });
+        let group = &mut groups[at];
+        if group.1.is_none() {
+            group.1 = item.from_name.as_ref().map(|n| n.trim().to_string());
+        }
+        group.2.push(item.message_id);
+    }
+    let total = groups.len();
+    groups.sort_by_key(|g| std::cmp::Reverse(g.2.len()));
+    groups.truncate(MAX_SENDERS);
+    (total, groups)
+}
+
+/// The one spelling of a sender as this module keys it: the lowercased bare
+/// address, which is how `unsubscribes` and `reading_sender_keeps` store it.
+pub(super) fn sender_key(from_addr: &str) -> String {
+    from_addr.trim().to_ascii_lowercase()
+}
+
 impl SqliteStore {
     /// HUMAN-DOOR ONLY. See the module header for what is counted and why.
     ///
@@ -200,115 +466,17 @@ impl SqliteStore {
     ) -> Result<ReadingSenders> {
         let conn = self.lock()?;
 
-        // WHO: the feed's answer, grouped. Items arrive newest first, so each
-        // group's ids are already newest first and the groups are in order of
-        // their newest mail.
-        let mut groups: Vec<(String, Option<String>, Vec<i64>)> = Vec::new();
-        let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-        for item in reading_items(&conn, account_id, feed_limit, inventory, now)? {
-            let sender = item.from_addr.trim().to_ascii_lowercase();
-            if sender.is_empty() {
-                continue;
-            }
-            let at = *index.entry(sender.clone()).or_insert_with(|| {
-                groups.push((sender, None, Vec::new()));
-                groups.len() - 1
-            });
-            let group = &mut groups[at];
-            if group.1.is_none() {
-                group.1 = item.from_name.map(|n| n.trim().to_string());
-            }
-            group.2.push(item.message_id);
-        }
-        let total_senders = groups.len();
-        // WHICH HUNDRED, decided before anything is measured so the cap bounds
-        // the work and not just the response: the senders with the most open
-        // mail, since clearing Reading is what the flow is for. The sort is
-        // stable, so ties stay in order of newest mail.
-        groups.sort_by_key(|g| std::cmp::Reverse(g.2.len()));
-        groups.truncate(MAX_SENDERS);
+        // WHO: the feed's answer, grouped.
+        let items = reading_items(&conn, account_id, feed_limit, inventory, now)?;
+        let (total_senders, groups) = busiest_senders(&items);
 
-        // WHEN FROM. Whichever floor is later wins, as in `share_open_rate`.
-        let window_floor = now - chrono::Duration::days(STATS_WINDOW_DAYS);
-        let floor = window_floor.max(open_ledger_since(&conn, account_id)?);
-        let dwell_floor = dwell_ledger_since(&conn, account_id)?;
-        let covered = (now - floor).max(chrono::Duration::zero());
-        // The ACTUAL length, never the nominal ninety: a week-old ledger that
-        // saw seven mails saw thirty a month, not two. A day at least, so the
-        // first hours of a ledger cannot scale one mail into hundreds.
-        let covered_days = (covered.num_seconds() as f32 / 86_400.0).max(1.0);
-
-        let rules = list_sender_rules_conn(&conn, account_id)?;
-        let mut counts = conn.prepare(SENDER_COUNTS_SQL)?;
-        let mut opens = conn.prepare(SENDER_OPENS_SQL)?;
+        let mut measurer = SenderMeasurer::new(&conn, account_id, now)?;
         let mut candidates = conn.prepare(SENDER_UNSUB_CANDIDATES_SQL)?;
-        let mut body = conn.prepare(MESSAGE_BODY_SQL)?;
-        let mut unsubscribed = conn.prepare(
-            "SELECT status, requested_at FROM unsubscribes
-             WHERE account_id = ?1 AND sender_addr = ?2",
-        )?;
-        let floor_text = floor.to_rfc3339();
+        let window_floor = measurer.window_floor.to_rfc3339();
 
         let mut senders = Vec::with_capacity(groups.len());
         for (sender, display_name, open_message_ids) in groups {
-            let (received, opened, cleared_unopened): (u32, u32, u32) = counts
-                .query_row(params![account_id, sender, floor_text], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-                })?;
-
-            // The dwell sample: opened where dwell could be reported. A stamp
-            // that will not parse is not evidence and is dropped, the same
-            // direction every ledger failure falls.
-            let opened_rows = opens
-                .query_map(
-                    params![account_id, sender, floor_text, DWELL_SAMPLE_CAP as i64],
-                    |r| {
-                        Ok((
-                            r.get::<_, i64>(0)?,
-                            r.get::<_, String>(1)?,
-                            r.get::<_, i64>(2)?,
-                            r.get::<_, i64>(3)?,
-                        ))
-                    },
-                )?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            let mut samples = Vec::new();
-            for (id, opened_at, dwell_ms, link_clicks) in opened_rows {
-                let in_ledger = DateTime::parse_from_rfc3339(&opened_at)
-                    .is_ok_and(|at| at.with_timezone(&Utc) >= dwell_floor);
-                if !in_ledger {
-                    continue;
-                }
-                // Borrowed straight from the row: the body is counted, never
-                // copied out of SQLite.
-                let words = body.query_row(params![account_id, id], |r| {
-                    Ok(word_count(r.get_ref(0)?.as_str().unwrap_or("")))
-                })?;
-                samples.push(OpenSample {
-                    dwell_ms: dwell_ms.max(0) as u64,
-                    link_clicks: link_clicks.clamp(0, i64::from(u32::MAX)) as u32,
-                    words,
-                });
-            }
-            let attention = summarize_attention(&samples);
-
-            let rule = match_sender_rule(&sender, &rules).cloned();
-            let signals = SenderSignals {
-                received,
-                opened,
-                cleared_unopened,
-                dwell_sample: attention.dwell_sample,
-                median_dwell_ms: attention.median_dwell_ms,
-                clicks: attention.clicks,
-                read_sample: attention.read_sample,
-                median_read_fraction: attention.median_read_fraction,
-                median_words: attention.median_words,
-                per_month: (received as f32 * 30.0 / covered_days * 10.0).round() / 10.0,
-                known_contact: is_known_contact_conn(&conn, account_id, &sender)?,
-                surface_rule: rule
-                    .as_ref()
-                    .is_some_and(|r| r.disposition == Disposition::Surface),
-            };
+            let measured = measurer.measure(&sender)?;
 
             // WHERE TO UNSUBSCRIBE FROM reads the ninety-day window and NOT
             // the ledger floor. The floor exists to keep a rate honest; a link
@@ -316,12 +484,7 @@ impl SqliteStore {
             // sitting open in Reading is exactly the mail from before it.
             let unsub_candidates = candidates
                 .query_map(
-                    params![
-                        account_id,
-                        sender,
-                        window_floor.to_rfc3339(),
-                        UNSUB_CANDIDATES as i64
-                    ],
+                    params![account_id, sender, window_floor, UNSUB_CANDIDATES as i64],
                     |r| {
                         Ok(UnsubCandidate {
                             message_id: r.get(0)?,
@@ -333,27 +496,17 @@ impl SqliteStore {
                 )?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
 
-            // Stored lowercased by every writer, so the UNIQUE index serves it.
-            let unsubscribed = unsubscribed
-                .query_row(params![account_id, sender], |r| {
-                    Ok(SenderUnsubscribed {
-                        status: r.get(0)?,
-                        requested_at: dt(r, 1)?,
-                    })
-                })
-                .optional()?;
-
-            let (score, reasons) = sender_fatigue::score(&signals);
             senders.push(ReadingSender {
                 sender,
                 display_name: display_name.filter(|n| !n.is_empty()),
                 open_message_ids,
-                signals,
-                rule,
+                signals: measured.signals,
+                rule: measured.rule,
                 unsub_candidates,
-                unsubscribed,
-                score,
-                reasons,
+                unsubscribed: measured.unsubscribed,
+                kept_at: measured.kept_at,
+                score: measured.score,
+                reasons: measured.reasons,
             });
         }
 
@@ -368,9 +521,32 @@ impl SqliteStore {
 
         Ok(ReadingSenders {
             window_days: STATS_WINDOW_DAYS,
-            ledger_days: covered.num_days().min(STATS_WINDOW_DAYS),
+            ledger_days: measurer.covered.num_days().min(STATS_WINDOW_DAYS),
             total_senders,
             senders,
         })
+    }
+
+    /// HUMAN-DOOR ONLY: the owner chose to stay subscribed to `sender` in the
+    /// purge flow. Upserts; a second keep refreshes the date. `false` for an
+    /// address with nothing in it.
+    pub fn keep_reading_sender(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+        now: DateTime<Utc>,
+    ) -> Result<bool> {
+        let sender = sender_key(sender);
+        if sender.is_empty() {
+            return Ok(false);
+        }
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO reading_sender_keeps(account_id, sender_addr, kept_at)
+             VALUES(?1, ?2, ?3)
+             ON CONFLICT(account_id, sender_addr) DO UPDATE SET kept_at = excluded.kept_at",
+            params![account_id, sender, now.to_rfc3339()],
+        )?;
+        Ok(true)
     }
 }

@@ -30,6 +30,7 @@ pub mod rule_suggest;
 pub mod rules;
 pub mod sender_fatigue;
 pub mod shipment;
+pub mod smart_done;
 pub mod stage1_llm;
 pub mod stage2;
 pub(crate) mod text;

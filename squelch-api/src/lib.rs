@@ -115,6 +115,20 @@ fn client_router(state: ApiState) -> Router {
         // behaviour toward each. Human door only: the agent door was never
         // handed what somebody opens or how long they look.
         .route("/client/v2/reading/senders", get(triage::reading_senders))
+        // "Leave this sender alone for a while." A deliberate decision in the
+        // purge flow, so it is audited where attention telemetry is not.
+        .route(
+            "/client/v2/reading/senders/keep",
+            post(triage::keep_reading_sender),
+        )
+        // "Clean Reading out for me", and its exact undo. HUMAN DOOR ONLY,
+        // like every write and more than most: it resolves mail in bulk on
+        // the owner's say-so, which no agent may borrow.
+        .route("/client/v2/reading/smart_done", post(triage::smart_done))
+        .route(
+            "/client/v2/reading/smart_done/{batch_id}/undo",
+            post(triage::smart_done_undo),
+        )
         .route(
             "/client/v2/messages/{message_id}/corrections",
             post(triage::correct),

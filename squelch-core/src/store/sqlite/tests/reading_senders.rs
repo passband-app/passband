@@ -14,10 +14,21 @@ use crate::triage::decision::{EmailKind, MessageDecision, MessageDestination};
 use crate::types::{SealedKind, Sensitivity};
 use chrono::Duration;
 
-const NEWS: &str = "news@letters.example";
+pub(super) const NEWS: &str = "news@letters.example";
 
 /// Commit a model decision placing `id` in Reading, the way the worker does.
-fn into_reading(store: &SqliteStore, acct: AccountId, id: i64) {
+pub(super) fn into_reading(store: &SqliteStore, acct: AccountId, id: i64) {
+    into_reading_with(store, acct, id, |_| {});
+}
+
+/// [`into_reading`] with the decision adjusted first: a promotion with a
+/// summary by default, so a test names only what it is about.
+pub(super) fn into_reading_with(
+    store: &SqliteStore,
+    acct: AccountId,
+    id: i64,
+    adjust: impl FnOnce(&mut MessageDecision),
+) {
     store.enqueue_agent_triage(acct, id, "test", false).unwrap();
     let job = store
         .claim_agent_job(acct, "triage", Utc::now(), 60)
@@ -25,13 +36,14 @@ fn into_reading(store: &SqliteStore, acct: AccountId, id: i64) {
         .unwrap();
     assert_eq!(job.message_id, id);
     let context = store.load_agent_context(&job).unwrap();
-    let decision = MessageDecision {
+    let mut decision = MessageDecision {
         kinds: vec![EmailKind::Promotional],
         destinations: vec![MessageDestination::Reading],
         summary: "An issue".into(),
         reason: "A newsletter".into(),
         ..Default::default()
     };
+    adjust(&mut decision);
     assert_eq!(
         store
             .commit_agent_decision(
@@ -47,7 +59,13 @@ fn into_reading(store: &SqliteStore, acct: AccountId, id: i64) {
 
 /// One triaged message from `from`, `days_ago` old. Its own thread, because
 /// done resolves a whole thread.
-fn mail(store: &SqliteStore, acct: AccountId, key: &str, from: &str, days_ago: i64) -> i64 {
+pub(super) fn mail(
+    store: &SqliteStore,
+    acct: AccountId,
+    key: &str,
+    from: &str,
+    days_ago: i64,
+) -> i64 {
     triaged(acct, key, key)
         .from(from)
         .received_at(Utc::now() - Duration::days(days_ago))
@@ -67,13 +85,13 @@ fn attention(store: &SqliteStore, id: i64) -> (i64, i64) {
 }
 
 /// The purge read with the Reading feed's defaults.
-fn senders(store: &SqliteStore, acct: AccountId) -> ReadingSenders {
+pub(super) fn senders(store: &SqliteStore, acct: AccountId) -> ReadingSenders {
     store
         .reading_senders(acct, Utc::now(), &AgentListQuery::default(), 200)
         .unwrap()
 }
 
-fn sender<'a>(read: &'a ReadingSenders, addr: &str) -> &'a ReadingSender {
+pub(super) fn sender<'a>(read: &'a ReadingSenders, addr: &str) -> &'a ReadingSender {
     read.senders
         .iter()
         .find(|s| s.sender == addr)
@@ -82,7 +100,7 @@ fn sender<'a>(read: &'a ReadingSenders, addr: &str) -> &'a ReadingSender {
 
 /// Both ledgers running since before anything these tests seed, so a test
 /// about one floor is not quietly decided by the other.
-fn old_ledgers(store: &SqliteStore, acct: AccountId) {
+pub(super) fn old_ledgers(store: &SqliteStore, acct: AccountId) {
     let since = (Utc::now() - Duration::days(400)).to_rfc3339();
     store
         .set_app_setting(acct, OPEN_LEDGER_SINCE_KEY, &since)

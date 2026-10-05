@@ -3403,7 +3403,8 @@ pub async fn get_usage(
         state.stage2_price_out_per_mtok,
     );
 
-    // One entry per ledger category, priced by THREE arms. Stage-2 runs the
+    // One entry per ledger category, priced by FOUR arms (the fourth, smart
+    // done's own model, is marked where it sits). Stage-2 runs the
     // capable model and its prices. `notify` runs the fast lane's own small
     // model and ITS prices (docs/NOTIFY.md §11.5): it is the one category that
     // is neither, and folding it into the arm below would bill a Haiku call at
@@ -3442,6 +3443,14 @@ pub async fn get_usage(
                 state.notify_model.as_ref(),
                 state.notify_price_in_per_mtok,
                 state.notify_price_out_per_mtok,
+            )
+        } else if name == squelch_core::metrics::SMART_DONE_USAGE_CATEGORY {
+            // THE FOURTH ARM: smart done's pass runs its own mid-sized model.
+            // Left to fall through it would be labelled and billed as Stage-1.
+            (
+                state.smart_done_model.as_ref(),
+                state.smart_done_price_in_per_mtok,
+                state.smart_done_price_out_per_mtok,
             )
         } else {
             (

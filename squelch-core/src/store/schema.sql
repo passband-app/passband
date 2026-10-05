@@ -337,6 +337,23 @@ CREATE TABLE IF NOT EXISTS triage (
     status          TEXT NOT NULL DEFAULT 'new',
     surfaced_at     TEXT,
     resolved_at     TEXT,
+    -- WHO RESOLVED THIS ROW, when it was not a person. NULL means a human did,
+    -- or a path older than this column: the two are indistinguishable, which
+    -- is the gap this column closes going forward (docs/TRIAGE-OPERATIONS.md,
+    -- "Historical automatic `done` rows without reliable provenance cannot be
+    -- distinguished from a human dismissal").
+    --
+    -- The one writer today is smart done, which stamps
+    -- `smart_done:<smart_done_batches.id>`. That stamp is what makes the batch
+    -- exactly undoable, and what keeps it out of every statistic that reads
+    -- `status = 'done'` as the owner deciding (the fatigue score's
+    -- `cleared_unopened` counts only rows where this is NULL: a sweep is not a
+    -- dismissal, and counting it would let the score feed itself).
+    --
+    -- ANY LATER HUMAN STATUS WRITE CLEARS IT. A person who reopens or re-does
+    -- a row has taken it over, and an undo of the batch must then leave it
+    -- alone. Every statement that writes `status` therefore writes this too.
+    resolved_by     TEXT,
     created_at      TEXT NOT NULL
 );
 
@@ -647,6 +664,38 @@ CREATE TABLE IF NOT EXISTS unsubscribes (
 );
 
 CREATE INDEX IF NOT EXISTS idx_unsubscribes_requested ON unsubscribes(account_id, requested_at);
+
+-- READING SENDER KEEPS. One row per (account, sender_addr): the owner looked at
+-- this sender in the Reading purge flow and chose to stay subscribed. The
+-- flow then leaves them alone for `KEEP_QUIET_DAYS`; after that the row no
+-- longer affects the score and is kept only as the date it happened.
+-- `sender_addr` is the lowercased bare address, as in `unsubscribes`. A second
+-- keep refreshes `kept_at`.
+--
+-- NOTHING DELETES A ROW. A later unsubscribe or squelch rule for the same
+-- sender simply outranks it at read time (the newer decision wins; see
+-- `reading_senders`), so no rule or unsubscribe writer has to know this table
+-- exists.
+CREATE TABLE IF NOT EXISTS reading_sender_keeps (
+    account_id  INTEGER NOT NULL,
+    sender_addr TEXT NOT NULL,
+    kept_at     TEXT NOT NULL,
+    PRIMARY KEY (account_id, sender_addr)
+);
+
+-- SMART DONE BATCHES. One row per press of "clean this out" that cleared
+-- anything. `triage.resolved_by = 'smart_done:<id>'` on each row it took is
+-- the membership; `detail` is JSON carrying each cleared message with the
+-- reason it went and the status it had, so an undo restores exactly that.
+-- `undone_at` is stamped by the first undo and makes every later one a no-op.
+CREATE TABLE IF NOT EXISTS smart_done_batches (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id  INTEGER NOT NULL,
+    created_at  TEXT NOT NULL,
+    undone_at   TEXT,
+    cleared     INTEGER NOT NULL,
+    detail      TEXT NOT NULL
+);
 
 -- AUTH-MAIL SHREDDER (retention). One row per message the retention pass moved
 -- to Gmail Trash, so the "N shredded" figure is a real ledger and a message can

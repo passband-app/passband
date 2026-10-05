@@ -73,6 +73,7 @@ mod rules;
 mod scheduled;
 mod search;
 mod senders;
+pub mod smart_done;
 mod specialists;
 #[cfg(test)]
 mod tests;

@@ -10,6 +10,7 @@ use squelch_core::store::SqliteStore;
 use squelch_core::triage::fye_headline::HeadlineClient;
 use squelch_core::triage::rule_infer::RuleInferClient;
 use squelch_core::triage::rule_suggest::RuleSuggestClient;
+use squelch_core::triage::smart_done::SmartDoneClient;
 use squelch_core::triage::unsub_page::UnsubPageClient;
 use squelch_core::types::AccountId;
 
@@ -79,6 +80,13 @@ pub struct ApiState {
     /// the whole ratio between a small model and a capable one.
     pub(crate) notify_price_in_per_mtok: f64,
     pub(crate) notify_price_out_per_mtok: f64,
+    /// The configured SMART DONE model id and its per-MTok prices: the label
+    /// and the fourth pricing arm on `/client/usage`'s `smart_done` category.
+    /// Its own numbers for the reason the notify lane has its own: it runs a
+    /// model that is neither stage's and not the notify model either.
+    pub(crate) smart_done_model: Arc<str>,
+    pub(crate) smart_done_price_in_per_mtok: f64,
+    pub(crate) smart_done_price_out_per_mtok: f64,
     /// Manual-refresh signal shared with the Gmail sync loop, fired by
     /// `POST /client/refresh`. `None` when no sync loop is wired in, which the
     /// endpoint reports as `triggered: false` rather than faking a poke.
@@ -191,6 +199,14 @@ pub struct ApiState {
     /// daily cap the usage ledger cannot see (timeouts report no usage) and
     /// cannot see in time (two calls racing the same ledger read).
     pub(crate) fye_headline_attempts: Arc<std::sync::Mutex<(String, u32)>>,
+    /// The model behind smart done's "has this expired" pass. `None` (no key,
+    /// every test harness) means a press clears on stored facts alone and
+    /// says so. See [`squelch_core::triage::smart_done`].
+    pub(crate) smart_done: Option<SmartDoneClient>,
+    /// Smart done model passes ATTEMPTED today, as (UTC day, count): the half
+    /// of the daily cap the usage ledger cannot see, exactly as
+    /// `fye_headline_attempts` is for the headline.
+    pub(crate) smart_done_attempts: Arc<std::sync::Mutex<(String, u32)>>,
     /// The hosted assistant relay: forwards the Passband app's Anthropic-shaped
     /// streaming request to the gateway with a daemon-held credential. `None`
     /// (no gateway + assistant key configured, and every test harness) means
@@ -400,6 +416,14 @@ impl ApiState {
                 .price_in_per_mtok,
             notify_price_out_per_mtok: squelch_core::config::NotifyConfig::default()
                 .price_out_per_mtok,
+            smart_done_model: {
+                let s = squelch_core::config::SmartDoneConfig::default();
+                Arc::from(s.model.as_str())
+            },
+            smart_done_price_in_per_mtok: squelch_core::config::SmartDoneConfig::default()
+                .price_in_per_mtok,
+            smart_done_price_out_per_mtok: squelch_core::config::SmartDoneConfig::default()
+                .price_out_per_mtok,
             refresh: None,
             spam_refresh: None,
             event_notifier: None,
@@ -425,6 +449,8 @@ impl ApiState {
             fye_headline: None,
             fye_headline_cache: Arc::new(std::sync::Mutex::new(None)),
             fye_headline_attempts: Arc::new(std::sync::Mutex::new((String::new(), 0))),
+            smart_done: None,
+            smart_done_attempts: Arc::new(std::sync::Mutex::new((String::new(), 0))),
             assistant: None,
             sharing: None,
             shipment_poll: None,
@@ -664,6 +690,29 @@ impl ApiState {
     /// `/client/v2/fye/headline` answering null.
     pub fn with_fye_headline(mut self, client: Option<HeadlineClient>) -> Self {
         self.fye_headline = client;
+        self
+    }
+
+    /// Attach smart done's model. `None` keeps
+    /// `/client/v2/reading/smart_done` clearing on stored facts alone.
+    pub fn with_smart_done(mut self, client: Option<SmartDoneClient>) -> Self {
+        self.smart_done = client;
+        self
+    }
+
+    /// Set the SMART DONE model + its per-MTok prices, which `/client/usage`
+    /// costs the `smart_done` category with. See
+    /// [`ApiState::with_notify_config`] for why each model that is not a
+    /// stage's gets its own entry point.
+    pub fn with_smart_done_config(
+        mut self,
+        model: impl Into<String>,
+        price_in_per_mtok: f64,
+        price_out_per_mtok: f64,
+    ) -> Self {
+        self.smart_done_model = Arc::from(model.into().as_str());
+        self.smart_done_price_in_per_mtok = price_in_per_mtok;
+        self.smart_done_price_out_per_mtok = price_out_per_mtok;
         self
     }
 
@@ -931,6 +980,12 @@ impl ApiState {
                 cfg.notify.price_in_per_mtok,
                 cfg.notify.price_out_per_mtok,
             )
+            // Smart done's own model and prices, for the same reason.
+            .with_smart_done_config(
+                cfg.smart_done.model.clone(),
+                cfg.smart_done.price_in_per_mtok,
+                cfg.smart_done.price_out_per_mtok,
+            )
             .with_tracking_base_url(cfg.tracking.base_url.clone())
             .with_console_allow_insecure_cookie(cfg.console.allow_insecure_cookie)
             // The poller's retirement cap doubles as the listing's suppression
@@ -946,6 +1001,9 @@ impl ApiState {
             .with_rule_suggestion(RuleSuggestClient::from_config(cfg))
             // The sitrep headline: same key, same notify model.
             .with_fye_headline(HeadlineClient::from_config(cfg))
+            // Smart done's expiry pass: same key, its OWN model
+            // (`[smart_done]`), billed under its own ledger category.
+            .with_smart_done(SmartDoneClient::from_config(cfg))
             // The unsubscribe page reader rides the same key and the notify
             // model, billed under its own ledger category.
             .with_unsub_page_reader(UnsubPageClient::from_config(cfg))

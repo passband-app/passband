@@ -47,6 +47,32 @@ pub const READING_WPM: u32 = 238;
 /// expected second or two would only manufacture noise.
 pub const MIN_WORDS_FOR_READ_FRACTION: u32 = 40;
 
+/// How long a "keep" from the purge flow holds. The owner looked at this
+/// sender and chose to stay subscribed; asking again next week would make the
+/// choice worthless, and never asking again would make it permanent on the
+/// strength of one tap. Two months is long enough to forget the question and
+/// short enough that a subscription gone stale comes back up.
+pub const KEEP_QUIET_DAYS: i64 = 60;
+
+/// Is a keep made at `kept_at` still the owner's latest word on a sender?
+///
+/// Not once [`KEEP_QUIET_DAYS`] have passed, and not when the owner has since
+/// said the opposite: asked the sender to stop (`unsubscribed_at`) or written
+/// a squelch rule that governs them (`squelched_at`). THE NEWER DECISION WINS,
+/// decided here at read time, so the keep row is never deleted and no rule or
+/// unsubscribe writer has to know keeps exist. A keep made AFTER either of
+/// those is the newer decision and holds.
+pub fn keep_in_force(
+    kept_at: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+    unsubscribed_at: Option<chrono::DateTime<chrono::Utc>>,
+    squelched_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> bool {
+    now - kept_at < chrono::Duration::days(KEEP_QUIET_DAYS)
+        && unsubscribed_at.is_none_or(|at| at <= kept_at)
+        && squelched_at.is_none_or(|at| at <= kept_at)
+}
+
 /// How many opened messages a dwell statistic needs before it says anything.
 const MIN_ATTENTION_SAMPLE: u32 = 3;
 
@@ -84,6 +110,9 @@ pub struct SenderSignals {
     pub known_contact: bool,
     /// A rule with disposition `surface` governs the sender.
     pub surface_rule: bool,
+    /// The owner chose to keep this sender, and that is still their latest
+    /// word ([`keep_in_force`]).
+    pub kept_recently: bool,
 }
 
 /// One attributable part of a score. Tagged with a snake_case `code` and
@@ -97,6 +126,8 @@ pub enum Reason {
     KnownContact,
     /// The owner wrote a rule asking for this sender's mail.
     WantedByRule,
+    /// The owner was asked about this sender lately and chose to keep them.
+    KeptRecently,
     RarelyOpened {
         opened: u32,
         received: u32,
@@ -221,6 +252,9 @@ pub fn score(signals: &SenderSignals) -> (Option<u8>, Vec<Reason>) {
     }
     if signals.surface_rule {
         return (Some(0), vec![Reason::WantedByRule]);
+    }
+    if signals.kept_recently {
+        return (Some(0), vec![Reason::KeptRecently]);
     }
     if signals.received < MIN_SAMPLE {
         return (None, vec![Reason::NotEnoughHistory]);
@@ -393,6 +427,39 @@ mod tests {
         let mut s = base(40, 0);
         s.surface_rule = true;
         assert_eq!(score(&s), (Some(0), vec![Reason::WantedByRule]));
+    }
+
+    #[test]
+    fn a_recent_keep_is_zero_with_its_own_reason() {
+        let mut s = base(40, 0);
+        s.kept_recently = true;
+        assert_eq!(score(&s), (Some(0), vec![Reason::KeptRecently]));
+        assert_eq!(
+            serde_json::to_value(Reason::KeptRecently).unwrap(),
+            serde_json::json!({"code": "kept_recently"})
+        );
+    }
+
+    #[test]
+    fn a_keep_holds_for_sixty_days_unless_a_newer_decision_overrides_it() {
+        use chrono::{Duration, TimeZone, Utc};
+        let now = Utc.with_ymd_and_hms(2026, 10, 5, 12, 0, 0).unwrap();
+        let kept = now - Duration::days(10);
+        assert!(keep_in_force(kept, now, None, None));
+        assert!(keep_in_force(
+            now - Duration::days(60) + Duration::seconds(1),
+            now,
+            None,
+            None
+        ));
+        assert!(!keep_in_force(now - Duration::days(60), now, None, None));
+        // An unsubscribe or a squelch rule AFTER the keep outranks it.
+        let later = Some(kept + Duration::days(1));
+        assert!(!keep_in_force(kept, now, later, None));
+        assert!(!keep_in_force(kept, now, None, later));
+        // One from BEFORE it does not: the keep is the newer decision.
+        let earlier = Some(kept - Duration::days(1));
+        assert!(keep_in_force(kept, now, earlier, earlier));
     }
 
     #[test]

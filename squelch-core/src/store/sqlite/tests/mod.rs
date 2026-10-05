@@ -16,6 +16,7 @@ mod rules;
 mod scheduled;
 mod search;
 mod senders;
+mod smart_done;
 mod spam;
 mod specialists;
 mod support;

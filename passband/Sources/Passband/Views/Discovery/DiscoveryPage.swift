@@ -7,6 +7,12 @@
 // (the keys, the steps, the picture large and moving) is the guide's, one click
 // away, so the list only has to be easy to run an eye down.
 //
+// ONE PLACE TO START. The first set not yet unlocked is the page's one card:
+// its picture large, its line and its keys, under "Start here" (or "Try this
+// next" once a few are unlocked). Everything else is a name beside a small
+// still, so the page reads as one suggestion and a short index, not a list of
+// eight things to get through.
+//
 // TWO SECTIONS. What has not been unlocked yet is on top: no lock, no grey, no
 // count of what is left. Under "Unlocked" are the sets that have been found,
 // in the same row; a kept one (three separate days) and a just
@@ -25,7 +31,7 @@
 // that set's guide in the right half. THE COLUMN NEVER CHANGES WIDTH: it is the
 // same measure centred on the page and in its half, so opening the guide moves
 // the list without re-wrapping a word of it. Clicking the open row, the guide's
-// close, or Esc puts the column back. In a window too narrow for both, the
+// close puts the column back; Esc leaves the page. In a window too narrow for both, the
 // guide takes the whole page.
 //
 // Pure presentation: every input is passed in, so the harness can lay it out
@@ -101,13 +107,18 @@ struct DiscoveryPage: View {
                 ForEach(items, id: \.self) { item in
                     switch item {
                     case .heading:
-                        unlockedHeading
+                        heading(DiscoveryCopy.unlockedHeading, top: complete ? 4 : 22)
+                            .transition(.opacity)
+                    case .more:
+                        heading(DiscoveryCopy.moreHeading, top: 20)
                             .transition(.opacity)
                     case .row(let set):
                         let placed = isPlacedUnlocked(set)
                         DiscoveryRow(
                             set: set, state: state(set),
                             unlocked: placed, fresh: placed && fresh.contains(set),
+                            featured: set == featured,
+                            eyebrow: unlocked.count <= 1 ? DiscoveryCopy.startHere : DiscoveryCopy.nextUp,
                             selected: selection == set, divider: !sectionEnds.contains(set),
                             live: live, fixedTime: fixedTime
                         ) { selection = selection == set ? nil : set }
@@ -134,6 +145,7 @@ struct DiscoveryPage: View {
     private enum Item: Hashable {
         case row(FeatureSet)
         case heading
+        case more
     }
 
     /// In Unlocked by now: found or kept, and (for a fresh one) arrived.
@@ -147,8 +159,14 @@ struct DiscoveryPage: View {
     /// Nothing unlocked yet: no Unlocked heading at all. An empty section
     /// would be a shelf waiting to be filled, which is the to-do list again.
     private var items: [Item] {
-        invitations.map(Item.row) + (unlocked.isEmpty ? [] : [.heading] + unlocked.map(Item.row))
+        let rest = invitations.dropFirst()
+        return invitations.prefix(1).map(Item.row)
+            + (rest.isEmpty ? [] : [.more] + rest.map(Item.row))
+            + (unlocked.isEmpty ? [] : [.heading] + unlocked.map(Item.row))
     }
+
+    /// WHERE TO START: the most everyday set not yet unlocked.
+    private var featured: FeatureSet? { invitations.first }
 
     /// The last row of each section: nothing follows it, so no hairline.
     private var sectionEnds: Set<FeatureSet> {
@@ -173,11 +191,11 @@ struct DiscoveryPage: View {
         }
     }
 
-    // MARK: the Unlocked heading
+    // MARK: section headings
 
-    private var unlockedHeading: some View {
+    private func heading(_ title: String, top: CGFloat) -> some View {
         HStack(alignment: .center, spacing: 12) {
-            Text(DiscoveryCopy.unlockedHeading)
+            Text(title)
                 .textCase(.uppercase)
                 .font(.system(size: 9.5, weight: .bold).width(.expanded))
                 .tracking(0.7)
@@ -189,8 +207,8 @@ struct DiscoveryPage: View {
         }
         .padding(.horizontal, DiscoveryRow.inset)
         // More air above than below: the heading belongs to what follows it.
-        .padding(.top, complete ? 4 : 26)
-        .padding(.bottom, 8)
+        .padding(.top, top)
+        .padding(.bottom, 6)
     }
 }
 
@@ -202,6 +220,9 @@ struct DiscoveryRow: View {
     /// In the Unlocked section: the same row, tagged when there is news.
     let unlocked: Bool
     var fresh = false
+    /// The page's one card: where to start.
+    var featured = false
+    var eyebrow = ""
     /// This row's guide is the one open.
     var selected = false
     /// A hairline under the row. Off for the last of a section.
@@ -216,59 +237,88 @@ struct DiscoveryRow: View {
     /// The row's wash runs this far past its content, so the content of every
     /// row, the masthead and the heading share one left edge.
     static let inset: CGFloat = 10
-    private static let picture: CGFloat = 92
     private static let gap: CGFloat = 14
+    private var picture: CGFloat { featured ? 190 : 64 }
 
     private var kept: Bool { state == .kept && unlocked }
 
     var body: some View {
-        HStack(alignment: .center, spacing: Self.gap) {
+        HStack(alignment: .center, spacing: featured ? 18 : Self.gap) {
             // ONLY UNDER THE POINTER. Everything else holds its poster.
-            DiscoveryVignette(set: set, live: live && hovering, fixedTime: fixedTime, cornerRadius: 6)
-                .frame(width: Self.picture)
+            DiscoveryVignette(
+                set: set, live: live && hovering, fixedTime: fixedTime, cornerRadius: featured ? 9 : 5)
+                .frame(width: picture)
 
-            VStack(alignment: .leading, spacing: 2) {
+            if featured {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(eyebrow)
+                        .font(.system(size: 9, weight: .bold).width(.expanded))
+                        .tracking(0.6)
+                        .foregroundStyle(Palette.accent)
+                    Text(set.title)
+                        .font(Typo.serif(21, weight: .medium))
+                        .foregroundStyle(Palette.ink)
+                    Text(set.line)
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(Palette.inkDim)
+                        .lineSpacing(1.5)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: 5) {
+                        ForEach(set.keys, id: \.self) { DiscoveryKeycap($0) }
+                    }
+                    .padding(.top, 5)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(set.title)
-                        .font(Typo.serif(16.5, weight: .medium))
+                        .font(Typo.serif(15.5, weight: .medium))
                         .foregroundStyle(Palette.ink)
                     tag
                 }
-                Text(set.line)
-                    .font(.system(size: 12))
-                    .foregroundStyle(Palette.inkDim)
-                    .lineSpacing(1.5)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
 
             Image(systemName: "chevron.right")
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(selected ? Palette.accent : Palette.inkFaintest)
                 .opacity(hovering || selected ? 1 : 0)
         }
-        .padding(.vertical, 9)
-        .padding(.horizontal, Self.inset)
+        .padding(.vertical, featured ? 12 : 6)
+        .padding(.leading, featured ? 12 : Self.inset)
+        .padding(.trailing, Self.inset)
         .background {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(selected ? Palette.accentSoft : Palette.hairline.opacity(hovering ? 0.4 : 0))
+            RoundedRectangle(cornerRadius: featured ? 14 : 9, style: .continuous)
+                .fill(fill)
+        }
+        .overlay {
+            // The card's edge, even all round. Plain rows have none.
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(selected ? Palette.accent.opacity(0.5) : Palette.hairline, lineWidth: 0.75)
+                .opacity(featured ? 1 : 0)
         }
         .overlay(alignment: .bottom) {
             Rectangle().fill(Palette.hairline).frame(height: 0.5)
-                .padding(.leading, Self.inset + Self.picture + Self.gap)
+                .padding(.leading, Self.inset + picture + Self.gap)
                 .padding(.trailing, Self.inset)
-                .opacity(divider && !selected && !hovering ? 1 : 0)
+                .opacity(divider && !featured && !selected && !hovering ? 1 : 0)
         }
         .contentShape(Rectangle())
         .onTapGesture(perform: open)
         .onHover { hovering = $0 }
         .animation(reduceMotion ? nil : .smooth(duration: 0.18), value: hovering)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(set.title), \(set.stateWords(state)). \(set.line)")
+        .accessibilityLabel(
+            "\(featured ? eyebrow.capitalized + ": " : "")\(set.title), \(set.stateWords(state)). \(set.line)")
         .accessibilityHint("Opens the guide.")
         .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
         .accessibilityAction(.default, open)
+    }
+
+    private var fill: Color {
+        if selected { return Palette.accentSoft }
+        if featured { return Palette.hairline.opacity(hovering ? 0.55 : 0.3) }
+        return Palette.hairline.opacity(hovering ? 0.4 : 0)
     }
 
     /// Kept and just-unlocked say so in a word beside the name; plain unlocked

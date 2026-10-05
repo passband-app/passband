@@ -91,12 +91,11 @@ struct DiscoveryView: View {
                 live: activeState == .key, settled: settled, selection: $selection)
         }
         // Esc leaves, as on Usage: a full routed page needs an exit other
-        // than the rail. An open guide closes first.
+        // than the rail. It leaves the WHOLE page, guide open or not: the
+        // guide has its own close, and Esc meaning two things is one too many.
         .keyContext(.modal)
         .keyBindings(.modal, [
-            KeyBinding("Escape", "back") {
-                if selection != nil { selection = nil } else { store.setView(.sitrep) }
-            }
+            KeyBinding("Escape", "back to sitrep") { store.setView(.sitrep) }
         ])
         .task {
             // Visiting is the acknowledgement, whoever routed here (the ring,

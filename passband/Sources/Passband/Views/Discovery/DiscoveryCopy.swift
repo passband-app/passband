@@ -191,6 +191,11 @@ enum DiscoveryCopy {
 
     /// The owner's word, verbatim. Do not restyle it into "Found".
     static let unlockedHeading = "Unlocked"
+    /// Over the one card at the top: the most everyday set not yet unlocked.
+    static let startHere = "START HERE"
+    static let nextUp = "TRY THIS NEXT"
+    /// The rest of what is new, under the card.
+    static let moreHeading = "After that"
     static let keptTag = "A HABIT"
     static let freshTag = "JUST UNLOCKED"
 

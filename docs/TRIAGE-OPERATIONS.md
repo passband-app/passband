@@ -406,15 +406,16 @@ Never cleared, whatever else is true:
 
 Then the stored dates are read. Times are read in the four shapes the triage
 agent writes: a timestamp with an offset, a local date and time with no offset
-(`2026-10-10T19:00:00` or `2026-10-10T19:00`, which is most timed events), and
-a bare date. With no timezone database, a local time or a bare date is taken to
+(`2026-10-10T19:00:00` or `2026-10-10T19:00`, which is most timed events, and
+the same with a space in place of the `T`), and a bare date. With no timezone database, a local time or a bare date is taken to
 be over at its last occurrence anywhere on Earth (12 hours behind UTC), which
 can only make a row wait longer.
 
 - Evidence dates are every event `start` and `ends`. One that was already over
   when the mail arrived is ignored (a wrong year, or a recap of something past).
-- Holds are an unresolved action's `due` (on the decision or on the thread's
-  current attention) and the decision's `revisit.at`. They can keep a row and
+- Holds are an unresolved action's `due` and `factors.attention_at` (each on the
+  decision or on the thread's current attention), and the decision's
+  `revisit.at`. They can keep a row and
   are never a reason to clear one.
 - A date that is present and cannot be read ("next Friday evening"; event starts
   are not format-checked at triage) counts as still ahead. The row is left alone
@@ -429,8 +430,9 @@ Each cleared message has exactly one reason, first match:
 1. `event_passed`: every event the stored decision records has passed.
 2. `offer_ended`: the stored decision's `ends` has passed.
 3. `ignored_sender`: the sender's fatigue score, computed by the same function
-   and under the same 100-sender cap as the list above, is 75 or more, and the
-   owner never opened this message. On a ledger under 14 days old no sender has
+   and under the same 100-sender cap as the list above, is 75 or more, the
+   owner never opened this message, and it was received at or after the open
+   ledger began (before that, "never opened" cannot be known). On a ledger under 14 days old no sender has
    a score, so this takes nothing.
 4. `stale_promo`: a promotion (the decision's `reading_kind`, else promotional
    and not editorial kinds), received 14 or more days ago, never opened, and
@@ -460,14 +462,25 @@ The model pass (`[smart_done]`, default `claude-sonnet-5` at low effort):
   that is a statement about fields, not about every word. A row with no
   summary, and restricted or auth mail, is not asked about.
 - Its yes is checked. An `expired` answer counts only for a row whose summary,
-  as the model was shown it (the first 220 characters), says when: a month or
-  weekday name, today, tomorrow, this week and the like, or a number written as
-  a date or time (`10/15`, `2026-10-15`, `15th`, `5pm`, `17:00`). A bare number
-  ("20% off", "3 new articles") is not a date. If 10 or more rows were asked and
-  half or more come back expired, the whole pass is discarded and reported as
-  `skipped_failed`. A
-  verdict is applied only if the row's stored summary is still the one that was
-  sent (compared by fingerprint under the write's lock), so a message
+  as the model was shown it (the first 220 characters), says when: a day word
+  (a month or weekday name, today, tomorrow, tonight, day, days, hours, week,
+  weekend, EOD, a named holiday, month names in Spanish, French and German) or
+  a number written as a date or time (`10/15`, `2026-10-15`, `15th`, `5pm`,
+  `17:00`, `May 5`, `Sat 12`). A bare number ("20% off", "Top 10") is not a date.
+- The whole pass is discarded, and reported as `skipped_failed`, when the model
+  says yes to summaries that say nothing about time: 3 or more such yeses, or
+  20% of the yeses once there are at least 5. A model following the prompt
+  never does that. A backstop also discards a pass that calls 80% or more of 10
+  or more rows expired. Half a batch really having expired is ordinary (the
+  week after a sale), so the share alone is not treated as a sign of trouble.
+- That check is a floor, not protection. In one real mailbox 46% of Reading
+  summaries passed the gate before its word list was widened, and more pass
+  now, so a pass steered to say yes only to those rows can still take a good
+  share of what was asked. What bounds it is that a press is one batch of at
+  most 60 model-judged rows, undone exactly by one call, and that an undo is
+  remembered.
+- A verdict is applied only if the row's stored summary is still the one that
+  was sent (compared by fingerprint under the write's lock), so a message
   re-triaged during the call is left alone.
 - At most 60 rows per press, newest first, one attempt, 20 seconds.
 - At most 20 passes per account per day.

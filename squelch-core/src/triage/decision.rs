@@ -106,7 +106,14 @@ impl SupportedTime {
         if let Ok(at) = DateTime::parse_from_rfc3339(value) {
             return Some(StatedTime::Instant(at.with_timezone(&Utc)));
         }
-        for format in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%dT%H:%M"] {
+        // With a `T` between the date and the time, or a space: the same
+        // local time either way.
+        for format in [
+            "%Y-%m-%dT%H:%M:%S%.f",
+            "%Y-%m-%dT%H:%M",
+            "%Y-%m-%d %H:%M:%S%.f",
+            "%Y-%m-%d %H:%M",
+        ] {
             if let Ok(local) = chrono::NaiveDateTime::parse_from_str(value, format) {
                 return Some(StatedTime::Local(local));
             }

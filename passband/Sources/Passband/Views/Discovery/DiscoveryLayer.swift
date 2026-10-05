@@ -69,6 +69,8 @@ struct DiscoveryView: View {
     /// frame has to put fresh rows in their OLD place for the arrival to read.
     @State private var arrivedFresh: Set<FeatureSet>
     @State private var settled: Bool
+    /// The set whose guide is open.
+    @State private var selection: FeatureSet?
 
     private var discovery: Discovery { Discovery.shared }
 
@@ -86,13 +88,15 @@ struct DiscoveryView: View {
             RoutedHeader(title: DiscoveryCopy.pageTitle, subtitle: DiscoveryCopy.pageSubtitle)
             DiscoveryPage(
                 state: discovery.state(of:), fresh: arrivedFresh,
-                live: activeState == .key, settled: settled)
+                live: activeState == .key, settled: settled, selection: $selection)
         }
         // Esc leaves, as on Usage: a full routed page needs an exit other
-        // than the rail.
+        // than the rail. An open guide closes first.
         .keyContext(.modal)
         .keyBindings(.modal, [
-            KeyBinding("Escape", "back to sitrep") { store.setView(.sitrep) }
+            KeyBinding("Escape", "back") {
+                if selection != nil { selection = nil } else { store.setView(.sitrep) }
+            }
         ])
         .task {
             // Visiting is the acknowledgement, whoever routed here (the ring,

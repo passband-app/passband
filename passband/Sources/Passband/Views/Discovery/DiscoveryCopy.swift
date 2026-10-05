@@ -69,6 +69,58 @@ extension FeatureSet {
         }
     }
 
+    // MARK: - the guide
+
+    /// The guide's steps, in the order a hand does them. A step with no key
+    /// is something Passband does, not something to press. Keys are labelled
+    /// as the app's own hints label them.
+    var guide: [GuideStep] {
+        switch self {
+        case .clear: [
+            .init("↵", "Open any message from the board."),
+            .init("e", "Done. It leaves the board and the next one is waiting."),
+            .init("u", "Changed your mind? It comes straight back."),
+        ]
+        case .flow: [
+            .init("space", "On the board, press Space. For Your Eyes opens one email at a time."),
+            .init("E", "Done, and straight on to the next one."),
+            .init("⇧S", "Not sure yet? Set it aside and keep walking."),
+            .init(nil, "At the end you are back on the board, with the list behind you."),
+        ]
+        case .later: [
+            .init("h", "On any message, press h and say when you want it back."),
+            .init("↵", "Set it. The message leaves the board."),
+            .init(nil, "When the time comes, it is back at the top as if it had just arrived."),
+        ]
+        case .teach: [
+            .init("t", "Tell Passband how to treat a sender, in your own words."),
+            .init("v", "Sorted wrong? Say where it belongs."),
+            .init("u", "Inside a newsletter, unsubscribe without hunting for the link."),
+            .init(nil, "Passband sorts with all of it in mind from then on."),
+        ]
+        case .find: [
+            .init("/", "Search every message you have. Results arrive as you type."),
+            .init("⌘K", "Ask a question in plain words and get the answer from your mail."),
+        ]
+        case .glance: [
+            .init(nil, "Plans, packages, banking and receipts are read for you and shown on the board."),
+            .init("e", "Seen it? Clear a package and it is gone."),
+            .init("c", "Copy a sign-in code without opening the email."),
+        ]
+        case .read: [
+            .init(nil, "Newsletters gather in Your reading and stay off the board."),
+            .init("↵", "Open one whenever you like. Nothing in the stack is waiting on you."),
+            .init("hold e", "Finished, or not in the mood? Hold e to clear the whole stack."),
+        ]
+        case .write: [
+            .init("c", "Start a new message from anywhere."),
+            .init("r", "Reply from inside a message."),
+            .init("⌘⇧↵", "Send it later: pick a time and it goes then."),
+            .init(nil, "Name a group once, then write to everyone in it at once."),
+        ]
+        }
+    }
+
     // MARK: - the found moment
 
     /// The moment's headline: what was found, in the past tense of the thing
@@ -111,6 +163,15 @@ extension FeatureSet {
     }
 }
 
+struct GuideStep {
+    let key: String?
+    let text: String
+    init(_ key: String?, _ text: String) {
+        self.key = key
+        self.text = text
+    }
+}
+
 /// The page's own words.
 enum DiscoveryCopy {
     /// The header bar, in the routed pages' title + small caps pairing.
@@ -132,6 +193,15 @@ enum DiscoveryCopy {
     static let unlockedHeading = "Unlocked"
     static let keptTag = "A HABIT"
     static let freshTag = "JUST UNLOCKED"
+
+    /// Over the guide's title. Unseen is an invitation, never "locked".
+    static func guideEyebrow(_ state: SetState) -> String {
+        switch state {
+        case .unseen: "NEW TO TRY"
+        case .found: "UNLOCKED"
+        case .kept: "A HABIT"
+        }
+    }
 
     static let momentEyebrow = "SOMETHING NEW"
     static let ringLabel = "Ways through your mail"

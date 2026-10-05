@@ -240,6 +240,11 @@
                 }
                 .scrollBounceBehavior(.basedOnSize)
                 .scrollIndicators(.hidden)
+                // A vertical ScrollView hugs its content's WIDTH, and the
+                // content's width is seven cells of `size.width / 7`. Left to
+                // itself that is a loop that settles at zero: no size, no
+                // cells, no size. Taking the proposed width first breaks it.
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .onGeometryChange(for: CGSize.self) { $0.size } action: { size = $0 }
                 MonthFooter(loading: !store.calendarLoaded)
             }

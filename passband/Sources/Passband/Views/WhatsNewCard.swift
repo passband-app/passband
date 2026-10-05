@@ -64,8 +64,10 @@ struct WhatsNewCard: View {
     /// A feature page's picture, the stage's 2:1 across the card.
     private static let artHeight: CGFloat = (width * VignetteClock.canvas.height / VignetteClock.canvas.width).rounded()
     /// Every page of a walk is this tall, so Next changes what the card says
-    /// and never where its buttons are.
-    private static var pageHeight: CGFloat { artHeight + Space.scaled(128) }
+    /// and never where its buttons are. Room for a page line that wraps to a
+    /// second row, with air under it: at the old one-row height a longer line
+    /// sat on the footer's rule.
+    private static var pageHeight: CGFloat { artHeight + Space.scaled(156) }
 
     var body: some View {
         // A CLICK NEVER CLOSES IT. The scrim's backdrop click is the shortcuts

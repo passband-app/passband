@@ -17,11 +17,12 @@
 // ("Bug fixes") is said once, in a footnote, rather than weighing as much as
 // the headline. ReleaseDigest does the arranging.
 //
-// The NEWEST release gets the walk. Somebody who skipped two updates is still
-// owed the boundaries between them, since that is the only way to tell which
-// release broke or fixed the thing they came looking for, so the older ones
-// sit on the last page as rows that open in place, their headliners as tiles,
-// rather than as a second and third walk.
+// SKIPPED RELEASES ARE ONE CARD, NOT SEVERAL. Somebody two updates behind
+// opens on a greeter that says so and names the releases they are catching up
+// on, then walks every headliner they missed, newest release first, then gets
+// ONE list per surface with every release's bullets in it. Each page still
+// names the release its feature came from, which is where the boundaries
+// between releases stay visible.
 
 import SwiftUI
 
@@ -35,19 +36,28 @@ struct WhatsNewCard: View {
         private let paused = false
     #endif
 
-    /// The older releases opened in place, by version.
-    @State private var opened: Set<String> = []
-    /// Where the walk is: an index into `features`, or past them for the record.
+    /// Where the walk is: an index into `pages`.
     @State private var page = WhatsNew.openingPage
     /// Which way the last move went, so the words turn like a page: Next
     /// brings them in from the right, Back from the left.
     @State private var forward = true
 
+    private enum Page {
+        case greeter(ReleaseCatchUp)
+        case feature(ReleaseDigest.Headliner)
+        case record
+    }
+
     private var notes: [ReleaseNote] { store.whatsNew.notes }
-    /// The newest release's headliners, one page each.
-    private var features: [ReleaseDigest.Headliner] { notes.first?.digest.headliners ?? [] }
-    private var pageCount: Int { features.count + 1 }
-    private var onLast: Bool { page >= features.count }
+    private var catchUp: ReleaseCatchUp? { store.whatsNew.catchUp }
+    /// Every release on the card as one read.
+    private var digest: ReleaseDigest { ReleaseDigest(notes) }
+    /// The greeter when there is one, a page per headliner, then the record.
+    private var pages: [Page] {
+        (catchUp.map { [.greeter($0)] } ?? []) + digest.headliners.map { .feature($0) } + [.record]
+    }
+    private var pageCount: Int { pages.count }
+    private var onLast: Bool { page >= pageCount - 1 }
 
     private static let width: CGFloat = 580
     private static let radius: CGFloat = 20
@@ -65,16 +75,21 @@ struct WhatsNewCard: View {
         OverlayScrim(onDismiss: {}) {
             VStack(spacing: 0) {
                 if let newest = notes.first {
-                    if features.isEmpty {
+                    let pages = pages
+                    if pages.count == 1 {
                         record(newest, walked: false)
                     } else {
                         ZStack(alignment: .top) {
-                            if onLast {
+                            switch pages[min(page, pages.count - 1)] {
+                            case .greeter(let greeting):
+                                greeter(greeting, newest: newest)
+                                    .transition(pageTurn)
+                            case .feature(let headliner):
+                                feature(headliner)
+                                    .transition(.opacity)
+                            case .record:
                                 record(newest, walked: true)
                                     .transition(pageTurn)
-                            } else {
-                                feature(in: newest)
-                                    .transition(.opacity)
                             }
                         }
                         .frame(height: Self.pageHeight, alignment: .top)
@@ -145,9 +160,8 @@ struct WhatsNewCard: View {
     /// screen changing channel to the next, while the words beneath it slide
     /// like a page. Each layer is its own ZStack so the outgoing and incoming
     /// copies overlap in place instead of stacking.
-    private func feature(in note: ReleaseNote) -> some View {
-        let headliner = features[min(page, features.count - 1)]
-        return VStack(alignment: .leading, spacing: 0) {
+    private func feature(_ headliner: ReleaseDigest.Headliner) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
             ZStack {
                 Group {
                     if let vignette = headliner.vignette {
@@ -163,7 +177,7 @@ struct WhatsNewCard: View {
             .clipShape(UnevenRoundedRectangle(topLeadingRadius: Self.radius, topTrailingRadius: Self.radius))
 
             ZStack(alignment: .topLeading) {
-                words(headliner, in: note)
+                words(headliner)
                     .id(page)
                     .transition(pageTurn)
             }
@@ -174,12 +188,13 @@ struct WhatsNewCard: View {
         }
     }
 
-    private func words(_ headliner: ReleaseDigest.Headliner, in note: ReleaseNote) -> some View {
+    private func words(_ headliner: ReleaseDigest.Headliner) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .firstTextBaseline, spacing: Space.s8) {
                 // The release's own name rides every page, so the walk
-                // reads as one update rather than as four announcements.
-                Text("\(note.headline) · \(note.version)")
+                // reads as one update rather than as four announcements,
+                // and a walk across several says where each one ends.
+                Text(eyebrow(headliner))
                     .font(Typo.ui(9, weight: .bold).width(.expanded))
                     .tracking(0.8)
                     .textCase(.uppercase)
@@ -206,6 +221,12 @@ struct WhatsNewCard: View {
         .accessibilityElement(children: .combine)
     }
 
+    /// "Philipp's Update · 0.0.12": the release this page's feature shipped in.
+    private func eyebrow(_ headliner: ReleaseDigest.Headliner) -> String {
+        guard let note = notes.first(where: { $0.version == headliner.version }) else { return headliner.version }
+        return "\(note.headline) · \(note.version)"
+    }
+
     /// A headliner with no vignette drawn for it: its symbol on the same night
     /// screen, so a walk can mix pages that move with pages that do not.
     private func symbolArt(_ symbol: String) -> some View {
@@ -221,10 +242,65 @@ struct WhatsNewCard: View {
         .accessibilityHidden(true)
     }
 
+    // MARK: - the greeter
+
+    /// How many releases the greeter names before it starts counting instead.
+    private static let greeterRows = 5
+
+    /// The first page for somebody who took several releases at once: thanks,
+    /// which version they came from, and the releases about to be walked.
+    private func greeter(_ greeting: ReleaseCatchUp, newest: ReleaseNote) -> some View {
+        VStack(spacing: 0) {
+            hero(newest)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(greeting.title)
+                    .font(Typo.hero(30))
+                    .foregroundStyle(Palette.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(greeting.line)
+                    .font(Typo.ui(15))
+                    .foregroundStyle(Palette.inkDim)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, Space.s8)
+
+                VStack(alignment: .leading, spacing: Space.s8) {
+                    ForEach(notes.prefix(Self.greeterRows)) { note in
+                        HStack(alignment: .firstTextBaseline, spacing: Space.s10) {
+                            Text(note.version)
+                                .font(Typo.num(12, weight: .semibold))
+                                .foregroundStyle(Palette.accent)
+                            Text(note.headline)
+                                .font(Typo.ui(13, weight: .semibold))
+                                .foregroundStyle(Palette.ink)
+                                .lineLimit(1)
+                            Spacer(minLength: 8)
+                            Text(Self.longDate(note.date))
+                                .font(Typo.micro)
+                                .foregroundStyle(Palette.inkFaintest)
+                        }
+                    }
+                    if notes.count > Self.greeterRows {
+                        let more = notes.count - Self.greeterRows
+                        Text(more == 1 ? "And one release before those." : "And \(more) releases before those.")
+                            .font(Typo.micro)
+                            .foregroundStyle(Palette.inkFaint)
+                    }
+                }
+                .padding(.top, Space.s20)
+
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, Space.scaled(28))
+            .padding(.top, Space.s20)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
     // MARK: - the record
 
     /// The last page, and the whole card for a release with no headliners: the
-    /// hero, the headline, and everything the walk did not say.
+    /// hero, the headline, and everything the walk did not say, every release
+    /// on the card in one list per surface.
     @ViewBuilder
     private func record(_ newest: ReleaseNote, walked: Bool) -> some View {
         let lists = ScrollView {
@@ -232,10 +308,7 @@ struct WhatsNewCard: View {
                 title(newest)
                 // The headliners were just walked through; here they would be
                 // the same thing said twice.
-                ReleaseDigestView(digest: newest.digest, tiles: !walked)
-                if notes.count > 1 {
-                    earlier(Array(notes.dropFirst()))
-                }
+                ReleaseDigestView(digest: digest)
             }
             .padding(.horizontal, Space.scaled(28))
             .padding(.top, Space.s20)
@@ -301,76 +374,41 @@ struct WhatsNewCard: View {
         .clipShape(UnevenRoundedRectangle(topLeadingRadius: Self.radius, topTrailingRadius: Self.radius))
     }
 
+    /// One release is titled by its own headline. Several have no one headline
+    /// to borrow, so the page says what it is and whose bullets are in it.
     private func title(_ note: ReleaseNote) -> some View {
         VStack(alignment: .leading, spacing: Space.scaled(5)) {
-            Text(Self.longDate(note.date))
-                .font(Typo.micro)
-                .foregroundStyle(Palette.inkFaint)
-            Text(note.headline)
-                .font(Typo.hero(30))
-                .foregroundStyle(Palette.ink)
-                .fixedSize(horizontal: false, vertical: true)
-            // Plural only when it is: somebody who updates every week should
-            // not be told they missed a stack of releases.
             if notes.count > 1 {
-                Text(
-                    notes.count == 2
-                        ? "Plus one earlier release you skipped, at the bottom."
-                        : "Plus \(notes.count - 1) earlier releases you skipped, at the bottom."
-                )
-                .font(Typo.rowSub)
-                .foregroundStyle(Palette.inkFaint)
+                if let catchUp {
+                    Text("Since \(catchUp.from)")
+                        .font(Typo.micro)
+                        .foregroundStyle(Palette.inkFaint)
+                }
+                Text("The full list")
+                    .font(Typo.hero(30))
+                    .foregroundStyle(Palette.ink)
+                Text(Self.span(notes))
+                    .font(Typo.rowSub)
+                    .foregroundStyle(Palette.inkFaint)
+            } else {
+                Text(Self.longDate(note.date))
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.inkFaint)
+                Text(note.headline)
+                    .font(Typo.hero(30))
+                    .foregroundStyle(Palette.ink)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
 
-    private func earlier(_ older: [ReleaseNote]) -> some View {
-        VStack(alignment: .leading, spacing: Space.s8) {
-            SectionRule(symbol: "clock.arrow.circlepath", label: "Earlier")
-            ForEach(older) { note in
-                VStack(alignment: .leading, spacing: Space.s14) {
-                    Button {
-                        withAnimation(Motion.disclose) {
-                            if opened.contains(note.version) {
-                                opened.remove(note.version)
-                            } else {
-                                opened.insert(note.version)
-                            }
-                        }
-                    } label: {
-                        HStack(alignment: .firstTextBaseline, spacing: Space.s10) {
-                            Text(note.version)
-                                .font(Typo.num(12, weight: .semibold))
-                                .foregroundStyle(Palette.accent)
-                            Text(note.headline)
-                                .font(Typo.ui(13, weight: .semibold))
-                                .foregroundStyle(Palette.ink)
-                                .lineLimit(1)
-                            Spacer(minLength: 8)
-                            Text(Self.longDate(note.date))
-                                .font(Typo.micro)
-                                .foregroundStyle(Palette.inkFaintest)
-                            Image(systemName: "chevron.right")
-                                .font(Typo.ui(10, weight: .semibold))
-                                .foregroundStyle(Palette.inkFaint)
-                                .rotationEffect(.degrees(opened.contains(note.version) ? 90 : 0))
-                        }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-
-                    if opened.contains(note.version) {
-                        ReleaseDigestView(digest: note.digest)
-                            .transition(.opacity)
-                    }
-                }
-                .padding(Space.s12)
-                .background(Palette.ink.opacity(0.035), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(Palette.hairline, lineWidth: 1))
-            }
-        }
+    /// "Everything from 0.0.12 and 0.0.13, together." Oldest first, the order
+    /// they shipped in; past three it is a count, not a recital.
+    static func span(_ notes: [ReleaseNote]) -> String {
+        let versions = notes.reversed().map(\.version)
+        guard versions.count <= 3 else { return "Everything from \(versions.count) releases, together." }
+        let joined = versions.dropLast().joined(separator: ", ") + " and " + (versions.last ?? "")
+        return "Everything from \(joined), together."
     }
 
     private var footer: some View {
@@ -421,8 +459,16 @@ struct WhatsNewCard: View {
                 }
                 .buttonStyle(.plain)
                 .animation(.smooth(duration: 0.32), value: page)
-                .accessibilityLabel(index < features.count ? features[index].text : "Everything else")
+                .accessibilityLabel(label(pages[index]))
             }
+        }
+    }
+
+    private func label(_ page: Page) -> String {
+        switch page {
+        case .greeter: "Welcome back"
+        case .feature(let headliner): headliner.text
+        case .record: "Everything else"
         }
     }
 
@@ -443,18 +489,12 @@ struct WhatsNewCard: View {
 
 // MARK: - one release
 
-/// Tiles, then the per-surface record. Shared by the newest release and any
-/// older one opened in place, so the two can never be laid out differently.
+/// The per-surface record: what the walk did not give a page.
 private struct ReleaseDigestView: View {
     let digest: ReleaseDigest
-    /// False for the release whose headliners were pages of the walk.
-    var tiles = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: Space.s20) {
-            if tiles, !digest.headliners.isEmpty {
-                tileGrid
-            }
             ForEach(digest.sections) { section in
                 VStack(alignment: .leading, spacing: Space.s8) {
                     SectionRule(symbol: section.surface.symbol, label: section.surface.label)
@@ -471,53 +511,6 @@ private struct ReleaseDigestView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    /// Two up, in rows of equal height so a two-line tile does not leave its
-    /// neighbour floating. An odd one out takes the whole last row.
-    private var tileGrid: some View {
-        let pairs = stride(from: 0, to: digest.headliners.count, by: 2).map {
-            Array(digest.headliners[$0..<min($0 + 2, digest.headliners.count)])
-        }
-        return Grid(horizontalSpacing: 10, verticalSpacing: 10) {
-            ForEach(pairs.indices, id: \.self) { row in
-                GridRow {
-                    ForEach(pairs[row]) { headliner in
-                        tile(headliner)
-                            .gridCellColumns(pairs[row].count == 1 ? 2 : 1)
-                    }
-                }
-            }
-        }
-    }
-
-    private func tile(_ headliner: ReleaseDigest.Headliner) -> some View {
-        HStack(alignment: .top, spacing: Space.scaled(11)) {
-            Image(systemName: headliner.symbol)
-                .font(Typo.ui(14, weight: .semibold))
-                .foregroundStyle(Palette.accent)
-                .frame(width: 30, height: 30)
-                .background(Palette.accentSoft, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            VStack(alignment: .leading, spacing: Space.scaled(3)) {
-                Text(headliner.text)
-                    .font(Typo.ui(13, weight: .semibold))
-                    .foregroundStyle(Palette.ink)
-                    .fixedSize(horizontal: false, vertical: true)
-                // Which surface it landed on, said once for all of them:
-                // the whole reason the tile exists instead of two bullets.
-                Text(headliner.surfaces.map(\.label).joined(separator: " · "))
-                    .font(Typo.micro)
-                    .foregroundStyle(Palette.inkFaint)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(Space.scaled(11))
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Palette.ink.opacity(0.035), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Palette.hairline, lineWidth: 1))
-        .accessibilityElement(children: .combine)
     }
 
     private func bullet(_ text: String) -> some View {

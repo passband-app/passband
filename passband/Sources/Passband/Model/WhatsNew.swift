@@ -25,6 +25,10 @@ final class WhatsNew {
     /// note for this build there is still no card.
     static let forced = ProcessInfo.processInfo.environment["PASSBAND_FORCE_WHATS_NEW"] == "1"
 
+    /// The stamp to pretend to when forced, for looking at the card somebody
+    /// several releases behind gets: `PASSBAND_WHATS_NEW_SINCE=0.0.10`.
+    static let forcedSince = ProcessInfo.processInfo.environment["PASSBAND_WHATS_NEW_SINCE"]
+
     /// Which page of the walk the card opens on, for looking at one page with
     /// no hand on the keyboard (a screenshot has none). 0, the first, unless
     /// `PASSBAND_WHATS_NEW_PAGE` says otherwise; past the end is the record.
@@ -33,6 +37,10 @@ final class WhatsNew {
 
     /// What the card draws, newest release first. Empty means no card.
     private(set) var notes: [ReleaseNote] = []
+
+    /// Set when `notes` spans more than one release: the card opens by saying
+    /// so, and names the version this install was last on.
+    private(set) var catchUp: ReleaseCatchUp?
 
     var active: Bool { !notes.isEmpty }
 
@@ -61,10 +69,11 @@ final class WhatsNew {
         guard store.activeView == .sitrep, !store.daemonDown else { return }
         guard let running = runningVersion else { return }
 
-        let stamp = Self.forced ? nil : Prefs.shared.lastSeenReleaseNotes
+        let stamp = Self.forced ? Self.forcedSince : Prefs.shared.lastSeenReleaseNotes
         let unseen = ReleaseNotes.unseen(lastSeen: stamp, running: running)
         guard !unseen.isEmpty else { return }
         notes = unseen
+        catchUp = ReleaseNotes.catchUp(lastSeen: stamp, running: running, shown: unseen)
         Analytics.capture("whats_new_shown", ["releases": unseen.count])
     }
 
@@ -78,6 +87,7 @@ final class WhatsNew {
         else { return }
         dismissedThisSession = false
         notes = [current]
+        catchUp = nil
     }
 
     /// Closing the card. The stamp is the newest note ACTUALLY SHOWN, never the
@@ -88,6 +98,7 @@ final class WhatsNew {
         guard active else { return }
         stamp(ReleaseNotes.newestShown(notes))
         notes = []
+        catchUp = nil
         dismissedThisSession = true
     }
 

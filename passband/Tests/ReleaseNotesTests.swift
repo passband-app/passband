@@ -267,6 +267,71 @@ struct ReleaseNotesTests {
             version: "9.9.8", date: "2026-01-01", headline: "test",
             items: [ReleaseItem(.app, "One thing")])
         expect(plain.digest.headliners.isEmpty, "a release with no symbols has no tiles")
+
+        skippedReleases()
+    }
+
+    // MARK: - several releases as one card
+
+    static func skippedReleases() {
+        let newer = ReleaseNote(
+            version: "9.9.9", date: "2026-01-02", headline: "newer",
+            items: [
+                ReleaseItem(.app, "Flow mode", symbol: "wind"),
+                ReleaseItem(.ios, "Attach files to emails", symbol: "paperclip"),
+                ReleaseItem(.app, "Name an account"),
+                ReleaseItem(.app, "Bug fixes"),
+                ReleaseItem(.daemon, "Bug fixes"),
+            ])
+        let older = ReleaseNote(
+            version: "9.9.8", date: "2026-01-01", headline: "older",
+            items: [
+                ReleaseItem(.app, "Attach files to emails", symbol: "paperclip"),
+                ReleaseItem(.app, "Schedule an email for later", symbol: "clock"),
+                ReleaseItem(.app, "Wide emails fit the window"),
+                ReleaseItem(.app, "Name an account."),
+                ReleaseItem(.app, "Bug fixes"),
+                ReleaseItem(.daemon, "Triage is faster"),
+            ])
+        let d = ReleaseDigest([newer, older])
+
+        expect(
+            d.headliners.map(\.text) == ["Flow mode", "Attach files to emails", "Schedule an email for later"],
+            "every skipped release's headliners are walked, newest release first")
+        expect(
+            d.headliners.map(\.version) == ["9.9.9", "9.9.9", "9.9.8"],
+            "a page knows its release, the newest when two releases said it")
+        expect(
+            d.headliners[1].surfaces == [.app, .ios],
+            "one feature across two releases is one page naming both surfaces")
+        expect(d.sections.map(\.surface) == [.app, .daemon], "one section per surface, not per release")
+        expect(
+            d.sections.first?.items == ["Name an account", "Wide emails fit the window"],
+            "the bullets are one list, newest first, the same words said once")
+        expect(d.sections.first?.extras == ["Bug fixes"], "three releases of bug fixes are one footnote")
+        expect(d.sections.last?.items == ["Triage is faster"], "an older release's surface still lists")
+
+        // Whatever is skipped, nothing the table says goes missing.
+        let all = ReleaseDigest(table)
+        let said = Set((all.headliners.map(\.text) + all.sections.flatMap { $0.items + $0.extras }).map(ReleaseDigest.key))
+        expect(
+            table.flatMap(\.items).allSatisfy { said.contains(ReleaseDigest.key($0.text)) },
+            "the whole table merged still says every line")
+
+        // The greeting is for a jump of more than one release, and names both ends.
+        let two = ReleaseNotes.unseen(lastSeen: "0.0.2", running: "0.0.4")
+        let greeting = ReleaseNotes.catchUp(lastSeen: "0.0.2", running: "0.0.4", shown: two)
+        expect(greeting == ReleaseCatchUp(from: "0.0.2", to: "0.0.4"), "two releases at once are greeted")
+        expect(greeting?.title == "Thank you for updating to 0.0.4!", "the greeting names the new version")
+        expect(greeting?.line.hasSuffix("since you were on 0.0.2.") == true, "and the one they came from")
+        expect(greeting?.line.contains("\u{2014}") == false, "the greeting avoids em dashes")
+        let one = ReleaseNotes.unseen(lastSeen: "0.0.3", running: "0.0.4")
+        expect(
+            ReleaseNotes.catchUp(lastSeen: "0.0.3", running: "0.0.4", shown: one) == nil,
+            "the ordinary update is not greeted")
+        expect(
+            ReleaseNotes.catchUp(lastSeen: nil, running: "0.0.4", shown: two) == nil,
+            "no stamp, no version to say they came from")
     }
 
     // MARK: - harness

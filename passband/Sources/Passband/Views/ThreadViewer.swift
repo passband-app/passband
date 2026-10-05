@@ -324,35 +324,6 @@ struct ThreadViewer: View {
         // the back button it sits opposite rather than like a label.
         #if !os(macOS)
             .toolbar {
-                // THE VERBS THAT ARE KEYS ON THE MAC AND NOTHING ELSE: reply
-                // all is Enter, forward is `f`, remind is `h`, and a phone has
-                // none of the three. A menu and not three more words in the
-                // header's row, which already scrolls sideways to hold what it
-                // has. Declared before the checkmark so done keeps the corner.
-                ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        Button { openReply() } label: {
-                            Label("Reply", systemImage: "arrowshape.turn.up.left")
-                        }
-                        .disabled(store.inlineReply != nil)
-                        Button { openReplyAll() } label: {
-                            Label("Reply all", systemImage: "arrowshape.turn.up.left.2")
-                        }
-                        .disabled(store.inlineReply != nil)
-                        Button { forwardFromBar() } label: {
-                            Label("Forward", systemImage: "arrowshape.turn.up.right")
-                        }
-                        Divider()
-                        Button { remindFromBar() } label: {
-                            Label("Remind me", systemImage: "bell")
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis")
-                            .foregroundStyle(Palette.accent)
-                    }
-                    .disabled(thread == nil)
-                    .accessibilityLabel("More")
-                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { Task { await doneFromBar() } } label: {
                         Image(systemName: "checkmark")
@@ -710,25 +681,20 @@ struct ThreadViewer: View {
     @ViewBuilder
     private var actions: some View {
         if thread != nil {
-            // REPLY NEEDS A TARGET ON A PHONE. On the Mac `r` is the door and it
-            // is always open; here the only other way in is a leading swipe from
-            // a list, which lands you in this reader with the composer already
-            // up. Without this, a thread opened by tapping it could be read and
-            // never answered. Hidden while a composer IS open — it would be a
-            // button that does nothing (`openInlineReply` refuses to reset a live
-            // draft, and rightly).
+            // REMIND ME, first, on the phone: `h` on the Mac, and the one verb
+            // about this mail that is neither answering it nor finishing it.
+            // Reply is not here any more; it is at the end of the chain, where
+            // you are when you have read enough to answer.
             #if !os(macOS)
-                if store.inlineReply == nil {
-                    Button { openReply() } label: {
-                        HStack(spacing: Space.s4) {
-                            Image(systemName: "arrowshape.turn.up.left")
-                                .font(Typo.ui(10, weight: .semibold))
-                            Text("reply").font(Typo.micro)
-                        }
+                Button { remindFromBar() } label: {
+                    HStack(spacing: Space.s4) {
+                        Image(systemName: "bell")
+                            .font(Typo.ui(10, weight: .semibold))
+                        Text("remind me").font(Typo.micro)
                     }
-                    .buttonStyle(.textAction)
-                    .foregroundStyle(Palette.accent)
                 }
+                .buttonStyle(.textAction)
+                .foregroundStyle(Palette.accent)
             #endif
             // JUMP TO WHAT SURFACED THE THREAD: shown only while the
             // attention-bearing message is not the selected one — a
@@ -2167,13 +2133,12 @@ struct ThreadViewer: View {
     #endif
 
     #if !os(macOS)
-        /// The menu's Forward: `f`, on the message the reader is on.
-        private func forwardFromBar() {
-            guard let m = messages[safe: index] ?? newest else { return }
+        /// Forward: `f`, on one message of the chain.
+        private func forward(_ m: ClientMessage) {
             store.openComposeForward(message: m, fallbackSubject: thread?.subject ?? "")
         }
 
-        /// The menu's Remind: `h`, on the same message the key aims at. Once
+        /// The header's Remind: `h`, on the same message the key aims at. Once
         /// the reminder lands the mail is dealt with, so the reader leaves the
         /// way the checkmark leaves.
         private func remindFromBar() {

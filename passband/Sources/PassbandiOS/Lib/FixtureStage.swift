@@ -57,6 +57,35 @@
                 store.openComposeNew()
             case "tune":
                 if let first { Actions.tune(sender: first.sender) }
+            case "disconnected":
+                // Lasts until the poller's next pull, which is long enough.
+                SitrepPoller.shared.stop()
+                store.stats?.gmail = GmailHealth(
+                    connected: false,
+                    disconnected_since: ISO8601DateFormatter().string(
+                        from: Date().addingTimeInterval(-3 * 3600)),
+                    reconnect_url: "https://example.com/reconnect")
+            case "reconnect":
+                SitrepPoller.shared.stop()
+                store.stats?.gmail = GmailHealth(
+                    connected: false, reconnect_url: "https://example.com/reconnect")
+                // Straight to the prompt: the fixture has no account address,
+                // and without one `askReconnect` opens the browser instead.
+                store.reconnectAsk = AppStore.ReconnectAsk(
+                    url: "https://example.com/reconnect", email: "jamie@example.com")
+            case "violation":
+                UnsubscribeViolations.shared.stage(
+                    UnsubscribeRecord(
+                        sender: "deals@brightly.example", requested_at: ISO8601DateFormatter()
+                            .string(from: Date().addingTimeInterval(-9 * 86400)),
+                        method: .oneClick, violation_count: 4,
+                        smart_block: SmartBlockProposal(
+                            rule: "Only show receipts and account notices.",
+                            keeps: "receipts", drops: "promotions")))
+            case "clear":
+                SitrepPoller.shared.stop()
+                store.sitrep.standing = []
+                store.zones.reading = []
             default:
                 break
             }

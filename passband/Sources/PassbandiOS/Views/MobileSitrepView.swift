@@ -68,14 +68,25 @@ struct MobileSitrepView: View {
 
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                // ABOVE THE HERO, because it outranks it, as on the Mac: "what
+                // needs you today" is worthless while the mailbox behind it
+                // has been frozen since Tuesday.
+                banner
                 hero
                 if !ranked.isEmpty {
                     forYourEyes(visible: visible, overflow: overflow, queue: ranked)
+                } else if isClear {
+                    // An empty board is the best state this app has, and it
+                    // should not look like a broken one.
+                    ClearNote()
+                        .padding(.horizontal, 4)
+                        .transition(.opacity)
                 }
-                ReadingZone(
-                    senders: Reading.prune(
-                        store.zones.reading, resolved: store.resolvedIds),
-                    cursor: cursor)
+                // Empty reading still stands beside a live For-your-eyes, but
+                // on a board with nothing else it is one more absence.
+                if !(reading.isEmpty && ranked.isEmpty) {
+                    ReadingZone(senders: reading, cursor: cursor)
+                }
                 footnote
             }
             .padding(.horizontal, 16)
@@ -147,6 +158,36 @@ struct MobileSitrepView: View {
         .onChange(of: visible.count) { _, count in
             if count == 0 { expanded = false }
         }
+    }
+
+    // MARK: - what is wrong, when something is
+
+    /// The Mac's banner slot: a dead Google sign in with its way back, or
+    /// whatever else is keeping mail from arriving or being sorted. Not
+    /// dismissible on either platform, because neither goes away by wishing.
+    @ViewBuilder
+    private var banner: some View {
+        if store.gmailDisconnected {
+            GmailDisconnectedBanner()
+        } else if store.syncStatus.showsBanner {
+            SyncStatusBanner(status: store.syncStatus)
+        }
+    }
+
+    private var bannerShowing: Bool {
+        store.gmailDisconnected || store.syncStatus.showsBanner
+    }
+
+    private var reading: [ReadingSender] {
+        Reading.prune(store.zones.reading, resolved: store.resolvedIds)
+    }
+
+    /// Nothing for your eyes, and truly so: the board has loaded, and it is
+    /// not empty only because sync or triage is stuck.
+    private var isClear: Bool {
+        store.stats != nil && store.sitrep.standing.isEmpty
+            && store.syncStatus.emptyHero(
+                queued: store.triageWaiting, lastSync: store.daemonLastSync) == nil
     }
 
     // MARK: - hero
@@ -258,7 +299,7 @@ struct MobileSitrepView: View {
                 .font(Typo.micro)
                 .foregroundStyle(Palette.warn)
                 .frame(maxWidth: .infinity, alignment: .leading)
-        } else if let line = store.syncStatus.oneLine() {
+        } else if !bannerShowing, let line = store.syncStatus.oneLine() {
             // The same derived status the Mac's banner shows, in one line.
             Label(line, systemImage: "clock")
                 .font(Typo.micro)

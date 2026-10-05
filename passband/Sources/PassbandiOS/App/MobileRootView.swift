@@ -237,6 +237,34 @@ private struct MobileShell: View {
             showAuth = true
             store.consumeAuthPage()
         }
+        // THE STORE'S ROUTING, FOLLOWED. Shared views ask for a place by
+        // calling the store (`openMail` from the clear board's link,
+        // `openSearch` from a row's "search this sender"), and on the Mac the
+        // rail and the side panel answer. Here the answer is a tab, and until
+        // this watched for it those calls changed state no screen was showing.
+        .onChange(of: store.activeView) { _, view in
+            switch view {
+            case .sitrep: tab = .sitrep
+            case .emails: tab = .mail
+            default: break
+            }
+        }
+        // And the other way, so the store's idea of where the human is stays
+        // true for the next request. Written directly rather than through
+        // `setView`, which closes the reader: a tab switch here parks it.
+        .onChange(of: tab) { _, tab in
+            let view: MainView? =
+                switch tab {
+                case .sitrep: .sitrep
+                case .mail: .emails
+                default: nil
+                }
+            if let view, store.activeView != view { store.activeView = view }
+        }
+        // A seeded search is a request to be shown the search.
+        .onChange(of: store.search.query) { _, query in
+            if tab != .search, !query.trimmed.isEmpty { tab = .search }
+        }
         // Toasts ride ABOVE the tab bar, where the Mac's stack rides above the
         // rail. The offset clears the bar at rest; when the bar minimizes on
         // scroll the stack simply sits a little higher than it needs to, which is
@@ -264,6 +292,11 @@ private struct MobileShell: View {
         }
         .overlay {
             if !store.authQueue.isEmpty { AuthCodeModal() }
+        }
+        // Which Google account to pick, said before the browser opens: the
+        // sitrep's disconnected banner raises it.
+        .overlay {
+            if let ask = store.reconnectAsk { ReconnectAccountPrompt(ask: ask) }
         }
         // `v`. A SHEET here and a top-anchored command bar there, for one reason:
         // the palette autofocuses a text field, and a phone answers that by

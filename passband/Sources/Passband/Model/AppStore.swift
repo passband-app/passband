@@ -1836,6 +1836,8 @@ final class AppStore {
         // "Finish on their site" would tell the NEW daemon about a job it has
         // never heard of.
         UnsubscribeJobs.shared.reset()
+        // And the ignored-unsubscribe notice, for the same reason.
+        UnsubscribeViolations.shared.reset()
         sitrep = SitrepData()
         // Its own line since the stats left SitrepData. The old daemon's
         // stats over the new mailbox's empty bands read as "all clear": the

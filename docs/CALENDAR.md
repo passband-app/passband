@@ -786,10 +786,17 @@ from the plan below:
   (`StoredToken.scopes`, from the exchange, every refresh that names them, and
   import), resolves the calendar token with `CalendarCredentials` (Calendar
   slot first, then a Read slot whose scopes include `calendar.events`), and
-  reports `calendar {granted, connect_url, connect_command}` on
+  reports `calendar {granted, connect_url, connect_command, self_connect}` on
   `/client/stats`.
-- **Self-host**: `squelchd auth --calendar` mints a separate Calendar slot and
-  touches neither Gmail slot.
+- **Self-host**: the app's one Connect button works here too. With
+  `self_connect: true` the client calls `POST /client/calendar/connect`, and
+  the daemon runs the same consent `squelchd auth --calendar` runs (one
+  builder, `squelch_core::auth::LoopbackConsent`): it answers the consent URL,
+  waits for Google's redirect on a loopback listener (`127.0.0.1:8847`, or
+  `SQUELCH_AUTH_PORT`) for at most ten minutes, and stores a separate Calendar
+  slot that touches neither Gmail slot. On hosted the endpoint answers 409 and
+  the client opens `connect_url`. `squelchd auth --calendar` still does the
+  same from a terminal. Checks and storage: docs/SECURITY.md §8.
 
 - **Ghost mode needs no migration.** Every existing user gets the timeline and
   ghosts with zero consent. The grant is asked for at the first moment it is
@@ -810,8 +817,9 @@ from the plan below:
 - **New signups** do NOT see calendar yet: signup asks for Gmail only, and the
   calendar is granted later from the calendar page. Folding it into signup is
   a later decision.
-- **Self-host** gets a `squelchd auth` variant: `squelchd auth --calendar`
-  (BUILT).
+- **Self-host** connects from the app (`POST /client/calendar/connect`, the
+  daemon running the consent on loopback) or from a terminal with
+  `squelchd auth --calendar`. Both BUILT, and both build the same consent.
 - **Order of release:** control and warden, then the daemon, then the client.
   A client that meets a daemon without the capability shows ghost mode only.
 

@@ -9268,6 +9268,7 @@ async fn stats_offer_a_hosted_mailbox_the_calendar_link() {
             "granted": false,
             "connect_url": "https://signup.example/reconnect?calendar=1&hint=me%40example.com",
             "connect_command": null,
+            "self_connect": false,
         })
     );
     std::fs::remove_file(&path).ok();
@@ -9292,6 +9293,7 @@ async fn stats_report_a_hosted_calendar_grant() {
             "granted": true,
             "connect_url": "https://signup.example/reconnect?calendar=1&hint=me%40example.com",
             "connect_command": null,
+            "self_connect": false,
         })
     );
     std::fs::remove_file(&path).ok();
@@ -9312,6 +9314,7 @@ async fn stats_tell_a_self_host_the_calendar_command() {
             "granted": false,
             "connect_url": null,
             "connect_command": "squelchd auth --calendar",
+            "self_connect": true,
         })
     );
     std::fs::remove_file(&path).ok();
@@ -9324,6 +9327,8 @@ async fn stats_tell_a_self_host_the_calendar_command() {
         json["calendar"]["connect_command"],
         serde_json::json!("squelchd auth --calendar")
     );
+    // With no OAuth client there is nothing to run a consent with.
+    assert_eq!(json["calendar"]["self_connect"], serde_json::json!(false));
 }
 
 /// An address with characters a query string would misread is encoded, and

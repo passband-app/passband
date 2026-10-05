@@ -1354,6 +1354,53 @@ impl CalendarCredentials {
         }
     }
 
+    /// The configured mailbox this resolver reads for.
+    pub fn account_email(&self) -> &str {
+        &self.account_email
+    }
+
+    /// The OAuth client this resolver refreshes with, which is also the one a
+    /// consent run by the daemon is minted for.
+    pub fn client(&self) -> &OAuthClientConfig {
+        &self.client
+    }
+
+    /// Store a freshly consented token in the CALENDAR slot through the
+    /// configured backend (the same call `squelchd auth --calendar` makes),
+    /// read it back so "stored" means stored, and drop the cached `granted`
+    /// answer so the next `/client/stats` reads the new grant at once.
+    /// BLOCKING: it writes the backend.
+    pub fn store_calendar_token_blocking(&self, token: &StoredToken) -> Result<()> {
+        let stored = store_token_backend(
+            self.backend,
+            &self.credentials_path,
+            &self.account_email,
+            CredentialKind::Calendar,
+            token,
+        )
+        .and_then(|()| {
+            load_token_backend(
+                self.backend,
+                &self.credentials_path,
+                &self.account_email,
+                CredentialKind::Calendar,
+            )
+        })
+        .map(|_| ());
+        // Forgotten either way: after a failed write the slot may still have
+        // changed, and a fresh read costs one backend read.
+        self.forget_granted();
+        stored
+    }
+
+    /// Drop the cached answer to "is calendar granted", so the next
+    /// [`Self::granted`] reads the backend.
+    pub fn forget_granted(&self) {
+        if let Ok(mut cache) = self.granted_cache.lock() {
+            *cache = None;
+        }
+    }
+
     /// The credentials file's modification time, for the file backend.
     fn file_modified(&self) -> Option<std::time::SystemTime> {
         match self.backend {
@@ -2516,6 +2563,55 @@ mod tests {
                 .set_modified(first + Duration::from_secs(1))
                 .unwrap();
             assert!(!resolver.granted().await, "a changed file is read again");
+            std::fs::remove_file(&path).ok();
+        });
+    }
+
+    /// A consent the daemon stores itself (the app's Connect button) drops the
+    /// cached answer, so stats see the grant at once. Proven with the mtime
+    /// put back, which would otherwise keep the cached "no" for the TTL (and
+    /// the keyring has no mtime at all).
+    #[test]
+    fn storing_a_calendar_token_drops_the_granted_cache() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _g = ENV_LOCK.lock().unwrap();
+        rt.block_on(async {
+            let path = tmp_path("granted-forget");
+            let resolver = CalendarCredentials::new(
+                3_i64,
+                "you@x.com".into(),
+                CredentialBackend::File,
+                path.clone(),
+                client(),
+            );
+            store_token_file(
+                &path,
+                "you@x.com",
+                CredentialKind::Read,
+                &scoped("READ", Some(&[READONLY])),
+            )
+            .unwrap();
+            let first = std::fs::metadata(&path).unwrap().modified().unwrap();
+            assert!(!resolver.granted().await);
+
+            resolver
+                .store_calendar_token_blocking(&scoped("CAL", Some(&[EVENTS])))
+                .unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(first)
+                .unwrap();
+            assert!(resolver.granted().await, "the cached no outlived the grant");
+            let stored = load_token_file(&path, "you@x.com", CredentialKind::Calendar).unwrap();
+            assert_eq!(stored.access_token, "CAL");
+            // The Read slot is untouched.
+            let read = load_token_file(&path, "you@x.com", CredentialKind::Read).unwrap();
+            assert_eq!(read.access_token, "READ");
             std::fs::remove_file(&path).ok();
         });
     }

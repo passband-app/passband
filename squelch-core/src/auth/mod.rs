@@ -225,18 +225,50 @@ fn map_oauth_err<E: std::fmt::Display>(ctx: &str) -> impl Fn(E) -> CoreError + '
 type GoogleClient =
     BasicClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointSet>;
 
+/// Where a consent's exchange talks to Google: the token endpoint (which is
+/// sent the client secret) and Gmail's profile endpoint (which names the
+/// account). [`Default`] is Google's pinned pair, and every production path
+/// uses it.
+///
+/// A seam for tests only: the daemon's own test suite points both at a
+/// scripted socket to run the whole consent end to end. Nothing reads it from
+/// the environment or a config file, so no deployment can move it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoogleEndpoints {
+    pub token_url: String,
+    pub profile_url: String,
+}
+
+impl Default for GoogleEndpoints {
+    fn default() -> Self {
+        Self {
+            token_url: GOOGLE_TOKEN_URL.to_string(),
+            profile_url: GMAIL_PROFILE_URL.to_string(),
+        }
+    }
+}
+
 /// Build the Google client for one `redirect_uri`. Google checks the exchange's
 /// `redirect_uri` against the one the consent URL carried, so the client is
 /// built once per flow and used for both halves — the loopback and broker flows
 /// differ only in the string that lands here.
 fn google_client(client: &OAuthClientConfig, redirect_uri: &str) -> Result<GoogleClient> {
+    google_client_at(client, redirect_uri, GOOGLE_TOKEN_URL)
+}
+
+/// [`google_client`] against an explicit token endpoint; see [`GoogleEndpoints`].
+fn google_client_at(
+    client: &OAuthClientConfig,
+    redirect_uri: &str,
+    token_url: &str,
+) -> Result<GoogleClient> {
     Ok(BasicClient::new(ClientId::new(client.client_id.clone()))
         .set_client_secret(ClientSecret::new(client.client_secret.clone()))
         .set_auth_uri(
             AuthUrl::new(GOOGLE_AUTH_URL.to_string()).map_err(map_oauth_err("bad auth url"))?,
         )
         .set_token_uri(
-            TokenUrl::new(GOOGLE_TOKEN_URL.to_string()).map_err(map_oauth_err("bad token url"))?,
+            TokenUrl::new(token_url.to_string()).map_err(map_oauth_err("bad token url"))?,
         )
         .set_redirect_uri(
             RedirectUrl::new(redirect_uri.to_string())
@@ -250,10 +282,15 @@ fn google_client(client: &OAuthClientConfig, redirect_uri: &str) -> Result<Googl
 /// `state` is the caller's to choose — a random CSRF token on the loopback flow,
 /// the session id on the broker flow, where `docs/BROKER.md` pins
 /// `state == session_id` because that is how a callback finds its session.
+///
+/// `login_hint` pre-selects the configured mailbox on Google's account
+/// chooser. A convenience only: the exchange still holds the token against
+/// the configured account, whatever the person picks.
 fn authorize_url(
     oauth: &GoogleClient,
     scopes: AuthScopes,
     state: CsrfToken,
+    login_hint: Option<&str>,
 ) -> (Url, CsrfToken, PkceCodeVerifier) {
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
 
@@ -263,6 +300,9 @@ fn authorize_url(
     }
     if scopes.include_granted_scopes() {
         req = req.add_extra_param("include_granted_scopes", "true");
+    }
+    if let Some(hint) = login_hint.map(str::trim).filter(|h| !h.is_empty()) {
+        req = req.add_extra_param("login_hint", hint.to_string());
     }
     let (url, csrf_token) = req
         // Ask for a refresh token and force consent so we reliably get one.
@@ -295,23 +335,72 @@ fn exchange_code(
     code: String,
     pkce_verifier: PkceCodeVerifier,
 ) -> Result<(String, StoredToken)> {
-    let http = guarded_http(EXCHANGE_HTTP_TIMEOUT)?;
+    exchange_code_at(
+        oauth,
+        GMAIL_PROFILE_URL,
+        expected_account,
+        scopes,
+        code,
+        pkce_verifier,
+    )
+    .map_err(ConsentFailure::into_error)
+}
+
+/// Why a guarded exchange stored nothing, sorted into the kinds a caller
+/// shows differently. Each carries the full message the terminal flows print;
+/// a caller that must not show an address (the daemon's consent page) matches
+/// on the kind and never displays or logs the message.
+#[derive(Debug)]
+pub enum ConsentFailure {
+    /// Google says the token opens a different mailbox than the configured one.
+    WrongAccount(CoreError),
+    /// The grant does not cover what the scope set REQUIRES (for calendar: the
+    /// person unticked the calendar box on Google's screen).
+    ScopesNotGranted(CoreError),
+    /// Anything else: the exchange or the profile call failed.
+    Failed(CoreError),
+}
+
+impl ConsentFailure {
+    /// The message the terminal flows have always printed.
+    pub fn into_error(self) -> CoreError {
+        match self {
+            ConsentFailure::WrongAccount(e)
+            | ConsentFailure::ScopesNotGranted(e)
+            | ConsentFailure::Failed(e) => e,
+        }
+    }
+}
+
+/// [`exchange_code`] against an explicit profile endpoint (the token endpoint
+/// rides on `oauth`), with its refusals sorted by kind. The ONE body of the
+/// guarded exchange: every flow reaches it.
+fn exchange_code_at(
+    oauth: &GoogleClient,
+    profile_url: &str,
+    expected_account: Option<&str>,
+    scopes: AuthScopes,
+    code: String,
+    pkce_verifier: PkceCodeVerifier,
+) -> std::result::Result<(String, StoredToken), ConsentFailure> {
+    let http = guarded_http(EXCHANGE_HTTP_TIMEOUT).map_err(ConsentFailure::Failed)?;
 
     let token = oauth
         .exchange_code(AuthorizationCode::new(code))
         .set_pkce_verifier(pkce_verifier)
         .request(&http)
-        .map_err(map_oauth_err("token exchange failed"))?;
+        .map_err(map_oauth_err("token exchange failed"))
+        .map_err(ConsentFailure::Failed)?;
 
     let granted: Option<Vec<String>> = token
         .scopes()
         .map(|granted| granted.iter().map(|s| s.to_string()).collect());
-    check_scope_grant(scopes, granted.as_deref())?;
+    check_scope_grant(scopes, granted.as_deref()).map_err(ConsentFailure::ScopesNotGranted)?;
 
-    let mailbox = fetch_profile_email(&http, GMAIL_PROFILE_URL, token.access_token().secret())
-        .map_err(|e| calendar_identity_hint(scopes, e))?;
+    let mailbox = fetch_profile_email(&http, profile_url, token.access_token().secret())
+        .map_err(|e| ConsentFailure::Failed(calendar_identity_hint(scopes, e)))?;
     if let Some(expected) = expected_account {
-        check_account_match(expected, &mailbox)?;
+        check_account_match(expected, &mailbox).map_err(ConsentFailure::WrongAccount)?;
     }
 
     Ok((
@@ -683,9 +772,10 @@ pub fn run_auth_flow(
         .map_err(|e| CoreError::Credential(format!("reading listener addr: {e}")))?
         .port();
 
-    let oauth = google_client(client, &redirect_uri)?;
-    let (auth_url, csrf_token, pkce_verifier) =
-        authorize_url(&oauth, opts.scopes, CsrfToken::new_random());
+    // The SAME consent the daemon runs for the app's Connect button: one
+    // builder for the URL, one guarded exchange behind it.
+    let consent = LoopbackConsent::begin(client, opts.scopes, port, Some(account_email))?;
+    let auth_url = consent.url().clone();
 
     if opts.headless {
         println!(
@@ -715,19 +805,115 @@ pub fn run_auth_flow(
     // mismatched `state` is worth ending the flow over.
     let code = wait_for_code(
         &listener,
-        csrf_token.secret(),
+        consent.state.secret(),
         StrangerPolicy::Fatal,
         CONSENT_WAIT_TIMEOUT,
     )?;
 
-    let (_mailbox, token) = exchange_code(
-        &oauth,
-        Some(account_email),
-        opts.scopes,
-        code,
-        pkce_verifier,
-    )?;
+    let (_mailbox, token) = consent
+        .finish(code, account_email)
+        .map_err(ConsentFailure::into_error)?;
     Ok(token)
+}
+
+/// The path of the loopback redirect. A Desktop OAuth client accepts any port
+/// on `http://127.0.0.1`, and the flows here register the bare origin, so the
+/// browser comes back to `/`.
+pub const LOOPBACK_REDIRECT_PATH: &str = "/";
+
+/// The `redirect_uri` for a loopback listener on `port`. Always `127.0.0.1`,
+/// whatever the listener binds: it names the BROWSER's loopback.
+pub fn loopback_redirect_uri(port: u16) -> String {
+    format!("http://127.0.0.1:{port}")
+}
+
+/// One loopback consent in flight: the consent URL, the `state` the redirect
+/// must carry back, and the PKCE verifier that makes the returned code
+/// redeemable. Built by `squelchd auth` and by the daemon's
+/// `POST /client/calendar/connect` alike, so the two produce the same URL and
+/// run the same guarded exchange.
+///
+/// No `Debug`: it holds the verifier and the `state`, and a derived one is how
+/// either ends up in the first error somebody formats with `{:?}`.
+pub struct LoopbackConsent {
+    oauth: GoogleClient,
+    profile_url: String,
+    scopes: AuthScopes,
+    state: CsrfToken,
+    verifier: PkceCodeVerifier,
+    url: Url,
+}
+
+impl LoopbackConsent {
+    /// Mint a fresh `state` and PKCE pair and build the consent URL for a
+    /// redirect to `http://127.0.0.1:<port>`. No network: nothing is sent
+    /// until [`Self::finish`].
+    pub fn begin(
+        client: &OAuthClientConfig,
+        scopes: AuthScopes,
+        port: u16,
+        login_hint: Option<&str>,
+    ) -> Result<Self> {
+        Self::begin_at(
+            client,
+            scopes,
+            port,
+            login_hint,
+            &GoogleEndpoints::default(),
+        )
+    }
+
+    /// [`Self::begin`] with the exchange pointed at `endpoints`. Tests only;
+    /// see [`GoogleEndpoints`].
+    pub fn begin_at(
+        client: &OAuthClientConfig,
+        scopes: AuthScopes,
+        port: u16,
+        login_hint: Option<&str>,
+        endpoints: &GoogleEndpoints,
+    ) -> Result<Self> {
+        let oauth = google_client_at(client, &loopback_redirect_uri(port), &endpoints.token_url)?;
+        let (url, state, verifier) =
+            authorize_url(&oauth, scopes, CsrfToken::new_random(), login_hint);
+        Ok(Self {
+            oauth,
+            profile_url: endpoints.profile_url.clone(),
+            scopes,
+            state,
+            verifier,
+            url,
+        })
+    }
+
+    /// The consent URL to open in a browser.
+    pub fn url(&self) -> &Url {
+        &self.url
+    }
+
+    /// Whether `candidate` is this consent's `state`, compared in constant time.
+    pub fn state_matches(&self, candidate: &str) -> bool {
+        constant_time_eq(candidate, self.state.secret())
+    }
+
+    /// Redeem the code and run the guarded exchange: the grant must cover what
+    /// the scope set requires, and Google must name `expected_account` as the
+    /// mailbox behind the token. BLOCKING (one round trip to the token endpoint
+    /// and one to Gmail's profile). Returns the mailbox and the token to store;
+    /// stores nothing itself.
+    pub fn finish(
+        self,
+        code: String,
+        expected_account: &str,
+    ) -> std::result::Result<(String, StoredToken), ConsentFailure> {
+        exchange_code_at(
+            &self.oauth,
+            &self.profile_url,
+            Some(expected_account),
+            self.scopes,
+            code,
+            self.verifier,
+        )
+    }
 }
 
 /// Where the export flow's one-shot consent listener binds.
@@ -805,7 +991,7 @@ fn bind_consent_listener(bind_addr: &str) -> Result<(TcpListener, String)> {
         .local_addr()
         .map_err(|e| CoreError::Credential(format!("reading listener addr: {e}")))?
         .port();
-    Ok((listener, format!("http://127.0.0.1:{port}")))
+    Ok((listener, loopback_redirect_uri(port)))
 }
 
 /// `TcpListener::bind` with SO_REUSEADDR, which std cannot set before binding.
@@ -863,7 +1049,7 @@ pub fn run_export_flow(
     let (listener, redirect_uri) = bind_consent_listener(&bind.bind_addr())?;
     let oauth = google_client(client, &redirect_uri)?;
     let (auth_url, csrf_token, pkce_verifier) =
-        authorize_url(&oauth, scopes, CsrfToken::new_random());
+        authorize_url(&oauth, scopes, CsrfToken::new_random(), None);
 
     eprintln!(
         "\nOpen this URL in your browser to authorize squelch ({}):\n",
@@ -925,7 +1111,7 @@ pub fn run_broker_flow(
     // It is still 32 unguessable bytes minted for this one flow, so it carries
     // everything a random `CsrfToken` would have.
     let (auth_url, _state, pkce_verifier) =
-        authorize_url(&oauth, scopes, CsrfToken::new(session_id.clone()));
+        authorize_url(&oauth, scopes, CsrfToken::new(session_id.clone()), None);
 
     let http = broker_http()?;
     register_session(&http, &base, &session_id, &claim_token, auth_url.as_str())?;
@@ -1573,6 +1759,7 @@ mod tests {
             &oauth,
             AuthScopes::Write,
             CsrfToken::new(session_id.clone()),
+            None,
         );
 
         assert_eq!(url.scheme(), "https");
@@ -1622,7 +1809,8 @@ mod tests {
         let oauth = google_client(&test_client(), "http://127.0.0.1:8847").unwrap();
         let mut states = std::collections::HashSet::new();
         for _ in 0..8 {
-            let (url, csrf, _) = authorize_url(&oauth, AuthScopes::Read, CsrfToken::new_random());
+            let (url, csrf, _) =
+                authorize_url(&oauth, AuthScopes::Read, CsrfToken::new_random(), None);
             let state = url
                 .query_pairs()
                 .find(|(k, _)| k == "state")
@@ -2481,7 +2669,7 @@ mod tests {
     fn only_the_calendar_consent_includes_granted_scopes() {
         let oauth = google_client(&test_client(), "http://127.0.0.1:8847").unwrap();
         for scopes in [AuthScopes::Read, AuthScopes::Write, AuthScopes::Calendar] {
-            let (url, _, _) = authorize_url(&oauth, scopes, CsrfToken::new_random());
+            let (url, _, _) = authorize_url(&oauth, scopes, CsrfToken::new_random(), None);
             let params: std::collections::HashMap<String, String> = url
                 .query_pairs()
                 .map(|(k, v)| (k.into(), v.into()))
@@ -2660,5 +2848,146 @@ mod tests {
         .to_string();
         assert!(err.contains("no consent arrived"), "{err}");
         assert!(err.contains("nothing was stored"), "{err}");
+    }
+
+    // --- the shared loopback consent (CLI and the daemon's Connect) --------
+
+    fn query_params(url: &Url) -> std::collections::HashMap<String, String> {
+        url.query_pairs()
+            .map(|(k, v)| (k.into(), v.into()))
+            .collect()
+    }
+
+    /// The calendar consent `squelchd auth --calendar` and the daemon's
+    /// Connect button both build: every parameter, the loopback redirect on
+    /// the given port, and the configured mailbox as `login_hint`.
+    #[test]
+    fn the_loopback_calendar_consent_url_carries_every_parameter() {
+        let consent = LoopbackConsent::begin(
+            &test_client(),
+            AuthScopes::Calendar,
+            DEFAULT_HEADLESS_PORT,
+            Some("me@gmail.com"),
+        )
+        .unwrap();
+        let url = consent.url();
+        assert_eq!(url.host_str(), Some("accounts.google.com"));
+        assert_eq!(url.path(), "/o/oauth2/v2/auth");
+        let p = query_params(url);
+        let get = |k: &str| p.get(k).map(String::as_str);
+        assert_eq!(get("client_id"), Some("1234.apps.googleusercontent.com"));
+        assert_eq!(get("redirect_uri"), Some("http://127.0.0.1:8847"));
+        assert_eq!(get("response_type"), Some("code"));
+        assert_eq!(get("scope"), Some(CALENDAR_SCOPES.join(" ").as_str()));
+        assert_eq!(get("access_type"), Some("offline"));
+        assert_eq!(get("prompt"), Some("consent"));
+        assert_eq!(get("include_granted_scopes"), Some("true"));
+        assert_eq!(get("login_hint"), Some("me@gmail.com"));
+        assert_eq!(get("code_challenge_method"), Some("S256"));
+        assert!(!get("code_challenge").unwrap().is_empty());
+        let state = get("state").unwrap();
+        assert!(consent.state_matches(state));
+        assert!(!consent.state_matches(&format!("{state}x")));
+        assert!(!consent.state_matches(""));
+        assert!(!url.as_str().contains("not-a-real-secret"));
+        assert_eq!(
+            loopback_redirect_uri(8847),
+            "http://127.0.0.1:8847",
+            "the bare origin; the redirect lands on {LOOPBACK_REDIRECT_PATH}"
+        );
+
+        // A blank hint is no hint.
+        let none =
+            LoopbackConsent::begin(&test_client(), AuthScopes::Calendar, 8847, Some(" ")).unwrap();
+        assert!(!query_params(none.url()).contains_key("login_hint"));
+    }
+
+    /// Two consents differ only in what each must mint fresh: the `state` and
+    /// the PKCE challenge.
+    #[test]
+    fn two_loopback_consents_differ_only_in_their_secrets() {
+        let mk = || {
+            LoopbackConsent::begin(
+                &test_client(),
+                AuthScopes::Calendar,
+                8847,
+                Some("me@gmail.com"),
+            )
+            .unwrap()
+        };
+        let (a, b) = (mk(), mk());
+        let (mut pa, mut pb) = (query_params(a.url()), query_params(b.url()));
+        for k in ["state", "code_challenge"] {
+            assert_ne!(pa.remove(k), pb.remove(k), "{k} repeated");
+        }
+        assert_eq!(pa, pb);
+        let b_state = query_params(b.url()).remove("state").unwrap();
+        assert!(
+            !a.state_matches(&b_state),
+            "one consent's state opens another"
+        );
+    }
+
+    fn scripted_consent(base: &str) -> LoopbackConsent {
+        LoopbackConsent::begin_at(
+            &test_client(),
+            AuthScopes::Calendar,
+            8847,
+            Some("me@gmail.com"),
+            &GoogleEndpoints {
+                token_url: format!("{base}/token"),
+                profile_url: format!("{base}/profile"),
+            },
+        )
+        .unwrap()
+    }
+
+    /// The guarded exchange behind both flows, end to end against a scripted
+    /// Google, sorts its refusals into the kinds the daemon's page shows.
+    #[test]
+    fn a_loopback_consent_sorts_its_refusals() {
+        let granted = format!("{GMAIL_READONLY_SCOPE} {}", CALENDAR_SCOPES.join(" "));
+
+        let base = scripted_google(vec![
+            token_answer(Some(&granted)),
+            json_answer("200 OK", r#"{"emailAddress":"Me@Gmail.com"}"#),
+        ]);
+        let (mailbox, token) = scripted_consent(&base)
+            .finish("the-code".into(), "me@gmail.com")
+            .unwrap_or_else(|e| panic!("a matching consent stores: {e:?}"));
+        assert_eq!(mailbox, "Me@Gmail.com");
+        assert!(token.grants_calendar());
+        assert_eq!(token.refresh_token.as_deref(), Some("fresh-refresh"));
+
+        let base = scripted_google(vec![
+            token_answer(Some(&granted)),
+            json_answer("200 OK", r#"{"emailAddress":"someone@else.com"}"#),
+        ]);
+        let refused = scripted_consent(&base).finish("the-code".into(), "me@gmail.com");
+        assert!(
+            matches!(refused, Err(ConsentFailure::WrongAccount(_))),
+            "{:?}",
+            refused.err()
+        );
+
+        // The calendar box unticked: Google hands back the Gmail grant alone.
+        let base = scripted_google(vec![token_answer(Some(GMAIL_READONLY_SCOPE))]);
+        let refused = scripted_consent(&base).finish("the-code".into(), "me@gmail.com");
+        assert!(
+            matches!(refused, Err(ConsentFailure::ScopesNotGranted(_))),
+            "{:?}",
+            refused.err()
+        );
+
+        let base = scripted_google(vec![json_answer(
+            "400 Bad Request",
+            r#"{"error":"invalid_grant"}"#,
+        )]);
+        let refused = scripted_consent(&base).finish("the-code".into(), "me@gmail.com");
+        assert!(
+            matches!(refused, Err(ConsentFailure::Failed(_))),
+            "{:?}",
+            refused.err()
+        );
     }
 }

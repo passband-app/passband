@@ -3485,10 +3485,15 @@ pub async fn get_stats(State(state): State<ApiState>) -> Result<impl IntoRespons
         )
     });
     let connect_command = connect_url.is_none().then_some("squelchd auth --calendar");
+    // `self_connect`: whether `POST /client/calendar/connect` runs the consent
+    // here (a self-host with an OAuth client). The client's one Connect button
+    // calls it when true and opens `connect_url` otherwise; `connect_command`
+    // stays for older builds that still print it.
     body["calendar"] = json!({
         "granted": granted,
         "connect_url": connect_url,
         "connect_command": connect_command,
+        "self_connect": crate::calendar_connect::self_connect(&state),
     });
     Ok(Json(body))
 }

@@ -657,6 +657,31 @@ the Calendar API, and no mail path loads the Calendar slot. Hosted is unchanged:
 control plane seals ONE token into the Read and Write slots, as before, and a
 calendar grant adds `calendar.events` and `calendarlist.readonly` to that one token.
 
+**The loopback consent endpoint (self-host only).** `POST /client/calendar/connect`
+(human door, bearer authed) lets the app's Connect button grant calendar on a
+daemon with no control plane. A daemon that knows a console origin answers 409
+and starts nothing; one with no OAuth client answers 409 too. Otherwise it mints a
+fresh `state` and PKCE pair through `squelch_core::auth::LoopbackConsent`, the
+builder `squelchd auth --calendar` uses, so the URL is the CLI's (calendar scopes,
+`access_type=offline`, `prompt=consent`, `include_granted_scopes=true`,
+`login_hint` set to the configured mailbox). The redirect lands on a listener bound
+to `127.0.0.1` only (port 8847, or `SQUELCH_AUTH_PORT`), which refuses non-loopback
+peers and serves one route, `/`. One consent is pending per daemon: a new call
+replaces it, a matching redirect consumes it, it expires after ten minutes, and
+the listener stops when nothing is pending. A redirect is redeemed only when its
+`state` matches the pending one in constant time; a wrong or stale `state` gets a
+plain page and changes nothing. The code then goes through the same guarded
+exchange as every other consent: the grant must include `calendar.events`, and
+Google's profile must name the configured mailbox (case-insensitive). Any refusal
+stores nothing and shows a page that names no address. A good consent is stored
+in the Calendar slot through the configured backend (keyring on macOS, file
+elsewhere) by the same call the CLI makes, the `granted` cache is dropped, and the
+calendar sync is kicked. Pages carry no scripts and no links, under
+`default-src 'none'`. Logs name the event kind only, never the code, the `state`,
+a token or an address. Anything on this machine can reach the listener while it is
+up, but a code it delivers is useless without the PKCE verifier held in the
+daemon, and only the redirect carrying the pending `state` is redeemed.
+
 **Credentials file writes.** The calendar resolver is a third writer of the
 credentials file beside the Gmail Read and Write stores, so every write goes
 through one read-modify-write (`credentials.rs:update_credentials_file`) under a

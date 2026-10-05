@@ -8,6 +8,7 @@
 mod agent;
 mod assistant;
 mod auth;
+mod calendar_connect;
 mod console;
 mod devices;
 mod error;
@@ -174,6 +175,14 @@ fn client_router(state: ApiState) -> Router {
         // most once per account per 30 seconds. HUMAN DOOR ONLY: the agent
         // door neither reads the calendar nor spends its quota.
         .route("/client/timeline/refresh", post(handlers::refresh_timeline))
+        // Connect Google Calendar on a SELF-HOST: the daemon runs the consent
+        // `squelchd auth --calendar` runs, on a loopback listener, and answers
+        // the consent URL. 409 on hosted, where the control plane runs it.
+        // HUMAN DOOR ONLY: the agent door can neither grant nor read calendar.
+        .route(
+            "/client/calendar/connect",
+            post(calendar_connect::connect_calendar),
+        )
         .route("/client/search", get(handlers::search))
         // The user's own sent mail. Human door only — this is the one listing
         // that reads `is_sent = 1`, and the agent door gets no such route: what

@@ -301,6 +301,24 @@ docker run --rm -p 8847:8847 \
 Import it the same way. Approve both screens with the same Google account, since
 one blob names one mailbox.
 
+**Google Calendar.** The app's calendar page has a Connect button. On your own
+daemon it asks squelchd to run the Google consent itself: the daemon hands the app
+a consent URL, your browser opens it, and Google sends you back to a listener the
+daemon runs on its own loopback, `127.0.0.1:8847` (set `SQUELCH_AUTH_PORT` to move
+it). That redirect has to reach the daemon's own loopback. When the daemon and
+the browser are on the same Mac, nothing is needed. When the daemon is on a NAS,
+forward the port first with `ssh -L 8847:127.0.0.1:8847 nas`, and note the same
+catch as step 3: inside the compose service above the listener is on the
+container's loopback, which the tunnel cannot reach, so this works only for a
+daemon running with host networking (or not in a container). Otherwise use the
+`auth` service from step 3:
+`docker compose run --rm auth auth --calendar --headless --port 8847`.
+The consent must be finished as the mailbox's own Google account and with the
+calendar box ticked, or nothing is stored. The terminal route does the same thing:
+`squelchd auth --calendar`, with `--headless` on a box with no browser (it prints
+the URL and waits on the same port). Calendar is optional and read only, and
+connecting it never touches the Gmail credentials.
+
 **Model triage.** Add `ANTHROPIC_API_KEY` to the environment and restart. Daily
 spend caps are on by default and tunable from the app's Settings without a
 restart.

@@ -145,6 +145,17 @@ pub struct ApiState {
     /// Google. `kick` is `None` when no loop runs (no OAuth client), and the
     /// endpoint then answers `kicked: false`. HUMAN DOOR ONLY.
     pub(crate) calendar_refresh: CalendarRefresh,
+    /// The one Google Calendar consent this daemon may have in flight for the
+    /// app's Connect button (`POST /client/calendar/connect`, self-host only),
+    /// and the loopback listener that waits for its redirect. Shared by every
+    /// clone, so a second Connect replaces the first. HUMAN DOOR ONLY.
+    pub(crate) calendar_consent: Arc<crate::calendar_connect::CalendarConsent>,
+    /// The loopback port that consent's listener binds: the headless CLI's
+    /// fixed port, or `SQUELCH_AUTH_PORT`.
+    pub(crate) calendar_consent_port: u16,
+    /// Where that consent's exchange talks to Google. Google's pinned pair in
+    /// production; see [`squelch_core::auth::GoogleEndpoints`].
+    pub(crate) calendar_consent_endpoints: Arc<squelch_core::auth::GoogleEndpoints>,
     /// The process's metrics registry, read by `/client/stats` to answer
     /// whether this mailbox's Gmail credential is currently working.
     ///
@@ -237,6 +248,23 @@ pub struct ApiState {
     pub(crate) unsub: crate::unsub_job::UnsubJobs,
 }
 
+/// The loopback port for the self-host calendar consent: `SQUELCH_AUTH_PORT`
+/// when it is a port number, else the headless CLI's fixed port, so one SSH
+/// tunnel serves both.
+fn auth_port_from_env() -> u16 {
+    let default = squelch_core::auth::DEFAULT_HEADLESS_PORT;
+    match std::env::var("SQUELCH_AUTH_PORT") {
+        Ok(raw) if !raw.trim().is_empty() => raw.trim().parse().unwrap_or_else(|_| {
+            eprintln!(
+                "squelch-api: SQUELCH_AUTH_PORT is not a port number; the calendar consent \
+                 listener uses {default}."
+            );
+            default
+        }),
+        _ => default,
+    }
+}
+
 /// The calendar sync kick and its per-account throttle. See
 /// [`ApiState::calendar_refresh`].
 #[derive(Clone, Default)]
@@ -244,6 +272,23 @@ pub(crate) struct CalendarRefresh {
     pub(crate) kick: Option<Arc<tokio::sync::Notify>>,
     pub(crate) last_kick:
         Arc<std::sync::Mutex<std::collections::HashMap<AccountId, std::time::Instant>>>,
+}
+
+impl CalendarRefresh {
+    /// Start a calendar sync now, past the 30 second floor, and restart that
+    /// floor. For a grant that just landed, which is worth a sync whenever the
+    /// page last asked for one. `false` when no sync loop runs.
+    pub(crate) fn kick_now(&self, account: AccountId) -> bool {
+        let Some(kick) = &self.kick else {
+            return false;
+        };
+        self.last_kick
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(account, std::time::Instant::now());
+        kick.notify_one();
+        true
+    }
 }
 
 /// What the human door needs to force a carrier pass: the poller's
@@ -439,6 +484,9 @@ impl ApiState {
             console_sso_url: None,
             calendar: None,
             calendar_refresh: CalendarRefresh::default(),
+            calendar_consent: Default::default(),
+            calendar_consent_port: squelch_core::auth::DEFAULT_HEADLESS_PORT,
+            calendar_consent_endpoints: Default::default(),
             sync_metrics: None,
             gmail_budget: None,
             console_allow_insecure_cookie: false,
@@ -657,6 +705,26 @@ impl ApiState {
     /// [`CalendarSync::kick_handle`]: squelch_core::gcal::sync::CalendarSync::kick_handle
     pub fn with_calendar_sync_kick(mut self, kick: Arc<tokio::sync::Notify>) -> Self {
         self.calendar_refresh.kick = Some(kick);
+        self
+    }
+
+    /// The loopback port the self-host calendar consent's listener binds.
+    /// `0` binds an ephemeral port (tests), and the consent URL then carries
+    /// the port that was bound.
+    pub fn with_calendar_consent_port(mut self, port: u16) -> Self {
+        self.calendar_consent_port = port;
+        self
+    }
+
+    /// Point the self-host calendar consent's exchange at `endpoints`. TESTS
+    /// ONLY: production keeps Google's pinned pair, and nothing reads this
+    /// from the environment or a config file.
+    #[doc(hidden)]
+    pub fn with_calendar_consent_endpoints(
+        mut self,
+        endpoints: squelch_core::auth::GoogleEndpoints,
+    ) -> Self {
+        self.calendar_consent_endpoints = Arc::new(endpoints);
         self
     }
 
@@ -932,6 +1000,7 @@ impl ApiState {
         );
         Ok(Self::new(store, account_id, token)
             .with_console_sso_url(std::env::var("SQUELCH_CONSOLE_SSO_URL").ok())
+            .with_calendar_consent_port(auth_port_from_env())
             .with_sharing(sharing))
     }
 

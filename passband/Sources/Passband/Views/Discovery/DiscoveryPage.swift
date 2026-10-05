@@ -27,12 +27,11 @@
 // MOTION BUDGET. Every row rests on its poster and plays only under the
 // pointer: one picture moving at a time, and only the one being looked at.
 //
-// A ROW IS A DOOR. Clicking one slides the column into the left half and opens
-// that set's guide in the right half. THE COLUMN NEVER CHANGES WIDTH: it is the
-// same measure centred on the page and in its half, so opening the guide moves
-// the list without re-wrapping a word of it. Clicking the open row, the guide's
-// close puts the column back; Esc leaves the page. In a window too narrow for both, the
-// guide takes the whole page.
+// ALWAYS TWO HALVES. The list is the left half and a guide is always open in
+// the right: the picture large and playing, then the gesture step by step. The
+// page opens on the first set not yet unlocked, and clicking a row swaps the
+// guide. There is no list-only state, so nothing slides or re-wraps. (The
+// window's minimum width leaves room for both; there is no narrow form.)
 //
 // Pure presentation: every input is passed in, so the harness can lay it out
 // in any state. `DiscoveryView` is what reads the store and acknowledges.
@@ -51,10 +50,9 @@ struct DiscoveryPage: View {
     /// False holds fresh rows in their old place at the top; flipping it is
     /// the arrival.
     var settled = true
-    /// The set whose guide is open, owned by the shell so Esc can close it.
-    @Binding var selection: FeatureSet?
+    /// The set whose guide is open. There is always one.
+    @Binding var selection: FeatureSet
 
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var width: CGFloat = 900
     /// HELD AT THE TOP THROUGH THE ARRIVAL. A scroll view keeps its place by
     /// anchoring to a row on screen, and the row on screen at arrival is the
@@ -65,37 +63,25 @@ struct DiscoveryPage: View {
     static let column: CGFloat = 520
     private static let gutter: CGFloat = 24
 
-    private var open: Bool { selection != nil }
-    /// Room for the list AND the guide. Narrower, the guide stands alone.
-    private var sideBySide: Bool { width >= 720 }
-    /// ONE MEASURE, open or closed: what fits in half the page, so the list
-    /// can slide into its half without a line of it re-wrapping.
     private var listWidth: CGFloat {
-        let room = sideBySide ? width / 2 : width
-        return max(0, min(Self.column, room - 2 * Self.gutter))
+        max(0, min(Self.column, width / 2 - 2 * Self.gutter))
     }
 
     var body: some View {
         HStack(spacing: 0) {
             list
-                // The container narrows; the column inside it does not.
-                .frame(maxWidth: open ? (sideBySide ? width / 2 : 0) : .infinity)
-                .clipped()
-                .opacity(open && !sideBySide ? 0 : 1)
-                .allowsHitTesting(!open || sideBySide)
-            if let set = selection {
-                Rectangle().fill(Palette.hairline).frame(width: 0.5)
-                    .transition(.opacity)
-                DiscoveryGuide(
-                    set: set, state: state(set), live: live, fixedTime: fixedTime,
-                    showsBack: !sideBySide
-                ) { selection = nil }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
-            }
+                .frame(width: width / 2)
+            Rectangle().fill(Palette.hairline).frame(width: 0.5)
+            DiscoveryGuide(set: selection, state: state(selection), live: live, fixedTime: fixedTime)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .animation(reduceMotion ? nil : .smooth(duration: 0.32), value: open)
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
+    }
+
+    /// WHERE THE PAGE OPENS: the most everyday set not yet unlocked, or the
+    /// first of all once everything is.
+    static func opening(_ state: (FeatureSet) -> SetState) -> FeatureSet {
+        FeatureSet.allCases.first { state($0) == .unseen } ?? FeatureSet.allCases[0]
     }
 
     private var list: some View {
@@ -121,7 +107,7 @@ struct DiscoveryPage: View {
                             eyebrow: unlocked.count <= 1 ? DiscoveryCopy.startHere : DiscoveryCopy.nextUp,
                             selected: selection == set, divider: !sectionEnds.contains(set),
                             live: live, fixedTime: fixedTime
-                        ) { selection = selection == set ? nil : set }
+                        ) { selection = set }
                             .id(set)
                     }
                 }
@@ -345,9 +331,6 @@ struct DiscoveryGuide: View {
     let state: SetState
     var live = true
     var fixedTime: Double? = nil
-    /// The narrow window's form: the guide stands alone, so it needs a way back.
-    var showsBack = false
-    let close: () -> Void
 
     var body: some View {
         ScrollView(.vertical) {
@@ -402,20 +385,6 @@ struct DiscoveryGuide: View {
             .padding(.top, 28)
             .padding(.bottom, 56)
             .frame(maxWidth: .infinity)
-        }
-        .overlay(alignment: showsBack ? .topLeading : .topTrailing) {
-            Button(action: close) {
-                Image(systemName: showsBack ? "chevron.left" : "xmark")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Palette.inkDim)
-                    .frame(width: 26, height: 26)
-                    .background(Circle().fill(Palette.hairline.opacity(0.5)))
-                    .contentShape(Circle())
-            }
-            .buttonStyle(.plain)
-            .help("Back to the list")
-            .accessibilityLabel("Back to the list")
-            .padding(12)
         }
         .accessibilityElement(children: .contain)
     }

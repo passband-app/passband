@@ -70,7 +70,7 @@ struct DiscoveryView: View {
     @State private var arrivedFresh: Set<FeatureSet>
     @State private var settled: Bool
     /// The set whose guide is open.
-    @State private var selection: FeatureSet?
+    @State private var selection: FeatureSet
 
     private var discovery: Discovery { Discovery.shared }
 
@@ -81,6 +81,7 @@ struct DiscoveryView: View {
         // workspace because the environment is not available yet in init.
         let still = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         _settled = State(initialValue: fresh.isEmpty || still)
+        _selection = State(initialValue: DiscoveryPage.opening(Discovery.shared.state(of:)))
     }
 
     var body: some View {
@@ -91,8 +92,7 @@ struct DiscoveryView: View {
                 live: activeState == .key, settled: settled, selection: $selection)
         }
         // Esc leaves, as on Usage: a full routed page needs an exit other
-        // than the rail. It leaves the WHOLE page, guide open or not: the
-        // guide has its own close, and Esc meaning two things is one too many.
+        // than the rail.
         .keyContext(.modal)
         .keyBindings(.modal, [
             KeyBinding("Escape", "back to sitrep") { store.setView(.sitrep) }

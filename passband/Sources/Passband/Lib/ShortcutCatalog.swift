@@ -44,6 +44,18 @@ enum ShortcutCatalog {
                 Item(["t"], "tune sender rule"),
                 Item(["f"], "search this sender"),
                 Item(["u"], "undo last action"),
+                Item(["p"], "purge Reading, one sender at a time"),
+            ]),
+        Group(
+            title: "Purge",
+            items: [
+                Item(["u"], "unsubscribe from this sender"),
+                Item(["m"], "mute this sender"),
+                Item(["e"], "clear their mail, stay subscribed"),
+                Item(["s"], "skip, leave as is"),
+                Item(["z"], "back one card"),
+                Item(["Esc"], "review what you chose"),
+                Item(["Enter"], "confirm, on the summary"),
             ]),
         Group(
             title: "Thread viewer",

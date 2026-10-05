@@ -526,6 +526,13 @@ run_suite purge \
   Sources/Passband/Lib/Purge.swift \
   Tests/PurgeTests.swift
 
+# The smart done receipt: the headline, one line per reason in good-news
+# terms, the plurals, and that the lines account for everything cleared even
+# when a newer daemon names a reason this build has no words for.
+run_suite smart-done \
+  Sources/Passband/Lib/SmartDone.swift \
+  Tests/SmartDoneTests.swift
+
 # Reading groups canonical membership without reconstructing triage from copy.
 run_suite reading \
   Sources/Passband/Model/SubjectText.swift \

@@ -109,6 +109,9 @@ enum Analytics {
         // The purge deck: how many cards it opened with, and what a finished
         // one came to. Counts and a duration; never a sender.
         "purge_started", "purge_finished",
+        // Smart done on the Reading zone: how much it cleared, split by the
+        // daemon's reason codes as counts, and whether it was taken back.
+        "smart_done", "smart_done_undone",
         "connect_succeeded", "connection_lost", "connection_restored",
         "account_added",
         "tour_started", "tour_completed", "tour_skipped", "whats_new_shown",

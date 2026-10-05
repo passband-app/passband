@@ -896,6 +896,58 @@ struct UnsubscribeRecord: Codable, Sendable, Hashable, Identifiable {
     var id: String { sender }
 }
 
+// MARK: - reading smart done
+
+/// `POST /client/v2/reading/smart_done`: the daemon marked expired and plainly
+/// unwanted Reading mail done, and says what it took and why.
+struct SmartDoneResult: Decodable, Sendable, Hashable {
+    /// The handle the undo takes. nil when nothing was cleared, or when this
+    /// daemon keeps no batch to undo.
+    var batch_id: String?
+    var cleared: Int
+    var senders: Int
+    /// Reason code to count. Codes this build has no line for are still
+    /// counted in `cleared`; `SmartDoneCopy` folds them into one plain line.
+    var by_reason: [String: Int]
+    var message_ids: [Int]
+    /// Whether the model pass ran: `ok`, or one of the `skipped_` codes.
+    var model: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case batch_id, cleared, senders, by_reason, message_ids, model
+    }
+
+    init(
+        batch_id: String?, cleared: Int, senders: Int, by_reason: [String: Int],
+        message_ids: [Int], model: String? = "ok"
+    ) {
+        self.batch_id = batch_id
+        self.cleared = cleared
+        self.senders = senders
+        self.by_reason = by_reason
+        self.message_ids = message_ids
+        self.model = model
+    }
+
+    /// Lenient about everything but the count: a receipt can be drawn from
+    /// `cleared` alone, and a daemon a release ahead must not cost the whole
+    /// answer over a field this build does not read.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        batch_id = try c.decodeIfPresent(String.self, forKey: .batch_id)
+        cleared = try c.decode(Int.self, forKey: .cleared)
+        senders = try c.decodeIfPresent(Int.self, forKey: .senders) ?? 0
+        by_reason = try c.decodeIfPresent([String: Int].self, forKey: .by_reason) ?? [:]
+        message_ids = try c.decodeIfPresent([Int].self, forKey: .message_ids) ?? []
+        model = try c.decodeIfPresent(String.self, forKey: .model)
+    }
+}
+
+/// `POST /client/v2/reading/smart_done/{batch_id}/undo`.
+struct SmartDoneUndone: Decodable, Sendable, Hashable {
+    var reopened: Int
+}
+
 // MARK: - reading purge
 
 /// `GET /client/v2/reading/senders`: every sender with open mail in Reading,
@@ -932,7 +984,9 @@ struct PurgeSender: Decodable, Sendable, Hashable, Identifiable {
         var read_sample: Int
         var median_read_fraction: Double?
         var median_words: Int?
-        var per_month: Double
+        /// nil until the daemon's ledger covers a week: three emails in a
+        /// day is not "ninety a month", and the daemon will not say so.
+        var per_month: Double?
     }
 
     /// The rule governing the sender, if any. Not a `SenderRule`: the daemon

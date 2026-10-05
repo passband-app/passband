@@ -3795,7 +3795,7 @@ private final class WheelYield {
     /// the only thing on screen that moves on its own while you read, slow
     /// enough to sit in the corner of the eye. All the way round, never one
     /// edge lit. Still under Reduce Motion.
-    private struct FlowBorder: View {
+    struct FlowBorder: View {
         let radius: CGFloat
         let moving: Bool
 

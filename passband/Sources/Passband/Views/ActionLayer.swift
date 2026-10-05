@@ -41,17 +41,48 @@ struct ActionLayer: View {
             // opposite corner, so a job and an undo chip never fight for one.
             // Sitrep only, with no reader or composer over it: `u` leaves the
             // reader on purpose, and this is where the user lands.
-            if showsUnsubscribeTray {
+            //
+            // THE SMART DONE RECEIPT SHARES THE CORNER, under the tray: one
+            // column pinned to the bottom edge, so a job starting while a
+            // receipt is up pushes nothing sideways and covers nothing.
+            if showsUnsubscribeTray || showsSmartDoneReceipt {
                 VStack(spacing: 0) {
                     Spacer(minLength: 0)
                     HStack(spacing: 0) {
                         Spacer(minLength: 0)
-                        UnsubscribeTray().fixedSize()
+                        VStack(alignment: .trailing, spacing: Space.s10) {
+                            if showsUnsubscribeTray {
+                                UnsubscribeTray().fixedSize()
+                                    .transition(.opacity)
+                            }
+                            if showsSmartDoneReceipt, let receipt = store.smartDoneReceipt {
+                                SmartDoneReceiptCard(receipt: receipt)
+                                    .id(receipt.id)
+                                    .transition(
+                                        .move(edge: .trailing).combined(with: .opacity))
+                            }
+                        }
                     }
                 }
                 .padding(.trailing, Space.scaled(18))
                 .padding(.bottom, Space.scaled(18))
                 .transition(.opacity)
+                .animation(.smooth(duration: 0.3), value: store.smartDoneReceipt?.id)
+                .animation(.smooth(duration: 0.26), value: showsUnsubscribeTray)
+            }
+
+            // THE PURGE: the deck and its confirm step over the blurred
+            // board, then the end card. Here and not on the sitrep because
+            // everything under this layer is blurred while a deck is up.
+            if let session = store.purge {
+                PurgeOverlay(session: session)
+            }
+            if let finish = store.purgeFinished {
+                // Clears only ITS OWN finish, as the walk's card does.
+                PurgeComplete(finish: finish) {
+                    if store.purgeFinished?.id == finish.id { store.dismissPurgeFinished() }
+                }
+                .id(finish.id)
             }
 
             if let request = store.ruleEditor {
@@ -116,10 +147,20 @@ struct ActionLayer: View {
         .background { ViolationScanKeeper(scan: scanViolations) }
     }
 
+    /// NOT WHILE A PURGE OR ITS END CARD IS UP. A commit starts a job per
+    /// automatic unsubscribe, and a column of spinners and "Unsubscribed from"
+    /// cards racing the celebration would be the same news told twice, in
+    /// two places, at once. The tray is there when the card leaves, with
+    /// whatever is still running or needs a person.
     private var showsUnsubscribeTray: Bool {
-        store.activeView == .sitrep && store.threadId == nil && !store.composeOpen
-            && !UnsubscribeJobs.shared.items.isEmpty
+        store.showsSitrepCorner && !purgeUp && !UnsubscribeJobs.shared.items.isEmpty
     }
+
+    private var showsSmartDoneReceipt: Bool {
+        store.showsSitrepCorner && !purgeUp && store.smartDoneReceipt != nil
+    }
+
+    private var purgeUp: Bool { store.purge != nil || store.purgeFinished != nil }
 
     // MARK: - toasts
 
@@ -464,9 +505,10 @@ private struct ViolationScanKeeper: View {
 /// window closes. Drawn from the clock rather than animated to a value, like
 /// the reader's hold ring, so it empties on the same second the chip leaves
 /// even when it mounts late or the layer re-renders mid-sweep.
-private struct UndoCountdown: View {
+struct UndoCountdown: View {
     let startedAt: Date
     let expiresAt: Date
+    var tint: Color = Palette.warn
 
     private static let size: CGFloat = 11
 
@@ -479,7 +521,7 @@ private struct UndoCountdown: View {
                     .stroke(Palette.hairlineStrong, lineWidth: 1.75)
                 Circle()
                     .trim(from: 0, to: left)
-                    .stroke(Palette.warn, style: StrokeStyle(lineWidth: 1.75, lineCap: .round))
+                    .stroke(tint, style: StrokeStyle(lineWidth: 1.75, lineCap: .round))
                     .rotationEffect(.degrees(-90))
             }
             .frame(width: Self.size, height: Self.size)

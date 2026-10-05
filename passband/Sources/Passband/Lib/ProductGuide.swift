@@ -204,6 +204,13 @@ enum ProductGuide {
         - Hover a package and press e to clear it until its next update. Right-click has "Clear this package".
         - Hover a Reading card and press e to mark everything from that sender done. That one cannot be undone.
 
+        Clearing out Reading (two pills at the top right of the Reading card, on the Mac):
+        - "smart done" clears what has plainly run its course in one press: events that already happened, offers that ended, mail that is no longer current, and promotions and senders the user never opens. It can take up to about 20 seconds. A receipt card at the bottom right then says how many emails were cleared and why, with an Undo button. Undo, or the u key, puts all of it back, and stays for 30 seconds.
+        - "purge", or the p key, goes through Reading one sender at a time, starting with the ones the user reads least. Each card shows what the user did with that sender's mail (how many were opened, how long they were read, how many arrive a month) and that sender's latest subjects.
+        - On a purge card: u unsubscribes, m mutes the sender (a rule hides their future mail), e clears their mail and stays subscribed, s skips and leaves everything as it is. A choice the card cannot offer is greyed out with the reason. The suggested choice is the blue one. z or Delete goes back a card.
+        - Nothing is sent while going through the cards. Esc, or the last card, opens a summary of the choices. Return on that summary applies them, z goes back, and Esc asks before throwing them away.
+        - Some senders can only be unsubscribed from on their own website. Their card says "you finish on their site". Their mail is cleared, and the card at the end lists them under "Finish on their site" with an Open button each. The user stays subscribed to those until they finish there.
+
         Other things on the page:
         - Clicking the headline asks for a different one. The name in the greeting is set in Settings > General > You.
         - With nothing in For your eyes the page says there is no important mail, shows the day's tally and links to all mail.

@@ -261,10 +261,10 @@ struct PurgeSummary: Hashable, Sendable {
             case nil: onTheirSite += 1
             case .unsubscribe:
                 unsubscribed += 1
-                perMonth += card.sender.signals.per_month
+                perMonth += card.sender.signals.per_month ?? 0
             case .mute:
                 muted += 1
-                perMonth += card.sender.signals.per_month
+                perMonth += card.sender.signals.per_month ?? 0
             case .clear: cleared += 1
             case .skip: skipped += 1
             }
@@ -342,5 +342,133 @@ enum PurgeCopy {
             out.append(digit)
         }
         return String(out.reversed())
+    }
+}
+
+// MARK: - what the deck, the confirm step and the end card say
+
+/// How the evidence's own numbers are drawn as marks. A row of 23 marks with
+/// one lit says "opened 1 of 23" faster than the sentence does, but only
+/// while each mark is still an email: past `cap` the row is drawn at `cap`
+/// and the lit share is kept in proportion, never rounded away to nothing or
+/// up to everything.
+enum PurgeMarks {
+    static let cap = 24
+
+    static func split(lit: Int, of total: Int, cap: Int = PurgeMarks.cap) -> (lit: Int, total: Int) {
+        let total = max(0, total)
+        let lit = min(max(0, lit), total)
+        guard total > cap else { return (lit, total) }
+        var scaled = Int((Double(lit) / Double(total) * Double(cap)).rounded())
+        // One opened in two hundred is still one: a row with none lit would
+        // say "never". And one unopened is still one.
+        if lit > 0 { scaled = max(1, scaled) }
+        if lit < total { scaled = min(cap - 1, scaled) }
+        return (scaled, cap)
+    }
+
+    /// A month as thirty days, with about `perMonth` of them carrying mail.
+    static func days(perMonth: Double) -> (lit: Int, total: Int) {
+        (min(30, max(0, Int(perMonth.rounded()))), 30)
+    }
+}
+
+extension PurgeCopy {
+    /// The four choices as the card names them.
+    static func title(_ decision: PurgeDecision) -> String {
+        switch decision {
+        case .unsubscribe: "Unsubscribe"
+        case .mute: "Mute"
+        case .clear: "Clear"
+        case .skip: "Skip"
+        }
+    }
+
+    /// The few words under each choice: what it does, or why it is not on
+    /// offer. An unsubscribe the app cannot finish says so HERE, before it is
+    /// chosen, not on the end card after.
+    static func caption(_ decision: PurgeDecision, on card: PurgeCard) -> String {
+        let allowed = card.allowed.contains(decision)
+        switch decision {
+        case .unsubscribe:
+            if !allowed { return "no link found" }
+            return card.unsubscribeIsOnTheirSite ? "you finish on their site" : "ask them to stop"
+        case .mute:
+            return allowed ? "hide what they send" : "already muted"
+        case .clear:
+            return "stay subscribed"
+        case .skip:
+            return "leave as is"
+        }
+    }
+
+    /// Said aloud as a decision is staged. STAGED, in the words: nothing has
+    /// been sent, and a listener cannot see the card that says so.
+    static func staged(_ decision: PurgeDecision, name: String) -> String {
+        switch decision {
+        case .unsubscribe: "Will unsubscribe from \(name)."
+        case .mute: "Will mute \(name)."
+        case .clear: "Will clear \(name) and stay subscribed."
+        case .skip: "Skipped \(name)."
+        }
+    }
+
+    /// The confirm step: what one press will do, a line per kind, in the
+    /// order they matter. Kinds with nothing staged are left out.
+    static func plan(_ summary: PurgeSummary) -> [String] {
+        var out: [String] = []
+        let ending = summary.unsubscribed + summary.onTheirSite
+        if ending > 0 { out.append("Unsubscribe from \(ending)") }
+        if summary.muted > 0 { out.append("Mute \(summary.muted)") }
+        if summary.cleared > 0 { out.append("Clear \(summary.cleared) and stay subscribed") }
+        return out
+    }
+
+    /// Unsubscribes the app cannot finish, said plainly BEFORE the press.
+    /// nil when there are none.
+    static func siteNote(_ summary: PurgeSummary) -> String? {
+        let n = summary.onTheirSite
+        guard n > 0 else { return nil }
+        let ending = summary.unsubscribed + summary.onTheirSite
+        if ending == 1 {
+            return "That one needs a visit to the sender's site afterwards. Until then you are still subscribed."
+        }
+        let which = n == ending ? (n == 2 ? "Both" : "All \(n)") : "\(n) of them"
+        let verb = n == 1 ? "needs" : "need"
+        let those = n == 1 ? "that one" : "those"
+        return "\(which) \(verb) a visit to the sender's site afterwards. Until then you are still subscribed to \(those)."
+    }
+
+    /// "31 emails leave Reading". nil when none do.
+    static func leaving(_ emails: Int) -> String? {
+        guard emails > 0 else { return nil }
+        return emails == 1 ? "1 email leaves Reading" : "\(emails) emails leave Reading"
+    }
+
+    /// "about 60 fewer a month". nil at zero: clearing ends nothing.
+    static func fewer(_ perMonth: Int) -> String? {
+        guard perMonth > 0 else { return nil }
+        return "about \(perMonth) fewer a month"
+    }
+
+    /// The end card's headline: the best true thing about what happened.
+    static func finished(_ summary: PurgeSummary) -> String {
+        if summary.fewerPerMonth > 0 {
+            return summary.fewerPerMonth == 1
+                ? "About 1 fewer email a month." : "About \(summary.fewerPerMonth) fewer emails a month."
+        }
+        if summary.emailsCleared > 0 {
+            return summary.emailsCleared == 1
+                ? "1 email cleared." : "\(summary.emailsCleared) emails cleared."
+        }
+        return "Reading is lighter."
+    }
+
+    /// Decisions that did not go through. nil when all did.
+    static func failedNote(_ failed: Int) -> String? {
+        guard failed > 0 else { return nil }
+        return failed == 1
+            ? "1 did not go through and is still in Reading."
+            : "\(failed) did not go through and are still in Reading."
     }
 }

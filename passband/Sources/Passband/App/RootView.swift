@@ -115,6 +115,14 @@ struct RootView: View {
         // connected to. Hung on the daemon's answer for the same reason as the
         // share ask: it arrives with the first stats and not before.
         .overlay { TestFlightNudgeModal() }
+        // Screenshots of the purge and smart done over canned senders. A
+        // beat after launch so the first connect's wipe cannot clear it; a
+        // no-op unless the launch environment asked (Lib/PurgeFixture.swift).
+        .task {
+            guard PurgeFixture.active else { return }
+            try? await Task.sleep(for: .milliseconds(2500))
+            store.applyLaunchFixture()
+        }
         .onChange(of: store.iosConnected) { _, connected in
             TestFlightNudge.shared.askIfEarned(
                 iosConnected: connected, othersShowing: ShareNudge.shared.showingNudge)
@@ -647,6 +655,16 @@ struct MainShell: View {
         // for surface bindings (the thread viewer's `u` = unsubscribe).
         bindings.append(
             KeyBinding(declining: "u", "undo last action") {
+                // A smart done receipt on screen is an undo too. Whichever
+                // of the two happened LAST is the one `u` takes back, which
+                // is what the key means everywhere else.
+                if store.smartDoneUndoOffered,
+                    let receipt = store.smartDoneReceipt,
+                    (store.undos.last?.createdAt ?? .distantPast) < receipt.createdAt
+                {
+                    Task { await store.undoSmartDone() }
+                    return true
+                }
                 guard !store.undos.isEmpty else { return false }
                 Task { await store.fireUndo() }
                 return true

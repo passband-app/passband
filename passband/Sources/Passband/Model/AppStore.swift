@@ -841,6 +841,10 @@ final class AppStore {
     /// end by asking the real daemon to unsubscribe from fixture message ids.
     @discardableResult
     func startPurge() async -> PurgeStart {
+        if PurgeFixture.active {
+            openFixtureDeck()
+            return .started
+        }
         guard !RehearsalMode.isEnabled else { return .unavailable }
         guard purge == nil else { return .started }
         let e = epoch
@@ -861,7 +865,24 @@ final class AppStore {
         purge = PurgeSession(
             deck: deck, ledgerDays: page.ledger_days, totalSenders: page.totalSenders)
         Analytics.capture("purge_started", ["cards": deck.cards.count])
+        // Built now, off the main thread, so the end card does not hitch
+        // compiling a shader at the moment it should feel good.
+        #if os(macOS)
+            PhosphorScene.purgeDone.warm()
+        #endif
         return .started
+    }
+
+    /// True while `beginPurge` is fetching the senders: the pill's calm wait.
+    var purgeStarting = false
+
+    /// The purge pill and `p`: open the deck, and say why when it cannot.
+    func beginPurge() async {
+        guard !purgeStarting, purge == nil else { return }
+        purgeStarting = true
+        let result = await startPurge()
+        purgeStarting = false
+        if let toast = result.toast { pushToast(toast, result == .failed ? .error : .info) }
     }
 
     /// Stage a decision for the card on screen. False when the card does not
@@ -941,6 +962,10 @@ final class AppStore {
     func commitPurge() async {
         guard let session = purge, session.phase == .confirming else { return }
         purge?.phase = .applying
+        if PurgeFixture.active {
+            await commitFixturePurge(session)
+            return
+        }
         let e = epoch
         // Captured BEFORE the first request, as the reader does: a job that
         // starts under an older generation belongs to another account's tray.
@@ -1138,6 +1163,15 @@ final class AppStore {
         guard purgeFinished?.sites.contains(site) == true,
             purgeFinished?.opening.contains(site.id) != true
         else { return }
+        if PurgeFixture.active {
+            // No request and no browser: the row just goes, after a beat long
+            // enough to see what "in flight" looks like.
+            purgeFinished?.opening.insert(site.id)
+            try? await Task.sleep(for: .milliseconds(900))
+            purgeFinished?.opening.remove(site.id)
+            purgeFinished?.sites.removeAll { $0.id == site.id }
+            return
+        }
         switch site.step {
         case .page(let url):
             Opener.open(url)
@@ -1174,6 +1208,318 @@ final class AppStore {
     /// The end card has been seen.
     func dismissPurgeFinished() {
         purgeFinished = nil
+    }
+
+    /// The latest summary lines for a sender on the deck, newest first, so
+    /// the card can show what their mail looks like. Read off the Reading
+    /// board already on screen, matched by address: no request.
+    func purgeSummaries(for address: String, limit: Int = 3) -> [String] {
+        let lines: [String]
+        if PurgeFixture.active {
+            lines = PurgeFixture.summaries[address] ?? []
+        } else {
+            lines =
+                zones.reading.first { $0.address == address }?.items.map(\.one_line) ?? []
+        }
+        var seen = Set<String>()
+        return lines.map(Reading.cleanSummary)
+            .filter { !$0.isEmpty && seen.insert($0).inserted }
+            .prefix(limit).map { $0 }
+    }
+
+    // MARK: purge and smart done fixtures (see Lib/PurgeFixture.swift)
+
+    /// Put the app in the state the launch environment asked for. Called once
+    /// by the window, a beat after it is up. Does nothing in a normal launch.
+    func applyLaunchFixture() {
+        if let mode = PurgeFixture.purge {
+            switch mode {
+            case .deck(let skip):
+                openFixtureDeck()
+                // Decided the way the walked fixtures are, so the tally
+                // above the card has something on it. Never past the last
+                // card: the deck would close itself.
+                let staged = PurgeFixture.staged(siteBound: true)
+                for i in 0..<min(skip, (purge?.deck.cards.count ?? 1) - 1) {
+                    purge?.deck.decide(i < staged.count ? staged[i] : .skip)
+                }
+            case .confirm, .applying:
+                openFixtureDeck(staged: PurgeFixture.staged(siteBound: true))
+                if mode == .applying { purge?.phase = .applying }
+            case .finish, .finishSites:
+                openFixtureDeck(staged: PurgeFixture.staged(siteBound: mode == .finishSites))
+                guard let session = purge else { return }
+                purge = nil
+                purgeFinished = fixtureFinish(session, failing: mode == .finishSites)
+            }
+        }
+        if let mode = PurgeFixture.smartDone {
+            switch mode {
+            case .working: smartDoneWorking = true
+            case .receipt: showSmartDoneReceipt(PurgeFixture.smartDoneResult)
+            }
+        }
+    }
+
+    private func openFixtureDeck(staged: [PurgeDecision] = []) {
+        var deck = PurgeDeck(senders: PurgeFixture.senders)
+        for decision in staged { deck.decide(decision) }
+        purgeFinished = nil
+        purge = PurgeSession(
+            deck: deck, ledgerDays: PurgeFixture.ledgerDays, totalSenders: deck.cards.count)
+        if !staged.isEmpty {
+            purge?.deck.finishEarly()
+            purge?.phase = .confirming
+        }
+    }
+
+    /// What a simulated commit comes to: every staged decision "lands" as
+    /// asked, a site-bound unsubscribe becomes a row to finish, and (when
+    /// asked) one sender fails so that line can be seen. Sends nothing.
+    private func fixtureFinish(_ session: PurgeSession, failing: Bool) -> PurgeFinish {
+        var outcomes: [String: PurgeOutcome] = [:]
+        var sites: [PurgeFinish.Site] = []
+        for (card, decision) in session.deck.plan where decision != .skip {
+            if failing, card.id == PurgeFixture.failing {
+                outcomes[card.id] = .failed
+            } else if decision == .unsubscribe, card.unsubscribeIsOnTheirSite {
+                outcomes[card.id] = .onTheirSite(emailsCleared: card.sender.open_count)
+                sites.append(
+                    PurgeFinish.Site(
+                        sender: card.sender.sender, displayName: card.sender.display_name,
+                        step: .page(url: "https://example.com/unsubscribe"), refused: nil))
+            } else {
+                outcomes[card.id] = .applied(decision, emailsCleared: card.sender.open_count)
+            }
+        }
+        return PurgeFinish(
+            summary: PurgeSummary(deck: session.deck, outcomes: outcomes),
+            duration: Date().timeIntervalSince(session.startedAt), sites: sites)
+    }
+
+    private func commitFixturePurge(_ session: PurgeSession) async {
+        try? await Task.sleep(for: .milliseconds(1800))
+        guard purge?.startedAt == session.startedAt else { return }
+        purge = nil
+        purgeFinished = fixtureFinish(session, failing: false)
+    }
+
+    // MARK: smart done
+
+    /// SMART DONE: one press on the Reading zone and the daemon marks expired
+    /// and plainly unwanted mail done. What it took is shown as a receipt
+    /// with an undo that reopens exactly that batch.
+    struct SmartDoneReceipt: Equatable, Identifiable {
+        let id = UUID()
+        /// nil when this daemon kept no batch: a receipt with no undo.
+        var batchId: String?
+        var cleared: Int
+        var senders: Int
+        var byReason: [String: Int]
+        var messageIds: [Int]
+        /// The model pass was meant to run and did not.
+        var modelMissed: Bool
+        var createdAt = Date()
+        /// When the receipt, and the undo on it, leave.
+        var expiresAt: Date
+        /// The undo request is out.
+        var undoing = false
+    }
+    /// The daemon is working on it: up to about twenty seconds.
+    var smartDoneWorking = false
+    var smartDoneReceipt: SmartDoneReceipt?
+
+    /// How long a receipt and its undo stay. Six times an ordinary undo chip:
+    /// this one took a batch of mail nobody looked at one by one, and reading
+    /// what it took is the point of showing it.
+    static let smartDoneUndoTTL: TimeInterval = 30
+    /// A receipt with nothing to undo is only news.
+    private static let smartDoneNewsTTL: TimeInterval = 9
+
+    /// The receipt is on screen with a live undo, so `u` means that. Only
+    /// where the receipt is drawn (the bare sitrep): a key must not undo
+    /// something the person cannot see.
+    var smartDoneUndoOffered: Bool {
+        guard let receipt = smartDoneReceipt else { return false }
+        return receipt.batchId != nil && !receipt.undoing && showsSitrepCorner
+    }
+
+    /// The sitrep with nothing over it: where the bottom-right corner's cards
+    /// (the unsubscribe tray, the smart done receipt) are drawn.
+    var showsSitrepCorner: Bool {
+        activeView == .sitrep && threadId == nil && !composeOpen
+    }
+
+    /// The press. Asks the daemon, takes what it cleared off the board at
+    /// once, and puts up the receipt.
+    ///
+    /// NEVER FROM THE PRACTICE INBOX: its mail is fixtures, and the real
+    /// daemon would be asked to clean a mailbox the person is not looking at.
+    func runSmartDone() async {
+        guard !smartDoneWorking else { return }
+        if PurgeFixture.active {
+            smartDoneWorking = true
+            try? await Task.sleep(for: .seconds(3))
+            smartDoneWorking = false
+            showSmartDoneReceipt(PurgeFixture.smartDoneResult)
+            return
+        }
+        guard !RehearsalMode.isEnabled else {
+            pushToast(SmartDoneCopy.unavailable, .info)
+            return
+        }
+        let e = epoch
+        smartDoneWorking = true
+        // A second run closes the first one's undo: the daemon undoes by
+        // batch, and two receipts in one corner would be two countdowns.
+        smartDoneReceipt = nil
+        let result: SmartDoneResult?
+        do {
+            result = try await APIClient.shared.smartDone()
+        } catch let error as APIError where error.status == 429 {
+            // One press at a time, daemon-side: another device got there
+            // first. Its sweep is this mailbox's too, so show the result.
+            guard e == epoch else { return }
+            smartDoneWorking = false
+            pushToast(SmartDoneCopy.alreadyRunning, .info)
+            await refreshZones(force: true)
+            return
+        } catch {
+            guard e == epoch else { return }
+            smartDoneWorking = false
+            pushToast(SmartDoneCopy.failed, .error)
+            // A timeout is not proof nothing happened: show what the daemon
+            // has now rather than what the board had before.
+            await refreshZones(force: true)
+            return
+        }
+        // The OLD account's daemon answered; its ids mean nothing here. The
+        // switch's wipe already put the pill back to rest.
+        guard e == epoch else { return }
+        smartDoneWorking = false
+        guard let result else {
+            pushToast(SmartDoneCopy.unavailable, .info)
+            return
+        }
+        // Counts only: never a sender, an address or a word of mail.
+        Analytics.capture(
+            "smart_done",
+            [
+                "cleared": result.cleared,
+                "senders": result.senders,
+                "event_passed": result.by_reason["event_passed"] ?? 0,
+                "offer_ended": result.by_reason["offer_ended"] ?? 0,
+                "expired": result.by_reason["expired"] ?? 0,
+                "ignored_sender": result.by_reason["ignored_sender"] ?? 0,
+                "stale_promo": result.by_reason["stale_promo"] ?? 0,
+                "model_ran": result.model == "ok",
+                "undoable": result.batch_id != nil,
+            ])
+        guard result.cleared > 0 else {
+            pushToast(SmartDoneCopy.nothing(model: result.model), .info)
+            return
+        }
+        showSmartDoneReceipt(result)
+        await sweepResolved(result.message_ids, epoch: e)
+        guard e == epoch else { return }
+        // The tiles left optimistically; this makes the daemon's list the
+        // thing on screen, as `commitPurge` does.
+        await refreshZones(force: true)
+    }
+
+    private func showSmartDoneReceipt(_ result: SmartDoneResult) {
+        let ttl = result.batch_id == nil ? Self.smartDoneNewsTTL : Self.smartDoneUndoTTL
+        let receipt = SmartDoneReceipt(
+            batchId: result.batch_id, cleared: result.cleared, senders: result.senders,
+            byReason: result.by_reason, messageIds: result.message_ids,
+            modelMissed: SmartDoneCopy.modelMissed(result.model),
+            expiresAt: Date().addingTimeInterval(ttl))
+        smartDoneReceipt = receipt
+        let id = receipt.id
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(ttl))
+            // Not while its undo is out: that request's answer still has to
+            // find the receipt it belongs to.
+            guard let self, self.smartDoneReceipt?.id == id, self.smartDoneReceipt?.undoing != true
+            else { return }
+            self.smartDoneReceipt = nil
+        }
+    }
+
+    func dismissSmartDoneReceipt() {
+        guard smartDoneReceipt?.undoing != true else { return }
+        smartDoneReceipt = nil
+    }
+
+    /// Reopen exactly what the receipt on screen cleared.
+    func undoSmartDone() async {
+        guard let receipt = smartDoneReceipt, !receipt.undoing, let batch = receipt.batchId
+        else { return }
+        smartDoneReceipt?.undoing = true
+        if PurgeFixture.active {
+            try? await Task.sleep(for: .milliseconds(700))
+            smartDoneReceipt = nil
+            pushToast(SmartDoneCopy.undone(reopened: receipt.cleared), .info)
+            return
+        }
+        let e = epoch
+        do {
+            let undone = try await APIClient.shared.undoSmartDone(batchId: batch)
+            // Reopened on the OLD account's daemon: nothing to tell this one.
+            guard e == epoch else { return }
+            unresolve(Set(receipt.messageIds))
+            if smartDoneReceipt?.id == receipt.id { smartDoneReceipt = nil }
+            pushToast(SmartDoneCopy.undone(reopened: undone.reopened), .info)
+            Analytics.capture("smart_done_undone", ["reopened": undone.reopened])
+            // The refresh after the clear took these tiles out of the zone's
+            // rows for real, so un-resolving alone shows nothing: the board
+            // has to be read again. Forced, to outlast a pass already out.
+            await refreshZones(force: true)
+            await SitrepPoller.shared.pull()
+        } catch {
+            guard e == epoch else { return }
+            if smartDoneReceipt?.id == receipt.id { smartDoneReceipt?.undoing = false }
+            pushToast("Undo did not go through. Try again.", .error)
+        }
+    }
+
+    /// Take a batch of resolved mail off the Reading zone AS A SWEEP: sender
+    /// by sender in the order the board draws them, a few at a time, so the
+    /// eye sees the zone being cleared rather than a grid that blinked. Ids
+    /// not on the board are simply recorded.
+    private func sweepResolved(_ ids: [Int], epoch e: Int) async {
+        let all = Set(ids)
+        guard !all.isEmpty else { return }
+        var onBoard: [[Int]] = []
+        var seen = Set<Int>()
+        for sender in Reading.prune(zones.reading, resolved: resolvedIds) {
+            let mine = sender.items.map(\.id).filter(all.contains)
+            guard !mine.isEmpty else { continue }
+            onBoard.append(mine)
+            seen.formUnion(mine)
+        }
+        noteResolved(all.subtracting(seen))
+        guard !onBoard.isEmpty else { return }
+        #if os(macOS)
+            let still = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        #else
+            let still = UIAccessibility.isReduceMotionEnabled
+        #endif
+        if still {
+            withAnimation(.easeOut(duration: 0.25)) { noteResolved(seen) }
+            return
+        }
+        // At most eight waves however many tiles there are: the sweep should
+        // take about half a second whether it clears four senders or forty.
+        let perWave = max(1, Int((Double(onBoard.count) / 8).rounded(.up)))
+        var i = 0
+        while i < onBoard.count {
+            guard e == epoch else { return }
+            let wave = Set(onBoard[i..<min(i + perWave, onBoard.count)].joined())
+            withAnimation(.smooth(duration: 0.42)) { noteResolved(wave) }
+            i += perWave
+            try? await Task.sleep(for: .milliseconds(60))
+        }
     }
     var readingMail = false
     var readingStack: Bool {
@@ -2298,6 +2644,10 @@ final class AppStore {
         // apply in flight sees the epoch move and reports to nobody.
         purge = nil
         purgeFinished = nil
+        // A smart done in flight was asked of the old daemon, and a receipt's
+        // undo names a batch the new one never made.
+        smartDoneWorking = false
+        smartDoneReceipt = nil
         sitrep = SitrepData()
         // Its own line since the stats left SitrepData. The old daemon's
         // stats over the new mailbox's empty bands read as "all clear": the
@@ -6376,6 +6726,25 @@ final class AppStore {
         sitrep.standing.removeAll { $0.id == messageId }
         sitrep.new.removeAll { $0.id == messageId }
         sitrep.open.removeAll { $0.id == messageId }
+    }
+
+    /// The same for a batch, as ONE change to `resolvedIds`: every insert
+    /// fires its observers, and a smart done can name dozens of ids.
+    func noteResolved(_ ids: Set<Int>) {
+        guard !ids.isEmpty else { return }
+        resolvedIds.formUnion(ids)
+        sitrep.standing.removeAll { ids.contains($0.id) }
+        sitrep.new.removeAll { ids.contains($0.id) }
+        sitrep.open.removeAll { ids.contains($0.id) }
+    }
+
+    /// The reverse, for an undo that reopened a batch on the daemon: stop
+    /// hiding exactly these ids everywhere a resolved id is hidden, as
+    /// `fireUndo` does for one. The caller refreshes what it needs to.
+    func unresolve(_ ids: Set<Int>) {
+        guard !ids.isEmpty else { return }
+        resolvedIds.subtract(ids)
+        for id in ids { reopenInMail(id) }
     }
 
     /// Done on a whole Reading sender at once: the tile's `e`, and the reader's

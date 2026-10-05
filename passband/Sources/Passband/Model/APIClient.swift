@@ -769,6 +769,32 @@ actor APIClient {
             "/client/v2/reading/senders/keep", body: UnsubSenderBody(sender: sender))
     }
 
+    /// The daemon's smart done runs a model pass and may take about twenty
+    /// seconds; the default idle timer would give up first and report a
+    /// clean-up that is still happening as a failure.
+    private static let smartDoneTimeout: TimeInterval = 45
+
+    /// Ask the daemon to mark expired and plainly unwanted Reading mail done.
+    /// nil when this daemon predates the route.
+    ///
+    /// Never asked of the practice inbox: its mail is fixtures.
+    func smartDone() async throws -> SmartDoneResult? {
+        guard !RehearsalMode.isEnabled else { return nil }
+        do {
+            return try await post(
+                "/client/v2/reading/smart_done", body: EmptyBody(),
+                timeout: Self.smartDoneTimeout)
+        } catch let error as APIError where error.status == 404 {
+            return nil
+        }
+    }
+
+    /// Reopen exactly what one smart done cleared.
+    func undoSmartDone(batchId: String) async throws -> SmartDoneUndone {
+        let id = batchId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? batchId
+        return try await post("/client/v2/reading/smart_done/\(id)/undo", body: EmptyBody())
+    }
+
     // MARK: - sealed
 
     func listSealed() async throws -> [SealedMeta] { try await get("/client/sealed") }

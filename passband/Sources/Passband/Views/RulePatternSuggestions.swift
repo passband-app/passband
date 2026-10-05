@@ -162,13 +162,12 @@ struct RulePatternSuggestions: View {
         // A new keystroke is a new question; an Esc answered the old one.
         dismissed = false
         let ask = RulePatternSuggest.ask(for: typed)
-        if ask == .nothing {
-            rows = []
-            return
+        // A hand-written glob takes the menu down at once, not a debounce later.
+        if ask != .nothing {
+            // Debounce: a fresh keystroke cancels this task before the request.
+            try? await Task.sleep(for: Self.debounce)
+            guard !Task.isCancelled else { return }
         }
-        // Debounce: a fresh keystroke cancels this task before the request.
-        try? await Task.sleep(for: Self.debounce)
-        guard !Task.isCancelled else { return }
 
         var senders: [SenderHit] = []
         var domains: [SenderDomainHit] = []
@@ -176,11 +175,11 @@ struct RulePatternSuggestions: View {
         case .nothing:
             break
         case .domains(let fragment):
-            domains = await Self.domains(fragment, limit: Self.domainRowsAlone)
+            domains = await Self.hosts(matching: fragment, limit: Self.domainRowsAlone)
         case .senders(let text, let host):
             async let people = (try? APIClient.shared.senders(text, limit: Self.senderRows)) ?? []
             if let host {
-                domains = await Self.domains(host, limit: Self.domainRowsBeside)
+                domains = await Self.hosts(matching: host, limit: Self.domainRowsBeside)
             }
             senders = await people
         }
@@ -192,7 +191,7 @@ struct RulePatternSuggestions: View {
     /// Hosts for a fragment. A daemon older than `/client/sender-domains`
     /// answers 404, and the hosts are then rolled up from the senders it does
     /// have; any other failure is just no hosts.
-    private static func domains(_ fragment: String, limit: Int) async -> [SenderDomainHit] {
+    private static func hosts(matching fragment: String, limit: Int) async -> [SenderDomainHit] {
         do {
             return try await APIClient.shared.senderDomains(fragment, limit: limit)
         } catch let error as APIError where error.kind == .notFound {

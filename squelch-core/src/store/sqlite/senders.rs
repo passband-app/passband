@@ -105,10 +105,7 @@ impl SqliteStore {
         // become `%`, which every row matches: the prefix tier is then a tie
         // for all and volume decides, which is exactly the empty-fragment
         // listing described above.
-        let escaped = q
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
+        let escaped = search::escape_like(q);
         let contains = format!("%{escaped}%");
         let prefix = format!("{escaped}%");
         let budget = limit.saturating_mul(25);
@@ -173,10 +170,7 @@ impl SqliteStore {
         limit: u32,
     ) -> Result<Vec<SenderDomainEntry>> {
         let q = q.trim();
-        let escaped = q
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
+        let escaped = search::escape_like(q);
         let contains = format!("%{escaped}%");
         let prefix = format!("{escaped}%");
         let budget = limit.saturating_mul(25);

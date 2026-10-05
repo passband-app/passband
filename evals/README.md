@@ -9,6 +9,15 @@ Gold is every triage decision stored since the 2026-09-20 cutover. The
 owner treats those as correct, and `adjudicate` lets them say where they
 are not.
 
+## Results
+
+Each comparison gets a dated write-up under `results/`: what was run, on
+which cases, what it cost, what it got wrong, and what to try next.
+Numbers only; the per-case reports stay beside the dataset.
+
+- [October 2026: Claude effort levels and seven open-weight models on
+  Fireworks](results/2026-10-triage-model-comparison.md)
+
 ## Where the data lives, and why not here
 
 A dataset is personal mail. It lives under `~/.local/share/squelch/evals/`

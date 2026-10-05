@@ -158,7 +158,7 @@ enum ProductGuide {
         Moving:
         - ⌘[ goes back and ⌘] goes forward.
         - Esc closes whatever is on top: an overlay, a panel, an open email. From a page it returns to the Sitrep.
-        - / or ⌘F opens search.
+        - / opens search, and so does ⌘F from any page. With an email open, ⌘F finds text in that email instead.
         - ⌘K opens this assistant. ⌘⇧K starts a new chat.
         - c or ⌘N starts a new message.
         - ? or ⌘/ shows the keyboard shortcut sheet.
@@ -219,6 +219,12 @@ enum ProductGuide {
         - j or the down arrow goes to the newer message, k or the up arrow to the older one.
         - The right arrow or l opens the next email in the list the user came from. The left arrow opens the previous one.
         - Esc or ⌘[ goes back. If a side panel is open, the first Esc closes that.
+
+        Finding text in the open email:
+        - ⌘F opens a find bar at the top right of the reader. Typing highlights every match in the thread and shows a count like "2 of 7".
+        - Enter or ⌘G goes to the next match, Shift+Enter or ⌘⇧G to the previous one. The arrows on the bar do the same. It wraps around, across every message in the thread.
+        - Esc closes the bar. A second Esc closes the email.
+        - It searches the text that is shown. Open "show quoted history" on a message to include its quoted replies.
 
         Finishing:
         - e or d: done, and close the reader. The header has an "e done" button too.
@@ -395,7 +401,8 @@ enum ProductGuide {
 
     private static let search = """
         Opening:
-        - / from any page, or ⌘F. Reopening search brings back the last query, selected so typing replaces it.
+        - / from any page, or ⌘F when no email is open. Reopening search brings back the last query, selected so typing replaces it.
+        - With an email open, ⌘F finds text inside that email instead (see reading_mail). / still opens search from there.
         - f on a row in the Emails list searches everything from that sender.
 
         What it searches:

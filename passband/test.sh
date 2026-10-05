@@ -468,6 +468,13 @@ run_suite recent-search-ring \
   Sources/Passband/Lib/RecentSearchRing.swift \
   Tests/RecentSearchRingTests.swift
 
+# ⌘F in the reader: matches in a string, the cursor walking them across a
+# thread's messages (wrap, skip, the backwards step into an uncounted message),
+# and the session reconciling its text estimate with what a frame reports.
+run_suite find-in-thread \
+  Sources/Passband/Lib/FindInThread.swift \
+  Tests/FindInThreadTests.swift
+
 run_suite search-preview \
   Sources/Passband/Model/SubjectText.swift \
   Sources/Passband/Model/WireTypes.swift \

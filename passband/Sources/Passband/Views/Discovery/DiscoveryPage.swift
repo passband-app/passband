@@ -4,21 +4,23 @@
 // everyday set first and each one more niche than the last.
 //
 // TWO SECTIONS, AND THE TOP ONE IS AN INVITATION. What has not been unlocked
-// yet sits at the top, large, on a lit card, with its vignette playing: the
-// most attractive thing on the page, never the dimmest. No lock, no grey, no
-// count of what is left. Below it, under "Unlocked", every set that has been
-// found sinks into a calmer, smaller row; a kept one (three separate days)
-// is warmer than a merely found one, by fill and a quiet tag. When everything
-// is unlocked the top section is simply gone and the masthead says so.
+// yet sits at the top, a size up from the rest: the first thing read, never
+// the dimmest. No lock, no grey, no count of what is left. Below it, under
+// "Unlocked", every set that has been found sinks into a smaller row; a kept
+// one (three separate days) is warmer than a merely found one, by fill and a
+// quiet tag. When everything is unlocked the top section is simply gone and
+// the masthead says so.
+//
+// QUIET ON PURPOSE. No glow, no bloom, no light behind anything: a row is a
+// flat card with a hairline, and the page is a list, not a trophy case.
 //
 // ONE FOREACH FOR BOTH SECTIONS, heading included, so a row moving from the
 // top into Unlocked keeps its identity and can be animated across. That is
 // what `settled` drives: a set found since the last visit starts where it used
 // to sit and settles into Unlocked once the page is up.
 //
-// MOTION BUDGET. Invitation rows play while on screen. Unlocked rows rest on
-// their poster and play on hover; a just-unlocked one plays, because it is the
-// news. A row scrolled out of view counts as not live, so its clock stops.
+// MOTION BUDGET. Every row rests on its poster and plays only under the
+// pointer: one picture moving at a time, and only the one being looked at.
 //
 // Pure presentation: every input is passed in, so the harness can lay it out
 // in any state. `DiscoveryView` is what reads the store and acknowledges.
@@ -44,21 +46,21 @@ struct DiscoveryPage: View {
     /// one that leaves: left alone, the page follows it to the bottom.
     @State private var position = ScrollPosition(edge: .top)
 
-    /// The reading column. Wide enough for a large vignette and a comfortable
-    /// line beside it, narrow enough that a row is one glance.
-    static let column: CGFloat = 860
+    /// The reading column. Wide enough for a vignette and a comfortable line
+    /// beside it, narrow enough that a row is one glance.
+    static let column: CGFloat = 720
     private static let gutter: CGFloat = 32
 
     /// Below this the invitation rows stack, picture over words, rather than
     /// squeezing either.
-    private var stacked: Bool { width < 680 }
+    private var stacked: Bool { width < 520 }
 
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 0) {
                     masthead(proxy)
-                        .padding(.bottom, 30)
+                        .padding(.bottom, 22)
                     ForEach(items, id: \.self) { item in
                         switch item {
                         case .heading:
@@ -70,13 +72,13 @@ struct DiscoveryPage: View {
                                 set: set, state: state(set),
                                 prominent: !placed, fresh: placed && fresh.contains(set),
                                 stacked: stacked, live: live, fixedTime: fixedTime)
-                                .padding(.bottom, placed ? 10 : 18)
+                                .padding(.bottom, 8)
                                 .id(set)
                         }
                     }
                 }
                 .padding(.horizontal, Self.gutter)
-                .padding(.top, 34)
+                .padding(.top, 26)
                 .padding(.bottom, 64)
                 .frame(maxWidth: Self.column + 2 * Self.gutter, alignment: .leading)
                 .frame(maxWidth: .infinity)
@@ -118,24 +120,22 @@ struct DiscoveryPage: View {
     // MARK: masthead
 
     private func masthead(_ proxy: ScrollViewProxy) -> some View {
-        HStack(alignment: .center, spacing: 22) {
+        HStack(alignment: .center, spacing: 16) {
             DiscoveryRing(
-                progress: DiscoveryProgress(state, fresh: fresh), diameter: 54, breathing: live && fixedTime == nil)
-                .frame(width: 78, height: 78)
-                .background(Circle().fill(Palette.accentSoft))
-                .overlay(Circle().strokeBorder(Palette.accent.opacity(0.25), lineWidth: 0.75))
+                progress: DiscoveryProgress(state, fresh: fresh), diameter: 40, breathing: live && fixedTime == nil)
+                .frame(width: 44, height: 44)
 
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(DiscoveryCopy.eyebrow)
                     .font(.system(size: 10.5, weight: .bold).width(.expanded))
                     .tracking(0.7)
                     .foregroundStyle(Palette.accent)
                 Text(complete ? DiscoveryCopy.completeHeadline : DiscoveryCopy.headline)
-                    .font(Typo.hero(stacked ? 28 : 36))
+                    .font(Typo.serif(stacked ? 22 : 26, weight: .medium))
                     .foregroundStyle(Palette.ink)
                     .fixedSize(horizontal: false, vertical: true)
                 Text(complete ? DiscoveryCopy.completeSubline : DiscoveryCopy.subline)
-                    .font(.system(size: 14))
+                    .font(.system(size: 13))
                     .foregroundStyle(Palette.inkDim)
                     .lineSpacing(2)
                     .fixedSize(horizontal: false, vertical: true)
@@ -181,16 +181,16 @@ struct DiscoveryPage: View {
     private var unlockedHeading: some View {
         HStack(alignment: .center, spacing: 14) {
             Text(DiscoveryCopy.unlockedHeading)
-                .font(Typo.serif(22, weight: .medium))
-                .foregroundStyle(Palette.ink)
+                .font(Typo.serif(17, weight: .medium))
+                .foregroundStyle(Palette.inkDim)
                 .accessibilityAddTraits(.isHeader)
             Rectangle()
                 .fill(Palette.hairline)
                 .frame(height: 0.5)
         }
         // More air above than below: the heading belongs to what follows it.
-        .padding(.top, complete ? 4 : 26)
-        .padding(.bottom, 14)
+        .padding(.top, complete ? 4 : 18)
+        .padding(.bottom, 12)
     }
 }
 
@@ -199,7 +199,7 @@ struct DiscoveryPage: View {
 struct DiscoveryRow: View {
     let set: FeatureSet
     let state: SetState
-    /// The invitation form: large, lit, playing. False is the Unlocked form.
+    /// The invitation form, a size up. False is the Unlocked form.
     let prominent: Bool
     var fresh = false
     /// The narrow window's form: picture over words.
@@ -209,101 +209,76 @@ struct DiscoveryRow: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
-    @State private var visible = true
 
     private var kept: Bool { state == .kept && !prominent }
-    private var radius: CGFloat { prominent ? 24 : 18 }
+    private var radius: CGFloat { prominent ? 16 : 13 }
 
-    /// Invitations play; Unlocked rests until hovered, unless it is the news.
-    private var playing: Bool { live && visible && (prominent || fresh || hovering) }
+    /// ONLY UNDER THE POINTER. Everything else holds its poster.
+    private var playing: Bool { live && hovering }
 
     private var vignetteWidth: CGFloat {
-        if prominent { return stacked ? 440 : 320 }
-        return stacked ? 132 : 176
+        if prominent { return stacked ? 300 : 168 }
+        return 112
     }
 
     var body: some View {
         // ONE LAYOUT VALUE, not an `if`: the stacked and side-by-side forms
         // are the same row, so a window resize does not rebuild it.
         let layout = prominent && stacked
-            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 16))
-            : AnyLayout(HStackLayout(alignment: .center, spacing: prominent ? 30 : 20))
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 12))
+            : AnyLayout(HStackLayout(alignment: .center, spacing: prominent ? 18 : 14))
 
         layout {
             DiscoveryVignette(
-                set: set, live: playing, fixedTime: fixedTime, cornerRadius: prominent ? 14 : 10)
+                set: set, live: playing, fixedTime: fixedTime, cornerRadius: prominent ? 9 : 7)
                 .frame(maxWidth: vignetteWidth)
-                // The screen lit from within: an even phosphor glow all round
-                // an invitation's picture, so the top of the page is where the
-                // light is.
-                .shadow(color: VignetteInk.phosphor.opacity(prominent ? (hovering ? 0.34 : 0.22) : 0), radius: 22)
 
-            VStack(alignment: .leading, spacing: prominent ? 9 : 5) {
+            VStack(alignment: .leading, spacing: prominent ? 4 : 2) {
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
                     Text(set.title)
-                        .font(prominent ? Typo.hero(30) : Typo.serif(21, weight: .medium))
+                        .font(Typo.serif(prominent ? 19 : 15.5, weight: .medium))
                         .foregroundStyle(Palette.ink)
                     tag
                 }
                 Text(set.line)
-                    .font(.system(size: prominent ? 14.5 : 12.5))
+                    .font(.system(size: prominent ? 12.5 : 12))
                     .foregroundStyle(Palette.inkDim)
-                    .lineSpacing(prominent ? 3 : 1.5)
+                    .lineSpacing(1.5)
                     .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: 400, alignment: .leading)
+                    .frame(maxWidth: 420, alignment: .leading)
                 HStack(spacing: 5) {
-                    ForEach(set.keys, id: \.self) { DiscoveryKeycap($0, large: prominent) }
+                    ForEach(set.keys, id: \.self) { DiscoveryKeycap($0) }
                 }
-                .padding(.top, prominent ? 8 : 4)
+                .padding(.top, prominent ? 6 : 4)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(prominent ? 16 : 10)
-        .padding(.trailing, prominent ? 16 : 10)
-        .background { card }
+        .padding(prominent ? 9 : 7)
+        .padding(.trailing, 9)
+        .background { RoundedRectangle(cornerRadius: radius, style: .continuous).fill(fill) }
         .overlay {
             // EVEN all round: a state is a border's colour and weight, never
             // one lit edge.
             RoundedRectangle(cornerRadius: radius, style: .continuous)
-                .strokeBorder(border, lineWidth: fresh || kept ? 1 : 0.75)
+                .strokeBorder(border, lineWidth: 0.75)
         }
-        .shadow(color: fresh ? Palette.accent.opacity(0.35) : .clear, radius: 14)
         .contentShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
         .onHover { hovering = $0 }
         .animation(reduceMotion ? nil : .smooth(duration: 0.2), value: hovering)
-        // SCROLLED AWAY IS NOT LIVE. The stage stops on disappear, but rows in
-        // a plain VStack never disappear, so the scroll view is asked.
-        .onScrollVisibilityChange(threshold: 0.05) { visible = $0 }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(set.title), \(set.stateWords(state)). \(set.line)")
         .accessibilityHint("Keys: \(set.keys.joined(separator: ", "))")
     }
 
-    @ViewBuilder private var card: some View {
-        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
-        ZStack {
-            shape.fill(fill)
-            // The invitation's light: a still, wide bloom from behind the
-            // picture, the same phosphor the vignettes are lit with. It is
-            // what makes the top of the page the warm part of it.
-            shape.fill(
-                RadialGradient(
-                    colors: [Palette.accent.opacity(prominent ? (hovering ? 0.2 : 0.14) : 0), .clear],
-                    center: stacked ? UnitPoint(x: 0.5, y: 0.3) : UnitPoint(x: 0.28, y: 0.5),
-                    startRadius: 0, endRadius: 520))
-        }
-    }
-
     private var fill: Color {
-        if prominent { return Palette.readerBackground.opacity(hovering ? 0.75 : 0.6) }
-        if kept { return Palette.accentSoft.opacity(hovering ? 1 : 0.8) }
-        return Palette.hairline.opacity(hovering ? 0.5 : 0.28)
+        if kept { return Palette.accentSoft.opacity(hovering ? 0.75 : 0.5) }
+        if prominent { return Palette.hairline.opacity(hovering ? 0.6 : 0.34) }
+        return Palette.hairline.opacity(hovering ? 0.4 : 0.16)
     }
 
     private var border: Color {
-        if fresh { return DiscoveryInk.ringHot.opacity(0.7) }
-        if prominent { return hovering ? Palette.accent.opacity(0.35) : Palette.hairline }
-        if kept { return Palette.accent.opacity(0.45) }
+        if fresh { return DiscoveryInk.ringHot.opacity(0.6) }
+        if kept { return Palette.accent.opacity(0.3) }
         return Palette.hairline
     }
 
@@ -315,10 +290,10 @@ struct DiscoveryRow: View {
         return Text(word)
             .font(.system(size: 8.5, weight: .bold).width(.expanded))
             .tracking(0.5)
-            .foregroundStyle(kept && !fresh ? Color.white : DiscoveryInk.ringHot)
+            .foregroundStyle(fresh ? DiscoveryInk.ringHot : Palette.accent)
             .padding(.horizontal, 7)
             .padding(.vertical, 3)
-            .background(Capsule().fill(kept && !fresh ? Palette.accent : Palette.accentSoft))
+            .background(Capsule().fill(Palette.accentSoft))
             .fixedSize()
             // Opacity, not an `if`: the tag comes and goes as the row settles.
             .opacity(!prominent && (fresh || kept) ? 1 : 0)

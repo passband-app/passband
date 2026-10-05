@@ -1985,6 +1985,11 @@ fn may_resolve_sender_mail(resolved: &ResolvedDisposition, sweep: bool) -> bool 
 #[derive(Debug, Deserialize)]
 pub struct SuggestRuleQuery {
     sender: String,
+    /// `smart_block` asks for a filtered rule that keeps this sender's
+    /// consequential mail and drops the promotion, answered under
+    /// `smart_block`. Absent (and any other value) is the plain sentence.
+    #[serde(default)]
+    mode: Option<String>,
 }
 
 /// GET /client/rules/suggest?sender=addr: the sentence the owner might write
@@ -1993,6 +1998,11 @@ pub struct SuggestRuleQuery {
 /// clear pattern. It is only ever SHOWN: the owner accepts it with tab and
 /// saves it themselves, and its disposition is then inferred from the owner's
 /// sentence like any other. See [`squelch_core::triage::rule_suggest`].
+///
+/// `mode=smart_block` answers `smart_block: {rule, keeps, drops}` instead (null
+/// when there is no line to draw), for the ignored-unsubscribe notice. The key
+/// is PRESENT in every answer to that mode and absent otherwise, so a client
+/// can tell this daemon from one that predates the mode and ignored it.
 pub async fn suggest_rule(
     State(state): State<ApiState>,
     Query(params): Query<SuggestRuleQuery>,
@@ -2003,7 +2013,15 @@ pub async fn suggest_rule(
     if sender.is_empty() {
         return Err(ApiError::bad_request("sender must not be empty"));
     }
-    let none = || (no_store(), Json(serde_json::json!({ "suggestion": null })));
+    let smart = params.mode.as_deref() == Some("smart_block");
+    let none = move || {
+        let body = if smart {
+            serde_json::json!({ "suggestion": null, "smart_block": null })
+        } else {
+            serde_json::json!({ "suggestion": null })
+        };
+        (no_store(), Json(body))
+    };
     let Some(client) = state.rule_suggest.clone() else {
         return Ok(none());
     };
@@ -2023,7 +2041,12 @@ pub async fn suggest_rule(
         if spent >= u64::from(rule_suggest::DAILY_CAP) {
             return Ok(None);
         }
-        let history = store.sender_rule_digest(account_id, &addr, rule_suggest::HISTORY_LIMIT)?;
+        let limit = if smart {
+            rule_suggest::SMART_BLOCK_HISTORY_LIMIT
+        } else {
+            rule_suggest::HISTORY_LIMIT
+        };
+        let history = store.sender_rule_digest(account_id, &addr, limit)?;
         let rules = store.list_sender_rules(account_id)?;
         Ok(Some((history, rules)))
     })
@@ -2039,15 +2062,21 @@ pub async fn suggest_rule(
         })
         .map(|r| r.want_text)
         .collect();
-    let (suggestion, usage) = rule_suggest::suggest_rule(
-        &client,
-        &rule_suggest::SuggestInput {
-            from_addr: &sender,
-            existing_rules: &existing,
-            history: &history,
-        },
-    )
-    .await;
+    let input = rule_suggest::SuggestInput {
+        from_addr: &sender,
+        existing_rules: &existing,
+        history: &history,
+    };
+    let (body, usage) = if smart {
+        let (block, usage) = rule_suggest::smart_block(&client, &input).await;
+        (
+            serde_json::json!({ "suggestion": null, "smart_block": block }),
+            usage,
+        )
+    } else {
+        let (suggestion, usage) = rule_suggest::suggest_rule(&client, &input).await;
+        (serde_json::json!({ "suggestion": suggestion }), usage)
+    };
     if let Some(u) = usage {
         let _ = store_call(&state, move |store, account_id| {
             let day = Utc::now().format("%Y-%m-%d").to_string();
@@ -2063,10 +2092,7 @@ pub async fn suggest_rule(
         })
         .await;
     }
-    Ok((
-        no_store(),
-        Json(serde_json::json!({ "suggestion": suggestion })),
-    ))
+    Ok((no_store(), Json(body)))
 }
 
 pub async fn create_rule(
@@ -5984,10 +6010,10 @@ pub async fn unsubscribe_resolution(
     Json(body): Json<ResolutionBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     let resolution = match body.resolution.as_str() {
-        "blocked" | "dismissed" => body.resolution.clone(),
+        "blocked" | "filtered" | "dismissed" => body.resolution.clone(),
         _ => {
             return Err(ApiError::bad_request(
-                "resolution must be one of: blocked, dismissed",
+                "resolution must be one of: blocked, filtered, dismissed",
             ));
         }
     };

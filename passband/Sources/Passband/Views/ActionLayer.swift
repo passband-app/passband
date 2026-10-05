@@ -15,6 +15,11 @@ struct ActionLayer: View {
     @State private var blockBusy = false
     /// Senders acted on this session, so a lagging read model can't re-nag.
     @State private var acted: Set<String> = []
+    /// The smart block proposed for the sender on the notice, once it lands.
+    @State private var smartBlocks: [String: SmartBlockProposal] = [:]
+    /// Senders already asked about this session, answer or not: the scan
+    /// re-runs every minute and one model call per notice is the budget.
+    @State private var smartAsked: Set<String> = []
 
     var body: some View {
         ZStack(alignment: .bottomLeading) {
@@ -213,31 +218,86 @@ struct ActionLayer: View {
     // MARK: - unsubscribe violations
 
     private func violationPrompt(_ record: UnsubscribeRecord) -> some View {
-        VStack(alignment: .leading, spacing: Space.scaled(9)) {
+        let name = SenderCache.resolved(record.sender).displayName
+        let smart = smartBlocks[record.sender]
+        return VStack(alignment: .leading, spacing: Space.scaled(9)) {
             Text(
-                "\(SenderCache.resolved(record.sender).displayName) is ignoring your unsubscribe — "
+                "\(name) is ignoring your unsubscribe. "
                     + "\(record.violation_count) email\(record.violation_count == 1 ? "" : "s") "
                     + "since you asked \(Fmt.relAge(record.requested_at)) ago."
             )
             .font(Typo.rowSub)
             .foregroundStyle(Palette.ink)
             .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: Typo.measure(360), alignment: .leading)
+
+            if let smart { smartBlockProposal(smart) }
 
             HStack(spacing: Space.s8) {
-                Button("Block sender") { Task { await block(record) } }
-                    .buttonStyle(.glassProminent)
-                    .tint(Palette.danger)
-                    .disabled(blockBusy)
+                // With a smart block on offer it is the recommendation, and one
+                // notice gets one prominent button.
+                if smart == nil {
+                    Button("Block sender") { Task { await block(record) } }
+                        .buttonStyle(.glassProminent)
+                        .tint(Palette.danger)
+                } else {
+                    Button("Block sender") { Task { await block(record) } }
+                        .buttonStyle(.glass)
+                }
+                if let smart {
+                    Button("Smart block") { Task { await smartBlock(record, smart) } }
+                        .buttonStyle(.glassProminent)
+                        .tint(Palette.accent)
+                        .help("Saves this rule for \(record.sender): \(smart.rule)")
+                        .transition(.opacity)
+                }
                 Button("Keep") { Task { await keep(record) } }
                     .buttonStyle(.glass)
-                    .disabled(blockBusy)
             }
             .controlSize(.small)
+            .disabled(blockBusy)
         }
+        // A WIDTH, not a maximum. The toast stack is measured at its ideal
+        // size, where a maximum proposes nothing and the sentence measures as
+        // one line; it then wraps to two when placed, and the line the stack
+        // never counted hung down through the layer's bottom margin.
+        .frame(width: Typo.measure(360), alignment: .leading)
         .padding(Space.scaled(13))
         .passbandGlass(.pane, cornerRadius: 14, tint: Palette.dangerSoft)
         .transition(.move(edge: .leading).combined(with: .opacity))
+        .animation(.smooth(duration: 0.24), value: smart)
+        .task(id: record.sender) { await proposeSmartBlock(for: record.sender) }
+    }
+
+    /// What the smart block would do, and under it the sentence it saves: the
+    /// rule is model text about the sender's own subjects, so it is on screen
+    /// in full before the button that keeps it can be pressed.
+    private func smartBlockProposal(_ smart: SmartBlockProposal) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: Space.s8) {
+            Image(systemName: "sparkles")
+                .font(Typo.micro)
+                .foregroundStyle(Palette.accent)
+            VStack(alignment: .leading, spacing: Space.s2) {
+                Text("Keep \(smart.keeps), drop \(smart.drops)")
+                    .font(Typo.rowSub)
+                    .foregroundStyle(Palette.ink)
+                Text("Rule: \(smart.rule)")
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.inkDim)
+            }
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        .transition(.opacity)
+    }
+
+    /// One ask per sender per session. Silence on every failure: no model, an
+    /// older daemon, or a sender with nothing worth keeping all leave the
+    /// notice as the two buttons it always was.
+    private func proposeSmartBlock(for sender: String) async {
+        guard !smartAsked.contains(sender) else { return }
+        smartAsked.insert(sender)
+        guard let proposal = try? await APIClient.shared.suggestSmartBlock(sender: sender)
+        else { return }
+        smartBlocks[sender] = proposal
     }
 
     private func scanViolations() async {
@@ -270,6 +330,24 @@ struct ActionLayer: View {
             store.pushToast("blocked \(record.sender)", .success)
         } catch {
             store.pushToast(errText(error, "block failed"), .error)
+        }
+        blockBusy = false
+        blockPrompt = nil
+    }
+
+    private func smartBlock(_ record: UnsubscribeRecord, _ smart: SmartBlockProposal) async {
+        guard !blockBusy else { return }
+        blockBusy = true
+        acted.insert(record.sender)
+        do {
+            // Exact sender address, like the block. Forward-only: nothing on
+            // the board moves, so there is no sender to note as resolved.
+            try await Actions.createSmartBlockRule(sender: record.sender, want: smart.rule)
+            try await APIClient.shared.setUnsubResolution(
+                sender: record.sender, resolution: .filtered)
+            store.pushToast("filtering \(record.sender), keeping \(smart.keeps)", .success)
+        } catch {
+            store.pushToast(errText(error, "smart block failed"), .error)
         }
         blockBusy = false
         blockPrompt = nil

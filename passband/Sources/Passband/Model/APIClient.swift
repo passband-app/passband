@@ -613,6 +613,16 @@ actor APIClient {
         return answer.suggestion
     }
 
+    /// A filtered rule that would keep `sender`'s consequential mail and drop
+    /// the promotion, or nil when there is no such line to draw. Nil too from
+    /// a daemon that predates the mode: it answers the plain sentence, which
+    /// was written for a different question and is not used here.
+    func suggestSmartBlock(sender: String) async throws -> SmartBlockProposal? {
+        let answer: RuleSuggestion = try await get(
+            "/client/rules/suggest", query: ["sender": sender, "mode": "smart_block"])
+        return answer.smart_block
+    }
+
     /// The sitrep's headline: one sentence about what the For-your-eyes band is
     /// about. `today` is the owner's local date, because "due tomorrow" is a
     /// question about THEIR calendar and the daemon runs in UTC. A daemon too

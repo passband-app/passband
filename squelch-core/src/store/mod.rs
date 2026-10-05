@@ -966,6 +966,8 @@ pub struct SenderDigestRow {
     pub status: String,
     /// The owner opened it in Passband.
     pub opened: bool,
+    /// What triage called it (`marketing`, `bill`, ...), when it said.
+    pub category: Option<String>,
 }
 
 /// One other message in the escalated row's thread. Verdict and envelope only,

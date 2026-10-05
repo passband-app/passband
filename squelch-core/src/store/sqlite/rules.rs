@@ -12,7 +12,7 @@ use super::*;
 /// and pinning it means a missing index is a loud prepare error, not a silent
 /// walk. `tests::attention::rule_digest_seeks_the_nocase_sender_index` pins it.
 pub(crate) const SENDER_RULE_DIGEST_SQL: &str =
-    "SELECT m.subject, t.tier, t.status, t.opened_at IS NOT NULL
+    "SELECT m.subject, t.tier, t.status, t.opened_at IS NOT NULL, t.category
      FROM messages m INDEXED BY idx_messages_from_nocase
      JOIN triage t ON t.message_id = m.id
      WHERE m.account_id = ?1
@@ -212,6 +212,7 @@ impl SqliteStore {
                     tier: r.get(1)?,
                     status: r.get(2)?,
                     opened: r.get(3)?,
+                    category: r.get(4)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;

@@ -283,4 +283,15 @@ enum Actions {
                 source_message_id: sourceMessageId, sweep: true))
         Analytics.capture("block_rule_created")
     }
+
+    /// A smart block: a FILTERED rule on the exact address carrying a sentence
+    /// the owner read and accepted. Forward-only like every rule that is not a
+    /// block, so nothing already on the board moves.
+    static func createSmartBlockRule(sender: String, want: String) async throws {
+        try await APIClient.shared.createRule(
+            CreateRuleBody(
+                match_pattern: sender.trimmingCharacters(in: .whitespaces).lowercased(),
+                want: want, disposition: .filtered))
+        Analytics.capture("block_rule_created", ["smart": true])
+    }
 }

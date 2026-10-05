@@ -6524,6 +6524,24 @@ async fn unsubscribe_resolution_sets_blocked_and_404s_unknown_and_400s_bad_value
         |a| a.action == "unsub_resolution" && a.detail.as_deref() == Some("news@x.com:blocked")
     ));
 
+    // filtered (a smart block) is a resolution too.
+    let resp = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            "/client/unsubscribes/resolution",
+            serde_json::json!({ "sender": "news@x.com", "resolution": "filtered" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        store.list_unsubscribes(acct).unwrap()[0]
+            .resolution
+            .as_deref(),
+        Some("filtered")
+    );
+
     // Unknown sender => 404.
     let resp = app
         .clone()
@@ -11425,6 +11443,116 @@ async fn rule_suggestion_is_cleaned_and_billed_to_its_own_category() {
         usage_categories(&store, acct),
         vec!["rule_suggest".to_string()]
     );
+}
+
+/// The suggester answering a smart-block call with these three fields.
+async fn app_with_smart_block(
+    rule: &str,
+    keeps: &str,
+    drops: &str,
+    seed: impl FnOnce(&SqliteStore, i64),
+) -> Harness {
+    let answer = serde_json::json!({ "rule": rule, "keeps": keeps, "drops": drops }).to_string();
+    let body = serde_json::json!({
+        "content": [{ "type": "text", "text": answer }],
+        "stop_reason": "end_turn",
+        "usage": { "input_tokens": 90, "output_tokens": 20 }
+    })
+    .to_string();
+    app_with_suggest_body(body, seed).await
+}
+
+fn seed_mixed_sender(store: &SqliteStore, acct: i64) {
+    for (g, s) in [
+        ("g1", "New state filing requirement"),
+        ("g2", "50% off your next LLC"),
+        ("g3", "Webinar: grow your business"),
+        ("g4", "Annual report deadline changed"),
+    ] {
+        seed_suggest_msg(store, acct, g, "info@corp.com", s, Sensitivity::Normal);
+    }
+}
+
+#[tokio::test]
+async fn smart_block_mode_answers_the_rule_and_its_labels() {
+    let Harness { app, store, acct } = app_with_smart_block(
+        "only state regulation alerts, no marketing.",
+        "regulation alerts",
+        "marketing and webinars",
+        seed_mixed_sender,
+    )
+    .await;
+    let resp = app
+        .oneshot(authed(
+            "GET",
+            "/client/rules/suggest?sender=Info@Corp.com&mode=smart_block",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(
+        json["smart_block"],
+        serde_json::json!({
+            "rule": "only state regulation alerts, no marketing",
+            "keeps": "regulation alerts",
+            "drops": "marketing and webinars",
+        })
+    );
+    assert_eq!(json["suggestion"], Value::Null);
+    assert_eq!(
+        usage_categories(&store, acct),
+        vec!["rule_suggest".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn smart_block_is_null_when_there_is_no_line_to_draw_or_too_little_mail() {
+    // The model's "all promotion" answer: the key is there, and null.
+    let Harness { app, .. } = app_with_smart_block("", "", "", seed_mixed_sender).await;
+    let resp = app
+        .oneshot(authed(
+            "GET",
+            "/client/rules/suggest?sender=info@corp.com&mode=smart_block",
+        ))
+        .await
+        .unwrap();
+    let json = body_json(resp).await;
+    assert!(json.as_object().unwrap().contains_key("smart_block"));
+    assert_eq!(json["smart_block"], Value::Null);
+
+    // Three messages clear the sentence's floor but not this one: no call.
+    let Harness { app, store, acct } =
+        app_with_smart_block("only alerts", "alerts", "marketing", |store, acct| {
+            for g in ["g1", "g2", "g3"] {
+                seed_suggest_msg(store, acct, g, "a@b.com", "hi", Sensitivity::Normal);
+            }
+        })
+        .await;
+    let resp = app
+        .oneshot(authed(
+            "GET",
+            "/client/rules/suggest?sender=a@b.com&mode=smart_block",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(body_json(resp).await["smart_block"], Value::Null);
+    assert!(usage_categories(&store, acct).is_empty());
+}
+
+#[tokio::test]
+async fn the_plain_suggestion_carries_no_smart_block_key() {
+    // What a client reads to tell this mode was honoured: an older daemon
+    // ignores `mode` and answers exactly this shape.
+    let Harness { app, .. } =
+        app_with_rule_suggestion("only order confirmations", seed_mixed_sender).await;
+    let resp = app
+        .oneshot(authed("GET", "/client/rules/suggest?sender=info@corp.com"))
+        .await
+        .unwrap();
+    let json = body_json(resp).await;
+    assert_eq!(json["suggestion"], "only order confirmations");
+    assert!(!json.as_object().unwrap().contains_key("smart_block"));
 }
 
 #[tokio::test]

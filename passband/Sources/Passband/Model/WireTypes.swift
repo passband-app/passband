@@ -787,6 +787,20 @@ struct CreateRuleBody: Codable, Sendable {
 /// history, or no clear pattern.
 struct RuleSuggestion: Codable, Sendable {
     var suggestion: String?
+    /// Only in answer to `mode=smart_block`, and null there when the sender
+    /// sends nothing worth keeping apart. A daemon that predates the mode
+    /// ignores it and never sends the key, which decodes the same as null.
+    var smart_block: SmartBlockProposal? = nil
+}
+
+/// A filtered rule proposed for a sender who ignored an unsubscribe: `rule` is
+/// the sentence that gets saved, `keeps` and `drops` are what it means at a
+/// glance. All three are model text about the sender's own subjects, so they
+/// are shown as plain Text and saved only on the owner's click.
+struct SmartBlockProposal: Codable, Sendable, Hashable {
+    var rule: String
+    var keeps: String
+    var drops: String
 }
 
 /// GET /client/v2/fye/headline. Null when the daemon has no model, the band is
@@ -834,7 +848,8 @@ enum UnsubStatus: String, LenientRawEnum {
 }
 
 enum UnsubResolution: String, LenientRawEnum {
-    case blocked, dismissed
+    /// `filtered` is a smart block: a filtered rule in place of a mute.
+    case blocked, filtered, dismissed
     static var unknownFallback: UnsubResolution { .dismissed }
 }
 

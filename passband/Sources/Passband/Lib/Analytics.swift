@@ -183,6 +183,9 @@ enum Analytics {
             // "cleared" for the null that takes the mark off. "calendar" (the
             // page, and thread_opened's source from it) is a MainView.
             "going", "dismissed", "cleared",
+            // calendar_opened's `view`: which way the page was drawn when it
+            // opened (CalendarViewMode's raw values).
+            "agenda", "month",
             // group_* modes — how an audience is addressed. "individual" is the
             // only one that is not also a header name.
             "to", "bcc", "individual",

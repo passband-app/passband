@@ -50,6 +50,17 @@ run_suite agenda \
   Sources/Passband/Lib/Agenda.swift \
   Tests/AgendaTests.swift
 
+# The month view's arithmetic: the grid's days in the user's calendar, where
+# each item sits on a day's strip (the night cap, 7am, past midnight, the DST
+# Sundays), spans and their lanes, the unlikely counts, the day column, the
+# keys' moves, and the range the page asks for.
+run_suite month-grid \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Agenda.swift \
+  Sources/Passband/Lib/MonthGrid.swift \
+  Tests/MonthGridTests.swift
+
 # The real poller against a cancellation-oblivious transport: mailbox switches
 # must detach old requests before the next mailbox starts warming.
 run_suite sitrep-poller \

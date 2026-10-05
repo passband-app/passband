@@ -144,11 +144,18 @@ extension AppStore {
         calendarLoadGeneration &+= 1
         let generation = calendarLoadGeneration
         // Local midnight YESTERDAY: last night's still-running party has to
-        // come back, and the daemon judges `expired` in this offset.
+        // come back, and the daemon judges `expired` in this offset. With a
+        // month on screen, that month too (`MonthGrid.requestRange`, which
+        // keeps the agenda's window inside it whenever it can).
         let cal = Calendar.current
-        let from = cal.date(byAdding: .day, value: -1, to: cal.startOfDay(for: Date())) ?? Date()
+        let now = Date()
+        var from = cal.date(byAdding: .day, value: -1, to: cal.startOfDay(for: now)) ?? now
+        var to: Date?
+        if let month = calendarRequestMonth(now: now) {
+            (from, to) = MonthGrid.requestRange(month: month, now: now, calendar: cal)
+        }
         do {
-            let feed = try await APIClient.shared.getTimeline(from: from)
+            let feed = try await APIClient.shared.getTimeline(from: from, to: to)
             guard isCurrent(e), generation == calendarLoadGeneration else { return }
             // Assignment is invalidation: an unchanged answer is not written.
             if feed != calendarFeed { calendarFeed = feed }
@@ -159,6 +166,63 @@ extension AppStore {
             guard isCurrent(e), generation == calendarLoadGeneration else { return }
         }
         if !calendarLoaded { calendarLoaded = true }
+    }
+
+    // MARK: - the month
+
+    /// Where the month is: the remembered place, or today's.
+    func calendarMonthPlace(now: Date, calendar: Calendar) -> MonthPlace {
+        calendarPlace ?? MonthGrid.place(today: now, calendar: calendar)
+    }
+
+    /// The month the timeline request has to cover, while one is on screen.
+    func calendarRequestMonth(now: Date) -> Date? {
+        guard calendarMode == .month else { return nil }
+        return calendarMonthPlace(now: now, calendar: .current).month
+    }
+
+    /// `a` / `m` and the header's switch. The levels the month had open are
+    /// closed, so coming back to it starts from the grid.
+    func setCalendarMode(_ mode: CalendarViewMode) {
+        guard mode != calendarMode else { return }
+        calendarMode = mode
+        calendarDayOpen = false
+        calendarMonthItem = nil
+    }
+
+    /// An arrow, a month step, or today. The day moves, so whatever item was
+    /// open was the old day's and closes; an opened day stays open, so on a
+    /// narrow window the arrows page through the columns.
+    func moveCalendarMonth(_ move: MonthMove, now: Date = Date()) {
+        let cal = Calendar.current
+        calendarPlace = MonthGrid.navigate(
+            calendarMonthPlace(now: now, calendar: cal), move, today: now, calendar: cal)
+        calendarMonthItem = nil
+    }
+
+    /// A cell clicked: that day selected and, where the grid and the column
+    /// cannot both show, opened.
+    func selectCalendarDay(_ day: Date, open: Bool, now: Date = Date()) {
+        let cal = Calendar.current
+        calendarPlace = MonthGrid.select(day, in: calendarMonthPlace(now: now, calendar: cal), calendar: cal)
+        calendarMonthItem = nil
+        if open { calendarDayOpen = true }
+    }
+
+    /// Escape on the month: closes the item's detail, then the opened day.
+    /// False when there is nothing to close, so Escape goes on to its usual
+    /// "back to the sitrep".
+    func calendarMonthBack() -> Bool {
+        guard activeView == .calendar, calendarMode == .month else { return false }
+        if calendarMonthItem != nil {
+            calendarMonthItem = nil
+            return true
+        }
+        if calendarDayOpen {
+            calendarDayOpen = false
+            return true
+        }
+        return false
     }
 
     /// The user's word on a ghost: going, dismissed, or (nil) neither. Drawn

@@ -618,6 +618,16 @@ final class AppStore {
     /// A load has finished at least once (success or failure) for this
     /// account, so an empty feed can be told from one still on its way.
     var calendarLoaded = false
+    /// Agenda or month, and where the month is. Kept here, not in the page,
+    /// for the session: the page is unmounted every time you leave it, and
+    /// coming back should land where you were. `calendarPlace` nil is today.
+    var calendarMode: CalendarViewMode = .agenda
+    var calendarPlace: MonthPlace?
+    /// The month's levels, deepest last: the selected day's column opened in
+    /// place of the grid (narrow windows only), and the item whose detail is
+    /// showing. Escape closes them in that order (`calendarMonthBack`).
+    var calendarDayOpen = false
+    var calendarMonthItem: String?
     /// The connect card, while it is up. Its own property, apart from the
     /// feed: `modalOverlayOpen` reads it, and the whole shell reads that.
     var calendarConnectAsk: CalendarConnectAsk?
@@ -1812,6 +1822,9 @@ final class AppStore {
         zoneRetryOwed = false
         calendarFeed = nil
         calendarLoaded = false
+        // Ids are the account's: the item open in the month means nothing in
+        // the next mailbox. The mode and the month are the user's, and stay.
+        calendarMonthItem = nil
         calendarConnectAsk = nil
         calendarConnectWait = nil
         calendarConnectStarting = false

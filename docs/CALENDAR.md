@@ -532,7 +532,11 @@ in time order, "N earlier today" and "N unlikely" folds); a detail pane with
 the mail behind each item and the model's own words shown as attributed
 quotes; going and dismiss on ghosts; the connect card (shown once per account
 as a modal, then a quiet banner), its waiting state, and a line for the sync
-state. It has never been seen on screen by the people who built it.
+state; a month view (Agenda / Month in the header, `m` and `a`), drawn as the
+shape of the month: a strip of hours per day with a folded night cap, named
+spans for trips and stays across the top, no titles in cells, a selected day's
+column beside the grid, and the item detail in that same pane. It has never
+been seen on screen by the people who built it.
 
 - **Sitrep agenda.** Replaces the Calendar zone: today and the next few days,
   real events and ghosts together, with the next commitment called out. This

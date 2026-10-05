@@ -513,8 +513,12 @@ actor APIClient {
     /// (so last night's party, still running, comes back) and the zone the
     /// daemon judges `expired` in, so a date-only ghost lasts to the end of
     /// the USER's day. `to` is the daemon's default span from there.
-    func getTimeline(from: Date) async throws -> TimelineFeed {
-        try await get("/client/timeline", query: ["from": Self.rfc3339Local(from)])
+    /// `to` nil takes the daemon's default window (90 days past a day
+    /// behind `from`); the month view sends both (`MonthGrid.requestRange`).
+    func getTimeline(from: Date, to: Date? = nil) async throws -> TimelineFeed {
+        try await get(
+            "/client/timeline",
+            query: ["from": Self.rfc3339Local(from), "to": to.map(Self.rfc3339Local)])
     }
 
     /// `POST /client/timeline/refresh`: ask the calendar sync to run now. A

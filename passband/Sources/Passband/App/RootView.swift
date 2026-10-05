@@ -703,7 +703,7 @@ struct RoutedHost<Content: View>: View {
     /// in user-facing copy, which this app does not do.)
     private var heading: (title: String, subtitle: String?) {
         switch view {
-        case .calendar: ("Calendar", "agenda")
+        case .calendar: ("Calendar", store.calendarMode == .month ? "month" : "agenda")
         case .rules: ("Rules", "sender rules")
         case .groups: ("Groups", "named audiences")
         default: (view.label, nil)
@@ -718,7 +718,11 @@ struct RoutedHost<Content: View>: View {
                 content
             } else {
                 VStack(alignment: .leading, spacing: 0) {
-                    RoutedHeader(title: heading.title, subtitle: heading.subtitle)
+                    RoutedHeader(title: heading.title, subtitle: heading.subtitle) {
+                        // The calendar's one header control: which way the
+                        // page is drawn (`a` / `m`).
+                        if view == .calendar { CalendarModeSwitch() }
+                    }
                     content
                 }
             }
@@ -728,7 +732,14 @@ struct RoutedHost<Content: View>: View {
         // contexts above this one, so their Esc wins while they're up and this
         // fires only from the bare list.
         .keyBindings(.modal, [
-            KeyBinding("Escape", "back to sitrep") { store.setView(.sitrep) }
+            KeyBinding("Escape", "back to sitrep") {
+                // The month's own levels (an item's detail, a day opened in
+                // place of the grid) close first. Asked here rather than
+                // bound by the page: two Escapes in one context would be
+                // ordered by which view happened to appear first.
+                if store.calendarMonthBack() { return }
+                store.setView(.sitrep)
+            }
         ])
     }
 }

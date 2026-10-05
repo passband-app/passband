@@ -1,4 +1,7 @@
-// THE CALENDAR PAGE, v1: an agenda. Today and the days after it, real events
+// THE CALENDAR PAGE: an agenda, and the month (Views/CalendarMonth.swift),
+// switched with `a` / `m` and the header's control.
+//
+// The agenda: today and the days after it, real events
 // and the ghosts Passband found in mail in one time order, with the next
 // commitment called out and today's shape as one strip. Most days this page
 // is the whole calendar, so it reads top to bottom like a day planner rather
@@ -49,6 +52,8 @@
         /// The last agenda built, so a body re-run that changed nothing it
         /// is built from (a window resize, a selection) does not rebuild it.
         @State private var memo = AgendaMemo()
+        /// The same for the month: its grid and the selected day's column.
+        @State private var monthMemo = MonthMemo()
 
         /// Two columns once the list's measure and the detail both fit.
         private var twoColumns: Bool {
@@ -56,6 +61,14 @@
         }
         private static var listMeasure: CGFloat { Typo.measure(560) }
         private static var detailWidth: CGFloat { Typo.measure(340) }
+
+        /// The month's grid and its pane side by side: seven cells of about
+        /// 78 points, and the column at the detail's own width (the pane
+        /// shows one or the other).
+        private var monthTwoPanes: Bool {
+            pageWidth >= Self.monthGridMin + Self.detailWidth + Space.scaled(18) + Space.scaled(44)
+        }
+        private static var monthGridMin: CGFloat { Typo.measure(546) }
 
         // THIS BODY NEVER READS `stats`. The poller reassigns it nearly every
         // ten seconds, and a reader here would rebuild the whole agenda on
@@ -68,17 +81,61 @@
             TimelineView(.everyMinute) { context in
                 let now = context.date
                 let cal = Calendar.current
-                let days = memo.days(store.calendarFeed, now: now, calendar: cal)
-                let next = Agenda.next(days, now: now)
-                let rows = navigable(days)
-                let selected = rows.first { $0.id == selection } ?? defaultSelection(next, rows)
-                page(days: days, next: next, rows: rows, selected: selected, now: now, cal: cal)
+                // Two subtrees on purpose, each with its own key set: the
+                // agenda's state lives in this view's @State and the month's
+                // in the store, so neither is lost by the switch.
+                switch store.calendarMode {
+                case .agenda:
+                    let days = memo.days(store.calendarFeed, now: now, calendar: cal)
+                    let next = Agenda.next(days, now: now)
+                    let rows = navigable(days)
+                    let selected = rows.first { $0.id == selection } ?? defaultSelection(next, rows)
+                    page(days: days, next: next, rows: rows, selected: selected, now: now, cal: cal)
+                case .month:
+                    monthPage(now: now, cal: cal)
+                }
             }
             .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { pageWidth = $0 }
             .background { CalendarRefreshKeeper() }
             .onAppear {
-                Analytics.capture("calendar_opened", ["granted": store.calendarGranted])
+                Analytics.capture(
+                    "calendar_opened",
+                    ["granted": store.calendarGranted, "view": store.calendarMode.rawValue])
             }
+            // The month on screen is part of what is asked for, so turning
+            // the page (or switching mode) asks at once rather than at the
+            // next poll tick. Only on a change: the keeper's first run covers
+            // the page appearing.
+            .onChange(of: store.calendarRequestMonth(now: Date())) {
+                Task { await store.refreshCalendar() }
+            }
+            // A day opened in place of the grid means nothing once the grid
+            // and the column fit side by side again.
+            .onChange(of: monthTwoPanes) { _, two in
+                if two, store.calendarDayOpen { store.calendarDayOpen = false }
+            }
+        }
+
+        // MARK: - the month
+
+        private func monthPage(now: Date, cal: Calendar) -> some View {
+            let place = store.calendarMonthPlace(now: now, calendar: cal)
+            let model = monthMemo.month(store.calendarFeed, month: place.month, calendar: cal)
+            let column = monthMemo.column(day: place.day, calendar: cal)
+            let unlikelyKey = "u\(place.day.timeIntervalSince1970)"
+            let unlikelyOpen = openFolds.contains(unlikelyKey)
+            let order = column.order + (unlikelyOpen ? column.unlikely : [])
+            let item = store.calendarMonthItem.flatMap { id in monthMemo.items.first { $0.id == id } }
+            return VStack(spacing: 0) {
+                CalendarStatusLines()
+                CalendarMonthView(
+                    model: model, column: column, place: place, item: item,
+                    twoPanes: monthTwoPanes, paneWidth: Self.detailWidth,
+                    unlikelyOpen: unlikelyOpen, toggleUnlikely: { toggle(unlikelyKey) },
+                    now: now, calendar: cal)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .keyBindings(.modal, monthBindings(order: order, item: item))
         }
 
         @ViewBuilder
@@ -284,7 +341,7 @@
                 scrollTarget = rows[i].id
                 return true
             }
-            return [
+            return modeBindings() + [
                 KeyBinding(declining: "j", "next") { step(+1) },
                 KeyBinding(declining: "k", "previous") { step(-1) },
                 KeyBinding(declining: "ArrowDown", "next") { step(+1) },
@@ -301,6 +358,79 @@
                 },
                 KeyBinding(declining: "x", "dismiss") {
                     guard free(), let ghost = selected?.ghost else { return false }
+                    Task { await store.markGhost(ghost, .dismissed, viaKey: true) }
+                    return true
+                },
+            ]
+        }
+
+        /// `a` and `m`, on both: the agenda and the month.
+        private func modeBindings() -> [KeyBinding] {
+            [
+                KeyBinding(declining: "a", "agenda") {
+                    guard !store.modalOverlayOpen else { return false }
+                    store.setCalendarMode(.agenda)
+                    return true
+                },
+                KeyBinding(declining: "m", "month") {
+                    guard !store.modalOverlayOpen else { return false }
+                    store.setCalendarMode(.month)
+                    return true
+                },
+            ]
+        }
+
+        /// The month's keys. Arrows move the day (and turn the page off the
+        /// grid's edge), `t` is today, `[` `]` and `,` `.` the months; j/k
+        /// step through the selected day's items, and Enter goes one level
+        /// in: the day (where it is not already beside the grid), then its
+        /// first item, then that item's mail, as the detail's own hint says.
+        /// Escape is the routed host's (`AppStore.calendarMonthBack`).
+        private func monthBindings(order: [AgendaItem], item: AgendaItem?) -> [KeyBinding] {
+            let free = { !store.modalOverlayOpen }
+            func move(_ m: MonthMove) -> Bool {
+                guard free() else { return false }
+                store.moveCalendarMonth(m)
+                return true
+            }
+            func step(_ delta: Int) -> Bool {
+                guard free(), !order.isEmpty else { return false }
+                let at = item.flatMap { i in order.firstIndex { $0.id == i.id } }
+                let i = at.map { max(0, min(order.count - 1, $0 + delta)) } ?? (delta > 0 ? 0 : order.count - 1)
+                store.calendarMonthItem = order[i].id
+                return true
+            }
+            return modeBindings() + [
+                KeyBinding(declining: "ArrowLeft", "previous day") { move(.days(-1)) },
+                KeyBinding(declining: "ArrowRight", "next day") { move(.days(1)) },
+                KeyBinding(declining: "ArrowUp", "a week back") { move(.days(-7)) },
+                KeyBinding(declining: "ArrowDown", "a week on") { move(.days(7)) },
+                KeyBinding(declining: "t", "today") { move(.today) },
+                KeyBinding(declining: "[", "previous month") { move(.months(-1)) },
+                KeyBinding(declining: "]", "next month") { move(.months(1)) },
+                KeyBinding(declining: ",", "previous month") { move(.months(-1)) },
+                KeyBinding(declining: ".", "next month") { move(.months(1)) },
+                KeyBinding(declining: "j", "next") { step(+1) },
+                KeyBinding(declining: "k", "previous") { step(-1) },
+                KeyBinding(declining: "Enter", "open") {
+                    guard free() else { return false }
+                    if let item { return open(item) }
+                    if !monthTwoPanes, !store.calendarDayOpen {
+                        store.calendarDayOpen = true
+                        return true
+                    }
+                    guard let first = order.first else { return false }
+                    store.calendarMonthItem = first.id
+                    return true
+                },
+                KeyBinding(declining: "y", "going") {
+                    guard free(), let ghost = item?.ghost else { return false }
+                    let state: GhostState? = ghost.state == .going ? nil : .going
+                    Task { await store.markGhost(ghost, state, viaKey: true) }
+                    return true
+                },
+                KeyBinding(declining: "x", "dismiss") {
+                    guard free(), let ghost = item?.ghost else { return false }
                     Task { await store.markGhost(ghost, .dismissed, viaKey: true) }
                     return true
                 },
@@ -394,9 +524,25 @@
         var thin = false
         var hue: Color = CalendarInk.account
         var cornerRadius: CGFloat = 3
+        /// A flat end where the block goes on past what is drawn: past
+        /// midnight, or out of the night cap into the day. Corners tell the
+        /// truth about edges (the mock's week notes).
+        var flatLeading = false
+        var flatTrailing = false
+        /// A guessed end's piece after midnight: all guess, so no solid start
+        /// of its own. Only with `estimated`.
+        var tailOnly = false
+        /// A guessed end fades out to nothing instead of stopping at an edge
+        /// (the month's strip; the mock's `.strip b.est`). Not where the
+        /// block continues past what is drawn.
+        var feather = false
 
         var body: some View {
-            let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            let lead: CGFloat = flatLeading ? 0 : cornerRadius
+            let trail: CGFloat = flatTrailing ? 0 : cornerRadius
+            let shape = UnevenRoundedRectangle(
+                topLeadingRadius: lead, bottomLeadingRadius: lead,
+                bottomTrailingRadius: trail, topTrailingRadius: trail, style: .continuous)
             ZStack {
                 switch thin ? .outline : fill {
                 case .solid:
@@ -406,8 +552,15 @@
                         shape.fill(
                             LinearGradient(
                                 stops: [
-                                    .init(color: hue.opacity(0.78), location: 0.35),
+                                    .init(color: hue.opacity(tailOnly ? 0.36 : 0.78), location: tailOnly ? 0 : 0.35),
                                     .init(color: hue.opacity(0.22), location: 1),
+                                ], startPoint: .leading, endPoint: .trailing)
+                        )
+                        .mask(
+                            LinearGradient(
+                                stops: [
+                                    .init(color: .black, location: feather && !flatTrailing ? 0.6 : 1),
+                                    .init(color: feather && !flatTrailing ? .clear : .black, location: 1),
                                 ], startPoint: .leading, endPoint: .trailing))
                     } else {
                         shape.fill(hue.opacity(0.78))
@@ -709,6 +862,44 @@
             built = Agenda.days(items, now: now, calendar: calendar)
             (self.feed, self.now, zone) = (feed, now, calendar.timeZone)
             return built
+        }
+    }
+
+    /// The month's derivations, kept until something they are built from
+    /// changes: the feed and the zone (the items), the month (the grid), the
+    /// day (the column). Not keyed by the clock: the grid does not move with
+    /// the minute, and the now tick is drawn from `now` directly.
+    private final class MonthMemo {
+        private var feed: TimelineFeed?
+        private var zone: TimeZone?
+        private(set) var items: [AgendaItem] = []
+        private var month: Date?
+        private var firstWeekday: Int?
+        private var built = MonthModel(month: .distantPast, weeks: [], lanes: 0)
+        private var day: Date?
+        private var builtColumn: DayColumn?
+
+        func month(_ feed: TimelineFeed?, month: Date, calendar: Calendar) -> MonthModel {
+            var stale = false
+            if feed != self.feed || calendar.timeZone != zone {
+                items = feed.map { Agenda.items($0, calendar: calendar) } ?? []
+                (self.feed, zone) = (feed, calendar.timeZone)
+                builtColumn = nil
+                stale = true
+            }
+            if stale || month != self.month || calendar.firstWeekday != firstWeekday {
+                built = MonthGrid.build(items, month: month, calendar: calendar)
+                (self.month, firstWeekday) = (month, calendar.firstWeekday)
+            }
+            return built
+        }
+
+        /// Call after `month(_:month:calendar:)`, which keeps `items` current.
+        func column(day: Date, calendar: Calendar) -> DayColumn {
+            if let builtColumn, day == self.day { return builtColumn }
+            let column = MonthGrid.column(items, day: day, calendar: calendar)
+            (self.day, builtColumn) = (day, column)
+            return column
         }
     }
 

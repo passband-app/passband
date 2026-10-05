@@ -388,10 +388,15 @@ struct ShortcutsOverlay: View {
             Group(
                 title: "Calendar",
                 items: [
+                    (["a", "m"], "agenda / month"),
                     (["j", "k"], "move selection"),
                     (["Enter"], "open the mail behind it"),
                     (["y"], "going (again: not going)"),
                     (["x"], "dismiss"),
+                    (["←", "→", "↑", "↓"], "month: move the day"),
+                    (["[", "]"], "month: previous / next"),
+                    (["t"], "month: today"),
+                    (["Enter"], "month: open the day"),
                 ]), at: 2)
         return out
     }

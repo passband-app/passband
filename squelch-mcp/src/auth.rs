@@ -11,7 +11,8 @@
 //! - **Open** (neither issuer nor public URL set): today's self-host door. No
 //!   auth layer at all; the only guard is rmcp's Host allow-list.
 //! - **OAuth** (both set): every `/mcp` request needs a valid bearer JWT.
-//! - **Misconfigured** (exactly one set, or a value that does not parse): the
+//! - **Misconfigured** (exactly one set, a value that does not parse, or a
+//!   public URL whose path is not exactly `/mcp`): the
 //!   door answers 503 to everything. A half-configured daemon must never fall
 //!   back to Open, because the most likely way to get here is a hosted pod
 //!   whose second variable went missing, and that pod's `/mcp` is published.
@@ -144,6 +145,11 @@ pub enum MisconfiguredReason {
     InvalidIssuer,
     /// The public URL is not an acceptable URL.
     InvalidPublicUrl,
+    /// The public URL's path is not exactly [`crate::MCP_PATH`], or it has a
+    /// query. The door is only ever mounted there and the metadata link is
+    /// derived from it, so any other resource could never match a token's
+    /// `aud`: the daemon would start looking healthy and refuse everything.
+    PublicUrlNotMcpPath,
     /// The JWKS override is not an acceptable URL.
     InvalidJwksUrl,
     /// OAuth is configured but the daemon has no real account email to bind
@@ -162,6 +168,9 @@ impl MisconfiguredReason {
             }
             Self::InvalidIssuer => "SQUELCH_MCP_OAUTH_ISSUER is not a valid https URL",
             Self::InvalidPublicUrl => "SQUELCH_MCP_PUBLIC_URL is not a valid https URL",
+            Self::PublicUrlNotMcpPath => {
+                "SQUELCH_MCP_PUBLIC_URL must have the path /mcp exactly, with no trailing slash, query or fragment"
+            }
             Self::InvalidJwksUrl => "SQUELCH_MCP_OAUTH_JWKS_URL is not a valid https URL",
             Self::NoAccountEmail => {
                 "agent sign-in needs this daemon's real account email (SQUELCH_ACCOUNT_EMAIL), not the default"
@@ -272,6 +281,12 @@ impl AgentDoorAuth {
         let Some(public) = acceptable_url(public_url) else {
             return Self::Misconfigured(MisconfiguredReason::InvalidPublicUrl);
         };
+        // The resource IS the door: the router mounts only `MCP_PATH`, and the
+        // metadata URL is `<origin>/.well-known/oauth-protected-resource/mcp`.
+        // (`acceptable_url` already refused a fragment.)
+        if public.path() != crate::MCP_PATH || public.query().is_some() {
+            return Self::Misconfigured(MisconfiguredReason::PublicUrlNotMcpPath);
+        }
         let jwks_url = match non_blank(jwks_url) {
             Some(j) => match acceptable_url(j) {
                 Some(_) => j.to_string(),
@@ -341,8 +356,6 @@ pub enum Refusal {
     WrongMailbox,
     /// The JWKS has never been fetched successfully, so nothing can verify.
     JwksUnavailable,
-    /// The door is misconfigured; nothing is served.
-    Misconfigured,
 }
 
 impl Refusal {
@@ -364,12 +377,11 @@ impl Refusal {
             Self::MissingEmail => "missing_email",
             Self::WrongMailbox => "wrong_mailbox",
             Self::JwksUnavailable => "jwks_unavailable",
-            Self::Misconfigured => "misconfigured",
         }
     }
 
     /// Every category, in a fixed order: the refusal log's counters.
-    pub const ALL: [Refusal; 17] = [
+    pub const ALL: [Refusal; 16] = [
         Self::NoToken,
         Self::Oversize,
         Self::Malformed,
@@ -386,7 +398,6 @@ impl Refusal {
         Self::MissingEmail,
         Self::WrongMailbox,
         Self::JwksUnavailable,
-        Self::Misconfigured,
     ];
 
     fn index(self) -> usize {
@@ -1007,9 +1018,7 @@ impl AuthLayerState {
     /// response says which check failed (I6).
     fn refusal_response(&self, why: Refusal) -> Response {
         let (status, challenge) = match why {
-            Refusal::JwksUnavailable | Refusal::Misconfigured => {
-                (StatusCode::SERVICE_UNAVAILABLE, None)
-            }
+            Refusal::JwksUnavailable => (StatusCode::SERVICE_UNAVAILABLE, None),
             Refusal::NoToken => (StatusCode::UNAUTHORIZED, Some(self.challenge.clone())),
             _ => (
                 StatusCode::UNAUTHORIZED,
@@ -1351,8 +1360,11 @@ mod tests {
         );
     }
 
-    /// A token accepted with about a second of leeway left still gets the
-    /// whole response from a handler that takes longer than that.
+    /// A token accepted with a few seconds of leeway left still gets the
+    /// whole response from a handler that takes longer than that. (A few, not
+    /// one: signing and the first JWKS fetch take real time in a debug build
+    /// under a loaded test run, and a token that expires before `verify` is a
+    /// 401, which is not what this test is about.)
     #[tokio::test]
     async fn a_slow_response_to_a_late_token_is_not_cut_off() {
         use crate::testing::{KEY_A_PEM, KID_A, StubJwks, sign, unix_now, valid_claims};
@@ -1372,7 +1384,8 @@ mod tests {
             .route(
                 "/mcp",
                 axum::routing::any(|| async {
-                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    // Longer than the at most 4 seconds of leeway left below.
+                    tokio::time::sleep(Duration::from_secs(5)).await;
                     "the whole answer"
                 }),
             )
@@ -1385,7 +1398,7 @@ mod tests {
             "https://alice.passband.email/mcp",
             "alice@example.com",
         );
-        c["exp"] = serde_json::json!(unix_now() - 59);
+        c["exp"] = serde_json::json!(unix_now() - 57);
         let req = axum::http::Request::builder()
             .method("POST")
             .uri("/mcp")
@@ -1401,5 +1414,49 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(&body[..], b"the whole answer");
+    }
+
+    /// The public URL names the door itself, so its path must be `/mcp` and
+    /// nothing else. Each of these would start up looking healthy and then
+    /// refuse every token as `audience`.
+    #[test]
+    fn a_public_url_whose_path_is_not_exactly_mcp_is_misconfigured() {
+        let issuer = Some("https://a.authkit.app");
+        for bad in [
+            "https://mail.example.net/agent",
+            "https://mail.example.net/mcp/",
+            "https://mail.example.net/mcp?x=1",
+            "https://mail.example.net/mcp?",
+            "https://mail.example.net/MCP",
+            "https://mail.example.net",
+            "https://mail.example.net/",
+            "https://mail.example.net/x/mcp",
+        ] {
+            let auth = AgentDoorAuth::from_values(issuer, Some(bad), None);
+            assert_eq!(
+                auth,
+                AgentDoorAuth::Misconfigured(MisconfiguredReason::PublicUrlNotMcpPath),
+                "{bad}"
+            );
+            let line = auth.describe();
+            assert!(line.starts_with("MISCONFIGURED, answering 503: "), "{line}");
+            assert!(line.contains("/mcp exactly"), "{line}");
+            assert!(
+                !line.contains("mail.example.net"),
+                "the value leaked: {line}"
+            );
+        }
+        for good in [
+            "https://alice.passband.email/mcp",
+            "https://mail.example.net:8443/mcp",
+        ] {
+            assert!(
+                matches!(
+                    AgentDoorAuth::from_values(issuer, Some(good), None),
+                    AgentDoorAuth::OAuth(_)
+                ),
+                "{good}"
+            );
+        }
     }
 }

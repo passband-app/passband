@@ -555,10 +555,13 @@ build the HTTP agent door (the bare rmcp service is private to the crate):
   No auth layer at all; the only guard is rmcp's Host allow-list (loopback plus
   `SQUELCH_MCP_ALLOWED_HOSTS`). This is self-host, and it is fit only for a listener
   the owner controls the reach of. No metadata routes exist.
-- **OAuth.** Both are set, each a valid `https` URL (`http` only on loopback). Every
+- **OAuth.** Both are set, each a valid `https` URL (`http` only on loopback), and
+  the public URL's path is exactly `/mcp` with no query or fragment (the resource
+  IS the door, so any other path could never match a token's `aud`). Every
   `/mcp` request needs a bearer token, verified below. Two unauthenticated GET routes
   publish RFC 9728 protected-resource metadata naming the issuer.
-- **Misconfigured.** Exactly one is set, one does not parse, or OAuth is configured
+- **Misconfigured.** Exactly one is set, one does not parse, the public URL's path
+  is anything but exactly `/mcp`, or OAuth is configured
   but the daemon has no real account email to bind tokens to (unset, or the
   `me@localhost` placeholder; `AgentDoorAuth::for_account`, applied inside
   `agent_door_router` so no host can skip it). `/mcp` answers 503

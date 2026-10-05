@@ -1944,14 +1944,6 @@ fn agent_door_status(auth: &squelch_mcp::AgentDoorAuth) -> squelch_api::AgentDoo
     }
 }
 
-/// The agent door's mode for the startup line. The public URL is public (the
-/// door's own metadata publishes it); nothing else about the config is shown,
-/// and a misconfiguration names the setting at fault, never its value.
-fn describe_agent_door(auth: &squelch_mcp::AgentDoorAuth) -> String {
-    // The same wording the standalone squelch-mcp binary prints.
-    auth.describe()
-}
-
 /// The router hosting both doors: `/mcp` (agent door, read-only, sealed-absent)
 /// and `/client/*` (human door, bearer-authed, the only write capability). They
 /// share the store; the agent door never sees the write credential.
@@ -2425,12 +2417,15 @@ fn cmd_serve(
             .await
             .map_err(|e| other_err(format!("bind {bind}: {e}")))?;
         let bound = listener.local_addr().unwrap_or(bind);
-        // Single startup line. No tokens or message content are ever logged;
-        // the agent door's mode names the public URL (it is published in the
-        // door's own metadata) and nothing else.
+        // Single startup line. No tokens or message content are ever logged.
+        // The agent door's mode is `AgentDoorAuth::describe`, the same text the
+        // standalone squelch-mcp binary prints: the public URL in OAuth mode
+        // (the door's own metadata publishes it) and nothing else of the
+        // config; a misconfiguration names the setting at fault, never its
+        // value.
         eprintln!(
             "squelchd: serving agent door http://{bound}/mcp ({mode}) and human door http://{bound}/client/*",
-            mode = describe_agent_door(&agent_door),
+            mode = agent_door.describe(),
         );
 
         // The metrics door, on its OWN listener: a second bind, a one-route

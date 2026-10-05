@@ -258,6 +258,10 @@ enum ReleaseNotes {
             headline: "Cleanup Time",
             items: [
                 ReleaseItem(
+                    .app, "Connect your agents",
+                    detail: "Hosted accounts can sign Claude or ChatGPT in to their mailbox from Settings, under Agents",
+                    symbol: "link"),
+                ReleaseItem(
                     .app, "Smart block",
                     detail: "When a sender ignores your unsubscribe, block just the mail you did not want",
                     symbol: "hand.raised"),

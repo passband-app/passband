@@ -18,6 +18,7 @@ Cleanup Time
 
 ### Mac
 
+- **Connect your agents.** Hosted accounts can sign Claude or ChatGPT in to their mailbox from Settings, under Agents
 - **Smart block.** When a sender ignores your unsubscribe, block just the mail you did not want
 - Ask ⌘K how Passband works
 - `⌘F` to find text in an email

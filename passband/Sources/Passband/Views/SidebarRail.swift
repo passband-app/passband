@@ -213,7 +213,7 @@ struct SidebarRail: View {
         if let version = updater.pending, !RehearsalMode.isEnabled {
             Button { updater.showAgain() } label: {
                 Image(systemName: "arrow.down.circle")
-                    .font(.system(size: 17, weight: .medium))
+                    .font(Typo.ui(17, weight: .medium))
                     .foregroundStyle(Palette.accent)
                     .symbolEffect(.bounce, value: updateArrived)
                     .frame(width: Self.iconWidth, height: Self.iconHeight)

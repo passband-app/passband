@@ -1,15 +1,19 @@
 // Sparkle auto-update wearing Passband's own face. One updater for the process
 // (Sparkle asserts if a second one starts for the same bundle), and one card
-// inside the app instead of Sparkle's separate window: a new version arrives as
-// an in-app alert whose single button installs it and relaunches. "Update" and
-// then "Install and Relaunch" in a second dialog is one decision asked twice.
+// inside the app instead of Sparkle's separate window.
+//
+// Scheduled checks run hourly and download silently: the new version is
+// fetched and unpacked in the background, installs itself on the next quit,
+// and the card only appears once it is ready, offering a restart into it now.
+// A check the human asks for from the menu still goes through the user driver
+// below, where a new version arrives as an in-app alert whose single button
+// installs it and relaunches.
 //
 // This is a full SPUUserDriver rather than the standard driver plus its
 // gentle-reminder delegate. That delegate can only DEFER Sparkle's own alert,
 // and that alert is exactly the second click being removed. What the standard
-// driver used to own is reproduced here on purpose, not dropped: the permission
-// prompt below, so a fresh install still never phones home undisclosed, and the
-// two answers a check the human asked for has to get (up to date / it failed).
+// driver used to own is reproduced here on purpose, not dropped: the two
+// answers a check the human asked for has to get (up to date / it failed).
 // A BACKGROUND failure stays silent, which is the one thing a driver with no
 // window of its own can do that Sparkle's cannot.
 //
@@ -32,6 +36,9 @@ enum UpdatePhase: Equatable {
     case checking
     /// Sparkle has an update and is holding for an answer.
     case available(version: String)
+    /// Downloaded in the background and waiting for the next quit. Restart
+    /// installs it now; Later only hides the card, since the quit still will.
+    case ready(version: String)
     /// nil fraction: the feed declared no length, so there is a download but no
     /// honest way to draw how much of it is done.
     case downloading(Double?)
@@ -46,14 +53,14 @@ enum UpdatePhase: Equatable {
     /// buttons are gone.
     var busy: Bool {
         switch self {
-        case .idle, .checking, .available: false
+        case .idle, .checking, .available, .ready: false
         case .downloading, .extracting, .installing: true
         }
     }
 }
 
 @MainActor
-final class Updater: NSObject, ObservableObject, SPUUserDriver {
+final class Updater: NSObject, ObservableObject, SPUUserDriver, SPUUpdaterDelegate {
     static let shared = Updater()
 
     /// Sparkle's engine. Implicitly unwrapped because it is constructed with
@@ -78,11 +85,26 @@ final class Updater: NSObject, ObservableObject, SPUUserDriver {
         }
     }
 
+    /// The version waiting to be installed, for the rail's update tile. Outlives
+    /// the card on purpose: Later hides the card, never this. Nil once a check
+    /// says the app is current; a relaunch into the update clears it by
+    /// starting a fresh process.
+    @Published private(set) var pending: String?
+
     /// Sparkle's question, parked until the human answers it. `install` is the
     /// card's one button; `dismiss` is Later, which brings the update back on
     /// the next scheduled check rather than burying the version forever, which
     /// is what `skip` would do. Nil whenever nothing is waiting on an answer.
     private var choice: ((SPUUserUpdateChoice) -> Void)?
+
+    /// Sparkle's install-now handle for an update it downloaded silently. Nil
+    /// unless `phase` is `.ready`. Sparkle installs on quit regardless; this
+    /// only lets the card do it sooner.
+    private var installNow: (() -> Void)?
+
+    /// Later's alarm: the card comes back this long after it was waved off.
+    private static let remindAfter: Duration = .seconds(60 * 60)
+    private var reminder: Task<Void, Never>?
 
     /// Set the moment the human presses Update. This is what makes the second
     /// prompt unnecessary: `showReady(toInstallAndRelaunch:)` answers itself
@@ -101,18 +123,17 @@ final class Updater: NSObject, ObservableObject, SPUUserDriver {
     private override init() {
         super.init()
         let engine = SPUUpdater(
-            hostBundle: .main, applicationBundle: .main, userDriver: self, delegate: nil)
+            hostBundle: .main, applicationBundle: .main, userDriver: self, delegate: self)
         self.engine = engine
-        // PASSBAND ALWAYS ASKS FIRST, and this line is what makes that true.
-        // Sparkle's automatic-download mode does not merely skip the download
-        // prompt: SPUAutomaticUpdateDriver never calls the user driver at all,
-        // so there is no showUpdateFound, no card, and the new version lands on
-        // the next quit with nobody told. That is the exact opposite of the
-        // thing this file exists to draw. The preference persists in user
-        // defaults — Sparkle's own permission prompt used to offer it, and an
-        // install that answered yes years ago still carries the yes — so it is
-        // overridden on EVERY launch rather than written once.
-        engine.automaticallyDownloadsUpdates = false
+        // Always check, always download silently. Both are forced on EVERY
+        // launch, not left to Info.plist: the preferences persist in user
+        // defaults, and older builds asked (and forced downloads off), so an
+        // existing install can carry a "no" to either. In automatic-download
+        // mode SPUAutomaticUpdateDriver never calls the user driver; the one
+        // place this file hears about the update is
+        // `updater(_:willInstallUpdateOnQuit:immediateInstallationBlock:)`.
+        engine.automaticallyChecksForUpdates = true
+        engine.automaticallyDownloadsUpdates = true
         do {
             try engine.start()
         } catch {
@@ -145,39 +166,95 @@ final class Updater: NSObject, ObservableObject, SPUUserDriver {
         reply(.install)
     }
 
-    /// Later. `dismiss`, not `skip`: the version comes back around on the next
-    /// scheduled check, because "not now" is not "never".
+    /// The rail tile: put the card back in front of the human. A downloaded
+    /// update just re-shows its card; one that was only offered had its
+    /// Sparkle session closed by Later, so it takes a check to ask again.
+    func showAgain() {
+        guard phase == .idle, let pending else { return }
+        reminder?.cancel()
+        if installNow != nil {
+            phase = .ready(version: pending)
+        } else {
+            check()
+        }
+    }
+
+    /// Restart into an update that downloaded in the background.
+    func restartNow() {
+        guard let installNow else { return }
+        reminder?.cancel()
+        phase = .installing
+        installNow()
+    }
+
+    /// Later: the card goes, and comes back an hour from now. `dismiss`, not
+    /// `skip`, because "not now" is not "never".
     func later() {
-        guard let reply = choice else {
+        if case .ready(let version) = phase {
+            // Downloaded and waiting for the quit, so there is nothing to
+            // re-check: the same card simply comes back.
             phase = .idle
+            remind { $0.phase = .ready(version: version) }
             return
         }
-        choice = nil
+        if let reply = choice {
+            choice = nil
+            reply(.dismiss)
+        }
         phase = .idle
-        reply(.dismiss)
+        // Sparkle's session is over, so coming back means asking again. A
+        // background check lands on the silent path (a `.ready` card) or, for
+        // an update that cannot install unattended, `showUpdateFound`.
+        remind { $0.engine.checkForUpdatesInBackground() }
+    }
+
+    /// Runs `bringBack` after `remindAfter`, unless the card has come back some
+    /// other way in the meantime (a menu check, a newer download).
+    private func remind(_ bringBack: @escaping @MainActor (Updater) -> Void) {
+        reminder?.cancel()
+        reminder = Task { [weak self] in
+            try? await Task.sleep(for: Self.remindAfter)
+            guard let self, !Task.isCancelled, self.phase == .idle else { return }
+            bringBack(self)
+        }
     }
 
     // MARK: - SPUUserDriver: permission
 
-    /// The only modal in this driver, and it earns it: it is asked once, before
-    /// the first scheduled check, and the answer decides whether this install
-    /// ever talks to passband.app on its own.
+    /// Never asked in practice: `SUEnableAutomaticChecks` in Info.plist tells
+    /// Sparkle the answer already. Required by the protocol, so it gives the
+    /// same answer without a modal. The system profile is never sent: it is a
+    /// hardware and locale fingerprint, and none of it makes the feed better
+    /// at telling this app there is a newer zip.
     func show(
         _ request: SPUUpdatePermissionRequest,
         reply: @escaping (SUUpdatePermissionResponse) -> Void
     ) {
-        let alert = NSAlert()
-        alert.messageText = "Check for Passband updates automatically?"
-        alert.informativeText =
-            "Passband can look at passband.app now and then and tell you when a new "
-            + "version is ready. Nothing about your mail or your accounts is sent."
-        alert.addButton(withTitle: "Check Automatically")
-        alert.addButton(withTitle: "Don't Check")
-        let allowed = alert.runModal() == .alertFirstButtonReturn
-        // The system profile is never sent, whatever the answer: it is a
-        // hardware and locale fingerprint, and none of it makes the feed
-        // better at telling this app there is a newer zip.
-        reply(SUUpdatePermissionResponse(automaticUpdateChecks: allowed, sendSystemProfile: false))
+        reply(SUUpdatePermissionResponse(automaticUpdateChecks: true, sendSystemProfile: false))
+    }
+
+    // MARK: - SPUUpdaterDelegate: the silent path
+
+    /// A scheduled check downloaded and unpacked an update with nobody asked.
+    /// YES takes over the install: Sparkle holds the update cycle (no point
+    /// checking hourly for a version already waiting) and installs on quit
+    /// regardless, and `immediateInstallHandler` lets the card do it now.
+    func updater(
+        _ updater: SPUUpdater, willInstallUpdateOnQuit item: SUAppcastItem,
+        immediateInstallationBlock immediateInstallHandler: @escaping () -> Void
+    ) -> Bool {
+        let version = item.displayVersionString
+        reminder?.cancel()
+        installNow = immediateInstallHandler
+        pending = version
+        phase = .ready(version: version)
+        // Same once-per-version banner as a found update: the card only speaks
+        // to someone looking at the window.
+        if Self.bannered != version {
+            Self.bannered = version
+            Task { await Notifier.shared.postUpdate(version: version) }
+        }
+        return true
     }
 
     // MARK: - SPUUserDriver: the check
@@ -201,9 +278,11 @@ final class Updater: NSObject, ObservableObject, SPUUserDriver {
             reply(.dismiss)
             return
         }
+        reminder?.cancel()
         choice = reply
         consented = false
         let version = appcastItem.displayVersionString
+        pending = version
         phase = .available(version: version)
         // The card only speaks to someone looking at the window. A scheduled
         // check usually lands while Passband sits behind other apps or with its
@@ -226,6 +305,8 @@ final class Updater: NSObject, ObservableObject, SPUUserDriver {
 
     func showUpdateNotFoundWithError(_ error: Error, acknowledgement: @escaping () -> Void) {
         phase = .idle
+        // Current after all: whatever the tile was pointing at is gone.
+        if installNow == nil { pending = nil }
         // Silence unless someone is waiting to hear it.
         if userInitiated {
             let alert = NSAlert()
@@ -333,6 +414,9 @@ final class Updater: NSObject, ObservableObject, SPUUserDriver {
         choice = nil
         consented = false
         userInitiated = false
+        // A silently downloaded update outlives the session that fetched it:
+        // it is still waiting for the quit, so its card stays.
+        if case .ready = phase { return }
         phase = .idle
     }
 

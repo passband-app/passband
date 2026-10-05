@@ -478,7 +478,9 @@ enum ProductGuide {
         - While Passband is the front window, banners go to Notification Center only. Clicking a banner opens that message.
 
         Updates:
-        - A new version shows as a card at the bottom of the window. "Update" installs it and restarts; "Later" asks again at the next check.
+        - Passband checks for a new version every hour and downloads it in the background. It installs the next time Passband quits.
+        - When one is ready, a card at the bottom of the window offers "Restart" to install it now. "Later" hides the card for an hour.
+        - While a new version is waiting, a down-arrow icon sits in the sidebar above the share icon. Clicking it brings the card back.
         - The Passband menu has "Check for Updates…". The installed version is printed at the bottom right of Settings.
         - Settings > General > Help has "What's new" for the release notes and "Practice inbox" to replay the tour.
 

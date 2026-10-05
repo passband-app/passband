@@ -247,6 +247,17 @@ run_suite testflight-nudge \
   Sources/Passband/Lib/TestFlightNudge.swift \
   Tests/TestFlightNudgeTests.swift
 
+# When the agent-door ad fires: a week in, once, only at a door an agent can
+# actually use, never to somebody who has been to Settings > Agents or whose
+# mailbox an agent has already written to, and never on the iPhone ad's heels.
+run_suite agent-nudge \
+  Sources/Passband/Lib/Platform.swift \
+  Sources/Passband/Lib/ShareNudge.swift \
+  Sources/Passband/Lib/TestFlightNudge.swift \
+  Sources/Passband/Model/AgentConnect.swift \
+  Sources/Passband/Lib/AgentNudge.swift \
+  Tests/AgentNudgeTests.swift
+
 # What "remind me…" resolves to. Foundation only, and every date computed
 # through an injected now/calendar — which is the whole reason it is testable:
 # a reminder is only ever wrong LATER, so the arithmetic has to be pinned here

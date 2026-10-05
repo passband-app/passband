@@ -1057,7 +1057,7 @@ with no restart and nothing to wait out.</p>
 <p class="muted">A code lets one new device in. Creating one retires any code that was still
 outstanding, so there is never more than one live at a time.</p>
 
-<h2>Agent door</h2>
+<h2>Agent MCP</h2>
 {agent_door}
 
 <h2>Sign out</h2>
@@ -1095,12 +1095,12 @@ There is no token to copy. Setup steps for each agent are in the Passband app, u
 Agents.</p>"#,
             url = escape_html(public_url),
         ),
-        AgentDoorStatus::Open => r#"<p>Agent sign-in is not set up on this daemon, so the agent door (<code>/mcp</code>) asks for
+        AgentDoorStatus::Open => r#"<p>Agent sign-in is not set up on this daemon, so Agent MCP (<code>/mcp</code>) asks for
 no sign-in. It answers only to host names this daemon trusts: loopback, plus any listed in
 <code>SQUELCH_MCP_ALLOWED_HOSTS</code>. That suits an agent on the same machine, or one reaching
 it through a proxy you run. Hosted Passband addresses do not publish it in this state.</p>"#
             .to_string(),
-        AgentDoorStatus::Unavailable => r#"<p>The agent door (<code>/mcp</code>) is refusing every request because its sign-in
+        AgentDoorStatus::Unavailable => r#"<p>Agent MCP (<code>/mcp</code>) is refusing every request because its sign-in
 settings are incomplete. <code>SQUELCH_MCP_OAUTH_ISSUER</code> and
 <code>SQUELCH_MCP_PUBLIC_URL</code> must be set together, as valid URLs. The daemon's log names
 the setting at fault. Mail sync and this console are not affected.</p>"#
@@ -1548,9 +1548,7 @@ mod tests {
         let (store, acct, app) = fixture_with(|s| s.with_agent_door(status));
         let token = sign_in(&app, &store, acct).await;
         let html = body_of(app.oneshot(get("/console", Some(&token))).await.unwrap()).await;
-        let start = html
-            .find("<h2>Agent door</h2>")
-            .expect("agent door section");
+        let start = html.find("<h2>Agent MCP</h2>").expect("agent door section");
         let end = html[start..]
             .find("<h2>Sign out</h2>")
             .expect("next section")

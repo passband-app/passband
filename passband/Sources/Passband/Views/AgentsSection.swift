@@ -46,6 +46,9 @@ struct AgentsSection: View {
         .task(id: endpoint) {
             await connect.check(serverURL: store.settings?.serverURL)
         }
+        // Somebody who has been here knows the door exists, so the one-time
+        // ad for it never goes up after this (`AgentNudge`).
+        .onAppear { AgentNudge.shared.notePaneSeen() }
     }
 
     // MARK: - where the door is
@@ -82,7 +85,7 @@ struct AgentsSection: View {
                 }
                 statusExplanation(endpoint)
             } else {
-                SettingsHint("Add an account under Account first. The agent door lives on the same server.")
+                SettingsHint("Add an account under Account first. Agent MCP lives on the same server.")
             }
         }
     }
@@ -128,11 +131,11 @@ struct AgentsSection: View {
             CodeBlock(text: host)
         case .notServed:
             SettingsHint(
-                "Nothing answers at /mcp on this server. Hosted Passband doesn't open the agent door yet. A self-hosted daemon does."
+                "Nothing answers at /mcp on this server. Hosted Passband doesn't offer Agent MCP yet. A self-hosted daemon does."
             )
         case .unreachable:
             SettingsHint(
-                "The agent door didn't answer from here. If the daemon is on another machine, check it is running and that this address reaches it."
+                "Agent MCP didn't answer from here. If the daemon is on another machine, check it is running and that this address reaches it."
             )
         case .unknown, .checking:
             EmptyView()
@@ -230,7 +233,7 @@ struct AgentsSection: View {
                 )
             } else {
                 SettingsHint(
-                    "The agent door has no password of its own. Anything that can reach the address above can read your triaged mail, so keep it on this computer or your tailnet."
+                    "Agent MCP has no password of its own. Anything that can reach the address above can read your triaged mail, so keep it on this computer or your tailnet."
                 )
             }
         }

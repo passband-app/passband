@@ -110,7 +110,7 @@ enum Analytics {
         "account_added",
         "tour_started", "tour_completed", "tour_skipped", "whats_new_shown",
         "invite_sent", "invite_nudge_accepted", "invite_nudge_dismissed",
-        "ios_nudge_closed",
+        "ios_nudge_closed", "agent_nudge_closed",
         "group_created", "group_updated", "group_deleted",
         // Derived, never captured by a call site: see `milestones`.
         "milestone", "catchup_completed",
@@ -149,6 +149,10 @@ enum Analytics {
         // The TestFlight ask closing, with one bool: whether the link was
         // copied. A QR scan leaves no trace, so this is a floor on uptake.
         "ios_nudge_closed",
+        // The agent-door ad closing, with one bool: whether its button was
+        // taken to Settings > Agents. Whether an agent then connects is not
+        // measured here, at any level.
+        "agent_nudge_closed",
         // Send groups carry a mode and a member COUNT. Whether people organize
         // their correspondents into audiences at all, and which shape they
         // reach for, is the "does the product work" question for this feature;

@@ -96,7 +96,10 @@ final class WhatsNew {
     /// it on the reader's behalf.
     func dismiss() {
         guard active else { return }
-        stamp(ReleaseNotes.newestShown(notes))
+        // A forced card is a preview. Stamping from one told this Mac it had
+        // read a release it had not taken yet, and the real update then
+        // announced nothing.
+        if !Self.forced { stamp(ReleaseNotes.newestShown(notes)) }
         notes = []
         catchUp = nil
         dismissedThisSession = true

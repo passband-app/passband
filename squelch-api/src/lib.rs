@@ -9,6 +9,7 @@ mod agent;
 mod assistant;
 mod auth;
 mod calendar_connect;
+mod calendar_write;
 mod console;
 mod devices;
 mod error;
@@ -182,6 +183,18 @@ fn client_router(state: ApiState) -> Router {
         .route(
             "/client/calendar/connect",
             post(calendar_connect::connect_calendar),
+        )
+        // The user's own create, edit and delete of one event on their Google
+        // Calendar: Google first, then the local row, each attempt audited.
+        // HUMAN DOOR ONLY: the agent door and the in-app assistant can neither
+        // read nor write a calendar.
+        .route(
+            "/client/calendar/events",
+            post(calendar_write::create_event),
+        )
+        .route(
+            "/client/calendar/events/{calendar_id}/{id}",
+            patch(calendar_write::edit_event).delete(calendar_write::delete_event),
         )
         .route("/client/search", get(handlers::search))
         // The user's own sent mail. Human door only — this is the one listing

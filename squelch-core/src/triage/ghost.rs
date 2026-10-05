@@ -776,14 +776,82 @@ fn note(raw: &str) -> String {
 /// path: a query string is where a meeting passcode lives. A path with a
 /// credential-shaped segment (a join token) is cut back to the host.
 pub(crate) fn launder_location(raw: &str) -> Option<String> {
-    let text = map_urls(&plain(raw), |url| {
-        let (host, path) = url_host_path(url)?;
-        if path.split('/').any(credential_shaped) {
-            return Some(host);
+    clean_text(&map_urls(&plain(raw), meeting_link))
+}
+
+/// A URL in display text: host and path, never the query, and the host alone
+/// when the path carries a credential-shaped segment.
+fn meeting_link(url: &str) -> Option<String> {
+    let (host, path) = url_host_path(url)?;
+    if path.split('/').any(credential_shaped) {
+        return Some(host);
+    }
+    Some(format!("{host}{path}"))
+}
+
+/// Cap on a calendar event's description.
+pub const DESCRIPTION_CAP: usize = 2000;
+
+/// A calendar event's description, laundered as a location is (control, bidi
+/// and invisible characters out, every URL cut to host and path) line by
+/// line, so its paragraphs survive: at most one blank line in a row, at most
+/// [`DESCRIPTION_CAP`] characters. Google's description "Can contain HTML",
+/// and an invitation's usually does: line-breaking tags become line breaks,
+/// every other tag goes, and the few entities an editor writes are decoded,
+/// so the client is never handed markup to show as text.
+pub(crate) fn launder_description(raw: &str) -> Option<String> {
+    let text = html_to_text(raw);
+    let mut lines: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let line = map_urls(&plain(line), meeting_link);
+        if line.is_empty() && lines.last().is_none_or(|l: &String| l.is_empty()) {
+            continue;
         }
-        Some(format!("{host}{path}"))
-    });
-    clean_text(&text)
+        lines.push(line);
+    }
+    let text = truncate_trimmed(&lines.join("\n"), DESCRIPTION_CAP);
+    (!text.is_empty()).then_some(text)
+}
+
+/// Markup to plain text, for [`launder_description`]. A `<` starts a tag only
+/// when a letter, `/` or `!` follows it, so "a < b" is text.
+fn html_to_text(raw: &str) -> String {
+    const BREAKS: [&str; 7] = ["br", "p", "div", "li", "tr", "h1", "h2"];
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(at) = rest.find('<') {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 1..];
+        let tag_like = after
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '/' || c == '!');
+        match after.find('>').filter(|_| tag_like) {
+            Some(close) => {
+                let name: String = after[..close]
+                    .trim_start_matches('/')
+                    .chars()
+                    .take_while(char::is_ascii_alphanumeric)
+                    .collect::<String>()
+                    .to_ascii_lowercase();
+                if BREAKS.contains(&name.as_str()) {
+                    out.push('\n');
+                }
+                rest = &after[close + 1..];
+            }
+            None => {
+                out.push('<');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out.replace("&nbsp;", " ")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
 }
 
 /// The zone a start claims, as an IANA PLACE zone, or None: a valid name with

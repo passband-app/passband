@@ -2186,6 +2186,8 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
                 "failures",
                 "retry_at",
                 "truncated",
+                "color",
+                "access_role",
             ]
         );
         assert_eq!(
@@ -2208,6 +2210,9 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
                 "transparent",
                 "html_link",
                 "updated_at",
+                "color_id",
+                "organizer_self",
+                "description",
             ]
         );
         assert!(index_exists(&conn));
@@ -2230,7 +2235,7 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
     {
         let upgraded = SqliteStore::open(&path).unwrap();
         let conn = upgraded.lock().unwrap();
-        assert_eq!(columns(&conn, "calendar_events").len(), 17);
+        assert_eq!(columns(&conn, "calendar_events").len(), 20);
         assert!(index_exists(&conn));
         let mail: i64 = conn
             .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
@@ -2249,22 +2254,30 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
         .query_row("SELECT COUNT(*) FROM calendar_calendars", [], |r| r.get(0))
         .unwrap();
     assert_eq!(kept, 1, "a later open keeps what is there");
-    // A calendar table from before the per-calendar failure state gains it,
-    // keeping its rows, with the defaults that mean "never failed, not cut".
+    // A calendar table from before the per-calendar failure state, the
+    // colour and the role (and an events table from before the colour, the
+    // organizer flag and the description) gains them, keeping its rows, with
+    // the defaults that mean "never failed, not cut".
     reopened
         .lock()
         .unwrap()
         .execute_batch(
             "ALTER TABLE calendar_calendars DROP COLUMN failures;
              ALTER TABLE calendar_calendars DROP COLUMN retry_at;
-             ALTER TABLE calendar_calendars DROP COLUMN truncated;",
+             ALTER TABLE calendar_calendars DROP COLUMN truncated;
+             ALTER TABLE calendar_calendars DROP COLUMN color;
+             ALTER TABLE calendar_calendars DROP COLUMN access_role;
+             ALTER TABLE calendar_events DROP COLUMN color_id;
+             ALTER TABLE calendar_events DROP COLUMN organizer_self;
+             ALTER TABLE calendar_events DROP COLUMN description;",
         )
         .unwrap();
     drop(reopened);
     let reopened = SqliteStore::open(&path).unwrap();
     {
         let conn = reopened.lock().unwrap();
-        assert_eq!(columns(&conn, "calendar_calendars").len(), 13);
+        assert_eq!(columns(&conn, "calendar_calendars").len(), 15);
+        assert_eq!(columns(&conn, "calendar_events").len(), 20);
         let row: (i64, Option<String>, i64) = conn
             .query_row(
                 "SELECT failures, retry_at, truncated FROM calendar_calendars",

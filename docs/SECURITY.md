@@ -613,17 +613,21 @@ it. That move is what the guard below exists for.
 - `needs_you` sends the user to the ORIGINAL link, not a post-redirect hop that may
   depend on this job's cookies.
 
-## 8. Google Calendar (read only)
+## 8. Google Calendar
 
-**Invariant.** Calendar data (event titles, places, organizers, links, calendar
-names) is human-door data: served on `GET /client/timeline` and nowhere else, never
-in a log line, never in a triage prompt. Nothing calendar-related is on `/mcp` or
-`/client/agent/*`. The daemon only reads calendars; nothing writes to one.
+**Invariant.** Calendar data (event titles, places, descriptions, organizers,
+links, calendar names) is human-door data: served on `GET /client/timeline` (and
+in the answer to the user's own write) and nowhere else, never in a log line,
+never in a triage prompt. Nothing calendar-related is on `/mcp` or
+`/client/agent/*`. The daemon writes to a calendar only when the user creates,
+edits or deletes one event from the human door; nothing writes on its own.
 
 **Enforcement.**
-- **Two tables, one reader.** `calendar_calendars` and `calendar_events`
-  (`squelch-core/src/store/sqlite/calendar.rs`) are written only by the sync loop
-  (`squelch-core/src/gcal/sync.rs`) and read only by `handlers.rs:get_timeline`.
+- **Two tables, human door only.** `calendar_calendars` and `calendar_events`
+  (`squelch-core/src/store/sqlite/calendar.rs`) are written by the sync loop
+  (`squelch-core/src/gcal/sync.rs`) and, one row at a time after Google accepted
+  it, by the user's own write (`squelch-api/src/calendar_write.rs`); they are read
+  only by `handlers.rs:get_timeline` and those write handlers.
   Every query is scoped by `account_id`. A log line names a calendar by its
   position in the pass, never its id, which is usually an address.
 - **Laundered and capped** (`gcal/mod.rs:read_event`). A shared calendar is written
@@ -634,7 +638,9 @@ in a log line, never in a triage prompt. Nothing calendar-related is on `/mcp` o
   250 per calendar per pass, 8 MB per response, one listing of 5000. Google is asked
   for less in the first place: a `fields` mask names only what is read, and
   `maxAttendees=1` leaves out every guest but the user, so an invitation anyone can
-  send never delivers its description or guest list to the daemon.
+  send never delivers its guest list, attachments or conference data to the daemon.
+  Its description is read (the app shows it): markup becomes text, each line is
+  laundered like a place, and it stops at 2000 characters.
 - **`html_link` is an allow-list** (`gcal/mod.rs:google_link`): https, a host that is
   `google.com` or ends in `.google.com`, no userinfo, at most 2048 characters.
   Anything else is dropped, because the client opens it.
@@ -643,6 +649,28 @@ in a log line, never in a triage prompt. Nothing calendar-related is on `/mcp` o
   kind (`auth`, `quota`, `unavailable`).
 - **Calendar failures stay out of Gmail.** The loop is its own task; no failure of
   it touches Gmail health or sync.
+
+**The user's own writes** (`squelch-api/src/calendar_write.rs`). `POST
+/client/calendar/events`, `PATCH` and `DELETE /client/calendar/events/{calendar_id}/{id}`,
+on the human door only, bearer authed, `no-store`. The order is fixed: the grant,
+the body (title 1 to 200 characters, refused rather than cut; one precision; the
+end after the start; place and description cut to 200 and 2000; all three lose
+control and invisible characters but are otherwise sent as typed, so a link keeps
+its query at Google, while the stored copy is Google's answer laundered by
+`read_event`),
+the calendar (one being read, on which the user is `owner` or `writer`), the
+stored event and the edit guard (`gcal/mod.rs:SyncedEvent::editable`: the user's
+own event, by `organizer.self`, no organizer, or the mailbox's own address), and
+only then Google, through the same `CalendarCredentials` resolver the sync uses,
+with `sendUpdates=none` so nobody is invited or mailed. Only Google's success
+changes a row, and what is stored is Google's answer read by the sync's own
+`read_event`. A write is never retried. Error bodies are fixed strings that never
+echo the request; logs carry the action and an error kind, never an id. Every
+attempt writes one audit row (`calendar_event_create` / `_edit` / `_delete`,
+actor `client-api`, target `calendar:<calendar_id>/<event_id>`, detail `ok` or the
+reason), never a title, place or description. The `calendar:` prefix keeps the
+audit listing's join to `messages` (a numeric target) from matching a calendar id
+that starts with digits. The in-app assistant has no tool for any of it.
 
 **The token is the union; the slot is the boundary.** Self-host
 `squelchd auth --calendar` stores its token in its own credential slot
@@ -694,7 +722,10 @@ minute.
 **What a maintainer must not break.**
 - Do not add a calendar route to the agent door or MCP, or put calendar text in a
   triage prompt, without a decision recorded in docs/CALENDAR.md §10.
-- Do not log an event's title, place, organizer, attendee, link or a calendar id.
+- Do not log an event's title, place, description, organizer, attendee, link or a
+  calendar id.
+- Do not change a local calendar row before Google accepted the write, retry a
+  write, send `sendUpdates` other than `none`, or audit a write's text.
 - Do not let a mail path load the Calendar slot, or the calendar loop load the
   Write slot: the token in either can do more than its job.
 - Do not loosen `google_link` or drop the `fields` mask or `maxAttendees`.

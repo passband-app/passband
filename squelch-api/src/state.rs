@@ -145,6 +145,10 @@ pub struct ApiState {
     /// Google. `kick` is `None` when no loop runs (no OAuth client), and the
     /// endpoint then answers `kicked: false`. HUMAN DOOR ONLY.
     pub(crate) calendar_refresh: CalendarRefresh,
+    /// Where the user's own calendar writes go: `None` is Google's Calendar
+    /// API ([`squelch_core::gcal::client::API_BASE`]); a test's local fake
+    /// otherwise. Never read from the environment or a config file.
+    pub(crate) calendar_api_base: Option<Arc<str>>,
     /// The one Google Calendar consent this daemon may have in flight for the
     /// app's Connect button (`POST /client/calendar/connect`, self-host only),
     /// and the loopback listener that waits for its redirect. Shared by every
@@ -484,6 +488,7 @@ impl ApiState {
             console_sso_url: None,
             calendar: None,
             calendar_refresh: CalendarRefresh::default(),
+            calendar_api_base: None,
             calendar_consent: Default::default(),
             calendar_consent_port: squelch_core::auth::DEFAULT_HEADLESS_PORT,
             calendar_consent_endpoints: Default::default(),
@@ -705,6 +710,14 @@ impl ApiState {
     /// [`CalendarSync::kick_handle`]: squelch_core::gcal::sync::CalendarSync::kick_handle
     pub fn with_calendar_sync_kick(mut self, kick: Arc<tokio::sync::Notify>) -> Self {
         self.calendar_refresh.kick = Some(kick);
+        self
+    }
+
+    /// Send the user's calendar writes to `base` instead of Google. TESTS
+    /// ONLY, like [`Self::with_calendar_consent_endpoints`].
+    #[doc(hidden)]
+    pub fn with_calendar_api_base(mut self, base: impl Into<Arc<str>>) -> Self {
+        self.calendar_api_base = Some(base.into());
         self
     }
 

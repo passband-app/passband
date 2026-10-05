@@ -1912,8 +1912,12 @@ fn ghost_view(
 /// route (docs/CALENDAR.md §10 leaves that open, and until it is decided the
 /// answer is no).
 ///
-/// `{ "ghosts": [...], "events": [...], "calendar": {granted, synced_at,
-/// error, truncated} }`. Events are served only while calendar is granted.
+/// `{ "ghosts": [...], "events": [...], "calendars": [...], "calendar":
+/// {granted, synced_at, error, truncated} }`. Events and calendars are served
+/// only while calendar is granted. `calendars` is every calendar being read,
+/// the primary first: `{id, name, color, primary, writable}`, `writable`
+/// being whether the app may create events on it (the user is `owner` or
+/// `writer`).
 /// `error` is the credential's or the PRIMARY calendar's (a shared calendar
 /// that cannot be read is not an account error). `truncated` is true when
 /// the listing hit its cap (it keeps the events nearest now) or a calendar
@@ -1950,15 +1954,20 @@ pub async fn get_timeline(
         Some(calendar) => calendar.granted().await,
         None => false,
     };
-    let (ghosts, events, status) = store_call(&state, move |store, account_id| {
+    let (ghosts, events, calendars, status) = store_call(&state, move |store, account_id| {
         let ghosts = store.list_ghost_events(account_id, from, to)?;
         if !granted {
-            return Ok((ghosts, Vec::new(), Default::default()));
+            return Ok((ghosts, Vec::new(), Vec::new(), Default::default()));
         }
         let (events, cut) = store.list_calendar_events(account_id, from, to, now)?;
         let mut status: squelch_core::gcal::CalendarStatus = store.calendar_status(account_id)?;
         status.truncated |= cut;
-        Ok((ghosts, events, status))
+        let calendars: Vec<_> = store
+            .calendar_calendars(account_id)?
+            .into_iter()
+            .filter(|c| c.selected)
+            .collect();
+        Ok((ghosts, events, calendars, status))
     })
     .await?;
     // The display match, computed here and never stored, so it can never go
@@ -1982,12 +1991,32 @@ pub async fn get_timeline(
             view
         })
         .collect();
-    let events: Vec<_> = events.iter().map(calendar_event_view).collect();
+    let account_email = state
+        .calendar()
+        .map(|c| c.account_email().to_string())
+        .unwrap_or_default();
+    let events: Vec<_> = events
+        .iter()
+        .map(|e| calendar_event_view(e, &account_email))
+        .collect();
+    let calendars: Vec<_> = calendars
+        .iter()
+        .map(|c| {
+            json!({
+                "id": c.calendar_id,
+                "name": c.summary,
+                "color": c.color,
+                "primary": c.is_primary,
+                "writable": c.writable(),
+            })
+        })
+        .collect();
     Ok((
         no_store(),
         Json(json!({
             "ghosts": ghosts,
             "events": events,
+            "calendars": calendars,
             "calendar": {
                 "granted": granted,
                 "synced_at": status.synced_at.map(|at| at.to_rfc3339()),
@@ -2006,8 +2035,14 @@ pub async fn get_timeline(
 /// `end` is the INCLUSIVE last day (Google's exclusive `end.date` minus one),
 /// and null for a one-day event, as a one-day ghost has none. `busy` is false
 /// when the event is marked free. Declined events are served; the client
-/// hides them.
-fn calendar_event_view(event: &squelch_core::gcal::SyncedEvent) -> serde_json::Value {
+/// hides them. `color` is the event's own colour or its calendar's
+/// (`#rrggbb`, or null when Google gave neither), `editable` the edit guard
+/// ([`squelch_core::gcal::SyncedEvent::editable`]) for `account_email`, and
+/// `description` laundered text of at most 2000 characters.
+pub(crate) fn calendar_event_view(
+    event: &squelch_core::gcal::SyncedEvent,
+    account_email: &str,
+) -> serde_json::Value {
     let row = &event.row;
     json!({
         "id": row.event_id,
@@ -2024,6 +2059,9 @@ fn calendar_event_view(event: &squelch_core::gcal::SyncedEvent) -> serde_json::V
         "busy": !row.transparent,
         "organizer": row.organizer_email,
         "html_link": row.html_link,
+        "color": event.color(),
+        "editable": event.editable(account_email),
+        "description": row.description,
     })
 }
 

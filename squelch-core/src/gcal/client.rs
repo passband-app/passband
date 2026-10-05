@@ -1,4 +1,12 @@
-//! The Calendar API client: `calendarList.list` and `events.list`, read only.
+//! The Calendar API client: `calendarList.list` and `events.list` for the
+//! sync, and `events.insert`, `events.patch` and `events.delete` for the
+//! user's own writes from the human door.
+//!
+//! Every write sends `sendUpdates=none` ("No notifications are sent"): nobody
+//! is invited or told by this wave. An all-day event's `end.date` is
+//! exclusive at Google (the Events resource: `end` is "The (exclusive) end
+//! time of the event"); the conversion to and from the inclusive last day the
+//! app uses lives in [`super::write`] and [`super::read_event`].
 //!
 //! Google's rules this follows, from the `events.list` reference and the
 //! "Synchronize resources efficiently" guide:
@@ -16,8 +24,9 @@
 //!   which is all [`super::read_event`] reads (its `self` and
 //!   `responseStatus`).
 //! - `fields` (partial response) names only what the daemon reads, so an
-//!   invitation anyone can send cannot fill a page with its description and
-//!   guest list, and a bloated page does not reach [`BODY_CAP`].
+//!   invitation anyone can send cannot fill a page with its guest list,
+//!   attachments or conference data. Its description is read (the app shows
+//!   it), laundered and cut to 2000 characters as it is stored.
 //! - `nextSyncToken` arrives on the LAST page only; every earlier page carries
 //!   `nextPageToken`.
 //! - 410 Gone means the sync token is invalid: clear it and sync in full.
@@ -47,19 +56,38 @@ const LIST_PAGE_SIZE: u32 = 250;
 /// Attendees per event: Google then returns only the user's own entry.
 pub const MAX_ATTENDEES: u32 = 1;
 
+/// Of one event, exactly what [`super::read_event`] reads. Anything else an
+/// event carries (attachments, conference data, the other guests) is never
+/// sent. One macro so a listed event and a written one are asked for alike.
+macro_rules! event_fields {
+    () => {
+        "id,status,iCalUID,summary,description,location,colorId,start,end,\
+organizer(email,self),attendees(self,responseStatus),transparency,htmlLink,updated"
+    };
+}
+
 /// The `events.list` partial response: the page's paging tokens and the
-/// calendar's own title and zone, and of each event exactly what
-/// [`super::read_event`] reads. Anything else an event carries (its
-/// description, attachments, conference data, the other guests) is never
-/// sent.
-pub const EVENTS_FIELDS: &str = "nextPageToken,nextSyncToken,summary,timeZone,\
-items(id,status,iCalUID,summary,location,start,end,organizer/email,\
-attendees(self,responseStatus),transparency,htmlLink,updated)";
+/// calendar's own title and zone, and of each event [`EVENT_FIELDS`].
+pub const EVENTS_FIELDS: &str = concat!(
+    "nextPageToken,nextSyncToken,summary,timeZone,items(",
+    event_fields!(),
+    ")"
+);
+
+/// The partial response of `events.insert` and `events.patch`: the one event
+/// written, read by the same [`super::read_event`].
+pub const EVENT_FIELDS: &str = event_fields!();
 
 /// The `calendarList.list` partial response: what
 /// [`super::read_calendar_entry`] reads.
 pub const LIST_FIELDS: &str = "nextPageToken,\
-items(id,summary,summaryOverride,primary,selected,deleted,hidden,timeZone)";
+items(id,summary,summaryOverride,primary,selected,deleted,hidden,timeZone,\
+backgroundColor,colorId,accessRole)";
+
+/// `sendUpdates` on every write: "`none`: No notifications are sent." This
+/// wave invites nobody, and an edit to an event with guests must not mail
+/// them on the user's behalf from a calendar page.
+pub const SEND_UPDATES: &str = "none";
 
 /// The most bytes read from one response. 250 events of the largest shape
 /// Google sends stay far below it.
@@ -223,18 +251,95 @@ impl CalendarApi {
         })
     }
 
-    async fn get(&self, url: url::Url, token: &str) -> Result<Value, CallError> {
-        let unavailable = CallError::Kind(CalendarErrorKind::Unavailable);
-        let resp = self
-            .http
-            .get(url)
-            .bearer_auth(token)
-            .send()
+    /// `events.insert`: create `event` (Google's event shape) on the calendar,
+    /// telling no one. Google's answer, the event as stored, carries its id,
+    /// its link and the times as Google normalized them.
+    pub async fn insert_event(
+        &self,
+        token: &str,
+        calendar_id: &str,
+        event: &Value,
+    ) -> Result<Value, CallError> {
+        let url = self.write_url(&["calendars", calendar_id, "events"], true)?;
+        self.call(reqwest::Method::POST, url, token, Some(event))
             .await
-            .map_err(|_| unavailable)?;
+    }
+
+    /// `events.patch`: "field values you specify replace the existing
+    /// values. Fields that you don't specify in the request remain
+    /// unchanged", and a field set to `null` is deleted. Telling no one.
+    pub async fn patch_event(
+        &self,
+        token: &str,
+        calendar_id: &str,
+        event_id: &str,
+        patch: &Value,
+    ) -> Result<Value, CallError> {
+        let url = self.write_url(&["calendars", calendar_id, "events", event_id], true)?;
+        self.call(reqwest::Method::PATCH, url, token, Some(patch))
+            .await
+    }
+
+    /// `events.delete`, telling no one. Success is "an empty response body".
+    /// A 410 (the event is already deleted at Google) is [`CallError::Gone`],
+    /// which the caller reads as done.
+    pub async fn delete_event(
+        &self,
+        token: &str,
+        calendar_id: &str,
+        event_id: &str,
+    ) -> Result<(), CallError> {
+        let url = self.write_url(&["calendars", calendar_id, "events", event_id], false)?;
+        self.call(reqwest::Method::DELETE, url, token, None)
+            .await
+            .map(|_| ())
+    }
+
+    /// A write's URL: `sendUpdates=none` always, and the one-event fields
+    /// mask when an event comes back.
+    fn write_url(&self, segments: &[&str], answers: bool) -> Result<url::Url, CallError> {
+        let mut url = self.url(segments)?;
+        {
+            let mut q = url.query_pairs_mut();
+            q.append_pair("sendUpdates", SEND_UPDATES);
+            if answers {
+                q.append_pair("fields", EVENT_FIELDS);
+            }
+        }
+        Ok(url)
+    }
+
+    /// A read, whose answer must be a JSON object: an empty body is Google
+    /// misbehaving, never an empty page (a full read would sweep on it).
+    async fn get(&self, url: url::Url, token: &str) -> Result<Value, CallError> {
+        match self.call(reqwest::Method::GET, url, token, None).await? {
+            Value::Null => Err(CallError::Kind(CalendarErrorKind::Unavailable)),
+            body => Ok(body),
+        }
+    }
+
+    /// One request. A 2xx answers its JSON object, or `Null` for an empty
+    /// body (a delete). Never retried: a write that timed out may have
+    /// happened, and sending it again could make it twice.
+    async fn call(
+        &self,
+        method: reqwest::Method,
+        url: url::Url,
+        token: &str,
+        body: Option<&Value>,
+    ) -> Result<Value, CallError> {
+        let unavailable = CallError::Kind(CalendarErrorKind::Unavailable);
+        let mut request = self.http.request(method, url).bearer_auth(token);
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        let resp = request.send().await.map_err(|_| unavailable)?;
         let status = resp.status().as_u16();
-        if status == 200 {
+        if (200..300).contains(&status) {
             let bytes = read_capped(resp, BODY_CAP).await.ok_or(unavailable)?;
+            if bytes.iter().all(u8::is_ascii_whitespace) {
+                return Ok(Value::Null);
+            }
             let body: Value = serde_json::from_slice(&bytes).map_err(|_| unavailable)?;
             return if body.is_object() {
                 Ok(body)

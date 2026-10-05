@@ -829,7 +829,8 @@ from the plan below:
 
 ### Calendar sync (BUILT in wave 2)
 
-Read only (slice B). Nothing writes to a Google Calendar.
+Read only (slice B). The only writes are the user's own, described under
+"Creating and editing events" below.
 
 - **What is read.** The primary calendar always, plus every calendar the user
   shows in Google Calendar (`selected`, not hidden or deleted) when the list
@@ -843,11 +844,13 @@ Read only (slice B). Nothing writes to a Google Calendar.
   guests comes back with the user's own entry alone, and a `fields` mask
   naming only what the daemon reads: the paging and sync tokens, the
   calendar's title and zone, and of each event its id, status, iCal id,
-  title, place, start, end, organizer address, the attendee entry's `self`
-  and `responseStatus`, transparency, link and update time. A description,
-  attachments, conference data and the other guests are never sent, so an
-  invitation anyone can send cannot bloat a page past the body cap.
-  `calendarList.list` carries a mask of its own.
+  title, description, place, colour id, start, end, organizer address and
+  `self` flag, the attendee entry's `self` and `responseStatus`,
+  transparency, link and update time. Attachments, conference data and the
+  other guests are never sent. The description (added in wave 3, which shows
+  it) is laundered and cut to 2000 characters as it is stored.
+  `calendarList.list` carries a mask of its own, which since wave 3 includes
+  each calendar's `backgroundColor`, `colorId` and `accessRole`.
 - **Window.** 30 days back to 400 days ahead. The first read of a calendar is
   bounded by the window; later reads use Google's sync token, which Google
   refuses beside `timeMin`/`timeMax`, so changed events outside the window are
@@ -909,6 +912,87 @@ Read only (slice B). Nothing writes to a Google Calendar.
 - **Human door only.** Titles, places, organizers and links never reach an
   agent route, a log line or a triage prompt. A log names a calendar by its
   position in the pass, never its id, which is usually an address.
+
+### Creating and editing events (BUILT in wave 3)
+
+The user creates, edits and deletes events on their own Google calendars from
+the calendar page. This is the first thing that writes to a real calendar. It
+is a direct user action on a real event, one at a time, not a write derived
+from a ghost, so it does not wait on "Before anything writes to a real
+calendar" below; it has an audit trail instead. Ghosts are not editable, and
+promoting a ghost to a real event is later work.
+
+- **Routes** (human door, bearer authed, `no-store`, in
+  `squelch-api/src/calendar_write.rs`):
+  - `POST /client/calendar/events` with `{"calendar_id", "title", "start",
+    "end", "all_day", "location"?, "description"?}` answers 201 with the
+    event in the timeline's shape.
+  - `PATCH /client/calendar/events/{calendar_id}/{id}` with any subset of the
+    same fields answers 200 with the event. An absent field is left alone;
+    `location` and `description` take `null` to clear. A `calendar_id` in the
+    body must be the event's own: moving an event is not offered.
+  - `DELETE /client/calendar/events/{calendar_id}/{id}` answers 204. An event
+    Google says is already deleted (410) is deleted locally too.
+- **Times.** RFC3339 with an offset for a timed event, `YYYY-MM-DD` for an
+  all-day one, both of one precision, the end after the start. An all-day
+  `end` is the INCLUSIVE last day, as the timeline serves it (equal to the
+  start for one day). Google's `end` is "The (exclusive) end time of the
+  event", so the daemon sends the day after the last day and reads Google's
+  answer back through the sync's own `read_event`, which subtracts it again.
+  An edit that changes any time sends both start and end, the other form set
+  to `null` (Google's patch rule: "To delete a field, specify the field and
+  set it to `null`"), so an event switched between all-day and timed does not
+  keep both.
+- **Checked before Google.** Title trimmed, non-empty, at most 200 characters
+  (refused, never cut); location and description trimmed and cut to 200 and
+  2000; all three lose control and invisible characters and nothing else;
+  the
+  calendar one being read on which the user is `owner` or `writer`; for an
+  edit or delete, a stored event that passes the edit guard. Only then is
+  Google called, with `sendUpdates=none` on every write ("No notifications are
+  sent"): this wave invites and tells nobody.
+- **The edit guard.** An event is `editable` when its calendar's role is
+  `owner` or `writer` AND the event is the user's own: Google's
+  `organizer.self` ("Whether the organizer corresponds to the calendar on
+  which this copy of the event appears"), no organizer, or an organizer
+  address equal to the mailbox's (case-insensitive). Another organizer's
+  invitation on the user's own calendar is served `editable: false` and
+  refused with 403. `writerWithoutPrivateAccess` is not offered: it cannot
+  write the private events it sees with their details hidden.
+- **Sent as typed, stored laundered.** The one deliberate asymmetry: Google
+  gets the user's own text whole (a meeting link keeps its passcode, so the
+  user's own event still works), while the copy the daemon stores and serves
+  is Google's answer read through the sync's `read_event`, laundered like
+  every synced event (a link without its query, markup as text).
+- **Google first, then local.** Only Google's success changes a row, and what
+  is stored is Google's answer (its id, link, organizer and normalized times),
+  not the request. A refusal, a timeout or a transport failure is a 502 with a
+  fixed message and leaves every row exactly as it was. A write is never
+  retried: one that timed out may have happened. After a write the sync is
+  kicked, so the next pass confirms it.
+- **Errors.** 400 for a bad body (end before start, mixed precision, a title
+  empty or over 200, a missing field, an unknown or read-only calendar), 403
+  when calendar is not granted or the event is not editable, 404 for an
+  unknown event, 502 when Google refuses. Error bodies are fixed strings and
+  never echo the request.
+- **Audit.** One row per attempt in the audit log, in the mail actions' shape:
+  action `calendar_event_create`, `calendar_event_edit` or
+  `calendar_event_delete`, actor `client-api`, target
+  `calendar:<calendar_id>/<event_id>`, detail `ok` or the reason
+  (`rejected:body`, `rejected:calendar`, `rejected:read_only`,
+  `rejected:not_granted`, `rejected:not_editable`, `failed:target`,
+  `failed:google`, `failed:answer`). Never a title, place or description.
+- **Colour and roles on the timeline.** Each event gains `color` (`#rrggbb`:
+  the event's own `colorId` from Google's event palette, else its calendar's
+  `backgroundColor`, else null), `editable` and `description`. The body gains
+  `calendars: [{id, name, color, primary, writable}]`, the calendars being
+  read, the primary first. Without the list scope the primary calendar is the
+  only one, the user's own (`writable`), with no colour. Google's palettes are
+  held in the daemon because `colors.get` does not accept the
+  `calendar.events` scope.
+- **Not here.** No agent route, no MCP tool, no assistant tool. No guests, no
+  RSVP, no moving an event between calendars, no recurring-series edits (an
+  edit to an instance changes that instance).
 
 ### Verification and disclosure
 

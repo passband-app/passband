@@ -399,14 +399,7 @@ impl CalendarSync {
         token: &str,
         list_granted: bool,
     ) -> std::result::Result<Vec<CalendarMeta>, CalendarErrorKind> {
-        let primary_only = || {
-            vec![CalendarMeta {
-                calendar_id: PRIMARY.to_string(),
-                summary: None,
-                is_primary: true,
-                time_zone: None,
-            }]
-        };
+        let primary_only = || vec![CalendarMeta::primary_only()];
         if !list_granted {
             return Ok(primary_only());
         }
@@ -434,6 +427,8 @@ impl CalendarSync {
                         summary: c.summary,
                         is_primary: c.is_primary,
                         time_zone: c.time_zone,
+                        color: c.color,
+                        access_role: c.access_role,
                     })
                     .collect();
                 if !kept.iter().any(|c| c.calendar_id == PRIMARY) {
@@ -467,12 +462,7 @@ impl CalendarSync {
                 None => break,
             }
         }
-        let mut list = vec![primary.unwrap_or(CalendarMeta {
-            calendar_id: PRIMARY.to_string(),
-            summary: None,
-            is_primary: true,
-            time_zone: None,
-        })];
+        let mut list = vec![primary.unwrap_or_else(CalendarMeta::primary_only)];
         list.extend(others);
         list.truncate(MAX_CALENDARS);
         Ok(list)

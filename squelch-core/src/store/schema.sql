@@ -1756,7 +1756,10 @@ END;
 -- `unavailable`, cleared by the next good read. `failures` counts reads that
 -- failed in a row and `retry_at` is when a SECONDARY calendar is tried again,
 -- so one broken shared calendar backs off on its own. `truncated` says the
--- per-calendar event cap dropped events (the farthest from now).
+-- per-calendar event cap dropped events (the farthest from now). `color` is
+-- `#rrggbb` (Google's `backgroundColor`), `access_role` Google's `accessRole`
+-- (`owner` and `writer` are the calendars the app may write events to); the
+-- primary calendar read without the list scope is `owner` with no colour.
 CREATE TABLE IF NOT EXISTS calendar_calendars (
     account_id      INTEGER NOT NULL,
     calendar_id     TEXT NOT NULL,
@@ -1771,6 +1774,8 @@ CREATE TABLE IF NOT EXISTS calendar_calendars (
     failures        INTEGER NOT NULL DEFAULT 0,
     retry_at        TEXT,
     truncated       INTEGER NOT NULL DEFAULT 0,
+    color           TEXT,
+    access_role     TEXT,
     PRIMARY KEY(account_id, calendar_id)
 );
 -- The events of the synced window (a month back, 400 days ahead), recurring
@@ -1780,6 +1785,10 @@ CREATE TABLE IF NOT EXISTS calendar_calendars (
 -- Google's exclusive `end.date`, and NULL for a one-day event) and
 -- `start_sort` the ghosts' UTC sort key. `status` is `confirmed` or `tentative`: a cancelled event is
 -- deleted, never stored. `transparent` is "free" on the user's calendar.
+-- `color_id` is the event's own colour (an id into Google's event palette),
+-- `organizer_self` Google's `organizer.self` (this calendar organizes it),
+-- `description` laundered text of at most 2000 characters. Also written,
+-- one row at a time, after Google accepts the user's own create or edit.
 CREATE TABLE IF NOT EXISTS calendar_events (
     account_id      INTEGER NOT NULL,
     calendar_id     TEXT NOT NULL,
@@ -1798,6 +1807,9 @@ CREATE TABLE IF NOT EXISTS calendar_events (
     transparent     INTEGER NOT NULL DEFAULT 0,
     html_link       TEXT,
     updated_at      TEXT,
+    color_id        TEXT,
+    organizer_self  INTEGER NOT NULL DEFAULT 0,
+    description     TEXT,
     PRIMARY KEY(account_id, calendar_id, event_id)
 );
 CREATE INDEX IF NOT EXISTS idx_calendar_events_start ON calendar_events(account_id, start_sort);

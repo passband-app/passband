@@ -633,6 +633,22 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
         "truncated",
         "INTEGER NOT NULL DEFAULT 0",
     )?;
+    // Colour and role per calendar, colour, organizer flag and description per
+    // event (calendar wave 3). The calendar tables have not shipped, so this
+    // only carries a development store forward: a calendar's role and colour
+    // are filled by the next pass, an event's fields by its next change or
+    // the daily full read. Until then a stored event reads as not the
+    // user's own, which only hides an Edit button.
+    add_column_if_missing(conn, "calendar_calendars", "color", "TEXT")?;
+    add_column_if_missing(conn, "calendar_calendars", "access_role", "TEXT")?;
+    add_column_if_missing(conn, "calendar_events", "color_id", "TEXT")?;
+    add_column_if_missing(
+        conn,
+        "calendar_events",
+        "organizer_self",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(conn, "calendar_events", "description", "TEXT")?;
 
     // STRANDED FAN-OUTS. A group send settles its recipients from a background
     // task, and no task survives the process. So any recipient still 'pending'

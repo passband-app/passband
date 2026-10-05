@@ -1,10 +1,16 @@
-//! Google Calendar, READ ONLY (docs/CALENDAR.md §8, "Calendar sync"). Nothing
-//! here writes to a calendar.
+//! Google Calendar (docs/CALENDAR.md §8, "Calendar sync" and "Creating and
+//! editing events").
 //!
-//! Three parts: [`client`] calls the Calendar API, [`sync`] decides when, and
+//! Four parts: [`client`] calls the Calendar API, [`sync`] decides when to
+//! read, [`write`] checks a user's create or edit before anything is sent, and
 //! this module turns what Google sends into rows that are safe to store
 //! ([`read_event`], [`read_calendar_entry`]) and holds the timeline's display
 //! match between a ghost and a real event ([`ghost_matches`]).
+//!
+//! THE ONLY WRITES are the user's own create, edit and delete on the human
+//! door, one event at a time. Nothing here writes to a calendar on its own,
+//! and Google's answer to a write goes through [`read_event`] like any synced
+//! item, so one event shape exists.
 //!
 //! HUMAN DOOR ONLY. Event titles, places, organizers and links are personal
 //! data: they are served on `/client/timeline` and nowhere else, never logged,
@@ -22,6 +28,7 @@
 
 pub mod client;
 pub mod sync;
+pub mod write;
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -85,6 +92,48 @@ impl CalendarErrorKind {
     }
 }
 
+/// The user's effective role on a calendar: `calendarList`'s `accessRole`,
+/// "the effective access role that the authenticated user has on the
+/// calendar".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessRole {
+    FreeBusyReader,
+    Reader,
+    WriterWithoutPrivateAccess,
+    Writer,
+    Owner,
+}
+
+impl AccessRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FreeBusyReader => "freeBusyReader",
+            Self::Reader => "reader",
+            Self::WriterWithoutPrivateAccess => "writerWithoutPrivateAccess",
+            Self::Writer => "writer",
+            Self::Owner => "owner",
+        }
+    }
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "freeBusyReader" => Some(Self::FreeBusyReader),
+            "reader" => Some(Self::Reader),
+            "writerWithoutPrivateAccess" => Some(Self::WriterWithoutPrivateAccess),
+            "writer" => Some(Self::Writer),
+            "owner" => Some(Self::Owner),
+            _ => None,
+        }
+    }
+    /// Whether the user may create and edit events on the calendar from the
+    /// app: `owner` or `writer` only. `writerWithoutPrivateAccess` can write
+    /// too, but not to the private events it sees with their details hidden,
+    /// and a write the app offers and Google then refuses is worse than one
+    /// it does not offer.
+    pub fn writable(self) -> bool {
+        matches!(self, Self::Owner | Self::Writer)
+    }
+}
+
 /// One calendar to read, as the pass found it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CalendarMeta {
@@ -93,6 +142,62 @@ pub struct CalendarMeta {
     pub summary: Option<String>,
     pub is_primary: bool,
     pub time_zone: Option<String>,
+    /// `#rrggbb`, lowercase: Google's `backgroundColor`, or the calendar
+    /// palette's colour for its `colorId`.
+    pub color: Option<String>,
+    pub access_role: Option<AccessRole>,
+}
+
+impl CalendarMeta {
+    /// The primary calendar when nothing but its alias is known (no list
+    /// scope). The user owns their primary calendar; its colour is unknown.
+    pub fn primary_only() -> Self {
+        Self {
+            calendar_id: PRIMARY.to_string(),
+            summary: None,
+            is_primary: true,
+            time_zone: None,
+            color: None,
+            access_role: Some(AccessRole::Owner),
+        }
+    }
+}
+
+/// A colour as Google writes it, `#0088aa`, normalized to lowercase. Anything
+/// else is None: the value is served to a client that draws with it.
+pub fn hex_color(raw: &str) -> Option<String> {
+    let hex = raw.strip_prefix('#')?;
+    (hex.len() == 6 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| format!("#{}", hex.to_ascii_lowercase()))
+}
+
+/// Google's global EVENT palette (`colors.get`, `event`: "A global palette of
+/// event colors, mapping from the color ID to its definition"), by id. Held
+/// here rather than fetched because `colors.get` does not accept the
+/// `calendar.events` scope, which is the one scope a calendar grant is sure to
+/// carry.
+const EVENT_PALETTE: [&str; 11] = [
+    "#a4bdfc", "#7ae7bf", "#dbadff", "#ff887c", "#fbd75b", "#ffb878", "#46d6db", "#e1e1e1",
+    "#5484ed", "#51b749", "#dc2127",
+];
+
+/// Google's global CALENDAR palette, by id, for a list entry that carries a
+/// `colorId` and no `backgroundColor` (which "supersedes the index-based
+/// colorId property", so in practice this is a fallback that never runs).
+const CALENDAR_PALETTE: [&str; 24] = [
+    "#ac725e", "#d06b64", "#f83a22", "#fa573c", "#ff7537", "#ffad46", "#42d692", "#16a765",
+    "#7bd148", "#b3dc6c", "#fbe983", "#fad165", "#92e1c0", "#9fe1e7", "#9fc6e7", "#4986e7",
+    "#9a9cff", "#b99aff", "#c2c2c2", "#cabdbf", "#cca6ac", "#f691b2", "#cd74e6", "#a47ae2",
+];
+
+fn palette(palette: &[&'static str], id: &str) -> Option<&'static str> {
+    let n: usize = id.parse().ok()?;
+    palette.get(n.checked_sub(1)?).copied()
+}
+
+/// An event's own colour override, by its `colorId`.
+pub fn event_palette_color(color_id: &str) -> Option<&'static str> {
+    palette(&EVENT_PALETTE, color_id)
 }
 
 /// A calendar as stored.
@@ -114,6 +219,16 @@ pub struct StoredCalendar {
     pub retry_at: Option<DateTime<Utc>>,
     /// Events were dropped at [`MAX_EVENTS_PER_CALENDAR`].
     pub truncated: bool,
+    pub color: Option<String>,
+    pub access_role: Option<AccessRole>,
+}
+
+impl StoredCalendar {
+    /// A calendar the app may create and edit events on: one being read, on
+    /// which the user is `owner` or `writer`.
+    pub fn writable(&self) -> bool {
+        self.selected && self.access_role.is_some_and(AccessRole::writable)
+    }
 }
 
 /// The timeline's `calendar` status, from the stored rows.
@@ -178,10 +293,18 @@ pub struct EventRow {
     pub end: Option<EventTime>,
     pub start_timezone: Option<String>,
     pub organizer_email: Option<String>,
+    /// Google's `organizer.self`: "Whether the organizer corresponds to the
+    /// calendar on which this copy of the event appears."
+    pub organizer_self: bool,
     pub self_response: Option<SelfResponse>,
     pub transparent: bool,
     pub html_link: Option<String>,
     pub updated_at: Option<String>,
+    /// The event's own colour override: an id into the event palette.
+    pub color_id: Option<String>,
+    /// Laundered like a location, line breaks kept, at most
+    /// [`ghost::DESCRIPTION_CAP`] characters.
+    pub description: Option<String>,
 }
 
 impl EventRow {
@@ -208,12 +331,45 @@ pub struct PageApplied {
     pub dropped: usize,
 }
 
-/// One stored event as the timeline serves it, with its calendar's name.
+/// One stored event as the timeline serves it, with its calendar's name,
+/// colour and the user's role on it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncedEvent {
     pub calendar_id: String,
     pub calendar_name: Option<String>,
+    pub calendar_color: Option<String>,
+    pub calendar_access: Option<AccessRole>,
     pub row: EventRow,
+}
+
+impl SyncedEvent {
+    /// The colour it is drawn in: its own override when it has one, else its
+    /// calendar's.
+    pub fn color(&self) -> Option<String> {
+        self.row
+            .color_id
+            .as_deref()
+            .and_then(event_palette_color)
+            .map(str::to_string)
+            .or_else(|| self.calendar_color.clone())
+    }
+
+    /// THE EDIT GUARD: whether the app offers to edit or delete this event.
+    /// The calendar is one the user writes to (`owner` or `writer`), AND the
+    /// event is the user's own: Google marks this calendar as its organizer
+    /// (`organizer.self`), or it names no organizer, or the organizer is the
+    /// mailbox's own address. An invitation from someone else, sitting on the
+    /// user's own calendar, is theirs to change, not the user's.
+    pub fn editable(&self, account_email: &str) -> bool {
+        let writable = self.calendar_access.is_some_and(AccessRole::writable);
+        let own = self.row.organizer_self
+            || self
+                .row
+                .organizer_email
+                .as_deref()
+                .is_none_or(|org| org.eq_ignore_ascii_case(account_email.trim()));
+        writable && own
+    }
 }
 
 /// The synced window for a pass that starts at `now`.
@@ -364,11 +520,43 @@ pub fn read_event(
                 .and_then(|o| o.get("email"))
                 .and_then(Value::as_str),
         ),
+        organizer_self: item
+            .get("organizer")
+            .and_then(|o| o.get("self"))
+            .and_then(Value::as_bool)
+            == Some(true),
         self_response,
         transparent: item.get("transparency").and_then(Value::as_str) == Some("transparent"),
         html_link: google_link(item.get("htmlLink").and_then(Value::as_str)),
         updated_at,
+        // Only an id the palette knows: anything else would be stored to
+        // mean nothing.
+        color_id: item
+            .get("colorId")
+            .and_then(Value::as_str)
+            .filter(|id| event_palette_color(id).is_some())
+            .map(str::to_string),
+        description: item
+            .get("description")
+            .and_then(Value::as_str)
+            .and_then(ghost::launder_description),
     })))
+}
+
+/// [`read_event`] for Google's answer to a write the user just made: the same
+/// reading with no window, because the user may create an event anywhere in
+/// time and the answer is served whether or not the sync will keep it (a full
+/// read sweeps one outside the window, as it would any other). A cancelled or
+/// unreadable answer is None.
+pub fn read_written_event(item: &Value, calendar_zone: Option<&str>) -> Option<EventRow> {
+    match read_event(
+        item,
+        calendar_zone,
+        (DateTime::<Utc>::MIN_UTC, DateTime::<Utc>::MAX_UTC),
+    )? {
+        EventItem::Upsert(row) => Some(*row),
+        EventItem::Remove(_) => None,
+    }
 }
 
 /// One `calendarList` entry: the calendar and whether to read it. Only a
@@ -385,12 +573,29 @@ pub fn read_calendar_entry(item: &Value) -> Option<(CalendarMeta, bool)> {
             .and_then(Value::as_str)
             .and_then(ghost::clean_text)
     });
+    // `backgroundColor` "supersedes the index-based colorId property"; the
+    // calendar palette is the fallback for an entry that carries only the id.
+    let color = item
+        .get("backgroundColor")
+        .and_then(Value::as_str)
+        .and_then(hex_color)
+        .or_else(|| {
+            item.get("colorId")
+                .and_then(Value::as_str)
+                .and_then(|id| palette(&CALENDAR_PALETTE, id))
+                .map(str::to_string)
+        });
     Some((
         CalendarMeta {
             calendar_id: if is_primary { PRIMARY.to_string() } else { id },
             summary,
             is_primary,
             time_zone: text(item, "timeZone").and_then(|z| ghost::iana_zone(&z)),
+            color,
+            access_role: item
+                .get("accessRole")
+                .and_then(Value::as_str)
+                .and_then(AccessRole::parse),
         },
         wanted,
     ))
@@ -487,6 +692,28 @@ mod tests {
         "2026-10-01T12:00:00Z".parse().unwrap()
     }
 
+    /// A stored row with nothing but its start.
+    fn row(start: &str) -> EventRow {
+        EventRow {
+            event_id: "e".into(),
+            ical_uid: None,
+            tentative: false,
+            summary: None,
+            location: None,
+            start: at(start),
+            end: None,
+            start_timezone: None,
+            organizer_email: None,
+            organizer_self: false,
+            self_response: None,
+            transparent: false,
+            html_link: None,
+            updated_at: None,
+            color_id: None,
+            description: None,
+        }
+    }
+
     fn upsert(item: Value) -> EventRow {
         match read_event(&item, Some("America/New_York"), window(now())) {
             Some(EventItem::Upsert(row)) => *row,
@@ -562,20 +789,12 @@ mod tests {
         let event = |cal: &str, title: &str, start: &str| SyncedEvent {
             calendar_id: cal.into(),
             calendar_name: None,
+            calendar_color: None,
+            calendar_access: None,
             row: EventRow {
-                event_id: format!("{cal}-{title}"),
-                ical_uid: None,
-                tentative: false,
                 summary: Some(title.into()),
-                location: None,
-                start: at(start),
-                end: None,
-                start_timezone: None,
-                organizer_email: None,
-                self_response: None,
-                transparent: false,
-                html_link: None,
-                updated_at: None,
+                event_id: format!("{cal}-{title}"),
+                ..row(start)
             },
         };
         let events = [
@@ -803,5 +1022,145 @@ mod tests {
         ] {
             assert!(!read_calendar_entry(&entry).unwrap().1, "{entry}");
         }
+    }
+
+    #[test]
+    fn an_event_reads_its_colour_organizer_flag_and_description() {
+        let row = upsert(json!({
+            "id": "e", "start": {"dateTime": "2026-10-05T09:00:00Z"},
+            "colorId": "11",
+            "organizer": {"email": "team@group.calendar.google.com", "self": true},
+            "description": "<p>Agenda</p><p>Join https://meet.example/abc?pwd=1</p>"
+        }));
+        assert_eq!(row.color_id.as_deref(), Some("11"));
+        assert!(row.organizer_self);
+        assert_eq!(
+            row.description.as_deref(),
+            Some("Agenda\n\nJoin meet.example/abc"),
+            "a paragraph each, the meeting link without its query"
+        );
+        // An id the palette does not know, no organizer flag, a long
+        // description cut at its cap.
+        let other = upsert(json!({
+            "id": "e2", "start": {"dateTime": "2026-10-05T09:00:00Z"},
+            "colorId": "99",
+            "organizer": {"email": "a@example.com"},
+            "description": "x".repeat(5000)
+        }));
+        assert_eq!(other.color_id, None);
+        assert!(!other.organizer_self);
+        assert_eq!(
+            other.description.map(|d| d.chars().count()),
+            Some(ghost::DESCRIPTION_CAP)
+        );
+    }
+
+    #[test]
+    fn a_written_event_is_read_wherever_it_falls() {
+        let far =
+            json!({"id": "far", "start": {"date": "2031-01-01"}, "end": {"date": "2031-01-03"}});
+        assert!(matches!(
+            read_event(&far, None, window(now())),
+            Some(EventItem::Remove(_))
+        ));
+        let row = read_written_event(&far, None).unwrap();
+        assert_eq!(row.end.unwrap().to_string(), "2031-01-02", "inclusive");
+        assert_eq!(
+            read_written_event(&json!({"id": "c", "status": "cancelled"}), None),
+            None
+        );
+    }
+
+    #[test]
+    fn colours_are_googles_hex_or_its_palette() {
+        assert_eq!(hex_color("#0088AA").as_deref(), Some("#0088aa"));
+        for bad in ["0088aa", "#08a", "#0088aaff", "#00g8aa", "red"] {
+            assert_eq!(hex_color(bad), None, "{bad}");
+        }
+        assert_eq!(event_palette_color("1"), Some("#a4bdfc"));
+        assert_eq!(event_palette_color("11"), Some("#dc2127"));
+        for bad in ["0", "12", "-1", "x", ""] {
+            assert_eq!(event_palette_color(bad), None, "{bad}");
+        }
+        let (meta, _) = read_calendar_entry(&json!({
+            "id": "a", "selected": true, "backgroundColor": "#9FE1E7",
+            "colorId": "1", "accessRole": "writer"
+        }))
+        .unwrap();
+        assert_eq!(
+            meta.color.as_deref(),
+            Some("#9fe1e7"),
+            "backgroundColor wins"
+        );
+        assert_eq!(meta.access_role, Some(AccessRole::Writer));
+        let (meta, _) =
+            read_calendar_entry(&json!({"id": "b", "colorId": "16", "accessRole": "nope"}))
+                .unwrap();
+        assert_eq!(
+            meta.color.as_deref(),
+            Some("#4986e7"),
+            "the palette fallback"
+        );
+        assert_eq!(meta.access_role, None);
+    }
+
+    #[test]
+    fn only_owner_and_writer_calendars_are_writable() {
+        for (raw, writable) in [
+            ("owner", true),
+            ("writer", true),
+            ("writerWithoutPrivateAccess", false),
+            ("reader", false),
+            ("freeBusyReader", false),
+        ] {
+            let role = AccessRole::parse(raw).unwrap();
+            assert_eq!(role.as_str(), raw);
+            assert_eq!(role.writable(), writable, "{raw}");
+        }
+    }
+
+    /// THE EDIT GUARD, every arm.
+    #[test]
+    fn an_event_is_editable_on_a_writable_calendar_when_it_is_the_users_own() {
+        let event = |access: Option<AccessRole>, organizer: Option<&str>, own: bool| SyncedEvent {
+            calendar_id: PRIMARY.into(),
+            calendar_name: None,
+            calendar_color: Some("#123456".into()),
+            calendar_access: access,
+            row: EventRow {
+                organizer_email: organizer.map(str::to_string),
+                organizer_self: own,
+                ..row("2026-10-05T09:00:00Z")
+            },
+        };
+        let me = "Me@Example.com";
+        let owner = Some(AccessRole::Owner);
+        assert!(event(owner, None, false).editable(me), "no organizer");
+        assert!(
+            event(owner, Some("x@y.com"), true).editable(me),
+            "organizer.self"
+        );
+        assert!(
+            event(owner, Some("me@example.COM"), false).editable(me),
+            "the mailbox's own address, any case"
+        );
+        assert!(
+            !event(owner, Some("boss@example.com"), false).editable(me),
+            "someone else's invitation"
+        );
+        assert!(event(Some(AccessRole::Writer), None, false).editable(me));
+        for access in [
+            None,
+            Some(AccessRole::Reader),
+            Some(AccessRole::FreeBusyReader),
+            Some(AccessRole::WriterWithoutPrivateAccess),
+        ] {
+            assert!(!event(access, None, true).editable(me), "{access:?}");
+        }
+        // Colour: the event's own over the calendar's.
+        let mut colored = event(owner, None, true);
+        assert_eq!(colored.color().as_deref(), Some("#123456"));
+        colored.row.color_id = Some("2".into());
+        assert_eq!(colored.color().as_deref(), Some("#7ae7bf"));
     }
 }

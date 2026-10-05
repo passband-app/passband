@@ -337,8 +337,9 @@ async fn timeline_serves_every_field_with_the_right_end_tier() {
     // which with no grant is empty and says so.
     let mut top: Vec<_> = body.as_object().unwrap().keys().cloned().collect();
     top.sort();
-    assert_eq!(top, ["calendar", "events", "ghosts"]);
+    assert_eq!(top, ["calendar", "calendars", "events", "ghosts"]);
     assert_eq!(body["events"], json!([]));
+    assert_eq!(body["calendars"], json!([]));
     assert_eq!(
         body["calendar"],
         json!({"granted": false, "synced_at": null, "error": null, "truncated": false})

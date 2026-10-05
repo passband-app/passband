@@ -1,8 +1,10 @@
 //! Google Calendar, the stored half: `calendar_calendars` (which calendars are
 //! read, and each one's sync token and last outcome) and `calendar_events`
-//! (the events in the synced window). Written only by the sync loop
-//! ([`crate::gcal::sync`]), read only by the human door's timeline. HUMAN DOOR
-//! ONLY: no agent route and no triage prompt reads either table.
+//! (the events in the synced window). Written by the sync loop
+//! ([`crate::gcal::sync`]) and, one event at a time, by the human door after
+//! Google accepted the user's own create, edit or delete; read only by the
+//! human door. HUMAN DOOR ONLY: no agent route and no triage prompt reads
+//! either table.
 //!
 //! EVERY WRITE IS ONE SHORT TRANSACTION over data already in hand. The sync
 //! loop fetches a page, then hands it here; the store's one connection is
@@ -15,8 +17,8 @@
 use super::ghosts::{in_range, listing_order, sort_key};
 use super::*;
 use crate::gcal::{
-    CalendarErrorKind, CalendarMeta, CalendarStatus, EventItem, EventRow, MAX_EVENTS_PER_CALENDAR,
-    PRIMARY, PageApplied, SelfResponse, StoredCalendar, SyncedEvent,
+    AccessRole, CalendarErrorKind, CalendarMeta, CalendarStatus, EventItem, EventRow,
+    MAX_EVENTS_PER_CALENDAR, PRIMARY, PageApplied, SelfResponse, StoredCalendar, SyncedEvent,
 };
 use crate::triage::ghost::EventTime;
 use chrono::FixedOffset;
@@ -48,13 +50,14 @@ impl SqliteStore {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
             "SELECT calendar_id,summary,is_primary,selected,time_zone,sync_token,synced_at,
-                    full_synced_at,last_error_kind,failures,retry_at,truncated
+                    full_synced_at,last_error_kind,failures,retry_at,truncated,color,access_role
              FROM calendar_calendars WHERE account_id=?1
              ORDER BY is_primary DESC, calendar_id",
         )?;
         let rows = stmt
             .query_map([account], |r| {
                 let kind: Option<String> = r.get(8)?;
+                let role: Option<String> = r.get(13)?;
                 Ok(StoredCalendar {
                     calendar_id: r.get(0)?,
                     summary: r.get(1)?,
@@ -68,6 +71,8 @@ impl SqliteStore {
                     failures: r.get::<_, i64>(9)?.clamp(0, i64::from(u32::MAX)) as u32,
                     retry_at: dt_opt(r, 10)?,
                     truncated: r.get(11)?,
+                    color: r.get(12)?,
+                    access_role: role.as_deref().and_then(AccessRole::parse),
                 })
             })?
             .collect::<std::result::Result<_, _>>()?;
@@ -88,19 +93,24 @@ impl SqliteStore {
         let tx = conn.transaction()?;
         for cal in calendars {
             tx.execute(
-                "INSERT INTO calendar_calendars(account_id,calendar_id,summary,is_primary,selected,time_zone)
-                 VALUES(?1,?2,?3,?4,1,?5)
+                "INSERT INTO calendar_calendars(account_id,calendar_id,summary,is_primary,selected,time_zone,
+                                                color,access_role)
+                 VALUES(?1,?2,?3,?4,1,?5,?6,?7)
                  ON CONFLICT(account_id,calendar_id) DO UPDATE SET
                     summary=COALESCE(excluded.summary,summary),
                     is_primary=excluded.is_primary,
                     selected=1,
-                    time_zone=COALESCE(excluded.time_zone,time_zone)",
+                    time_zone=COALESCE(excluded.time_zone,time_zone),
+                    color=COALESCE(excluded.color,color),
+                    access_role=COALESCE(excluded.access_role,access_role)",
                 params![
                     account,
                     cal.calendar_id,
                     cal.summary,
                     cal.is_primary,
-                    cal.time_zone
+                    cal.time_zone,
+                    cal.color,
+                    cal.access_role.map(AccessRole::as_str),
                 ],
             )?;
         }
@@ -375,9 +385,7 @@ impl SqliteStore {
         let split = sort_key(&EventTime::At(now.fixed_offset())).clamp(low.clone(), high.clone());
         let select = |cond: &str, order: &str| {
             format!(
-                "SELECT e.calendar_id,c.summary,e.event_id,e.ical_uid,e.status,e.summary,e.location,
-                        e.starts_at,e.ends_at,e.start_timezone,e.organizer_email,e.self_response,
-                        e.transparent,e.html_link,e.updated_at,c.is_primary
+                "SELECT {EVENT_COLUMNS}
                  FROM calendar_events e
                  JOIN calendar_calendars c ON c.account_id=e.account_id AND c.calendar_id=e.calendar_id
                  WHERE e.account_id=?1 AND c.selected=1 AND {cond}
@@ -402,36 +410,12 @@ impl SqliteStore {
             let mut taken = 0;
             while taken <= cap {
                 let Some(r) = rows.next()? else { break };
-                let starts_at: String = r.get(7)?;
-                let Some(start) = EventTime::parse(&starts_at).filter(|s| in_range(s, from, to))
+                let Some((primary, event)) =
+                    synced_event(r)?.filter(|(_, e)| in_range(&e.row.start, from, to))
                 else {
                     continue;
                 };
-                let status: String = r.get(4)?;
-                let ends_at: Option<String> = r.get(8)?;
-                let response: Option<String> = r.get(11)?;
-                near.push((
-                    r.get(15)?,
-                    SyncedEvent {
-                        calendar_id: r.get(0)?,
-                        calendar_name: r.get(1)?,
-                        row: EventRow {
-                            event_id: r.get(2)?,
-                            ical_uid: r.get(3)?,
-                            tentative: status == "tentative",
-                            summary: r.get(5)?,
-                            location: r.get(6)?,
-                            start,
-                            end: ends_at.as_deref().and_then(EventTime::parse),
-                            start_timezone: r.get(9)?,
-                            organizer_email: r.get(10)?,
-                            self_response: response.as_deref().and_then(SelfResponse::parse),
-                            transparent: r.get(12)?,
-                            html_link: r.get(13)?,
-                            updated_at: r.get(14)?,
-                        },
-                    },
-                ));
+                near.push((primary, event));
                 taken += 1;
             }
         }
@@ -461,6 +445,116 @@ impl SqliteStore {
         });
         Ok((near.into_iter().map(|(_, e)| e).collect(), truncated))
     }
+
+    /// One stored event of a calendar being read, with its calendar's name,
+    /// colour and role. None when there is no such event, or its calendar is
+    /// no longer read.
+    pub fn calendar_event(
+        &self,
+        account: AccountId,
+        calendar_id: &str,
+        event_id: &str,
+    ) -> Result<Option<SyncedEvent>> {
+        let conn = self.lock()?;
+        let sql = format!(
+            "SELECT {EVENT_COLUMNS}
+             FROM calendar_events e
+             JOIN calendar_calendars c ON c.account_id=e.account_id AND c.calendar_id=e.calendar_id
+             WHERE e.account_id=?1 AND e.calendar_id=?2 AND e.event_id=?3 AND c.selected=1"
+        );
+        let found = conn
+            .query_row(&sql, params![account, calendar_id, event_id], synced_event)
+            .optional()?;
+        Ok(found.flatten().map(|(_, event)| event))
+    }
+
+    /// THE USER'S OWN WRITE, after Google accepted it: store Google's answer
+    /// (already read by [`crate::gcal::read_written_event`]) under its
+    /// calendar. `false`, storing nothing, when the calendar stopped being
+    /// read in the meantime. The next sync pass carries the same event and
+    /// changes nothing.
+    pub fn calendar_put_event(
+        &self,
+        account: AccountId,
+        calendar_id: &str,
+        row: &EventRow,
+    ) -> Result<bool> {
+        let conn = self.lock()?;
+        let selected: Option<bool> = conn
+            .query_row(
+                "SELECT selected FROM calendar_calendars WHERE account_id=?1 AND calendar_id=?2",
+                params![account, calendar_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if selected != Some(true) {
+            return Ok(false);
+        }
+        upsert_event(&conn, account, calendar_id, row)?;
+        Ok(true)
+    }
+
+    /// The user deleted an event at Google: remove its row. Whether a row was
+    /// there.
+    pub fn calendar_remove_event(
+        &self,
+        account: AccountId,
+        calendar_id: &str,
+        event_id: &str,
+    ) -> Result<bool> {
+        let conn = self.lock()?;
+        Ok(conn.execute(
+            "DELETE FROM calendar_events WHERE account_id=?1 AND calendar_id=?2 AND event_id=?3",
+            params![account, calendar_id, event_id],
+        )? > 0)
+    }
+}
+
+/// The columns [`synced_event`] reads, over `calendar_events e` joined to its
+/// `calendar_calendars c`.
+const EVENT_COLUMNS: &str = "e.calendar_id,c.summary,e.event_id,e.ical_uid,e.status,e.summary,
+    e.location,e.starts_at,e.ends_at,e.start_timezone,e.organizer_email,e.self_response,
+    e.transparent,e.html_link,e.updated_at,c.is_primary,c.color,c.access_role,e.color_id,
+    e.organizer_self,e.description";
+
+/// One event read by [`EVENT_COLUMNS`], with whether its calendar is the
+/// primary one. None for a start that does not parse (never written so).
+fn synced_event(r: &rusqlite::Row<'_>) -> rusqlite::Result<Option<(bool, SyncedEvent)>> {
+    let starts_at: String = r.get(7)?;
+    let Some(start) = EventTime::parse(&starts_at) else {
+        return Ok(None);
+    };
+    let status: String = r.get(4)?;
+    let ends_at: Option<String> = r.get(8)?;
+    let response: Option<String> = r.get(11)?;
+    let role: Option<String> = r.get(17)?;
+    Ok(Some((
+        r.get(15)?,
+        SyncedEvent {
+            calendar_id: r.get(0)?,
+            calendar_name: r.get(1)?,
+            calendar_color: r.get(16)?,
+            calendar_access: role.as_deref().and_then(AccessRole::parse),
+            row: EventRow {
+                event_id: r.get(2)?,
+                ical_uid: r.get(3)?,
+                tentative: status == "tentative",
+                summary: r.get(5)?,
+                location: r.get(6)?,
+                start,
+                end: ends_at.as_deref().and_then(EventTime::parse),
+                start_timezone: r.get(9)?,
+                organizer_email: r.get(10)?,
+                organizer_self: r.get(19)?,
+                self_response: response.as_deref().and_then(SelfResponse::parse),
+                transparent: r.get(12)?,
+                html_link: r.get(13)?,
+                updated_at: r.get(14)?,
+                color_id: r.get(18)?,
+                description: r.get(20)?,
+            },
+        },
+    )))
 }
 
 fn upsert_event(
@@ -472,15 +566,17 @@ fn upsert_event(
     tx.execute(
         "INSERT INTO calendar_events(account_id,calendar_id,event_id,ical_uid,status,summary,location,
              starts_at,start_sort,ends_at,all_day,start_timezone,organizer_email,self_response,
-             transparent,html_link,updated_at)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
+             transparent,html_link,updated_at,color_id,organizer_self,description)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)
          ON CONFLICT(account_id,calendar_id,event_id) DO UPDATE SET
              ical_uid=excluded.ical_uid, status=excluded.status, summary=excluded.summary,
              location=excluded.location, starts_at=excluded.starts_at,
              start_sort=excluded.start_sort, ends_at=excluded.ends_at, all_day=excluded.all_day,
              start_timezone=excluded.start_timezone, organizer_email=excluded.organizer_email,
              self_response=excluded.self_response, transparent=excluded.transparent,
-             html_link=excluded.html_link, updated_at=excluded.updated_at",
+             html_link=excluded.html_link, updated_at=excluded.updated_at,
+             color_id=excluded.color_id, organizer_self=excluded.organizer_self,
+             description=excluded.description",
         params![
             account,
             calendar_id,
@@ -499,6 +595,9 @@ fn upsert_event(
             row.transparent,
             row.html_link,
             row.updated_at,
+            row.color_id,
+            row.organizer_self,
+            row.description,
         ],
     )?;
     Ok(())

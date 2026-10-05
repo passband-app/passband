@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const PROMPT_VERSION: &str = "agent-triage-v5";
+pub const PROMPT_VERSION: &str = "agent-triage-v6";
 const SYSTEM: &str = include_str!("prompts/agent-v1.txt");
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "step", rename_all = "snake_case")]
@@ -1123,6 +1123,22 @@ mod tests {
         assert!(SYSTEM.contains("invite, referral, promo, or waitlist code"));
         assert!(SYSTEM.contains("invite or referral or promo codes"));
         assert!(!SYSTEM.contains('\u{2014}'), "em dash in the agent prompt");
+    }
+    /// v6: Sonnet 5.5 read "authentication credentials" literally and left a
+    /// door code, survey PINs and claim upload links unsealed; the prompt now
+    /// names non-account access grants. It also buried state-change notices
+    /// (a returned ACH transfer, a TestFlight approval), so meaningful
+    /// developments are spelled out, and user-facing text is told to go
+    /// without em dashes, which Opus itself wrote in 2% of push bodies.
+    #[test]
+    fn prompt_v6_names_access_grants_developments_and_em_dashes() {
+        assert_eq!(PROMPT_VERSION, "agent-triage-v6");
+        assert!(SYSTEM.contains("whether or not an account is involved"));
+        assert!(SYSTEM.contains("door, lockbox, gate and Wi-Fi codes"));
+        assert!(SYSTEM.contains("document upload links"));
+        assert!(SYSTEM.contains("join or accept links of invitations are not access grants"));
+        assert!(SYSTEM.contains("something of the owner's changed state"));
+        assert!(SYSTEM.contains("without em dashes"));
     }
     #[test]
     fn credentials_are_not_inferred_from_auth_category() {

@@ -789,6 +789,22 @@ struct RuleSuggestion: Codable, Sendable {
     var suggestion: String?
 }
 
+/// `GET /client/unsubscribes/smart_block`. Null when the sender sends nothing
+/// worth keeping apart, or the daemon could not say.
+struct SmartBlockAnswer: Codable, Sendable {
+    var smart_block: SmartBlockProposal?
+}
+
+/// A filtered rule proposed for a sender who ignored an unsubscribe: `rule` is
+/// the sentence that gets saved, `keeps` and `drops` are what it means at a
+/// glance. All three are model text about the sender's own subjects, so they
+/// are shown as plain Text and saved only on the owner's click.
+struct SmartBlockProposal: Codable, Sendable, Hashable {
+    var rule: String
+    var keeps: String
+    var drops: String
+}
+
 /// GET /client/v2/fye/headline. Null when the daemon has no model, the band is
 /// empty, or the model had nothing to say.
 struct FyeHeadline: Codable, Sendable {
@@ -834,7 +850,8 @@ enum UnsubStatus: String, LenientRawEnum {
 }
 
 enum UnsubResolution: String, LenientRawEnum {
-    case blocked, dismissed
+    /// `filtered` is a smart block: a filtered rule in place of a mute.
+    case blocked, filtered, dismissed
     static var unknownFallback: UnsubResolution { .dismissed }
 }
 
@@ -870,6 +887,11 @@ struct UnsubscribeRecord: Codable, Sendable, Hashable, Identifiable {
     /// choose_topics | needs_browser | link_error | unclear, for `needs_you`.
     var status_reason: String? = nil
     var status_at: String? = nil
+    /// The smart block the daemon has worked out for this sender, and whether
+    /// it has worked one out at all: asked with no proposal is a settled no.
+    /// Both absent from a daemon without smart blocks.
+    var smart_block: SmartBlockProposal? = nil
+    var smart_block_asked: Bool? = nil
 
     var id: String { sender }
 }

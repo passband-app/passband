@@ -162,7 +162,7 @@ PR: `search_settled { turns, hits, opened, lane }` and
 |---|---|---|
 | `rule_created` (M) | `has_want`, `edit`, `suggested`, `from_suggestion`; `disposition`: `surface` `squelch` `filtered` | Does the card's suggested sentence get taken. |
 | `rule_deleted` (M) | `disposition` | |
-| `block_rule_created` (M) | | `x` on a sender. |
+| `block_rule_created` (M) | `smart` (bool, only when true) | `x` on a sender, or the ignored-unsubscribe notice. `smart` is the notice's filtered rule in place of a mute. |
 | `group_created` / `group_updated` / `group_deleted` (M) | `mode`: `to` `bcc` `individual`; `members` | Audience shape and size. Never who. |
 | `invite_sent` (M) | `count`, `failed`; `source`: `rail` `settings` `nudge` | Which surface drives shares. |
 | `invite_nudge_accepted` / `invite_nudge_dismissed` (M) | | The two-week ask. |

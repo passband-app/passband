@@ -679,6 +679,17 @@ actor APIClient {
         try await get("/client/unsubscribes")
     }
 
+    /// A filtered rule that would keep `sender`'s consequential mail and drop
+    /// the promotion, or nil when there is no such line to draw. The daemon
+    /// asks a model once and remembers; after that the answer rides
+    /// `getUnsubscribes`. A daemon too old for the route 404s, which the
+    /// caller reads as none.
+    func unsubSmartBlock(sender: String) async throws -> SmartBlockProposal? {
+        let answer: SmartBlockAnswer = try await get(
+            "/client/unsubscribes/smart_block", query: ["sender": sender])
+        return answer.smart_block
+    }
+
     @discardableResult
     func setUnsubResolution(sender: String, resolution: UnsubResolution) async throws
         -> UnsubResolutionResult

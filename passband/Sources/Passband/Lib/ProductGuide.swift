@@ -209,6 +209,7 @@ enum ProductGuide {
         - With nothing in For your eyes the page says there is no important mail, shows the day's tally and links to all mail.
         - "ingesting" in the top bar means new mail is still being sorted and will land on the next refresh.
         - Unsubscribes Passband is carrying out show in a tray at the bottom right.
+        - If a sender keeps emailing after an unsubscribe, a notice appears at the bottom left with "Block sender" and "Keep". When that sender also sends mail worth having, the notice adds "Smart block": it shows a rule that keeps the important kinds and drops the promotion, and saves it as a filter rule on that address.
         """
 
     private static let readingMail = """

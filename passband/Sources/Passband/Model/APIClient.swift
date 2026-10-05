@@ -355,6 +355,14 @@ actor APIClient {
         try await get("/client/senders", query: ["q": q, "limit": String(limit)])
     }
 
+    /// The rule editor's `*@` suggestions: the hosts mail comes from, ranked
+    /// for a fragment of one. An empty `q` is a real question, like `senders`.
+    /// A daemon older than the route answers 404; the menu then rolls hosts up
+    /// from `senders` instead (`RulePatternSuggest.domains(from:)`).
+    func senderDomains(_ q: String, limit: Int = 8) async throws -> [SenderDomainHit] {
+        try await get("/client/sender-domains", query: ["q": q, "limit": String(limit)])
+    }
+
     /// The reader's contact card for one address. A daemon older than the
     /// route answers 404, which the card treats as "no history to show".
     func person(_ addr: String) async throws -> PersonCard {

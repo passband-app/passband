@@ -201,9 +201,9 @@ data:
   # tenants, one pod restart each, once rule 2 has been followed. The warden
   # image itself has to be new enough to know these names: an older warden
   # ignores them and renders no relay env at all.
-  # SQUELCH_WARDEN_RELAY_URL: "https://relay.squelch.sh"
-  # SQUELCH_WARDEN_RELAY_SECRET_NAME: "apns-relay"
-  # SQUELCH_WARDEN_RELAY_TOPIC: "app.passband.client.ios"
+  SQUELCH_WARDEN_RELAY_URL: "https://relay.squelch.sh"
+  SQUELCH_WARDEN_RELAY_SECRET_NAME: "apns-relay"
+  SQUELCH_WARDEN_RELAY_TOPIC: "app.passband.client.ios"
   # 3. EDIT ME. The control plane's origin, handed to every tenant daemon as
   # SQUELCH_CONSOLE_SSO_URL. It is what puts "Continue with Google" on a tenant's
   # own /console login page: Google forbids wildcard redirect URIs, so a

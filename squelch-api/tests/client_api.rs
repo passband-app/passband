@@ -9,7 +9,7 @@ use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use serde_json::Value;
 use squelch_api::{ApiState, router};
-use squelch_core::store::{SpamScope, SqliteStore, Store, UsageTokens};
+use squelch_core::store::{SmartBlockMemo, SpamScope, SqliteStore, Store, UsageTokens};
 use squelch_core::types::{SealedKind, Sensitivity, Tier};
 use tower::ServiceExt;
 
@@ -11473,145 +11473,188 @@ fn seed_mixed_sender(store: &SqliteStore, acct: i64) {
     }
 }
 
-#[tokio::test]
-async fn smart_block_mode_answers_the_rule_and_its_labels() {
-    let Harness { app, store, acct } = app_with_smart_block(
-        "only state regulation alerts, no marketing.",
-        "regulation alerts",
-        "marketing and webinars",
-        seed_mixed_sender,
-    )
-    .await;
-    let resp = app
-        .oneshot(authed(
-            "GET",
-            "/client/rules/suggest?sender=Info@Corp.com&mode=smart_block",
-        ))
-        .await
+const SMART_BLOCK: &str = "/client/unsubscribes/smart_block?sender=Info@Corp.com";
+
+/// A sender with both kinds of mail, and an unsubscribe on file for them.
+fn seed_ignored_unsubscribe(store: &SqliteStore, acct: i64) {
+    seed_mixed_sender(store, acct);
+    store
+        .upsert_unsubscribe(acct, "info@corp.com", "one_click", None, chrono::Utc::now())
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let json = body_json(resp).await;
-    assert_eq!(
-        json["smart_block"],
-        serde_json::json!({
-            "rule": "only state regulation alerts, no marketing",
-            "keeps": "regulation alerts",
-            "drops": "marketing and webinars",
-        })
-    );
-    assert_eq!(json["suggestion"], Value::Null);
-    assert_eq!(
-        usage_categories(&store, acct),
-        vec!["rule_suggest".to_string()]
-    );
 }
 
-#[tokio::test]
-async fn a_smart_block_is_proposed_once_and_then_remembered() {
-    let Harness { app, store, acct } = app_with_smart_block(
-        "only regulation alerts",
-        "regulation alerts",
-        "marketing",
-        |store, acct| {
-            seed_mixed_sender(store, acct);
-            store
-                .upsert_unsubscribe(acct, "info@corp.com", "one_click", None, chrono::Utc::now())
-                .unwrap();
-        },
-    )
-    .await;
-    let ask = || {
-        authed(
-            "GET",
-            "/client/rules/suggest?sender=info@corp.com&mode=smart_block",
-        )
-    };
-    let first = body_json(app.clone().oneshot(ask()).await.unwrap()).await;
-    assert_eq!(first["smart_block"]["keeps"], "regulation alerts");
-    let kept = store
-        .unsubscribe_smart_block(acct, "info@corp.com")
-        .unwrap()
-        .expect("the proposal was kept on the row");
-
-    // Swap what is remembered for something the model would not say: the
-    // second answer can then only have come from the row.
+fn suggest_calls(store: &SqliteStore, acct: i64) -> u64 {
     store
-        .set_unsubscribe_smart_block(
-            acct,
-            "info@corp.com",
-            &kept.replace("marketing", "webinars"),
-        )
-        .unwrap();
-    let second = body_json(app.clone().oneshot(ask()).await.unwrap()).await;
-    assert_eq!(second["smart_block"]["drops"], "webinars");
-    let calls: u64 = store
         .list_usage_by_category(acct, 1)
         .unwrap()
         .into_iter()
         .flat_map(|(_, days)| days)
         .map(|d| d.calls)
-        .sum();
-    assert_eq!(calls, 1, "the remembered proposal cost a second call");
+        .sum()
+}
 
-    // It survives the owner asking again, which resets the rest of the row.
+#[tokio::test]
+async fn a_smart_block_is_cleaned_billed_and_rides_the_unsubscribe_list() {
+    let Harness { app, store, acct } = app_with_smart_block(
+        "only state regulation alerts, no marketing.",
+        "regulation alerts",
+        "marketing and webinars",
+        seed_ignored_unsubscribe,
+    )
+    .await;
+    let proposal = serde_json::json!({
+        "rule": "only state regulation alerts, no marketing",
+        "keeps": "regulation alerts",
+        "drops": "marketing and webinars",
+    });
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", SMART_BLOCK))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["smart_block"], proposal);
+    assert_eq!(
+        usage_categories(&store, acct),
+        vec!["rule_suggest".to_string()]
+    );
+
+    let list = body_json(
+        app.oneshot(authed("GET", "/client/unsubscribes"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(list[0]["smart_block"], proposal);
+    assert_eq!(list[0]["smart_block_asked"], true);
+}
+
+#[tokio::test]
+async fn a_smart_block_is_asked_of_the_model_once() {
+    let Harness { app, store, acct } = app_with_smart_block(
+        "only regulation alerts",
+        "regulation alerts",
+        "marketing",
+        seed_ignored_unsubscribe,
+    )
+    .await;
+    let first = body_json(
+        app.clone()
+            .oneshot(authed("GET", SMART_BLOCK))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(first["smart_block"]["drops"], "marketing");
+
+    // Swap what is remembered for something the model would not say: the
+    // second answer can then only have come from the row.
+    let mut kept = match store
+        .unsubscribe_smart_block(acct, "info@corp.com")
+        .unwrap()
+    {
+        Some(SmartBlockMemo::Asked(Some(block))) => block,
+        other => panic!("the proposal was not kept on the row: {other:?}"),
+    };
+    kept.drops = "webinars".into();
+    store
+        .set_unsubscribe_smart_block(acct, "info@corp.com", Some(&kept))
+        .unwrap();
+    let second = body_json(
+        app.clone()
+            .oneshot(authed("GET", SMART_BLOCK))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(second["smart_block"]["drops"], "webinars");
+    assert_eq!(suggest_calls(&store, acct), 1, "paid for a second call");
+
+    // A proposal survives the owner asking again, which resets the rest.
     store
         .upsert_unsubscribe(acct, "info@corp.com", "one_click", None, chrono::Utc::now())
         .unwrap();
-    assert!(
+    assert_eq!(
         store
             .unsubscribe_smart_block(acct, "info@corp.com")
-            .unwrap()
-            .is_some()
+            .unwrap(),
+        Some(SmartBlockMemo::Asked(Some(kept)))
     );
 }
 
 #[tokio::test]
-async fn smart_block_is_null_when_there_is_no_line_to_draw_or_too_little_mail() {
-    // The model's "all promotion" answer: the key is there, and null.
-    let Harness { app, .. } = app_with_smart_block("", "", "", seed_mixed_sender).await;
-    let resp = app
-        .oneshot(authed(
-            "GET",
-            "/client/rules/suggest?sender=info@corp.com&mode=smart_block",
-        ))
-        .await
-        .unwrap();
-    let json = body_json(resp).await;
-    assert!(json.as_object().unwrap().contains_key("smart_block"));
-    assert_eq!(json["smart_block"], Value::Null);
+async fn a_no_is_remembered_until_the_owner_unsubscribes_again() {
+    // The model's "all promotion" answer.
+    let Harness { app, store, acct } =
+        app_with_smart_block("", "", "", seed_ignored_unsubscribe).await;
+    for _ in 0..2 {
+        let json = body_json(
+            app.clone()
+                .oneshot(authed("GET", SMART_BLOCK))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(json["smart_block"], Value::Null);
+    }
+    assert_eq!(
+        suggest_calls(&store, acct),
+        1,
+        "asked again about a known no"
+    );
+    let list = body_json(
+        app.oneshot(authed("GET", "/client/unsubscribes"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(list[0]["smart_block"], Value::Null);
+    assert_eq!(list[0]["smart_block_asked"], true);
 
-    // Three messages clear the sentence's floor but not this one: no call.
+    store
+        .upsert_unsubscribe(acct, "info@corp.com", "one_click", None, chrono::Utc::now())
+        .unwrap();
+    assert_eq!(
+        store
+            .unsubscribe_smart_block(acct, "info@corp.com")
+            .unwrap(),
+        Some(SmartBlockMemo::NotAsked)
+    );
+}
+
+#[tokio::test]
+async fn too_little_mail_is_neither_asked_nor_remembered_and_no_unsubscribe_is_404() {
     let Harness { app, store, acct } =
         app_with_smart_block("only alerts", "alerts", "marketing", |store, acct| {
             for g in ["g1", "g2", "g3"] {
                 seed_suggest_msg(store, acct, g, "a@b.com", "hi", Sensitivity::Normal);
             }
+            store
+                .upsert_unsubscribe(acct, "a@b.com", "one_click", None, chrono::Utc::now())
+                .unwrap();
+            seed_mixed_sender(store, acct);
         })
         .await;
+    // Three messages clear the sentence's floor but not this one.
     let resp = app
+        .clone()
         .oneshot(authed(
             "GET",
-            "/client/rules/suggest?sender=a@b.com&mode=smart_block",
+            "/client/unsubscribes/smart_block?sender=a@b.com",
         ))
         .await
         .unwrap();
     assert_eq!(body_json(resp).await["smart_block"], Value::Null);
-    assert!(usage_categories(&store, acct).is_empty());
-}
+    assert_eq!(suggest_calls(&store, acct), 0);
+    assert_eq!(
+        store.unsubscribe_smart_block(acct, "a@b.com").unwrap(),
+        Some(SmartBlockMemo::NotAsked)
+    );
 
-#[tokio::test]
-async fn the_plain_suggestion_carries_no_smart_block_key() {
-    // What a client reads to tell this mode was honoured: an older daemon
-    // ignores `mode` and answers exactly this shape.
-    let Harness { app, .. } =
-        app_with_rule_suggestion("only order confirmations", seed_mixed_sender).await;
-    let resp = app
-        .oneshot(authed("GET", "/client/rules/suggest?sender=info@corp.com"))
-        .await
-        .unwrap();
-    let json = body_json(resp).await;
-    assert_eq!(json["suggestion"], "only order confirmations");
-    assert!(!json.as_object().unwrap().contains_key("smart_block"));
+    // Plenty of mail, but nobody ever unsubscribed from them.
+    let resp = app.oneshot(authed("GET", SMART_BLOCK)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(suggest_calls(&store, acct), 0);
 }
 
 #[tokio::test]

@@ -958,6 +958,15 @@ pub struct UnsubscribeRecord {
     pub status_reason: Option<String>,
     /// When `status` last changed.
     pub status_at: Option<DateTime<Utc>>,
+    /// The smart block proposed for this sender: a filtered rule that keeps
+    /// their consequential mail and drops the promotion. `None` when nothing
+    /// was proposed, which `smart_block_asked` tells apart from never asked.
+    #[serde(default)]
+    pub smart_block: Option<crate::triage::rule_suggest::SmartBlock>,
+    /// The question has been answered for this sender, whichever way, so a
+    /// client has no reason to ask `GET /client/unsubscribes/smart_block`.
+    #[serde(default)]
+    pub smart_block_asked: bool,
 }
 
 str_enum! {

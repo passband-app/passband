@@ -18,15 +18,15 @@ use squelch_core::CoreError;
 use squelch_core::config::{CACHE_READ_INPUT_MULT, CACHE_WRITE_INPUT_MULT};
 use squelch_core::store::{
     ActionMessageRef, ClientPlatform, Draft, DraftKey, FtsQuery, NewAuditEntry,
-    OutboundAttachmentMeta, SearchDiagnostics, SearchFilter, SearchSort, SitrepBand, SpamScope,
-    SqliteStore, Store,
+    OutboundAttachmentMeta, SearchDiagnostics, SearchFilter, SearchSort, SenderDigestRow,
+    SitrepBand, SmartBlockMemo, SpamScope, SqliteStore, Store,
 };
 use squelch_core::sync::{LABEL_INBOX, LABEL_SPAM, decode_raw_b64url, parse_internal_date};
 use squelch_core::triage::llm::Usage;
 use squelch_core::triage::rule_infer;
 use squelch_core::triage::rule_suggest;
 use squelch_core::types::{
-    AccountId, AttentionStatus, Disposition, GroupMode, ShredStats, Tier, TriageAxis,
+    AccountId, AttentionStatus, Disposition, GroupMode, SenderRule, ShredStats, Tier, TriageAxis,
 };
 use std::collections::HashMap;
 use std::time::Duration;
@@ -1985,11 +1985,6 @@ fn may_resolve_sender_mail(resolved: &ResolvedDisposition, sweep: bool) -> bool 
 #[derive(Debug, Deserialize)]
 pub struct SuggestRuleQuery {
     sender: String,
-    /// `smart_block` asks for a filtered rule that keeps this sender's
-    /// consequential mail and drops the promotion, answered under
-    /// `smart_block`. Absent (and any other value) is the plain sentence.
-    #[serde(default)]
-    mode: Option<String>,
 }
 
 /// GET /client/rules/suggest?sender=addr: the sentence the owner might write
@@ -1998,11 +1993,6 @@ pub struct SuggestRuleQuery {
 /// clear pattern. It is only ever SHOWN: the owner accepts it with tab and
 /// saves it themselves, and its disposition is then inferred from the owner's
 /// sentence like any other. See [`squelch_core::triage::rule_suggest`].
-///
-/// `mode=smart_block` answers `smart_block: {rule, keeps, drops}` instead (null
-/// when there is no line to draw), for the ignored-unsubscribe notice. The key
-/// is PRESENT in every answer to that mode and absent otherwise, so a client
-/// can tell this daemon from one that predates the mode and ignored it.
 pub async fn suggest_rule(
     State(state): State<ApiState>,
     Query(params): Query<SuggestRuleQuery>,
@@ -2013,57 +2003,18 @@ pub async fn suggest_rule(
     if sender.is_empty() {
         return Err(ApiError::bad_request("sender must not be empty"));
     }
-    let smart = params.mode.as_deref() == Some("smart_block");
-    let none = move || {
-        let body = if smart {
-            serde_json::json!({ "suggestion": null, "smart_block": null })
-        } else {
-            serde_json::json!({ "suggestion": null })
-        };
-        (no_store(), Json(body))
-    };
+    let none = || (no_store(), Json(serde_json::json!({ "suggestion": null })));
     let Some(client) = state.rule_suggest.clone() else {
         return Ok(none());
     };
-    // A smart block is proposed once per sender and then remembered: the
-    // notice comes back (a relaunch, a second device, a request made again)
-    // with the same rule, and without a second call.
-    if smart {
-        let addr = sender.clone();
-        let cached = store_call(&state, move |store, account_id| {
-            store.unsubscribe_smart_block(account_id, &addr)
-        })
-        .await?
-        .and_then(|raw| serde_json::from_str::<rule_suggest::SmartBlock>(&raw).ok());
-        if let Some(block) = cached {
-            return Ok((
-                no_store(),
-                Json(serde_json::json!({ "suggestion": null, "smart_block": block })),
-            ));
-        }
-    }
     let addr = sender.clone();
     let digest = store_call(&state, move |store, account_id| {
         // The runaway guard: past the day's cap the route answers null
         // without spending. Read from the same ledger the calls bill into.
-        let today = Utc::now().format("%Y-%m-%d").to_string();
-        let spent: u64 = store
-            .list_usage_by_category(account_id, 1)?
-            .into_iter()
-            .filter(|(c, _)| c == squelch_core::metrics::RULE_SUGGEST_USAGE_CATEGORY)
-            .flat_map(|(_, days)| days)
-            .filter(|d| d.day == today)
-            .map(|d| d.calls)
-            .sum();
-        if spent >= u64::from(rule_suggest::DAILY_CAP) {
+        if rule_suggest_capped(store, account_id)? {
             return Ok(None);
         }
-        let limit = if smart {
-            rule_suggest::SMART_BLOCK_HISTORY_LIMIT
-        } else {
-            rule_suggest::HISTORY_LIMIT
-        };
-        let history = store.sender_rule_digest(account_id, &addr, limit)?;
+        let history = store.sender_rule_digest(account_id, &addr, rule_suggest::HISTORY_LIMIT)?;
         let rules = store.list_sender_rules(account_id)?;
         Ok(Some((history, rules)))
     })
@@ -2071,56 +2022,160 @@ pub async fn suggest_rule(
     let Some((history, rules)) = digest else {
         return Ok(none());
     };
-    let existing: Vec<String> = rules
+    let existing = rules_in_the_owners_words(rules, &sender);
+    let (suggestion, usage) = rule_suggest::suggest_rule(
+        &client,
+        &rule_suggest::SuggestInput {
+            from_addr: &sender,
+            existing_rules: &existing,
+            history: &history,
+        },
+    )
+    .await;
+    if let Some(u) = usage {
+        let _ = store_call(&state, move |store, account_id| {
+            bill_rule_suggest(store, account_id, u);
+            Ok(())
+        })
+        .await;
+    }
+    Ok((
+        no_store(),
+        Json(serde_json::json!({ "suggestion": suggestion })),
+    ))
+}
+
+/// The suggester's runaway guard: past the day's cap its routes answer without
+/// spending. Read from the same ledger the calls bill into.
+fn rule_suggest_capped(store: &SqliteStore, account_id: AccountId) -> Result<bool, CoreError> {
+    let today = Utc::now().format("%Y-%m-%d").to_string();
+    let spent: u64 = store
+        .list_usage_by_category(account_id, 1)?
+        .into_iter()
+        .filter(|(c, _)| c == squelch_core::metrics::RULE_SUGGEST_USAGE_CATEGORY)
+        .flat_map(|(_, days)| days)
+        .filter(|d| d.day == today)
+        .map(|d| d.calls)
+        .sum();
+    Ok(spent >= u64::from(rule_suggest::DAILY_CAP))
+}
+
+/// Best-effort: a ledger miss must not cost the owner the answer it paid for.
+fn bill_rule_suggest(store: &SqliteStore, account_id: AccountId, usage: Usage) {
+    let day = Utc::now().format("%Y-%m-%d").to_string();
+    if let Err(e) = store.extract_bump_usage(
+        account_id,
+        &day,
+        squelch_core::metrics::RULE_SUGGEST_USAGE_CATEGORY,
+        usage.into(),
+    ) {
+        eprintln!("squelch: rule suggestion usage ledger bump failed ({e})");
+    }
+}
+
+/// The owner's own sentences from the rules that cover `sender`.
+fn rules_in_the_owners_words(rules: Vec<SenderRule>, sender: &str) -> Vec<String> {
+    rules
         .into_iter()
         .filter(|r| {
             !r.want_text.trim().is_empty()
-                && squelch_core::triage::rules::glob_match(&r.match_pattern, &sender)
+                && squelch_core::triage::rules::glob_match(&r.match_pattern, sender)
         })
         .map(|r| r.want_text)
-        .collect();
-    let input = rule_suggest::SuggestInput {
-        from_addr: &sender,
-        existing_rules: &existing,
-        history: &history,
+        .collect()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SmartBlockQuery {
+    sender: String,
+}
+
+/// What the first store read of [`unsubscribe_smart_block`] settles.
+enum SmartBlockLookup {
+    /// Answered already, or not answerable right now (no model, the day's cap).
+    Known(Option<rule_suggest::SmartBlock>),
+    Ask(Vec<SenderDigestRow>, Vec<SenderRule>),
+}
+
+/// GET /client/unsubscribes/smart_block?sender=addr: for a sender who ignored
+/// an unsubscribe, a filtered rule that keeps their consequential mail and
+/// drops the promotion, as `smart_block: {rule, keeps, drops}`; null when the
+/// sender has no such line to draw. 404 when no unsubscribe was ever asked of
+/// them.
+///
+/// ASKED OF A MODEL ONCE. The answer, a no included, is remembered on the
+/// unsubscribe row and rides `GET /client/unsubscribes` from then on, so the
+/// notice shows the same rule on a relaunch or another device without paying
+/// again. Silence (too little mail, a refusal, a timeout) is not remembered.
+/// The rule is only ever SHOWN: see [`squelch_core::triage::rule_suggest`].
+pub async fn unsubscribe_smart_block(
+    State(state): State<ApiState>,
+    Query(params): Query<SmartBlockQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let sender = params.sender.trim().to_lowercase();
+    if sender.is_empty() {
+        return Err(ApiError::bad_request("sender must not be empty"));
+    }
+    let answer = |block: Option<rule_suggest::SmartBlock>| {
+        (no_store(), Json(json!({ "smart_block": block })))
     };
-    let (body, usage) = if smart {
-        let (block, usage) = rule_suggest::smart_block(&client, &input).await;
-        if let Some(found) = &block
-            && let Ok(raw) = serde_json::to_string(found)
-        {
-            let addr = sender.clone();
-            // Best-effort: a sender with no unsubscribe row keeps nothing, and
-            // a failed write only means the next ask pays again.
-            let _ = store_call(&state, move |store, account_id| {
-                store.set_unsubscribe_smart_block(account_id, &addr, &raw)
-            })
-            .await;
+    let client = state.rule_suggest.clone();
+    let has_model = client.is_some();
+    let addr = sender.clone();
+    let lookup = store_call(&state, move |store, account_id| {
+        let Some(memo) = store.unsubscribe_smart_block(account_id, &addr)? else {
+            return Ok(None);
+        };
+        if let SmartBlockMemo::Asked(block) = memo {
+            return Ok(Some(SmartBlockLookup::Known(block)));
         }
-        (
-            serde_json::json!({ "suggestion": null, "smart_block": block }),
-            usage,
-        )
-    } else {
-        let (suggestion, usage) = rule_suggest::suggest_rule(&client, &input).await;
-        (serde_json::json!({ "suggestion": suggestion }), usage)
+        if !has_model || rule_suggest_capped(store, account_id)? {
+            return Ok(Some(SmartBlockLookup::Known(None)));
+        }
+        let history =
+            store.sender_rule_digest(account_id, &addr, rule_suggest::SMART_BLOCK_HISTORY_LIMIT)?;
+        Ok(Some(SmartBlockLookup::Ask(
+            history,
+            store.list_sender_rules(account_id)?,
+        )))
+    })
+    .await?;
+    let (history, rules) = match lookup {
+        None => return Err(ApiError::not_found()),
+        Some(SmartBlockLookup::Known(block)) => return Ok(answer(block)),
+        Some(SmartBlockLookup::Ask(history, rules)) => (history, rules),
     };
-    if let Some(u) = usage {
+    let Some(client) = client else {
+        return Ok(answer(None));
+    };
+    let existing = rules_in_the_owners_words(rules, &sender);
+    let (answered, usage) = rule_suggest::smart_block(
+        &client,
+        &rule_suggest::SuggestInput {
+            from_addr: &sender,
+            existing_rules: &existing,
+            history: &history,
+        },
+    )
+    .await;
+    if answered.is_some() || usage.is_some() {
+        let remembered = answered.clone();
         let _ = store_call(&state, move |store, account_id| {
-            let day = Utc::now().format("%Y-%m-%d").to_string();
-            if let Err(e) = store.extract_bump_usage(
-                account_id,
-                &day,
-                squelch_core::metrics::RULE_SUGGEST_USAGE_CATEGORY,
-                u.into(),
-            ) {
-                eprintln!("squelch: rule suggestion usage ledger bump failed ({e})");
+            if let Some(u) = usage {
+                bill_rule_suggest(store, account_id, u);
+            }
+            // Best-effort: a failed write only means the next ask pays again.
+            if let Some(block) = &remembered
+                && let Err(e) =
+                    store.set_unsubscribe_smart_block(account_id, &sender, block.as_ref())
+            {
+                eprintln!("squelch: smart block was not remembered ({e})");
             }
             Ok(())
         })
         .await;
     }
-    Ok((no_store(), Json(body)))
+    Ok(answer(answered.flatten()))
 }
 
 pub async fn create_rule(

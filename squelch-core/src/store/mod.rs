@@ -19,6 +19,7 @@ use crate::error::Result;
 // the type comments in `metrics.rs` and docs/NOTIFY.md §11.4.
 use crate::metrics::{NotifyDecision, NotifyLane};
 use crate::triage::extract::shipments::ShipmentsApplied;
+use crate::triage::rule_suggest::SmartBlock;
 use crate::triage::{CalendarInfo, CarrierTrack, DeadlineHit, ReceiptInfo, ShipmentInfo};
 use crate::types::{
     AccountId, AttachmentInfo, AttentionStatus, AttentionUpdate, AuditEntry, Banking,
@@ -968,6 +969,23 @@ pub struct SenderDigestRow {
     pub opened: bool,
     /// What triage called it (`marketing`, `bill`, ...), when it said.
     pub category: Option<String>,
+}
+
+/// Whether a smart block has been worked out for a sender, and what it was.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SmartBlockMemo {
+    NotAsked,
+    /// Asked and answered; `None` is "this sender has no line to draw".
+    Asked(Option<SmartBlock>),
+}
+
+impl SmartBlockMemo {
+    /// Read the `unsubscribes.smart_block` column: NULL is never asked, JSON
+    /// `null` is an answered no. Anything unreadable is asked again.
+    pub(crate) fn from_column(raw: Option<String>) -> Self {
+        raw.and_then(|raw| serde_json::from_str::<Option<SmartBlock>>(&raw).ok())
+            .map_or(Self::NotAsked, Self::Asked)
+    }
 }
 
 /// One other message in the escalated row's thread. Verdict and envelope only,
@@ -2445,25 +2463,27 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
         resolution: &str,
     ) -> Result<bool>;
 
-    /// The smart block already proposed for this sender's ignored unsubscribe,
-    /// as the JSON it was stored in, so a notice shown again offers the same
-    /// rule without a second model call. It outlives a resolution and a fresh
-    /// request on purpose: it is a reading of the sender, not of the request.
+    /// What is remembered about a smart block for this sender's ignored
+    /// unsubscribe, so the question is put to a model once. `None` when the
+    /// sender has no unsubscribe row at all.
     fn unsubscribe_smart_block(
         &self,
         account_id: AccountId,
         sender: &str,
-    ) -> Result<Option<String>>;
+    ) -> Result<Option<SmartBlockMemo>>;
 
-    /// Remember a proposed smart block on the sender's unsubscribe row. `false`
-    /// when there is no row, and then nothing is kept. This is model text about
-    /// sender-written subjects: it is stored to be SHOWN again, and becomes a
-    /// rule only through the owner's click, like the first time.
+    /// Remember the answer on the sender's unsubscribe row: a proposal, or
+    /// `None` for "nothing worth keeping apart". `false` when there is no row.
+    /// A proposal is model text about sender-written subjects: it is stored to
+    /// be SHOWN again and becomes a rule only through the owner's click. It
+    /// outlives a resolution and a fresh request, being a reading of the
+    /// sender; a remembered `None` is dropped by a fresh request, so asking
+    /// again gets a second look at a sender whose mail may have changed.
     fn set_unsubscribe_smart_block(
         &self,
         account_id: AccountId,
         sender: &str,
-        proposal: &str,
+        proposal: Option<&SmartBlock>,
     ) -> Result<bool>;
 
     /// Upsert one extracted promotion + stamp `triage.extractor_model_used`.

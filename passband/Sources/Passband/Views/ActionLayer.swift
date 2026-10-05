@@ -15,12 +15,6 @@ struct ActionLayer: View {
     @State private var blockBusy = false
     /// Senders acted on this session, so a lagging read model can't re-nag.
     @State private var acted: Set<String> = []
-    /// The smart block proposed for a sender, fetched BEFORE its notice is
-    /// raised so the notice arrives whole.
-    @State private var smartBlocks: [String: SmartBlockProposal] = [:]
-    /// Senders already asked about this session, answer or not: the scan
-    /// re-runs every minute. The daemon remembers a proposal across sessions.
-    @State private var smartAsked: Set<String> = []
 
     var body: some View {
         ZStack(alignment: .bottomLeading) {
@@ -220,7 +214,7 @@ struct ActionLayer: View {
 
     private func violationPrompt(_ record: UnsubscribeRecord) -> some View {
         let name = SenderCache.resolved(record.sender).displayName
-        let smart = smartBlocks[record.sender]
+        let smart = record.smart_block
         return VStack(alignment: .leading, spacing: Space.scaled(9)) {
             Text(
                 "\(name) is ignoring your unsubscribe. "
@@ -236,19 +230,15 @@ struct ActionLayer: View {
             HStack(spacing: Space.s8) {
                 // With a smart block on offer it is the recommendation, and one
                 // notice gets one prominent button.
-                if smart == nil {
-                    Button("Block sender") { Task { await block(record) } }
-                        .buttonStyle(.glassProminent)
-                        .tint(Palette.danger)
-                } else {
-                    Button("Block sender") { Task { await block(record) } }
-                        .buttonStyle(.glass)
-                }
+                let blockSender = Button("Block sender") { Task { await block(record) } }
                 if let smart {
+                    blockSender.buttonStyle(.glass)
                     Button("Smart block") { Task { await smartBlock(record, smart) } }
                         .buttonStyle(.glassProminent)
                         .tint(Palette.accent)
                         .help("Saves this rule for \(record.sender): \(smart.rule)")
+                } else {
+                    blockSender.buttonStyle(.glassProminent).tint(Palette.danger)
                 }
                 Button("Keep") { Task { await keep(record) } }
                     .buttonStyle(.glass)
@@ -286,52 +276,35 @@ struct ActionLayer: View {
         }
     }
 
-    /// One ask per sender per session, made before the notice is shown.
-    /// Silence on every failure: no model, an older daemon, or a sender with
-    /// nothing worth keeping all leave the notice as the two buttons it always
-    /// was. `false` only when the ask was cut short, so the next scan retries
-    /// instead of raising a notice that never got its answer.
-    private func proposeSmartBlock(for sender: String) async -> Bool {
-        guard !smartAsked.contains(sender) else { return true }
-        smartAsked.insert(sender)
-        let proposal = try? await APIClient.shared.suggestSmartBlock(sender: sender)
-        if Task.isCancelled {
-            smartAsked.remove(sender)
-            return false
-        }
-        if let proposal { smartBlocks[sender] = proposal }
-        return true
-    }
-
     private func scanViolations() async {
-        let gen = UnsubscribeJobs.shared.generation
         guard let rows = try? await APIClient.shared.getUnsubscribes() else { return }
-        // The same rows carry automatic-unsubscribe jobs: a `needs_you` left
-        // from before a relaunch reaches the tray through this fetch.
-        UnsubscribeJobs.shared.absorb(rows, generation: gen)
         // Surface one at a time: a stack of these is a nag, not a prompt.
-        let next = rows.first {
+        var next = rows.first {
             $0.violation_count > 0 && $0.resolution == nil && !acted.contains($0.sender)
         }
-        // The notice waits for its smart block, so the third button is there
-        // when it arrives and not a second later. Bounded by the daemon's own
-        // budget for the call; a notice already up is never held back.
-        if let next, next.sender != blockPrompt?.sender {
-            guard await proposeSmartBlock(for: next.sender) else { return }
-            // The wait is long enough for the owner to have answered an
-            // earlier notice for this sender.
-            if acted.contains(next.sender) { return }
+        if var row = next {
+            if row.sender == blockPrompt?.sender {
+                // A notice already up keeps what it was raised with.
+                row.smart_block = row.smart_block ?? blockPrompt?.smart_block
+            } else if row.smart_block_asked != true {
+                // The notice waits for its smart block, so the third button is
+                // there when it arrives and not a second later. Asked once:
+                // the daemon remembers the answer and sends it with the row
+                // from then on. Silence on every failure (no model, an older
+                // daemon) leaves the notice as the two buttons it always was.
+                row.smart_block = try? await APIClient.shared.unsubSmartBlock(sender: row.sender)
+                // The wait is long enough for the owner to have answered an
+                // earlier notice for this sender.
+                if acted.contains(row.sender) { return }
+            }
+            next = row
         }
         // Assignment is invalidation, and the answer is nil nearly always.
         if next != blockPrompt { blockPrompt = next }
     }
 
     private func block(_ record: UnsubscribeRecord) async {
-        guard !blockBusy else { return }
-        blockBusy = true
-        // Mark acted immediately so a refresh mid-flight can't re-surface it.
-        acted.insert(record.sender)
-        do {
+        await resolve(record, failure: "block failed") {
             // Exact sender address, not the domain.
             try await Actions.createBlockRule(sender: record.sender)
             // No message on screen to name, but the rule is still a verdict on
@@ -340,38 +313,43 @@ struct ActionLayer: View {
             try await APIClient.shared.setUnsubResolution(
                 sender: record.sender, resolution: .blocked)
             store.pushToast("blocked \(record.sender)", .success)
-        } catch {
-            store.pushToast(errText(error, "block failed"), .error)
         }
-        blockBusy = false
-        blockPrompt = nil
     }
 
     private func smartBlock(_ record: UnsubscribeRecord, _ smart: SmartBlockProposal) async {
-        guard !blockBusy else { return }
-        blockBusy = true
-        acted.insert(record.sender)
-        do {
+        await resolve(record, failure: "smart block failed") {
             // Exact sender address, like the block. Forward-only: nothing on
             // the board moves, so there is no sender to note as resolved.
             try await Actions.createSmartBlockRule(sender: record.sender, want: smart.rule)
             try await APIClient.shared.setUnsubResolution(
                 sender: record.sender, resolution: .filtered)
             store.pushToast("filtering \(record.sender), keeping \(smart.keeps)", .success)
-        } catch {
-            store.pushToast(errText(error, "smart block failed"), .error)
         }
-        blockBusy = false
-        blockPrompt = nil
     }
 
     private func keep(_ record: UnsubscribeRecord) async {
+        // Best-effort, so no failure toast: the session-level `acted` set
+        // already suppresses the re-nag.
+        await resolve(record, failure: nil) {
+            try await APIClient.shared.setUnsubResolution(
+                sender: record.sender, resolution: .dismissed)
+        }
+    }
+
+    /// The frame every answer to the notice shares: one at a time, and the
+    /// notice comes down whether or not the work behind it succeeded.
+    private func resolve(
+        _ record: UnsubscribeRecord, failure: String?, _ work: () async throws -> Void
+    ) async {
         guard !blockBusy else { return }
         blockBusy = true
+        // Mark acted immediately so a refresh mid-flight can't re-surface it.
         acted.insert(record.sender)
-        // Best-effort: the session-level `acted` set already suppresses re-nag.
-        _ = try? await APIClient.shared.setUnsubResolution(
-            sender: record.sender, resolution: .dismissed)
+        do {
+            try await work()
+        } catch {
+            if let failure { store.pushToast(errText(error, failure), .error) }
+        }
         blockBusy = false
         blockPrompt = nil
     }
@@ -474,7 +452,10 @@ private struct ViolationScanKeeper: View {
             .task(id: store.lastRefresh) {
                 if let lastScan, Date().timeIntervalSince(lastScan) < Self.interval { return }
                 lastScan = Date()
-                await scan()
+                // Detached from this task's cancellation: the next tick
+                // replaces the task, and a scan cut off while it waits on a
+                // smart block would pay for the answer and never read it.
+                await Task { await scan() }.value
             }
     }
 }

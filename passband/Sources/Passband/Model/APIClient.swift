@@ -613,16 +613,6 @@ actor APIClient {
         return answer.suggestion
     }
 
-    /// A filtered rule that would keep `sender`'s consequential mail and drop
-    /// the promotion, or nil when there is no such line to draw. Nil too from
-    /// a daemon that predates the mode: it answers the plain sentence, which
-    /// was written for a different question and is not used here.
-    func suggestSmartBlock(sender: String) async throws -> SmartBlockProposal? {
-        let answer: RuleSuggestion = try await get(
-            "/client/rules/suggest", query: ["sender": sender, "mode": "smart_block"])
-        return answer.smart_block
-    }
-
     /// The sitrep's headline: one sentence about what the For-your-eyes band is
     /// about. `today` is the owner's local date, because "due tomorrow" is a
     /// question about THEIR calendar and the daemon runs in UTC. A daemon too
@@ -679,6 +669,17 @@ actor APIClient {
 
     func getUnsubscribes() async throws -> [UnsubscribeRecord] {
         try await get("/client/unsubscribes")
+    }
+
+    /// A filtered rule that would keep `sender`'s consequential mail and drop
+    /// the promotion, or nil when there is no such line to draw. The daemon
+    /// asks a model once and remembers; after that the answer rides
+    /// `getUnsubscribes`. A daemon too old for the route 404s, which the
+    /// caller reads as none.
+    func unsubSmartBlock(sender: String) async throws -> SmartBlockProposal? {
+        let answer: SmartBlockAnswer = try await get(
+            "/client/unsubscribes/smart_block", query: ["sender": sender])
+        return answer.smart_block
     }
 
     @discardableResult

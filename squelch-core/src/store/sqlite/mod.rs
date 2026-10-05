@@ -89,6 +89,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::error::{CoreError, Result};
 // The ledger's stored lane/decision strings ARE the metric labels; see `notify`.
 use crate::metrics::{NotifyDecision, NotifyLane};
+use crate::store::SmartBlockMemo;
 use crate::store::{
     AttachmentBytes, BankingApplied, BlankBodyScan, ClientPlatform, ClientSeen, ClientTag,
     ContactEntry, Device, DeviceToken, Draft, DraftFields, DraftKey, ExtractQueued, FtsQuery,
@@ -101,6 +102,7 @@ use crate::store::{
     Stage2UsageDay, Store, SyncState, TermDf, ThreadSibling, TrackedMessage, TriageDebug,
     TriagedMessage, UsageTokens,
 };
+use crate::triage::rule_suggest::SmartBlock;
 use crate::types::{
     AccountId, AttachmentInfo, AttentionStatus, AttentionUpdate, AuditEntry, BandCounts, Banking,
     CalendarUpdate, ClientAttachment, ClientMessage, ClientThreadView, Deadline, Disposition,
@@ -1222,7 +1224,7 @@ impl Store for SqliteStore {
         &self,
         account_id: AccountId,
         sender: &str,
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<SmartBlockMemo>> {
         self.unsubscribe_smart_block(account_id, sender)
     }
 
@@ -1230,7 +1232,7 @@ impl Store for SqliteStore {
         &self,
         account_id: AccountId,
         sender: &str,
-        proposal: &str,
+        proposal: Option<&SmartBlock>,
     ) -> Result<bool> {
         self.set_unsubscribe_smart_block(account_id, sender, proposal)
     }

@@ -290,6 +290,10 @@ fn client_router(state: ApiState) -> Router {
             "/client/unsubscribes/resolution",
             post(handlers::unsubscribe_resolution),
         )
+        .route(
+            "/client/unsubscribes/smart_block",
+            get(handlers::unsubscribe_smart_block),
+        )
         // Notification delivery: the SSE feed plus the iOS NSE's by-id fetch.
         // Human door only — the agent door gains no access to the event log.
         .route("/client/events", get(events::events_stream))

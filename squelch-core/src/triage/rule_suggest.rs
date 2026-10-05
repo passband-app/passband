@@ -158,14 +158,8 @@ pub fn smart_block_schema() -> serde_json::Value {
     })
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SmartBlockOutput {
-    pub rule: String,
-    pub keeps: String,
-    pub drops: String,
-}
-
-/// A proposed filtered rule and the two labels that summarize it.
+/// A proposed filtered rule and the two labels that summarize it. Also the
+/// shape the model answers in, which [`clean_smart_block`] folds into this.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SmartBlock {
     pub rule: String,
@@ -175,7 +169,7 @@ pub struct SmartBlock {
 
 /// All three fields or nothing: a rule the notice cannot summarize is one the
 /// owner would be saving unread.
-pub fn clean_smart_block(raw: SmartBlockOutput) -> Option<SmartBlock> {
+pub fn clean_smart_block(raw: SmartBlock) -> Option<SmartBlock> {
     let label = |s: &str| clean_suggestion(s).filter(|l| l.chars().count() <= MAX_LABEL_CHARS);
     Some(SmartBlock {
         rule: clean_suggestion(&raw.rule)?,
@@ -426,27 +420,32 @@ pub async fn suggest_rule(
     if input.history.len() < MIN_HISTORY {
         return (None, None);
     }
-    bounded(suggest_at(client, input)).await
+    let (answer, usage) = bounded(suggest_at(client, input)).await;
+    (answer.flatten(), usage)
 }
 
-/// Propose a smart block for a sender, with the usage the call spent. The same
-/// contract as [`suggest_rule`]: infallible, bounded, and every non-answer
-/// (a sender with nothing worth keeping included) is `None`.
+/// Propose a smart block for a sender, with the usage the call spent.
+/// Infallible and bounded like [`suggest_rule`], but it tells an ANSWER from
+/// silence, because the caller remembers answers: `Some(None)` is the model
+/// saying this sender has no line to draw, and `None` is no answer at all (too
+/// little history, a refusal, a failure, a timeout), which is worth asking
+/// again.
 pub async fn smart_block(
     client: &RuleSuggestClient,
     input: &SuggestInput<'_>,
-) -> (Option<SmartBlock>, Option<Usage>) {
+) -> (Option<Option<SmartBlock>>, Option<Usage>) {
     if input.history.len() < SMART_BLOCK_MIN_HISTORY {
         return (None, None);
     }
     bounded(smart_block_at(client, input)).await
 }
 
+/// The outer `Option` is whether the model answered; the inner is its answer.
 async fn bounded<T>(
     call: impl Future<Output = std::result::Result<LlmOutcome<Option<T>>, ClassifyError>>,
-) -> (Option<T>, Option<Usage>) {
+) -> (Option<Option<T>>, Option<Usage>) {
     match tokio::time::timeout(SUGGEST_BUDGET, call).await {
-        Ok(Ok(LlmOutcome::Ok(suggestion, usage))) => (suggestion, usage),
+        Ok(Ok(LlmOutcome::Ok(answer, usage))) => (Some(answer), usage),
         Ok(Ok(LlmOutcome::Refused(usage))) => (None, usage),
         Ok(Ok(LlmOutcome::Failed(kind, usage))) => {
             eprintln!("squelch: rule suggestion failed ({kind})");
@@ -563,7 +562,7 @@ mod tests {
 
     #[test]
     fn a_smart_block_is_all_three_fields_or_nothing() {
-        let out = |rule: &str, keeps: &str, drops: &str| SmartBlockOutput {
+        let out = |rule: &str, keeps: &str, drops: &str| SmartBlock {
             rule: rule.into(),
             keeps: keeps.into(),
             drops: drops.into(),

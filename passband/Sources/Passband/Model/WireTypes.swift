@@ -787,10 +787,12 @@ struct CreateRuleBody: Codable, Sendable {
 /// history, or no clear pattern.
 struct RuleSuggestion: Codable, Sendable {
     var suggestion: String?
-    /// Only in answer to `mode=smart_block`, and null there when the sender
-    /// sends nothing worth keeping apart. A daemon that predates the mode
-    /// ignores it and never sends the key, which decodes the same as null.
-    var smart_block: SmartBlockProposal? = nil
+}
+
+/// `GET /client/unsubscribes/smart_block`. Null when the sender sends nothing
+/// worth keeping apart, or the daemon could not say.
+struct SmartBlockAnswer: Codable, Sendable {
+    var smart_block: SmartBlockProposal?
 }
 
 /// A filtered rule proposed for a sender who ignored an unsubscribe: `rule` is
@@ -885,6 +887,11 @@ struct UnsubscribeRecord: Codable, Sendable, Hashable, Identifiable {
     /// choose_topics | needs_browser | link_error | unclear, for `needs_you`.
     var status_reason: String? = nil
     var status_at: String? = nil
+    /// The smart block the daemon has worked out for this sender, and whether
+    /// it has worked one out at all: asked with no proposal is a settled no.
+    /// Both absent from a daemon without smart blocks.
+    var smart_block: SmartBlockProposal? = nil
+    var smart_block_asked: Bool? = nil
 
     var id: String { sender }
 }

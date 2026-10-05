@@ -521,7 +521,9 @@ private struct ReleaseDigestView: View {
                 .fill(Palette.accent.opacity(0.7))
                 .frame(width: 4, height: 4)
                 .padding(.top, Typo.size(13) / 2)
-            Text(text)
+            // A key is written in backticks for the changelog's markdown; a
+            // bullet is plain text, so here the marks come off.
+            Text(text.replacingOccurrences(of: "`", with: ""))
                 .font(Typo.row)
                 .foregroundStyle(Palette.inkDim)
                 .fixedSize(horizontal: false, vertical: true)

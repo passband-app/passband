@@ -253,6 +253,26 @@ enum ReleaseNotes {
     /// THE TABLE. Newest first, and the only place a release note is written.
     static let all: [ReleaseNote] = [
         ReleaseNote(
+            version: "0.0.13",
+            date: "2026-10-05",
+            headline: "Cleanup Time",
+            items: [
+                ReleaseItem(
+                    .app, "Smart block",
+                    detail: "When a sender ignores your unsubscribe, block just the mail you did not want",
+                    symbol: "hand.raised"),
+                ReleaseItem(.app, "Ask ⌘K how Passband works"),
+                ReleaseItem(.app, "`⌘F` to find text in an email"),
+                ReleaseItem(.app, "E and S walk Reading from one sender to the next"),
+                ReleaseItem(.app, "Better rule writing"),
+                ReleaseItem(.app, "Auto update"),
+                ReleaseItem(.app, "Better UX"),
+                ReleaseItem(.app, "Bug fixes"),
+                ReleaseItem(.ios, "Bug fixes"),
+                ReleaseItem(.daemon, "Suggests a smart block for senders who ignore an unsubscribe"),
+                ReleaseItem(.daemon, "Bug fixes"),
+            ]),
+        ReleaseNote(
             version: "0.0.12",
             date: "2026-10-01",
             headline: "Philipp's Update",

@@ -7,7 +7,7 @@ use axum::{
     response::IntoResponse,
 };
 use chrono::Utc;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use squelch_core::store::{Store, agent_triage::AgentTriageStore};
 
@@ -20,11 +20,23 @@ pub struct FeedQuery {
     pub include_done: Option<bool>,
 }
 
+/// How many items a feed page holds: 200 unless asked, never more than 1000.
+/// Shared with [`reading_senders`], whose senders must be the senders of the
+/// items the Reading feed returns for the same `limit`.
+fn feed_limit(requested: Option<usize>) -> usize {
+    requested.unwrap_or(200).clamp(1, 1000)
+}
+
+/// Where a feed's window starts when the caller names no `since`.
+fn default_feed_since(now: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
+    now - chrono::Duration::days(30)
+}
+
 pub async fn feed(
     State(state): State<ApiState>,
     Query(query): Query<FeedQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let limit = query.limit.unwrap_or(200).clamp(1, 1000);
+    let limit = feed_limit(query.limit);
     let ranking = state.triage_config.ranking.clone();
     let now = Utc::now();
     if query.all_time == Some(true) && query.since.is_some() {
@@ -36,7 +48,7 @@ pub async fn feed(
         since: if query.all_time == Some(true) {
             None
         } else {
-            Some(query.since.unwrap_or(now - chrono::Duration::days(30)))
+            Some(query.since.unwrap_or(default_feed_since(now)))
         },
         include_done: query.include_done.unwrap_or(false),
     };
@@ -268,6 +280,226 @@ pub async fn opened(
     })
     .await?;
     Ok(Json(json!({"ok": true})))
+}
+
+#[derive(Deserialize)]
+pub struct AttentionReport {
+    /// Milliseconds this message was on screen since the last report.
+    #[serde(default)]
+    pub dwell_ms: u64,
+    /// Links in it followed since the last report. A count: the client never
+    /// sends which.
+    #[serde(default)]
+    pub link_clicks: u32,
+}
+
+/// POST /client/v2/messages/{message_id}/attention: add one report of reading
+/// attention to a message's totals. See
+/// [`AgentTriageStore::record_message_attention`] for the clamps.
+///
+/// ALWAYS 204 FOR A WELL-FORMED REPORT, and this is where it parts from
+/// `/opened` above, which answers 404 for a message it does not know. Two
+/// reasons, and the first is a contract with clients already shipped:
+///
+/// - A client reads 404 from THIS route as "this daemon predates the route"
+///   and stops reporting for the rest of the session. A 404 for one unknown
+///   id (mail deleted on another device while it was on screen) would silence
+///   every report after it.
+/// - A sealed row is accepted and never written. Answering it differently
+///   from a missing one would tell the caller which an id was; one status for
+///   written, sealed and missing alike says nothing.
+///
+/// A malformed body still gets the extractor's ordinary 4xx.
+///
+/// NO AUDIT ROW, as `/opened` writes none. `audit_log` records what the owner
+/// DID to their mailbox (sent, unsubscribed, changed a rule); this is
+/// telemetry about looking at it, it fires several times per message read,
+/// and a log flooded with it would bury the entries the log exists to keep.
+pub async fn attention(
+    State(state): State<ApiState>,
+    Path(message_id): Path<i64>,
+    Json(report): Json<AttentionReport>,
+) -> Result<impl IntoResponse, ApiError> {
+    store_call(&state, move |store, account| {
+        store.record_message_attention(account, message_id, report.dwell_ms, report.link_clicks)
+    })
+    .await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+pub struct ReadingSendersQuery {
+    /// The Reading feed's own `limit`, so a client that pages the feed
+    /// differently still gets the senders of the items it is showing.
+    pub limit: Option<usize>,
+}
+
+/// The counts behind a score, as the client shows them ("opened 1 of 23").
+#[derive(Serialize)]
+struct SignalsView {
+    received: u32,
+    opened: u32,
+    cleared_unopened: u32,
+    dwell_sample: u32,
+    median_dwell_ms: Option<u64>,
+    clicks: u32,
+    read_sample: u32,
+    median_read_fraction: Option<f32>,
+    median_words: Option<u32>,
+    per_month: f32,
+}
+
+#[derive(Serialize)]
+struct RuleView {
+    id: i64,
+    disposition: &'static str,
+    match_pattern: String,
+}
+
+#[derive(Serialize)]
+struct UnsubscribeView {
+    /// The message to hand `POST /client/unsubscribe`.
+    message_id: i64,
+    /// Whether that route's automatic path would run for it.
+    auto: bool,
+}
+
+#[derive(Serialize)]
+struct UnsubscribedView {
+    status: String,
+    requested_at: chrono::DateTime<Utc>,
+}
+
+#[derive(Serialize)]
+struct SenderView {
+    sender: String,
+    display_name: Option<String>,
+    open_count: usize,
+    open_message_ids: Vec<i64>,
+    signals: SignalsView,
+    known_contact: bool,
+    rule: Option<RuleView>,
+    unsubscribe: Option<UnsubscribeView>,
+    unsubscribed: Option<UnsubscribedView>,
+    score: Option<u8>,
+    reasons: Vec<squelch_core::triage::sender_fatigue::Reason>,
+}
+
+#[derive(Serialize)]
+struct ReadingSendersView {
+    window_days: i64,
+    ledger_days: i64,
+    total_senders: usize,
+    senders: Vec<SenderView>,
+}
+
+/// GET /client/v2/reading/senders: every sender with open mail in Reading,
+/// most purge-worthy first, with the owner's own behaviour toward each and the
+/// reasons behind the score. The store half is
+/// [`squelch_core::store::sqlite::reading_senders`], which says what is
+/// counted; this half adds the one thing that lives in this crate, whether
+/// there is a link to unsubscribe with.
+///
+/// THE UNSUBSCRIBE ANSWER IS READ, NEVER PROBED. It runs the same pure
+/// classification `POST /client/unsubscribe` runs, over stored fields, and
+/// makes no request to anything: a GET to an unsubscribe link can itself
+/// unsubscribe, and listing senders must not do that. `auto` is that route's
+/// own refusal rules plus `unsub_job::choose_plan`, so it is true only when
+/// asking for the automatic path would actually start a job.
+///
+/// Read-only, and `no-store` like the feed it is derived from.
+pub async fn reading_senders(
+    State(state): State<ApiState>,
+    Query(query): Query<ReadingSendersQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let limit = feed_limit(query.limit);
+    let now = Utc::now();
+    let inventory = squelch_core::store::agent_triage::AgentListQuery {
+        since: Some(default_feed_since(now)),
+        include_done: false,
+    };
+    let view = store_call(&state, move |store, account| {
+        let read = store.reading_senders(account, now, &inventory, limit)?;
+        let mut senders = Vec::with_capacity(read.senders.len());
+        for sender in read.senders {
+            // The first candidate, newest first, that has a link at all. The
+            // header is tried on what the one locked read already returned;
+            // only a candidate whose header named nothing costs a second,
+            // short store call for its body, taken AFTER that lock was
+            // released so sync is never queued behind a hundred bodies.
+            let mut unsubscribe = None;
+            for candidate in &sender.unsub_candidates {
+                let header = candidate.list_unsubscribe.as_deref();
+                let mut found = crate::unsubscribe::link_for(header, None);
+                if found.0 == crate::unsubscribe::UnsubPlan::None {
+                    let Some(fields) = store.message_unsub_fields(account, candidate.message_id)?
+                    else {
+                        continue;
+                    };
+                    found = crate::unsubscribe::link_for(header, fields.body_html.as_deref());
+                }
+                let (crate::unsubscribe::UnsubPlan::Browser { url }, from_header) = found else {
+                    continue;
+                };
+                // Spam never reaches here: the store's candidates exclude it.
+                let auto = crate::unsubscribe::auto_refusal(false, candidate.auth_pass).is_none()
+                    && crate::unsub_job::choose_plan(
+                        from_header,
+                        candidate.list_unsub_one_click,
+                        &url,
+                        &sender.sender,
+                    )
+                    .is_some();
+                unsubscribe = Some(UnsubscribeView {
+                    message_id: candidate.message_id,
+                    auto,
+                });
+                break;
+            }
+            let s = sender.signals;
+            senders.push(SenderView {
+                open_count: sender.open_message_ids.len(),
+                open_message_ids: sender.open_message_ids,
+                sender: sender.sender,
+                display_name: sender.display_name,
+                signals: SignalsView {
+                    received: s.received,
+                    opened: s.opened,
+                    cleared_unopened: s.cleared_unopened,
+                    dwell_sample: s.dwell_sample,
+                    median_dwell_ms: s.median_dwell_ms,
+                    clicks: s.clicks,
+                    read_sample: s.read_sample,
+                    median_read_fraction: s.median_read_fraction,
+                    median_words: s.median_words,
+                    per_month: s.per_month,
+                },
+                known_contact: s.known_contact,
+                rule: sender.rule.map(|rule| RuleView {
+                    id: rule.id,
+                    disposition: rule.disposition.as_str(),
+                    match_pattern: rule.match_pattern,
+                }),
+                unsubscribe,
+                // A legacy row has no status: the client opened the link
+                // itself, which is what "browser" says.
+                unsubscribed: sender.unsubscribed.map(|u| UnsubscribedView {
+                    status: u.status.unwrap_or_else(|| "browser".into()),
+                    requested_at: u.requested_at,
+                }),
+                score: sender.score,
+                reasons: sender.reasons,
+            });
+        }
+        Ok(ReadingSendersView {
+            window_days: read.window_days,
+            ledger_days: read.ledger_days,
+            total_senders: read.total_senders,
+            senders,
+        })
+    })
+    .await?;
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(view)))
 }
 
 pub async fn capabilities() -> impl IntoResponse {

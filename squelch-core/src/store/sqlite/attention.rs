@@ -951,11 +951,27 @@ impl SqliteStore {
 /// epoch — because the epoch reads as "the ledger has always been running",
 /// which is the one answer that produces the flattering number this whole
 /// mechanism exists to prevent.
-fn open_ledger_since(conn: &Connection, account_id: AccountId) -> Result<DateTime<Utc>> {
+pub(super) fn open_ledger_since(conn: &Connection, account_id: AccountId) -> Result<DateTime<Utc>> {
+    ledger_since(conn, account_id, OPEN_LEDGER_SINCE_KEY)
+}
+
+/// The moment an account's DWELL ledger started running: the same resolution
+/// as [`open_ledger_since`] over the other key, with the same fallbacks and
+/// the same direction of failure (see `migrate::stamp_dwell_ledger_start`).
+/// It floors `opened_at`, not `received_at`: mail that arrived last year and
+/// was opened this morning was opened where dwell could be reported.
+pub(super) fn dwell_ledger_since(
+    conn: &Connection,
+    account_id: AccountId,
+) -> Result<DateTime<Utc>> {
+    ledger_since(conn, account_id, DWELL_LEDGER_SINCE_KEY)
+}
+
+fn ledger_since(conn: &Connection, account_id: AccountId, key: &str) -> Result<DateTime<Utc>> {
     let stored: Option<String> = conn
         .query_row(
             "SELECT value FROM app_settings WHERE account_id = ?1 AND key = ?2",
-            params![account_id, OPEN_LEDGER_SINCE_KEY],
+            params![account_id, key],
             |r| r.get(0),
         )
         .optional()?;

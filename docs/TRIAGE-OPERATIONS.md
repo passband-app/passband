@@ -206,6 +206,76 @@ access, rather than silently truncated. Its token usage is recorded separately a
 `agent_access`, using the notification model's price configuration. Human TUI
 reads remain available while assessments are pending.
 
+### Reading attention and the per-sender purge read
+
+`POST /client/v2/messages/{id}/attention` takes `{"dwell_ms": n, "link_clicks": n}`
+(either may be omitted) and ADDS the report to that message's totals in
+`triage.dwell_ms` and `triage.link_clicks`. One report adds at most 10 minutes and
+20 clicks; a message holds at most 1 hour and 1,000 clicks. It answers `204` for
+every well-formed report, including one about a message id the daemon does not
+know or a sealed message, and writes nothing for those two. That differs from
+`/opened`, which answers `404` for an unknown id: clients treat a `404` from the
+attention route as "this daemon predates the route" and stop reporting for the
+session. The route writes no audit row (it fires several times per message read)
+and changes nothing in the agent's `user_state` fingerprint, so a report cannot
+make an in-flight triage commit stale. Human door only.
+
+What is stored is two counts per message. No URL, link host, scroll position or
+timestamp of a report is kept, and only the owner's own client can write them.
+
+`GET /client/v2/reading/senders` lists each sender that has open mail in Reading
+(the same inventory `/client/v2/feed?destination=reading` returns, with the same
+`limit`), at most 100 senders, most purge-worthy first:
+
+```
+{ "window_days": 90, "ledger_days": 37, "total_senders": 12,
+  "senders": [ {
+    "sender": "news@example.com", "display_name": "Example News",
+    "open_count": 3, "open_message_ids": [812, 790, 771],
+    "signals": { "received": 23, "opened": 1, "cleared_unopened": 4,
+                 "dwell_sample": 1, "median_dwell_ms": 4000, "clicks": 0,
+                 "read_sample": 1, "median_read_fraction": 0.02,
+                 "median_words": 900, "per_month": 18.6 },
+    "known_contact": false,
+    "rule": null,
+    "unsubscribe": { "message_id": 812, "auto": true },
+    "unsubscribed": null,
+    "score": 71,
+    "reasons": [ { "code": "rarely_opened", "opened": 1, "received": 23 } ]
+  } ] }
+```
+
+- Counts cover the sender's inbound, non-spam, non-sealed mail that the owner did
+  not write, received since the later of 90 days ago and the start of the open
+  ledger (`app_settings.opened_ledger_since`, else the account's `created_at`).
+  `ledger_days` is how many days that actually is, and `per_month` scales by it.
+- The dwell sample is mail opened at or after the dwell ledger started
+  (`dwell_ledger_since`, stamped on the open that added the column) for which a
+  client reported any dwell or click. An open with no report behind it, from a
+  client that predates the attention route, is not counted as a zero-second look.
+  The sample is the newest 25 such opens per sender.
+- Dwell is judged against length. A message's read fraction is its dwell over the
+  time its words take at 238 words per minute, capped at 1; words are counted in
+  `messages.body`, the flattened text triage reads. Mail under 40 words has no
+  read fraction.
+- `score` is 0 to 100, or `null` under 4 received messages. A sender the owner
+  has written to, or one governed by a `surface` rule, is always 0. The scoring
+  and the reason codes (`not_enough_history`, `known_contact`, `wanted_by_rule`,
+  `rarely_opened`, `cleared_unopened`, `skimmed`, `brief_looks`, `read_closely`,
+  `never_clicked`, `high_volume`) live in `squelch-core/src/triage/sender_fatigue.rs`.
+  Reasons carry numbers only; the client writes the sentence.
+- `unsubscribe` names the newest of the sender's last three messages that has a
+  usable unsubscribe link, found by the same classification
+  `POST /client/unsubscribe` uses. `auto` is true only when that route's automatic
+  path would run for it. Nothing is fetched to decide either.
+- `unsubscribed` is the sender's row in the unsubscribe ledger; `status` is
+  `browser` for a row with no job status.
+- Opens, dwell and clicks are recorded by Passband clients only. Mail read
+  elsewhere looks ignored here, so the scores lean high; the list suggests and
+  never acts.
+
+The read writes nothing: it does not stamp `surfaced_at` or `opened_at`.
+
 Record cards read canonical Receipt, Banking, Calendar and Delivery decisions;
 marketing cards read promotional Reading decisions. Model date-only deadlines
 retain their calendar date and expire at the end of that day in the user's local

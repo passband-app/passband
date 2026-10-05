@@ -1131,14 +1131,7 @@ impl SqliteStore {
     }
 
     pub(super) fn is_known_contact(&self, account_id: AccountId, addr: &str) -> Result<bool> {
-        let conn = self.lock()?;
-        let n: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM contacts
-             WHERE account_id=?1 AND addr=?2 COLLATE NOCASE AND sent_count > 0",
-            params![account_id, addr],
-            |r| r.get(0),
-        )?;
-        Ok(n > 0)
+        is_known_contact_conn(&*self.lock()?, account_id, addr)
     }
 
     pub(super) fn sync_state(
@@ -1499,4 +1492,22 @@ impl SqliteStore {
         }
         Ok(true)
     }
+}
+
+/// [`SqliteStore::is_known_contact`] for a caller already holding the
+/// connection: the one definition of "the owner has written to this address",
+/// so a read that asks it for many senders under one lock cannot drift from
+/// the floor triage applies.
+pub(super) fn is_known_contact_conn(
+    conn: &Connection,
+    account_id: AccountId,
+    addr: &str,
+) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM contacts
+             WHERE account_id=?1 AND addr=?2 COLLATE NOCASE AND sent_count > 0",
+        params![account_id, addr],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
 }

@@ -28,6 +28,7 @@ pub mod router;
 pub mod rule_infer;
 pub mod rule_suggest;
 pub mod rules;
+pub mod sender_fatigue;
 pub mod shipment;
 pub mod stage1_llm;
 pub mod stage2;

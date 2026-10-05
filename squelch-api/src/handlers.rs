@@ -5702,37 +5702,17 @@ pub async fn unsubscribe(
     .ok_or_else(ApiError::not_found)?;
 
     let sender = fields.from_addr.trim().to_ascii_lowercase();
-    // HEADER FIRST, body second. `List-Unsubscribe` is the sender NAMING its own
-    // endpoint; a footer link is us reading the mail and picking one. Plenty of
-    // senders ship no header at all, and telling those readers "there is no
-    // unsubscribe link" while one sits visible at the bottom of the message is
-    // simply wrong.
-    let (plan, from_header) =
-        match crate::unsubscribe::classify_unsubscribe(fields.list_unsubscribe.as_deref()) {
-            crate::unsubscribe::UnsubPlan::None => (
-                crate::unsubscribe::classify_unsubscribe_body(fields.body_html.as_deref()),
-                false,
-            ),
-            header => (header, true),
-        };
+    // Header first, body second: see `unsubscribe::link_for`.
+    let (plan, from_header) = crate::unsubscribe::link_for(
+        fields.list_unsubscribe.as_deref(),
+        fields.body_html.as_deref(),
+    );
 
     // THE AUTOMATIC PATH, for a client that asked for it and mail we trust
-    // enough to act on. Spam is refused because fetching a spammer's link tells
-    // them the address is live; unauthenticated mail because the link's sender
-    // may not be who the From line says. Both fall through to the browser
-    // response, with the reason, so the person decides with the address bar in
-    // front of them.
-    let mut refused = if fields.is_spam {
-        Some("spam")
-    } else {
-        match fields.auth_pass {
-            Some(true) => None,
-            Some(false) => Some("unverified"),
-            // Mail from before the verdict was recorded: never checked, which
-            // is not the same claim as "failed", and the client says so.
-            None => Some("unchecked"),
-        }
-    };
+    // enough to act on (`unsubscribe::auto_refusal` has the two refusals). Both
+    // fall through to the browser response, with the reason, so the person
+    // decides with the address bar in front of them.
+    let mut refused = crate::unsubscribe::auto_refusal(fields.is_spam, fields.auth_pass);
     if body.auto
         && refused.is_none()
         && let crate::unsubscribe::UnsubPlan::Browser { url } = &plan

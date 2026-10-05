@@ -907,6 +907,74 @@ fn migrate_adds_reminder_columns_and_the_due_index_to_preexisting_triage() {
 }
 
 #[test]
+fn migrate_adds_attention_columns_and_dates_the_dwell_ledger_once() {
+    // A `triage` table that records opens but predates dwell and clicks, in a
+    // mailbox with two accounts. Both columns land at zero, and because that
+    // zero is not a measurement the dwell ledger is dated for EVERY existing
+    // account on this open, and never moved by a later one.
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE accounts(id INTEGER PRIMARY KEY, email TEXT NOT NULL,
+             created_at TEXT NOT NULL);
+         CREATE TABLE app_settings(account_id INTEGER NOT NULL, key TEXT NOT NULL,
+             value TEXT NOT NULL, PRIMARY KEY(account_id, key));
+         CREATE TABLE triage(
+             message_id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL,
+             model_used TEXT, status TEXT NOT NULL DEFAULT 'new', opened_at TEXT);
+         INSERT INTO accounts VALUES (1, 'a@example.com', '2020-01-01T00:00:00+00:00'),
+                                     (2, 'b@example.com', '2020-01-01T00:00:00+00:00');
+         INSERT INTO triage(message_id, account_id, opened_at)
+             VALUES (1, 1, '2026-01-01T00:00:00+00:00');",
+    )
+    .unwrap();
+    let before = Utc::now();
+    migrate(&conn).unwrap();
+
+    let (dwell, clicks): (i64, i64) = conn
+        .query_row(
+            "SELECT dwell_ms, link_clicks FROM triage WHERE message_id=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((dwell, clicks), (0, 0), "NOT NULL DEFAULT 0 on old rows");
+
+    let stamps = |conn: &Connection| -> Vec<(i64, String)> {
+        conn.prepare("SELECT account_id, value FROM app_settings WHERE key=?1 ORDER BY account_id")
+            .unwrap()
+            .query_map([DWELL_LEDGER_SINCE_KEY], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap()
+    };
+    let first = stamps(&conn);
+    assert_eq!(
+        first.iter().map(|s| s.0).collect::<Vec<_>>(),
+        [1, 2],
+        "one stamp per existing account"
+    );
+    for (_, value) in &first {
+        let at = DateTime::parse_from_rfc3339(value).unwrap();
+        assert!(at >= before && at <= Utc::now(), "stamped at this open");
+    }
+    // `opened_at` was already there, so the OPEN ledger is not restarted by
+    // an open that only adds dwell.
+    let open_stamps: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM app_settings WHERE key=?1",
+            [OPEN_LEDGER_SINCE_KEY],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(open_stamps, 0);
+
+    // Idempotent: a second open adds nothing and moves nothing.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    migrate(&conn).unwrap();
+    assert_eq!(stamps(&conn), first);
+}
+
+#[test]
 fn migrate_adds_notify_eligible_at_null_to_a_preexisting_triage_table() {
     // A `triage` table predating the notify-eligibility stamp. The column has
     // to land through the migration seam rather than schema.sql, because

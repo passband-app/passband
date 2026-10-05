@@ -295,6 +295,27 @@ CREATE TABLE IF NOT EXISTS triage (
     -- product. Every consumer has to know that; see `Store::share_open_rate`,
     -- which is the only one, and which says so.
     opened_at       TEXT,
+    -- HOW LONG THIS MAIL WAS ON SCREEN, in milliseconds, summed over every
+    -- report the owner's client has sent (`POST
+    -- /client/v2/messages/{id}/attention`). A duration and nothing else: not
+    -- what was scrolled to, not when. Clamped per report and in total (see
+    -- `store::agent_triage::MAX_DWELL_TOTAL_MS`), so a reader left open over
+    -- lunch cannot make one newsletter look studied.
+    --
+    -- ZERO MEANS TWO DIFFERENT THINGS, and only `dwell_ledger_since` tells them
+    -- apart: a row opened before the client could report dwell has 0 for no
+    -- behavioural reason. Every statistic over this column therefore counts
+    -- only rows whose `opened_at` is at or after that floor; see
+    -- `migrate::stamp_dwell_ledger_start`.
+    --
+    -- NOT part of the agent's `user_state` fingerprint, on purpose: a dwell
+    -- report arrives while mail is being read, which is exactly when a triage
+    -- pass may be in flight, and it changes nothing that pass decided.
+    dwell_ms        INTEGER NOT NULL DEFAULT 0,
+    -- HOW MANY LINKS IN THIS MAIL THE OWNER FOLLOWED, summed the same way and
+    -- under the same floor. A COUNT ONLY: no URL, no host, no position is
+    -- ever stored, here or anywhere else.
+    link_clicks     INTEGER NOT NULL DEFAULT 0,
     -- MAY THIS MESSAGE EVER NOTIFY, and from when (RFC3339 UTC). NULL means
     -- never: a backfill row, the user's own sent copy, or mail that was already
     -- older than `notify.freshness_window_secs` the first time we saw it.

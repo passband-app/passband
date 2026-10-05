@@ -104,6 +104,17 @@ fn client_router(state: ApiState) -> Router {
             "/client/v2/messages/{message_id}/opened",
             post(triage::opened),
         )
+        // "This is how long I looked, and how many links I followed." HUMAN
+        // DOOR ONLY for the reason `/opened` is: it is a statement about what
+        // a PERSON did, which an agent cannot make. Counts only, never a URL.
+        .route(
+            "/client/v2/messages/{message_id}/attention",
+            post(triage::attention),
+        )
+        // The senders behind the open mail in Reading, with the owner's own
+        // behaviour toward each. Human door only: the agent door was never
+        // handed what somebody opens or how long they look.
+        .route("/client/v2/reading/senders", get(triage::reading_senders))
         .route(
             "/client/v2/messages/{message_id}/corrections",
             post(triage::correct),

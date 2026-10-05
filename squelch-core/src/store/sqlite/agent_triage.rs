@@ -1742,6 +1742,39 @@ impl AgentTriageStore for SqliteStore {
         params![now.to_rfc3339(),account,message])?;
         Ok(())
     }
+    fn record_message_attention(
+        &self,
+        account: AccountId,
+        message: i64,
+        dwell_ms: u64,
+        link_clicks: u32,
+    ) -> Result<()> {
+        let dwell = dwell_ms.min(MAX_DWELL_REPORT_MS);
+        let clicks = link_clicks.min(MAX_LINK_CLICKS_REPORT);
+        if dwell == 0 && clicks == 0 {
+            return Ok(());
+        }
+        let conn = self.lock()?;
+        // One statement: the add and both ceilings are evaluated against the
+        // stored row, so two reports racing through the mutex cannot both read
+        // the old total. The WHERE is all three refusals at once: another
+        // account's message, an id that does not exist, and a sealed row
+        // (`sensitivity='normal'`) each match nothing, and the call answers Ok
+        // for all of them without having looked to see which it was.
+        conn.execute(
+            "UPDATE triage SET dwell_ms=min(?1,dwell_ms+?2), link_clicks=min(?3,link_clicks+?4)
+             WHERE account_id=?5 AND message_id=?6 AND sensitivity='normal'",
+            params![
+                MAX_DWELL_TOTAL_MS as i64,
+                dwell as i64,
+                MAX_LINK_CLICKS_TOTAL,
+                clicks,
+                account,
+                message
+            ],
+        )?;
+        Ok(())
+    }
     fn agent_access_allowed(&self, account: AccountId, message: i64) -> Result<bool> {
         super::messages::external_message_allowed_conn(&*self.lock()?, account, message)
     }
@@ -1940,17 +1973,31 @@ impl AgentTriageStore for SqliteStore {
         limit: usize,
         query: &AgentListQuery,
     ) -> Result<Vec<AgentListItem>> {
-        let conn = self.lock()?;
-        let mut items = list_items_with_query(&conn, account, "reading", Utc::now(), query)?;
-
-        items.sort_by(|a, b| {
-            b.received_at
-                .cmp(&a.received_at)
-                .then_with(|| b.message_id.cmp(&a.message_id))
-        });
-        items.truncate(limit);
-        Ok(items)
+        reading_items(&*self.lock()?, account, limit, query, Utc::now())
     }
+}
+
+/// The Reading inventory, newest first: the ONE answer to "what is in Reading".
+/// `GET /client/v2/feed?destination=reading` reads it through
+/// `agent_reading_with_query`, and the per-sender purge read
+/// (`reading_senders`) calls it under the lock it already holds, so the two
+/// cannot disagree about which mail is open there.
+pub(super) fn reading_items(
+    conn: &Connection,
+    account: AccountId,
+    limit: usize,
+    query: &AgentListQuery,
+    now: DateTime<Utc>,
+) -> Result<Vec<AgentListItem>> {
+    let mut items = list_items_with_query(conn, account, "reading", now, query)?;
+
+    items.sort_by(|a, b| {
+        b.received_at
+            .cmp(&a.received_at)
+            .then_with(|| b.message_id.cmp(&a.message_id))
+    });
+    items.truncate(limit);
+    Ok(items)
 }
 
 /// A blank display name is no display name.

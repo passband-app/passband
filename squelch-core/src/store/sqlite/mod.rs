@@ -68,6 +68,7 @@ mod migrate;
 mod notify;
 mod outbound;
 pub mod people;
+pub mod reading_senders;
 mod rules;
 mod scheduled;
 mod search;
@@ -116,6 +117,12 @@ use crate::types::{
 /// share stat can refuse to look back further than the column has existed. See
 /// `migrate::stamp_open_ledger_start`.
 pub(crate) const OPEN_LEDGER_SINCE_KEY: &str = "opened_ledger_since";
+
+/// `app_settings` key recording when this account's dwell ledger started: the
+/// first open on which `triage.dwell_ms` existed. Dwell and click statistics
+/// count only mail opened at or after it. See
+/// `migrate::stamp_dwell_ledger_start`.
+pub(crate) const DWELL_LEDGER_SINCE_KEY: &str = "dwell_ledger_since";
 
 // schema.sql stays beside `store/mod.rs`; this file is `store/sqlite/mod.rs`.
 const SCHEMA: &str = include_str!("../schema.sql");

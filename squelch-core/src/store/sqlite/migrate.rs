@@ -283,6 +283,17 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     if add_column_if_missing(conn, "triage", "opened_at", "TEXT")? {
         stamp_open_ledger_start(conn)?;
     }
+    // HOW LONG IT WAS READ AND HOW MANY LINKS WERE FOLLOWED. Zero on every
+    // pre-existing row, and that zero is not a measurement: no client reported
+    // either before these columns existed. So the dwell ledger dates itself
+    // exactly as the open ledger above does, keyed off `dwell_ms` alone so the
+    // stamp is written once even if an open is interrupted between the two
+    // columns. The floor is compared against `opened_at`, not `received_at`:
+    // what matters is whether the OPEN happened where dwell could be reported.
+    if add_column_if_missing(conn, "triage", "dwell_ms", "INTEGER NOT NULL DEFAULT 0")? {
+        stamp_dwell_ledger_start(conn)?;
+    }
+    add_column_if_missing(conn, "triage", "link_clicks", "INTEGER NOT NULL DEFAULT 0")?;
 
     // AND THE SWEEP'S INDEX, HERE rather than in schema.sql, for the reason
     // spelled out at that file's `idx_triage_remind_at` note: it runs before this
@@ -1104,6 +1115,26 @@ pub(super) fn rebuild_fts_if_stale(conn: &Connection) -> Result<()> {
 /// `INSERT OR IGNORE`, so a re-run cannot move a stamp that is already the
 /// truth - which would restart the clock and hide the number for another month.
 fn stamp_open_ledger_start(conn: &Connection) -> Result<()> {
+    stamp_ledger_start(conn, OPEN_LEDGER_SINCE_KEY)
+}
+
+/// Record, per existing account, the moment the DWELL ledger started running.
+///
+/// The same lie the open ledger guards against, one column over. A mailbox
+/// that has been recording opens for months has, the instant `dwell_ms` is
+/// added, a pile of opened mail with zero dwell and zero clicks. Read naively
+/// that says its owner glances at everything for no time at all and never
+/// follows a link, which would rank every newsletter they actually read as a
+/// purge candidate. So dwell and click statistics count only mail OPENED at or
+/// after this stamp (`attention::dwell_ledger_since`); an account created
+/// later has reported dwell since it existed and falls back to `created_at`.
+fn stamp_dwell_ledger_start(conn: &Connection) -> Result<()> {
+    stamp_ledger_start(conn, DWELL_LEDGER_SINCE_KEY)
+}
+
+/// The shared body of the two ledger stamps: one `app_settings` row per
+/// existing account, written once.
+fn stamp_ledger_start(conn: &Connection, key: &str) -> Result<()> {
     // BOTH TABLES OR NEITHER. In production this is never false: `schema.sql`
     // creates both and runs in full before this function does. It is false only
     // in the migration suite, which builds deliberately partial old schemas to
@@ -1115,7 +1146,7 @@ fn stamp_open_ledger_start(conn: &Connection) -> Result<()> {
     conn.execute(
         "INSERT OR IGNORE INTO app_settings(account_id, key, value)
          SELECT id, ?1, ?2 FROM accounts",
-        rusqlite::params![OPEN_LEDGER_SINCE_KEY, Utc::now().to_rfc3339()],
+        rusqlite::params![key, Utc::now().to_rfc3339()],
     )?;
     Ok(())
 }

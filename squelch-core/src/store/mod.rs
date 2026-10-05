@@ -2445,6 +2445,27 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
         resolution: &str,
     ) -> Result<bool>;
 
+    /// The smart block already proposed for this sender's ignored unsubscribe,
+    /// as the JSON it was stored in, so a notice shown again offers the same
+    /// rule without a second model call. It outlives a resolution and a fresh
+    /// request on purpose: it is a reading of the sender, not of the request.
+    fn unsubscribe_smart_block(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+    ) -> Result<Option<String>>;
+
+    /// Remember a proposed smart block on the sender's unsubscribe row. `false`
+    /// when there is no row, and then nothing is kept. This is model text about
+    /// sender-written subjects: it is stored to be SHOWN again, and becomes a
+    /// rule only through the owner's click, like the first time.
+    fn set_unsubscribe_smart_block(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+        proposal: &str,
+    ) -> Result<bool>;
+
     /// Upsert one extracted promotion + stamp `triage.extractor_model_used`.
     /// Unlike [`Store::banking_apply`] this does NOT resolve the triage row.
     fn marketing_apply(&self, applied: &MarketingApplied) -> Result<()>;

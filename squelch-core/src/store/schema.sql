@@ -620,6 +620,7 @@ CREATE TABLE IF NOT EXISTS unsubscribes (
     status            TEXT,
     status_url        TEXT,
     status_reason     TEXT,
+    smart_block       TEXT,
     status_at         TEXT,
     UNIQUE(account_id, sender_addr)
 );

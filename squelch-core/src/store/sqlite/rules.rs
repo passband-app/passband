@@ -455,4 +455,36 @@ impl SqliteStore {
         )?;
         Ok(n > 0)
     }
+
+    pub(super) fn unsubscribe_smart_block(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+    ) -> Result<Option<String>> {
+        let conn = self.lock()?;
+        let found = conn
+            .query_row(
+                "SELECT smart_block FROM unsubscribes
+                 WHERE account_id = ?1 AND sender_addr = ?2",
+                params![account_id, sender],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        Ok(found.flatten())
+    }
+
+    pub(super) fn set_unsubscribe_smart_block(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+        proposal: &str,
+    ) -> Result<bool> {
+        let conn = self.lock()?;
+        let n = conn.execute(
+            "UPDATE unsubscribes SET smart_block = ?3
+             WHERE account_id = ?1 AND sender_addr = ?2",
+            params![account_id, sender, proposal],
+        )?;
+        Ok(n > 0)
+    }
 }

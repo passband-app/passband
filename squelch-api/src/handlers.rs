@@ -2025,6 +2025,23 @@ pub async fn suggest_rule(
     let Some(client) = state.rule_suggest.clone() else {
         return Ok(none());
     };
+    // A smart block is proposed once per sender and then remembered: the
+    // notice comes back (a relaunch, a second device, a request made again)
+    // with the same rule, and without a second call.
+    if smart {
+        let addr = sender.clone();
+        let cached = store_call(&state, move |store, account_id| {
+            store.unsubscribe_smart_block(account_id, &addr)
+        })
+        .await?
+        .and_then(|raw| serde_json::from_str::<rule_suggest::SmartBlock>(&raw).ok());
+        if let Some(block) = cached {
+            return Ok((
+                no_store(),
+                Json(serde_json::json!({ "suggestion": null, "smart_block": block })),
+            ));
+        }
+    }
     let addr = sender.clone();
     let digest = store_call(&state, move |store, account_id| {
         // The runaway guard: past the day's cap the route answers null
@@ -2069,6 +2086,17 @@ pub async fn suggest_rule(
     };
     let (body, usage) = if smart {
         let (block, usage) = rule_suggest::smart_block(&client, &input).await;
+        if let Some(found) = &block
+            && let Ok(raw) = serde_json::to_string(found)
+        {
+            let addr = sender.clone();
+            // Best-effort: a sender with no unsubscribe row keeps nothing, and
+            // a failed write only means the next ask pays again.
+            let _ = store_call(&state, move |store, account_id| {
+                store.set_unsubscribe_smart_block(account_id, &addr, &raw)
+            })
+            .await;
+        }
         (
             serde_json::json!({ "suggestion": null, "smart_block": block }),
             usage,

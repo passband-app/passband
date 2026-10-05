@@ -11507,6 +11507,65 @@ async fn smart_block_mode_answers_the_rule_and_its_labels() {
 }
 
 #[tokio::test]
+async fn a_smart_block_is_proposed_once_and_then_remembered() {
+    let Harness { app, store, acct } = app_with_smart_block(
+        "only regulation alerts",
+        "regulation alerts",
+        "marketing",
+        |store, acct| {
+            seed_mixed_sender(store, acct);
+            store
+                .upsert_unsubscribe(acct, "info@corp.com", "one_click", None, chrono::Utc::now())
+                .unwrap();
+        },
+    )
+    .await;
+    let ask = || {
+        authed(
+            "GET",
+            "/client/rules/suggest?sender=info@corp.com&mode=smart_block",
+        )
+    };
+    let first = body_json(app.clone().oneshot(ask()).await.unwrap()).await;
+    assert_eq!(first["smart_block"]["keeps"], "regulation alerts");
+    let kept = store
+        .unsubscribe_smart_block(acct, "info@corp.com")
+        .unwrap()
+        .expect("the proposal was kept on the row");
+
+    // Swap what is remembered for something the model would not say: the
+    // second answer can then only have come from the row.
+    store
+        .set_unsubscribe_smart_block(
+            acct,
+            "info@corp.com",
+            &kept.replace("marketing", "webinars"),
+        )
+        .unwrap();
+    let second = body_json(app.clone().oneshot(ask()).await.unwrap()).await;
+    assert_eq!(second["smart_block"]["drops"], "webinars");
+    let calls: u64 = store
+        .list_usage_by_category(acct, 1)
+        .unwrap()
+        .into_iter()
+        .flat_map(|(_, days)| days)
+        .map(|d| d.calls)
+        .sum();
+    assert_eq!(calls, 1, "the remembered proposal cost a second call");
+
+    // It survives the owner asking again, which resets the rest of the row.
+    store
+        .upsert_unsubscribe(acct, "info@corp.com", "one_click", None, chrono::Utc::now())
+        .unwrap();
+    assert!(
+        store
+            .unsubscribe_smart_block(acct, "info@corp.com")
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
 async fn smart_block_is_null_when_there_is_no_line_to_draw_or_too_little_mail() {
     // The model's "all promotion" answer: the key is there, and null.
     let Harness { app, .. } = app_with_smart_block("", "", "", seed_mixed_sender).await;

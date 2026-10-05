@@ -1218,6 +1218,23 @@ impl Store for SqliteStore {
         self.set_unsubscribe_resolution(account_id, sender, resolution)
     }
 
+    fn unsubscribe_smart_block(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+    ) -> Result<Option<String>> {
+        self.unsubscribe_smart_block(account_id, sender)
+    }
+
+    fn set_unsubscribe_smart_block(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+        proposal: &str,
+    ) -> Result<bool> {
+        self.set_unsubscribe_smart_block(account_id, sender, proposal)
+    }
+
     fn correct_triage(
         &self,
         account_id: AccountId,

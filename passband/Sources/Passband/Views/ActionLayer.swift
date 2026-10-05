@@ -15,10 +15,11 @@ struct ActionLayer: View {
     @State private var blockBusy = false
     /// Senders acted on this session, so a lagging read model can't re-nag.
     @State private var acted: Set<String> = []
-    /// The smart block proposed for the sender on the notice, once it lands.
+    /// The smart block proposed for a sender, fetched BEFORE its notice is
+    /// raised so the notice arrives whole.
     @State private var smartBlocks: [String: SmartBlockProposal] = [:]
     /// Senders already asked about this session, answer or not: the scan
-    /// re-runs every minute and one model call per notice is the budget.
+    /// re-runs every minute. The daemon remembers a proposal across sessions.
     @State private var smartAsked: Set<String> = []
 
     var body: some View {
@@ -248,7 +249,6 @@ struct ActionLayer: View {
                         .buttonStyle(.glassProminent)
                         .tint(Palette.accent)
                         .help("Saves this rule for \(record.sender): \(smart.rule)")
-                        .transition(.opacity)
                 }
                 Button("Keep") { Task { await keep(record) } }
                     .buttonStyle(.glass)
@@ -264,8 +264,6 @@ struct ActionLayer: View {
         .padding(Space.scaled(13))
         .passbandGlass(.pane, cornerRadius: 14, tint: Palette.dangerSoft)
         .transition(.move(edge: .leading).combined(with: .opacity))
-        .animation(.smooth(duration: 0.24), value: smart)
-        .task(id: record.sender) { await proposeSmartBlock(for: record.sender) }
     }
 
     /// What the smart block would do, and under it the sentence it saves: the
@@ -286,18 +284,23 @@ struct ActionLayer: View {
             }
             .fixedSize(horizontal: false, vertical: true)
         }
-        .transition(.opacity)
     }
 
-    /// One ask per sender per session. Silence on every failure: no model, an
-    /// older daemon, or a sender with nothing worth keeping all leave the
-    /// notice as the two buttons it always was.
-    private func proposeSmartBlock(for sender: String) async {
-        guard !smartAsked.contains(sender) else { return }
+    /// One ask per sender per session, made before the notice is shown.
+    /// Silence on every failure: no model, an older daemon, or a sender with
+    /// nothing worth keeping all leave the notice as the two buttons it always
+    /// was. `false` only when the ask was cut short, so the next scan retries
+    /// instead of raising a notice that never got its answer.
+    private func proposeSmartBlock(for sender: String) async -> Bool {
+        guard !smartAsked.contains(sender) else { return true }
         smartAsked.insert(sender)
-        guard let proposal = try? await APIClient.shared.suggestSmartBlock(sender: sender)
-        else { return }
-        smartBlocks[sender] = proposal
+        let proposal = try? await APIClient.shared.suggestSmartBlock(sender: sender)
+        if Task.isCancelled {
+            smartAsked.remove(sender)
+            return false
+        }
+        if let proposal { smartBlocks[sender] = proposal }
+        return true
     }
 
     private func scanViolations() async {
@@ -309,6 +312,15 @@ struct ActionLayer: View {
         // Surface one at a time: a stack of these is a nag, not a prompt.
         let next = rows.first {
             $0.violation_count > 0 && $0.resolution == nil && !acted.contains($0.sender)
+        }
+        // The notice waits for its smart block, so the third button is there
+        // when it arrives and not a second later. Bounded by the daemon's own
+        // budget for the call; a notice already up is never held back.
+        if let next, next.sender != blockPrompt?.sender {
+            guard await proposeSmartBlock(for: next.sender) else { return }
+            // The wait is long enough for the owner to have answered an
+            // earlier notice for this sender.
+            if acted.contains(next.sender) { return }
         }
         // Assignment is invalidation, and the answer is nil nearly always.
         if next != blockPrompt { blockPrompt = next }

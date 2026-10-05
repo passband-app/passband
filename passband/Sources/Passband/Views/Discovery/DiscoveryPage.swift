@@ -1,18 +1,17 @@
-// THE DISCOVERY PAGE, the ring's one door on the rail: a column of rows, one
-// per feature set, each a looping picture of the gesture beside its name, one
-// line and its keys. `FeatureSet` case order is the column's order, the most
-// everyday set first and each one more niche than the last.
+// THE DISCOVERY PAGE, the ring's one door on the rail: a table of contents,
+// one line per feature set. `FeatureSet` case order is the column's order, the
+// most everyday set first and each one more niche than the last.
 //
-// TWO SECTIONS, AND THE TOP ONE IS AN INVITATION. What has not been unlocked
-// yet sits at the top, a size up from the rest: the first thing read, never
-// the dimmest. No lock, no grey, no count of what is left. Below it, under
-// "Unlocked", every set that has been found sinks into a smaller row; a kept
-// one (three separate days) is warmer than a merely found one, by fill and a
-// quiet tag. When everything is unlocked the top section is simply gone and
-// the masthead says so.
+// A LIST, NOT A SHELF. No cards, no borders, no glow, no keycaps: a small still
+// of the gesture, the set's name and one line, hairlines between. The detail
+// (the keys, the steps, the picture large and moving) is the guide's, one click
+// away, so the list only has to be easy to run an eye down.
 //
-// QUIET ON PURPOSE. No glow, no bloom, no light behind anything: a row is a
-// flat card with a hairline, and the page is a list, not a trophy case.
+// TWO SECTIONS. What has not been unlocked yet is on top: no lock, no grey, no
+// count of what is left. Under "Unlocked" are the sets that have been found,
+// in the same row; a kept one (three separate days) and a just
+// unlocked one say so in a word beside the name. When everything is unlocked
+// the top section is simply gone.
 //
 // ONE FOREACH FOR BOTH SECTIONS, heading included, so a row moving from the
 // top into Unlocked keeps its identity and can be animated across. That is
@@ -22,9 +21,10 @@
 // MOTION BUDGET. Every row rests on its poster and plays only under the
 // pointer: one picture moving at a time, and only the one being looked at.
 //
-// A ROW IS A DOOR. Clicking one moves the column to the left, where it becomes
-// a slim index, and opens that set's guide on the right: the picture large and
-// playing, then the gesture step by step. Clicking the open row, the guide's
+// A ROW IS A DOOR. Clicking one slides the column into the left half and opens
+// that set's guide in the right half. THE COLUMN NEVER CHANGES WIDTH: it is the
+// same measure centred on the page and in its half, so opening the guide moves
+// the list without re-wrapping a word of it. Clicking the open row, the guide's
 // close, or Esc puts the column back. In a window too narrow for both, the
 // guide takes the whole page.
 //
@@ -48,33 +48,35 @@ struct DiscoveryPage: View {
     /// The set whose guide is open, owned by the shell so Esc can close it.
     @Binding var selection: FeatureSet?
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var width: CGFloat = 900
     /// HELD AT THE TOP THROUGH THE ARRIVAL. A scroll view keeps its place by
     /// anchoring to a row on screen, and the row on screen at arrival is the
     /// one that leaves: left alone, the page follows it to the bottom.
     @State private var position = ScrollPosition(edge: .top)
 
-    /// The reading column. Wide enough for a vignette and a comfortable line
-    /// beside it, narrow enough that a row is one glance.
-    static let column: CGFloat = 720
-    private static let gutter: CGFloat = 32
+    /// The column's widest measure: a name and a line, read in one glance.
+    static let column: CGFloat = 520
+    private static let gutter: CGFloat = 24
 
-    /// Below this the invitation rows stack, picture over words, rather than
-    /// squeezing either.
-    private var stacked: Bool { width < 520 }
-    /// The guide is open, so the column is the slim index beside it.
-    private var condensed: Bool { selection != nil }
-    /// Room for the index AND the guide. Narrower, the guide stands alone.
+    private var open: Bool { selection != nil }
+    /// Room for the list AND the guide. Narrower, the guide stands alone.
     private var sideBySide: Bool { width >= 720 }
-    private static let indexWidth: CGFloat = 320
+    /// ONE MEASURE, open or closed: what fits in half the page, so the list
+    /// can slide into its half without a line of it re-wrapping.
+    private var listWidth: CGFloat {
+        let room = sideBySide ? width / 2 : width
+        return max(0, min(Self.column, room - 2 * Self.gutter))
+    }
 
     var body: some View {
         HStack(spacing: 0) {
             list
-                // Width and opacity, not an `if`: the column keeps its scroll
-                // place and its rows their identity while the guide is open.
-                .frame(maxWidth: condensed ? (sideBySide ? Self.indexWidth : 0) : .infinity)
-                .opacity(condensed && !sideBySide ? 0 : 1)
+                // The container narrows; the column inside it does not.
+                .frame(maxWidth: open ? (sideBySide ? width / 2 : 0) : .infinity)
+                .clipped()
+                .opacity(open && !sideBySide ? 0 : 1)
+                .allowsHitTesting(!open || sideBySide)
             if let set = selection {
                 Rectangle().fill(Palette.hairline).frame(width: 0.5)
                     .transition(.opacity)
@@ -86,47 +88,42 @@ struct DiscoveryPage: View {
                     .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
-        .animation(reduceMotion ? nil : .smooth(duration: 0.32), value: condensed)
+        .animation(reduceMotion ? nil : .smooth(duration: 0.32), value: open)
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
     }
 
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
     private var list: some View {
-        ScrollViewReader { proxy in
-            ScrollView(.vertical) {
-                VStack(alignment: .leading, spacing: 0) {
-                    masthead(proxy)
-                        .padding(.bottom, condensed ? 14 : 22)
-                    ForEach(items, id: \.self) { item in
-                        switch item {
-                        case .heading:
-                            unlockedHeading
-                                .transition(.opacity)
-                        case .row(let set):
-                            let placed = isPlacedUnlocked(set)
-                            DiscoveryRow(
-                                set: set, state: state(set),
-                                prominent: !placed, fresh: placed && fresh.contains(set),
-                                stacked: stacked, condensed: condensed, selected: selection == set,
-                                live: live, fixedTime: fixedTime
-                            ) { selection = selection == set ? nil : set }
-                                .padding(.bottom, condensed ? 5 : 8)
-                                .id(set)
-                        }
+        ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 0) {
+                masthead
+                    .padding(.horizontal, DiscoveryRow.inset)
+                    .padding(.bottom, 14)
+                ForEach(items, id: \.self) { item in
+                    switch item {
+                    case .heading:
+                        unlockedHeading
+                            .transition(.opacity)
+                    case .row(let set):
+                        let placed = isPlacedUnlocked(set)
+                        DiscoveryRow(
+                            set: set, state: state(set),
+                            unlocked: placed, fresh: placed && fresh.contains(set),
+                            selected: selection == set, divider: !sectionEnds.contains(set),
+                            live: live, fixedTime: fixedTime
+                        ) { selection = selection == set ? nil : set }
+                            .id(set)
                     }
                 }
-                .padding(.horizontal, condensed ? 12 : Self.gutter)
-                .padding(.top, condensed ? 16 : 26)
-                .padding(.bottom, 64)
-                .frame(maxWidth: Self.column + 2 * Self.gutter, alignment: .leading)
-                .frame(maxWidth: .infinity)
             }
-            .scrollIndicators(.automatic)
-            .scrollPosition($position)
-            .onChange(of: settled) { _, now in
-                if now { position.scrollTo(edge: .top) }
-            }
+            .frame(width: listWidth, alignment: .leading)
+            .padding(.top, 28)
+            .padding(.bottom, 64)
+            .frame(maxWidth: .infinity)
+        }
+        .scrollIndicators(.automatic)
+        .scrollPosition($position)
+        .onChange(of: settled) { _, now in
+            if now { position.scrollTo(edge: .top) }
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(DiscoveryCopy.ringLabel)
@@ -153,87 +150,47 @@ struct DiscoveryPage: View {
         invitations.map(Item.row) + (unlocked.isEmpty ? [] : [.heading] + unlocked.map(Item.row))
     }
 
+    /// The last row of each section: nothing follows it, so no hairline.
+    private var sectionEnds: Set<FeatureSet> {
+        Set([invitations.last, unlocked.last].compactMap { $0 })
+    }
+
     private var complete: Bool { FeatureSet.allCases.allSatisfy { state($0) != .unseen } }
 
     // MARK: masthead
 
-    private func masthead(_ proxy: ScrollViewProxy) -> some View {
-        HStack(alignment: .center, spacing: condensed ? 10 : 16) {
+    /// The ring and one line. The header bar above already names the page.
+    private var masthead: some View {
+        HStack(alignment: .center, spacing: 12) {
             DiscoveryRing(
-                progress: DiscoveryProgress(state, fresh: fresh), diameter: condensed ? 24 : 40,
+                progress: DiscoveryProgress(state, fresh: fresh), diameter: 26,
                 breathing: live && fixedTime == nil)
-                .frame(width: condensed ? 28 : 44, height: condensed ? 28 : 44)
-
-            VStack(alignment: .leading, spacing: 4) {
-                if !condensed {
-                    Text(DiscoveryCopy.eyebrow)
-                        .font(.system(size: 10.5, weight: .bold).width(.expanded))
-                        .tracking(0.7)
-                        .foregroundStyle(Palette.accent)
-                }
-                Text(complete ? DiscoveryCopy.completeHeadline : DiscoveryCopy.headline)
-                    .font(Typo.serif(condensed ? 16 : stacked ? 22 : 26, weight: .medium))
-                    .foregroundStyle(Palette.ink)
-                    .fixedSize(horizontal: false, vertical: true)
-                if !condensed {
-                Text(complete ? DiscoveryCopy.completeSubline : DiscoveryCopy.subline)
-                    .font(.system(size: 13))
-                    .foregroundStyle(Palette.inkDim)
-                    .lineSpacing(2)
-                    .fixedSize(horizontal: false, vertical: true)
-                if let newest = FeatureSet.allCases.last(where: { fresh.contains($0) && state($0) != .unseen }) {
-                    justUnlockedChip(newest) {
-                        withAnimation(.smooth(duration: 0.5)) { proxy.scrollTo(newest, anchor: .center) }
-                    }
-                    .padding(.top, 6)
-                }
-                }
-            }
+                .frame(width: 30, height: 30)
+            Text(complete ? DiscoveryCopy.completeHeadline : DiscoveryCopy.headline)
+                .font(Typo.serif(21, weight: .medium))
+                .foregroundStyle(Palette.ink)
+                .fixedSize(horizontal: false, vertical: true)
         }
-    }
-
-    /// FINDABLE AT A GLANCE: the newest find, named in the masthead, and a
-    /// click away even when Unlocked is below the fold. A pointer to good
-    /// news, not a badge.
-    private func justUnlockedChip(_ set: FeatureSet, go: @escaping () -> Void) -> some View {
-        Button(action: go) {
-            HStack(spacing: 7) {
-                Text(DiscoveryCopy.freshTag)
-                    .font(.system(size: 9, weight: .bold).width(.expanded))
-                    .tracking(0.5)
-                    .foregroundStyle(DiscoveryInk.ringHot)
-                Text(set.title)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(Palette.ink)
-                Image(systemName: "arrow.down")
-                    .font(.system(size: 9.5, weight: .semibold))
-                    .foregroundStyle(Palette.inkDim)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(Capsule().fill(Palette.accentSoft))
-            .overlay(Capsule().strokeBorder(Palette.accent.opacity(0.35), lineWidth: 0.75))
-            .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Just unlocked: \(set.title). Show it.")
     }
 
     // MARK: the Unlocked heading
 
     private var unlockedHeading: some View {
-        HStack(alignment: .center, spacing: 14) {
+        HStack(alignment: .center, spacing: 12) {
             Text(DiscoveryCopy.unlockedHeading)
-                .font(Typo.serif(17, weight: .medium))
+                .textCase(.uppercase)
+                .font(.system(size: 9.5, weight: .bold).width(.expanded))
+                .tracking(0.7)
                 .foregroundStyle(Palette.inkDim)
                 .accessibilityAddTraits(.isHeader)
             Rectangle()
                 .fill(Palette.hairline)
                 .frame(height: 0.5)
         }
+        .padding(.horizontal, DiscoveryRow.inset)
         // More air above than below: the heading belongs to what follows it.
-        .padding(.top, complete ? 4 : condensed ? 10 : 18)
-        .padding(.bottom, condensed ? 8 : 12)
+        .padding(.top, complete ? 4 : 26)
+        .padding(.bottom, 8)
     }
 }
 
@@ -242,15 +199,13 @@ struct DiscoveryPage: View {
 struct DiscoveryRow: View {
     let set: FeatureSet
     let state: SetState
-    /// The invitation form, a size up. False is the Unlocked form.
-    let prominent: Bool
+    /// In the Unlocked section: the same row, tagged when there is news.
+    let unlocked: Bool
     var fresh = false
-    /// The narrow window's form: picture over words.
-    var stacked = false
-    /// The index form, beside an open guide: picture, name, one line.
-    var condensed = false
     /// This row's guide is the one open.
     var selected = false
+    /// A hairline under the row. Off for the last of a section.
+    var divider = true
     var live = true
     var fixedTime: Double? = nil
     var open: () -> Void = {}
@@ -258,104 +213,75 @@ struct DiscoveryRow: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
 
-    private var kept: Bool { state == .kept && !prominent }
-    private var large: Bool { prominent && !condensed }
-    private var radius: CGFloat { large ? 16 : 13 }
+    /// The row's wash runs this far past its content, so the content of every
+    /// row, the masthead and the heading share one left edge.
+    static let inset: CGFloat = 10
+    private static let picture: CGFloat = 92
+    private static let gap: CGFloat = 14
 
-    /// ONLY UNDER THE POINTER. Everything else holds its poster.
-    private var playing: Bool { live && hovering }
-
-    private var vignetteWidth: CGFloat {
-        if condensed { return 80 }
-        if prominent { return stacked ? 300 : 168 }
-        return 112
-    }
+    private var kept: Bool { state == .kept && unlocked }
 
     var body: some View {
-        // ONE LAYOUT VALUE, not an `if`: the stacked and side-by-side forms
-        // are the same row, so a window resize does not rebuild it.
-        let layout = large && stacked
-            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 12))
-            : AnyLayout(HStackLayout(alignment: .center, spacing: large ? 18 : condensed ? 11 : 14))
+        HStack(alignment: .center, spacing: Self.gap) {
+            // ONLY UNDER THE POINTER. Everything else holds its poster.
+            DiscoveryVignette(set: set, live: live && hovering, fixedTime: fixedTime, cornerRadius: 6)
+                .frame(width: Self.picture)
 
-        layout {
-            DiscoveryVignette(
-                set: set, live: playing, fixedTime: fixedTime, cornerRadius: large ? 9 : 7)
-                .frame(maxWidth: vignetteWidth)
-
-            VStack(alignment: .leading, spacing: large ? 4 : 2) {
-                HStack(alignment: .firstTextBaseline, spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(set.title)
-                        .font(Typo.serif(condensed ? 14.5 : prominent ? 19 : 15.5, weight: .medium))
+                        .font(Typo.serif(16.5, weight: .medium))
                         .foregroundStyle(Palette.ink)
-                    if !condensed { tag }
+                    tag
                 }
                 Text(set.line)
-                    .font(.system(size: condensed ? 11.5 : prominent ? 12.5 : 12))
+                    .font(.system(size: 12))
                     .foregroundStyle(Palette.inkDim)
                     .lineSpacing(1.5)
-                    .lineLimit(condensed ? 2 : nil)
+                    .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: 420, alignment: .leading)
-                if !condensed {
-                    HStack(spacing: 5) {
-                        ForEach(set.keys, id: \.self) { DiscoveryKeycap($0) }
-                    }
-                    .padding(.top, prominent ? 6 : 4)
-                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+
+            Image(systemName: "chevron.right")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(selected ? Palette.accent : Palette.inkFaintest)
+                .opacity(hovering || selected ? 1 : 0)
         }
-        .padding(large ? 9 : 7)
-        .padding(.trailing, 9)
-        .background { RoundedRectangle(cornerRadius: radius, style: .continuous).fill(fill) }
-        .overlay {
-            // EVEN all round: a state is a border's colour and weight, never
-            // one lit edge.
-            RoundedRectangle(cornerRadius: radius, style: .continuous)
-                .strokeBorder(border, lineWidth: selected ? 1 : 0.75)
+        .padding(.vertical, 9)
+        .padding(.horizontal, Self.inset)
+        .background {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(selected ? Palette.accentSoft : Palette.hairline.opacity(hovering ? 0.4 : 0))
         }
-        .contentShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Palette.hairline).frame(height: 0.5)
+                .padding(.leading, Self.inset + Self.picture + Self.gap)
+                .padding(.trailing, Self.inset)
+                .opacity(divider && !selected && !hovering ? 1 : 0)
+        }
+        .contentShape(Rectangle())
         .onTapGesture(perform: open)
         .onHover { hovering = $0 }
-        .animation(reduceMotion ? nil : .smooth(duration: 0.2), value: hovering)
+        .animation(reduceMotion ? nil : .smooth(duration: 0.18), value: hovering)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(set.title), \(set.stateWords(state)). \(set.line)")
-        .accessibilityHint("Keys: \(set.keys.joined(separator: ", ")). Opens the guide.")
+        .accessibilityHint("Opens the guide.")
         .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
         .accessibilityAction(.default, open)
     }
 
-    private var fill: Color {
-        if selected { return Palette.accentSoft }
-        if kept { return Palette.accentSoft.opacity(hovering ? 0.75 : 0.5) }
-        if prominent { return Palette.hairline.opacity(hovering ? 0.6 : 0.34) }
-        return Palette.hairline.opacity(hovering ? 0.4 : 0.16)
-    }
-
-    private var border: Color {
-        if selected { return Palette.accent.opacity(0.6) }
-        if fresh { return DiscoveryInk.ringHot.opacity(0.6) }
-        if kept { return Palette.accent.opacity(0.3) }
-        return Palette.hairline
-    }
-
-    /// Kept and just-unlocked wear a tag beside the name; plain unlocked and
-    /// the invitations wear nothing: the section already says what they are,
-    /// and "not yet" is not a state worth a label.
+    /// Kept and just-unlocked say so in a word beside the name; plain unlocked
+    /// and the invitations say nothing: the section already says what they
+    /// are, and "not yet" is not a state worth a label.
     private var tag: some View {
-        let word = fresh ? DiscoveryCopy.freshTag : DiscoveryCopy.keptTag
-        return Text(word)
+        Text(fresh ? DiscoveryCopy.freshTag : DiscoveryCopy.keptTag)
             .font(.system(size: 8.5, weight: .bold).width(.expanded))
             .tracking(0.5)
             .foregroundStyle(fresh ? DiscoveryInk.ringHot : Palette.accent)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 3)
-            .background(Capsule().fill(Palette.accentSoft))
             .fixedSize()
             // Opacity, not an `if`: the tag comes and goes as the row settles.
-            .opacity(!prominent && (fresh || kept) ? 1 : 0)
-            .alignmentGuide(.firstTextBaseline) { d in d[VerticalAlignment.center] + 3 }
+            .opacity(unlocked && (fresh || kept) ? 1 : 0)
     }
 }
 

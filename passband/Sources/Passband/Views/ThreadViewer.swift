@@ -29,9 +29,11 @@ struct ThreadViewer: View {
         var cardOpacity: Double
         /// The subject bar does not slide; it fades out and back in.
         var headerOpacity: Double
-        /// The one arriving: it is the reader keys go to, and it draws its own
-        /// page under the card so it covers the one it slides over.
+        /// The one arriving: it is the reader keys go to.
         var incoming: Bool
+        /// The card on top, which draws its own page under it so it covers
+        /// the one it slides over. The arriving one, except on an undone S.
+        var raised: Bool
     }
 
     @Environment(AppStore.self) private var store
@@ -116,12 +118,21 @@ struct ThreadViewer: View {
     /// only thing that says it happened.
     @State private var arrivals = 0
 
-    /// A held `e` on a Reading stack, from key-down until key-up or the ring
-    /// closing. `holdToken` is the press (a stale timer checks it is still the
-    /// current one); `holdStartedAt` is set once the press has outlasted a tap
-    /// and the ring is on screen, and is the instant the ring counts from.
+    /// A held `e` or `E` on a Reading stack, from key-down until key-up or the
+    /// ring closing. `holdToken` is the press (a stale timer checks it is still
+    /// the current one); `holdStartedAt` is set once the press has outlasted a
+    /// tap and the ring is on screen, and is the instant the ring counts from.
     @State private var holdToken: UUID?
+    /// ⌘F: the find session for the thread on screen. An object rather than
+    /// `@State` values because the bodies it searches sit below the message
+    /// cards, which diff on their data and would not pass a term down.
+    @State private var find = ReaderFind()
     @State private var holdStartedAt: Date?
+    /// Which of the two the ring is for, fixed when it appears: `E` moves on
+    /// to the next sender once the stack is clear, and `holdOnward` is whether
+    /// there is one to move on to.
+    @State private var holdAdvancing = false
+    @State private var holdOnward = false
 
     enum ConfirmMode: Equatable { case ask, noLink }
 
@@ -276,7 +287,8 @@ struct ThreadViewer: View {
                 if let holdStartedAt {
                     StackDoneHold(
                         startedAt: holdStartedAt, duration: Self.holdDuration,
-                        count: stackRemaining.count)
+                        count: stackRemaining.count,
+                        key: holdAdvancing ? "E" : "e", onward: holdOnward)
                 }
             #endif
         }
@@ -284,6 +296,21 @@ struct ThreadViewer: View {
         // The outgoing side of a turn is on its way out: it must not answer a
         // key meant for the email arriving over it.
         .keyBindings(.thread, turn?.incoming == false ? [] : bindings)
+        .environment(find)
+        // The menu's ⌘F, which is the same verb as the key in the keymap.
+        .onChange(of: store.findInEmailTick) { _, _ in openFind() }
+        // This view outlives a thread (done+next swaps the content under it),
+        // and a term typed for the last email is not a question about this one.
+        .onChange(of: threadId) { _, _ in find.close() }
+        .onChange(of: messages.map(\.id)) { _, _ in find.adopt(findCorpus) }
+        .onChange(of: find.query) { _, _ in find.queryChanged(from: index) }
+        // An undone walk step, addressed to the reader it landed on.
+        .onChange(of: store.walkRewind) { _, r in
+            // Not the card a turn is leaving behind; the one arriving takes
+            // it, and settles the turn first.
+            guard let r, r.from == threadId, turn?.incoming != false else { return }
+            Task { await rewind(r) }
+        }
         // THE PHONE'S `e`. Done is the verb this reader exists to end on, and
         // until now the only way to say it on a phone was to back out and swipe
         // the row you had just been reading — leave the thread, find it again,
@@ -431,7 +458,7 @@ struct ThreadViewer: View {
                     // the arriving card: a scale or a 3D tilt would
                     // re-rasterise every web frame in the column per frame.
                     .background {
-                        if turn?.incoming == true {
+                        if turn?.raised == true {
                             ReaderBackdrop()
                                 .shadow(color: .black.opacity(0.28), radius: 24, x: -8)
                         }
@@ -463,7 +490,10 @@ struct ThreadViewer: View {
         /// stateful children never move.
         private var deck: some View {
             GeometryReader { reader in
-                let stacked = store.readingStack
+                // The card turning away to another sender keeps the shape it
+                // had: the store's queue is the new sender's already.
+                let kept = turn?.incoming == false ? store.skipTurn?.outgoingStacked : nil
+                let stacked = kept ?? store.readingStack
                 let flight: AppStore.ThreadFlight = stacked ? store.threadFlight : .settled
                 let cardWidth = stacked ? max(0, reader.size.width - Self.stackPeekWidth) : reader.size.width
                 // Constrain the scroll viewport to the window. The full-height
@@ -486,7 +516,7 @@ struct ThreadViewer: View {
                 // No scale on a card full of web frames — see RootView.
                 .opacity(flight.opacity)
                 .background(alignment: .topLeading) {
-                    if stacked, let next = store.nextQueuedThread {
+                    if stacked, kept == nil, let next = store.nextQueuedThread {
                         // THE SAME SURFACE AS THE CARD: done+next mounts the next
                         // thread exactly here and walks it in, so a peek dressed
                         // any differently would pop as it becomes the card.
@@ -903,10 +933,62 @@ struct ThreadViewer: View {
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .active { acknowledgeVisibleFocus() }
                 }
+                // Conditional, not hidden: this floats over a scroll surface,
+                // and a transparent bar would go on eating the wheel under it.
+                .overlay(alignment: .topTrailing) {
+                    if find.open {
+                        // Left of the card / chat switch, which owns this
+                        // corner and must stay reachable with the bar up.
+                        ReaderFindBar(find: find) { find.close() }
+                            .padding(.top, Space.s10)
+                            .padding(.trailing, Space.scaled(64))
+                    }
+                }
+                // THE CURSOR MOVED TO A MATCH. The selection follows it, so
+                // j/k carry on from where the find left off, but the scroll is
+                // the find's: a match is a line inside a message, and the
+                // selection's own scroll only knows how to show a message's top.
+                .onChange(of: find.cursor) { _, cursor in
+                    guard let cursor,
+                        let position = messages.firstIndex(where: { $0.id == cursor.message })
+                    else { return }
+                    // A card the lazy stack has not mounted has no body to say
+                    // where the match is. Bringing its top in mounts it, and
+                    // the body's answer does the fine aim below.
+                    if map.frames[position] == nil {
+                        settleTask?.cancel()
+                        proxy.scrollTo(position, anchor: .top)
+                    }
+                    if index != position {
+                        find.steering = true
+                        index = position
+                    }
+                }
+                // A BODY PLACED THE ACTIVE MATCH. Only scrolled to when it is
+                // not already comfortably in the window: the first match moves
+                // with every letter typed, and a column that re-centred on
+                // each one would never hold still. A beat first, because the
+                // anchor is laid out by the update this tick arrives in.
+                .onChange(of: find.aimTick) { _, _ in
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(40))
+                        guard find.open, viewportHeight > 0, let y = find.anchorMinY else { return }
+                        // The top band is taller: the bar itself sits there.
+                        guard y < 64 || y > viewportHeight - 72 else { return }
+                        settleTask?.cancel()
+                        proxy.scrollTo(ReaderFind.anchorID, anchor: UnitPoint(x: 0.5, y: 0.4))
+                    }
+                }
                 .onChange(of: index) { was, now in
                     // Reaching the end of the thread IS reading what arrived —
                     // whether that took the pill, a press of `j`, or the rail.
                     if now == newestIndex { arrivals = 0 }
+                    // The find moved the selection and has aimed the column
+                    // itself, at a line rather than at this card's top.
+                    if find.steering {
+                        find.steering = false
+                        return
+                    }
                     if abs(now - was) == 1 {
                         withAnimation(Motion.scrollFollow) { proxy.scrollTo(now, anchor: .top) }
                     } else {
@@ -1417,8 +1499,41 @@ struct ThreadViewer: View {
             // With a side panel open beside the reader, Esc sheds the PANEL and
             // keeps reading — the email is what you chose, the results are what
             // you came through. A second Esc closes the reader.
+            // ⌘F with an email open finds IN it. Search is `/`, and the menu.
+            KeyBinding("f", "find in this email", meta: true, allowInInput: true) { openFind() },
+            // Enter walks the matches while the caret is in the find field,
+            // and only then: anywhere else it is still reply-all, or a newline
+            // in the reply being written.
+            KeyBinding(declining: "Enter", "next match", allowInInput: true) {
+                guard find.open, find.fieldFocused else { return false }
+                find.step(1)
+                return true
+            },
+            KeyBinding(declining: "shift+Enter", "previous match", allowInInput: true) {
+                guard find.open, find.fieldFocused else { return false }
+                find.step(-1)
+                return true
+            },
+            // ⌘G / ⌘⇧G, the system's spelling, from anywhere in the reader.
+            KeyBinding(
+                declining: "g", "next match", meta: true, allowInInput: true, exactCase: true
+            ) {
+                guard find.open else { return false }
+                find.step(1)
+                return true
+            },
+            KeyBinding(
+                declining: "G", "previous match", meta: true, allowInInput: true, exactCase: true
+            ) {
+                guard find.open else { return false }
+                find.step(-1)
+                return true
+            },
             KeyBinding("Escape", "back", allowInInput: true) {
-                if store.sideView.isOpen {
+                // The find bar is the innermost thing open, so it goes first.
+                if find.open {
+                    find.close()
+                } else if store.sideView.isOpen {
                     store.closeSide()
                 } else {
                     store.closeThread()
@@ -1485,16 +1600,38 @@ struct ThreadViewer: View {
             store.readingStack
                 ? KeyBinding(
                     "e", "done (hold: the whole stack)",
-                    onRelease: { cancelled in endStackHold(cancelled: cancelled) }
-                ) { beginStackHold() }
+                    onRelease: { cancelled in endStackHold(cancelled: cancelled, advancing: false) }
+                ) { beginStackHold(advancing: false) }
                 : KeyBinding("e", "done", onRelease: Self.swallowUntilKeyUp) {
                     Task { await doneAndClose() }
                 },
             KeyBinding("d", "done", onRelease: Self.swallowUntilKeyUp) {
                 Task { await doneAndClose() }
             },
-            KeyBinding("E", "done + next") { Task { await doneAndNext() } },
-            KeyBinding("D", "done + next") { Task { await doneAndNext() } },
+            // `E` IN READING WALKS THE BOARD: past this sender's last email
+            // it goes on to the next sender's card. On a stack it is a hold
+            // like `e`, and the ring closing clears the stack and moves on.
+            //
+            // A HOLD ON EVERY READING EMAIL, stack or not, so the registry
+            // swallows the key's autorepeats: a repeat carried onto the next
+            // sender's stack would start that stack's ring from a press that
+            // began somewhere else, and the ring has no undo. Everywhere else
+            // `E`/`D` still repeat.
+            store.readingStack
+                ? KeyBinding(
+                    "E", "done + next (hold: the whole stack, then the next sender)",
+                    onRelease: { cancelled in endStackHold(cancelled: cancelled, advancing: true) }
+                ) { beginStackHold(advancing: true) }
+                : store.readingMail
+                    ? KeyBinding("E", "done + next", onRelease: Self.swallowUntilKeyUp) {
+                        Task { await doneAndNext(acrossSenders: true) }
+                    }
+                    : KeyBinding("E", "done + next") { Task { await doneAndNext() } },
+            store.readingMail
+                ? KeyBinding("D", "done + next", onRelease: Self.swallowUntilKeyUp) {
+                    Task { await doneAndNext(acrossSenders: true) }
+                }
+                : KeyBinding("D", "done + next") { Task { await doneAndNext() } },
             // `S` = SKIP: E's twin with the done left out. The email stays on
             // the board and the walk moves on, so E and S together are a
             // two-key pass through everything Space opened. exactCase because
@@ -1502,9 +1639,20 @@ struct ThreadViewer: View {
             // into a jump to another email.
             // DECLINES WITH NO QUEUE (a reader opened from search, a
             // notification, a contact card): there is nothing to skip to, and
-            // a skip that quietly closed the reader would read as Esc.
+            // a skip that quietly closed the reader would read as Esc. A
+            // Reading sender with one email still has the next sender's card.
             KeyBinding(declining: "S", "skip to next", exactCase: true) {
-                guard store.threadQueue.count > 1 else { return false }
+                guard store.threadQueue.count > 1 || store.nextReadingSender != nil else {
+                    return false
+                }
+                Task { await skipToNext() }
+                return true
+            },
+            // IN FLOW MODE the bare letter is the skip: Space said "walk me
+            // through these", so there is no other verb for `s` to be mistaken
+            // for. Outside a walk it declines, and a stray `s` stays a typo.
+            KeyBinding(declining: "s", "skip to next (flow mode)", exactCase: true) {
+                guard store.walk != nil, store.threadQueue.count > 1 else { return false }
                 Task { await skipToNext() }
                 return true
             },
@@ -1523,7 +1671,15 @@ struct ThreadViewer: View {
                         // the mail is dealt with, so the walk carries on.
                         onScheduled: { Task { await remindAndNext() } }))
             },
-            KeyBinding("u", "unsubscribe") { confirmMode = .ask },
+            // While an undo chip is up, `u` is the undo it advertises, even
+            // here: this context is asked before "global", so a plain binding
+            // would answer an undo with an unsubscribe prompt. Declining hands
+            // the key on to the global undo.
+            KeyBinding(declining: "u", "unsubscribe") {
+                guard store.undos.isEmpty else { return false }
+                confirmMode = .ask
+                return true
+            },
             // `r` = reply, and it lives HERE rather than in the composer's own
             // set because it is what opens the composer when there is none. With
             // one open the body has focus, so `r` is input-suppressed (no
@@ -1566,6 +1722,17 @@ struct ThreadViewer: View {
             bindings.append(KeyBinding("b", "chat / email style") { toggleStyle() })
         }
         return bindings
+    }
+
+    /// What the find reads for a message nothing has mounted: its text.
+    private var findCorpus: [(id: Int, text: String)] {
+        messages.map { (id: $0.id, text: $0.content) }
+    }
+
+    /// ⌘F. Again with the bar already up puts the caret back in it.
+    private func openFind() {
+        guard !messages.isEmpty else { return }
+        find.begin(messages: findCorpus, from: index)
     }
 
     /// Move the selection by one message, clamped at both ends. The scroll
@@ -1806,9 +1973,11 @@ struct ThreadViewer: View {
     }
 
     /// Plain done walks a Reading sender's stack, or closes an ordinary reader.
+    /// In flow mode it is `E`: the walk is what Space started, and a done that
+    /// closed the reader would end it on the first email.
     private func doneAndClose() async {
         guard store.threadFlight == .settled else { return }
-        if store.readingStack {
+        if store.readingStack || store.walk != nil {
             await doneAndNext()
             return
         }
@@ -1836,14 +2005,14 @@ struct ThreadViewer: View {
     /// How long the ring takes to close, counted from when it appears.
     static let holdDuration: Duration = .milliseconds(750)
 
-    /// What a held `e` would clear: the stack's rows not already done.
+    /// What a held `e` or `E` would clear: the stack's rows not already done.
     private var stackRemaining: [AttentionUpdate] {
         store.threadQueue.filter { !store.resolvedIds.contains($0.id) }
     }
 
     /// Key down. Nothing happens yet: the key coming up inside the grace is a
     /// tap, and a tap has to stay exactly the walk it always was.
-    private func beginStackHold() {
+    private func beginStackHold(advancing: Bool) {
         store.settleSkipTurn()
         guard store.threadFlight == .settled, holdToken == nil else { return }
         let token = UUID()
@@ -1851,6 +2020,8 @@ struct ThreadViewer: View {
         Task {
             try? await Task.sleep(for: Self.holdGrace)
             guard holdToken == token else { return }
+            holdAdvancing = advancing
+            holdOnward = advancing && store.nextReadingSender != nil
             withAnimation(Motion.disclose) { holdStartedAt = .now }
             try? await Task.sleep(for: Self.holdDuration)
             // Let go early, or the app lost the keyboard: the ring was the
@@ -1858,14 +2029,14 @@ struct ThreadViewer: View {
             guard holdToken == token, store.threadId == threadId else { return }
             holdToken = nil
             withAnimation(Motion.disclose) { holdStartedAt = nil }
-            await doneWholeStack()
+            await doneWholeStack(advancing: advancing)
         }
     }
 
     /// Key up (or the keyboard went elsewhere). Before the ring showed it was a
     /// tap, so it does what a tap does; once the ring is up, letting go is the
     /// way to back out, and nothing is marked.
-    private func endStackHold(cancelled: Bool) {
+    private func endStackHold(cancelled: Bool, advancing: Bool) {
         guard holdToken != nil else { return }
         let wasTap = holdStartedAt == nil
         holdToken = nil
@@ -1874,22 +2045,43 @@ struct ThreadViewer: View {
         // inside the grace). A tap then belongs to nothing: done on the closed
         // thread would mark mail the reader just walked away from.
         guard wasTap, !cancelled, store.threadId == threadId else { return }
-        Task { await doneAndClose() }
+        Task {
+            if advancing { await doneAndNext(acrossSenders: true) } else { await doneAndClose() }
+        }
     }
 
     /// The ring closed: every email left in this sender's stack is done, in one
     /// go, and the reader leaves with them. Same flight as a plain done, so it
-    /// reads as the stack going rather than the screen blinking.
-    private func doneWholeStack() async {
+    /// reads as the stack going rather than the screen blinking. Held with
+    /// `E`, the next sender's card then comes in, as it does off the end of a
+    /// tapped walk.
+    private func doneWholeStack(advancing: Bool) async {
         guard store.threadFlight == .settled else { return }
         let items = stackRemaining
         guard let first = items.first else { return }
-        let liftedAt = liftOff()
+        let onward = advancing ? store.nextReadingSender : nil
+        store.flightContinues = onward != nil
+        let liftedAt = liftOff(leavingSender: onward != nil)
         await store.markReadingDone(items, sender: first.sender)
         Discovery.note(.stackCleared)
         await flightOut(since: liftedAt)
         guard store.threadId == threadId else { return }
-        store.closeThread()
+        guard let onward else {
+            store.closeThread()
+            return
+        }
+        await walkIn(onward)
+    }
+
+    /// The next Reading sender's card, newest email first, walked in from
+    /// below: another sender is a new subject, not more of the same pile.
+    private func walkIn(_ sender: ReadingSender) async {
+        store.openThread(
+            sender.latestThreadId, queue: sender.items, entering: .bottom, readingMail: true,
+            from: .reader)
+        try? await Task.sleep(for: .milliseconds(30))
+        guard store.threadId == sender.latestThreadId else { return }
+        withAnimation(Motion.deckCard) { store.threadFlight = .settled }
     }
 
     /// The resolve both verbs share, undo-first through `Actions.done` whenever
@@ -1900,9 +2092,9 @@ struct ThreadViewer: View {
     /// notification) has no row, so it resolves the newest message directly.
     /// There is no undo chip on that path: undo restores a row to a band, and
     /// this one never came from one.
-    private func resolveOpenThread(via: Actions.Via) async {
+    private func resolveOpenThread(via: Actions.Via, rewind: WalkRewind? = nil) async {
         if let row = store.threadQueue.first(where: { $0.thread_id == threadId }) {
-            await Actions.done(row, via: via, on: .reader)
+            await Actions.done(row, via: via, on: .reader, rewind: rewind)
             return
         }
         guard let newest else { return }
@@ -1964,7 +2156,11 @@ struct ThreadViewer: View {
     /// substitutes a crossfade. The departure runs concurrently with the round
     /// trip — the email is going either way — and only the leftover of its
     /// 220ms is ever waited on.
-    private func doneAndNext() async {
+    ///
+    /// `acrossSenders` is `E`/`D` on Reading mail: off the end of one sender's
+    /// emails the walk goes on to the next sender's card rather than closing.
+    /// Plain `e` on a stack leaves it false, and still ends where the stack does.
+    private func doneAndNext(acrossSenders: Bool = false) async {
         // An S turn still settling is finished first, so the card it skipped
         // never shows through under this email as it lifts off.
         store.settleSkipTurn()
@@ -1985,12 +2181,24 @@ struct ThreadViewer: View {
         // sibling the store just resolved, a row done from a list underneath) is
         // not something to walk a reader onto.
         let next = store.nextQueuedThread
+        let onward = acrossSenders && next == nil ? store.nextReadingSender : nil
+        var edge: AppStore.ThreadEdge?
+        if let cur, let next {
+            edge = (store.readingStack || sameSender(next, queue[cur])) ? .trailing : .bottom
+        }
+        // On a walk the undo plays this step backwards. Not on the last email:
+        // that one ends the walk, and there is nothing left to walk back in.
+        var rewind: WalkRewind?
+        if store.walk != nil, let next, let edge {
+            rewind = WalkRewind(
+                back: threadId, from: next.thread_id, step: .done(arrivedFrom: edge))
+        }
 
         // Another email takes this one's place: the floor goes down under the
         // flight so nothing behind the reader flashes through the gap.
-        store.flightContinues = next != nil
-        let liftedAt = liftOff()
-        await resolveOpenThread(via: .key)
+        store.flightContinues = next != nil || onward != nil
+        let liftedAt = liftOff(leavingSender: onward != nil)
+        await resolveOpenThread(via: .key, rewind: rewind)
         await flightOut(since: liftedAt)
         // Counted once the email is truly gone from this reader, not for a
         // done that was overtaken (Esc mid-flight).
@@ -2001,16 +2209,14 @@ struct ThreadViewer: View {
         // reader must not haul the next thread back onto a page nobody is on.
         guard store.threadId == threadId else { return }
 
-        guard let cur, let next else {
+        guard let next, let edge else {
             // Nothing behind it — an empty queue, or the end of one: the reader
             // leaves with the email rather than snapping back to show an empty
             // one. The end of a Space walk is the bottom of the list, which
-            // the sitrep celebrates.
-            leaveAtEnd()
+            // the sitrep celebrates. In Reading the next sender comes first.
+            if let onward { await walkIn(onward) } else { leaveAtEnd() }
             return
         }
-        let edge: AppStore.ThreadEdge =
-            (store.readingStack || sameSender(next, queue[cur])) ? .trailing : .bottom
         // Mounted OFF SCREEN, unanimated, and walked in on the next frame. The
         // sleep is the whole reason this works: an offset that is set and
         // cleared inside one update has never been drawn, so there is nothing
@@ -2049,23 +2255,46 @@ struct ThreadViewer: View {
         // too, and the tally it ends on has to include it.
         store.walk?.skipped += 1
         let queue = store.threadQueue
-        guard queue.contains(where: { $0.thread_id == threadId }),
-            let next = store.nextQueuedThread
-        else {
+        let inQueue = queue.contains(where: { $0.thread_id == threadId })
+        let outgoing = threadId
+        // The open FIRST (it settles any turn), then this turn: both land in
+        // the same render, so the new reader's first frame is at the edge.
+        if inQueue, let next = store.nextQueuedThread {
+            // On a walk a skip gets an undo like a done does, and all it
+            // undoes is the step: the email never left the board, so the way
+            // back is the whole of it. Pushed BEFORE the open, which would
+            // otherwise be the reader on `next` asking for it.
+            if store.walk != nil, let row = queue.first(where: { $0.thread_id == outgoing }) {
+                store.pushUndo(
+                    kind: .skip, messageId: row.id, label: "skipped \(row.sender)",
+                    rewind: WalkRewind(back: outgoing, from: next.thread_id, step: .skip)
+                ) {}
+            }
+            store.openThread(
+                next.thread_id, queue: queue, readingMail: store.readingMail, from: .reader)
+            store.skipTurn = AppStore.SkipTurn(outgoing: outgoing)
+        } else if inQueue, let onward = store.nextReadingSender {
+            // Past a Reading sender's last email is the next sender's card,
+            // the same turn of the page.
+            let stacked = store.readingStack
+            store.openThread(
+                onward.latestThreadId, queue: onward.items, readingMail: true, from: .reader)
+            store.skipTurn = AppStore.SkipTurn(outgoing: outgoing, outgoingStacked: stacked)
+        } else {
             // Skipping the last one is leaving: the email is still on the
             // board, the reader just has nothing left to show. It is still
             // the bottom of the list, so a walk ends on its moment.
             leaveAtEnd()
             return
         }
-        let outgoing = threadId
-        // The open FIRST (it settles any turn), then this turn: both land in
-        // the same render, so the new reader's first frame is at the edge.
-        store.openThread(
-            next.thread_id, queue: queue, readingMail: store.readingMail, from: .reader)
-        store.skipTurn = AppStore.SkipTurn(outgoing: outgoing)
-        // One frame with the new reader mounted at the right edge, so the
-        // animation has somewhere to move it FROM (see `doneAndNext`).
+        await playTurn(outgoing: outgoing)
+    }
+
+    /// The page turn itself, either way: `skipTurn` is already set with its
+    /// new reader mounted, and this moves both cards and clears it.
+    private func playTurn(outgoing: String) async {
+        // One frame with the new reader mounted at its edge, so the animation
+        // has somewhere to move it FROM (see `doneAndNext`).
         try? await Task.sleep(for: .milliseconds(30))
         guard store.skipTurn?.outgoing == outgoing else { return }
         // A little spring on the arrival: it lands, not just stops. With
@@ -2081,6 +2310,38 @@ struct ThreadViewer: View {
         withAnimation(.easeIn(duration: 0.18).delay(0.14)) { store.skipTurn?.incomingHeader = 1 }
         try? await Task.sleep(for: .milliseconds(460))
         if store.skipTurn?.outgoing == outgoing { store.skipTurn = nil }
+    }
+
+    /// `u` on a walk step: the step, backwards. A done's email comes back
+    /// down through the top it left by while this one goes back out the edge
+    /// it came in from; a skip's page turn runs in reverse. The undo itself
+    /// (the email reopened on the server) has already landed.
+    private func rewind(_ r: WalkRewind) async {
+        store.walkRewind = nil
+        store.settleSkipTurn()
+        guard store.threadId == threadId, store.threadFlight == .settled else { return }
+        let queue = store.threadQueue
+        switch r.step {
+        case .skip:
+            store.openThread(
+                r.back, queue: queue, readingMail: store.readingMail, from: .reader)
+            store.skipTurn = AppStore.SkipTurn(outgoing: threadId, reversed: true)
+            await playTurn(outgoing: threadId)
+        case .done(let arrivedFrom):
+            store.flightContinues = true
+            withAnimation(Motion.depart) {
+                store.threadFlight =
+                    arrivedFrom == .trailing ? .departingTrailing : .departingDown
+            }
+            try? await Task.sleep(for: Motion.departTime)
+            guard store.threadId == threadId else { return }
+            store.openThread(
+                r.back, queue: queue, entering: .top, readingMail: store.readingMail,
+                from: .reader)
+            try? await Task.sleep(for: .milliseconds(30))
+            guard store.threadId == r.back else { return }
+            withAnimation(Motion.deckCard) { store.threadFlight = .settled }
+        }
     }
 
     /// The tail of `doneAndNext`, for `h`: the reminder is already set (the
@@ -2121,11 +2382,16 @@ struct ThreadViewer: View {
     /// Beat one: lift the finished email out through the top of the window, and
     /// hand back when it started so the wait can be the REMAINDER of the flight
     /// rather than the whole of it on top of the round trip.
-    private func liftOff() -> ContinuousClock.Instant {
+    ///
+    /// A stack's card drops off its pile. `leavingSender` is the exception:
+    /// the next sender walks in from below, and a card that fell through the
+    /// floor it then rose out of would read as the same email coming back.
+    private func liftOff(leavingSender: Bool = false) -> ContinuousClock.Instant {
         // Every departure finishes an S turn first (see `settleSkipTurn`).
         store.settleSkipTurn()
         withAnimation(Motion.depart) {
-            store.threadFlight = store.readingStack ? .departingDown : .departing
+            store.threadFlight =
+                store.readingStack && !leavingSender ? .departingDown : .departing
         }
         return .now
     }
@@ -2825,9 +3091,9 @@ private struct MessageCard: View, Equatable {
                 allowTrackers: message.allowsTrackers,
                 attachments: message.attachmentList,
                 textHeight: Self.guessedBody(message, style: style),
-                bubble: chat, mine: mine)
+                bubble: chat, mine: mine, findID: message.id)
         } else {
-            PlainBody(content: message.content, fills: !chat)
+            PlainBody(content: message.content, fills: !chat, findID: message.id)
                 .padding(.horizontal, chat ? Space.s12 : 0)
                 .padding(.vertical, chat ? Space.scaled(9) : 0)
                 // The same corner the web frame clips itself to, so a plain
@@ -3069,19 +3335,81 @@ struct PlainBody: View {
     /// the column, so it does; a bubble is only as wide as what is in it, and a
     /// flexible frame with no bound is the child's own size.
     var fills = true
+    /// The message this body is, for the reader's find. nil outside the reader.
+    var findID: Int?
     @State private var open = false
+    @Environment(ReaderFind.self) private var find: ReaderFind?
+
+    /// What the reader's find has for this body: the term's matches in the
+    /// text that is SHOWN (folded history is not searched, as in a mail
+    /// frame), and which of them the cursor is on.
+    private struct Found {
+        var request: FindRequest
+        var visible: [Range<String.Index>]
+        var quoted: [Range<String.Index>]
+        var count: Int { visible.count + quoted.count }
+        /// The request's active match, clamped: a step backwards into this
+        /// message asks for "the last one" before anybody has counted.
+        var active: Int? {
+            request.active >= 0 && count > 0 ? min(request.active, count - 1) : nil
+        }
+    }
+
+    private func search(shown: String, quoted: String?) -> Found? {
+        guard let find, let findID, let request = find.request(for: findID) else { return nil }
+        return Found(
+            request: request,
+            visible: TextFind.ranges(of: request.query, in: shown),
+            quoted: open ? quoted.map { TextFind.ranges(of: request.query, in: $0) } ?? [] : [])
+    }
+
+    /// The text with its matches painted, or the plain string when there is
+    /// nothing to paint, which is every body outside a find.
+    private func painted(_ text: String, _ hits: [Range<String.Index>], active: Int?) -> Text {
+        guard !hits.isEmpty else { return Text(text) }
+        var out = AttributedString(text)
+        for (i, hit) in hits.enumerated() {
+            guard let from = AttributedString.Index(hit.lowerBound, within: out),
+                let to = AttributedString.Index(hit.upperBound, within: out)
+            else { continue }
+            out[from..<to].backgroundColor = i == active ? FindPaint.active : FindPaint.match
+            out[from..<to].foregroundColor = FindPaint.ink
+        }
+        return Text(out)
+    }
+
+    /// The scroll target for the active match. Plain text has no document to
+    /// ask where a range is drawn, so the match is placed by how far through
+    /// the text it starts: off by a line or two in mail with uneven
+    /// paragraphs, which lands it in the window all the same.
+    @ViewBuilder
+    private func anchor(_ text: String, _ hits: [Range<String.Index>], active: Int?) -> some View {
+        if let active, hits.indices.contains(active), !text.isEmpty {
+            let through =
+                CGFloat(text.distance(from: text.startIndex, to: hits[active].lowerBound))
+                / CGFloat(text.count)
+            GeometryReader { box in
+                FindAnchor(spot: FindSpot(y: box.size.height * through, height: 18))
+            }
+        }
+    }
 
     var body: some View {
         // Memoized: the split is a regex walk of every line, and this body is
         // evaluated whenever the card is.
         let split = Quotes.splitTextMemoized(content)
+        let shown = split.quoted == nil ? content : split.visible
+        let found = search(shown: shown, quoted: split.quoted)
         VStack(alignment: .leading, spacing: Space.s8) {
-            Text(split.quoted == nil ? content : split.visible)
+            painted(shown, found?.visible ?? [], active: found?.active)
                 .font(Typo.ui(13.5))
                 .foregroundStyle(Palette.ink)
                 .textSelection(.enabled)
                 .frame(maxWidth: fills ? .infinity : nil, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
+                .overlay(alignment: .topLeading) {
+                    anchor(shown, found?.visible ?? [], active: found?.active)
+                }
             if let quoted = split.quoted {
                 Button {
                     open.toggle()
@@ -3096,7 +3424,10 @@ struct PlainBody: View {
                 .buttonStyle(.textAction)
                 .help("the quoted reply chain below this message")
                 if open {
-                    Text(quoted)
+                    // The cursor counts through the reply first, then the
+                    // history under it, which is the order they are read in.
+                    let active = found?.active.map { $0 - (found?.visible.count ?? 0) }
+                    painted(quoted, found?.quoted ?? [], active: active)
                         .font(Typo.ui(13))
                         .foregroundStyle(Palette.inkFaint)
                         .textSelection(.enabled)
@@ -3105,9 +3436,28 @@ struct PlainBody: View {
                             Rectangle().fill(Palette.hairline).frame(width: 2)
                         }
                         .fixedSize(horizontal: false, vertical: true)
+                        .overlay(alignment: .topLeading) {
+                            anchor(quoted, found?.quoted ?? [], active: active)
+                        }
                 }
             }
         }
+        // WHAT THIS BODY HOLDS, said to the session whenever the question or
+        // the shown text changes. A task and not the body: reporting writes
+        // observable state, which a body evaluation must not.
+        .task(id: FindReport(request: found?.request, count: found?.count ?? 0, open: open)) {
+            guard let find, let findID, let found else { return }
+            find.report(
+                findID, query: found.request.query, count: found.count,
+                active: found.active ?? FindRequest.none)
+            if found.active != nil { find.aim() }
+        }
+    }
+
+    private struct FindReport: Equatable {
+        let request: FindRequest?
+        let count: Int
+        let open: Bool
     }
 }
 
@@ -3160,8 +3510,8 @@ private struct UnsubConfirm: View {
 /// The per-message twin of `RetriageConfirm`. Same shape as `UnsubConfirm`: own
 /// "modal" KeyContext so the thread's j/k/e/d/u are dead while it asks, Enter
 /// confirms, Esc cancels.
-/// The held `e` on a Reading stack: a big `e` and a ring that closes around it
-/// over `duration`. It is the confirmation — let go before it closes and
+/// The held `e` (or `E`) on a Reading stack: the key, big, and a ring that
+/// closes around it over `duration`. It is the confirmation — let go before it closes and
 /// nothing happens — so it takes no clicks and no keys of its own; the key
 /// being held is the only input it has.
 ///
@@ -3171,6 +3521,15 @@ private struct StackDoneHold: View {
     let startedAt: Date
     let duration: Duration
     let count: Int
+    /// The key being held, as typed: `e` closes the reader after, `E` moves on.
+    var key = "e"
+    /// True when a next sender is waiting, and the caption says so.
+    var onward = false
+
+    private var caption: String {
+        let what = count == 1 ? "hold to mark it done" : "hold to mark all \(count) done"
+        return onward ? what + ", then the next sender" : what
+    }
 
     private var seconds: Double {
         Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18
@@ -3191,14 +3550,16 @@ private struct StackDoneHold: View {
                             .trim(from: 0, to: p)
                             .stroke(Palette.accent, style: StrokeStyle(lineWidth: 5, lineCap: .round))
                             .rotationEffect(.degrees(-90))
-                        Text("e")
+                        Text(key)
                             .font(.system(size: 72, weight: .semibold, design: .rounded))
                             .foregroundStyle(Palette.ink)
-                            .offset(y: -4)
+                            // A lowercase letter sits low in its line box;
+                            // a capital is already centred.
+                            .offset(y: key == key.lowercased() ? -4 : 0)
                     }
                     .frame(width: 128, height: 128)
                 }
-                Text(count == 1 ? "hold to mark it done" : "hold to mark all \(count) done")
+                Text(caption)
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkDim)
             }
@@ -3210,7 +3571,9 @@ private struct StackDoneHold: View {
         .allowsHitTesting(false)
         .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .center)))
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(count == 1 ? "Hold e to mark done" : "Hold e to mark all \(count) done")
+        .accessibilityLabel(
+            (count == 1 ? "Hold \(key) to mark done" : "Hold \(key) to mark all \(count) done")
+                + (onward ? ", then open the next sender" : ""))
     }
 }
 
@@ -3367,8 +3730,8 @@ private final class WheelYield {
                 }
                 .foregroundStyle(Palette.accent.opacity(0.85))
                 VStack(alignment: .leading, spacing: Space.s6) {
-                    row("⇧E", "done + next")
-                    if canSkip { row("⇧S", "skip") }
+                    row("e", "done + next")
+                    if canSkip { row("s", "skip") }
                 }
             }
             .padding(.horizontal, Space.scaled(11))
@@ -3378,7 +3741,7 @@ private final class WheelYield {
             .allowsHitTesting(false)
             .accessibilityElement(children: .combine)
             .accessibilityLabel(
-                canSkip ? "Flow mode. Shift E: done and next. Shift S: skip." : "Flow mode. Shift E: done and next.")
+                canSkip ? "Flow mode. E: done and next. S: skip." : "Flow mode. E: done and next.")
         }
 
         private func row(_ key: String, _ label: String) -> some View {

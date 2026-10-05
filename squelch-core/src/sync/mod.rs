@@ -191,8 +191,30 @@ enum Mailbox {
 }
 
 impl Mailbox {
-    fn is_sent(self) -> bool {
-        matches!(self, Mailbox::Sent)
+    /// Whether one fetched message lands as sent. THE MESSAGE'S OWN LABELS
+    /// DECIDE when Gmail served them, not the walk that found it: the
+    /// `labelId` filter on `history.list` leaks in both directions, and an
+    /// INBOX walk has handed back the user's own outbound mail. The composer's
+    /// send echo had already written that row as sent, the INBOX sighting
+    /// MINed `is_sent` to 0, and every message one tenant sent from the app
+    /// was stored as received mail and gone from the sent page.
+    ///
+    /// INBOX present is received, whichever walk found it, which keeps a note
+    /// to self (both labels) the visible copy, as the walk order already does.
+    /// Otherwise the INBOX walk defers to a SENT label, and the SENT walk keeps
+    /// what it always did: a leaked archived message carrying neither label
+    /// stays out of triage rather than surfacing mail a filter skipped the
+    /// inbox for. No labels at all (a format that omits them) falls back to
+    /// the walk. Spam stays spam: that batch is never sent mail.
+    fn sighting_is_sent(self, label_ids: &[String]) -> bool {
+        if self == Mailbox::Spam {
+            return false;
+        }
+        let has = |l: &str| label_ids.iter().any(|x| x == l);
+        if has(LABEL_INBOX) {
+            return false;
+        }
+        self == Mailbox::Sent || has(LABEL_SENT)
     }
     fn is_spam(self) -> bool {
         matches!(self, Mailbox::Spam)
@@ -400,6 +422,9 @@ pub struct GmailMessage {
     pub id: String,
     #[serde(default)]
     pub thread_id: Option<String>,
+    /// The message's labels as of this read; every format carries them.
+    #[serde(default)]
+    pub label_ids: Vec<String>,
     /// base64url of the full RFC822 message (present with `format=raw`).
     #[serde(default)]
     pub raw: Option<String>,
@@ -2385,7 +2410,7 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 gmail_thread_id: msg.thread_id.clone(),
                 raw,
                 internal_date: parse_internal_date(msg.internal_date.as_deref()),
-                is_sent: mailbox.is_sent(),
+                is_sent: mailbox.sighting_is_sent(&msg.label_ids),
                 is_spam: mailbox.is_spam(),
                 account_addr: self.account_email.clone(),
             };
@@ -3756,6 +3781,9 @@ mod tests {
         listing: HashMap<String, Vec<String>>,
         /// gmail message id -> RFC822 source.
         bodies: HashMap<String, String>,
+        /// gmail message id -> the `labelIds` its `messages.get` reports.
+        /// Absent means the field is omitted, as the older fixtures expect.
+        message_labels: HashMap<String, Vec<String>>,
         errors: HashMap<String, std::collections::VecDeque<(u16, String)>>,
         retry_after: Option<String>,
         /// labelId -> the verbatim 200 body `labels.get` answers with. Absent
@@ -3792,6 +3820,13 @@ mod tests {
         }
         fn body(&self, id: &str, eml: String) -> &Self {
             self.0.lock().unwrap().bodies.insert(id.to_string(), eml);
+            self
+        }
+        fn message_labels(&self, id: &str, labels: &[&str]) -> &Self {
+            self.0.lock().unwrap().message_labels.insert(
+                id.to_string(),
+                labels.iter().map(|s| s.to_string()).collect(),
+            );
             self
         }
         /// Make `messages.get` for `id` take `d` before it answers.
@@ -3918,13 +3953,18 @@ mod tests {
             // `payload.headers` a `format=metadata` caller reads. Gmail sends one
             // or the other per the requested format; serving both keeps the mock
             // format-agnostic, and each caller reads only its own field.
-            Some(eml) => Json(json!({
-                "id": id,
-                "raw": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(eml),
-                "payload": { "headers": mock_headers(eml) },
-                "internalDate": Utc::now().timestamp_millis().to_string(),
-            }))
-            .into_response(),
+            Some(eml) => {
+                let mut body = json!({
+                    "id": id,
+                    "raw": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(eml),
+                    "payload": { "headers": mock_headers(eml) },
+                    "internalDate": Utc::now().timestamp_millis().to_string(),
+                });
+                if let Some(labels) = st.message_labels.get(&id) {
+                    body["labelIds"] = json!(labels);
+                }
+                Json(body).into_response()
+            }
             None => StatusCode::NOT_FOUND.into_response(),
         }
     }
@@ -5887,6 +5927,85 @@ mod tests {
             crate::metrics::render(&metrics, None)
                 .contains("squelchd_embedder_gate_timeouts_total 1\n"),
             "a ceiling nobody can scrape is a ceiling nobody knows fired"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_inbox_walk_that_leaks_an_echoed_send_does_not_demote_it() {
+        // Production, 2026-10: the INBOX history walk handed back the user's
+        // own sends. The INBOX half ingests first and the SENT half subtracts
+        // its ids, so the walk alone decided the row was received mail, and
+        // it was gone from the sent page. The message's own labels
+        // (SENT, no INBOX) are what must decide.
+        let (store, acct) = store_at_cursor(Some(100));
+        let now = Utc::now();
+        let eml = sent_eml(now, "alice@friends.com", "re: the lease");
+
+        let echoed = ingest::ingest_sent(
+            &store,
+            acct,
+            "me@example.com",
+            "g-out",
+            None,
+            eml.clone().into_bytes(),
+            Some(now),
+            now,
+        )
+        .unwrap()
+        .expect("the echo commits a row");
+
+        let g = MockGmail::default();
+        g.history(LABEL_INBOX, LabelHistory::added(160, &[(160, "g-out")]));
+        g.history(LABEL_SENT, LabelHistory::added(160, &[(160, "g-out")]));
+        g.body("g-out", eml);
+        g.message_labels("g-out", &["SENT"]);
+        let base = serve_mock(g.clone()).await;
+
+        engine(store.clone(), acct, &base)
+            .poll_once()
+            .await
+            .unwrap();
+
+        assert!(
+            store.stored_is_sent(echoed).unwrap(),
+            "the INBOX sighting must not demote the echo to received mail"
+        );
+        assert!(store.events_after(acct, 0, 100).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_note_to_self_found_by_the_sent_walk_alone_lands_visible() {
+        // The other direction of the same rule: a message carrying INBOX is
+        // received mail whichever walk reached it, so a note to self that only
+        // the SENT history returned still lands as the visible copy.
+        let (store, acct) = store_at_cursor(Some(100));
+        let now = Utc::now();
+        let eml = format!(
+            "From: me@example.com\r\n\
+             To: me@example.com\r\n\
+             Subject: note to self about the lease\r\n\
+             Date: {}\r\n\
+             \r\n\
+             remember to countersign\r\n",
+            now.to_rfc2822()
+        );
+
+        let g = MockGmail::default();
+        g.history(LABEL_INBOX, LabelHistory::quiet(150));
+        g.history(LABEL_SENT, LabelHistory::added(150, &[(150, "g-self")]));
+        g.body("g-self", eml);
+        g.message_labels("g-self", &["INBOX", "SENT", "UNREAD"]);
+        let base = serve_mock(g.clone()).await;
+
+        engine(store.clone(), acct, &base)
+            .poll_once()
+            .await
+            .unwrap();
+
+        let view = store.thread_view_with_html(acct, "g-self").unwrap();
+        assert!(
+            !store.stored_is_sent(view.messages[0].id).unwrap(),
+            "the inbox copy is received mail, whichever walk found it"
         );
     }
 

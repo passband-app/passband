@@ -162,6 +162,31 @@ enum Reading {
         .sorted(by: boardOrder)
     }
 
+    /// THE WALK ACROSS SENDERS: who the reader goes to when it runs off the end
+    /// of one sender's mail. `order` is the board AS IT STOOD WHEN THE TILE WAS
+    /// OPENED, and it has to be a snapshot: a sender is placed by its newest
+    /// unresolved message, so every done on the way through a stack moves that
+    /// sender down the live board, and "the card after this one" read off the
+    /// live board would skip everyone it had just been moved past.
+    ///
+    /// `board` is the live, pruned one, and it supplies the mail: a sender
+    /// cleared since the snapshot is passed over, and one partly read opens on
+    /// what is left. A sender whose newest mail is the thread already open is
+    /// passed over too, since opening it would be standing still.
+    static func next(
+        after address: String, in order: [String], board: [ReadingSender], notThread: String
+    ) -> ReadingSender? {
+        guard let here = order.firstIndex(of: address) else { return nil }
+        for candidate in order.dropFirst(here + 1) {
+            if let sender = board.first(where: { $0.address == candidate }),
+                !sender.latestThreadId.isEmpty, sender.latestThreadId != notThread
+            {
+                return sender
+            }
+        }
+        return nil
+    }
+
     static func domainPattern(_ address: String) -> String {
         let domain =
             SenderID.faviconDomain(address) ?? address.split(separator: "@").last.map(String.init)

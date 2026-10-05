@@ -397,18 +397,14 @@ struct DiscoveryGuide: View {
 /// a lit top edge.
 struct DiscoveryKeycap: View {
     let label: String
-    var large = false
-    init(_ label: String, large: Bool = false) {
-        self.label = label
-        self.large = large
-    }
+    init(_ label: String) { self.label = label }
 
     var body: some View {
         Text(label)
-            .font(Typo.mono(large ? 12 : 11, weight: .medium))
+            .font(Typo.mono(11, weight: .medium))
             .foregroundStyle(Palette.ink.opacity(0.85))
-            .padding(.horizontal, large ? 8 : 7)
-            .frame(minWidth: large ? 25 : 22, minHeight: large ? 24 : 21)
+            .padding(.horizontal, 7)
+            .frame(minWidth: 22, minHeight: 21)
             .background(
                 RoundedRectangle(cornerRadius: 5, style: .continuous)
                     .fill(Palette.readerBackground.opacity(0.85))

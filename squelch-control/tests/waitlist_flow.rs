@@ -163,6 +163,8 @@ impl Harness {
             profile_url: "http://127.0.0.1:1/profile".into(),
             userinfo_url: "http://127.0.0.1:1/userinfo".into(),
             alert_webhook_url: None,
+            // No agent door: `/agent/auth` is not mounted.
+            workos: None,
             bifrost: None,
             waitlist: waitlist.then(|| WaitlistConfig {
                 admin_token: ADMIN_TOKEN.into(),
@@ -933,6 +935,7 @@ async fn a_signup_cookie_is_not_an_admin_cookie() {
             invite: Some(1),
             app: false,
             reconnect: false,
+            agent: false,
             iat: chrono::Utc::now().timestamp(),
         },
     );

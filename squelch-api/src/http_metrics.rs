@@ -8,6 +8,9 @@
 //!
 //! The clock stops when the handler returns its response HEAD, before the body
 //! streams; see the histogram's docs for why that is the number wanted here.
+//!
+//! A handler that awaits a model before it answers owes [`ROUTE_CLASSES`] a
+//! row; a test walks the table against the real router.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -15,7 +18,29 @@ use std::time::Instant;
 use axum::extract::{MatchedPath, Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
-use squelch_core::metrics::{HTTP_ROUTE_UNMATCHED, SyncMetrics};
+use squelch_core::metrics::{HTTP_ROUTE_UNMATCHED, RouteClass, SyncMetrics};
+
+/// Every (method, route template) that is not [`RouteClass::Local`]. Keyed on
+/// the method too: `GET /client/rules` is a store read, `POST /client/rules`
+/// infers a disposition.
+pub const ROUTE_CLASSES: &[(&str, &str, RouteClass)] = &[
+    ("GET", "/client/v2/fye/headline", RouteClass::Llm),
+    ("GET", "/client/rules/suggest", RouteClass::Llm),
+    ("POST", "/client/rules", RouteClass::Llm),
+    ("PUT", "/client/rules/{id}", RouteClass::Llm),
+    // A relay: the response head is the gateway's, so the clock stops on the
+    // provider's time to first byte.
+    ("POST", "/client/assistant/messages", RouteClass::Llm),
+];
+
+/// Anything not in the table, an unmatched path included, is the daemon's own
+/// time.
+fn route_class(method: &str, route: &str) -> RouteClass {
+    ROUTE_CLASSES
+        .iter()
+        .find(|(m, r, _)| *m == method && *r == route)
+        .map_or(RouteClass::Local, |(_, _, class)| *class)
+}
 
 pub async fn record_http_metrics(
     State(metrics): State<Arc<SyncMetrics>>,
@@ -34,6 +59,7 @@ pub async fn record_http_metrics(
         &route,
         method.as_str(),
         resp.status().as_u16(),
+        route_class(method.as_str(), &route),
         started.elapsed().as_secs_f64(),
     );
     resp

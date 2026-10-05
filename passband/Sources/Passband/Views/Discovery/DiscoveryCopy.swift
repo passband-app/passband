@@ -54,21 +54,6 @@ extension FeatureSet {
         }
     }
 
-    /// The set's mark, for the shared placeholder vignette and anywhere a
-    /// glyph has to stand in for the set.
-    var symbol: String {
-        switch self {
-        case .clear: "checkmark.circle"
-        case .flow: "arrow.forward.circle"
-        case .later: "clock"
-        case .teach: "text.bubble"
-        case .find: "magnifyingglass"
-        case .read: "books.vertical"
-        case .glance: "shippingbox"
-        case .write: "square.and.pencil"
-        }
-    }
-
     // MARK: - the guide
 
     /// The guide's steps, in the order a hand does them. A step with no key
@@ -178,16 +163,10 @@ enum DiscoveryCopy {
     static let pageTitle = "Discover"
     static let pageSubtitle = "ways through your mail"
 
-    static let eyebrow = "WAYS THROUGH YOUR MAIL"
     static let headline = "More than one way through."
-    /// Says the order out loud, so the column reads as everyday first rather
-    /// than as a queue: nothing here is owed.
-    static let subline = "The everyday ones come first. Try whichever looks good, whenever you like."
-
     /// Everything unlocked: the top section has gone, and the page says so
     /// calmly rather than throwing a party.
     static let completeHeadline = "You know every way through."
-    static let completeSubline = "All of it is yours now, and it stays here for whenever you want a reminder."
 
     /// The owner's word, verbatim. Do not restyle it into "Found".
     static let unlockedHeading = "Unlocked"

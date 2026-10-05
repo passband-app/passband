@@ -35,12 +35,17 @@ Config comes from `~/.config/squelch/config.toml` (override with `--config`) plu
 | `SQUELCH_POLL_SECS` | Gmail poll interval | `45` |
 | `SQUELCH_FETCH_CONCURRENCY` | `messages.get` calls in flight while a window of mail is fetched (first backfill, catch-up, history walk); each is a raw body in memory, and the Gmail budget caps the gain past 2 | `2` |
 | `SQUELCH_MCP_ALLOWED_HOSTS` | extra Host values when fronted by a proxy | — |
+| `SQUELCH_MCP_OAUTH_ISSUER` | OAuth issuer for the agent door; set together with the next one | unset (agent door open) |
+| `SQUELCH_MCP_PUBLIC_URL` | this daemon's public `/mcp` URL, the token audience | unset (agent door open) |
+| `SQUELCH_MCP_OAUTH_JWKS_URL` | override for the issuer's signing keys | `<issuer>/oauth2/jwks` |
 | `SQUELCH_METRICS_BIND` | second listener serving `GET /metrics` and `GET /healthz` | unset (no port opened) |
 | `SQUELCH_EMBED_MODEL` | semantic-recall weights, same value as `[embed] model` | `Xenova/bge-small-en-v1.5` |
 | `SQUELCH_CRED_BACKEND` | `keyring` or `file` | `keyring` on macOS, `file` on Linux |
 | `SQUELCH_CREDENTIALS_PATH` | where the `file` backend writes, mode 0600 | `~/.config/squelch/credentials.json` |
 
 The listener defaults to loopback and never silently widens. To expose it beyond the machine, front it with a reverse proxy (e.g. `tailscale serve --bg 8848`) and set `SQUELCH_MCP_ALLOWED_HOSTS`.
+
+The agent door has three modes, and the startup line says which one it is in. With neither `SQUELCH_MCP_OAUTH_ISSUER` nor `SQUELCH_MCP_PUBLIC_URL` set it is **open**: no sign-in, and the Host allow-list (loopback plus `SQUELCH_MCP_ALLOWED_HOSTS`) is its only guard, which is the self-host posture and why the advice above matters. With both set it requires **OAuth** bearer tokens from that issuer, bound to this mailbox's address, and adds the public URL's host to the allow-list itself. With only one set, a value that is not a valid URL, a public URL whose path is not exactly `/mcp` (no trailing slash, other path or query), or both set while the account email is unset or the `me@localhost` placeholder (tokens need a real mailbox to bind to), it is **misconfigured**: `/mcp` answers 503, the human door serves on, and the log names the setting at fault. The full model is in [docs/SECURITY.md](../docs/SECURITY.md) §8.
 
 ### The embedding model
 

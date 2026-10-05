@@ -3,9 +3,13 @@
 // uses APIClient with an explicit agent audience. The server excludes pending
 // and restricted sources even though the human reader can open them.
 //
-// THREE TIERS, and the descriptions say which is which because the model reads
+// FOUR TIERS, and the descriptions say which is which because the model reads
 // them:
 //   * READS take nothing back and are never gated.
+//   * HELP reads nothing at all: product_help, list_shortcuts and find_setting
+//     answer from tables compiled into the app (Lib/ProductGuide.swift), so
+//     "how do I reply all?" costs no daemon call and none of it sits in the
+//     system prompt of a question that never asked.
 //   * SAFE WRITES touch Passband's LOCAL store only (status, triage rules,
 //     drafts). Reversible in the app, invisible to Gmail, so no card.
 //   * GATED WRITES touch the mailbox. They park on a confirmation card and only
@@ -50,9 +54,12 @@ enum AgentTools {
         case labelMessage = "label_message"
         case sendEmail = "send_email"
         case unsubscribeSender = "unsubscribe_sender"
+        case productHelp = "product_help"
+        case listShortcuts = "list_shortcuts"
+        case findSetting = "find_setting"
 
         /// The chip's glyph. On the tool rather than in the view: a second
-        /// stringly-typed list of the same fourteen names is a list that drifts.
+        /// stringly-typed list of the same names is a list that drifts.
         var symbol: String {
             switch self {
             case .searchMail: "magnifyingglass"
@@ -69,6 +76,26 @@ enum AgentTools {
             case .labelMessage: "tag"
             case .sendEmail: "paperplane"
             case .unsubscribeSender: "hand.raised"
+            case .productHelp: "book"
+            case .listShortcuts: "keyboard"
+            case .findSetting: "gearshape"
+            }
+        }
+
+        /// Whether the tool exists on the platform in hand. The help tools
+        /// answer from a guide written against the MAC app: its keys, its rail,
+        /// its Settings panes. Offered on the phone they would tell somebody
+        /// holding one to press Enter, so the phone does not get them until it
+        /// has a guide of its own.
+        var isAvailable: Bool {
+            switch self {
+            case .productHelp, .listShortcuts, .findSetting:
+                #if os(macOS)
+                    true
+                #else
+                    false
+                #endif
+            default: true
             }
         }
     }
@@ -87,7 +114,7 @@ enum AgentTools {
         name: String, input: [String: JSONValue], gate: ActionGate,
         cite: (ToolCitation) -> Void, show: ([EmailCard]) -> Void
     ) async -> ToolOutcome {
-        guard let tool = Tool(rawValue: name) else {
+        guard let tool = Tool(rawValue: name), tool.isAvailable else {
             return failure("unknown tool \(name)", summary: "unknown tool")
         }
         do {
@@ -106,6 +133,9 @@ enum AgentTools {
             case .labelMessage: return await labelMessage(input, gate)
             case .sendEmail: return await sendEmail(input, gate)
             case .unsubscribeSender: return await unsubscribeSender(input, gate)
+            case .productHelp: return productHelp(input)
+            case .listShortcuts: return listShortcuts()
+            case .findSetting: return findSetting(input)
             }
         } catch {
             // Compact, so the model can adapt (a sealed message reads as a 404).
@@ -395,6 +425,41 @@ enum AgentTools {
             ])
         }
         return ok(["contacts": rows], summary: "looked up \(quoted(query))")
+    }
+
+    // MARK: - help (the app's own tables)
+
+    // PLAIN TEXT, where every other result is JSON. A guide is prose the model
+    // reads and then says in its own words, and wrapping it in an object would
+    // spend tokens on escaped newlines to carry no structure at all. None of it
+    // is mail-derived either: the app wrote every word, so the Trust rules have
+    // nothing to guard here.
+
+    private static func productHelp(_ input: [String: JSONValue]) -> ToolOutcome {
+        guard let raw = string(input, "topic"), let topic = ProductGuide.Topic(rawValue: raw) else {
+            // The model sometimes asks its question instead of naming a topic.
+            // Answering with the list teaches it the vocabulary in one turn.
+            return failure(
+                "topic must be one of: " + ProductGuide.Topic.allCases.map(\.rawValue).joined(separator: ", "),
+                summary: "no such help topic")
+        }
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+        return ToolOutcome(
+            content: ProductGuide.text(topic, runningVersion: version), isError: false,
+            summary: "read the guide: \(topic.title)")
+    }
+
+    private static func listShortcuts() -> ToolOutcome {
+        ToolOutcome(
+            content: ProductGuide.shortcuts(), isError: false, summary: "checked the shortcuts")
+    }
+
+    private static func findSetting(_ input: [String: JSONValue]) -> ToolOutcome {
+        let query = string(input, "query")
+        return ToolOutcome(
+            content: ProductGuide.settings(matching: query), isError: false,
+            summary: query.map { "looked up the setting for \(quoted($0))" }
+                ?? "listed the settings")
     }
 
     // MARK: - safe writes (local store only)
@@ -1143,5 +1208,47 @@ enum AgentTools {
                         description: "The thread_id that message_id came back with."),
                 ],
                 required: ["message_id", "thread_id"])),
+
+        Wire.ToolDef(
+            name: Tool.productHelp.rawValue,
+            description: """
+                How Passband itself works, one topic at a time: what a screen is for, \
+                how to do something in the app, which key or button does it. Call \
+                this before answering any question about using Passband ("how do I \
+                reply all?", "what is the noise page?", "can I schedule a send?"). \
+                Pick the closest topic, and ask for a second one if the first does \
+                not cover it. It reads the app's built-in guide, never the mailbox.
+                """,
+            input_schema: .init(
+                properties: [
+                    "topic": .init(
+                        type: "string", description: ProductGuide.topicIndex,
+                        values: ProductGuide.Topic.allCases.map(\.rawValue))
+                ],
+                required: ["topic"])),
+
+        Wire.ToolDef(
+            name: Tool.listShortcuts.rawValue,
+            description: """
+                Every keyboard shortcut in Passband, grouped by where it works. The \
+                same table the app shows when the user presses ?. Use it for "what \
+                are the shortcuts" or to find the key for one action.
+                """,
+            input_schema: .init(properties: [:], required: nil)),
+
+        Wire.ToolDef(
+            name: Tool.findSetting.rawValue,
+            description: """
+                Find a Passband setting by describing it ("dark mode", "signature", \
+                "stop loading images"). Returns each match with where it lives in \
+                Settings and what it does. Omit the query to list every setting.
+                """,
+            input_schema: .init(
+                properties: [
+                    "query": .init(
+                        type: "string",
+                        description: "A few words for the setting or its effect.")
+                ],
+                required: nil)),
     ]
 }

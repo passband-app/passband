@@ -156,7 +156,7 @@ actor RehearsalAPI {
                 (term.isEmpty || "\(message.sender) \(message.subject) \(message.body)".lowercased().contains(term))
             }.map { SearchHit(id: $0.id, thread_id: threadID($0.id), from_addr: address($0), from_name: $0.sender, subject: $0.subject, received_at: stamp(), snippet: $0.explanation, legs: ["keyword"]) }
             data = try encode(SearchPage(items: hits, match_kind: "keyword", sort: query["sort"]))
-        case ("GET", "/client/sealed"), ("GET", "/client/marketing"), ("GET", "/client/groups"), ("GET", "/client/unsubscribes"), ("GET", "/client/audit"), ("GET", "/client/triage-feedback"), ("GET", "/client/contacts"), ("GET", "/client/senders"):
+        case ("GET", "/client/sealed"), ("GET", "/client/marketing"), ("GET", "/client/groups"), ("GET", "/client/unsubscribes"), ("GET", "/client/audit"), ("GET", "/client/triage-feedback"), ("GET", "/client/contacts"), ("GET", "/client/senders"), ("GET", "/client/sender-domains"):
             data = Data("[]".utf8)
         case ("GET", "/client/person"):
             // The practice inbox has no history behind its senders: the card

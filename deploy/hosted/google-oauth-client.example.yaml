@@ -33,11 +33,33 @@
 #
 # ## Rotation
 #
-# Replace the Secret, then restart the tenants that need the new value:
-# `kubectl -n tenants rollout restart deploy -l app.kubernetes.io/name=squelchd`.
+# NEVER `kubectl rollout restart` the tenant Deployments to make them read a
+# new value. It restarts every tenant at once, and it records a
+# `kubectl-rollout` field manager on each Deployment. The warden's drift check
+# (squelch-warden/src/drift.rs, `foreign_managers`) treats any manager that is
+# not the warden as foreign, and the roller then skips that tenant ("needs a
+# person (another field manager…)") on every roll until somebody runs
+# `squelch-control reconcile <label>` for it, one mailbox blip each.
+# ROLLOUT.md, "The five things that actually bite", item 1.
+#
+# Change the Secret's NAME instead, which changes the rendered pod, so the
+# roller delivers it one tenant per tick:
+#
+# 1. Create the new value under a NEW name, `google-oauth-client-2` (the
+#    command at the top, new name). Do this FIRST: this reference is NOT
+#    optional, so a pod rendered against a Secret that does not exist yet
+#    sits in CreateContainerConfigError.
+# 2. Set SQUELCH_WARDEN_OAUTH_SECRET_NAME: "google-oauth-client-2" in
+#    15-warden-config.yaml, then apply it and restart the serving WARDEN in the
+#    same minute (SETUP.md §8):
+#        kubectl apply -f deploy/hosted/15-warden-config.yaml
+#        kubectl -n warden rollout restart deploy/squelch-warden
+# 3. Let the roller converge. Delete the old Secret only after every tenant
+#    reports current (`squelch-control drift <label>`): a tenant not yet rolled
+#    still references it, and that reference is required.
+#
 # Rotating the client secret in Google's console invalidates nothing that is
-# already issued, so there is no rush and no outage; a daemon picks the new one
-# up at its next start.
+# already issued, so there is no rush and no outage while the roller works.
 #
 # The Secret's NAME is `SQUELCH_WARDEN_OAUTH_SECRET_NAME` on the warden
 # (default `google-oauth-client`); the two data keys are fixed.

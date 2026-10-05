@@ -193,7 +193,11 @@ final class Prefs {
         // like a stored one, and this needs to see absence — the same reason
         // `tourCompleted` is written the way it is.
         _nameChosen = defaults.object(forKey: Key.nameChosen) as? Bool ?? !storedName.isEmpty
-        _signature = defaults.string(forKey: Key.signature) ?? ""
+        // ABSENT, NOT EMPTY, is what earns the default. The Settings editor
+        // stores on every keystroke, so a signature somebody cleared is a
+        // stored "" and stays none; only an install that never touched the
+        // field signs with the house line.
+        _signature = defaults.string(forKey: Key.signature) ?? Prefs.defaultSignature
         _assistantModel =
             AssistantModel.migrating(rawValue: defaults.string(forKey: Key.assistantModel) ?? "")
             ?? .haiku
@@ -432,6 +436,12 @@ final class Prefs {
         defaults.set(local, forKey: Key.userName)
     }
 
+    /// What every install signs with until its human says otherwise. Markdown,
+    /// like any other signature, so the dashes need the blank line
+    /// `signatureSeed` puts above them: "--" directly under a line of text is
+    /// a CommonMark heading underline, not a separator.
+    static let defaultSignature = "--\n\nSent from [Passband](https://passband.app)"
+
     /// The email signature, as markdown — same dialect as the compose body.
     /// Stored raw (no trimming in the setter: it is bound to a live editor, and
     /// normalizing under the caret would fight every trailing newline typed).
@@ -451,11 +461,18 @@ final class Prefs {
         return sig.isEmpty ? "" : "\n\n" + sig
     }
 
-    /// True while a compose body holds nothing the user typed: blank, or exactly
-    /// the seeded signature block. The draft machinery treats such a body as
-    /// empty — it must neither block a restore nor be worth saving as a draft.
+    /// True while a compose body holds nothing the user typed: blank, or only
+    /// the signature. The draft machinery treats such a body as empty — it
+    /// must neither block a restore nor be worth saving as a draft.
+    ///
+    /// COMPARED TRIMMED, not against the seed byte for byte. A picture added
+    /// to a fresh composer and taken out again closes up one of the seed's two
+    /// leading newlines, and that body is as untyped as the one it started as:
+    /// an exact match called it written, so it sent, and Esc kept it as a
+    /// draft of nothing but the signature.
     func isBodyUntouched(_ body: String) -> Bool {
-        body.trimmed.isEmpty || body == signatureSeed
+        let typed = body.trimmed
+        return typed.isEmpty || typed == signature.trimmed
     }
 
     private var _assistantModel: AssistantModel

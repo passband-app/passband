@@ -355,6 +355,14 @@ actor APIClient {
         try await get("/client/senders", query: ["q": q, "limit": String(limit)])
     }
 
+    /// The rule editor's `*@` suggestions: the hosts mail comes from, ranked
+    /// for a fragment of one. An empty `q` is a real question, like `senders`.
+    /// A daemon older than the route answers 404; the menu then rolls hosts up
+    /// from `senders` instead (`RulePatternSuggest.domains(from:)`).
+    func senderDomains(_ q: String, limit: Int = 8) async throws -> [SenderDomainHit] {
+        try await get("/client/sender-domains", query: ["q": q, "limit": String(limit)])
+    }
+
     /// The reader's contact card for one address. A daemon older than the
     /// route answers 404, which the card treats as "no history to show".
     func person(_ addr: String) async throws -> PersonCard {
@@ -669,6 +677,17 @@ actor APIClient {
 
     func getUnsubscribes() async throws -> [UnsubscribeRecord] {
         try await get("/client/unsubscribes")
+    }
+
+    /// A filtered rule that would keep `sender`'s consequential mail and drop
+    /// the promotion, or nil when there is no such line to draw. The daemon
+    /// asks a model once and remembers; after that the answer rides
+    /// `getUnsubscribes`. A daemon too old for the route 404s, which the
+    /// caller reads as none.
+    func unsubSmartBlock(sender: String) async throws -> SmartBlockProposal? {
+        let answer: SmartBlockAnswer = try await get(
+            "/client/unsubscribes/smart_block", query: ["sender": sender])
+        return answer.smart_block
     }
 
     @discardableResult

@@ -104,13 +104,13 @@ enum Analytics {
         "thread_opened", "thread_live_arrival", "undo_fired", "assistant_asked",
         "search_deeper_started",
         "triage_corrected", "triage_digest", "rule_created", "rule_deleted",
-        "process_completed", "notification_opened", "sealed_revealed",
+        "notification_opened", "sealed_revealed",
         "shipment_cleared",
         "connect_succeeded", "connection_lost", "connection_restored",
         "account_added",
         "tour_started", "tour_completed", "tour_skipped", "whats_new_shown",
         "invite_sent", "invite_nudge_accepted", "invite_nudge_dismissed",
-        "ios_nudge_closed",
+        "ios_nudge_closed", "agent_nudge_closed",
         "group_created", "group_updated", "group_deleted",
         // Discovery: which feature sets get found and which get kept. `full`
         // only: this is the "which actions are used" layer, not whether the
@@ -137,7 +137,7 @@ enum Analytics {
         "thread_live_arrival",
         "undo_fired", "assistant_asked",
         "triage_corrected", "triage_digest", "rule_created", "rule_deleted",
-        "process_completed", "notification_opened", "sealed_revealed",
+        "notification_opened", "sealed_revealed",
         "connect_succeeded", "connection_lost", "connection_restored",
         "account_added",
         // Onboarding carries where it started from and the practice step it
@@ -154,6 +154,10 @@ enum Analytics {
         // The TestFlight ask closing, with one bool: whether the link was
         // copied. A QR scan leaves no trace, so this is a floor on uptake.
         "ios_nudge_closed",
+        // The agent-door ad closing, with one bool: whether its button was
+        // taken to Settings > Agents. Whether an agent then connects is not
+        // measured here, at any level.
+        "agent_nudge_closed",
         // Send groups carry a mode and a member COUNT. Whether people organize
         // their correspondents into audiences at all, and which shape they
         // reach for, is the "does the product work" question for this feature;
@@ -178,7 +182,7 @@ enum Analytics {
             // Listed by hand, so a new case must land here too or its undo
             // trips the debug assert.
             "archive", "done", "label", "ruleDelete", "groupDelete", "remind", "send",
-            "draftDelete", "schedule", "scheduledCancel",
+            "draftDelete", "schedule", "scheduledCancel", "skip",
             // group_* modes — how an audience is addressed. "individual" is the
             // only one that is not also a header name.
             "to", "bcc", "individual",

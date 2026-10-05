@@ -46,9 +46,14 @@ struct EmailWebView: View {
     let bubble: Bool
     /// Which side the bubble is on. Only read when `bubble` is set.
     let mine: Bool
+    /// The message this body is, for the reader's find (ReaderFind). nil for a
+    /// body no find reaches: a preview, a reveal, the forward composer.
+    let findID: Int?
 
     @Environment(Prefs.self) private var prefs
     @Environment(AppStore.self) private var store
+    /// Present only inside the reader, and read through `findRequest`.
+    @Environment(ReaderFind.self) private var find: ReaderFind?
 
     @State private var height: CGFloat = 0
     /// The width the document came to, for a hugging bubble. 0 until the
@@ -73,6 +78,10 @@ struct EmailWebView: View {
     /// something — see `apply`, which defers to the measuring pass except when
     /// this is set.
     @State private var sizingIsUserDriven = false
+    /// Where the document says the active find match is: its top edge and its
+    /// height, in the frame's own points. Only drawn while this body holds the
+    /// cursor, so a stale one costs nothing.
+    @State private var findSpot: FindSpot?
 
     /// HOW MANY OF THIS DOCUMENT'S REPORTED HEIGHTS ARE ALLOWED TO BECOME THE
     /// FRAME'S HEIGHT, and when. Exactly two, and both at a moment that means
@@ -107,7 +116,7 @@ struct EmailWebView: View {
     init(
         html: String, cacheKey: String? = nil, allowTrackers: Bool = false,
         attachments: [Attachment] = [], textHeight: CGFloat = 0,
-        bubble: Bool = false, mine: Bool = false
+        bubble: Bool = false, mine: Bool = false, findID: Int? = nil
     ) {
         self.html = html
         self.cacheKey = cacheKey
@@ -116,6 +125,7 @@ struct EmailWebView: View {
         self.textHeight = textHeight
         self.bubble = bubble
         self.mine = mine
+        self.findID = findID
         _prepared = State(
             initialValue: PreparedBodies.shared.get(
                 PreparedKeyMemo.shared.key(
@@ -279,6 +289,8 @@ struct EmailWebView: View {
                 // The pool's message identity. nil is not "unkeyed", it is
                 // NOT POOLABLE — see WebFramePool.Key.
                 poolKey: cacheKey,
+                find: findRequest,
+                onFind: { request, result in noteFind(request, result) },
                 onHeight: { m in
                     apply(m)
                 },
@@ -297,6 +309,7 @@ struct EmailWebView: View {
             // past the edge while the heights are being retaken.
             .frame(maxWidth: displayWidth)
             .frame(height: empty ? 0 : displayHeight)
+            .overlay(alignment: .topLeading) { findAnchor }
             // A NARROWER OR WIDER FRAME IS A NEW DOCUMENT TO SIZE. The column
             // changes width when a pane opens beside the reader or the window
             // is resized; the document reflows and reports its new height —
@@ -449,6 +462,34 @@ struct EmailWebView: View {
                 height = rememberedHeight ?? max(guessedHeight ?? 0, Self.unmeasuredFallbackHeight)
             }
             measured = true
+        }
+    }
+
+    /// What the reader's find wants of this body, or nil when there is no
+    /// find, or no reader.
+    private var findRequest: FindRequest? {
+        guard let find, let findID else { return nil }
+        return find.request(for: findID)
+    }
+
+    /// The document's answer: file the count, and when this body holds the
+    /// cursor, remember where the match is and ask the reader to look.
+    private func noteFind(_ request: FindRequest, _ result: FindResult) {
+        guard let find, let findID else { return }
+        find.report(findID, query: request.query, count: result.count, active: result.active)
+        guard result.active >= 0 else { return }
+        findSpot = FindSpot(y: result.y, height: max(1, result.height))
+        find.aim()
+    }
+
+    /// THE SCROLL TARGET FOR THE ACTIVE MATCH. The column scrolls, the frame
+    /// does not, so "bring that match into view" has to be said to the column,
+    /// and the column can only aim at a view. This is that view: nothing
+    /// drawn, pinned where the document says the match is.
+    @ViewBuilder
+    private var findAnchor: some View {
+        if let request = findRequest, request.active >= 0, let spot = findSpot {
+            FindAnchor(spot: spot)
         }
     }
 
@@ -708,6 +749,12 @@ enum EmailFrame {
         controller.addUserScript(
             WKUserScript(
                 source: measuringScript, injectionTime: .atDocumentEnd,
+                forMainFrameOnly: true))
+        // Find in the open email (Lib/FindInThread.swift). Its own script so
+        // the search can be read, and tested, without the measuring bridge.
+        controller.addUserScript(
+            WKUserScript(
+                source: FindScript.source, injectionTime: .atDocumentEnd,
                 forMainFrameOnly: true))
         config.userContentController = controller
 
@@ -1096,6 +1143,10 @@ final class EmailFrameCoordinator: NSObject {
     var onLoaded: () -> Void
     var onQuotedFound: (Bool) -> Void
     var onLink: (String) -> Void
+    /// What this document holds of the reader's find term. Set on every update
+    /// like the four above; not an initializer argument because most hosts
+    /// (a preview, a reveal, the forward composer) never ask.
+    var onFind: (FindRequest, FindResult) -> Void = { _, _ in }
 
     /// The frame's permanent hinge, borrowed while this representable owns the
     /// frame. Strong, so `release` can still hand it to the pool after WebKit
@@ -1127,6 +1178,13 @@ final class EmailFrameCoordinator: NSObject {
     /// is unknown, which is what a load in flight leaves behind.
     private var wantedCollapse = true
     private var appliedCollapse: Bool?
+
+    /// THE FIND TERM THE HOST WANTS PAINTED, and the one the document has
+    /// painted. Apart for the reason the quoted history's two are: an update
+    /// that changed nothing about the find must not cost a script round trip
+    /// into every open message. `nil` wanted is no find at all.
+    private var wantedFind: FindRequest?
+    private var appliedFind: FindRequest?
 
     /// THE DENSITY THE HOST WANTS THE DOCUMENT DRAWN AT, and the one it is
     /// drawn at. Kept apart for the reason the quoted history's two are: `load`
@@ -1208,6 +1266,7 @@ final class EmailFrameCoordinator: NSObject {
         // function the toggle calls does not exist yet — and `documentDidLoad`
         // is what applies the host's wish once it does.
         appliedCollapse = nil
+        appliedFind = nil
         // The document about to land is written at these metrics, so there is
         // nothing to restyle when it does, unless the setting moves first.
         appliedMetrics = metrics
@@ -1242,6 +1301,9 @@ final class EmailFrameCoordinator: NSObject {
         // which is also a fresh host's default — so the update that follows
         // this has nothing to toggle and does not say so twice.
         appliedCollapse = true
+        // And parked with no find painted (checkIn clears it), so a reader
+        // with the bar up paints this one on the update that follows.
+        appliedFind = nil
         // A pool hit is a frame parked at the density in force now (the
         // density is in the key), so it is already drawn the way it is wanted.
         appliedMetrics = key.metrics
@@ -1305,6 +1367,34 @@ final class EmailFrameCoordinator: NSObject {
         applyCollapse(webView)
     }
 
+    func setFind(_ webView: WKWebView, _ request: FindRequest?) {
+        wantedFind = request
+        applyFind(webView)
+    }
+
+    /// Paint the wanted term and tell the host what the document holds of it.
+    /// `fresh` re-reads a document whose DRAWN text changed under a term it
+    /// had already searched: the quoted history folding or unfolding.
+    private func applyFind(_ webView: WKWebView, fresh: Bool = false) {
+        guard documentLive, fresh || appliedFind != wantedFind else { return }
+        appliedFind = wantedFind
+        guard let request = wantedFind else {
+            webView.evaluateJavaScript("window.__passbandFind && window.__passbandFind('')")
+            return
+        }
+        let query = Self.scriptLiteral(request.query)
+        webView.evaluateJavaScript(
+            "window.__passbandFind ? window.__passbandFind(\(query), \(request.active), \(fresh)) : null"
+        ) { [weak self] value, _ in
+            // An answer to a question nobody is asking any more: the term or
+            // the cursor moved while this one was in the content process.
+            guard let self, self.wantedFind == request,
+                let result = FindResult(payload: value)
+            else { return }
+            self.onFind(request, result)
+        }
+    }
+
     /// The document just finished loading, so it IS collapsed: the injected
     /// script does that before its first measurement. That is what makes the
     /// state knowable again — and what re-applies an expanded history the
@@ -1326,6 +1416,8 @@ final class EmailFrameCoordinator: NSObject {
         applyMetrics(webView, settle: false)
         applyCollapse(webView)
         settle(webView)
+        // After the collapse, so the search reads the document as it is drawn.
+        applyFind(webView, fresh: true)
     }
 
     /// A navigation that failed will never report anything, and a host still
@@ -1395,6 +1487,10 @@ final class EmailFrameCoordinator: NSObject {
             // behind it, so this is the only thing that ever tells the host
             // the document has finished moving.
             self?.settle(webView)
+            // And what is drawn is what a find matches, so the term in force
+            // is searched again: unfolding the history is how its matches
+            // come into the count at all.
+            self?.applyFind(webView, fresh: true)
         }
     }
 
@@ -1863,6 +1959,10 @@ final class WebFramePool {
         // height with no owner attached, so it is what the next checkout reports.
         entry.webView.evaluateJavaScript(
             "window.__passbandSetQuotes && window.__passbandSetQuotes(true)")
+        // And with nothing highlighted: the paint lives in the document, so a
+        // frame parked mid-find would come back still lit for a term nobody
+        // is looking for.
+        entry.webView.evaluateJavaScript("window.__passbandFind && window.__passbandFind('')")
 
         // Two frames of one document: keep the one just used.
         if let incumbent = frames.removeValue(forKey: key) {

@@ -274,14 +274,47 @@ the per-daemon thing this design imagined — `deploy/hosted/SETUP.md` §11.)
   by a pairing claim at `POST /client/pair`, each named, individually revocable, and
   dead on the next request. The pairing flow this was a prerequisite for is shipped
   with it (`squelchd pair`).
-- `/mcp` gets real bearer auth once internet-facing (today: localhost trust +
-  allowed-hosts). **STILL OPEN**, and the MVP ships around it rather than through
-  it: a tenant's Ingress declares the human-door prefixes only, so the agent door is
-  simply not published (see the runbook's "The agent door is not served"). That is
-  a routing answer to an auth question, and it holds exactly as long as nobody
-  wants MCP from the internet — which is the next thing somebody will want. Later,
-  MCP-spec OAuth so claude.ai can connect natively — marquee feature: point Claude
-  at your mailbox intelligence with no localhost anywhere.
+- `/mcp` gets real auth once internet-facing (self-host: localhost trust +
+  allowed-hosts, unchanged). **BUILT 2026-10-01 as MCP-spec OAuth, skipping the
+  bearer-token step this line used to plan**, and off until the operator turns it
+  on. The MVP shipped around the question: a tenant's Ingress declared the
+  human-door prefixes only, so the agent door was simply not published. That was a
+  routing answer to an auth question. The auth answer:
+  - Each tenant daemon is an OAuth **resource server** and nothing more. An
+    unauthenticated `/mcp` request gets a 401 pointing at the daemon's own
+    protected-resource metadata, which names the authorization server.
+  - The authorization server is **WorkOS AuthKit** in Standalone Connect mode. It
+    does client registration, PKCE, consent and token issuance, and delegates
+    login to the control plane (`GET /agent/auth`), which runs the same Google
+    identity hop as an app sign-in and tells WorkOS which mailbox signed in.
+    We did not write an authorization server, and that was the point of the
+    choice: a per-tenant consent page and token endpoint is a large public attack
+    surface for a team this size.
+  - The daemon verifies the JWT locally: signature against AuthKit's JWKS,
+    issuer, audience equal to its own `/mcp` URL, and **the token's `email` equal
+    to its own mailbox**. The last check is the tenant boundary. One wildcard
+    resource indicator covers the fleet, so any Passband user can obtain a token
+    aimed at another tenant's URL; audience alone would let them in. The claim
+    is there only because the WorkOS environment's JWT template puts it there;
+    without the template every token is refused, which is the safe direction.
+  - Before the control plane tells WorkOS who signed in, it shows its own page
+    naming the mailbox and asking the person to confirm they started this.
+    Client names on AuthKit's consent screen are self-chosen, so that screen
+    alone was not enough against a link sent by someone else.
+  - What it cost, both accepted with eyes open. WorkOS is now a party that can
+    mint a token that reads a hosted mailbox's non-sealed mail (sealed mail stays
+    structurally absent, and the agent door still cannot reach the write
+    credential). And revoking an agent is no longer ours to do on the next
+    request: AuthKit issues refresh tokens, so an approved agent keeps access
+    until its grant is revoked on the WorkOS side, an operator action today, and
+    the access token's lifetime only bounds how long a revoked grant's last
+    token still works. That is the one place this departs from the device-token
+    rule.
+  - Self-host gets none of this and loses nothing: with the two env vars unset
+    the door behaves exactly as before.
+  - Turning it on, the rollout order, and the three WorkOS facts to verify on
+    the real environment first are in `deploy/hosted/SETUP.md`. Still owed after
+    this: per-agent listing and revoke in Settings > Agents.
 - Credential file backend gains encryption-at-rest with a per-tenant key (KMS/age).
   SHIPPED, as age rather than KMS. The daemon reads `SQUELCH_CRED_AGE_IDENTITY`;
   the identity is minted in-cluster per tenant and written straight into that
@@ -360,8 +393,8 @@ The actual path, in order:
    so the one condition worth paging on has its own code
    (`deploy/hosted/ROLLOUT.md`).
    Still open from this phase's original list:
-   - **`/mcp` bearer auth.** Routed around, not solved: the tenant Ingress simply
-     does not publish the agent door. See "Changes to existing code" above.
+   - **`/mcp` auth. BUILT 2026-10-01** as OAuth through WorkOS AuthKit, off until
+     the operator sets the issuer. See "Changes to existing code" above.
    - **Litestream. BUILT 2026-08-10**, after being owed since the pre-k3s design
      promised it "from day one"; **client-side encryption added 2026-08-11**.
      One host-level systemd service on `carrier` streams every tenant's SQLite to

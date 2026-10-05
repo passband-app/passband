@@ -118,7 +118,6 @@ named.
 | `email_remind` (M) | | Reminder set from the palette. No origin yet: the palette is opened by key and chosen by key or click, and the choice is what fires. |
 | `email_reopened`, `email_labeled` | | In the vocabulary and in `Actions`, but nothing in the app calls `Actions.reopen` or `Actions.label`. Dead until a surface does. |
 | `undo_fired` (M) | `kind`: `archive` `done` `label` `ruleDelete` `groupDelete` `remind` `send` | Undo rate per verb, against the verb's own count. |
-| `process_completed` (M) | `count` | Deck size when the process pass ended. |
 | `sealed_revealed` (M) | | Sealed mail opened. |
 | `shipment_cleared` | | The card's context-menu clear. |
 | `notification_opened` (M) | `has_thread` | Banner taps. |
@@ -134,9 +133,8 @@ thread to the next: an open the reader made, not the person; subtract it from
 "threads people chose to open"), `tour` (the practice inbox's examples).
 
 **`via` / `surface`** on the verbs (`Actions.Via`, `Actions.Surface`):
-`via` is how the verb was input: `key`, `click`, `swipe` (a phone rail or the
-process deck's throw), `assistant` (an agent tool; no surface). `surface` is
-the page: `sitrep`, `emails`, `reader`, `process`. Keyboard adoption is
+`via` is how the verb was input: `key`, `click`, `swipe` (a phone rail), `assistant` (an agent tool; no surface). `surface` is
+the page: `sitrep`, `emails`, `reader`. Keyboard adoption is
 `via = key` over all verbs; where triage happens is `surface`.
 
 ### Compose
@@ -164,11 +162,12 @@ PR: `search_settled { turns, hits, opened, lane }` and
 |---|---|---|
 | `rule_created` (M) | `has_want`, `edit`, `suggested`, `from_suggestion`; `disposition`: `surface` `squelch` `filtered` | Does the card's suggested sentence get taken. |
 | `rule_deleted` (M) | `disposition` | |
-| `block_rule_created` (M) | | `x` on a sender. |
+| `block_rule_created` (M) | `smart` (bool, only when true) | `x` on a sender, or the ignored-unsubscribe notice. `smart` is the notice's filtered rule in place of a mute. |
 | `group_created` / `group_updated` / `group_deleted` (M) | `mode`: `to` `bcc` `individual`; `members` | Audience shape and size. Never who. |
 | `invite_sent` (M) | `count`, `failed`; `source`: `rail` `settings` `nudge` | Which surface drives shares. |
 | `invite_nudge_accepted` / `invite_nudge_dismissed` (M) | | The two-week ask. |
 | `ios_nudge_closed` (M) | `copied` | The TestFlight ask closing, and whether the link was copied. A QR scan leaves no trace, so this is a floor on uptake. |
+| `agent_nudge_closed` (M) | `opened` | The Agent MCP ad closing, and whether its button went to Settings > Agents. |
 
 ## Dashboards to build
 

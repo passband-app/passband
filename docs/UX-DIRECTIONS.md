@@ -45,7 +45,7 @@ quietly left behind"* — not "what happened today." Not a day brief; a situatio
 **Server prerequisites (additive):** `status` + `surfaced_at` on triage rows;
 `since`/`status` params on `/client/updates`; MCP read path stamps the ledger.
 
-**Keys:** j/k nav · r reply · e archive · d done · p process-mode · a browse-all ·
+**Keys:** j/k nav · r reply · e archive · d done · a browse-all ·
 t tune sender · T rules audit · squelch knob on the noise divider.
 
 ## Action feel (locked): undo-first
@@ -59,7 +59,7 @@ t tune sender · T rules audit · squelch knob on the noise divider.
 
 ## Documented alternatives
 
-### A — "Triage deck" (survives as process-mode, `p`)
+### A — "Triage deck" (dropped)
 One card at a time, single-key verbs, empty-queue-is-done. Fastest processing; rejected
 as chassis because it makes email a treadmill and hides the standing situation.
 
@@ -278,8 +278,7 @@ panel. The three inner components are reused **verbatim** — a host
 into, so their `j/k/n/e/x/r/Enter` bindings light up unchanged.
 
 **Side panels / overlays are retained** for the drill-in / ceremony surfaces:
-thread drill-in, browse-all (`a`), search (`/`), reveal, rule editor, compose,
-and process mode. The `SideView` union is trimmed to `thread | browse | search`.
+thread drill-in, browse-all (`a`), search (`/`), reveal, rule editor, and compose. The `SideView` union is trimmed to `thread | browse | search`.
 
 ## Sitrep — the abstracted dashboard (zero email rows)
 

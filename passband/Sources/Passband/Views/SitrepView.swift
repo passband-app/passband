@@ -581,6 +581,13 @@ struct SitrepView: View {
                     TriageFixTarget(
                         messageId: u.id, sender: u.sender, subject: u.one_line))
             },
+            // `t` = tune this sender's rule, the verb the reader has on the
+            // same key. Bound HERE because the sitrep is its own key context:
+            // the list's `t` is never consulted from this page.
+            KeyBinding("t", "tune sender") {
+                guard eyesActionable, let u = reachable[safe: cursor.index] else { return }
+                Actions.tune(sender: u.sender)
+            },
             KeyBinding("h", "remind me later") {
                 guard eyesActionable, let u = reachable[safe: cursor.index] else { return }
                 store.openRemind(

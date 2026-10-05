@@ -104,7 +104,10 @@ struct ComposePane: View {
             #endif
             .keyContext(.modal)
             .keyBindings(.modal, bindings)
-            .onAppear { focusedField = .recipient(.to) }
+            .onAppear {
+                focusedField = .recipient(.to)
+                settleFocus()
+            }
             // Back from the drafts page (or a draft opened from it): the
             // fields remounted with nothing focused, so put the caret where
             // the mail still needs something, the way opening does.
@@ -136,6 +139,36 @@ struct ComposePane: View {
     private func refocus() {
         guard let compose = store.compose else { return }
         focusedField = compose.to.trimmed.isEmpty ? .recipient(.to) : .subject
+    }
+
+    /// ASK AGAIN ONCE THE PANE IS REALLY THERE. The request made in `onAppear`
+    /// is made while the pane is still sliding in, and on a forward it is made
+    /// in the same pass that mounts the quoted original's web frame; `f` then
+    /// opened a composer with the caret nowhere, and the address typed next
+    /// went to the reader's keys instead of the `to` line. One hop later covers
+    /// the mount, and one more after the slide (RootView's 0.22s) covers the
+    /// frame landing.
+    ///
+    /// Never a second opinion on a caret somebody already placed: a click into
+    /// the body in that third of a second stays where it was put.
+    private func settleFocus() {
+        for delay in [0, 0.3] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                guard store.compose?.page == .compose, !hasCaret else { return }
+                refocus()
+            }
+        }
+    }
+
+    /// Some text input already holds the caret. On the Mac that is asked of the
+    /// window, because the body is a platform text view `FocusState` cannot see
+    /// (a field's editor is an NSTextView too, so this covers all of them).
+    private var hasCaret: Bool {
+        #if os(macOS)
+            (NSApp.keyWindow?.firstResponder as? NSTextView)?.isEditable == true
+        #else
+            focusedField != nil
+        #endif
     }
 
     /// Page one: the fields, the editor, and the footer that sends them.

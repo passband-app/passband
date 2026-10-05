@@ -87,8 +87,7 @@ struct ReleaseItem: Sendable {
     /// the thing, in one sentence. A key written in backticks is set as a key.
     let detail: String?
     /// An SF Symbol makes this item a HEADLINER: the What's New card gives it
-    /// a page of its own in the walk (and a tile, once the release is an older
-    /// one). The author picks them, a few per release, because no rule can
+    /// a page of its own in the walk. The author picks them, a few per release, because no rule can
     /// tell the feature people updated for from the fix they will never
     /// notice. The markdown ignores it.
     let symbol: String?
@@ -134,12 +133,18 @@ struct ReleaseNote: Identifiable, Sendable {
     var digest: ReleaseDigest { ReleaseDigest(self) }
 }
 
-/// One release arranged for READING rather than for the record. The table is
+/// One release, or every release somebody skipped, arranged for READING rather
+/// than for the record. The table is
 /// written per surface because that is how the parts ship; read straight off it,
 /// the same feature appears twice ("Schedule an email for later" on the Mac and
 /// again on the phone) and "Bug fixes" weighs as much as the headline. This is
 /// the card's arrangement, and it lives here, next to the table and free of
 /// SwiftUI, so the test suite can hold it to that.
+///
+/// SEVERAL RELEASES ARE ONE READ. Somebody who skipped an update is walked
+/// through every headliner they missed, newest release first, and then handed
+/// one list per surface rather than a list per release: the same arrangement,
+/// with the same folding, over more rows.
 struct ReleaseDigest: Sendable {
     struct Headliner: Sendable, Identifiable {
         let text: String
@@ -150,6 +155,8 @@ struct ReleaseDigest: Sendable {
         let vignette: ReleaseVignette?
         /// Every surface the same words landed on, in surface order.
         let surfaces: [ReleaseSurface]
+        /// The release that brought it; the newest one, when two said it.
+        let version: String
         var id: String { text }
     }
 
@@ -170,27 +177,38 @@ struct ReleaseDigest: Sendable {
     /// quietly, after the things that are.
     static let catchAlls: Set<String> = ["bug fixes", "ui improvements", "visual improvements"]
 
-    init(_ note: ReleaseNote) {
-        // A headliner claims its words on EVERY surface, symbol or not, so a
-        // feature that shipped on two surfaces is one tile tagged with both.
+    init(_ note: ReleaseNote) { self.init([note]) }
+
+    /// `notes` newest first, which is the order the walk and the lists keep.
+    init(_ notes: [ReleaseNote]) {
+        // A headliner claims its words on EVERY surface and in EVERY release
+        // given, symbol or not, so a feature that shipped on the Mac in one
+        // release and the phone in the next is one page tagged with both.
         var headliners: [Headliner] = []
-        for item in note.items {
-            guard let symbol = item.symbol else { continue }
-            let key = Self.key(item.text)
-            guard !headliners.contains(where: { Self.key($0.text) == key }) else { continue }
-            let surfaces = ReleaseSurface.allCases.filter { surface in
-                note.items(on: surface).contains { Self.key($0.text) == key }
+        for note in notes {
+            for item in note.items {
+                guard let symbol = item.symbol else { continue }
+                let key = Self.key(item.text)
+                guard !headliners.contains(where: { Self.key($0.text) == key }) else { continue }
+                let surfaces = ReleaseSurface.allCases.filter { surface in
+                    notes.contains { $0.items(on: surface).contains { Self.key($0.text) == key } }
+                }
+                headliners.append(
+                    Headliner(
+                        text: item.text, detail: item.detail, symbol: symbol, vignette: item.vignette,
+                        surfaces: surfaces, version: note.version))
             }
-            headliners.append(
-                Headliner(
-                    text: item.text, detail: item.detail, symbol: symbol, vignette: item.vignette,
-                    surfaces: surfaces))
         }
         let claimed = Set(headliners.map { Self.key($0.text) })
 
         self.headliners = headliners
         self.sections = ReleaseSurface.allCases.compactMap { surface in
-            let left = note.items(on: surface).map(\.text).filter { !claimed.contains(Self.key($0)) }
+            // Said once per surface: "Bug fixes" in three releases running is
+            // still one footnote.
+            var said = Set<String>()
+            let left = notes.flatMap { $0.items(on: surface).map(\.text) }.filter {
+                !claimed.contains(Self.key($0)) && said.insert(Self.key($0)).inserted
+            }
             let items = left.filter { !Self.catchAlls.contains(Self.key($0)) }
             let extras = left.filter { Self.catchAlls.contains(Self.key($0)) }
             guard !items.isEmpty || !extras.isEmpty else { return nil }
@@ -221,9 +239,43 @@ struct ReleaseDigest: Sendable {
     }
 }
 
+/// The greeting for somebody who took more than one release at once: which
+/// version they were reading notes for last, and which one they are on now.
+struct ReleaseCatchUp: Sendable, Equatable {
+    let from: String
+    let to: String
+
+    var title: String { "Thank you for updating to \(to)!" }
+    var line: String { "We have been hard at work, and here's what's new since you were on \(from)." }
+}
+
 enum ReleaseNotes {
     /// THE TABLE. Newest first, and the only place a release note is written.
     static let all: [ReleaseNote] = [
+        ReleaseNote(
+            version: "0.0.13",
+            date: "2026-10-05",
+            headline: "Cleanup Time",
+            items: [
+                ReleaseItem(
+                    .app, "Connect your agents",
+                    detail: "Hosted accounts can sign Claude or ChatGPT in to their mailbox from Settings, under Agents",
+                    symbol: "link"),
+                ReleaseItem(
+                    .app, "Smart block",
+                    detail: "When a sender ignores your unsubscribe, block just the mail you did not want",
+                    symbol: "hand.raised"),
+                ReleaseItem(.app, "Ask ⌘K how Passband works"),
+                ReleaseItem(.app, "`⌘F` to find text in an email"),
+                ReleaseItem(.app, "E and S walk Reading from one sender to the next"),
+                ReleaseItem(.app, "Better rule writing"),
+                ReleaseItem(.app, "Auto update"),
+                ReleaseItem(.app, "Better UX"),
+                ReleaseItem(.app, "Bug fixes"),
+                ReleaseItem(.ios, "Bug fixes"),
+                ReleaseItem(.daemon, "Suggests a smart block for senders who ignore an unsubscribe"),
+                ReleaseItem(.daemon, "Bug fixes"),
+            ]),
         ReleaseNote(
             version: "0.0.12",
             date: "2026-10-01",
@@ -732,6 +784,14 @@ enum ReleaseNotes {
                 return pair.version > floor
             }
             .map(\.note)
+    }
+
+    /// The greeting owed with `shown`, or nil for the ordinary one-release
+    /// update, which needs no explaining. `lastSeen` is the stamp, so "since
+    /// you were on" names the last release this install read notes for.
+    static func catchUp(lastSeen: String?, running: String, shown: [ReleaseNote]) -> ReleaseCatchUp? {
+        guard shown.count > 1, let lastSeen, ReleaseVersion(lastSeen) != nil else { return nil }
+        return ReleaseCatchUp(from: lastSeen, to: running)
     }
 
     /// What to stamp once the card is closed: the newest note actually SHOWN,

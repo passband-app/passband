@@ -95,6 +95,60 @@ async fn the_tag_reaches_the_row_the_pusher_reads() {
     assert_eq!(h.store.list_devices(h.acct).unwrap()[0].tag, None);
 }
 
+/// The declared APNs environment reaches the row folded to lowercase, survives
+/// a re-register that omits it (an older build), and an unknown value is a 400
+/// that writes nothing.
+#[tokio::test]
+async fn the_environment_reaches_the_row_and_outlives_a_silent_reregister() {
+    let h = harness(|_, _| {});
+
+    let resp = h
+        .app
+        .clone()
+        .oneshot(post(
+            "/client/devices",
+            json!({ "token": DEV_A, "environment": "Sandbox" }),
+            true,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        h.store.list_devices(h.acct).unwrap()[0]
+            .environment
+            .as_deref(),
+        Some("sandbox")
+    );
+
+    let resp = h
+        .app
+        .clone()
+        .oneshot(post("/client/devices", json!({ "token": DEV_A }), true))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        h.store.list_devices(h.acct).unwrap()[0]
+            .environment
+            .as_deref(),
+        Some("sandbox"),
+        "a register without the field must not erase it"
+    );
+
+    let resp = h
+        .app
+        .clone()
+        .oneshot(post(
+            "/client/devices",
+            json!({ "token": DEV_B, "environment": "development" }),
+            true,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(h.store.list_devices(h.acct).unwrap().len(), 1);
+}
+
 /// A tag carrying the pusher's own delimiter is refused at the door, not
 /// stored and split apart later.
 #[tokio::test]
@@ -186,7 +240,9 @@ async fn register_then_unregister_round_trips() {
 #[tokio::test]
 async fn the_token_travels_in_the_body_not_the_path() {
     let h = harness(|_, _| {});
-    h.store.upsert_device(h.acct, DEV_A, "ios", None).unwrap();
+    h.store
+        .upsert_device(h.acct, DEV_A, "ios", None, None)
+        .unwrap();
 
     // The request line of the real call mentions no token at all.
     let req = unregister(DEV_A, true);
@@ -199,7 +255,9 @@ async fn the_token_travels_in_the_body_not_the_path() {
     assert!(h.store.list_devices(h.acct).unwrap().is_empty());
 
     // A token in the path is a 405/404, never a working endpoint.
-    h.store.upsert_device(h.acct, DEV_A, "ios", None).unwrap();
+    h.store
+        .upsert_device(h.acct, DEV_A, "ios", None, None)
+        .unwrap();
     let req = authed("DELETE", &format!("/client/devices/{DEV_A}"));
     let resp = h.app.oneshot(req).await.unwrap();
     assert!(

@@ -1,6 +1,6 @@
 // SIDEBAR — the slim icon rail: Sitrep / Emails / Auth / Rules / Groups on the
-// 1..5 keys; Usage and Settings sit below a divider, out of that sequence so
-// adding one never renumbers it. The discovery ring sits just ABOVE that
+// 1..5 keys; Update + Usage + Settings sit below a divider, out of that sequence
+// so adding one never renumbers it. The discovery ring sits just ABOVE that
 // divider, alone after the spacer: a real destination with no number key, its
 // RailButton drawing the ring where the others draw a symbol. ONE long-lived
 // pane behind the icons is the selector, moved by GEOMETRY not identity: per-icon glass drags the glyph along and
@@ -22,6 +22,10 @@ struct SidebarRail: View {
     @State private var slots: [MainView: CGRect] = [:]
     /// True for the span of a slide, so the pane can firm up while it moves.
     @State private var traveling = false
+    @State private var updateHovering = false
+    /// Bumped once when the update tile appears, for its single bounce.
+    @State private var updateArrived = 0
+    @ObservedObject private var updater = Updater.shared
     @State private var accountDeniedAttempts = 0
 
     /// THE TILE AND THE RAIL HOLD STILL ACROSS DENSITY. The glyphs grow with
@@ -130,6 +134,8 @@ struct SidebarRail: View {
                     .frame(width: 22, height: 0.5)
                     .padding(.vertical, Space.s4)
 
+                updateButton
+
                 ForEach(MainView.bottomViews, id: \.self) { view in
                     RailButton(
                         view: view, keyNumber: nil, active: store.activeView == view,
@@ -151,6 +157,43 @@ struct SidebarRail: View {
             .frame(width: Self.railWidth)
             .frame(maxHeight: .infinity)
             .ignoresSafeArea(edges: .top)
+    }
+
+    /// A NEWER PASSBAND IS WAITING. First in the bottom group, so it is the
+    /// first thing there the eye lands on, and present for as long as a version
+    /// is pending: Later hides the card, never this. It goes when the app
+    /// relaunches into the update.
+    ///
+    /// Accent rather than a red dot: red in this rail means Auth wants an
+    /// answer now, and an update never does. One bounce on arrival, then still;
+    /// a rail tile that keeps moving is a tile you learn to hate.
+    ///
+    /// The click brings the card back rather than restarting: a relaunch from a
+    /// 44pt tile is one stray click away from quitting someone mid-email, and
+    /// the card says what Restart does before it is pressed.
+    @ViewBuilder
+    private var updateButton: some View {
+        if let version = updater.pending, !RehearsalMode.isEnabled {
+            Button { updater.showAgain() } label: {
+                Image(systemName: "arrow.down.circle")
+                    .font(Typo.ui(17, weight: .medium))
+                    .foregroundStyle(Palette.accent)
+                    .symbolEffect(.bounce, value: updateArrived)
+                    .frame(width: Self.iconWidth, height: Self.iconHeight)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .background {
+                RoundedRectangle(cornerRadius: Self.selectorRadius, style: .continuous)
+                    .fill(Palette.hairline.opacity(updateHovering ? 0.7 : 0))
+                    .frame(width: Self.iconWidth, height: Self.iconHeight)
+            }
+            .onHover { updateHovering = $0 }
+            .onAppear { updateArrived += 1 }
+            .help("Passband \(version) is available")
+            .accessibilityLabel("Passband \(version) is available")
+            .transition(.scale(scale: 0.6).combined(with: .opacity))
+        }
     }
 
     /// WHICH MAILBOX YOU ARE IN, at the foot of the rail — and the fastest way

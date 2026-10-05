@@ -108,7 +108,7 @@ struct RootView: View {
         // and not before; `askIfEarned` is what decides whether a fortnight has
         // actually been used, and it can only ever say yes once.
         .onChange(of: store.shareAvailable) { _, canShare in
-            guard !TestFlightNudge.shared.showingNudge else { return }
+            guard !TestFlightNudge.shared.showingNudge, !AgentNudge.shared.showingNudge else { return }
             ShareNudge.shared.askIfEarned(canShare: canShare)
         }
         // THE IPHONE ASK, two days in, for a mailbox no phone has ever
@@ -117,14 +117,22 @@ struct RootView: View {
         .overlay { TestFlightNudgeModal() }
         .onChange(of: store.iosConnected) { _, connected in
             TestFlightNudge.shared.askIfEarned(
-                iosConnected: connected, othersShowing: ShareNudge.shared.showingNudge)
+                iosConnected: connected,
+                othersShowing: ShareNudge.shared.showingNudge || AgentNudge.shared.showingNudge)
         }
+        // THE AGENT-DOOR AD, a week in, for a mailbox whose door an agent can
+        // actually use. Asked at the first sync (ShellWatchers, after the tour
+        // and What's New have had their turn) and on every return to the app,
+        // below.
+        .overlay { AgentNudgeModal() }
         // And on every return to the app, because the answer above changes
         // once per launch at most: a Mac left open across the two-day mark
         // would otherwise never hear the rule again until it was quit.
         .onReceive(NotificationCenter.default.publisher(for: Platform.didBecomeActiveNotification)) { _ in
             TestFlightNudge.shared.askIfEarned(
-                iosConnected: store.iosConnected, othersShowing: ShareNudge.shared.showingNudge)
+                iosConnected: store.iosConnected,
+                othersShowing: ShareNudge.shared.showingNudge || AgentNudge.shared.showingNudge)
+            AgentNudge.shared.askIfEarned(store: store)
         }
         .task {
             // Pay WebKit's process-launch cost at boot rather than on the first
@@ -272,6 +280,8 @@ private struct ShellWatchers: View {
                     store.tour.maybeStart()
                     // Onboarding claims the moment before release notes.
                     store.whatsNew.maybeShow()
+                    // The agent-door ad waits out both: it checks for them.
+                    AgentNudge.shared.askIfEarned(store: store)
                 }
             }
     }
@@ -281,9 +291,10 @@ struct MainShell: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// The readers on screen: the open thread, plus the one it is turning
     /// away from while an S is in flight (behind it, so it is drawn first).
+    /// An undone S turns the other way, with the outgoing card on top.
     private func readerSlots(_ threadId: String) -> [String] {
-        guard let out = store.skipTurn?.outgoing, out != threadId else { return [threadId] }
-        return [out, threadId]
+        guard let turn = store.skipTurn, turn.outgoing != threadId else { return [threadId] }
+        return turn.reversed ? [threadId, turn.outgoing] : [turn.outgoing, threadId]
     }
 
     @Environment(AppStore.self) private var store
@@ -455,17 +466,27 @@ struct MainShell: View {
                                 ThreadViewer(
                                     threadId: id,
                                     turn: turn.map { t in
-                                        outgoing
+                                        // The card underneath recedes and dims;
+                                        // the one on top slides the full width.
+                                        // Forward, the top card is arriving;
+                                        // reversed, it is the one leaving.
+                                        let under = t.reversed ? 1 - t.progress : t.progress
+                                        let raised = outgoing == t.reversed
+                                        return raised
                                             ? .init(
-                                                cardSlide: -0.3 * t.progress,
-                                                cardOpacity: 1 - 0.55 * t.progress,
-                                                headerOpacity: t.outgoingHeader,
-                                                incoming: false)
-                                            : .init(
-                                                cardSlide: 1 - t.progress,
+                                                cardSlide: t.reversed ? t.progress : 1 - t.progress,
                                                 cardOpacity: 1,
-                                                headerOpacity: t.incomingHeader,
-                                                incoming: true)
+                                                headerOpacity: outgoing
+                                                    ? t.outgoingHeader : t.incomingHeader,
+                                                incoming: !outgoing,
+                                                raised: true)
+                                            : .init(
+                                                cardSlide: -0.3 * under,
+                                                cardOpacity: 1 - 0.55 * under,
+                                                headerOpacity: outgoing
+                                                    ? t.outgoingHeader : t.incomingHeader,
+                                                incoming: !outgoing,
+                                                raised: false)
                                     })
                                 .offset(outgoing ? .zero : flight.offset(in: geo.size))
                                 .opacity(outgoing ? 1 : flight.opacity)
@@ -770,8 +791,10 @@ extension AppStore.ThreadFlight {
         case .settled: .zero
         case .departing: CGSize(width: 0, height: -window.height)
         case .departingDown: CGSize(width: 0, height: window.height)
+        case .departingTrailing: CGSize(width: window.width, height: 0)
         case .entering(.bottom): CGSize(width: 0, height: window.height)
         case .entering(.trailing): CGSize(width: window.width, height: 0)
+        case .entering(.top): CGSize(width: 0, height: -window.height)
         }
     }
 
@@ -785,7 +808,7 @@ extension AppStore.ThreadFlight {
     /// departure or an arrival, and it says so here once.
     var isDeparting: Bool {
         switch self {
-        case .departing, .departingDown: true
+        case .departing, .departingDown, .departingTrailing: true
         case .settled, .entering: false
         }
     }

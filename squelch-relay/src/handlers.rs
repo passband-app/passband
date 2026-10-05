@@ -508,6 +508,7 @@ mod tests {
             apns_topics: vec!["dev.squelch.ios".into(), "dev.squelch.ios.beta".into()],
             apns_env: Environment::Production,
             auth_token: None,
+            push_token: None,
             apns_url_override: None,
             db_path: None,
             trusted_proxy_hops: 0,

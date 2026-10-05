@@ -22,15 +22,13 @@ final class DiscoveryPresenter {
     var openAtLaunch = ProcessInfo.processInfo.environment["PASSBAND_DISCOVERY_OPEN"] == "1"
     /// The found moment on screen, if any.
     var moment: FeatureSet?
-    /// Where the ring sits in `tourSpace`, so the moment can speak from it.
-    var ringFrame: CGRect = .zero
 }
 
 // MARK: - the ring on the rail
 
 /// The ring as the rail's icon for `.discovery`. The tile, the selector pane,
 /// the hover wash and the practice refusal are all `RailButton`'s; this is
-/// only the glyph, plus the frame the found moment is placed from.
+/// only the glyph.
 ///
 /// ALWAYS THERE, practice inbox included, and it never retires: all kept is a
 /// resting state, not a farewell.
@@ -45,9 +43,6 @@ struct DiscoveryRailGlyph: View {
             progress: DiscoveryProgress(discovery.state(of:), fresh: discovery.ledger.fresh),
             diameter: 24,
             breathing: activeState == .key && !reduceMotion)
-            .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(tourSpace)) } action: {
-                DiscoveryPresenter.shared.ringFrame = $0
-            }
     }
 
     /// For VoiceOver on the rail tile: the ring's progress in words.
@@ -128,16 +123,15 @@ struct DiscoveryLayer: View {
     private static let settle: Duration = .milliseconds(1400)
 
     var body: some View {
-        GeometryReader { geo in
-            let origin = geo.frame(in: .named(tourSpace)).origin
-            let ring = presenter.ringFrame.offsetBy(dx: -origin.x, dy: -origin.y)
-            ZStack(alignment: .topLeading) {
-                if let set = presenter.moment {
-                    momentCard(set, ring: ring, in: geo.size)
-                }
+        // BOTTOM RIGHT, where the app's other one-off cards arrive, at their
+        // margin. Never two at once: see `atRest`.
+        ZStack(alignment: .bottomTrailing) {
+            if let set = presenter.moment {
+                momentCard(set)
             }
-            .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
         }
+        .padding(20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
         .animation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.5, dampingFraction: 0.84), value: presenter.moment)
         // THE MOMENT IS THE BOARD'S. It only arrives on the sitrep, and a
         // route away (the page included) takes it with it rather than leaving
@@ -173,6 +167,9 @@ struct DiscoveryLayer: View {
             // A finished walk has its own moment on the sitrep, and it is very
             // often the thing that just found flow mode. One at a time.
             && store.walkFinished == nil
+            // The corner belongs to one card at a time, and an ad or an
+            // update that got there first keeps it.
+            && !AgentNudge.othersShowing(store) && !AgentNudge.shared.showingNudge
             && !RehearsalMode.isEnabled && activeState == .key
     }
 
@@ -183,23 +180,17 @@ struct DiscoveryLayer: View {
 
     // MARK: moment
 
-    private func momentCard(_ set: FeatureSet, ring: CGRect, in size: CGSize) -> some View {
-        // Read out here, not in the guides: they are Sendable closures, and
-        // the rail's width is main-actor state.
-        let leading = SidebarRail.railWidth + 10
-        return DiscoveryMomentHost(set: set, live: activeState == .key, hold: Self.momentHold) {
+    private func momentCard(_ set: FeatureSet) -> some View {
+        DiscoveryMomentHost(set: set, live: activeState == .key, hold: Self.momentHold) {
             presenter.moment = nil
         } open: {
             presenter.moment = nil
             store.setView(.discovery, viaPointer: true)
         }
-        // Beside the ring, centred on it, so it reads as the ring speaking.
-        .alignmentGuide(.leading) { _ in -leading }
-        .alignmentGuide(.top) { d in -(max(16, min(size.height - d.height - 16, ring.midY - d.height / 2))) }
         .transition(
             .asymmetric(
-                insertion: .scale(scale: 0.9, anchor: .leading).combined(with: .opacity)
-                    .combined(with: .offset(x: -14)),
+                insertion: .scale(scale: 0.96, anchor: .bottomTrailing).combined(with: .opacity)
+                    .combined(with: .offset(x: 24, y: 14)),
                 removal: .opacity))
     }
 }

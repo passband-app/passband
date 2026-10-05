@@ -171,6 +171,10 @@ pub struct ApiState {
     /// this. `None` (no API key configured, and every test harness) means
     /// inference resolves to `filtered`, which is the safe default. HUMAN DOOR
     /// ONLY, like every other rule write.
+    ///
+    /// A route that AWAITS any of the model handles below before it answers
+    /// owes `ROUTE_CLASSES` in `http_metrics.rs` a row, or its seconds are
+    /// charted as the daemon's own.
     pub(crate) rule_infer: Option<Arc<RuleInferClient>>,
     /// The small model that suggests a rule sentence for the rule card. It
     /// reads the sender's recent subjects, so its output is only ever SHOWN,

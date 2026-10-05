@@ -6,9 +6,14 @@ mod common;
 use axum::body::Body;
 use axum::http::Request;
 use common::{authed, state_with};
-use squelch_api::{LLM_ROUTES, record_http_metrics, router};
+use squelch_api::{ROUTE_CLASSES, record_http_metrics, router};
 use squelch_core::metrics::{SyncMetrics, render};
 use tower::ServiceExt;
+
+/// One request's `_count` line for a label set.
+fn count(labels: &str) -> String {
+    format!("squelchd_http_request_duration_seconds_count{{{labels}}} 1\n")
+}
 
 #[tokio::test]
 async fn latency_is_keyed_by_route_template_and_unmatched_paths_collapse() {
@@ -45,8 +50,6 @@ async fn latency_is_keyed_by_route_template_and_unmatched_paths_collapse() {
         .unwrap();
 
     let text = render(&metrics, None);
-    let count =
-        |labels: &str| format!("squelchd_http_request_duration_seconds_count{{{labels}}} 1\n");
     assert!(
         text.contains(&count(
             r#"route="/client/thread/{thread_id}",method="GET",status="4xx",class="local""#
@@ -74,10 +77,10 @@ async fn latency_is_keyed_by_route_template_and_unmatched_paths_collapse() {
 }
 
 /// The table is strings, and a string does not notice its route being renamed.
-/// Every entry has to land on a real (method, template) in the router, or the
-/// route it meant is being recorded as `local` and is back on the wrong axis.
+/// Every row has to land on a real (method, template) in the router, or the
+/// route it meant is being recorded as `local`.
 #[tokio::test]
-async fn every_llm_route_is_a_real_route_and_records_as_llm() {
+async fn every_classed_route_is_a_real_route_and_records_its_class() {
     let (state, _store, _acct) = state_with(|_, _| {});
     let metrics = SyncMetrics::new();
     let app = router(state).layer(axum::middleware::from_fn_with_state(
@@ -85,7 +88,7 @@ async fn every_llm_route_is_a_real_route_and_records_as_llm() {
         record_http_metrics,
     ));
 
-    for (method, template) in LLM_ROUTES {
+    for (method, template, class) in ROUTE_CLASSES {
         let uri = template.replace("{id}", "1");
         assert!(!uri.contains('{'), "fill in the parameter of {template}");
         let resp = app.clone().oneshot(authed(method, &uri)).await.unwrap();
@@ -98,13 +101,14 @@ async fn every_llm_route_is_a_real_route_and_records_as_llm() {
             .lines()
             .find(|l| l.contains(&series) && l.contains("_count"))
             .unwrap_or_else(|| panic!("{method} {template} matched no route\n{text}"));
-        assert!(line.contains(r#"class="llm""#), "{line}");
+        let want = format!(r#"class="{}""#, class.label());
+        assert!(line.contains(&want), "{line}");
     }
 
     // The same template under a verb that reads the store stays local.
     app.oneshot(authed("GET", "/client/rules")).await.unwrap();
     let text = render(&metrics, None);
-    assert!(text.contains(
-        "squelchd_http_request_duration_seconds_count{route=\"/client/rules\",method=\"GET\",status=\"2xx\",class=\"local\"} 1\n"
-    ));
+    assert!(text.contains(&count(
+        r#"route="/client/rules",method="GET",status="2xx",class="local""#
+    )));
 }

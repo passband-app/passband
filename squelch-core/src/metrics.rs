@@ -941,20 +941,17 @@ pub const HTTP_SERIES_CAP: usize = 200;
 pub const HTTP_ROUTE_UNMATCHED: &str = "unmatched";
 
 /// What a request spends its time WAITING on, as the `class` label of the
-/// latency histogram. A closed set, and a pure function of (method, route
-/// template): the table that assigns it lives beside the middleware in
-/// `squelch-api/src/http_metrics.rs`.
+/// latency histogram. Assigned per (method, route template) by `ROUTE_CLASSES`
+/// in `squelch-api/src/http_metrics.rs`.
 ///
 /// It exists so a dashboard can keep two populations apart without naming
 /// routes. A store read is single-digit milliseconds and a model call is
 /// seconds; plotted on one axis the second flattens the first, and a p95 over
 /// both describes neither. A new kind of slow-by-design route (one that waits
-/// on a carrier, say) is a new variant here, not a longer regex in a panel.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// on a carrier, say) is a new variant here and a row in that table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum RouteClass {
-    /// The daemon's own work: the store, the router, auth. The default, and
-    /// what every request that matched no route records as.
-    #[default]
+    /// The daemon's own work: the store, the router, auth.
     Local,
     /// The handler awaits a language model before it answers, so its latency
     /// is the provider's and is expected to be seconds.
@@ -962,7 +959,7 @@ pub enum RouteClass {
 }
 
 impl RouteClass {
-    pub fn as_str(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Self::Local => "local",
             Self::Llm => "llm",
@@ -989,10 +986,8 @@ impl RouteClass {
 /// becomes a label: `route` is the router's own template (`/client/thread/{thread_id}`,
 /// never the id) or [`HTTP_ROUTE_UNMATCHED`]; `method` is one of the nine
 /// standard verbs or `other`; `status` is a class (`2xx`), not a code; `class`
-/// is a [`RouteClass`]. Series are capped at [`HTTP_SERIES_CAP`] on top of
-/// that. `class` is decided by the route and method, so it names a series that
-/// already existed and adds none: the scrape's `sample_limit` arithmetic does
-/// not move.
+/// is a [`RouteClass`], decided by the route and method, so it adds no series.
+/// Series are capped at [`HTTP_SERIES_CAP`] on top of that.
 #[derive(Debug, Default)]
 pub struct HttpMetrics {
     series: RwLock<HashMap<HttpKey, Arc<HttpSeries>>>,
@@ -1124,7 +1119,7 @@ fn render_http(e: &mut Exposition, http: &HttpMetrics) {
             ("route", key.route.as_str()),
             ("method", key.method),
             ("status", key.status),
-            ("class", key.class.as_str()),
+            ("class", key.class.label()),
         ];
         let mut cumulative = 0u64;
         for (i, bound) in HTTP_BUCKETS.iter().enumerate() {

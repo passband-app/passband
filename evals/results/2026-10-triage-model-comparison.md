@@ -248,12 +248,52 @@ The three saved reports (`report-vs-gold.md`, `report-vs-production.md`,
 `report-fireworks-vs-production.md`) sit beside the dataset, outside the
 repo, because they name senders and subjects.
 
-## 8. Open follow-ups
+## 8. Addendum, 2026-10-05: prompt v6 experiment (not shipped)
+
+Branch `sealing-prompt` holds a prompt v6 that (a) widens the sealing rule
+from "authentication credentials" to any secret or link that grants access
+without a login, naming door and Wi-Fi codes, PINs, document upload links
+and private file or gallery links, (b) spells out what a meaningful
+development is for FYE, and (c) asks for user-facing text without em
+dashes. Sonnet 5.5 `medium` and Opus 5.5 `low` were re-run on the same 393
+cases and scored against the v5 `xhigh` reference (about $14).
+
+| | Sonnet v5 | Sonnet v6 | Opus `low` v5 | Opus `low` v6 |
+|---|---|---|---|---|
+| Credentials unsealed (of 15) | 7 | 0 | 1 | 0 |
+| Sealed that the reference left open | 0 | 6 | 0 | 38 |
+| FYE buried (of 93) | 14 | 15 | 4 | 7 |
+| False FYE | 6 | 10 | 14 | 15 |
+| Push misses / false pushes (49 real) | 12 / 9 | 8 / 12 | 3 / 11 | 2 / 15 |
+| Harm per email | 0.62 | 0.60 | 0.34 | 0.50 |
+| Projected $ per 1k | 11.95 | 12.33 | 23.74 | 23.52 |
+
+What it showed:
+
+- The sealing line closed Sonnet's gap completely, so that gap was wording,
+  not capability.
+- The same line made Opus over-seal: 38 cases the reference leaves open,
+  about 11% of mail when weighted, mostly receipts with tokenized invoice
+  links, payment-update links, booking manage links and file-transfer
+  links. Opus is following the rule as written. The rule is too broad, and
+  it exposes that the sealing policy for login-free convenience links was
+  never decided: the v5 reference seals claim upload links and a gallery
+  link but not payment-update links, and the stored gold is inconsistent on
+  the same sender.
+- The FYE sentence did not move Sonnet (15 buried against 14).
+- Em dashes were already at zero for both Claude models on this sample.
+
+v6 should not ship as written. The next iteration needs a product decision
+first: seal only secrets (codes, PINs, passwords of any kind, plus
+password-reset and sign-in links), or also links that act without a login,
+and if so which.
+
+## 9. Open follow-ups
 
 1. A second production rep for the noise floor (about $18).
 2. Opus 5.5 at `medium`, untested.
-3. A prompt line defining non-account access secrets (door codes, PINs,
-   document upload links), then re-run Sonnet 5.5 and Kimi K3.
+3. Decide the sealing policy for login-free links (section 8), write
+   prompt v7 to match, then re-run Sonnet 5.5, Opus `low` and Kimi K3.
 4. Kimi K3 with a working prompt cache on Fireworks' US router, if a
    non-Anthropic fallback is wanted.
 5. Repair messages that name the failing field and the fix, if a smaller

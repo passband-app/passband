@@ -2503,12 +2503,12 @@ Check each of these, and do not publish until every one is true:
   401s, logged as `missing_email`) and nobody can use it. Present but not the
   mailbox address the control plane sent means the binding is checking the
   wrong thing: stop.
-- **(b) `sub` is WorkOS's user id, not the mailbox.** Per WorkOS's docs `sub`
-  on a Connect user token is the WorkOS user id (`user_...`), even though the
-  control plane completes the flow with the lowercased mailbox as its own user
-  id. This check only confirms that, and confirms nothing depends on it: the
-  daemon authorizes on `email` and never reads `sub`. Anyone who later reaches
-  for `sub` should start from this fact.
+- **(b) Note what `sub` is, and that nothing depends on it.** WorkOS's docs
+  say `sub` on a Connect user token is the WorkOS user id (`user_...`). On the
+  production environment on 2026-10-05 it came back as the lowercased mailbox
+  instead, which is the id the control plane completes the flow with. Either
+  is fine: the daemon authorizes on `email` and never reads `sub`. Anyone who
+  later reaches for `sub` should start from the fact that it has been both.
 - **(c) Nothing in the environment can mint a user, or a session, with an
   arbitrary email.** In Standalone Connect the only way a user should come into
   being is the control plane's completion call, after Google has proven the

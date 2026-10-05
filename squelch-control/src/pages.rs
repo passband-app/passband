@@ -958,7 +958,17 @@ pub fn app_no_tenant(heading: &str, detail: &str) -> Response {
 /// with nothing interpolated, and the redirect target was already held to an
 /// absolute https URL before it was sent (see
 /// [`crate::workos::acceptable_redirect`]).
-const CSP_AGENT_CONFIRM: &str = "default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; form-action 'self' https:; frame-ancestors 'none'; base-uri 'none'";
+///
+/// AND LOOPBACK, because the chain does not always stop at AuthKit. When
+/// AuthKit already holds this agent's consent it shows no screen of its own
+/// and answers with a redirect straight to the agent's callback, which makes
+/// that callback one more hop of THIS form's submission. A desktop agent's
+/// callback is plain http on loopback (`http://127.0.0.1:<port>/callback`),
+/// and under `https:` alone Chrome ate the press: the completion had happened
+/// and the browser stayed on this page (seen on production, 2026-10-05, on the
+/// second authorization of one client). Loopback only, any port; plain http
+/// to anywhere else stays refused.
+const CSP_AGENT_CONFIRM: &str = "default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; form-action 'self' https: http://127.0.0.1:* http://localhost:*; frame-ancestors 'none'; base-uri 'none'";
 
 /// The same, on a plain-http local run, where the redirect may be plain http.
 const CSP_AGENT_CONFIRM_INSECURE: &str = "default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; form-action 'self' https: http:; frame-ancestors 'none'; base-uri 'none'";
@@ -1625,7 +1635,13 @@ mod tests {
         let csp = h[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
         assert!(csp.contains("frame-ancestors 'none'"), "{csp}");
         assert!(csp.contains("form-action 'self' https:"), "{csp}");
-        assert!(!csp.contains("http:;"), "{csp}");
+        // A returning agent's loopback callback is a hop of this form's
+        // submission; plain http to anywhere else is not allowed.
+        assert!(
+            csp.contains("form-action 'self' https: http://127.0.0.1:* http://localhost:*;"),
+            "{csp}"
+        );
+        assert!(!csp.contains("http:;") && !csp.contains("http: "), "{csp}");
         assert_eq!(h[header::X_FRAME_OPTIONS], "DENY");
         assert_eq!(h[header::CACHE_CONTROL], "no-store, no-cache");
         assert_eq!(h[header::REFERRER_POLICY], "no-referrer");

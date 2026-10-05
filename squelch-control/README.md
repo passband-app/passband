@@ -165,7 +165,8 @@ browser  ── GET /agent/auth?external_auth_id=<opaque> ──► 302 to Googl
 **Setup.** Set `SQUELCH_CONTROL_WORKOS_API_KEY` in the `control` service's
 Railway variables; unset, neither `/agent/auth` nor `/agent/confirm` is mounted
 (404). In the WorkOS
-dashboard, under *Connect* → *Configuration*, set the **Login URI** to
+dashboard, under *Connect* → *Configuration*, set the **External Sign-in URI**
+(the docs call it the Standalone Connect Login URI) to
 `https://<control origin>/agent/auth` (today `https://signup.passband.app/agent/auth`).
 The `control` service deploys itself from `main`: merge the change, set the
 variable, and let it redeploy. Do not `railway up`. The WorkOS API origin is a

@@ -2234,16 +2234,32 @@ living in the same environment (another app, an SSO connection, a social
 login) is another way to mint a token with an `email` in it, and the daemon
 cannot tell those tokens from ours. Nothing else lives in this environment.
 
-- **Dynamic Client Registration: on.** Most MCP clients register themselves.
-- **Client ID Metadata Documents: on.** The newer MCP clients identify
-  themselves by a URL instead of registering.
-- **Standalone Connect, Login URI:** `https://signup.passband.app/agent/auth`
-  (your control origin, the same value as `SQUELCH_WARDEN_CONSOLE_SSO_URL`,
-  plus `/agent/auth`). This is where AuthKit sends the user's browser to be
-  identified. The control plane does the Google sign-in it already does for the
-  console, finds that mailbox's tenant, and tells AuthKit who the user is.
-- **Resource Indicator:** `https://*.passband.email/mcp`. One wildcard for the
-  fleet, which is the reason for the email binding above.
+The first four live on one page, *Connect* then *Configuration* (as of October
+2026; the dashboard's labels are given in quotes where they differ from the
+docs):
+
+- **Dynamic Client Registration: on** ("MCP Auth"). Most MCP clients register
+  themselves.
+- **Client ID Metadata Documents: on** ("MCP Auth"). The newer MCP clients,
+  Claude's connectors among them, identify themselves by a URL instead of
+  registering.
+- **Standalone Connect Login URI** ("External Sign-in URI"):
+  `https://signup.passband.app/agent/auth` (your control origin, the same
+  value as `SQUELCH_WARDEN_CONSOLE_SSO_URL`, plus `/agent/auth`). This is where
+  AuthKit sends the user's browser to be identified. The control plane does the
+  Google sign-in it already does for the console, finds that mailbox's tenant,
+  and tells AuthKit who the user is. Once this is saved, every OAuth flow in
+  the environment bounces through it, so set it only after the control plane
+  that serves the route is deployed and holds the API key; before that the
+  flow dead-ends at a 404, which is the safe direction.
+- **Resource Indicator** ("MCP resource indicators"):
+  `https://*.passband.email/mcp`. One wildcard for the fleet, which is the
+  reason for the email binding above. Do not mark anything as the default.
+- An OAuth application created by hand under *Connect* then *Applications* is
+  not used by anything here: agents register themselves. Give it no secret and
+  no redirect URI.
+- Every setting here is per environment. Staging is for running the checklist
+  below; the fleet points at Production, and Production needs all of it again.
 - **JWT template:** exactly
 
   ```

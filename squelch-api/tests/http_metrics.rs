@@ -6,7 +6,7 @@ mod common;
 use axum::body::Body;
 use axum::http::Request;
 use common::{authed, state_with};
-use squelch_api::{record_http_metrics, router};
+use squelch_api::{LLM_ROUTES, record_http_metrics, router};
 use squelch_core::metrics::{SyncMetrics, render};
 use tower::ServiceExt;
 
@@ -49,13 +49,19 @@ async fn latency_is_keyed_by_route_template_and_unmatched_paths_collapse() {
         |labels: &str| format!("squelchd_http_request_duration_seconds_count{{{labels}}} 1\n");
     assert!(
         text.contains(&count(
-            r#"route="/client/thread/{thread_id}",method="GET",status="4xx""#
+            r#"route="/client/thread/{thread_id}",method="GET",status="4xx",class="local""#
         )),
         "{text}"
     );
-    assert!(text.contains(&count(r#"route="/client/stats",method="GET",status="2xx""#)));
-    assert!(text.contains(&count(r#"route="/client/stats",method="GET",status="4xx""#)));
-    assert!(text.contains(&count(r#"route="unmatched",method="GET",status="4xx""#)));
+    assert!(text.contains(&count(
+        r#"route="/client/stats",method="GET",status="2xx",class="local""#
+    )));
+    assert!(text.contains(&count(
+        r#"route="/client/stats",method="GET",status="4xx",class="local""#
+    )));
+    assert!(text.contains(&count(
+        r#"route="unmatched",method="GET",status="4xx",class="local""#
+    )));
     assert!(
         !text.contains("must-not-leak"),
         "a path parameter became a label"
@@ -65,4 +71,40 @@ async fn latency_is_keyed_by_route_template_and_unmatched_paths_collapse() {
         "an unmatched path became a label"
     );
     assert!(!text.contains("/no/such/route"));
+}
+
+/// The table is strings, and a string does not notice its route being renamed.
+/// Every entry has to land on a real (method, template) in the router, or the
+/// route it meant is being recorded as `local` and is back on the wrong axis.
+#[tokio::test]
+async fn every_llm_route_is_a_real_route_and_records_as_llm() {
+    let (state, _store, _acct) = state_with(|_, _| {});
+    let metrics = SyncMetrics::new();
+    let app = router(state).layer(axum::middleware::from_fn_with_state(
+        metrics.clone(),
+        record_http_metrics,
+    ));
+
+    for (method, template) in LLM_ROUTES {
+        let uri = template.replace("{id}", "1");
+        assert!(!uri.contains('{'), "fill in the parameter of {template}");
+        let resp = app.clone().oneshot(authed(method, &uri)).await.unwrap();
+        // A matched path with the wrong verb still carries its template, so
+        // the label check below would pass on it.
+        assert_ne!(resp.status(), 405, "{method} is not a verb of {template}");
+        let text = render(&metrics, None);
+        let series = format!(r#"route="{template}",method="{method}",status="#);
+        let line = text
+            .lines()
+            .find(|l| l.contains(&series) && l.contains("_count"))
+            .unwrap_or_else(|| panic!("{method} {template} matched no route\n{text}"));
+        assert!(line.contains(r#"class="llm""#), "{line}");
+    }
+
+    // The same template under a verb that reads the store stays local.
+    app.oneshot(authed("GET", "/client/rules")).await.unwrap();
+    let text = render(&metrics, None);
+    assert!(text.contains(
+        "squelchd_http_request_duration_seconds_count{route=\"/client/rules\",method=\"GET\",status=\"2xx\",class=\"local\"} 1\n"
+    ));
 }

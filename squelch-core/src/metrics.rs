@@ -940,6 +940,36 @@ pub const HTTP_SERIES_CAP: usize = 200;
 /// of such a request is attacker-chosen and must never become a label.
 pub const HTTP_ROUTE_UNMATCHED: &str = "unmatched";
 
+/// What a request spends its time WAITING on, as the `class` label of the
+/// latency histogram. A closed set, and a pure function of (method, route
+/// template): the table that assigns it lives beside the middleware in
+/// `squelch-api/src/http_metrics.rs`.
+///
+/// It exists so a dashboard can keep two populations apart without naming
+/// routes. A store read is single-digit milliseconds and a model call is
+/// seconds; plotted on one axis the second flattens the first, and a p95 over
+/// both describes neither. A new kind of slow-by-design route (one that waits
+/// on a carrier, say) is a new variant here, not a longer regex in a panel.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum RouteClass {
+    /// The daemon's own work: the store, the router, auth. The default, and
+    /// what every request that matched no route records as.
+    #[default]
+    Local,
+    /// The handler awaits a language model before it answers, so its latency
+    /// is the provider's and is expected to be seconds.
+    Llm,
+}
+
+impl RouteClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Llm => "llm",
+        }
+    }
+}
+
 /// Latency of the HTTP doors, one histogram series per (route template, method,
 /// status class).
 ///
@@ -958,8 +988,11 @@ pub const HTTP_ROUTE_UNMATCHED: &str = "unmatched";
 /// LABELS ARE A CLOSED SET, per the module's rule that nothing per-message ever
 /// becomes a label: `route` is the router's own template (`/client/thread/{thread_id}`,
 /// never the id) or [`HTTP_ROUTE_UNMATCHED`]; `method` is one of the nine
-/// standard verbs or `other`; `status` is a class (`2xx`), not a code. Series
-/// are capped at [`HTTP_SERIES_CAP`] on top of that.
+/// standard verbs or `other`; `status` is a class (`2xx`), not a code; `class`
+/// is a [`RouteClass`]. Series are capped at [`HTTP_SERIES_CAP`] on top of
+/// that. `class` is decided by the route and method, so it names a series that
+/// already existed and adds none: the scrape's `sample_limit` arithmetic does
+/// not move.
 #[derive(Debug, Default)]
 pub struct HttpMetrics {
     series: RwLock<HashMap<HttpKey, Arc<HttpSeries>>>,
@@ -973,6 +1006,7 @@ struct HttpKey {
     route: String,
     method: &'static str,
     status: &'static str,
+    class: RouteClass,
 }
 
 /// One series. Buckets are stored NON-cumulative (each observation lands in
@@ -991,13 +1025,14 @@ struct HttpSeries {
 
 impl HttpMetrics {
     /// Record one request. `route` must already be the template or
-    /// [`HTTP_ROUTE_UNMATCHED`]; this method normalizes the other two labels
-    /// itself so no caller can widen the set.
-    pub fn observe(&self, route: &str, method: &str, status: u16, seconds: f64) {
+    /// [`HTTP_ROUTE_UNMATCHED`]; this method normalizes the method and status
+    /// labels itself, and `class` is an enum, so no caller can widen the set.
+    pub fn observe(&self, route: &str, method: &str, status: u16, class: RouteClass, seconds: f64) {
         let key = HttpKey {
             route: route.to_owned(),
             method: normalize_method(method),
             status: status_class(status),
+            class,
         };
         let series = match self
             .series
@@ -1079,7 +1114,7 @@ fn render_http(e: &mut Exposition, http: &HttpMetrics) {
     e.family(
         NAME,
         MetricKind::Histogram,
-        "Request arrival to response head on the HTTP doors, by route template, method and status class. Streaming bodies are not waited for.",
+        "Request arrival to response head on the HTTP doors, by route template, method and status class. Streaming bodies are not waited for. class=llm marks a route that awaits a model and is slow by design.",
     );
     let bucket = format!("{NAME}_bucket");
     let sum = format!("{NAME}_sum");
@@ -1089,16 +1124,17 @@ fn render_http(e: &mut Exposition, http: &HttpMetrics) {
             ("route", key.route.as_str()),
             ("method", key.method),
             ("status", key.status),
+            ("class", key.class.as_str()),
         ];
         let mut cumulative = 0u64;
         for (i, bound) in HTTP_BUCKETS.iter().enumerate() {
             cumulative += series.buckets[i].load(Ordering::Relaxed);
             let le = fmt_value(*bound);
-            let labels = [base[0], base[1], base[2], ("le", le.as_str())];
+            let labels = [base[0], base[1], base[2], base[3], ("le", le.as_str())];
             e.sample(&bucket, &labels, cumulative as f64);
         }
         let total = series.count.load(Ordering::Relaxed);
-        let labels = [base[0], base[1], base[2], ("le", "+Inf")];
+        let labels = [base[0], base[1], base[2], base[3], ("le", "+Inf")];
         e.sample(&bucket, &labels, total as f64);
         e.sample(
             &sum,
@@ -2649,12 +2685,15 @@ mod http_metrics_tests {
     #[test]
     fn http_histogram_renders_cumulative_buckets_sum_and_count() {
         let m = SyncMetrics::new();
-        m.http().observe("/client/stats", "GET", 200, 0.003);
-        m.http().observe("/client/stats", "GET", 200, 0.7);
-        m.http().observe("/client/stats", "GET", 200, 30.0);
+        m.http()
+            .observe("/client/stats", "GET", 200, RouteClass::Local, 0.003);
+        m.http()
+            .observe("/client/stats", "GET", 200, RouteClass::Local, 0.7);
+        m.http()
+            .observe("/client/stats", "GET", 200, RouteClass::Local, 30.0);
         let text = render(&m, None);
         assert!(text.contains("# TYPE squelchd_http_request_duration_seconds histogram\n"));
-        let labels = r#"route="/client/stats",method="GET",status="2xx""#;
+        let labels = r#"route="/client/stats",method="GET",status="2xx",class="local""#;
         // Each observation lands in one bucket and the exposition cumulates.
         for (le, n) in [("0.005", 1), ("0.5", 1), ("1", 2), ("10", 2), ("+Inf", 3)] {
             let want = format!(
@@ -2689,8 +2728,10 @@ mod http_metrics_tests {
         let m = SyncMetrics::new();
         // A client-invented verb and codes outside every class still land in
         // fixed label values; the route is the caller's and is used verbatim.
-        m.http().observe("/client/rules", "BREW", 599, 0.01);
-        m.http().observe("/client/rules", "get", 42, 0.01);
+        m.http()
+            .observe("/client/rules", "BREW", 599, RouteClass::Local, 0.01);
+        m.http()
+            .observe("/client/rules", "get", 42, RouteClass::Local, 0.01);
         let lines = http_lines(&m);
         assert!(
             lines
@@ -2708,22 +2749,41 @@ mod http_metrics_tests {
                 .any(|l| l.contains("BREW") || l.contains("599"))
         );
         // NaN and negative durations are not a crash and not a negative sum.
-        m.http().observe("/client/rules", "GET", 200, f64::NAN);
-        m.http().observe("/client/rules", "GET", 200, -1.0);
+        m.http()
+            .observe("/client/rules", "GET", 200, RouteClass::Local, f64::NAN);
+        m.http()
+            .observe("/client/rules", "GET", 200, RouteClass::Local, -1.0);
         assert!(http_lines(&m).iter().any(|l| l
-            == r#"squelchd_http_request_duration_seconds_sum{route="/client/rules",method="GET",status="2xx"} 0"#));
+            == r#"squelchd_http_request_duration_seconds_sum{route="/client/rules",method="GET",status="2xx",class="local"} 0"#));
+    }
+
+    #[test]
+    fn http_class_is_a_label_on_the_series_it_names() {
+        let m = SyncMetrics::new();
+        m.http()
+            .observe("/client/rules", "GET", 200, RouteClass::Local, 0.002);
+        m.http()
+            .observe("/client/rules", "POST", 200, RouteClass::Llm, 3.0);
+        let lines = http_lines(&m);
+        assert!(lines.iter().any(|l| l
+            == r#"squelchd_http_request_duration_seconds_count{route="/client/rules",method="GET",status="2xx",class="local"} 1"#));
+        assert!(lines.iter().any(|l| l
+            == r#"squelchd_http_request_duration_seconds_bucket{route="/client/rules",method="POST",status="2xx",class="llm",le="10"} 1"#));
     }
 
     #[test]
     fn http_series_cap_drops_new_keys_and_counts_the_drops() {
         let m = SyncMetrics::new();
         for i in 0..HTTP_SERIES_CAP {
-            m.http().observe(&format!("/r{i}"), "GET", 200, 0.01);
+            m.http()
+                .observe(&format!("/r{i}"), "GET", 200, RouteClass::Local, 0.01);
         }
         // Existing series keep recording; new ones are refused and counted.
-        m.http().observe("/r0", "GET", 200, 0.01);
-        m.http().observe("/one-too-many", "GET", 200, 0.01);
-        m.http().observe("/r0", "POST", 200, 0.01);
+        m.http().observe("/r0", "GET", 200, RouteClass::Local, 0.01);
+        m.http()
+            .observe("/one-too-many", "GET", 200, RouteClass::Local, 0.01);
+        m.http()
+            .observe("/r0", "POST", 200, RouteClass::Local, 0.01);
         let lines = http_lines(&m);
         assert!(!lines.iter().any(|l| l.contains("one-too-many")));
         assert!(
@@ -2732,7 +2792,7 @@ mod http_metrics_tests {
                 .any(|l| l.contains(r#"route="/r0",method="POST""#))
         );
         assert!(lines.iter().any(|l| l
-            == r#"squelchd_http_request_duration_seconds_count{route="/r0",method="GET",status="2xx"} 2"#));
+            == r#"squelchd_http_request_duration_seconds_count{route="/r0",method="GET",status="2xx",class="local"} 2"#));
         assert!(lines.contains(&"squelchd_http_metrics_series_dropped_total 2".to_string()));
         // Exactly cap series: (buckets + Inf + sum + count) samples each, plus
         // the drop counter. This is the arithmetic the scrape job's

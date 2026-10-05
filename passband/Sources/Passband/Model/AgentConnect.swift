@@ -296,7 +296,7 @@ final class AgentConnect {
     /// SQUELCH_MCP_ALLOWED_HOSTS must never be set on hosted at all. Mid
     /// rollout a hosted door can say either, so this is the one honest line.
     nonisolated static let hostedUnavailable =
-        "The agent door isn't available for this mailbox right now. Try again later, and contact support if it stays that way."
+        "Agent MCP isn't available for this mailbox right now. Try again later, and contact support if it stays that way."
 
     /// Whether `status` from a hosted mailbox is one of those answers.
     nonisolated static func isHostedOutage(_ status: AgentDoorStatus, hosted: Bool) -> Bool {

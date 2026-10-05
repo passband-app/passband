@@ -2063,6 +2063,7 @@ struct ThreadViewer: View {
         store.flightContinues = onward != nil
         let liftedAt = liftOff(leavingSender: onward != nil)
         await store.markReadingDone(items, sender: first.sender)
+        Discovery.note(.stackCleared)
         await flightOut(since: liftedAt)
         guard store.threadId == threadId else { return }
         guard let onward else {
@@ -2570,6 +2571,7 @@ struct ThreadViewer: View {
                 Opener.open(result.url)
                 store.pushToast(Self.browserToast(result), .success)
             }
+            Discovery.note(.unsubscribed)
             // Drop the resolved rows NOW rather than one poll later.
             store.noteSenderResolved(result.sender)
             confirmMode = nil

@@ -109,6 +109,10 @@ targets:
           - "Views/UpdateAlert.swift"
           # The iPhone ask is a Mac card about the iPhone app.
           - "Views/TestFlightNudgeModal.swift"
+          # The discovery ring lives on the Mac's rail, and its page and found
+          # moment hang off the Mac shell. The ledger (Lib/DiscoveryLedger,
+          # Model/Discovery) does cross: the phone records finds too.
+          - "Views/Discovery/**"
           # The agent-door ad is a Mac card too, like the iPhone ask, and the
           # ad family's shared materials go with them. Its rule (Lib/
           # AgentNudge.swift) compiles here so the Agents pane can stamp it.

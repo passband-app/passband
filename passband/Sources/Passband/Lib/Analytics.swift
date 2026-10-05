@@ -112,6 +112,11 @@ enum Analytics {
         "invite_sent", "invite_nudge_accepted", "invite_nudge_dismissed",
         "ios_nudge_closed", "agent_nudge_closed",
         "group_created", "group_updated", "group_deleted",
+        // Discovery: which feature sets get found and which get kept. `full`
+        // only: this is the "which actions are used" layer, not whether the
+        // product works. Whether anybody visits the page is its `$screen`
+        // (`discovery`, a MainView), so it has no event of its own.
+        "feature_found", "feature_kept",
         // Derived, never captured by a call site: see `milestones`.
         "milestone", "catchup_completed",
     ]
@@ -213,6 +218,10 @@ enum Analytics {
             // makes the duplicate free, and naming it here is what keeps this
             // list readable as the vocabulary of THIS event.
             "rail", "settings", "nudge",
+            // feature_found / feature_kept sets: `FeatureSet`'s raw values, the
+            // discovery page's eight rows. Listed by hand like the undo kinds,
+            // so a new set must land here too or its find trips the debug assert.
+            "clear", "flow", "later", "teach", "find", "read", "glance", "write",
             // thread_opened sources (OpenSource): WHICH SURFACE the reader was
             // entered from. "sitrep", "emails", "groups" are MainViews above,
             // "reading" a triage kind, "reply" a compose kind; the rest are
@@ -234,7 +243,15 @@ enum Analytics {
 
     /// The funnel events that describe onboarding rather than happen inside
     /// it — never tagged `practice`, whatever mode the app is in.
-    private static let onboardingEvents: Set<String> = ["tour_started", "tour_completed", "tour_skipped"]
+    ///
+    /// The two discovery events ride with them. Practice mail never reaches the
+    /// ledger (`DiscoveryLedger.counts`), so the only find that can fire while
+    /// the practice inbox is up is the tour's own completion granting `clear`,
+    /// and that one is as real as `tour_completed` is.
+    private static let onboardingEvents: Set<String> = [
+        "tour_started", "tour_completed", "tour_skipped",
+        "feature_found", "feature_kept",
+    ]
 
     /// Screen views ride at `minimal` alongside lifecycle events.
     static func screen(_ name: String) {

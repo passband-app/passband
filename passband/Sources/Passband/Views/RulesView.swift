@@ -990,6 +990,7 @@ struct RuleEditor: View {
             ]
             if let resolved { properties["disposition"] = resolved.rawValue }
             Analytics.capture("rule_created", properties)
+            if request.rule == nil { Discovery.note(.ruleSaved) }
             let outcome = resolved.map { " → \($0.label)" } ?? ""
             store.pushToast(
                 "\(request.rule != nil ? "rule updated" : "rule saved") · \(pattern.trimmed)\(outcome)",

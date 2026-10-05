@@ -65,7 +65,8 @@ enum ProductGuide {
         var covers: String {
             switch self {
             case .gettingAround:
-                "the pages, the sidebar rail, navigation keys, undo, zoom, theme"
+                "the pages, the sidebar rail, the Discover page and its progress ring, navigation "
+                    + "keys, undo, zoom, theme"
             case .sitrep:
                 "the home board: For your eyes, Reading, the calendar, shipments, billing and "
                     + "receipts cards, flow mode"
@@ -154,6 +155,7 @@ enum ProductGuide {
         - 4 Rules: sender rules.
         - 5 Groups: named sets of recipients.
         - Usage and Settings sit at the bottom of the rail and have no number key. ⌘, opens Settings.
+        - The ring just above them opens Discover: a list of the ways through mail (the basics, flow mode, reminders, search, teaching Passband, the at a glance cards, the reading stack, writing) with a short guide to each on the right. The ring fills clockwise as the user tries each one on their own mail, and a feature used on three separate days is marked a habit. Nothing ever empties it. Esc leaves the page.
 
         Moving:
         - ⌘[ goes back and ⌘] goes forward.
@@ -488,7 +490,7 @@ enum ProductGuide {
         Updates:
         - Passband checks for a new version every hour and downloads it in the background. It installs the next time Passband quits.
         - When one is ready, a card at the bottom of the window offers "Restart" to install it now. "Later" hides the card for an hour.
-        - While a new version is waiting, a down-arrow icon sits in the sidebar above the share icon. Clicking it brings the card back.
+        - While a new version is waiting, a down-arrow icon sits near the bottom of the sidebar. Clicking it brings the card back.
         - The Passband menu has "Check for Updates…". The installed version is printed at the bottom right of Settings.
         - Settings > General > Help has "What's new" for the release notes and "Practice inbox" to replay the tour.
 
@@ -497,7 +499,7 @@ enum ProductGuide {
         - Audit log (Settings > Audit, or A on the Emails page): every action taken on the mail by the user or by an agent, with undo for the reversible ones.
 
         Sharing:
-        - The gift icon on the rail, or Settings > Account > Invites, sends a friend an invite from the user's own address. Shown only where the server supports it.
+        - Settings > Account > Invites sends a friend an invite from the user's own address. Shown only where the server supports it.
         - Settings > Account also has the link to the iPhone app on TestFlight.
 
         Privacy:

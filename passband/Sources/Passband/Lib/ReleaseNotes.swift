@@ -77,6 +77,9 @@ enum ReleaseSurface: String, CaseIterable, Sendable {
 /// its scene (Views/Vignette/ReleaseVignettes.swift). The markdown ignores it.
 enum ReleaseVignette: String, CaseIterable, Sendable {
     case mailList, flow, unsubscribe, clearStack
+    case smartBlock
+    /// Not a drawn scene: the agent ad's own conversation, live.
+    case agentSession
 }
 
 /// One bullet in a release.
@@ -260,11 +263,11 @@ enum ReleaseNotes {
                 ReleaseItem(
                     .app, "Connect your agents",
                     detail: "Hosted accounts can sign Claude or ChatGPT in to their mailbox from Settings, under Agents",
-                    symbol: "link"),
+                    symbol: "link", vignette: .agentSession),
                 ReleaseItem(
                     .app, "Smart block",
                     detail: "When a sender ignores your unsubscribe, block just the mail you did not want",
-                    symbol: "hand.raised"),
+                    symbol: "hand.raised", vignette: .smartBlock),
                 ReleaseItem(.app, "Ask ⌘K how Passband works"),
                 ReleaseItem(.app, "`⌘F` to find text in an email"),
                 ReleaseItem(.app, "E and S walk Reading from one sender to the next"),

@@ -214,7 +214,10 @@ private struct AgentAdCard: View {
 ///
 /// The mail in it is the practice inbox's (Cedar Credit, Rainforest): invented,
 /// and already the house's.
-private struct AgentSessionMock: View {
+///
+/// Not private: the What's New walk plays the same conversation on the agent
+/// door's page, so the ad and the release note show one thing.
+struct AgentSessionMock: View {
     let reduceMotion: Bool
     let live: Bool
 

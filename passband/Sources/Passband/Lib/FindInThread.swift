@@ -236,8 +236,8 @@ final class ReaderFind {
 
     func request(for id: Int) -> FindRequest? {
         guard open, !query.isEmpty else { return nil }
-        return FindRequest(
-            query: query, active: cursor?.message == id ? cursor?.match ?? FindRequest.none : FindRequest.none)
+        let active = cursor.flatMap { $0.message == id ? $0.match : nil }
+        return FindRequest(query: query, active: active ?? FindRequest.none)
     }
 
     /// A body's answer for the term in force. `active` is the index it made

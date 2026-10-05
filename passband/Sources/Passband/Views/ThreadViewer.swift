@@ -3353,7 +3353,7 @@ struct PlainBody: View {
         }
     }
 
-    private func found(shown: String, quoted: String?) -> Found? {
+    private func search(shown: String, quoted: String?) -> Found? {
         guard let find, let findID, let request = find.request(for: findID) else { return nil }
         return Found(
             request: request,
@@ -3397,7 +3397,7 @@ struct PlainBody: View {
         // evaluated whenever the card is.
         let split = Quotes.splitTextMemoized(content)
         let shown = split.quoted == nil ? content : split.visible
-        let found = found(shown: shown, quoted: split.quoted)
+        let found = search(shown: shown, quoted: split.quoted)
         VStack(alignment: .leading, spacing: Space.s8) {
             painted(shown, found?.visible ?? [], active: found?.active)
                 .font(Typo.ui(13.5))

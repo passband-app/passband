@@ -85,7 +85,7 @@ data:
   # silently upgrade every tenant's daemon on any pod restart. The warden
   # refuses to start without one. Changing this value and applying is what a
   # daemon rollout IS; the roller does the rest.
-  SQUELCH_WARDEN_IMAGE: "ghcr.io/passband-app/squelchd:daemon-0.0.11"
+  SQUELCH_WARDEN_IMAGE: "ghcr.io/passband-app/squelchd:daemon-0.0.12"
   # Everything below is a default, restated so this file is the one place an
   # operator has to look. See squelch-warden/README.md.
   SQUELCH_WARDEN_TENANT_NAMESPACE: "tenants"
@@ -228,7 +228,7 @@ data:
   # fail, mean this must never be set), and this line fourth. It moves every tenant's Deployment, so the roller carries it
   # one tenant per tick and each reconcile re-applies the Ingress with it; the
   # one tenant shape it can miss is in that section too.
-  # SQUELCH_WARDEN_MCP_OAUTH_ISSUER: "https://<something>.authkit.app"
+  SQUELCH_WARDEN_MCP_OAUTH_ISSUER: "https://secure-soul-15.authkit.app"
   # Per-tenant-container bounds. The number of tenants a box carries is these
   # divided into it; size them with 70-tenant-limits.yaml, not separately.
   #

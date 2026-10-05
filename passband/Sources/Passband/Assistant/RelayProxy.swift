@@ -81,6 +81,7 @@ enum RelayProxy {
                         "Bearer \(settings.apiToken)", forHTTPHeaderField: "Authorization")
                     req.setValue("application/json", forHTTPHeaderField: "content-type")
                     req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+                    req.identifyClient()
                     req.timeoutInterval = streamTimeout
                     req.httpBody = body
 

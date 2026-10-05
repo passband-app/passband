@@ -31,6 +31,13 @@ use axum::{
 /// proxy the whole deployment shares one, so the reverse order would let any
 /// internet client 429 the real daemon with a flood of 401s.
 ///
+/// `/v1/push` and `/v1/opens` are two sub-routers because they take different
+/// bearers: the push route accepts the full token OR the push-only one
+/// ([`auth::require_push_bearer`]), the drain accepts ONLY the full token
+/// ([`auth::require_bearer`]). Each keeps auth outside its rate limit, and both
+/// limits charge the SAME bucket ([`RelayState`] holds one limiter), so the
+/// split changes who gets in and nothing about how much they may do.
+///
 /// `GET /t/{token}` is the one route that must answer strangers: mail clients
 /// fetching the pixel cannot present a bearer. It is rate-limited against its
 /// own buckets, for the same reason auth is the outer layer on the daemon's.
@@ -44,21 +51,31 @@ use axum::{
 pub fn router(state: RelayState) -> Router {
     let authed = state.auth_token().is_some();
 
-    let mut daemon = Router::new().route("/v1/push", post(handlers::push));
+    let mut push = Router::new().route("/v1/push", post(handlers::push)).layer(
+        middleware::from_fn_with_state(state.clone(), ratelimit::limit),
+    );
     if authed {
-        daemon = daemon.route("/v1/opens", get(handlers::opens));
-    }
-    daemon = daemon.layer(middleware::from_fn_with_state(
-        state.clone(),
-        ratelimit::limit,
-    ));
-    if authed {
-        daemon = daemon.layer(middleware::from_fn_with_state(
+        push = push.layer(middleware::from_fn_with_state(
             state.clone(),
-            auth::require_bearer,
+            auth::require_push_bearer,
         ));
     }
-    let daemon = daemon.with_state(state.clone());
+    let mut daemon = push.with_state(state.clone());
+
+    if authed {
+        let opens = Router::new()
+            .route("/v1/opens", get(handlers::opens))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                ratelimit::limit,
+            ))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                auth::require_bearer,
+            ))
+            .with_state(state.clone());
+        daemon = daemon.merge(opens);
+    }
 
     let pixel = Router::new()
         .route("/t/{token}", get(handlers::pixel))

@@ -140,6 +140,17 @@ enum ComposeAttach {
         return body.utf16.count - seed.utf16.count
     }
 
+    /// A body left holding only the signature goes back to the seed exactly.
+    /// Taking a marker out drops its line, and with nothing typed that line
+    /// was one of the seed's two leading newlines: the next picture would then
+    /// miss `aboveSignature` and land under the signature. A body the
+    /// signature was deleted from is empty, not this, and stays empty.
+    private static func reseeded(_ body: String) -> String {
+        let typed = body.trimmed
+        guard !typed.isEmpty, typed == Prefs.shared.signature.trimmed else { return body }
+        return Prefs.shared.signatureSeed
+    }
+
     // MARK: - editing the tray
 
     /// Take a file out of the tray. Its marker goes with it — a body pointing
@@ -148,7 +159,7 @@ enum ComposeAttach {
     static func remove(_ attachment: ComposeAttachment, from slot: DraftSaver.Slot) {
         guard var state = read(slot) else { return }
         state.attachments.removeAll { $0.key == attachment.key }
-        state.body = ComposeMarkers.removeMarker(attachment, from: state.body)
+        state.body = reseeded(ComposeMarkers.removeMarker(attachment, from: state.body))
         write(slot, state)
         DraftSaver.shared.noteChange(slot)
         thumbs[attachment.contentId] = nil
@@ -167,7 +178,7 @@ enum ComposeAttach {
     static func toggleInline(_ attachment: ComposeAttachment, in slot: DraftSaver.Slot) {
         guard var state = read(slot) else { return }
         if ComposeMarkers.isInline(attachment, in: state.body) {
-            state.body = ComposeMarkers.removeMarker(attachment, from: state.body)
+            state.body = reseeded(ComposeMarkers.removeMarker(attachment, from: state.body))
         } else {
             state.body = ComposeMarkers.insertMarker(
                 attachment, into: state.body, at: aboveSignature(state.body))

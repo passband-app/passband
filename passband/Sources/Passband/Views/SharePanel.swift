@@ -65,7 +65,7 @@ struct SharePanel: View {
             Divider().overlay(Palette.hairline)
             content
         }
-        .frame(width: 560)
+        .frame(width: Typo.measure(560))
         .frame(maxHeight: 720)
         .background(Palette.canvas)
         .task { await load() }
@@ -81,10 +81,10 @@ struct SharePanel: View {
             Spacer()
             Button("Done") { dismiss() }
                 .buttonStyle(.glass)
-                .font(.system(size: 12, weight: .medium))
+                .font(Typo.ui(12, weight: .medium))
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 16)
+        .padding(.horizontal, Space.s20)
+        .padding(.vertical, Space.s16)
     }
 
     @ViewBuilder
@@ -123,14 +123,14 @@ struct SharePanel: View {
             ProgressView()
                 .controlSize(.small)
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 48)
+                .padding(.vertical, Space.scaled(48))
         }
     }
 
     // MARK: - the form
 
     private func form(_ availability: InviteAvailability) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: Space.s12) {
             Text(
                 "Each friend gets one of these from your own address, with an invite code of "
                     + "their own. Nobody on it can see who else you invited."
@@ -147,8 +147,8 @@ struct SharePanel: View {
                     .focused($focus, equals: .subject)
             }
 
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 6) {
+            VStack(alignment: .leading, spacing: Space.scaled(5)) {
+                HStack(spacing: Space.s6) {
                     Text("body").font(Typo.micro).foregroundStyle(Palette.inkFaint)
                     Text("markdown: **bold**, *italic*, `code`, [links](url)")
                         .font(Typo.micro)
@@ -157,8 +157,8 @@ struct SharePanel: View {
                         .minimumScaleFactor(0.85)
                 }
                 MarkdownTextView(text: $draft)
-                    .frame(minHeight: 220, maxHeight: .infinity)
-                    .padding(8)
+                    .frame(minHeight: Space.scaled(220), maxHeight: .infinity)
+                    .padding(Space.s8)
                     .background(
                         RoundedRectangle(cornerRadius: 9, style: .continuous)
                             .fill(Palette.canvas.opacity(0.65))
@@ -180,7 +180,7 @@ struct SharePanel: View {
 
             sendRow
         }
-        .padding(20)
+        .padding(Space.s20)
     }
 
     /// What the marker is, and a warning when it has been edited away.
@@ -207,7 +207,7 @@ struct SharePanel: View {
     }
 
     private var sendRow: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: Space.s10) {
             if recipients.count > Self.maxRecipients {
                 Text("\(Self.maxRecipients) at a time")
                     .font(Typo.micro)
@@ -218,7 +218,7 @@ struct SharePanel: View {
                 Task { await send() }
             }
             .buttonStyle(.glassProminent)
-            .font(.system(size: 12, weight: .semibold))
+            .font(Typo.ui(12, weight: .semibold))
             .disabled(!canSend)
         }
     }
@@ -244,13 +244,13 @@ struct SharePanel: View {
     /// rather than a banner over it: the codes are spent, and a form still
     /// standing invites a second press that would spend more.
     private func receipt(_ outcome: InviteSendResponse) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: Space.s14) {
             ForEach(outcome.results) { result in
-                HStack(alignment: .firstTextBaseline, spacing: 9) {
+                HStack(alignment: .firstTextBaseline, spacing: Space.scaled(9)) {
                     Image(systemName: result.sent ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
                         .foregroundStyle(result.sent ? Palette.positive : Palette.danger)
-                        .font(.system(size: 13))
-                    VStack(alignment: .leading, spacing: 2) {
+                        .font(Typo.ui(13))
+                    VStack(alignment: .leading, spacing: Space.s2) {
                         Text(result.email)
                             .font(Typo.row)
                             .foregroundStyle(Palette.ink)
@@ -272,12 +272,12 @@ struct SharePanel: View {
                 .foregroundStyle(Palette.inkFaint)
             }
         }
-        .padding(20)
+        .padding(Space.s20)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func message(_ title: String, detail: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: Space.s6) {
             Text(title)
                 .font(Typo.row)
                 .foregroundStyle(Palette.ink)
@@ -286,7 +286,7 @@ struct SharePanel: View {
                 .foregroundStyle(Palette.inkDim)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(20)
+        .padding(Space.s20)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 

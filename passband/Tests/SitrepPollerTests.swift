@@ -88,7 +88,14 @@ struct Stats: Equatable, Sendable {
     var sealed = 0
     var bands = Bands()
     var tier_counts: [String: Int] = [:]
+    /// Optional, as on the wire: present only while the daemon is walking a
+    /// known amount of mail. The poller reads it for `catchup_completed`.
+    var catch_up: CatchUpProgress?
     struct Bands: Equatable, Sendable { var standing = 0; var new = 0; var open = 0 }
+}
+struct CatchUpProgress: Equatable, Sendable {
+    var done: Int
+    var total: Int
 }
 struct SitrepData: Equatable {
     var standing: [AttentionUpdate] = []
@@ -144,6 +151,7 @@ struct RefreshError { var message: String; var kind: ErrorKind }
 }
 enum Analytics {
     static func capture(_ event: String) {}
+    static func capture(_ event: String, _ properties: [String: Int]) {}
     static func daily(_ event: String, _ properties: [String: Int]) {}
 }
 @MainActor final class ImageWarmer {

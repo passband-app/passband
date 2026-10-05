@@ -140,6 +140,36 @@ impl CarrierPollOutcome {
     }
 }
 
+/// How APNs answered for one device token, as the pusher classifies it. A
+/// CLOSED set of four and the only label on its family: no token, tag, topic or
+/// account ever becomes a series.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApnsPushOutcome {
+    /// `200`: APNs took it.
+    Delivered,
+    /// `410`: the device is gone and its row is deleted.
+    Dead,
+    /// A permanent 4xx: not retried, not deleted.
+    Rejected,
+    /// Retryable: `0`, `403`, `429`, `400 IdleTimeout`, `5xx`, anything
+    /// unexpected. The APNs reason decides that one case and is NEVER a label.
+    Failed,
+}
+
+impl ApnsPushOutcome {
+    /// Exposition order; the index into the outcome row.
+    const ALL: [Self; 4] = [Self::Delivered, Self::Dead, Self::Rejected, Self::Failed];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Delivered => "delivered",
+            Self::Dead => "dead",
+            Self::Rejected => "rejected",
+            Self::Failed => "failed",
+        }
+    }
+}
+
 /// What one row's trip through the Stage-1 refine pass produced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage1Verdict {
@@ -398,6 +428,14 @@ pub struct SyncMetrics {
     /// memory next to this one reads as cause and effect instead of a mystery.
     /// Written by [`crate::embed::LazyEmbedder`] on each load and unload.
     embedder_loaded: AtomicU64,
+
+    /// 1 when the APNs pusher task was spawned at startup, else 0. Together
+    /// with the counter below this is what makes a dead push path VISIBLE: an
+    /// outage once ran for over a month because nothing measured whether a
+    /// daemon had a pusher at all, or whether anything it sent landed.
+    apns_pusher_enabled: AtomicU64,
+    /// Per-token APNs results, indexed by [`ApnsPushOutcome`].
+    apns_push_results: [AtomicU64; ApnsPushOutcome::ALL.len()],
 
     /// Mirror of the engine's private `poll_healthy`: true once a poll has
     /// succeeded and until the next lifecycle error. The human door has no
@@ -762,6 +800,17 @@ impl SyncMetrics {
     pub fn set_embedder_loaded(&self, loaded: bool) {
         self.embedder_loaded
             .store(u64::from(loaded), Ordering::Relaxed);
+    }
+
+    /// Whether the APNs pusher task was spawned. An absolute state, set once.
+    pub fn set_apns_pusher_enabled(&self, enabled: bool) {
+        self.apns_pusher_enabled
+            .store(u64::from(enabled), Ordering::Relaxed);
+    }
+
+    /// Count one device token's APNs result.
+    pub fn record_apns_push(&self, outcome: ApnsPushOutcome) {
+        self.apns_push_results[outcome as usize].fetch_add(1, Ordering::Relaxed);
     }
 
     /// A poll advanced a shipment's status (`apply_carrier_track` said so).
@@ -1226,6 +1275,11 @@ pub struct StoreSnapshot {
     /// this is here so an operator can see the fleet's paired devices on a
     /// dashboard, and nothing reads it back.
     pub devices_paired: u64,
+    /// Which app versions have connected, and when each last did
+    /// ([`crate::store::SqliteStore::client_versions_seen`]): already folded to
+    /// one entry per (platform, version) and capped, so this is the series list
+    /// as it will be exported.
+    pub clients: Vec<crate::store::ClientSeen>,
     /// Durable investigation jobs, including delayed retries; excludes notifications.
     pub triage_jobs: [u64; 2],
     /// The same rolling 24-hour manual re-triage window as /client/retriage.
@@ -1268,13 +1322,18 @@ pub const NOTIFY_USAGE_CATEGORY: &str = "notify";
 /// at notify rates; see [`runs_notify_model`].
 pub const RULE_SUGGEST_USAGE_CATEGORY: &str = "rule_suggest";
 
+/// The sitrep headline. Runs the notify model, so it is priced at notify rates.
+pub const FYE_HEADLINE_USAGE_CATEGORY: &str = "fye_headline";
+
 /// Does this ledger category run [`crate::config::NotifyConfig::model`]? The
 /// ONE list both cost estimators consult, so a small-model category cannot be
 /// priced as small in one and as Stage-1 in the other.
 pub fn runs_notify_model(category: &str) -> bool {
     category == NOTIFY_USAGE_CATEGORY
         || category == RULE_SUGGEST_USAGE_CATEGORY
+        || category == FYE_HEADLINE_USAGE_CATEGORY
         || category == crate::triage::access::USAGE_CATEGORY
+        || category == crate::triage::unsub_page::USAGE_CATEGORY
 }
 
 /// Estimated spend for a ledger rollup, costed exactly as `/client/usage` does.
@@ -1549,6 +1608,29 @@ pub fn render(metrics: &SyncMetrics, db: Option<&StoreSnapshot>) -> String {
         metrics.get(&metrics.embedder_loaded),
     );
 
+    // Always emitted, 0 included: "this daemon has no pusher" must read as a
+    // 0 a dashboard can alert on, never as absence.
+    e.scalar(
+        "squelchd_apns_pusher_enabled",
+        MetricKind::Gauge,
+        "1 when the APNs pusher task was started (a relay is configured), else 0.",
+        metrics.get(&metrics.apns_pusher_enabled),
+    );
+    // All four outcomes from the first scrape, so `rate(...)` on one that just
+    // started moving reads correctly from its first sample.
+    e.family(
+        "squelchd_apns_push_results_total",
+        MetricKind::Counter,
+        "Per-device-token APNs results from the pusher, by outcome.",
+    );
+    for outcome in ApnsPushOutcome::ALL {
+        e.sample(
+            "squelchd_apns_push_results_total",
+            &[("outcome", outcome.label())],
+            metrics.get(&metrics.apns_push_results[outcome as usize]),
+        );
+    }
+
     // ALL 20 series are emitted, including carriers this daemon has no
     // credentials for: an absent series is indistinguishable from a scraper
     // problem, and a flat 0 is what makes `rate(...)` on a carrier that just
@@ -1680,6 +1762,32 @@ pub fn render(metrics: &SyncMetrics, db: Option<&StoreSnapshot>) -> String {
             "Client devices currently holding an unrevoked device token; console sessions excluded.",
             db.devices_paired as f64,
         );
+
+        // LABELLED, unlike the gauge above, and still inside this module's
+        // rule, because neither label can carry anything about a device or a
+        // person: `platform` is a closed enum and `version` is dotted digits
+        // by construction (`store::ClientTag::parse`), the same string for
+        // everyone on that release. The store hands over at most
+        // `CLIENT_VERSIONS_CAP` pairs, which is the cardinality bound.
+        //
+        // A family with NO samples until a client that names itself connects.
+        // There is no honest zero to stand in: 0 here would read as "last seen
+        // in 1970" on a dashboard that subtracts it from now.
+        e.family(
+            "squelchd_client_last_seen_timestamp_seconds",
+            MetricKind::Gauge,
+            "Unix time an app of this platform and version last made an authenticated request, per the X-Passband-Client header. Clients that do not send the header are not counted.",
+        );
+        for client in &db.clients {
+            e.sample(
+                "squelchd_client_last_seen_timestamp_seconds",
+                &[
+                    ("platform", client.platform.as_str()),
+                    ("version", &client.version),
+                ],
+                client.seen_at.timestamp() as f64,
+            );
+        }
 
         e.family(
             "squelchd_db_size_bytes",
@@ -1940,6 +2048,33 @@ mod tests {
         assert!(!text.contains("squelchd_llm_last_ok_unixtime 0\n"));
     }
 
+    /// The pusher gauge flips and each outcome counts on its own series; the
+    /// four series are the whole label space.
+    #[test]
+    fn apns_pusher_gauge_and_per_outcome_counts() {
+        let m = SyncMetrics::new();
+        m.set_apns_pusher_enabled(true);
+        m.record_apns_push(ApnsPushOutcome::Delivered);
+        m.record_apns_push(ApnsPushOutcome::Rejected);
+        m.record_apns_push(ApnsPushOutcome::Rejected);
+        let text = render(&m, None);
+        assert!(text.contains("squelchd_apns_pusher_enabled 1\n"));
+        for (outcome, n) in [
+            ("delivered", 1),
+            ("dead", 0),
+            ("rejected", 2),
+            ("failed", 0),
+        ] {
+            assert!(
+                text.contains(&format!(
+                    "squelchd_apns_push_results_total{{outcome=\"{outcome}\"}} {n}\n"
+                )),
+                "{outcome}"
+            );
+        }
+        assert_eq!(text.matches("squelchd_apns_push_results_total{").count(), 4);
+    }
+
     #[test]
     fn llm_config_failures_count_and_the_freshness_stamp_moves_only_on_a_verdict() {
         let m = SyncMetrics::new();
@@ -2026,12 +2161,15 @@ mod tests {
         // The gauge too: "not holding a session" must render as 0, never as
         // absence, or an unloaded fleet reads as a scraper problem.
         assert!(text.contains("squelchd_embedder_loaded 0\n"));
+        assert!(text.contains("squelchd_apns_pusher_enabled 0\n"));
+        assert!(text.contains("squelchd_apns_push_results_total{outcome=\"rejected\"} 0\n"));
         assert!(!text.contains("squelchd_db_size_bytes"));
         assert!(!text.contains("squelchd_store_messages"));
         assert!(!text.contains("squelchd_triage_jobs"));
         assert!(!text.contains("squelchd_retriage_messages"));
         assert!(text.contains("squelchd_catchup_messages_total 0\n"));
         assert!(!text.contains("squelchd_devices_paired"));
+        assert!(!text.contains("squelchd_client_last_seen_timestamp_seconds"));
         assert!(text.ends_with('\n'));
     }
 
@@ -2077,6 +2215,18 @@ mod tests {
             db_bytes: 4096,
             wal_bytes: 0,
             devices_paired: 2,
+            clients: vec![
+                crate::store::ClientSeen {
+                    platform: crate::store::ClientPlatform::Macos,
+                    version: "0.0.12".to_string(),
+                    seen_at: chrono::DateTime::from_timestamp(1_790_000_000, 0).unwrap(),
+                },
+                crate::store::ClientSeen {
+                    platform: crate::store::ClientPlatform::Ios,
+                    version: "0.0.6".to_string(),
+                    seen_at: chrono::DateTime::from_timestamp(1_789_000_000, 0).unwrap(),
+                },
+            ],
             triage_jobs: [9, 2],
             retriage: crate::types::RetriageProgress {
                 total: 7,
@@ -2111,6 +2261,20 @@ mod tests {
         assert!(text.contains("# TYPE squelchd_devices_paired gauge\n"));
         assert!(text.contains("squelchd_devices_paired 2\n"));
         assert!(!text.contains("squelchd_devices_paired{"));
+        // One series per (platform, version), and the value is the stamp
+        // itself, not an age: the dashboard does the subtraction.
+        assert_eq!(
+            text.matches("# TYPE squelchd_client_last_seen_timestamp_seconds gauge\n")
+                .count(),
+            1,
+            "one family header however many samples follow it"
+        );
+        assert!(text.contains(
+            "squelchd_client_last_seen_timestamp_seconds{platform=\"macos\",version=\"0.0.12\"} 1790000000\n"
+        ));
+        assert!(text.contains(
+            "squelchd_client_last_seen_timestamp_seconds{platform=\"ios\",version=\"0.0.6\"} 1789000000\n"
+        ));
     }
 
     #[test]
@@ -2165,6 +2329,7 @@ mod tests {
         // the rule suggester and the agent-access check both ride it.
         for category in [
             RULE_SUGGEST_USAGE_CATEGORY,
+            FYE_HEADLINE_USAGE_CATEGORY,
             crate::triage::access::USAGE_CATEGORY,
         ] {
             assert!(

@@ -528,15 +528,19 @@ pub struct PusherConfig {
     /// pusher POSTs to `{relay_url}/v1/push`. Env: `SQUELCH_RELAY_URL`.
     /// `None` => the pusher task is not spawned at all.
     pub relay_url: Option<String>,
-    /// Bearer presented to the relay; it is the value the relay itself validates
-    /// as `SQUELCH_RELAY_AUTH_TOKEN`. Env: `SQUELCH_RELAY_TOKEN`. Prefer the env
-    /// var over config.toml — this is secret material, and it is NEVER logged.
+    /// Bearer presented to the relay: its `SQUELCH_RELAY_AUTH_TOKEN` for a
+    /// self-hosted daemon (push AND the opens drain), or its push-only
+    /// `SQUELCH_RELAY_PUSH_TOKEN` for a hosted tenant. Env: `SQUELCH_RELAY_TOKEN`.
+    /// Prefer the env var over config.toml — this is secret material, and it is
+    /// NEVER logged.
     pub relay_token: Option<String>,
     /// Optional `apns-topic` (bundle id) override, forwarded verbatim. Must be in
     /// the relay's own allowlist. Env: `SQUELCH_RELAY_TOPIC`.
     pub topic: Option<String>,
-    /// Optional APNs environment override (`production` | `sandbox`), forwarded
-    /// verbatim; the relay validates it. Env: `SQUELCH_RELAY_APNS_ENV`.
+    /// The FALLBACK APNs environment (`production` | `sandbox`), for devices
+    /// that did not declare their own at registration. Normalized by the
+    /// pusher; a value the relay would refuse is dropped with a warning.
+    /// Env: `SQUELCH_RELAY_APNS_ENV`.
     pub environment: Option<String>,
 }
 

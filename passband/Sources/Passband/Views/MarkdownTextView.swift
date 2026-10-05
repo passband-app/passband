@@ -51,16 +51,16 @@ struct MarkdownTextView: NSViewRepresentable {
         view.string = text
         view.allowsUndo = true
         view.isRichText = false  // attributes are OURS; no pasted fonts
-        view.font = MarkdownStyle.baseFont
         view.textColor = NSColor(Palette.ink)
         view.insertionPointColor = NSColor(Palette.accent)
         view.drawsBackground = false
-        view.textContainerInset = NSSize(width: 2, height: 4)
         view.isAutomaticQuoteSubstitutionEnabled = false  // curly quotes break markers
         view.isAutomaticDashSubstitutionEnabled = false
         view.autoresizingMask = [.width]
         view.textContainer?.widthTracksTextView = true
-        view.rehighlight()
+        // The base font, the inset and the first styling pass: the same call a
+        // density flip makes later, so mount and flip cannot disagree.
+        view.applyDensity()
         // A body can open non-empty (the seeded signature); the caret belongs
         // at the top, above it, not after it where setString parks it.
         view.setSelectedRange(NSRange(location: 0, length: 0))
@@ -91,6 +91,19 @@ struct MarkdownTextView: NSViewRepresentable {
         if EditorRefocus.take(refocus, seen: &context.coordinator.focusSeen) {
             // After the overlay that had the caret has unmounted.
             DispatchQueue.main.async { view.window?.makeFirstResponder(view) }
+        }
+        // THE DENSITY SETTING FLIPPED WITH A DRAFT OPEN. The text view built
+        // its fonts from the density live at the last pass and observes
+        // nothing, so the representable is what notices: reading the setting
+        // here makes this update run when it changes, and the coordinator
+        // remembers which density the view was last styled at so the pass
+        // runs once per flip, not once per render. Attributes only, through
+        // `applyDensity`: the characters, the selection and the undo stack
+        // are never touched.
+        let density = Prefs.shared.density
+        if context.coordinator.density != density {
+            context.coordinator.density = density
+            view.applyDensity()
         }
         // Only external changes (a draft restore) land here — the coordinator
         // wrote user edits into the binding already, and re-setting the string
@@ -131,9 +144,12 @@ struct MarkdownTextView: NSViewRepresentable {
         /// The last `refocus` answered; starts at the mount's, which
         /// `autofocus` covers.
         var focusSeen: Int
+        /// The density the text view was last styled at (see `updateNSView`).
+        var density: DensityChoice
         init(_ parent: MarkdownTextView) {
             self.parent = parent
             self.focusSeen = parent.refocus
+            self.density = Prefs.shared.density
         }
 
         /// THIS EDITOR'S OWN HISTORY. Left to itself the text view registers
@@ -328,6 +344,22 @@ final class HighlightingTextView: NSTextView {
         } else if let png, let onPasteImage {
             onPasteImage(png, caret)
         }
+    }
+
+    /// Everything about the editor that is sized by the density setting, set
+    /// from the current one, then the styling pass over the text already here.
+    /// Run at mount and again on every flip (`MarkdownTextView.updateNSView`).
+    ///
+    /// The horizontal inset stays 2 in both: with the line fragment's 5 it is
+    /// the 7 the composer subtracts to put the body's left edge on the header
+    /// labels' edge, an alignment rather than room. The typing attributes are
+    /// reset because AppKit last derived them from the old fonts, and in an
+    /// empty editor they are what sizes the caret and the first letter.
+    func applyDensity() {
+        font = MarkdownStyle.baseFont
+        textContainerInset = NSSize(width: 2, height: Space.scaled(4))
+        rehighlight()
+        typingAttributes = MarkdownStyle.base
     }
 
     func rehighlight() {

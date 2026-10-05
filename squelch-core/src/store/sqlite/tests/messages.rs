@@ -1122,6 +1122,52 @@ fn sent_listing_is_account_scoped_and_reads_missing_recipients_as_empty() {
     assert_eq!(rows[0].to, "", "NULL recipients read as empty, never NULL");
 }
 
+/// THE PRODUCTION SEQUENCE that emptied a tenant's sent page: the composer's
+/// send echo writes the row as sent, then Gmail's label-filtered INBOX history
+/// serves the same message and the sticky `MIN` pins `is_sent` to 0. The row is
+/// still the user's own mail and still belongs here. A forged From-the-user
+/// that crossed Gmail's inbound edge (`auth_pass` set) does not, and neither
+/// does a From-the-user row in the spam folder.
+#[test]
+fn sent_listing_keeps_a_send_an_inbox_sighting_demoted() {
+    let (store, acct) = store();
+    let now = Utc::now();
+
+    let echoed = triaged(acct, "s-echo", "t-echo")
+        .from("me@example.com")
+        .is_sent(true)
+        .to_addrs("alice@friends.com")
+        .received_at(now)
+        .seed(&store);
+    let resighted = triaged(acct, "s-echo", "t-echo")
+        .from("me@example.com")
+        .to_addrs("alice@friends.com")
+        .received_at(now)
+        .seed(&store);
+    assert_eq!(resighted, echoed, "one row, not a copy");
+
+    triaged(acct, "g-forged", "t-forged")
+        .from("Me@Example.com")
+        .auth_pass(Some(false))
+        .received_at(now + chrono::Duration::seconds(1))
+        .seed(&store);
+
+    triaged(acct, "g-spam-me", "t-spam-me")
+        .from("me@example.com")
+        .is_spam(true)
+        .received_at(now + chrono::Duration::seconds(2))
+        .seed(&store);
+
+    let rows = store.sent_listing(acct, 50, 0).unwrap();
+    let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+    assert_eq!(
+        ids,
+        vec![echoed],
+        "the demoted send lists; the forgery and the spam row do not"
+    );
+    assert_eq!(rows[0].to, "alice@friends.com");
+}
+
 // ---- the recipients backfill queue --------------------------------------
 
 #[test]

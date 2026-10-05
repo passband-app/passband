@@ -21,7 +21,18 @@ struct UpdateAlert: View {
             case .checking:
                 narration(text: "checking for updates", fraction: nil, spinner: true)
             case .available(let version):
-                offer(version: version)
+                offer(
+                    title: "Passband \(version) is available",
+                    // What the button DOES, said before it is pressed: the app
+                    // quits and comes back, and anyone typing an email deserves
+                    // to know that before they find out.
+                    detail: "Updating installs it and restarts Passband.",
+                    action: "Update", perform: updater.installAndRelaunch)
+            case .ready(let version):
+                offer(
+                    title: "Passband \(version) is ready",
+                    detail: "It installs when you quit, or restart now.",
+                    action: "Restart", perform: updater.restartNow)
             case .downloading(let fraction):
                 narration(text: "downloading Passband", fraction: fraction, spinner: fraction == nil)
             case .extracting(let fraction):
@@ -35,42 +46,42 @@ struct UpdateAlert: View {
 
     // MARK: - the offer
 
-    private func offer(version: String) -> some View {
-        HStack(spacing: 13) {
+    private func offer(
+        title: String, detail: String, action: String, perform: @escaping () -> Void
+    ) -> some View {
+        HStack(spacing: Space.scaled(13)) {
             Image(systemName: "arrow.down.circle.fill")
-                .font(.system(size: 19, weight: .medium))
+                .font(Typo.ui(19, weight: .medium))
                 .foregroundStyle(Palette.accent)
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Passband \(version) is available")
-                    .font(.system(size: 13, weight: .semibold))
+            VStack(alignment: .leading, spacing: Space.s2) {
+                Text(title)
+                    .font(Typo.ui(13, weight: .semibold))
                     .foregroundStyle(Palette.ink)
-                // What the button DOES, said before it is pressed: the app
-                // quits and comes back, and anyone typing an email deserves to
-                // know that before they find out.
-                Text("Updating installs it and restarts Passband.")
+                Text(detail)
                     .font(Typo.rowSub)
                     .foregroundStyle(Palette.inkFaint)
             }
 
-            Spacer(minLength: 10)
+            Spacer(minLength: Space.s10)
 
             Button("Later") { updater.later() }
                 .buttonStyle(.glass)
-                .font(.system(size: 12, weight: .medium))
+                .font(Typo.ui(12, weight: .medium))
 
-            Button("Update") { updater.installAndRelaunch() }
+            // No .defaultAction: the card arrives unbidden, and on any page
+            // without its own Return binding that made Return a relaunch.
+            Button(action, action: perform)
                 .buttonStyle(.glassProminent)
-                .font(.system(size: 12, weight: .semibold))
-                .keyboardShortcut(.defaultAction)
+                .font(Typo.ui(12, weight: .semibold))
         }
-        .padding(.horizontal, 15)
-        .padding(.vertical, 12)
+        .padding(.horizontal, Space.scaled(15))
+        .padding(.vertical, Space.s12)
         .frame(maxWidth: 520)
         .passbandGlass(.pane, cornerRadius: 14, tint: Palette.glassTintStrong)
         .transition(.move(edge: .bottom).combined(with: .opacity))
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Passband \(version) is available")
+        .accessibilityLabel(title)
     }
 
     // MARK: - the work
@@ -80,14 +91,14 @@ struct UpdateAlert: View {
     /// only the download, and a card offering to abandon a half-installed app
     /// would be offering something it cannot do.
     private func narration(text: String, fraction: Double?, spinner: Bool) -> some View {
-        HStack(spacing: 11) {
+        HStack(spacing: Space.scaled(11)) {
             if spinner {
                 ProgressView()
                     .controlSize(.small)
                     .scaleEffect(0.8)
             } else {
                 Image(systemName: "arrow.down.circle")
-                    .font(.system(size: 15, weight: .medium))
+                    .font(Typo.ui(15, weight: .medium))
                     .foregroundStyle(Palette.accent)
             }
 
@@ -104,11 +115,11 @@ struct UpdateAlert: View {
                     .font(Typo.num(11))
                     .foregroundStyle(Palette.inkFaint)
                     .monospacedDigit()
-                    .frame(width: 32, alignment: .trailing)
+                    .frame(width: Space.scaled(32), alignment: .trailing)
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 9)
+        .padding(.horizontal, Space.s14)
+        .padding(.vertical, Space.scaled(9))
         .passbandGlass(.chrome, cornerRadius: 12, tint: Palette.glassTint)
         .transition(.move(edge: .bottom).combined(with: .opacity))
         .accessibilityElement(children: .combine)

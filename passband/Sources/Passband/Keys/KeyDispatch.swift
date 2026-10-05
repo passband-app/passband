@@ -414,11 +414,29 @@ private struct KeyContextModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         content
+            .environment(\.keyContext, context)
             .onAppear { if token == nil { token = KeyRegistry.shared.pushContext(context) } }
             .onDisappear {
                 if let token { KeyRegistry.shared.popContext(token) }
                 token = nil
             }
+    }
+}
+
+private struct KeyContextKey: EnvironmentKey {
+    static let defaultValue: KeyContext = .modal
+}
+
+extension EnvironmentValues {
+    /// The layer this view sits in: whatever the nearest `.keyContext(…)` above
+    /// it pushed. For a REUSED view that carries bindings of its own (the
+    /// recipient field) and so cannot name its host's context: a set registered
+    /// into any other layer is never consulted, and its keys silently fall
+    /// through to whatever is underneath. `.modal` where nothing above pushed
+    /// one, which is where such views lived before this existed.
+    var keyContext: KeyContext {
+        get { self[KeyContextKey.self] }
+        set { self[KeyContextKey.self] = newValue }
     }
 }
 

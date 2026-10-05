@@ -55,12 +55,16 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             // The boot view never passes through route(to:), so its screen event
             // is recorded here or not at all.
             Analytics.screen(AppStore.shared.activeView.rawValue)
+            AppStore.shared.identifyPerson()
         }
         return true
     }
 
     func applicationDidBecomeActive(_ application: UIApplication) {
-        Task { @MainActor in await PushRegistration.shared.registerAndSync() }
+        Task { @MainActor in
+            AppStore.shared.identifyPerson()
+            await PushRegistration.shared.registerAndSync()
+        }
     }
 
     func application(

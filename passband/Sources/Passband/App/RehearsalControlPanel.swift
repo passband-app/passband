@@ -95,14 +95,14 @@ private struct RehearsalControls: View {
     @State private var linkMessage: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: Space.s14) {
             Text("Onboarding rehearsal")
-                .font(.system(size: 15, weight: .semibold))
+                .font(Typo.ui(15, weight: .semibold))
             Text("The main window shows the customer experience. Appearance is the app's real setting; Start fresh returns to the opening and reloads the practice mail.")
-                .font(.system(size: 12))
+                .font(Typo.ui(12))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: 12) {
+            HStack(spacing: Space.s12) {
                 Button(prefs.theme == .dark ? "Light appearance" : "Dark appearance") { prefs.flipTheme() }
                 Button("Start fresh") { rehearsal.startFresh() }
             }
@@ -124,11 +124,11 @@ private struct RehearsalControls: View {
                 .disabled(store.accountActionsBlocked || rehearsal.restartingConnection)
                 .help("Open the copied login link here if macOS sends it to an older Passband build.")
                 if let linkMessage {
-                    Text(linkMessage).font(.system(size: 11)).foregroundStyle(.secondary)
+                    Text(linkMessage).font(Typo.ui(11)).foregroundStyle(.secondary)
                 }
             }
         }
-        .padding(20)
+        .padding(Space.s20)
         .frame(width: 360, alignment: .leading)
         .preferredColorScheme(prefs.theme.colorScheme)
     }

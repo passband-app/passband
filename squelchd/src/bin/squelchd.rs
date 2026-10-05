@@ -1612,9 +1612,9 @@ fn report_tracking_posture(config: &Config) {
 
     // The human door drops a scheme-less base URL, because it would ride into
     // outbound HTML as a RELATIVE url and resolve against the recipient's mail
-    // client. Silent there; loud here.
-    let lower = base.to_ascii_lowercase();
-    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+    // client. Silent there; loud here. The shared predicate, so this report,
+    // minting and the opens-poller gate cannot disagree about what counts.
+    if !squelch_core::tracking::is_mintable_base_url(base) {
         eprintln!(
             "squelchd: read tracking DISABLED: base_url `{base}` has no http(s) scheme, so it was rejected; sends go out untracked"
         );
@@ -1840,6 +1840,9 @@ async fn gather_store_metrics(
         // A COUNT, never a listing: the exported gauge is unlabelled, so no
         // device name can reach an unauthenticated scrape even in principle.
         let devices_paired = store.count_client_devices(account_id)?;
+        // Platform and version only, already folded: two phones on one build
+        // are one entry, and nothing that names a device comes back.
+        let clients = store.client_versions_seen(account_id)?;
         Ok::<_, squelch_core::CoreError>(squelch_core::metrics::StoreSnapshot {
             llm_cost_usd: squelch_core::metrics::estimate_cost_usd(&llm, &config),
             stats,
@@ -1847,6 +1850,7 @@ async fn gather_store_metrics(
             db_bytes,
             wal_bytes,
             devices_paired,
+            clients,
             triage_jobs: store.triage_job_counts(account_id)?,
             retriage: store.retriage_progress(account_id)?,
         })
@@ -2044,8 +2048,11 @@ fn cmd_serve(
 
     // The opens poller runs the same relay in the other direction: it collects
     // read-tracking pixel hits the relay saw and appends the `opened` events the
-    // pusher then delivers. Gated on the SAME `SQUELCH_RELAY_URL`; a daemon
-    // whose pixel is reached directly needs none of this.
+    // pusher then delivers. Gated on `SQUELCH_RELAY_URL` AND `SQUELCH_TRACK_URL`
+    // both: the relay's opens buffer is one global queue whose cursor ack
+    // DELETES, so a daemon that mints no pixels (a hosted tenant given a relay
+    // for push alone) must never collect. A daemon whose pixel is reached
+    // directly needs none of this.
     let opens_poller = match squelch_core::tracking::OpensPoller::from_config(
         store.clone() as Arc<dyn squelch_core::store::Store>,
         account_id,
@@ -2156,6 +2163,8 @@ fn cmd_serve(
         let pusher_handle = match pusher {
             Some(pusher) => {
                 eprintln!("squelchd: APNs pusher enabled (relay configured)");
+                sync_metrics.set_apns_pusher_enabled(true);
+                let pusher = pusher.with_metrics(sync_metrics.clone());
                 let shutdown_rx = shutdown_rx.clone();
                 Some(tokio::spawn(async move {
                     pusher.run(pusher_wake, shutdown_rx).await
@@ -2174,13 +2183,13 @@ fn cmd_serve(
         // and is awaited on the way out, like the pusher.
         let opens_handle = match opens_poller {
             Some(poller) => {
-                eprintln!("squelchd: opens poller enabled (relay configured)");
+                eprintln!("squelchd: opens poller enabled (relay and tracking configured)");
                 let shutdown_rx = shutdown_rx.clone();
                 Some(tokio::spawn(async move { poller.run(shutdown_rx).await }))
             }
             None => {
                 eprintln!(
-                    "squelchd: opens poller disabled (no SQUELCH_RELAY_URL / [pusher] relay_url)"
+                    "squelchd: opens poller disabled (needs both SQUELCH_RELAY_URL / [pusher] relay_url and SQUELCH_TRACK_URL / [tracking] base_url)"
                 );
                 None
             }

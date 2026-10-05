@@ -124,6 +124,18 @@ struct ComposeAttachmentsTests {
         expect(
             ComposeMarkers.removeMarker(a, from: "no marker here") == "no marker here",
             "nothing to remove is a no-op")
+        // A picture added to a composer holding only the seeded signature, then
+        // taken out, leaves nothing but the signature, give or take the blank
+        // lines above it (the marker's line may take one with it). That is the
+        // promise `isBodyUntouched` and the tray's reseed are written against:
+        // both compare trimmed.
+        let seed = "\n\n--\n\nSent from [Passband](https://passband.app)"
+        let pictured = ComposeMarkers.insertMarker(a, into: seed, at: 0)
+        let emptied = ComposeMarkers.removeMarker(a, from: pictured)
+        expect(
+            emptied.trimmingCharacters(in: .whitespacesAndNewlines)
+                == seed.trimmingCharacters(in: .whitespacesAndNewlines),
+            "a picture added to the bare seed and removed leaves only the signature")
         // Placed twice, removed twice.
         expect(
             ComposeMarkers.removeMarker(a, from: "\(marker)\na\n\(marker)\nb") == "a\nb",

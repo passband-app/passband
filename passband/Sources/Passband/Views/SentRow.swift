@@ -30,7 +30,7 @@ struct SentRow: View {
         // the cursor to this row first, so the keyboard picks up where the
         // pointer left it.
         ListRow(
-            selected: selected, cornerRadius: 8, hPadding: 11, vPadding: 6,
+            selected: selected, cornerRadius: 8, hPadding: Space.scaled(11), vPadding: Space.s6,
             onHoverChange: { if $0 { onHover() } },
             action: {
                 onHover()
@@ -39,7 +39,7 @@ struct SentRow: View {
         ) { _, _ in
             // Neither flag is read: the guts of a sent row are the same
             // selected or not, because there are no verb hints to reveal.
-            HStack(spacing: 9) {
+            HStack(spacing: Space.scaled(9)) {
                 // Stands in for UpdateRow's importance meter, in a slot the same
                 // width (five mono glyphs at 10pt) so flipping pages under the
                 // segmented control does not shunt the avatar and name column
@@ -50,7 +50,7 @@ struct SentRow: View {
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaintest)
                     .textCase(.uppercase)
-                    .frame(width: 30, alignment: .trailing)
+                    .frame(width: MeterSlot.width(), alignment: .trailing)
                     .layoutPriority(2)
 
                 // The slot is held even when the header carried nothing usable,
@@ -65,17 +65,19 @@ struct SentRow: View {
                 .frame(width: 20, height: 20)
 
                 Text(names.isEmpty ? "no recipient" : names)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(Typo.ui(12, weight: .medium))
                     .foregroundStyle(names.isEmpty ? Palette.inkFaintest : Palette.ink)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                    .frame(minWidth: 96, idealWidth: 150, maxWidth: 190, alignment: .leading)
+                    .frame(
+                        minWidth: Typo.measure(96), idealWidth: Typo.measure(150),
+                        maxWidth: Typo.measure(190), alignment: .leading)
                     .layoutPriority(2)
 
                 // Subject first and at priority, snippet in whatever is left:
                 // the subject is what a sent row is looked up by, and the
                 // snippet is the reminder of which draft it was.
-                HStack(spacing: 6) {
+                HStack(spacing: Space.s6) {
                     Text(item.subject.isEmpty ? "(no subject)" : item.subject)
                         .font(Typo.rowSub)
                         .foregroundStyle(Palette.inkDim)
@@ -92,16 +94,16 @@ struct SentRow: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-                HStack(spacing: 7) {
+                HStack(spacing: Space.scaled(7)) {
                     // The opt-in read receipt, kept deliberately quiet: an open
                     // is a pixel fetch and sometimes a proxy warming its cache,
                     // so the row states the count and nothing louder. No opens
                     // means no mark — "not opened" and "never tracked" are the
                     // same silence (see ReadReceipt.swift).
                     if item.opens > 0 {
-                        HStack(spacing: 3) {
+                        HStack(spacing: Space.scaled(3)) {
                             Image(systemName: "eye")
-                                .font(.system(size: 9, weight: .semibold))
+                                .font(Typo.ui(9, weight: .semibold))
                             Text("\(item.opens)")
                                 .font(Typo.num(10))
                         }
@@ -113,7 +115,7 @@ struct SentRow: View {
                     Text(Fmt.relAge(item.sent_at))
                         .font(Typo.num(10))
                         .foregroundStyle(Palette.inkFaintest)
-                        .frame(width: 30, alignment: .trailing)
+                        .frame(width: MeterSlot.width(), alignment: .trailing)
                 }
                 .layoutPriority(3)
             }
@@ -123,7 +125,7 @@ struct SentRow: View {
                 RoundedRectangle(cornerRadius: 1)
                     .fill(Palette.accent)
                     .frame(width: 2)
-                    .padding(.vertical, 4)
+                    .padding(.vertical, Space.s4)
             }
         }
     }

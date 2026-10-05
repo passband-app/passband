@@ -3,9 +3,13 @@
 // uses APIClient with an explicit agent audience. The server excludes pending
 // and restricted sources even though the human reader can open them.
 //
-// THREE TIERS, and the descriptions say which is which because the model reads
+// FOUR TIERS, and the descriptions say which is which because the model reads
 // them:
 //   * READS take nothing back and are never gated.
+//   * HELP reads nothing at all: product_help, list_shortcuts and find_setting
+//     answer from tables compiled into the app (Lib/ProductGuide.swift), so
+//     "how do I reply all?" costs no daemon call and none of it sits in the
+//     system prompt of a question that never asked.
 //   * SAFE WRITES touch Passband's LOCAL store only (status, triage rules,
 //     drafts). Reversible in the app, invisible to Gmail, so no card.
 //   * GATED WRITES touch the mailbox. They park on a confirmation card and only
@@ -50,9 +54,12 @@ enum AgentTools {
         case labelMessage = "label_message"
         case sendEmail = "send_email"
         case unsubscribeSender = "unsubscribe_sender"
+        case productHelp = "product_help"
+        case listShortcuts = "list_shortcuts"
+        case findSetting = "find_setting"
 
         /// The chip's glyph. On the tool rather than in the view: a second
-        /// stringly-typed list of the same fourteen names is a list that drifts.
+        /// stringly-typed list of the same names is a list that drifts.
         var symbol: String {
             switch self {
             case .searchMail: "magnifyingglass"
@@ -69,6 +76,26 @@ enum AgentTools {
             case .labelMessage: "tag"
             case .sendEmail: "paperplane"
             case .unsubscribeSender: "hand.raised"
+            case .productHelp: "book"
+            case .listShortcuts: "keyboard"
+            case .findSetting: "gearshape"
+            }
+        }
+
+        /// Whether the tool exists on the platform in hand. The help tools
+        /// answer from a guide written against the MAC app: its keys, its rail,
+        /// its Settings panes. Offered on the phone they would tell somebody
+        /// holding one to press Enter, so the phone does not get them until it
+        /// has a guide of its own.
+        var isAvailable: Bool {
+            switch self {
+            case .productHelp, .listShortcuts, .findSetting:
+                #if os(macOS)
+                    true
+                #else
+                    false
+                #endif
+            default: true
             }
         }
     }
@@ -87,7 +114,7 @@ enum AgentTools {
         name: String, input: [String: JSONValue], gate: ActionGate,
         cite: (ToolCitation) -> Void, show: ([EmailCard]) -> Void
     ) async -> ToolOutcome {
-        guard let tool = Tool(rawValue: name) else {
+        guard let tool = Tool(rawValue: name), tool.isAvailable else {
             return failure("unknown tool \(name)", summary: "unknown tool")
         }
         do {
@@ -106,6 +133,9 @@ enum AgentTools {
             case .labelMessage: return await labelMessage(input, gate)
             case .sendEmail: return await sendEmail(input, gate)
             case .unsubscribeSender: return await unsubscribeSender(input, gate)
+            case .productHelp: return productHelp(input)
+            case .listShortcuts: return listShortcuts()
+            case .findSetting: return findSetting(input)
             }
         } catch {
             // Compact, so the model can adapt (a sealed message reads as a 404).
@@ -397,6 +427,41 @@ enum AgentTools {
         return ok(["contacts": rows], summary: "looked up \(quoted(query))")
     }
 
+    // MARK: - help (the app's own tables)
+
+    // PLAIN TEXT, where every other result is JSON. A guide is prose the model
+    // reads and then says in its own words, and wrapping it in an object would
+    // spend tokens on escaped newlines to carry no structure at all. None of it
+    // is mail-derived either: the app wrote every word, so the Trust rules have
+    // nothing to guard here.
+
+    private static func productHelp(_ input: [String: JSONValue]) -> ToolOutcome {
+        guard let raw = string(input, "topic"), let topic = ProductGuide.Topic(rawValue: raw) else {
+            // The model sometimes asks its question instead of naming a topic.
+            // Answering with the list teaches it the vocabulary in one turn.
+            return failure(
+                "topic must be one of: " + ProductGuide.Topic.allCases.map(\.rawValue).joined(separator: ", "),
+                summary: "no such help topic")
+        }
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+        return ToolOutcome(
+            content: ProductGuide.text(topic, runningVersion: version), isError: false,
+            summary: "read the guide: \(topic.title)")
+    }
+
+    private static func listShortcuts() -> ToolOutcome {
+        ToolOutcome(
+            content: ProductGuide.shortcuts(), isError: false, summary: "checked the shortcuts")
+    }
+
+    private static func findSetting(_ input: [String: JSONValue]) -> ToolOutcome {
+        let query = string(input, "query")
+        return ToolOutcome(
+            content: ProductGuide.settings(matching: query), isError: false,
+            summary: query.map { "looked up the setting for \(quoted($0))" }
+                ?? "listed the settings")
+    }
+
     // MARK: - safe writes (local store only)
 
     @MainActor
@@ -410,6 +475,10 @@ enum AgentTools {
             return failure("status must be \"open\" or \"done\"", summary: "status failed")
         }
         let result = try await APIClient.shared.setStatus(messageId, status)
+        // The assistant's resolves count as the verb they are, under the one
+        // `via` no page owns, so "how much triage does the agent do" is the
+        // same query as "how much do people do by keyboard".
+        if status == .done { Analytics.capture("email_done", ["via": "assistant"]) }
         return ok(
             ["status": result.status, "message_id": messageId],
             summary: "marked \(raw)")
@@ -587,6 +656,7 @@ enum AgentTools {
             verifiedSender: target.sender, verifiedSubject: target.subject)
         return await confirmed(action, gate) {
             let result = try await APIClient.shared.actionArchive(target.messageId)
+            Analytics.capture("email_archived", ["via": "assistant"])
             return (json(["status": result.status, "message_id": target.messageId]), "Archived")
         }
     }
@@ -690,18 +760,32 @@ enum AgentTools {
             id: UUID(), tool: .unsubscribeSender, verb: "Unsubscribe",
             verifiedSender: target.sender, verifiedSubject: target.subject)
         return await confirmed(action, gate) {
+            let gen = UnsubscribeJobs.shared.generation
             let result = try await APIClient.shared.unsubscribe(messageId: target.messageId)
-            // THE DAEMON NEVER FETCHES THE LINK. Opening it in the user's own
-            // browser is the design: an unsubscribe is something the human did,
-            // from their machine, with their cookies. `Opener` hands the shell
-            // http(s) and nothing else, and logs at most the host.
-            guard Opener.isHTTP(result.url) else {
+            // USUALLY THE DAEMON DOES IT: the same job `u` starts, reported in
+            // the sitrep's tray, so the assistant does not have to wait on a
+            // stranger's website. The model hears only that it started.
+            if result.method == "auto" {
+                UnsubscribeJobs.shared.started(sender: result.sender, generation: gen)
+                return (
+                    json([
+                        "result": "unsubscribing", "sender": result.sender,
+                        "note": "Passband is unsubscribing in the background. If the sender's page "
+                            + "asks the user to choose what to stop, the user finishes it from "
+                            + "the corner of their dashboard.",
+                    ]), "Unsubscribing"
+                )
+            }
+            // The browser path (spam, unverified mail, an older daemon):
+            // `Opener` hands the shell http(s) and nothing else, and logs at
+            // most the host.
+            guard let url = result.url, Opener.isHTTP(url) else {
                 return (
                     json(["result": "no_http_link", "sender": result.sender]),
                     "No unsubscribe link"
                 )
             }
-            Opener.open(result.url)
+            Opener.open(url)
             // The URL itself stays out of the result: it is mail-derived, it
             // routinely carries a per-recipient token, and the model has no use
             // for it now that the browser has it.
@@ -1107,10 +1191,10 @@ enum AgentTools {
         Wire.ToolDef(
             name: Tool.unsubscribeSender.rawValue,
             description: """
-                Unsubscribe from the sender of one message: Passband finds their \
-                unsubscribe link and opens it in the user's browser for them to \
-                finish. Shows a confirmation card first and does nothing until they \
-                approve it. Pass both the message_id and the thread_id it came from: \
+                Unsubscribe from the sender of one message. Passband does it in the \
+                background when it can, and otherwise opens their unsubscribe page \
+                in the user's browser for them to finish. Shows a confirmation card \
+                first and does nothing until they approve it. Pass both the message_id and the thread_id it came from: \
                 the card names the sender Passband reads back, and the message has to \
                 be in that thread.
                 """,
@@ -1124,5 +1208,47 @@ enum AgentTools {
                         description: "The thread_id that message_id came back with."),
                 ],
                 required: ["message_id", "thread_id"])),
+
+        Wire.ToolDef(
+            name: Tool.productHelp.rawValue,
+            description: """
+                How Passband itself works, one topic at a time: what a screen is for, \
+                how to do something in the app, which key or button does it. Call \
+                this before answering any question about using Passband ("how do I \
+                reply all?", "what is the noise page?", "can I schedule a send?"). \
+                Pick the closest topic, and ask for a second one if the first does \
+                not cover it. It reads the app's built-in guide, never the mailbox.
+                """,
+            input_schema: .init(
+                properties: [
+                    "topic": .init(
+                        type: "string", description: ProductGuide.topicIndex,
+                        values: ProductGuide.Topic.allCases.map(\.rawValue))
+                ],
+                required: ["topic"])),
+
+        Wire.ToolDef(
+            name: Tool.listShortcuts.rawValue,
+            description: """
+                Every keyboard shortcut in Passband, grouped by where it works. The \
+                same table the app shows when the user presses ?. Use it for "what \
+                are the shortcuts" or to find the key for one action.
+                """,
+            input_schema: .init(properties: [:], required: nil)),
+
+        Wire.ToolDef(
+            name: Tool.findSetting.rawValue,
+            description: """
+                Find a Passband setting by describing it ("dark mode", "signature", \
+                "stop loading images"). Returns each match with where it lives in \
+                Settings and what it does. Omit the query to list every setting.
+                """,
+            input_schema: .init(
+                properties: [
+                    "query": .init(
+                        type: "string",
+                        description: "A few words for the setting or its effect.")
+                ],
+                required: nil)),
     ]
 }

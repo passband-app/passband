@@ -69,11 +69,20 @@
 	     secrets — a compromised feed host cannot forge an update without it. -->
 	<key>SUFeedURL</key>
 	<string>https://passband.app/appcast.xml</string>
-	<!-- Every four hours rather than Sparkle's daily default, so a release
-	     reaches people (and their update banner) the same working day. The
-	     feed is one static file; a check costs the site nothing. -->
+	<!-- Hourly, Sparkle's floor, rather than its daily default, so a release
+	     reaches people within the hour. The feed is one static file; a check
+	     costs the site nothing. -->
 	<key>SUScheduledCheckInterval</key>
-	<integer>14400</integer>
+	<integer>3600</integer>
+	<!-- Checks are on from first launch with no permission prompt: a check
+	     sends nothing about the user (the system profile is never sent), and
+	     an install that once answered "Don't Check" never updated again.
+	     Updater.swift also forces both of these on every launch, because the
+	     old answers persist in user defaults. -->
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUAutomaticallyUpdate</key>
+	<true/>
 	<key>SUPublicEDKey</key>
 	<string>QqVsdIdhyz8E/iZ+ZhvwYe4aaQSMtIkObys6PYhFgkg=</string>
 	<key>NSAppTransportSecurity</key>

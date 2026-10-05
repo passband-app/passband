@@ -7,6 +7,15 @@
         <title>Passband</title>
         <link>https://passband.app/appcast.xml</link>
         <item>
+            <title>0.0.12</title>
+            <pubDate>Fri, 02 Oct 2026 01:00:28 +0000</pubDate>
+            <sparkle:version>1551</sparkle:version>
+            <sparkle:shortVersionString>0.0.12</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://passband.app/download/Passband-0.0.12.zip" length="9666970" type="application/octet-stream" sparkle:edSignature="wWpW8WUpE5x1c6vaFdPTP0km7QFtokLq4mGcdn/Tq49lVB/RbQfbVCvBDJ08kvLRkvDJJFc7pKl4bgUHNIm0CA=="/>
+        </item>
+        <item>
             <title>0.0.11</title>
             <pubDate>Wed, 30 Sep 2026 21:57:06 +0000</pubDate>
             <sparkle:version>1404</sparkle:version>
@@ -23,15 +32,6 @@
             <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
             <enclosure url="https://passband.app/download/Passband-0.0.10.zip" length="8402791" type="application/octet-stream" sparkle:edSignature="hrbt9x87OypBe3qNVPE9EtWOj4af0FZ5yZLTU6BGw9vGmsX4IU6VrfIoHPrmdABcj7yqArI5nPhPQ73qdqM9Aw=="/>
-        </item>
-        <item>
-            <title>0.0.9</title>
-            <pubDate>Sun, 27 Sep 2026 06:01:40 +0000</pubDate>
-            <sparkle:version>1207</sparkle:version>
-            <sparkle:shortVersionString>0.0.9</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://passband.app/download/Passband-0.0.9.zip" length="8274783" type="application/octet-stream" sparkle:edSignature="q6kUgXOi2IdAzh1kprD2wZYBg1agf9flQCBijj27cJM063cvpHx3Uxs6H+aTor4UtgdRL22JSybnL8PTk0PFDw=="/>
         </item>
     </channel>
 </rss>

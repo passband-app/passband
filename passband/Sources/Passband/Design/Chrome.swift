@@ -103,6 +103,22 @@ struct WaitDots: View {
     }
 }
 
+// MARK: - the meter slot
+
+/// THE NARROW LEADING SLOT of a mail row: the importance meter on an arrival,
+/// the word "to" on a sent row, the clock on a scheduled one. Different things
+/// in the same column, so one formula or the lists stop lining up with each
+/// other.
+///
+/// It holds 10pt type and nothing else, so it grows by exactly what that type
+/// grows by: wider than `Typo.measure` would make it, narrower than the
+/// spacing curve would.
+enum MeterSlot {
+    @MainActor static func width(_ compact: CGFloat = 30) -> CGFloat {
+        compact * Typo.size(10) / 10
+    }
+}
+
 // MARK: - rules
 
 /// The 0.5pt rule dividing a header from what it heads. Ink-side (see
@@ -117,9 +133,14 @@ struct Hairline: View {
 
 /// Chip metrics. The hand-rolled copies these replaced drifted across 6/7/8/9
 /// horizontal and 2.5/3/4 vertical; 7/3 was the most common of each.
+///
+/// Computed, not stored: a `static let` would freeze at whichever density was
+/// live the first time a chip drew, and every chip after that would ignore the
+/// setting.
+@MainActor
 private enum ChipMetrics {
-    static let horizontal: CGFloat = 7
-    static let vertical: CGFloat = 3
+    static var horizontal: CGFloat { Space.scaled(7) }
+    static var vertical: CGFloat { Space.scaled(3) }
 }
 
 /// A glass chip action — the app's one small-button shape. Padding is fixed
@@ -206,7 +227,7 @@ struct KeyHint: View {
     }
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: Space.s4) {
             ForEach(keys, id: \.self) { Kbd($0) }
             Text(label).font(Typo.micro).foregroundStyle(Palette.inkFaintest)
         }
@@ -222,9 +243,9 @@ struct KeyHintBar: View {
     var leading: AnyView? = nil
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: Space.s4) {
             if let leading {
-                leading.padding(.trailing, 4)
+                leading.padding(.trailing, Space.s4)
             }
             ForEach(Array(hints.enumerated()), id: \.offset) { i, hint in
                 if i > 0 { Text("·").foregroundStyle(Palette.inkFaintest) }
@@ -232,8 +253,10 @@ struct KeyHintBar: View {
             }
             Spacer()
         }
-        .padding(.horizontal, 22)
-        .padding(.vertical, 10)
+        // 22 is the page gutter RoutedHeader sets its title on, so the hints
+        // start under the title; scaled rather than snapped to keep that line.
+        .padding(.horizontal, Space.scaled(22))
+        .padding(.vertical, Space.s10)
         .overlay(alignment: .top) { Hairline() }
     }
 }
@@ -249,7 +272,7 @@ struct StatusDot: View {
     var size: CGFloat = 6
 
     var body: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: Space.s4) {
             Circle().fill(color).frame(width: size, height: size)
             Text(label)
                 .font(Typo.micro)
@@ -269,7 +292,7 @@ struct SectionCard<Content: View>: View {
     @ViewBuilder var content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: Space.s12) {
             HStack {
                 Text(label)
                     .font(Typo.sectionLabel)
@@ -313,7 +336,7 @@ struct GlassSegmented<T: Hashable>: View {
     private static var travel: Animation { .smooth(duration: 0.32) }
 
     var body: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: Space.s2) {
             ForEach(options, id: \.value) { option in
                 Button {
                     selection = option.value
@@ -321,8 +344,8 @@ struct GlassSegmented<T: Hashable>: View {
                     Text(option.label)
                         .font(Typo.chip)
                         .foregroundStyle(selection == option.value ? .white : Palette.ink)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 5)
+                        .padding(.horizontal, Space.s12)
+                        .padding(.vertical, Space.scaled(5))
                         .contentShape(Capsule())
                         .onGeometryChange(for: CGRect.self) {
                             $0.frame(in: .named(segmentedSpace))

@@ -35,7 +35,7 @@ struct RecentSearches: View {
                 Button {
                     onRun(query)
                 } label: {
-                    HStack(spacing: 8) {
+                    HStack(spacing: Space.s8) {
                         // The reader's own words, rendered as Text and never as
                         // markup — the same rule the hit rows follow, and this
                         // string has been round-tripped through UserDefaults.
@@ -44,10 +44,10 @@ struct RecentSearches: View {
                             .foregroundStyle(i == armed ? Palette.ink : Palette.inkDim)
                             .lineLimit(1)
                             .truncationMode(.middle)
-                        Spacer(minLength: 8)
+                        Spacer(minLength: Space.s8)
                     }
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 7)
+                    .padding(.horizontal, Space.scaled(9))
+                    .padding(.vertical, Space.scaled(7))
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
                 }
@@ -58,8 +58,8 @@ struct RecentSearches: View {
                 )
             }
         }
-        .padding(4)
-        .padding(.top, 8)
+        .padding(Space.s4)
+        .padding(.top, Space.s8)
         .contextMenu {
             Button("Clear recent searches", action: onClear)
         }

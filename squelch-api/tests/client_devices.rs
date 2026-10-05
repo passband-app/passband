@@ -95,6 +95,60 @@ async fn the_tag_reaches_the_row_the_pusher_reads() {
     assert_eq!(h.store.list_devices(h.acct).unwrap()[0].tag, None);
 }
 
+/// The declared APNs environment reaches the row folded to lowercase, survives
+/// a re-register that omits it (an older build), and an unknown value is a 400
+/// that writes nothing.
+#[tokio::test]
+async fn the_environment_reaches_the_row_and_outlives_a_silent_reregister() {
+    let h = harness(|_, _| {});
+
+    let resp = h
+        .app
+        .clone()
+        .oneshot(post(
+            "/client/devices",
+            json!({ "token": DEV_A, "environment": "Sandbox" }),
+            true,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        h.store.list_devices(h.acct).unwrap()[0]
+            .environment
+            .as_deref(),
+        Some("sandbox")
+    );
+
+    let resp = h
+        .app
+        .clone()
+        .oneshot(post("/client/devices", json!({ "token": DEV_A }), true))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        h.store.list_devices(h.acct).unwrap()[0]
+            .environment
+            .as_deref(),
+        Some("sandbox"),
+        "a register without the field must not erase it"
+    );
+
+    let resp = h
+        .app
+        .clone()
+        .oneshot(post(
+            "/client/devices",
+            json!({ "token": DEV_B, "environment": "development" }),
+            true,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(h.store.list_devices(h.acct).unwrap().len(), 1);
+}
+
 /// A tag carrying the pusher's own delimiter is refused at the door, not
 /// stored and split apart later.
 #[tokio::test]
@@ -186,7 +240,9 @@ async fn register_then_unregister_round_trips() {
 #[tokio::test]
 async fn the_token_travels_in_the_body_not_the_path() {
     let h = harness(|_, _| {});
-    h.store.upsert_device(h.acct, DEV_A, "ios", None).unwrap();
+    h.store
+        .upsert_device(h.acct, DEV_A, "ios", None, None)
+        .unwrap();
 
     // The request line of the real call mentions no token at all.
     let req = unregister(DEV_A, true);
@@ -199,7 +255,9 @@ async fn the_token_travels_in_the_body_not_the_path() {
     assert!(h.store.list_devices(h.acct).unwrap().is_empty());
 
     // A token in the path is a 405/404, never a working endpoint.
-    h.store.upsert_device(h.acct, DEV_A, "ios", None).unwrap();
+    h.store
+        .upsert_device(h.acct, DEV_A, "ios", None, None)
+        .unwrap();
     let req = authed("DELETE", &format!("/client/devices/{DEV_A}"));
     let resp = h.app.oneshot(req).await.unwrap();
     assert!(
@@ -305,4 +363,40 @@ async fn a_token_the_relay_would_reject_is_refused_here() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
     assert!(h.store.list_devices(h.acct).unwrap().is_empty());
+}
+
+/// `/client/stats` says whether an iPhone app has ever connected, so the Mac
+/// knows whether to point at the TestFlight. Either witness is enough: a push
+/// registration (every iOS build leaves one) or a device token that named
+/// itself `ios/...`.
+#[tokio::test]
+async fn stats_says_whether_the_iphone_app_ever_connected() {
+    let stats = |h: &common::Harness| {
+        let app = h.app.clone();
+        async move {
+            body_json(app.oneshot(authed("GET", "/client/stats")).await.unwrap()).await
+                ["ios_connected"]
+                .clone()
+        }
+    };
+
+    let h = harness(|_, _| {});
+    assert_eq!(stats(&h).await, json!(false));
+    let resp = h
+        .app
+        .clone()
+        .oneshot(post("/client/devices", json!({ "token": DEV_A }), true))
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    assert_eq!(stats(&h).await, json!(true));
+
+    let h = harness(|_, _| {});
+    let phone = h.store.issue_device_token(h.acct, "phone").unwrap();
+    let ios = squelch_core::store::ClientTag::parse("ios/0.0.6").unwrap();
+    h.store
+        .verify_device_token_from(&phone.token, Some(&ios))
+        .unwrap()
+        .unwrap();
+    assert_eq!(stats(&h).await, json!(true));
 }

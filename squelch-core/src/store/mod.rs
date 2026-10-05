@@ -328,6 +328,12 @@ pub struct MessageUnsub {
     /// Sanitized rather than raw on purpose: it is the markup the reader was
     /// actually shown, and scripts and handlers are already gone from it.
     pub body_html: Option<String>,
+    /// The email-authentication verdict (`messages.auth_pass`): `None` when it
+    /// was never recorded. The automatic path runs only on `Some(true)`.
+    pub auth_pass: Option<bool>,
+    /// Gmail filed it as spam. Never unsubscribed from automatically: fetching
+    /// a spammer's link tells them the address is live.
+    pub is_spam: bool,
 }
 
 /// A row to append to the human-door audit log.
@@ -439,6 +445,10 @@ pub struct Device {
     /// under, stamped onto every push sent here so the receiver can tell which
     /// mailbox an event id belongs to. `None` for a client that never sent one.
     pub tag: Option<String>,
+    /// The APNs environment the client declared this token was minted in,
+    /// `production` or `sandbox`. `None` for a client that did not say; the
+    /// pusher then uses its configured environment, else the relay's default.
+    pub environment: Option<String>,
     pub created_at: DateTime<Utc>,
     /// Refreshed on every re-registration — iOS re-hands its token each launch,
     /// so this, not `created_at`, is the liveness signal.
@@ -463,6 +473,84 @@ pub struct DeviceToken {
     pub last_used_at: Option<DateTime<Utc>>,
     /// Set once, forever. A tombstoned token can never authenticate again.
     pub revoked_at: Option<DateTime<Utc>>,
+}
+
+/// The request header a client names itself in: `<platform>/<version>`, e.g.
+/// `macos/0.0.12`. Lowercase because that is how `http` spells header names.
+///
+/// ITS OWN HEADER rather than `User-Agent`, because the apps fetch remote
+/// images an email chose from the same process: a header the app only ever
+/// attaches to requests for its own daemon cannot leak to a sender's server
+/// the way a session-wide User-Agent would.
+pub const CLIENT_HEADER: &str = "x-passband-client";
+
+/// Longest [`CLIENT_HEADER`] value worth looking at: the longest platform, the
+/// slash, and four runs of five digits with their dots, with slack for
+/// whitespace. The header is read BEFORE the bearer is known to be good, so
+/// anything a stranger sends reaches the parser, and a megabyte of dots must
+/// be refused by its length rather than split into a vector first.
+const MAX_CLIENT_HEADER_LEN: usize = 48;
+
+crate::types::str_enum! {
+    /// Which app a client says it is. A CLOSED set, because it ends up as a
+    /// metric label (`squelchd_client_last_seen_timestamp_seconds`) and a label
+    /// is a series: an app this daemon has never heard of is not recorded at
+    /// all rather than recorded under whatever it called itself.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub enum ClientPlatform {
+        Macos => "macos",
+        Ios => "ios",
+    }
+}
+
+/// What a client said about itself in [`CLIENT_HEADER`], already validated.
+///
+/// The only way to build one is [`ClientTag::parse`], so a version that reaches
+/// the store or a metric label is always dotted digits and nothing else. The
+/// header is sent by whoever holds a token, which makes it the tenant's own
+/// text, not a stranger's, but it is still text that becomes a label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientTag {
+    pub platform: ClientPlatform,
+    version: String,
+}
+
+impl ClientTag {
+    /// Parse `<platform>/<version>`. `None` for anything else: an unknown
+    /// platform, a version that is not two to four dot-separated runs of one to
+    /// five digits, or a missing half. A request with an unparseable header
+    /// authenticates exactly as it would with none; it just is not recorded.
+    pub fn parse(header: &str) -> Option<Self> {
+        if header.len() > MAX_CLIENT_HEADER_LEN {
+            return None;
+        }
+        let (platform, version) = header.trim().split_once('/')?;
+        let platform = ClientPlatform::parse(platform)?;
+        let parts = version.split('.').collect::<Vec<_>>();
+        let numeric =
+            |p: &&str| (1..=5).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_digit());
+        if !(2..=4).contains(&parts.len()) || !parts.iter().all(numeric) {
+            return None;
+        }
+        Some(Self {
+            platform,
+            version: version.to_string(),
+        })
+    }
+
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+}
+
+/// One (platform, version) pair and the last time any of this account's
+/// devices connected as it. See
+/// [`SqliteStore::client_versions_seen`](sqlite::SqliteStore::client_versions_seen).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientSeen {
+    pub platform: ClientPlatform,
+    pub version: String,
+    pub seen_at: DateTime<Utc>,
 }
 
 /// A device token at the ONE moment its plaintext exists.
@@ -2233,12 +2321,25 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     /// `tag` is overwritten on every re-registration, including back to `None`:
     /// it describes where this device currently files the account, and a stale
     /// one would route a push at a mailbox the phone has since forgotten.
+    ///
+    /// `environment` is the OPPOSITE: `None` keeps whatever is stored. A token's
+    /// APNs environment never changes, so an older build re-registering the same
+    /// token without the field must not erase what a newer build declared. A
+    /// `Some` replaces it.
+    ///
+    /// CAPPED at `MAX_DEVICES_PER_ACCOUNT` (16) rows per account, because each
+    /// distinct (tag, environment) costs a relay request per event against a
+    /// rate limit the hosted fleet shares. Going over EVICTS the account's
+    /// least recently registered rows (never the one just upserted) in the
+    /// same transaction; it does not refuse, since stale and rejected rows
+    /// would otherwise lock a real phone out. Other accounts are untouched.
     fn upsert_device(
         &self,
         account_id: AccountId,
         token: &str,
         platform: &str,
         tag: Option<&str>,
+        environment: Option<&str>,
     ) -> Result<Device>;
 
     /// Every registered device for the account, oldest first — a stable order, so
@@ -2280,6 +2381,57 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
 
     /// List the account's unsubscribe records, newest `requested_at` first.
     fn list_unsubscribes(&self, account_id: AccountId) -> Result<Vec<UnsubscribeRecord>>;
+
+    /// Start an AUTOMATIC unsubscribe for `sender`: the row becomes
+    /// `method = 'auto'`, `status = 'running'`, with `url` kept as the page a
+    /// `needs_you` outcome will send the user to. Resets the violation ledger
+    /// exactly as [`Store::upsert_unsubscribe`] does.
+    fn begin_unsubscribe_job(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+        source_message_id: Option<i64>,
+        url: &str,
+        now: DateTime<Utc>,
+    ) -> Result<()>;
+
+    /// Settle a RUNNING job. `status` is `done` or `needs_you`; `method` says how
+    /// it went out (`one_click` | `page`) and is kept as `auto` when it did not.
+    /// `done` moves `requested_at` to `now`, so the violation grace runs from the
+    /// moment the sender was actually asked. A row that is no longer running
+    /// (the user re-asked through the browser meanwhile) is left alone.
+    fn finish_unsubscribe_job(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+        status: &str,
+        method: &str,
+        reason: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<()>;
+
+    /// The user followed a `needs_you` row's link to finish on the sender's
+    /// site: `status -> opened`, `requested_at -> now`, which arms the violation
+    /// detector. `false` when the sender has no `needs_you` row.
+    fn mark_unsubscribe_opened(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+        now: DateTime<Utc>,
+    ) -> Result<bool>;
+
+    /// Turn every `running` row whose sender is NOT in `live` and whose
+    /// `status_at` is before `stale_before` into `needs_you` with reason
+    /// `unclear`: the job that owned it died with the process. Its `status_url`
+    /// is still the original link, so the user can finish by hand. Returns how
+    /// many rows were reaped.
+    fn reap_unsubscribe_jobs(
+        &self,
+        account_id: AccountId,
+        live: &[String],
+        stale_before: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<usize>;
 
     /// Set the `resolution` (blocked|dismissed) on an existing unsubscribe row,
     /// disarming the violation detector for that sender. `false` when no row

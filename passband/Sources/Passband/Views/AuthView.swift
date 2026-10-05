@@ -70,12 +70,12 @@ struct AuthView: View {
     var body: some View {
         VStack(spacing: 0) {
             RoutedHeader(title: "Auth", subtitle: "codes, alerts & resets") {
-                HStack(spacing: 12) {
+                HStack(spacing: Space.s12) {
                     StatusDot(
                         color: Palette.lock,
                         label: "\(live.count) live · \(openDecisions.count) awaiting you",
                         tone: Palette.inkFaint, size: 5)
-                    HStack(spacing: 3) {
+                    HStack(spacing: Space.scaled(3)) {
                         Kbd("j")
                         Kbd("k")
                         Text("move").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
@@ -87,12 +87,12 @@ struct AuthView: View {
                 }
             }
 
-            HStack(alignment: .top, spacing: 16) {
+            HStack(alignment: .top, spacing: Space.s16) {
                 mainColumn
                 rail
             }
-            .padding(.horizontal, 22)
-            .padding(.vertical, 16)
+            .padding(.horizontal, Space.scaled(22))
+            .padding(.vertical, Space.s16)
         }
         .keyBindings(.modal, bindings)
         .overlay {
@@ -112,7 +112,7 @@ struct AuthView: View {
 
     private var mainColumn: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: Space.s14) {
                 if let focus {
                     FocusPanel(
                         meta: focus,
@@ -130,10 +130,10 @@ struct AuthView: View {
                     .font(Typo.rowSub)
                     .foregroundStyle(Palette.inkFaintest)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 24)
+                    .padding(.vertical, Space.s24)
                 }
 
-                HStack(spacing: 6) {
+                HStack(spacing: Space.s6) {
                     ForEach(Filter.allCases) { f in
                         Button {
                             filter = f
@@ -141,13 +141,13 @@ struct AuthView: View {
                         } label: {
                             Text(f.label)
                                 .font(Typo.micro)
-                                .padding(.horizontal, 9)
-                                .padding(.vertical, 3)
+                                .padding(.horizontal, Space.scaled(9))
+                                .padding(.vertical, Space.scaled(3))
                         }
                         .buttonStyle(.glass)
                         .foregroundStyle(filter == f ? Palette.accent : Palette.inkFaint)
                     }
-                    Spacer(minLength: 6)
+                    Spacer(minLength: Space.s6)
                     Text("\(shown.count) of \(visible.count) shown")
                         .font(Typo.micro)
                         .foregroundStyle(Palette.inkFaintest)
@@ -182,8 +182,8 @@ struct AuthView: View {
                 .foregroundStyle(Palette.inkFaintest)
                 .textCase(.uppercase)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.top, 10)
-                .padding(.bottom, 4)
+                .padding(.top, Space.s10)
+                .padding(.bottom, Space.s4)
             ForEach(rows) { m in
                 let i = shown.firstIndex(of: m) ?? 0
                 AuthRow(
@@ -200,8 +200,8 @@ struct AuthView: View {
     // MARK: - rail
 
     private var rail: some View {
-        VStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 9) {
+        VStack(spacing: Space.s12) {
+            VStack(alignment: .leading, spacing: Space.scaled(9)) {
                 HStack {
                     Text("Needs a decision")
                         .font(Typo.zoneTitle)
@@ -234,7 +234,7 @@ struct AuthView: View {
 
             ShredderCard()
         }
-        .frame(width: 306)
+        .frame(width: Typo.measure(306))
     }
 
     // MARK: - keymap
@@ -313,7 +313,7 @@ private struct FocusPanel: View {
     private var isCode: Bool { AuthCode.isCodeKind(meta.kind) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: Space.s14) {
             HStack {
                 Text("In focus")
                     .font(Typo.sectionLabel)
@@ -325,11 +325,11 @@ private struct FocusPanel: View {
                     .foregroundStyle(Palette.inkFaintest)
             }
 
-            HStack(spacing: 12) {
+            HStack(spacing: Space.s12) {
                 Avatar(sender: meta.sender, size: 42)
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: Space.s2) {
                     Text(SenderCache.resolved(meta.sender).displayName)
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(Typo.ui(15, weight: .semibold))
                         .foregroundStyle(Palette.ink)
                         .help(meta.sender)
                     Text(meta.subject)
@@ -338,7 +338,7 @@ private struct FocusPanel: View {
                         .lineLimit(2)
                         .help(meta.subject)
                 }
-                Spacer(minLength: 8)
+                Spacer(minLength: Space.s8)
                 Chip(
                     text: AuthCopy.label(meta.kind), tone: Palette.lock,
                     symbol: AuthCopy.symbol(meta.kind), filled: true)
@@ -348,15 +348,15 @@ private struct FocusPanel: View {
                 digits
                 actions
             } else {
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: Space.s8) {
                     Button(action: onReveal) {
-                        HStack(spacing: 6) {
+                        HStack(spacing: Space.s6) {
                             Image(systemName: "eye")
                             Text("Open it")
                             Kbd("r")
                         }
-                        .font(.system(size: 12, weight: .medium))
-                        .padding(.horizontal, 12).padding(.vertical, 5)
+                        .font(Typo.ui(12, weight: .medium))
+                        .padding(.horizontal, Space.s12).padding(.vertical, Space.scaled(5))
                     }
                     .buttonStyle(.glassProminent)
                     .tint(Palette.lock)
@@ -374,13 +374,13 @@ private struct FocusPanel: View {
     }
 
     private var digits: some View {
-        HStack(spacing: 7) {
+        HStack(spacing: Space.scaled(7)) {
             if revealed, let code {
                 ForEach(Array(code.enumerated()), id: \.offset) { _, ch in
                     Text(String(ch))
                         .font(Typo.mono(26, weight: .semibold))
                         .foregroundStyle(Palette.ink)
-                        .frame(width: 40, height: 52)
+                        .frame(width: Space.scaled(40), height: Space.scaled(52))
                         .background(
                             RoundedRectangle(cornerRadius: 10, style: .continuous)
                                 .fill(Palette.lockSoft)
@@ -394,7 +394,7 @@ private struct FocusPanel: View {
                     Text("·")
                         .font(Typo.mono(26, weight: .semibold))
                         .foregroundStyle(Palette.inkFaintest)
-                        .frame(width: 40, height: 52)
+                        .frame(width: Space.scaled(40), height: Space.scaled(52))
                         .background(
                             RoundedRectangle(cornerRadius: 10, style: .continuous)
                                 .fill(Palette.hairline.opacity(0.5)))
@@ -405,37 +405,37 @@ private struct FocusPanel: View {
     }
 
     private var actions: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: Space.s8) {
+            HStack(spacing: Space.s8) {
                 if revealed, let code, !code.isEmpty {
                     Button(action: onCopy) {
                         Label(
                             copied ? "Copied" : "Copy code",
                             systemImage: copied ? "checkmark" : "doc.on.doc"
                         )
-                        .font(.system(size: 12, weight: .medium))
-                        .padding(.horizontal, 12).padding(.vertical, 5)
+                        .font(Typo.ui(12, weight: .medium))
+                        .padding(.horizontal, Space.s12).padding(.vertical, Space.scaled(5))
                     }
                     .buttonStyle(.glassProminent)
                     .tint(Palette.lock)
 
                     Button(action: onArchive) {
                         Label("Used it · archive", systemImage: "archivebox")
-                            .font(.system(size: 12))
-                            .padding(.horizontal, 10).padding(.vertical, 5)
+                            .font(Typo.ui(12))
+                            .padding(.horizontal, Space.s10).padding(.vertical, Space.scaled(5))
                     }
                     .buttonStyle(.glass)
                     .foregroundStyle(Palette.inkDim)
                     .disabled(busy)
                 } else {
                     Button(action: onReveal) {
-                        HStack(spacing: 6) {
+                        HStack(spacing: Space.s6) {
                             Image(systemName: "eye")
                             Text(busy ? "Revealing…" : "Reveal code")
                             Kbd("r")
                         }
-                        .font(.system(size: 12, weight: .medium))
-                        .padding(.horizontal, 12).padding(.vertical, 5)
+                        .font(Typo.ui(12, weight: .medium))
+                        .padding(.horizontal, Space.s12).padding(.vertical, Space.scaled(5))
                     }
                     .buttonStyle(.glassProminent)
                     .tint(Palette.lock)
@@ -481,15 +481,15 @@ private struct AuthRow: View {
     var body: some View {
         ListRow(
             selected: selected, cornerRadius: 8, tint: Palette.lock,
-            hPadding: 10, vPadding: 6, action: onSelect
+            hPadding: Space.s10, vPadding: Space.s6, action: onSelect
         ) { _, _ in
-            HStack(spacing: 9) {
+            HStack(spacing: Space.scaled(9)) {
                 Avatar(sender: meta.sender, size: 20)
                 Text(SenderCache.resolved(meta.sender).displayName)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(Typo.ui(12, weight: .medium))
                     .foregroundStyle(Palette.ink)
                     .lineLimit(1)
-                    .frame(width: 150, alignment: .leading)
+                    .frame(width: Typo.measure(150), alignment: .leading)
                     .help(meta.sender)
                 Text(meta.subject)
                     .font(Typo.rowSub)
@@ -510,7 +510,7 @@ private struct AuthRow: View {
                 Text(Fmt.relAge(meta.received_at))
                     .font(Typo.num(10))
                     .foregroundStyle(Palette.inkFaintest)
-                    .frame(width: 30, alignment: .trailing)
+                    .frame(width: Space.scaled(30), alignment: .trailing)
             }
         }
     }
@@ -525,14 +525,14 @@ private struct DecisionCard: View {
     private var isReset: Bool { meta.kind == .passwordReset }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 7) {
+        VStack(alignment: .leading, spacing: Space.s8) {
+            HStack(spacing: Space.scaled(7)) {
                 Avatar(sender: meta.sender, size: 18)
                 Text(SenderCache.resolved(meta.sender).displayName)
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(Typo.ui(11, weight: .semibold))
                     .foregroundStyle(Palette.ink)
                     .lineLimit(1)
-                Spacer(minLength: 4)
+                Spacer(minLength: Space.s4)
                 Text(Fmt.relAge(meta.received_at))
                     .font(Typo.num(10))
                     .foregroundStyle(Palette.inkFaintest)
@@ -543,7 +543,7 @@ private struct DecisionCard: View {
                 .foregroundStyle(Palette.inkDim)
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: 7) {
+            HStack(spacing: Space.scaled(7)) {
                 Button(isReset ? "I asked" : "That was me", action: onMine)
                     .buttonStyle(.glassProminent)
                     .tint(Palette.accent)
@@ -555,7 +555,7 @@ private struct DecisionCard: View {
             }
             .controlSize(.small)
         }
-        .padding(10)
+        .padding(Space.s10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -577,10 +577,10 @@ private struct ShredderCard: View {
     var body: some View {
         Group {
             if let stats {
-                VStack(alignment: .leading, spacing: 9) {
-                    HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: Space.scaled(9)) {
+                    HStack(spacing: Space.s8) {
                         Image(systemName: "trash")
-                            .font(.system(size: 12))
+                            .font(Typo.ui(12))
                             .foregroundStyle(Palette.inkFaint)
                         Text("Auto-shredder")
                             .font(Typo.zoneTitle)

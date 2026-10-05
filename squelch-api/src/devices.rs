@@ -42,6 +42,14 @@ pub struct RegisterBody {
     /// ints that collide across accounts. Omitted by clients that predate it.
     #[serde(default)]
     pub tag: Option<String>,
+    /// The APNs environment this token was minted in: `production` for
+    /// TestFlight and App Store builds, `sandbox` for Xcode dev builds and the
+    /// simulator. Only the client knows, and a token pushed to the wrong one is
+    /// REJECTED by APNs, so this is what lets one daemon serve a mixed fleet.
+    /// Omitted by clients that predate it; the pusher then uses its configured
+    /// fallback. Omitting it on a re-register keeps what an earlier one stored.
+    #[serde(default)]
+    pub environment: Option<String>,
 }
 
 /// The unregister body — the token rides here, never in the path.
@@ -105,6 +113,23 @@ fn validate_tag(tag: Option<&str>) -> Result<Option<String>, ApiError> {
     Ok(Some(raw.to_string()))
 }
 
+/// The two APNs environments, and nothing else: the value is put on the wire
+/// to the relay verbatim, so an unknown one would only fail later, at push
+/// time, where nobody is looking. Absent and empty both mean "not declared";
+/// case is folded so `Sandbox` from a client is the same fact as `sandbox`.
+fn validate_environment(environment: Option<&str>) -> Result<Option<String>, ApiError> {
+    let Some(raw) = environment.map(str::trim).filter(|e| !e.is_empty()) else {
+        return Ok(None);
+    };
+    let folded = raw.to_ascii_lowercase();
+    match folded.as_str() {
+        "production" | "sandbox" => Ok(Some(folded)),
+        _ => Err(ApiError::bad_request(
+            "environment must be `production` or `sandbox`",
+        )),
+    }
+}
+
 /// `ios` by default; otherwise a short lowercase-ish label.
 fn validate_platform(platform: Option<&str>) -> Result<String, ApiError> {
     let raw = platform.unwrap_or(DEFAULT_PLATFORM).trim();
@@ -133,12 +158,20 @@ pub async fn register_device(
     let token = validate_token(&body.token)?.to_string();
     let platform = validate_platform(body.platform.as_deref())?;
     let tag = validate_tag(body.tag.as_deref())?;
+    let environment = validate_environment(body.environment.as_deref())?;
 
     let store = state.store.clone();
     let account_id = state.account_id;
-    let device =
-        blocking(move || store.upsert_device(account_id, &token, &platform, tag.as_deref()))
-            .await?;
+    let device = blocking(move || {
+        store.upsert_device(
+            account_id,
+            &token,
+            &platform,
+            tag.as_deref(),
+            environment.as_deref(),
+        )
+    })
+    .await?;
 
     // Audited with the device ROW ID; the token never reaches the audit log.
     crate::handlers::audit_action(
@@ -208,6 +241,26 @@ mod tests {
         assert!(validate_tag(Some("acct:41")).is_err());
         assert!(validate_tag(Some(&"x".repeat(65))).is_err());
         assert!(validate_tag(Some("a b")).is_err());
+    }
+
+    #[test]
+    fn environment_is_optional_folded_and_one_of_two() {
+        assert_eq!(validate_environment(None).unwrap(), None);
+        assert_eq!(validate_environment(Some("")).unwrap(), None);
+        assert_eq!(validate_environment(Some(" \n")).unwrap(), None);
+        assert_eq!(
+            validate_environment(Some("Sandbox")).unwrap().as_deref(),
+            Some("sandbox")
+        );
+        assert_eq!(
+            validate_environment(Some(" PRODUCTION "))
+                .unwrap()
+                .as_deref(),
+            Some("production")
+        );
+        // Anything else is refused, not passed through to the relay.
+        assert!(validate_environment(Some("development")).is_err());
+        assert!(validate_environment(Some("prod")).is_err());
     }
 
     #[test]

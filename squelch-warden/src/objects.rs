@@ -159,6 +159,16 @@ pub const OAUTH_CLIENT_ID_KEY: &str = "client_id";
 /// See [`OAUTH_CLIENT_ID_KEY`].
 pub const OAUTH_CLIENT_SECRET_KEY: &str = "client_secret";
 
+/// Data key in the shared APNs relay Secret
+/// ([`crate::config::Config::relay_secret_name`]): the relay's PUSH-ONLY
+/// bearer (`SQUELCH_RELAY_PUSH_TOKEN` on the relay), which can push and can
+/// NOT drain the relay's opens buffer. Never the full `SQUELCH_RELAY_AUTH_TOKEN`.
+///
+/// Same posture as the OAuth keys: the warden never reads it, it goes into the
+/// pod as a `secretKeyRef`, and only the Secret's NAME is ever in a pod spec,
+/// a log line or this process's memory.
+pub const RELAY_TOKEN_KEY: &str = "token";
+
 /// Annotation on the pod template carrying the SHA-256 of the credential
 /// ciphertext this pod was rolled for.
 ///
@@ -1486,6 +1496,38 @@ fn daemon_env(config: &Config, name: &TenantName) -> Vec<EnvVar> {
             &format!("https://{}/mcp", config.hostname(name.as_str())),
         ));
     }
+
+    // The APNs relay block, present only when the operator configured one, and
+    // byte-identical-when-unset for the LLM block's reason. Without
+    // SQUELCH_RELAY_URL the daemon never spawns its pusher, which is why no
+    // hosted tenant had ever received an iOS push before this block existed.
+    if let Some(relay_url) = &config.relay_url {
+        env.push(plain("SQUELCH_RELAY_URL", relay_url));
+        // The relay's push-only bearer, from the shared Secret, never inline.
+        // Push-only so a compromised tenant cannot drain the opens buffer the
+        // self-hosted daemons share (the relay 401s it at /v1/opens), and
+        // OPTIONAL for the LLM keys' reason: a missing Secret must leave the
+        // variable unset rather than hold EVERY tenant in
+        // CreateContainerConfigError at once. Unset, the daemon pushes with no
+        // bearer, the relay answers 401, the pusher logs it and backs off, and
+        // mail keeps working.
+        env.push(from_optional_secret(
+            "SQUELCH_RELAY_TOKEN",
+            config.relay_secret_name.clone(),
+            RELAY_TOKEN_KEY,
+        ));
+        if let Some(topic) = &config.relay_topic {
+            env.push(plain("SQUELCH_RELAY_TOPIC", topic));
+        }
+        // SQUELCH_RELAY_APNS_ENV IS NEVER SET HERE, and that is the fix rather
+        // than an omission. Sandbox versus production is a property of the
+        // build that registered a device token, so the client declares it per
+        // device at registration and the daemon forwards it per push; a client
+        // that predates that gets the relay's own default, production, which
+        // is what a TestFlight or App Store build needs. A fleet-wide switch
+        // here would force one answer onto every device of every tenant, which
+        // is exactly the bug being fixed.
+    }
     env
 }
 
@@ -1808,6 +1850,110 @@ mod tests {
             assert!(
                 env.iter().all(|e| e.name != llm_var),
                 "{llm_var} appears in an unconfigured pod"
+            );
+        }
+
+        // Same claim for the relay block: no URL, no token reference, no
+        // topic, and never the APNs environment.
+        for relay_var in [
+            "SQUELCH_RELAY_URL",
+            "SQUELCH_RELAY_TOKEN",
+            "SQUELCH_RELAY_TOPIC",
+            "SQUELCH_RELAY_APNS_ENV",
+        ] {
+            assert!(
+                env.iter().all(|e| e.name != relay_var),
+                "{relay_var} appears in an unconfigured pod"
+            );
+        }
+    }
+
+    /// The push half of the env contract. A configured relay reaches the pod
+    /// as a plain URL and an OPTIONAL secretKeyRef into the shared Secret:
+    /// a missing Secret must leave every tenant booting, not wedge the fleet.
+    #[test]
+    fn a_configured_relay_reaches_the_daemon_and_the_token_stays_optional() {
+        let mut c = test_config();
+        c.relay_url = Some("https://relay.squelch.sh".to_string());
+        let pod = tenant_deployment(&c).spec.unwrap().template.spec.unwrap();
+        let env = pod.containers[0].env.clone().unwrap();
+
+        let plain: BTreeMap<&str, &str> = env
+            .iter()
+            .filter_map(|e| Some((e.name.as_str(), e.value.as_deref()?)))
+            .collect();
+        assert_eq!(plain["SQUELCH_RELAY_URL"], "https://relay.squelch.sh");
+
+        let token = env
+            .iter()
+            .find(|e| e.name == "SQUELCH_RELAY_TOKEN")
+            .unwrap();
+        // From the Secret, never inline: the pod spec is world-readable.
+        assert!(token.value.is_none());
+        let from = token.value_from.clone().unwrap().secret_key_ref.unwrap();
+        assert_eq!(from.name, "apns-relay");
+        assert_eq!(from.key, "token");
+        assert_eq!(from.optional, Some(true));
+
+        // No topic configured, no topic rendered: the relay's default stands.
+        assert!(
+            env.iter().all(|e| e.name != "SQUELCH_RELAY_TOPIC"),
+            "an unset topic reached the pod"
+        );
+        // The APNs environment is per device now, never fleet-wide.
+        assert!(
+            env.iter().all(|e| e.name != "SQUELCH_RELAY_APNS_ENV"),
+            "a fleet-wide APNs environment reached the pod"
+        );
+        // And the relay turns on nothing of the LLM block's.
+        assert!(!plain.contains_key("SQUELCH_ANTHROPIC_BASE_URL"));
+    }
+
+    /// The full relay set: the topic lands under the daemon's real name, the
+    /// Secret can be renamed, and SQUELCH_RELAY_APNS_ENV is still absent.
+    #[test]
+    fn the_relay_topic_and_secret_name_reach_the_pod_when_configured() {
+        let mut c = test_config();
+        c.relay_url = Some("https://relay.squelch.sh".to_string());
+        c.relay_secret_name = "passband-relay".to_string();
+        c.relay_topic = Some("app.passband.client.ios".to_string());
+        let pod = tenant_deployment(&c).spec.unwrap().template.spec.unwrap();
+        let env = pod.containers[0].env.clone().unwrap();
+
+        let plain: BTreeMap<&str, &str> = env
+            .iter()
+            .filter_map(|e| Some((e.name.as_str(), e.value.as_deref()?)))
+            .collect();
+        assert_eq!(plain["SQUELCH_RELAY_URL"], "https://relay.squelch.sh");
+        assert_eq!(plain["SQUELCH_RELAY_TOPIC"], "app.passband.client.ios");
+
+        let from = env
+            .iter()
+            .find(|e| e.name == "SQUELCH_RELAY_TOKEN")
+            .unwrap()
+            .value_from
+            .clone()
+            .unwrap()
+            .secret_key_ref
+            .unwrap();
+        assert_eq!(from.name, "passband-relay");
+        assert_eq!(from.key, RELAY_TOKEN_KEY);
+        assert_eq!(from.optional, Some(true));
+
+        assert!(
+            env.iter().all(|e| e.name != "SQUELCH_RELAY_APNS_ENV"),
+            "a fleet-wide APNs environment reached the pod"
+        );
+        // Each relay variable exactly once.
+        for relay_var in [
+            "SQUELCH_RELAY_URL",
+            "SQUELCH_RELAY_TOKEN",
+            "SQUELCH_RELAY_TOPIC",
+        ] {
+            assert_eq!(
+                env.iter().filter(|e| e.name == relay_var).count(),
+                1,
+                "{relay_var}"
             );
         }
     }

@@ -199,6 +199,32 @@ with 401s rather than idling, until `squelch-control llm mint` re-applies its
 Deployment. The migration steps live in `deploy/hosted/PRODUCTION.md`,
 "History".
 
+### The push relay
+
+`SQUELCH_WARDEN_RELAY_URL`, injected as `SQUELCH_RELAY_URL`, plus the relay's
+**push-only** bearer as an **optional** `SQUELCH_RELAY_TOKEN` reference into a
+Secret shared by every tenant (`SQUELCH_WARDEN_RELAY_SECRET_NAME`, default
+`apns-relay`, key `token`), and `SQUELCH_WARDEN_RELAY_TOPIC` as `SQUELCH_RELAY_TOPIC`. The daemon
+spawns its APNs pusher only when the URL is set, so unset means no hosted iOS
+push at all. A missing Secret leaves the variable unset: the daemon pushes with
+no bearer, the relay answers 401, and mail is untouched. `SQUELCH_RELAY_APNS_ENV`
+is never rendered, because each device declares its own APNs environment at
+registration.
+
+The Secret holds the relay's `SQUELCH_RELAY_PUSH_TOKEN`, NEVER its
+`SQUELCH_RELAY_AUTH_TOKEN`: the push token opens `POST /v1/push` and is a 401
+at `GET /v1/opens`, the drain of a buffer every self-hosted daemon shares, so a
+compromised tenant pod cannot touch anyone's opens. The warden never reads the
+value; this is a doc rule, not something it can check. A new or late value is
+delivered by creating a Secret under a NEW name and changing
+`SQUELCH_WARDEN_RELAY_SECRET_NAME`, which the roller delivers one tenant per
+tick. Never by `kubectl rollout restart` on tenants: that leaves a foreign field
+manager on every Deployment and the roller skips them all until each is
+reconciled. The URL is refused with `@`, `?` or `#` in it, like the gateway's:
+userinfo would send the bearer to another host, and a query or fragment would
+swallow the path the daemon appends. Ordering and verification:
+`deploy/hosted/SETUP.md`, "iOS push through the relay".
+
 ### The console's Google link
 
 `SQUELCH_WARDEN_CONSOLE_SSO_URL`, an origin, injected as `SQUELCH_CONSOLE_SSO_URL`.
@@ -333,6 +359,9 @@ holds even for a tenant reconciled by hand.
 | `SQUELCH_WARDEN_EMBED_MODEL` | unset | Fleet-wide embedding model, passed on as `SQUELCH_EMBED_MODEL`. Unset means the daemon's own pin. Reseed `SQUELCH_WARDEN_MODEL_PVC` with the new weights BEFORE moving it: a model the volume does not hold is a cold download on every tenant, which is the readiness failure the warden warns about at boot. |
 | `SQUELCH_WARDEN_EMBED_IDLE_UNLOAD_SECS` | unset | Passed on as `SQUELCH_EMBED_IDLE_UNLOAD_SECS`: seconds before a tenant daemon drops its idle embedding session. Unset keeps the daemon's default; `0` never unloads. |
 | `SQUELCH_WARDEN_IMAGE_PULL_SECRET` | unset | For a private squelchd image. |
+| `SQUELCH_WARDEN_RELAY_URL` | unset | APNs relay, passed on as `SQUELCH_RELAY_URL`. https only, and no `@`, `?` or `#`. Unset means no hosted iOS push. |
+| `SQUELCH_WARDEN_RELAY_SECRET_NAME` | `apns-relay` | Secret holding the relay's PUSH-ONLY bearer (key `token`; the relay's `SQUELCH_RELAY_PUSH_TOKEN`, never its auth token), passed on as an optional `SQUELCH_RELAY_TOKEN` reference. Rename it to deliver a new value. |
+| `SQUELCH_WARDEN_RELAY_TOPIC` | unset | Passed on as `SQUELCH_RELAY_TOPIC`. Refused without the URL. Hosted needs `app.passband.client.ios`: the relay's default is the Mac bundle id. |
 | `SQUELCH_WARDEN_NODE_CIDR` | unset | Lets the node reach 8848 and 9464, when the CNI drops kubelet probes. |
 | `SQUELCH_WARDEN_HTTP_READINESS` | `off` | Probe `/healthz` on 9464 instead of accepting on 8848. Turn on only once the whole fleet runs a daemon that serves it. |
 | `SQUELCH_WARDEN_MIN_READY_SECS` | `30` | `minReadySeconds`: how long a pod must stay Ready to count Available. 0 to 300, and below the ready timeout. |

@@ -73,7 +73,12 @@ enum ChangelogTool {
             guard !items.isEmpty else { continue }
             out.append("### \(surface.label)")
             out.append("")
-            out.append(contentsOf: items.map { "- \($0.text)" })
+            // A headliner's page line rides along: the title alone ("Flow mode")
+            // says what it is called, not what it does.
+            out.append(
+                contentsOf: items.map { item in
+                    item.detail.map { "- **\(item.text).** \($0)" } ?? "- \(item.text)"
+                })
             out.append("")
         }
         return out.joined(separator: "\n")

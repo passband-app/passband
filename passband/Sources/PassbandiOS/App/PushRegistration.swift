@@ -10,6 +10,13 @@
 // collision `Notifier` prefixes its request identifiers against). The tag is a
 // locally-minted UUID that names nothing about the mailbox, so the blind relay
 // and APNs both stay blind while carrying it.
+//
+// It also carries the APNs ENVIRONMENT the token was minted in. A token is
+// valid in exactly one of sandbox and production, and ONLY THE BUILD KNOWS
+// WHICH: an Xcode or Simulator install and a TestFlight install of the same app
+// hold tokens for different APNs hosts, and a daemon that guessed one host for
+// every device pushed into the void for the rest (APNsEnvironment.swift). When
+// the build cannot tell, the field is left out and the daemon's default stands.
 
 import Foundation
 import UIKit
@@ -26,7 +33,7 @@ final class PushRegistration {
     private var syncing = false
     private var needsAnotherSync = false
 
-    /// `.badge` rides along because the app icon carries the due-today count
+    /// `.badge` rides along because the app icon carries the For-your-eyes count
     /// (Model/Badge.swift). It is a separate grant from `.alert`, so a user can
     /// keep banners and refuse the number, and `setBadgeCount` then does nothing
     /// — which is the correct outcome, not a failure to handle.
@@ -55,7 +62,7 @@ final class PushRegistration {
         case .authorized:
             // BEST EFFORT, FOR THE INSTALLS THAT PREDATE THE BADGE. `.badge` was
             // not in the set this app asked for until the icon started carrying
-            // the due-today count, and iOS grants what was asked for at the
+            // the For-your-eyes count, and iOS grants what was asked for at the
             // time — so an install that said yes to alerts a month ago has no
             // badge permission and no prompt is coming. Asking again is silent
             // and instant on an already-authorized app (the system does not
@@ -123,14 +130,13 @@ final class PushRegistration {
 
     private func register(token: String, tag: UUID, with settings: ConnectionSettings) async {
         // Registration is idempotent and retried whenever the app foregrounds.
-        await post(
-            "/client/devices",
-            body: [
-                "token": token,
-                "platform": "ios",
-                "tag": tag.uuidString,
-            ],
-            with: settings)
+        var body = [
+            "token": token,
+            "platform": "ios",
+            "tag": tag.uuidString,
+        ]
+        if let env = APNsEnvironment.current { body["environment"] = env.rawValue }
+        await post("/client/devices", body: body, with: settings)
     }
 
     /// POST one authenticated JSON body to the human door. Neither the daemon
@@ -149,6 +155,7 @@ final class PushRegistration {
         request.setValue("Bearer \(settings.apiToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.identifyClient()
         request.httpBody = encoded
         _ = try? await session.data(for: request)
     }

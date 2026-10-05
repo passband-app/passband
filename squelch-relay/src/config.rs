@@ -166,6 +166,14 @@ pub struct Config {
     /// (rate-limited only), which `from_env` produces only under an explicit
     /// `SQUELCH_RELAY_ALLOW_ANONYMOUS=1`.
     pub auth_token: Option<String>,
+    /// A second bearer that `POST /v1/push` accepts and `GET /v1/opens` DOES
+    /// NOT. It exists for the hosted fleet: every tenant pod holds a relay
+    /// bearer, and handing them [`Config::auth_token`] would let one
+    /// compromised pod read and delete every self-hosted daemon's opens, since
+    /// that buffer is one global queue. `None` (unset) is the relay exactly as
+    /// it was before this field existed. Only meaningful beside an
+    /// `auth_token`, and never equal to it; `from_env` refuses both mistakes.
+    pub push_token: Option<String>,
     /// TEST-ONLY base-URL override for the APNs host; wins over `apns_env`'s
     /// host. Production deployments must leave this unset.
     pub apns_url_override: Option<String>,
@@ -196,6 +204,10 @@ impl std::fmt::Debug for Config {
             .field(
                 "auth_token",
                 &self.auth_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "push_token",
+                &self.push_token.as_ref().map(|_| "<redacted>"),
             )
             .field("apns_url_override", &self.apns_url_override)
             .field("db_path", &self.db_path)
@@ -298,24 +310,38 @@ impl Config {
                 ));
             }
             (None, true) => None,
-            (Some(t), false) => {
-                if t.len() < MIN_AUTH_TOKEN_LEN {
-                    return Err(ConfigError::invalid(format!(
-                        "SQUELCH_RELAY_AUTH_TOKEN must be at least {MIN_AUTH_TOKEN_LEN} characters"
-                    )));
+            (Some(t), false) => Some(bearer_var("SQUELCH_RELAY_AUTH_TOKEN", t)?),
+        };
+
+        // The push-only bearer. Every refusal here is a split that would not
+        // hold: on an open relay a push-only token gates nothing (the route is
+        // open, and there is no drain to keep it away from), and a value EQUAL
+        // to the full token would hand the tenants the drain after all while
+        // the operator believes otherwise.
+        let push_token = match var("SQUELCH_RELAY_PUSH_TOKEN") {
+            None => None,
+            Some(_) if allow_anonymous => {
+                return Err(ConfigError::invalid(
+                    "SQUELCH_RELAY_PUSH_TOKEN is set alongside SQUELCH_RELAY_ALLOW_ANONYMOUS=1; an anonymous relay serves /v1/push open, so a push-only bearer would gate nothing",
+                ));
+            }
+            Some(t) => {
+                let t = bearer_var("SQUELCH_RELAY_PUSH_TOKEN", t)?;
+                match auth_token.as_deref() {
+                    // Unreachable today (no auth token without anonymous mode),
+                    // kept so a future relaxation cannot slip it through.
+                    None => {
+                        return Err(ConfigError::invalid(
+                            "SQUELCH_RELAY_PUSH_TOKEN is set without SQUELCH_RELAY_AUTH_TOKEN; the push-only bearer is the narrower of two and means nothing alone",
+                        ));
+                    }
+                    Some(full) if full == t => {
+                        return Err(ConfigError::invalid(
+                            "SQUELCH_RELAY_PUSH_TOKEN is equal to SQUELCH_RELAY_AUTH_TOKEN, so whoever holds it can also drain /v1/opens; generate a separate value",
+                        ));
+                    }
+                    Some(_) => Some(t),
                 }
-                // A token carrying whitespace or a control character can never
-                // be presented: it cannot go in an HTTP header. `var()` trims
-                // the ends, so what is left is interior — a secret pasted across
-                // two lines, which is exactly the shape a wrapped copy produces.
-                // Booting anyway would serve a relay that 401s every client
-                // forever, with a bare 401 and nothing in the logs to explain it.
-                if t.chars().any(|c| c.is_whitespace() || c.is_control()) {
-                    return Err(ConfigError::invalid(
-                        "SQUELCH_RELAY_AUTH_TOKEN contains whitespace or a control character, so it can never be sent as a bearer header; re-set it as one unbroken line",
-                    ));
-                }
-                Some(t)
             }
         };
 
@@ -377,6 +403,7 @@ impl Config {
             apns_topics,
             apns_env,
             auth_token,
+            push_token,
             apns_url_override,
             db_path,
             trusted_proxy_hops,
@@ -415,6 +442,29 @@ impl Config {
             .as_deref()
             .unwrap_or_else(|| self.apns_env.base_url())
     }
+}
+
+/// Validate a bearer the relay compares against, named by the variable it came
+/// from so the refusal points at the right one. The value never appears in
+/// the error.
+fn bearer_var(name: &str, t: String) -> Result<String, ConfigError> {
+    if t.len() < MIN_AUTH_TOKEN_LEN {
+        return Err(ConfigError::invalid(format!(
+            "{name} must be at least {MIN_AUTH_TOKEN_LEN} characters"
+        )));
+    }
+    // A token carrying whitespace or a control character can never be
+    // presented: it cannot go in an HTTP header. `var()` trims the ends, so
+    // what is left is interior — a secret pasted across two lines, which is
+    // exactly the shape a wrapped copy produces. Booting anyway would serve a
+    // relay that 401s every client forever, with a bare 401 and nothing in the
+    // logs to explain it.
+    if t.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(ConfigError::invalid(format!(
+            "{name} contains whitespace or a control character, so it can never be sent as a bearer header; re-set it as one unbroken line"
+        )));
+    }
+    Ok(t)
 }
 
 /// Split and validate the topic allowlist. Topics become an `apns-topic`
@@ -474,6 +524,7 @@ mod tests {
             apns_topics: topics.iter().map(|s| s.to_string()).collect(),
             apns_env: Environment::Production,
             auth_token: None,
+            push_token: None,
             apns_url_override: None,
             db_path: None,
             trusted_proxy_hops: 0,
@@ -508,6 +559,56 @@ mod tests {
         // The non-secret fields still print, or the impl is useless.
         assert!(s.contains("dev.squelch.ios"));
         assert!(s.contains("KEYID") || s.contains("\"K\""));
+    }
+
+    /// The push-only bearer is a secret of the same class: every tenant pod
+    /// holds it, and it must not reach a log any more than the full one does.
+    #[test]
+    fn debug_redacts_the_push_token() {
+        let mut c = cfg(&["dev.squelch.ios"]);
+        c.auth_token = Some("supersecretbearertokenvalue00000".into());
+        c.push_token = Some("pushonlybearertokenvalue11111111".into());
+        let s = format!("{c:?}");
+        assert!(
+            !s.contains("pushonlybearertokenvalue"),
+            "push token leaked: {s}"
+        );
+        assert!(
+            !s.contains("supersecretbearertokenvalue"),
+            "token leaked: {s}"
+        );
+        // PEM, full bearer, push bearer.
+        assert_eq!(s.matches("<redacted>").count(), 3);
+        assert!(s.contains("push_token"));
+    }
+
+    /// Both variables get the same refusals, each naming its own variable and
+    /// neither echoing the value it refused.
+    #[test]
+    fn bearer_refusals_name_their_variable() {
+        for name in ["SQUELCH_RELAY_AUTH_TOKEN", "SQUELCH_RELAY_PUSH_TOKEN"] {
+            let short = bearer_var(name, "shortsecretvalue".into())
+                .unwrap_err()
+                .to_string();
+            assert!(short.starts_with(name), "{short}");
+            assert!(short.contains("at least 32"), "{short}");
+            assert!(!short.contains("shortsecretvalue"), "{short}");
+
+            let wrapped = bearer_var(
+                name,
+                "0123456789abcdef0123456789\nabcdef0123456789abcdef".into(),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(wrapped.starts_with(name), "{wrapped}");
+            assert!(
+                wrapped.contains("whitespace or a control character"),
+                "{wrapped}"
+            );
+            assert!(!wrapped.contains("0123456789abcdef"), "{wrapped}");
+
+            assert!(bearer_var(name, "0123456789abcdef0123456789abcdef".into()).is_ok());
+        }
     }
 
     #[test]

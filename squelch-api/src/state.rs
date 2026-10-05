@@ -7,8 +7,10 @@ use squelch_core::credentials::{
     CredentialKind, CredentialStore, FileCredentialStore, KeyringCredentialStore,
 };
 use squelch_core::store::SqliteStore;
+use squelch_core::triage::fye_headline::HeadlineClient;
 use squelch_core::triage::rule_infer::RuleInferClient;
 use squelch_core::triage::rule_suggest::RuleSuggestClient;
+use squelch_core::triage::unsub_page::UnsubPageClient;
 use squelch_core::types::AccountId;
 
 /// The agent door's mode as the console describes it. Mirrors squelch-mcp's
@@ -24,6 +26,8 @@ pub enum AgentDoorStatus {
     /// Half-set or invalid settings: the door refuses everything (503).
     Unavailable,
 }
+/// A board hash and the headline written for it (`None`: nothing to say).
+pub(crate) type HeadlineCacheEntry = (u64, Option<String>);
 
 /// State threaded through every `/client/*` handler and the auth middleware.
 /// Cheap to clone: `Arc`s plus small copies.
@@ -192,6 +196,20 @@ pub struct ApiState {
     /// never saved on its own. `None` (no key, every test harness) means no
     /// suggestions. See [`squelch_core::triage::rule_suggest`].
     pub(crate) rule_suggest: Option<RuleSuggestClient>,
+    /// The small model behind the sitrep's headline. `None` (no key, every
+    /// test harness) means `/client/v2/fye/headline` answers null and the
+    /// client keeps its own line. See [`squelch_core::triage::fye_headline`].
+    pub(crate) fye_headline: Option<HeadlineClient>,
+    /// The last headline and the board it was written for, by hash. The route
+    /// is asked every time the sitrep settles, and the band is usually the
+    /// one it already described; a miss is the only thing that spends. A
+    /// `None` headline is cached too, so a board the model had nothing to say
+    /// about is not asked again.
+    pub(crate) fye_headline_cache: Arc<std::sync::Mutex<Option<HeadlineCacheEntry>>>,
+    /// Headline calls ATTEMPTED today, as (UTC day, count): the half of the
+    /// daily cap the usage ledger cannot see (timeouts report no usage) and
+    /// cannot see in time (two calls racing the same ledger read).
+    pub(crate) fye_headline_attempts: Arc<std::sync::Mutex<(String, u32)>>,
     /// The hosted assistant relay: forwards the Passband app's Anthropic-shaped
     /// streaming request to the gateway with a daemon-held credential. `None`
     /// (no gateway + assistant key configured, and every test harness) means
@@ -218,6 +236,10 @@ pub struct ApiState {
     /// packages exist. Defaults to the config default so a hand-built state
     /// still filters sensibly.
     pub(crate) shipment_policy: squelch_core::config::ShipmentListPolicy,
+    /// Automatic unsubscribes: the jobs running in this process, their slots,
+    /// and the small model that reads an unsubscribe page. See
+    /// [`crate::unsub_job`]. HUMAN DOOR ONLY.
+    pub(crate) unsub: crate::unsub_job::UnsubJobs,
 }
 
 /// What the human door needs to force a carrier pass: the poller's
@@ -420,10 +442,14 @@ impl ApiState {
             )),
             rule_infer: None,
             rule_suggest: None,
+            fye_headline: None,
+            fye_headline_cache: Arc::new(std::sync::Mutex::new(None)),
+            fye_headline_attempts: Arc::new(std::sync::Mutex::new((String::new(), 0))),
             assistant: None,
             sharing: None,
             shipment_poll: None,
             shipment_policy: squelch_core::config::ShipmentListPolicy::default(),
+            unsub: crate::unsub_job::UnsubJobs::default(),
         }
     }
 
@@ -546,10 +572,9 @@ impl ApiState {
         self.tracking_base_url = base_url
             .map(|u| u.trim().trim_end_matches('/').to_string())
             .filter(|u| !u.is_empty())
-            .filter(|u| {
-                let lower = u.to_ascii_lowercase();
-                lower.starts_with("http://") || lower.starts_with("https://")
-            })
+            // The shared predicate: the opens-poller gate and the startup
+            // posture report apply the same rule, so all three agree.
+            .filter(|u| squelch_core::tracking::is_mintable_base_url(u))
             .map(|u| Arc::from(u.as_str()));
         self
     }
@@ -663,6 +688,29 @@ impl ApiState {
     /// null.
     pub fn with_rule_suggestion(mut self, client: Option<RuleSuggestClient>) -> Self {
         self.rule_suggest = client;
+        self
+    }
+
+    /// Attach the sitrep headline writer. `None` keeps
+    /// `/client/v2/fye/headline` answering null.
+    pub fn with_fye_headline(mut self, client: Option<HeadlineClient>) -> Self {
+        self.fye_headline = client;
+        self
+    }
+
+    /// The small model that reads an unsubscribe page when a job needs one.
+    /// `None` (no key, every test harness) leaves the no-model rule: done only
+    /// when the page says so, and one action only when it is the obvious one.
+    pub fn with_unsub_page_reader(mut self, client: Option<UnsubPageClient>) -> Self {
+        self.unsub.page_reader = client.map(Arc::new);
+        self
+    }
+
+    /// TEST HOOK: let the automatic unsubscribe's fetcher reach loopback and
+    /// any port, so a test can serve the sender's pages itself. Production
+    /// never calls this; the SSRF guard in `unsub_fetch` is otherwise absolute.
+    pub fn with_unsub_fetch_allow_local(mut self, allow: bool) -> Self {
+        self.unsub.allow_local = allow;
         self
     }
 
@@ -927,6 +975,11 @@ impl ApiState {
             // The rule card's suggestion rides the same key and the NOTIFY
             // model, the one small model the daemon already runs and prices.
             .with_rule_suggestion(RuleSuggestClient::from_config(cfg))
+            // The sitrep headline: same key, same notify model.
+            .with_fye_headline(HeadlineClient::from_config(cfg))
+            // The unsubscribe page reader rides the same key and the notify
+            // model, billed under its own ledger category.
+            .with_unsub_page_reader(UnsubPageClient::from_config(cfg))
             // The assistant relay resolves only when BOTH the gateway base URL
             // and the assistant key are present; anything less is `None` and
             // the route 404s (see `Stage2Config::resolve_assistant`).

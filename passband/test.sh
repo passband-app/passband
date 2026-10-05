@@ -518,6 +518,16 @@ run_suite reading \
   Sources/Passband/Lib/Reading.swift \
   Tests/ReadingTests.swift
 
+# The Agents pane: which probe answers mean a sign-in door (an arbitrary 401
+# must not), and the text it hands somebody to paste. A snippet with a token
+# slot gets pasted with the slot still in, so every one is asserted, and the
+# self-hosted door's snippets are pinned to what they were before. A hosted
+# mailbox is never told to edit a daemon it does not have.
+run_suite agent-connect \
+  Sources/Passband/Lib/HostedServer.swift \
+  Sources/Passband/Model/AgentConnect.swift \
+  Tests/AgentConnectTests.swift
+
 # The all-mail list: lenses and the category picker, day headings and the
 # ranking inside them, the poll's head merging into the scrolled pages, and
 # the arrival stamp an older daemon does not send.

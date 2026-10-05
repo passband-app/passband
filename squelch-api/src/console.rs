@@ -61,7 +61,7 @@ use squelch_core::store::sqlite::device_tokens::{
 };
 use squelch_core::store::{DeviceToken, Store};
 
-use crate::state::ApiState;
+use crate::state::{AgentDoorStatus, ApiState};
 
 /// The session cookie's name.
 ///
@@ -1058,10 +1058,7 @@ with no restart and nothing to wait out.</p>
 outstanding, so there is never more than one live at a time.</p>
 
 <h2>Agent door</h2>
-<p>The agent door (<code>/mcp</code>) is not served on hosted Passband yet. Tenant addresses
-publish the client API and the tracking pixel only, and there is nothing to configure here until
-that changes. It is tracked as the <code>/mcp</code> bearer auth open item in
-<code>deploy/hosted/PRODUCTION.md</code>. A self-hosted daemon can serve it locally today.</p>
+{agent_door}
 
 <h2>Sign out</h2>
 <p>Signing out revokes this browser's own device token, so the cookie it leaves behind is worth
@@ -1078,8 +1075,37 @@ nothing to anybody who finds it.</p>
             surfaced = escape_html(&surfaced),
             cursor = escape_html(&cursor),
             rows = rows,
+            agent_door = agent_door_html(state.agent_door()),
         ),
     )
+}
+
+/// The "Agent door" section, true for whichever mode squelchd resolved.
+///
+/// Open cannot tell a self-hosted daemon from a hosted one with agent sign-in
+/// off (a hostname is no proof either way), so its text is written to be true
+/// for both: the door asks for no sign-in, it answers only to trusted host
+/// names, and hosted addresses do not publish it in that state.
+fn agent_door_html(status: &AgentDoorStatus) -> String {
+    match status {
+        AgentDoorStatus::OAuth { public_url } => format!(
+            r#"<p>Agents connect to this mailbox at <code>{url}</code>.</p>
+<p>When an agent first connects, it asks you to sign in with the Google account of this mailbox.
+There is no token to copy. Setup steps for each agent are in the Passband app, under
+Agents.</p>"#,
+            url = escape_html(public_url),
+        ),
+        AgentDoorStatus::Open => r#"<p>Agent sign-in is not set up on this daemon, so the agent door (<code>/mcp</code>) asks for
+no sign-in. It answers only to host names this daemon trusts: loopback, plus any listed in
+<code>SQUELCH_MCP_ALLOWED_HOSTS</code>. That suits an agent on the same machine, or one reaching
+it through a proxy you run. Hosted Passband addresses do not publish it in this state.</p>"#
+            .to_string(),
+        AgentDoorStatus::Unavailable => r#"<p>The agent door (<code>/mcp</code>) is refusing every request because its sign-in
+settings are incomplete. <code>SQUELCH_MCP_OAUTH_ISSUER</code> and
+<code>SQUELCH_MCP_PUBLIC_URL</code> must be set together, as valid URLs. The daemon's log names
+the setting at fault. Mail sync and this console are not affected.</p>"#
+            .to_string(),
+    }
 }
 
 /// The page a freshly minted pairing code renders on, and the only page in the
@@ -1515,6 +1541,74 @@ mod tests {
         let html = body_of(app.oneshot(get("/console", Some(&token))).await.unwrap()).await;
         assert!(html.contains("ada@example.com"), "still signed in");
         assert!(html.contains("revoked "), "the table shows the tombstone");
+    }
+
+    /// The "Agent door" section of the signed-in page, rendered for `status`.
+    async fn agent_door_section(status: AgentDoorStatus) -> String {
+        let (store, acct, app) = fixture_with(|s| s.with_agent_door(status));
+        let token = sign_in(&app, &store, acct).await;
+        let html = body_of(app.oneshot(get("/console", Some(&token))).await.unwrap()).await;
+        let start = html
+            .find("<h2>Agent door</h2>")
+            .expect("agent door section");
+        let end = html[start..]
+            .find("<h2>Sign out</h2>")
+            .expect("next section")
+            + start;
+        html[start..end].to_string()
+    }
+
+    /// OAuth mode shows the address agents connect to, escaped, and says how
+    /// sign-in works. It must not send anyone looking for a token.
+    #[tokio::test]
+    async fn the_agent_door_section_shows_the_oauth_address_escaped() {
+        let section = agent_door_section(AgentDoorStatus::OAuth {
+            public_url: "https://ada.passband.email/mcp?x=<b>&y".to_string(),
+        })
+        .await;
+        assert!(
+            section.contains("<code>https://ada.passband.email/mcp?x=&lt;b&gt;&amp;y</code>"),
+            "{section}"
+        );
+        assert!(!section.contains("<b>"), "the URL must be escaped");
+        assert!(section.contains("Google account of this mailbox"));
+        assert!(section.contains("There is no token to copy."));
+        // True on macOS (Settings) and iOS (the account page) alike.
+        assert!(
+            section.contains("in the Passband app, under\nAgents."),
+            "{section}"
+        );
+        assert!(!section.contains("Settings"));
+        assert!(!section.contains("not set up"));
+        assert!(!section.contains('\u{2014}'), "no em dashes");
+    }
+
+    /// Open mode (the default, and self-host) says the door needs no sign-in
+    /// and is limited to trusted host names. The old "not served on hosted
+    /// yet / bearer auth open item" copy is gone.
+    #[tokio::test]
+    async fn the_agent_door_section_describes_the_open_door_by_default() {
+        let (store, acct, app) = fixture();
+        let token = sign_in(&app, &store, acct).await;
+        let html = body_of(app.oneshot(get("/console", Some(&token))).await.unwrap()).await;
+        let section = agent_door_section(AgentDoorStatus::Open).await;
+        assert!(html.contains(&section), "Open is the default");
+        assert!(section.contains("asks for\nno sign-in"), "{section}");
+        assert!(section.contains("SQUELCH_MCP_ALLOWED_HOSTS"));
+        assert!(section.contains("Hosted Passband addresses do not publish it"));
+        assert!(!section.contains("bearer"));
+        assert!(!section.contains("PRODUCTION.md"));
+        assert!(!section.contains('\u{2014}'), "no em dashes");
+    }
+
+    /// A misconfigured door is described as refusing requests, never as open.
+    #[tokio::test]
+    async fn the_agent_door_section_says_a_misconfigured_door_refuses() {
+        let section = agent_door_section(AgentDoorStatus::Unavailable).await;
+        assert!(section.contains("refusing every request"), "{section}");
+        assert!(section.contains("SQUELCH_MCP_PUBLIC_URL"));
+        assert!(!section.contains("no sign-in"));
+        assert!(!section.contains('\u{2014}'), "no em dashes");
     }
 
     /// EVERY mutating POST refuses a cross-site request, whether it carries a

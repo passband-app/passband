@@ -4954,14 +4954,23 @@ version = "0.0.11"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.22.1",
  "chrono",
+ "futures",
+ "http-body",
+ "jsonwebtoken",
+ "reqwest",
  "rmcp",
  "schemars",
  "serde",
  "serde_json",
  "squelch-core",
+ "squelch-httpauth",
+ "squelch-mcp",
  "tokio",
  "tokio-util",
+ "tower",
+ "url",
 ]
 
 [[package]]

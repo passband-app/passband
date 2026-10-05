@@ -651,6 +651,8 @@ impl Harness {
             // login is the one that reads userinfo (`tests/console_auth.rs`).
             userinfo_url: format!("{google}/userinfo"),
             alert_webhook_url: Some(format!("{warden_url}/hook")),
+            // No agent door: `/agent/auth` is not mounted.
+            workos: None,
             // The struct is constructed directly, so an http mock URL is fine
             // here; `from_env` is where https is enforced.
             bifrost: bifrost_url.map(|url| BifrostConfig {

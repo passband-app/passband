@@ -106,6 +106,9 @@ enum Analytics {
         "triage_corrected", "triage_digest", "rule_created", "rule_deleted",
         "notification_opened", "sealed_revealed",
         "shipment_cleared",
+        // The purge deck: how many cards it opened with, and what a finished
+        // one came to. Counts and a duration; never a sender.
+        "purge_started", "purge_finished",
         "connect_succeeded", "connection_lost", "connection_restored",
         "account_added",
         "tour_started", "tour_completed", "tour_skipped", "whats_new_shown",

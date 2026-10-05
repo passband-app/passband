@@ -733,6 +733,448 @@ final class AppStore {
     private func dropSkipUndos() {
         undos.removeAll { $0.kind == .skip }
     }
+
+    // MARK: the purge
+
+    /// THE PURGE: a deck through Reading one SENDER at a time (`Lib/Purge.swift`
+    /// is the deck; this is the half that acts). Decisions are staged in the
+    /// session and NOTHING IS SENT until `commitPurge`: an unsubscribe is a
+    /// request to a third party and cannot be recalled, so going back a card
+    /// has to be free, and so does walking away.
+    struct PurgeSession: Equatable {
+        enum Phase: Equatable {
+            /// A card is on screen.
+            case deciding
+            /// The deck is over (or was left); the staged summary is up and
+            /// one press applies it.
+            case confirming
+            /// Requests are out. No way back from here, and no cancel: what
+            /// has been asked of a sender has been asked.
+            case applying
+        }
+        var deck: PurgeDeck
+        /// How many days the evidence on the cards covers, for `PurgeCopy.window`.
+        var ledgerDays: Int
+        /// Senders with open mail in Reading before the daemon's cap. More
+        /// than the deck holds when the list was cut short (or when some of
+        /// them are senders the deck does not offer).
+        var totalSenders: Int
+        var startedAt = Date()
+        var phase: Phase = .deciding
+
+        /// What the staged decisions would come to: the confirm step's text.
+        var summary: PurgeSummary { PurgeSummary(deck: deck) }
+    }
+    var purge: PurgeSession?
+
+    /// What a COMMITTED purge came to, for the moment at the end. Cleared by
+    /// `dismissPurgeFinished`.
+    struct PurgeFinish: Equatable, Identifiable {
+        /// An unsubscribe the daemon would not do itself (unverified mail, a
+        /// footer link): the sender's own page, for the person to finish on.
+        /// Offered one at a time at the end and never opened for them, because
+        /// a batch that opens nine browser tabs is hostile.
+        struct Site: Hashable, Identifiable, Sendable {
+            enum Step: Hashable, Sendable {
+                /// NOTHING HAS BEEN ASKED YET. The daemon records a request,
+                /// and starts holding the sender to it, the moment it is
+                /// asked; so it is asked when the person actually goes
+                /// (`openPurgeSite`), with this message. One who never does
+                /// just meets the sender again in the next purge.
+                case request(messageId: Int)
+                /// The daemon was asked to do it itself, declined at the last
+                /// moment and handed back the page: the request is already on
+                /// its books, and all that is left is to open this.
+                case page(url: String)
+            }
+            let sender: String
+            let displayName: String
+            let step: Step
+            /// Why it was not automatic (`UnsubscribeResult.auto_refused`),
+            /// when the daemon has already said: `unverified`, `footer_link`.
+            let refused: String?
+            var id: String { sender }
+        }
+        /// Corrected for what failed: these are things that happened.
+        var summary: PurgeSummary
+        var duration: TimeInterval
+        /// Pages still to visit, in deck order. `openPurgeSite` removes one.
+        var sites: [Site]
+        /// Senders whose `openPurgeSite` request is out, so a second click
+        /// on the same row does not ask twice.
+        var opening: Set<String> = []
+        let id = UUID()
+    }
+    var purgeFinished: PurgeFinish?
+
+    /// What `startPurge` came to, for the caller to turn into a toast.
+    enum PurgeStart: Equatable {
+        case started
+        /// Every sender in Reading is one the deck does not offer.
+        case nothingToPurge
+        /// This daemon has no purge route, or this is the practice inbox.
+        case unavailable
+        /// The request failed.
+        case failed
+        /// The account changed while the senders were loading.
+        case superseded
+
+        /// nil when there is nothing to say.
+        var toast: String? {
+            switch self {
+            case .started, .superseded: nil
+            case .nothingToPurge: "Nothing to purge right now."
+            case .unavailable: "Purge is not available on this server yet."
+            case .failed: "Could not load your senders. Try again."
+            }
+        }
+    }
+
+    /// How many decisions are applied at once. The daemon runs four
+    /// unsubscribe jobs at a time, so a fifth request would only queue there.
+    private static let purgeConcurrency = 4
+
+    /// Fetch the senders and open the deck. Sets nothing unless there is at
+    /// least one card to show.
+    ///
+    /// NEVER FROM THE PRACTICE INBOX. Its senders are fixtures; the flow would
+    /// end by asking the real daemon to unsubscribe from fixture message ids.
+    @discardableResult
+    func startPurge() async -> PurgeStart {
+        guard !RehearsalMode.isEnabled else { return .unavailable }
+        guard purge == nil else { return .started }
+        let e = epoch
+        let page: ReadingSendersPage?
+        do {
+            page = try await APIClient.shared.getReadingSenders()
+        } catch {
+            return e == epoch ? .failed : .superseded
+        }
+        // These are the OLD account's senders and message ids.
+        guard e == epoch else { return .superseded }
+        // A second press while the first was loading.
+        guard purge == nil else { return .started }
+        guard let page else { return .unavailable }
+        let deck = PurgeDeck(senders: page.senders)
+        guard !deck.isEmpty else { return .nothingToPurge }
+        purgeFinished = nil
+        purge = PurgeSession(
+            deck: deck, ledgerDays: page.ledger_days, totalSenders: page.totalSenders)
+        Analytics.capture("purge_started", ["cards": deck.cards.count])
+        return .started
+    }
+
+    /// Stage a decision for the card on screen. False when the card does not
+    /// offer it (see `PurgeDeck.decide`) or no card is up.
+    @discardableResult
+    func purgeDecide(_ decision: PurgeDecision) -> Bool {
+        guard purge?.phase == .deciding, purge?.deck.decide(decision) == true else { return false }
+        if purge?.deck.isFinished == true { purgeReachedEnd() }
+        return true
+    }
+
+    /// One card back, un-staging it. From the confirm step this returns to the
+    /// deck: the last card, or the one it was left on.
+    @discardableResult
+    func purgeBack() -> Bool {
+        guard let phase = purge?.phase, phase != .applying, purge?.deck.back() == true
+        else { return false }
+        purge?.phase = .deciding
+        return true
+    }
+
+    /// Stop here and go to the confirm step with what has been decided. The
+    /// cards not reached are untouched.
+    func purgeFinishEarly() {
+        guard purge?.phase == .deciding else { return }
+        purge?.deck.finishEarly()
+        purgeReachedEnd()
+    }
+
+    /// Nothing but skips is nothing to confirm and nothing to celebrate: the
+    /// deck just closes, like the reader does on Esc.
+    private func purgeReachedEnd() {
+        guard let session = purge else { return }
+        let summary = session.summary
+        if summary.isEmpty {
+            purge = nil
+            capturePurgeFinished(summary, session)
+        } else {
+            purge?.phase = .confirming
+        }
+    }
+
+    /// Throw the deck away. Nothing was sent, so there is nothing to undo.
+    /// Refused while applying: the requests are already out.
+    func cancelPurge() {
+        guard purge?.phase != .applying else { return }
+        purge = nil
+    }
+
+    /// One staged decision, applied. Built off the main actor by `applyPurge`.
+    private struct PurgeApplied: Sendable {
+        var sender: String
+        var outcome: PurgeOutcome = .failed
+        /// The daemon took the unsubscribe as a job: the tray should show it.
+        var jobStarted = false
+        var site: PurgeFinish.Site?
+        /// The daemon resolved the whole SENDER (an unsubscribe it accepted,
+        /// a mute's sweep), as opposed to this client marking `clearedIds`.
+        var senderResolved = false
+        /// Message ids marked done one by one: a clear, and an unsubscribe
+        /// left for the sender's site.
+        var clearedIds: [Int] = []
+    }
+
+    /// The confirm press: apply every staged decision.
+    ///
+    /// AT MOST `purgeConcurrency` AT ONCE, EACH ON ITS OWN. One sender's
+    /// failure says nothing about the next, so each decision runs in its own
+    /// child task and reports an outcome instead of throwing; the summary at
+    /// the end counts only what landed.
+    ///
+    /// AN ACCOUNT SWITCH STOPS IT. Message ids are per-daemon ints, so a
+    /// decision made about account A's sender must never be sent once B's
+    /// daemon is the configured one: the epoch is checked before every launch
+    /// and again inside each task before every request it makes. A switch
+    /// also wipes `purge`, so there is nothing left to report to.
+    func commitPurge() async {
+        guard let session = purge, session.phase == .confirming else { return }
+        purge?.phase = .applying
+        let e = epoch
+        // Captured BEFORE the first request, as the reader does: a job that
+        // starts under an older generation belongs to another account's tray.
+        let gen = UnsubscribeJobs.shared.generation
+        let plan = session.deck.plan.filter { $0.decision != .skip }
+        var outcomes: [String: PurgeOutcome] = [:]
+        var sites: [String: PurgeFinish.Site] = [:]
+
+        await withTaskGroup(of: PurgeApplied.self) { group in
+            var waiting = plan.makeIterator()
+            var running = 0
+            while true {
+                // Top up to the limit. Nothing new starts once the account
+                // has moved; what is already out is left to finish and its
+                // answer is dropped below.
+                while running < Self.purgeConcurrency, e == epoch,
+                    let (card, decision) = waiting.next()
+                {
+                    group.addTask { await Self.applyPurge(card, decision, epoch: e) }
+                    running += 1
+                }
+                guard let applied = await group.next() else { break }
+                running -= 1
+                guard e == epoch else { continue }
+                outcomes[applied.sender] = applied.outcome
+                if applied.jobStarted {
+                    UnsubscribeJobs.shared.started(sender: applied.sender, generation: gen)
+                }
+                if let site = applied.site { sites[applied.sender] = site }
+                if applied.outcome != .failed { notePurged(applied) }
+            }
+        }
+        guard e == epoch else {
+            // The switch's wipe has normally cleared the deck already. This is
+            // for an epoch bump that does not wipe: without it THIS session
+            // would sit in `.applying`, the one phase with no way out.
+            if purge?.phase == .applying, purge?.startedAt == session.startedAt { purge = nil }
+            return
+        }
+
+        let summary = PurgeSummary(deck: session.deck, outcomes: outcomes)
+        if summary.isEmpty {
+            // Every one of them failed, which is a daemon that is not
+            // answering rather than nine separate problems. The decisions are
+            // still staged: back to the confirm step, where trying again is
+            // one press, instead of making them walk the deck a second time.
+            purge?.phase = .confirming
+            pushToast("could not apply your choices; try again", .error)
+            return
+        }
+        purge = nil
+        purgeFinished = PurgeFinish(
+            summary: summary,
+            duration: Date().timeIntervalSince(session.startedAt),
+            sites: session.deck.cards.compactMap { sites[$0.id] })
+        capturePurgeFinished(summary, session)
+        // The tiles left optimistically; this is what makes the daemon's list
+        // the thing on screen. Forced, so it also outlasts any pass that read
+        // the daemon before these writes landed and would put a tile back.
+        await refreshZones(force: true)
+    }
+
+    /// Counts and a duration. Never a sender, an address or a word of mail.
+    private func capturePurgeFinished(_ summary: PurgeSummary, _ session: PurgeSession) {
+        Analytics.capture(
+            "purge_finished",
+            [
+                "cards": session.deck.cards.count,
+                "unsubscribed": summary.unsubscribed,
+                "muted": summary.muted,
+                "cleared": summary.cleared,
+                "on_their_site": summary.onTheirSite,
+                "skipped": summary.skipped,
+                "failed": summary.failed,
+                "emails_cleared": summary.emailsCleared,
+                "seconds": Int(Date().timeIntervalSince(session.startedAt)),
+            ])
+    }
+
+    /// One decision landed: make the screen agree NOW rather than a poll later.
+    ///
+    /// An unsubscribe the daemon took and a mute resolve the whole SENDER on
+    /// the server, so the whole sender is recorded here. A CLEAR IS NARROWER
+    /// ON PURPOSE, and so is an unsubscribe left for the sender's site: they
+    /// marked only the Reading mail they were shown, and the same address can
+    /// have a bill sitting in For your eyes. `noteSenderResolved` would hide
+    /// that for the rest of the session while the daemon still has it open.
+    private func notePurged(_ applied: PurgeApplied) {
+        if applied.senderResolved {
+            noteSenderResolved(applied.sender)
+        } else {
+            for id in applied.clearedIds { noteResolved(id) }
+        }
+        // Neither of those touches the Reading zone, which is the one place
+        // this sender is certainly on screen.
+        zones.reading.removeAll { $0.address == applied.sender }
+    }
+
+    /// Whether `e` is still the live account, asked from a child task.
+    private nonisolated static func purgeCurrent(_ e: Int) async -> Bool {
+        await MainActor.run { AppStore.shared.isCurrent(e) }
+    }
+
+    /// Apply one decision and say what happened. Never throws: see `commitPurge`.
+    private nonisolated static func applyPurge(
+        _ card: PurgeCard, _ decision: PurgeDecision, epoch e: Int
+    ) async -> PurgeApplied {
+        let sender = card.sender
+        var out = PurgeApplied(sender: sender.sender)
+        guard await purgeCurrent(e) else { return out }
+        do {
+            switch decision {
+            case .unsubscribe:
+                guard let link = sender.unsubscribe else { return out }
+                if card.unsubscribeIsOnTheirSite {
+                    // NO REQUEST. See `PurgeCard.unsubscribeIsOnTheirSite`:
+                    // their mail is cleared the way a clear clears it (minus
+                    // the "keep", which is the opposite of what was chosen),
+                    // and the asking waits for the visit.
+                    out.clearedIds = await setDone(sender.open_message_ids, epoch: e)
+                    guard !out.clearedIds.isEmpty || sender.open_message_ids.isEmpty else { return out }
+                    out.site = PurgeFinish.Site(
+                        sender: sender.sender, displayName: sender.display_name,
+                        step: .request(messageId: link.message_id), refused: nil)
+                    out.outcome = .onTheirSite(emailsCleared: out.clearedIds.count)
+                    return out
+                }
+                do {
+                    let result = try await APIClient.shared.unsubscribe(messageId: link.message_id)
+                    // Either way the daemon wrote the request down and
+                    // resolved the sender's mail with it.
+                    out.senderResolved = true
+                    if result.method == "auto" {
+                        out.jobStarted = true
+                        out.outcome = .applied(.unsubscribe, emailsCleared: sender.open_count)
+                    } else {
+                        // Promised automatic, refused when it came to it, and
+                        // handed back the page. The reader opens it on the
+                        // spot; here it waits for the end card, and until it
+                        // is visited nobody has been unsubscribed.
+                        if let url = result.url, Opener.isHTTP(url) {
+                            out.site = PurgeFinish.Site(
+                                sender: sender.sender, displayName: sender.display_name,
+                                step: .page(url: url), refused: result.auto_refused)
+                        }
+                        out.outcome = .onTheirSite(emailsCleared: sender.open_count)
+                    }
+                } catch let error as APIError where error.status == 422 {
+                    // No link after all. The reader asks "block instead?";
+                    // a batch cannot stop to ask, and the person already said
+                    // they want this sender gone, so it is muted.
+                    guard card.allowed.contains(.mute), await purgeCurrent(e) else { return out }
+                    try await mute(sender)
+                    out.senderResolved = true
+                    out.outcome = .applied(.mute, emailsCleared: sender.open_count)
+                }
+            case .mute:
+                try await mute(sender)
+                out.senderResolved = true
+                out.outcome = .applied(.mute, emailsCleared: sender.open_count)
+            case .clear:
+                out.clearedIds = await setDone(sender.open_message_ids, epoch: e)
+                // Not one landed: nothing was cleared, so nothing is claimed.
+                guard !out.clearedIds.isEmpty || sender.open_message_ids.isEmpty else { return out }
+                if await purgeCurrent(e) { await APIClient.shared.keepReadingSender(sender.sender) }
+                out.outcome = .applied(.clear, emailsCleared: out.clearedIds.count)
+            case .skip:
+                break
+            }
+        } catch {}
+        return out
+    }
+
+    /// The exact-address mute rule with its sweep, as the reader's block does
+    /// it, from the sender's newest open message.
+    private nonisolated static func mute(_ sender: PurgeSender) async throws {
+        try await Actions.createBlockRule(
+            sender: sender.sender, sourceMessageId: sender.open_message_ids.first)
+    }
+
+    /// The person is going to a sender's page to finish an unsubscribe the
+    /// daemon could not do for them. Takes the row off the end card's list.
+    ///
+    /// FOR A `.request` ROW THIS IS WHERE THE UNSUBSCRIBE IS ASKED FOR, not
+    /// the commit: the daemon records the request, resolves the sender and
+    /// starts its 72-hour clock on this call, so it is made at the moment the
+    /// person is actually on their way. The answer is treated as the reader
+    /// treats it: a job the daemon took after all goes to the tray and opens
+    /// nothing, otherwise the page it names is opened.
+    ///
+    /// NO LINK AFTER ALL (422) IS ONLY A TOAST. The reader offers a block
+    /// there and the commit mutes; a click on "finish on their site" asked
+    /// for a web page, and must not turn into a rule nobody was shown.
+    func openPurgeSite(_ site: PurgeFinish.Site) async {
+        guard purgeFinished?.sites.contains(site) == true,
+            purgeFinished?.opening.contains(site.id) != true
+        else { return }
+        switch site.step {
+        case .page(let url):
+            Opener.open(url)
+            purgeFinished?.sites.removeAll { $0.id == site.id }
+        case .request(let messageId):
+            let e = epoch
+            let gen = UnsubscribeJobs.shared.generation
+            purgeFinished?.opening.insert(site.id)
+            defer { if e == epoch { purgeFinished?.opening.remove(site.id) } }
+            do {
+                let result = try await APIClient.shared.unsubscribe(messageId: messageId)
+                // Asked of the OLD account's daemon; nothing here is the new
+                // one's news, and its browser is not ours to open.
+                guard e == epoch else { return }
+                if result.method == "auto" {
+                    UnsubscribeJobs.shared.started(sender: result.sender, generation: gen)
+                } else {
+                    Opener.open(result.url)
+                }
+                noteSenderResolved(result.sender)
+                purgeFinished?.sites.removeAll { $0.id == site.id }
+            } catch let error as APIError where error.status == 422 {
+                guard e == epoch else { return }
+                purgeFinished?.sites.removeAll { $0.id == site.id }
+                pushToast("no unsubscribe link from \(site.displayName) after all", .info)
+            } catch {
+                guard e == epoch else { return }
+                // The row stays: nothing was asked, and trying again is a click.
+                pushToast(errText(error, "unsubscribe failed"), .error)
+            }
+        }
+    }
+
+    /// The end card has been seen.
+    func dismissPurgeFinished() {
+        purgeFinished = nil
+    }
     var readingMail = false
     var readingStack: Bool {
         guard readingMail, let first = threadQueue.first else { return false }
@@ -1851,6 +2293,11 @@ final class AppStore {
         // "Finish on their site" would tell the NEW daemon about a job it has
         // never heard of.
         UnsubscribeJobs.shared.reset()
+        // A deck is the old account's senders and message ids, and its end
+        // card's links are unsubscribes the new daemon never heard of. An
+        // apply in flight sees the epoch move and reports to nobody.
+        purge = nil
+        purgeFinished = nil
         sitrep = SitrepData()
         // Its own line since the stats left SitrepData. The old daemon's
         // stats over the new mailbox's empty bands read as "all clear": the
@@ -2429,6 +2876,10 @@ final class AppStore {
     /// The tour joins on `wantsBlur` alone: its three talking steps are modals
     /// like any other, but its coach marks POINT AT the board, so blurring what
     /// they are ringing would defeat them.
+    /// A purge joins for as long as its deck is up: it is a decision about
+    /// the Reading zone made on top of it, not a page beside it. Its end card
+    /// (`purgeFinished`) does not, like the walk's: the board coming back into
+    /// focus with fewer tiles on it IS the reward.
     var modalOverlayOpen: Bool {
         askBarOpen || shortcutsOpen
             || triageFix != nil || remindTarget != nil || schedulePicker != nil
@@ -2437,6 +2888,7 @@ final class AppStore {
             || !authQueue.isEmpty || retriage != nil || retriageAsk != nil
             || reconnectAsk != nil
             || tour.wantsBlur || whatsNew.active
+            || purge != nil
     }
 
     // MARK: - sitrep zones
@@ -5933,23 +6385,7 @@ final class AppStore {
     func markReadingDone(_ items: [AttentionUpdate], sender: String) async {
         let ids = Set(items.map(\.id))
         zones.reading.removeAll { $0.items.contains { ids.contains($0.id) } }
-        let landed = await withTaskGroup(of: Int?.self) { group in
-            for item in items {
-                group.addTask {
-                    do {
-                        try await APIClient.shared.setStatus(item.id, .done)
-                        // No undo, so nothing re-pins: unpin as each one lands.
-                        await ImageStore.shared.release(messageId: item.id)
-                        return item.id
-                    } catch {
-                        return nil
-                    }
-                }
-            }
-            var landed: [Int] = []
-            for await id in group { if let id { landed.append(id) } }
-            return landed
-        }
+        let landed = await Self.setDone(items.map(\.id))
         // Record each as resolved, not just gone from the zone: the same
         // message can be sitting in a band or on the mail page, and this path
         // never went through removeFromBands. Only the ones that LANDED — a
@@ -5960,6 +6396,34 @@ final class AppStore {
             pushToast("some marks failed; refresh to re-sync", .error)
         } else {
             pushToast("done: \(SenderCache.resolved(sender).displayName) (\(items.count))", .info)
+        }
+    }
+
+    /// Mark every one of `ids` done, in PARALLEL, and return the ones that
+    /// landed. Shared by the Reading tile's `e` and the purge's clear, so the
+    /// two cannot come to mean different things by "done".
+    ///
+    /// `epoch`, when given, is checked before each request: the purge runs
+    /// this from a batch that an account switch must be able to stop, and an
+    /// id is only this account's id.
+    private nonisolated static func setDone(_ ids: [Int], epoch: Int? = nil) async -> [Int] {
+        await withTaskGroup(of: Int?.self) { group in
+            for id in ids {
+                group.addTask {
+                    if let epoch, !(await purgeCurrent(epoch)) { return nil }
+                    do {
+                        try await APIClient.shared.setStatus(id, .done)
+                        // No undo, so nothing re-pins: unpin as each one lands.
+                        await ImageStore.shared.release(messageId: id)
+                        return id
+                    } catch {
+                        return nil
+                    }
+                }
+            }
+            var landed: [Int] = []
+            for await id in group { if let id { landed.append(id) } }
+            return landed
         }
     }
 

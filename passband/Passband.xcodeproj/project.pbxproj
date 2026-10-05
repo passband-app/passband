@@ -131,6 +131,7 @@
 		4844BB010D4C2DFAD56727F5 /* ZoomSteps.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04968C0C118F8D82036B5293 /* ZoomSteps.swift */; };
 		4A484A26530C0131828B0A16 /* Loadable.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A74374DEAEE21CDF9A5067D /* Loadable.swift */; };
 		4A6FA53C127DAD99FB5AF300 /* SenderIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4C2C545E14D926E28E48DE6 /* SenderIdentity.swift */; };
+		4A6FDA78860AEBBD4C058CDF /* Purge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BE8A864DBE0FD81221CE869 /* Purge.swift */; };
 		4AC6AF18555B3DB2FE69CC91 /* ConnectionHealth.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FCD987D800267801D7B4DFE /* ConnectionHealth.swift */; };
 		4B52BE6DB257F23A493F4B02 /* ThreadViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2BD37CBEFEA8CEB215E3247 /* ThreadViewer.swift */; };
 		4BF112500D334A129834AAEB /* MobileToastHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0318A22219D3A1E36429C76 /* MobileToastHost.swift */; };
@@ -231,6 +232,7 @@
 		811AE61DFEA4A6D99E9AFE40 /* SitrepPoller.swift in Sources */ = {isa = PBXBuildFile; fileRef = A31EE886D87910F0348A94AB /* SitrepPoller.swift */; };
 		815B9C4E2BA52237B41F1556 /* SearchFetch.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA1F37AFE6C968BF66760A5B /* SearchFetch.swift */; };
 		81B5932453A50D4974259435 /* GroupPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0119D99E10BB97CC572DCA69 /* GroupPicker.swift */; };
+		8200EEA5A83E4C48E6975927 /* Purge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BE8A864DBE0FD81221CE869 /* Purge.swift */; };
 		822AC7C019AE85919C9B4181 /* QuickLookPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 361AB4D81F3740E2B072C5BA /* QuickLookPanel.swift */; };
 		823DFE5AD7F10600046D1459 /* DeeperSearch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8418478A0084D45C077A9305 /* DeeperSearch.swift */; };
 		8344C251CDFE9A73A78B574B /* SharePanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8F60C8D4A9145D5DD96DC2A /* SharePanel.swift */; };
@@ -593,6 +595,7 @@
 		67C63ACC5CBA08B09ABA71B2 /* SearchIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchIntent.swift; sourceTree = "<group>"; };
 		6895E072B54D7FEA646D6903 /* UpdateVerbs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateVerbs.swift; sourceTree = "<group>"; };
 		6AB8DA26906DE820ED1255EA /* ShortcutCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShortcutCatalog.swift; sourceTree = "<group>"; };
+		6BE8A864DBE0FD81221CE869 /* Purge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Purge.swift; sourceTree = "<group>"; };
 		6C9F46E8DA615783DD2BEAF6 /* WireTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WireTypes.swift; sourceTree = "<group>"; };
 		6D18C66DBE79E1F7D55CD6DD /* AppStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStore.swift; sourceTree = "<group>"; };
 		6D358053F47CDAD2D0B7EAB5 /* EmailsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmailsView.swift; sourceTree = "<group>"; };
@@ -878,6 +881,7 @@
 				37AEAA24984488DA00EBD6C4 /* Platform.swift */,
 				163BEF63DE1359294AD2ADD8 /* Prefs.swift */,
 				7AB80C57BCADB7324DD70C5F /* ProductGuide.swift */,
+				6BE8A864DBE0FD81221CE869 /* Purge.swift */,
 				30CE0F7FB80B319544FD62FA /* Quotes.swift */,
 				7079893CCCC8806D2B5099D8 /* Ranking.swift */,
 				D4382469FC056D0CD54B22F3 /* Raster.swift */,
@@ -1412,6 +1416,7 @@
 				D8F41B5F6FA8F83DAA537CB5 /* Prefs.swift in Sources */,
 				8DD946F7BC6990641C19ACC1 /* ProcessView.swift in Sources */,
 				BB2D4A838A4E7036B0B9C037 /* ProductGuide.swift in Sources */,
+				8200EEA5A83E4C48E6975927 /* Purge.swift in Sources */,
 				4F1ACF4C4907587277817F3D /* QuickLookPanel.swift in Sources */,
 				4C489FDA815D1AA53534BA7B /* Quotes.swift in Sources */,
 				1E07DF0006E501D0B7C3228A /* Ranking.swift in Sources */,
@@ -1628,6 +1633,7 @@
 				7379C8366D649A8F25C27826 /* Prefs.swift in Sources */,
 				7362D6064FE828BD80A2AEDA /* ProcessView.swift in Sources */,
 				9C995D3465CAD68AD186021D /* ProductGuide.swift in Sources */,
+				4A6FDA78860AEBBD4C058CDF /* Purge.swift in Sources */,
 				13068136E70BA1E4AD4A9709 /* PushRegistration.swift in Sources */,
 				822AC7C019AE85919C9B4181 /* QuickLookPanel.swift in Sources */,
 				79BB8595545903AE279A319C /* Quotes.swift in Sources */,

@@ -738,6 +738,37 @@ actor APIClient {
             body: UnsubResolutionBody(sender: sender, resolution: resolution.rawValue))
     }
 
+    // MARK: - reading purge
+
+    /// The purge deck's senders, or nil when this daemon has no such route
+    /// (404). nil is "there is no purge to offer", which is a different thing
+    /// from a failed request: the caller hides the entry point for one and
+    /// may say so for the other.
+    ///
+    /// Never asked of the practice inbox. Its senders are fixtures, and a
+    /// purge would end by unsubscribing from companies that do not exist.
+    func getReadingSenders() async throws -> ReadingSendersPage? {
+        guard !RehearsalMode.isEnabled else { return nil }
+        do {
+            return try await get("/client/v2/reading/senders")
+        } catch let error as APIError where error.status == 404 {
+            return nil
+        }
+    }
+
+    /// The owner looked at this sender in a purge and chose to stay. The
+    /// daemon remembers so the next purge does not ask about them again.
+    ///
+    /// DOES NOT THROW. It is a note about a decision that has already taken
+    /// effect on screen (the mail is cleared either way); the worst a lost
+    /// one costs is being asked about the same newsletter again. An older
+    /// daemon answers 404 and that is the same nothing.
+    func keepReadingSender(_ sender: String) async {
+        guard !RehearsalMode.isEnabled else { return }
+        try? await postNoContent(
+            "/client/v2/reading/senders/keep", body: UnsubSenderBody(sender: sender))
+    }
+
     // MARK: - sealed
 
     func listSealed() async throws -> [SealedMeta] { try await get("/client/sealed") }

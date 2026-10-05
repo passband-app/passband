@@ -515,6 +515,17 @@ run_suite capability-probe \
   Sources/Passband/Model/APIError.swift \
   Tests/CapabilityProbeTests.swift
 
+# The purge deck: who is offered, what each card may be asked and is nudged
+# toward, what a set of staged decisions comes to, and the sentences the
+# evidence is put in. Purge.swift is Foundation-only so this builds with just
+# the wire types, which ride along so the page is decoded from real JSON: an
+# unknown reason code from a newer daemon must cost one reason, not the deck.
+run_suite purge \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Purge.swift \
+  Tests/PurgeTests.swift
+
 # Reading groups canonical membership without reconstructing triage from copy.
 run_suite reading \
   Sources/Passband/Model/SubjectText.swift \

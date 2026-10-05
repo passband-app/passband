@@ -85,6 +85,12 @@ final class Updater: NSObject, ObservableObject, SPUUserDriver, SPUUpdaterDelega
         }
     }
 
+    /// The version waiting to be installed, for the rail's update tile. Outlives
+    /// the card on purpose: Later hides the card, never this. Nil once a check
+    /// says the app is current; a relaunch into the update clears it by
+    /// starting a fresh process.
+    @Published private(set) var pending: String?
+
     /// Sparkle's question, parked until the human answers it. `install` is the
     /// card's one button; `dismiss` is Later, which brings the update back on
     /// the next scheduled check rather than burying the version forever, which
@@ -160,6 +166,19 @@ final class Updater: NSObject, ObservableObject, SPUUserDriver, SPUUpdaterDelega
         reply(.install)
     }
 
+    /// The rail tile: put the card back in front of the human. A downloaded
+    /// update just re-shows its card; one that was only offered had its
+    /// Sparkle session closed by Later, so it takes a check to ask again.
+    func showAgain() {
+        guard phase == .idle, let pending else { return }
+        reminder?.cancel()
+        if installNow != nil {
+            phase = .ready(version: pending)
+        } else {
+            check()
+        }
+    }
+
     /// Restart into an update that downloaded in the background.
     func restartNow() {
         guard let installNow else { return }
@@ -227,6 +246,7 @@ final class Updater: NSObject, ObservableObject, SPUUserDriver, SPUUpdaterDelega
         let version = item.displayVersionString
         reminder?.cancel()
         installNow = immediateInstallHandler
+        pending = version
         phase = .ready(version: version)
         // Same once-per-version banner as a found update: the card only speaks
         // to someone looking at the window.
@@ -262,6 +282,7 @@ final class Updater: NSObject, ObservableObject, SPUUserDriver, SPUUpdaterDelega
         choice = reply
         consented = false
         let version = appcastItem.displayVersionString
+        pending = version
         phase = .available(version: version)
         // The card only speaks to someone looking at the window. A scheduled
         // check usually lands while Passband sits behind other apps or with its
@@ -284,6 +305,8 @@ final class Updater: NSObject, ObservableObject, SPUUserDriver, SPUUpdaterDelega
 
     func showUpdateNotFoundWithError(_ error: Error, acknowledgement: @escaping () -> Void) {
         phase = .idle
+        // Current after all: whatever the tile was pointing at is gone.
+        if installNow == nil { pending = nil }
         // Silence unless someone is waiting to hear it.
         if userInitiated {
             let alert = NSAlert()

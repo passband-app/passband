@@ -1,5 +1,5 @@
 // SIDEBAR — the slim icon rail: Sitrep / Emails / Auth / Rules / Groups on the
-// 1..5 keys; Share + Usage + Settings sit below a divider, out of that sequence
+// 1..5 keys; Update + Share + Usage + Settings sit below a divider, out of that sequence
 // so adding one never renumbers it. Share is the odd one there: it opens a sheet
 // rather than routing, so it carries no selector (see `shareButton`). ONE long-lived pane behind the icons is the selector,
 // moved by GEOMETRY not identity: per-icon glass drags the glyph along and
@@ -23,6 +23,10 @@ struct SidebarRail: View {
     @State private var traveling = false
     /// The share tile's own hover, which `RailButton` keeps for itself.
     @State private var shareHovering = false
+    @State private var updateHovering = false
+    /// Bumped once when the update tile appears, for its single bounce.
+    @State private var updateArrived = 0
+    @ObservedObject private var updater = Updater.shared
     @State private var shareDeniedAttempts = 0
     @State private var accountDeniedAttempts = 0
 
@@ -119,6 +123,8 @@ struct SidebarRail: View {
                     .frame(width: 22, height: 0.5)
                     .padding(.vertical, Space.s4)
 
+                updateButton
+
                 shareButton
 
                 ForEach(MainView.bottomViews, id: \.self) { view in
@@ -187,6 +193,43 @@ struct SidebarRail: View {
             .accessibilityLabel("share Passband")
             .accessibilityHint(RehearsalMode.isEnabled ? "Available after onboarding." : "")
             .modifier(PracticeRailFeedback(attempts: shareDeniedAttempts))
+        }
+    }
+
+    /// A NEWER PASSBAND IS WAITING. First in the bottom group, so it is the
+    /// first thing there the eye lands on, and present for as long as a version
+    /// is pending: Later hides the card, never this. It goes when the app
+    /// relaunches into the update.
+    ///
+    /// Accent rather than a red dot: red in this rail means Auth wants an
+    /// answer now, and an update never does. One bounce on arrival, then still;
+    /// a rail tile that keeps moving is a tile you learn to hate.
+    ///
+    /// The click brings the card back rather than restarting: a relaunch from a
+    /// 44pt tile is one stray click away from quitting someone mid-email, and
+    /// the card says what Restart does before it is pressed.
+    @ViewBuilder
+    private var updateButton: some View {
+        if let version = updater.pending, !RehearsalMode.isEnabled {
+            Button { updater.showAgain() } label: {
+                Image(systemName: "arrow.down.circle")
+                    .font(.system(size: 17, weight: .medium))
+                    .foregroundStyle(Palette.accent)
+                    .symbolEffect(.bounce, value: updateArrived)
+                    .frame(width: Self.iconWidth, height: Self.iconHeight)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .background {
+                RoundedRectangle(cornerRadius: Self.selectorRadius, style: .continuous)
+                    .fill(Palette.hairline.opacity(updateHovering ? 0.7 : 0))
+                    .frame(width: Self.iconWidth, height: Self.iconHeight)
+            }
+            .onHover { updateHovering = $0 }
+            .onAppear { updateArrived += 1 }
+            .help("Passband \(version) is available")
+            .accessibilityLabel("Passband \(version) is available")
+            .transition(.scale(scale: 0.6).combined(with: .opacity))
         }
     }
 

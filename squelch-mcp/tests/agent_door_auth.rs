@@ -854,12 +854,14 @@ async fn an_event_stream_is_closed_when_its_token_expires() {
     let jwks = StubJwks::start().await;
     let app = oauth_door(&jwks.url);
 
-    // A token at the very end of its leeway. Its responses get the 30 second
-    // floor (`RESPONSE_MIN_LIFETIME`) and not a second more, so this test
-    // takes about half a minute of real time: the stub JWKS is real network,
-    // which rules out a paused tokio clock.
+    // A token near the end of its leeway, with ten seconds left rather than
+    // one: the three requests before the stream opens must all still verify,
+    // and under a loaded machine one second was not enough. Its responses get
+    // the 30 second floor (`RESPONSE_MIN_LIFETIME`) and not a second more, so
+    // this test takes about half a minute of real time: the stub JWKS is real
+    // network, which rules out a paused tokio clock.
     let mut c = good_claims();
-    c["exp"] = json!(now() - 59);
+    c["exp"] = json!(now() - 50);
     let token = sign(&c);
 
     // The POST response is a normal, complete body.

@@ -110,11 +110,18 @@ cp -R "$RES_DIR/." "$APP/Contents/Resources/" 2>/dev/null || true
 # also emits the flattened Passband.icns fallback that CFBundleIconFile names.
 # actool ships with full Xcode, not the CommandLineTools; a machine without it
 # just builds an iconless bundle instead of failing.
-if ! xcrun actool Passband.icon \
-    --compile "$APP/Contents/Resources" \
+#
+# The same call compiles AgentLogos.xcassets (the agents' own marks in Settings >
+# Agents) into that Assets.car; without actool the pane falls back to SF
+# Symbols. Every path here is ABSOLUTE: actool hands them to a shared daemon
+# that resolves a relative one against its own working directory, which can be
+# another checkout entirely (seen 2026-10-05: a relative input resolved into a
+# different worktree, and a build came out with an Assets.car missing these).
+if ! xcrun actool "$PWD/Passband.icon" "$PWD/Sources/Passband/AgentLogos.xcassets" \
+    --compile "$PWD/$APP/Contents/Resources" \
     --platform macosx --minimum-deployment-target 26.0 \
     --app-icon Passband \
-    --output-partial-info-plist build/actool-partial.plist \
+    --output-partial-info-plist "$PWD/build/actool-partial.plist" \
     --output-format human-readable-text >/dev/null; then
   echo "    WARNING: actool failed; bundle has no app icon" >&2
 fi

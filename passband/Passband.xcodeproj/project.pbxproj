@@ -34,6 +34,7 @@
 		0DA5549C7654618C1D97DC96 /* SearchLanePrompt.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C4011E6AF1CD8193898F627 /* SearchLanePrompt.swift */; };
 		0ED6DA0EF049E4B8C3349A60 /* DeeperSearch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8418478A0084D45C077A9305 /* DeeperSearch.swift */; };
 		0FE1B2AACB4D13002E0F5381 /* GroupEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8FF235DC1DB2B57F7C06220 /* GroupEditor.swift */; };
+		10EC2ECDCCD06D1869F5DFF7 /* FindInThread.swift in Sources */ = {isa = PBXBuildFile; fileRef = 151C06F2A835787B0FDEDB24 /* FindInThread.swift */; };
 		113F529E6DD425BDAC1B02CB /* ScheduledRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2BB67D1D24C9D40DD0649549 /* ScheduledRow.swift */; };
 		120F38E19705221A8EAA5ECF /* SidePanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 992EA99CCF93A2EA929D6E3B /* SidePanel.swift */; };
 		126B9D58B8378EDF351CDE33 /* Zoom.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49ABACAD4FE96A07B2F2C669 /* Zoom.swift */; };
@@ -316,6 +317,7 @@
 		B6F86A1B7C9CECBF25C347FA /* SitrepZones.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22B6CF4EF83BEF15EB372184 /* SitrepZones.swift */; };
 		B755BE657EE21A33D4ED557B /* TestFlightNudge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DE74D8B3ADCEED239B127A1 /* TestFlightNudge.swift */; };
 		B91230E83D52E90A46495F77 /* WireTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C9F46E8DA615783DD2BEAF6 /* WireTypes.swift */; };
+		BA771F4795BCDCE964379257 /* FindBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 928C5A0026BC63E062B7676F /* FindBar.swift */; };
 		BB2D4A838A4E7036B0B9C037 /* ProductGuide.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7AB80C57BCADB7324DD70C5F /* ProductGuide.swift */; };
 		BBE3AD0E42A5038B4013E5BB /* Palette.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF7F148E013D8BCCE2BAA598 /* Palette.swift */; };
 		BBEE5699B3270D49E8BAF3C5 /* ImageTrim.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17A72FA204008ACE31765EA1 /* ImageTrim.swift */; };
@@ -376,6 +378,7 @@
 		D8FAA331307EB4021EF60BE1 /* Pairing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5512C13F456F49B6DF7B182B /* Pairing.swift */; };
 		D912E3C77E849D839A27A115 /* Platform.swift in Sources */ = {isa = PBXBuildFile; fileRef = 37AEAA24984488DA00EBD6C4 /* Platform.swift */; };
 		D950DAEE748237F8D4002E11 /* RetriageRun.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3DD43DBA7248BE2CB133F428 /* RetriageRun.swift */; };
+		DA0FBF25FA4A102FBC273EA3 /* FindBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 928C5A0026BC63E062B7676F /* FindBar.swift */; };
 		DA96B9B6DC4CF125D3626BEC /* Palette.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF7F148E013D8BCCE2BAA598 /* Palette.swift */; };
 		DBAF51D466CF5A747261E363 /* SitrepView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B0750416DB37BFF3B78457B /* SitrepView.swift */; };
 		DD6D172FDE2BDF162F554498 /* AsyncMemo.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0089253391F9BC0AE4818B /* AsyncMemo.swift */; };
@@ -402,6 +405,7 @@
 		E6A6870A7762EF9E762E1B5A /* SenderIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4C2C545E14D926E28E48DE6 /* SenderIdentity.swift */; };
 		E796A08FD35B6AFC987CF6A6 /* HTMLImg.swift in Sources */ = {isa = PBXBuildFile; fileRef = 579ABC2B7707848B4AED6F18 /* HTMLImg.swift */; };
 		E833B10A5EA2EBF6AB96DD70 /* CompositionSummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = E076DAB13B2768EAD01C88F3 /* CompositionSummary.swift */; };
+		E93B57DD5D448858473180D5 /* FindInThread.swift in Sources */ = {isa = PBXBuildFile; fileRef = 151C06F2A835787B0FDEDB24 /* FindInThread.swift */; };
 		E96078DC56E87F722CEBEDE8 /* Accounts.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4806E9349EDC2C9EF8520C5 /* Accounts.swift */; };
 		EA0F7FADC742BF00778433BF /* SubjectText.swift in Sources */ = {isa = PBXBuildFile; fileRef = E645BA6EC9A8686D95460095 /* SubjectText.swift */; };
 		EA82308C99D5B6C590E73289 /* AgentTools.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1E7DFB379AF677D44E393FF /* AgentTools.swift */; };
@@ -488,6 +492,7 @@
 		0C13060FB00E773CC4E33680 /* RuleGrouping.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuleGrouping.swift; sourceTree = "<group>"; };
 		10544C7DF8CDBA851AF0D9D8 /* Actions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Actions.swift; sourceTree = "<group>"; };
 		12468DFB107CC662204BCE84 /* MobileRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileRootView.swift; sourceTree = "<group>"; };
+		151C06F2A835787B0FDEDB24 /* FindInThread.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FindInThread.swift; sourceTree = "<group>"; };
 		15B8541C2F7C988507905103 /* RefinementSlot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RefinementSlot.swift; sourceTree = "<group>"; };
 		15D14DE02E72E63FE53D5C8D /* AttachmentStrip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentStrip.swift; sourceTree = "<group>"; };
 		163BEF63DE1359294AD2ADD8 /* Prefs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Prefs.swift; sourceTree = "<group>"; };
@@ -607,6 +612,7 @@
 		8F65DF255404CE32FC4AD8CF /* NeedToday.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NeedToday.swift; sourceTree = "<group>"; };
 		9145D0CE3DE4C79CF53CABDD /* UnsubscribeTray.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UnsubscribeTray.swift; sourceTree = "<group>"; };
 		92398A24BE2068AEBF3FA312 /* UpdateRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateRow.swift; sourceTree = "<group>"; };
+		928C5A0026BC63E062B7676F /* FindBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FindBar.swift; sourceTree = "<group>"; };
 		9369773169CED1C1EFD48EB0 /* AttachmentFiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentFiles.swift; sourceTree = "<group>"; };
 		949E0180F1D5B2769F394945 /* RecentSearchRing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecentSearchRing.swift; sourceTree = "<group>"; };
 		992EA99CCF93A2EA929D6E3B /* SidePanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidePanel.swift; sourceTree = "<group>"; };
@@ -772,6 +778,7 @@
 				6D358053F47CDAD2D0B7EAB5 /* EmailsView.swift */,
 				3BFBFFBE499370A5F88E2540 /* EmailWebCore.swift */,
 				49697D28E02B833310EE2C12 /* EmailWebView.swift */,
+				928C5A0026BC63E062B7676F /* FindBar.swift */,
 				C756C9A9A4570C1AFFE7003E /* GmailDisconnectedBanner.swift */,
 				F8FF235DC1DB2B57F7C06220 /* GroupEditor.swift */,
 				0119D99E10BB97CC572DCA69 /* GroupPicker.swift */,
@@ -842,6 +849,7 @@
 				E1C033DDA02DD344F437F943 /* Concurrency.swift */,
 				8418478A0084D45C077A9305 /* DeeperSearch.swift */,
 				84AD5723EFAFDE98586BA93D /* Density.swift */,
+				151C06F2A835787B0FDEDB24 /* FindInThread.swift */,
 				5883BA424612265657845246 /* Format.swift */,
 				B5C36FCC4B2230B257E66F84 /* FromOperator.swift */,
 				579ABC2B7707848B4AED6F18 /* HTMLImg.swift */,
@@ -1335,6 +1343,8 @@
 				D559CB25DC210A5DDEAA0D51 /* EmailsView.swift in Sources */,
 				AEC2A5C751D79A22E98CBA4A /* EventBanner.swift in Sources */,
 				88A8F0598E0AD01532B11B24 /* EventStream.swift in Sources */,
+				BA771F4795BCDCE964379257 /* FindBar.swift in Sources */,
+				10EC2ECDCCD06D1869F5DFF7 /* FindInThread.swift in Sources */,
 				BD58A1B90A390D639D6D0AEB /* Format.swift in Sources */,
 				D71AFB170CE49A2A793EA34F /* FrameMeasurer.swift in Sources */,
 				8CE0E4896AE3E381845DD88F /* FromOperator.swift in Sources */,
@@ -1539,6 +1549,8 @@
 				4E260638B2736F4A91E83841 /* EmailsView.swift in Sources */,
 				CDE77DF3DD16A78A9192624E /* EventBanner.swift in Sources */,
 				D52ECED560FD5574D03D0A08 /* EventStream.swift in Sources */,
+				DA0FBF25FA4A102FBC273EA3 /* FindBar.swift in Sources */,
+				E93B57DD5D448858473180D5 /* FindInThread.swift in Sources */,
 				CDD154C0CEFB4D530E29DD34 /* Format.swift in Sources */,
 				D573F38D0D9CD3402667A0F2 /* FrameMeasurer.swift in Sources */,
 				B16F0BC548D1406ED477C2D8 /* FromOperator.swift in Sources */,

@@ -123,6 +123,10 @@ struct ThreadViewer: View {
     /// the current one); `holdStartedAt` is set once the press has outlasted a
     /// tap and the ring is on screen, and is the instant the ring counts from.
     @State private var holdToken: UUID?
+    /// ⌘F: the find session for the thread on screen. An object rather than
+    /// `@State` values because the bodies it searches sit below the message
+    /// cards, which diff on their data and would not pass a term down.
+    @State private var find = ReaderFind()
     @State private var holdStartedAt: Date?
     /// Which of the two the ring is for, fixed when it appears: `E` moves on
     /// to the next sender once the stack is clear, and `holdOnward` is whether
@@ -292,6 +296,14 @@ struct ThreadViewer: View {
         // The outgoing side of a turn is on its way out: it must not answer a
         // key meant for the email arriving over it.
         .keyBindings(.thread, turn?.incoming == false ? [] : bindings)
+        .environment(find)
+        // The menu's ⌘F, which is the same verb as the key in the keymap.
+        .onChange(of: store.findInEmailTick) { _, _ in openFind() }
+        // This view outlives a thread (done+next swaps the content under it),
+        // and a term typed for the last email is not a question about this one.
+        .onChange(of: threadId) { _, _ in find.close() }
+        .onChange(of: messages.map(\.id)) { _, _ in find.adopt(findCorpus) }
+        .onChange(of: find.query) { _, _ in find.queryChanged(from: index) }
         // An undone walk step, addressed to the reader it landed on.
         .onChange(of: store.walkRewind) { _, r in
             // Not the card a turn is leaving behind; the one arriving takes
@@ -921,10 +933,62 @@ struct ThreadViewer: View {
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .active { acknowledgeVisibleFocus() }
                 }
+                // Conditional, not hidden: this floats over a scroll surface,
+                // and a transparent bar would go on eating the wheel under it.
+                .overlay(alignment: .topTrailing) {
+                    if find.open {
+                        // Left of the card / chat switch, which owns this
+                        // corner and must stay reachable with the bar up.
+                        ReaderFindBar(find: find) { find.close() }
+                            .padding(.top, Space.s10)
+                            .padding(.trailing, Space.scaled(64))
+                    }
+                }
+                // THE CURSOR MOVED TO A MATCH. The selection follows it, so
+                // j/k carry on from where the find left off, but the scroll is
+                // the find's: a match is a line inside a message, and the
+                // selection's own scroll only knows how to show a message's top.
+                .onChange(of: find.cursor) { _, cursor in
+                    guard let cursor,
+                        let position = messages.firstIndex(where: { $0.id == cursor.message })
+                    else { return }
+                    // A card the lazy stack has not mounted has no body to say
+                    // where the match is. Bringing its top in mounts it, and
+                    // the body's answer does the fine aim below.
+                    if map.frames[position] == nil {
+                        settleTask?.cancel()
+                        proxy.scrollTo(position, anchor: .top)
+                    }
+                    if index != position {
+                        find.steering = true
+                        index = position
+                    }
+                }
+                // A BODY PLACED THE ACTIVE MATCH. Only scrolled to when it is
+                // not already comfortably in the window: the first match moves
+                // with every letter typed, and a column that re-centred on
+                // each one would never hold still. A beat first, because the
+                // anchor is laid out by the update this tick arrives in.
+                .onChange(of: find.aimTick) { _, _ in
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(40))
+                        guard find.open, viewportHeight > 0, let y = find.anchorMinY else { return }
+                        // The top band is taller: the bar itself sits there.
+                        guard y < 64 || y > viewportHeight - 72 else { return }
+                        settleTask?.cancel()
+                        proxy.scrollTo(ReaderFind.anchorID, anchor: UnitPoint(x: 0.5, y: 0.4))
+                    }
+                }
                 .onChange(of: index) { was, now in
                     // Reaching the end of the thread IS reading what arrived —
                     // whether that took the pill, a press of `j`, or the rail.
                     if now == newestIndex { arrivals = 0 }
+                    // The find moved the selection and has aimed the column
+                    // itself, at a line rather than at this card's top.
+                    if find.steering {
+                        find.steering = false
+                        return
+                    }
                     if abs(now - was) == 1 {
                         withAnimation(Motion.scrollFollow) { proxy.scrollTo(now, anchor: .top) }
                     } else {
@@ -1435,8 +1499,41 @@ struct ThreadViewer: View {
             // With a side panel open beside the reader, Esc sheds the PANEL and
             // keeps reading — the email is what you chose, the results are what
             // you came through. A second Esc closes the reader.
+            // ⌘F with an email open finds IN it. Search is `/`, and the menu.
+            KeyBinding("f", "find in this email", meta: true, allowInInput: true) { openFind() },
+            // Enter walks the matches while the caret is in the find field,
+            // and only then: anywhere else it is still reply-all, or a newline
+            // in the reply being written.
+            KeyBinding(declining: "Enter", "next match", allowInInput: true) {
+                guard find.open, find.fieldFocused else { return false }
+                find.step(1)
+                return true
+            },
+            KeyBinding(declining: "shift+Enter", "previous match", allowInInput: true) {
+                guard find.open, find.fieldFocused else { return false }
+                find.step(-1)
+                return true
+            },
+            // ⌘G / ⌘⇧G, the system's spelling, from anywhere in the reader.
+            KeyBinding(
+                declining: "g", "next match", meta: true, allowInInput: true, exactCase: true
+            ) {
+                guard find.open else { return false }
+                find.step(1)
+                return true
+            },
+            KeyBinding(
+                declining: "G", "previous match", meta: true, allowInInput: true, exactCase: true
+            ) {
+                guard find.open else { return false }
+                find.step(-1)
+                return true
+            },
             KeyBinding("Escape", "back", allowInInput: true) {
-                if store.sideView.isOpen {
+                // The find bar is the innermost thing open, so it goes first.
+                if find.open {
+                    find.close()
+                } else if store.sideView.isOpen {
                     store.closeSide()
                 } else {
                     store.closeThread()
@@ -1625,6 +1722,17 @@ struct ThreadViewer: View {
             bindings.append(KeyBinding("b", "chat / email style") { toggleStyle() })
         }
         return bindings
+    }
+
+    /// What the find reads for a message nothing has mounted: its text.
+    private var findCorpus: [(id: Int, text: String)] {
+        messages.map { (id: $0.id, text: $0.content) }
+    }
+
+    /// ⌘F. Again with the bar already up puts the caret back in it.
+    private func openFind() {
+        guard !messages.isEmpty else { return }
+        find.begin(messages: findCorpus, from: index)
     }
 
     /// Move the selection by one message, clamped at both ends. The scroll
@@ -2981,9 +3089,9 @@ private struct MessageCard: View, Equatable {
                 allowTrackers: message.allowsTrackers,
                 attachments: message.attachmentList,
                 textHeight: Self.guessedBody(message, style: style),
-                bubble: chat, mine: mine)
+                bubble: chat, mine: mine, findID: message.id)
         } else {
-            PlainBody(content: message.content, fills: !chat)
+            PlainBody(content: message.content, fills: !chat, findID: message.id)
                 .padding(.horizontal, chat ? Space.s12 : 0)
                 .padding(.vertical, chat ? Space.scaled(9) : 0)
                 // The same corner the web frame clips itself to, so a plain
@@ -3225,19 +3333,81 @@ struct PlainBody: View {
     /// the column, so it does; a bubble is only as wide as what is in it, and a
     /// flexible frame with no bound is the child's own size.
     var fills = true
+    /// The message this body is, for the reader's find. nil outside the reader.
+    var findID: Int?
     @State private var open = false
+    @Environment(ReaderFind.self) private var find: ReaderFind?
+
+    /// What the reader's find has for this body: the term's matches in the
+    /// text that is SHOWN (folded history is not searched, as in a mail
+    /// frame), and which of them the cursor is on.
+    private struct Found {
+        var request: FindRequest
+        var visible: [Range<String.Index>]
+        var quoted: [Range<String.Index>]
+        var count: Int { visible.count + quoted.count }
+        /// The request's active match, clamped: a step backwards into this
+        /// message asks for "the last one" before anybody has counted.
+        var active: Int? {
+            request.active >= 0 && count > 0 ? min(request.active, count - 1) : nil
+        }
+    }
+
+    private func found(shown: String, quoted: String?) -> Found? {
+        guard let find, let findID, let request = find.request(for: findID) else { return nil }
+        return Found(
+            request: request,
+            visible: TextFind.ranges(of: request.query, in: shown),
+            quoted: open ? quoted.map { TextFind.ranges(of: request.query, in: $0) } ?? [] : [])
+    }
+
+    /// The text with its matches painted, or the plain string when there is
+    /// nothing to paint, which is every body outside a find.
+    private func painted(_ text: String, _ hits: [Range<String.Index>], active: Int?) -> Text {
+        guard !hits.isEmpty else { return Text(text) }
+        var out = AttributedString(text)
+        for (i, hit) in hits.enumerated() {
+            guard let from = AttributedString.Index(hit.lowerBound, within: out),
+                let to = AttributedString.Index(hit.upperBound, within: out)
+            else { continue }
+            out[from..<to].backgroundColor = i == active ? FindPaint.active : FindPaint.match
+            out[from..<to].foregroundColor = FindPaint.ink
+        }
+        return Text(out)
+    }
+
+    /// The scroll target for the active match. Plain text has no document to
+    /// ask where a range is drawn, so the match is placed by how far through
+    /// the text it starts: off by a line or two in mail with uneven
+    /// paragraphs, which lands it in the window all the same.
+    @ViewBuilder
+    private func anchor(_ text: String, _ hits: [Range<String.Index>], active: Int?) -> some View {
+        if let active, hits.indices.contains(active), !text.isEmpty {
+            let through =
+                CGFloat(text.distance(from: text.startIndex, to: hits[active].lowerBound))
+                / CGFloat(text.count)
+            GeometryReader { box in
+                FindAnchor(spot: FindSpot(y: box.size.height * through, height: 18))
+            }
+        }
+    }
 
     var body: some View {
         // Memoized: the split is a regex walk of every line, and this body is
         // evaluated whenever the card is.
         let split = Quotes.splitTextMemoized(content)
+        let shown = split.quoted == nil ? content : split.visible
+        let found = found(shown: shown, quoted: split.quoted)
         VStack(alignment: .leading, spacing: Space.s8) {
-            Text(split.quoted == nil ? content : split.visible)
+            painted(shown, found?.visible ?? [], active: found?.active)
                 .font(Typo.ui(13.5))
                 .foregroundStyle(Palette.ink)
                 .textSelection(.enabled)
                 .frame(maxWidth: fills ? .infinity : nil, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
+                .overlay(alignment: .topLeading) {
+                    anchor(shown, found?.visible ?? [], active: found?.active)
+                }
             if let quoted = split.quoted {
                 Button {
                     open.toggle()
@@ -3252,7 +3422,10 @@ struct PlainBody: View {
                 .buttonStyle(.textAction)
                 .help("the quoted reply chain below this message")
                 if open {
-                    Text(quoted)
+                    // The cursor counts through the reply first, then the
+                    // history under it, which is the order they are read in.
+                    let active = found?.active.map { $0 - (found?.visible.count ?? 0) }
+                    painted(quoted, found?.quoted ?? [], active: active)
                         .font(Typo.ui(13))
                         .foregroundStyle(Palette.inkFaint)
                         .textSelection(.enabled)
@@ -3261,9 +3434,28 @@ struct PlainBody: View {
                             Rectangle().fill(Palette.hairline).frame(width: 2)
                         }
                         .fixedSize(horizontal: false, vertical: true)
+                        .overlay(alignment: .topLeading) {
+                            anchor(quoted, found?.quoted ?? [], active: active)
+                        }
                 }
             }
         }
+        // WHAT THIS BODY HOLDS, said to the session whenever the question or
+        // the shown text changes. A task and not the body: reporting writes
+        // observable state, which a body evaluation must not.
+        .task(id: FindReport(request: found?.request, count: found?.count ?? 0, open: open)) {
+            guard let find, let findID, let found else { return }
+            find.report(
+                findID, query: found.request.query, count: found.count,
+                active: found.active ?? FindRequest.none)
+            if found.active != nil { find.aim() }
+        }
+    }
+
+    private struct FindReport: Equatable {
+        let request: FindRequest?
+        let count: Int
+        let open: Bool
     }
 }
 

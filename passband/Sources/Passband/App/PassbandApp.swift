@@ -296,9 +296,20 @@ struct PassbandCommands: Commands {
             Button("New Ask Chat") { store.newAskChat() }
             .keyboardShortcut("k", modifiers: [.command, .shift])
             .disabled(blocked)
-            Button("Search…") { store.openSearch() }
-                .keyboardShortcut("f", modifiers: [.command])
-                .disabled(blocked)
+            // ⌘F FINDS IN WHAT IS OPEN. With an email on screen that is the
+            // email, the way it is a page in a browser; with none it is the
+            // mailbox. The reader also binds the chord in its own keymap,
+            // which is what answers the key; this is the pointer's route, and
+            // what keeps the menu from naming a verb the key will not do.
+            Button(store.threadId != nil ? "Find in Email…" : "Search…") {
+                if store.threadId != nil {
+                    store.findInEmailTick += 1
+                } else {
+                    store.openSearch()
+                }
+            }
+            .keyboardShortcut("f", modifiers: [.command])
+            .disabled(blocked)
             Divider()
             Button("Check for New Mail") {
                 Task { await SitrepPoller.shared.triggerMailRefresh() }

@@ -835,6 +835,10 @@ final class AppStore {
     /// so a thread switch under a live token is a viewer that simply never
     /// hears about the bump it no longer cares about.
     var openThreadRefreshToken = 0
+    /// Bumped by the menu's Find in Email (⌘F with a thread open). The viewer
+    /// watches it and opens its find bar: the session is the reader's own
+    /// state, so the store only has to say that it was asked for.
+    var findInEmailTick = 0
     /// WHAT THE HUMAN HAS ALREADY BEEN TOLD about the thread they are reading.
     /// Private because `noteThreadArrival` is the only door: the refetch and
     /// the announcement have different rules, and ThreadArrivals is where the

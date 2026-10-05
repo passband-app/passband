@@ -370,7 +370,7 @@ enum ProductGuide {
 
         Making one:
         - From an email: press t in the reader, or on a highlighted row on the Sitrep or in the Emails list. The editor opens for that sender and may suggest a sentence; Tab takes the suggestion.
-        - From the Rules page (key 4, or T on the Emails page): n.
+        - From the Rules page (key 4, or T on the Emails page): n. Typing in the match field lists senders who have written to the user, by name or address; typing *@ lists whole domains instead. Arrows pick, Enter or Tab takes one, Esc hides the list.
         - In the editor: Enter saves, Option+Enter adds a line, Esc cancels and keeps what was typed. "advanced" (⌘D) shows the match pattern and the disposition picker, and with it open Tab cycles the disposition.
         - This assistant can write one when asked. It only adds rules; it never changes one the user wrote.
 

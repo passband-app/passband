@@ -403,6 +403,13 @@ struct RuleEditor: View {
     /// Whether the suggestion was ever actually on screen: it arrived while the
     /// field was still empty. One that lands behind typing was never offered.
     @State private var suggestionShown = false
+    /// Whether the pattern field has been typed in since the card opened or a
+    /// sender was last taken from the menu. The sender menu waits for this: a
+    /// rule opened for editing must not arrive under a menu about its own
+    /// pattern.
+    @State private var patternTyped = false
+    /// The pattern the menu last wrote, so that write is not read as typing.
+    @State private var takenPattern: String?
     @FocusState private var focusedField: FocusTarget?
     /// What the card opened on BEFORE any draft was laid over it. Leaving the
     /// card back on these values is not a draft, it is nothing written.
@@ -697,14 +704,41 @@ struct RuleEditor: View {
 
         if advanced {
             Field(label: "match pattern") {
-                TextField("*@example.com", text: $pattern)
-                    .textFieldStyle(.plain)
-                    .font(Typo.mono(12))
-                    .focused($focusedField, equals: .pattern)
-                    .autocorrectionDisabled()
+                TextField(
+                    mode == .create ? "a sender, or *@ for a whole domain" : "*@example.com",
+                    text: $pattern
+                )
+                .textFieldStyle(.plain)
+                .font(Typo.mono(12))
+                .focused($focusedField, equals: .pattern)
+                .autocorrectionDisabled()
+                #if os(iOS)
+                    .textInputAutocapitalization(.never)
+                    .keyboardType(.emailAddress)
+                #endif
+                .onChange(of: pattern) { _, new in
+                    guard focusedField == .pattern, new != takenPattern else { return }
+                    takenPattern = nil
+                    patternTyped = true
+                }
+            }
+            // Mounted AFTER the card's own bindings, so its Enter, Tab and Esc
+            // win while it has rows (see RulePatternSuggestions).
+            if patternTyped, focusedField == .pattern {
+                RulePatternSuggestions(typed: pattern, onAccept: takePattern)
+                    .padding(.top, -Space.s4)
             }
             dispositionOverride
         }
+    }
+
+    /// A sender taken from the menu: it names who the rule is about, and the
+    /// next thing to write is what is wanted from them.
+    private func takePattern(_ taken: String) {
+        takenPattern = taken
+        pattern = taken
+        patternTyped = false
+        focusedField = .want
     }
 
     /// One row: the keys on the left (Mac only — a phone has none of them),

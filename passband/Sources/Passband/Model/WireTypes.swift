@@ -1536,6 +1536,22 @@ struct SenderHit: Codable, Sendable, Equatable, Identifiable {
     var id: String { addr }
 }
 
+/// One row of the sender directory rolled up by host (GET
+/// /client/sender-domains): everyone at one domain who has written to this
+/// account, for the rule editor's `*@` suggestions. The host is exactly what
+/// the addresses carry, subdomain and all, because that is what a rule's glob
+/// has to match.
+struct SenderDomainHit: Codable, Sendable, Equatable, Identifiable {
+    var domain: String
+    /// How many addresses at the host. nil when the row was rolled up on this
+    /// side from a page of senders, which cannot know.
+    var sender_count: Int?
+    var msg_count: Int
+    var last_received_at: String?
+
+    var id: String { domain }
+}
+
 /// GET /client/person?addr= — the reader's contact card: everything the daemon
 /// knows about one address. The optional parts are ABSENT when there is
 /// nothing to say (no mail from them, never written to, no rule), and sealed

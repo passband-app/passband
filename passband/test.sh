@@ -451,6 +451,15 @@ run_suite from-operator \
   Sources/Passband/Lib/FromOperator.swift \
   Tests/FromOperatorTests.swift
 
+# The rule editor's sender menu: what each field text asks the sender
+# directory for (people, or hosts after `*@`), and the host roll-up that
+# stands in for /client/sender-domains on a daemon older than the route.
+run_suite rule-pattern-suggest \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/RulePatternSuggest.swift \
+  Tests/RulePatternSuggestTests.swift
+
 # The actual onboarding controller with in-memory collaborators: the store
 # stub flips the real RehearsalMode flag the way the real one does.
 run_suite tour-controller \

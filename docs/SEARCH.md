@@ -282,6 +282,17 @@ account, served by `GET /client/senders?q=`. Three decisions in it:
   waiting for the next keystroke. The door's limit cap (25) keeps that from
   being a directory dump.
 
+**The rule editor reads the same directory.** Its match-pattern field offers
+senders the same way (`RulePatternSuggest.swift`), and `*@` asks for hosts
+instead: `GET /client/sender-domains?q=` is the directory grouped by the host
+after the `@`, ranked for a fragment of one (starts-with first, then volume),
+with the same lazy sealed probe run per host. The host is not folded to a
+registrable domain, because a rule's glob matches the whole address and
+`*@stripe.com` does not cover `e.stripe.com`. It groups a computed column, so
+it costs more than the sender ranking: 7 ms for the busiest eight hosts of a
+synthetic 4k-sender directory. A client talking to a daemon older than the
+route gets a 404 and rolls hosts up from a page of `/client/senders?q=@frag`.
+
 Ranking is the contacts menu's: prefix match on address or display name first,
 then volume, then recency, then address. The menu's keys (arrows, Enter, Tab,
 Esc) mount only while it is showing, so they take those keys from the results

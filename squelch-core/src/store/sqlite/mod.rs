@@ -96,10 +96,10 @@ use crate::store::{
     MarketingOffer, MessageMissingRecipients, MessageOpen, MessageUnsub, MintedPairingCode,
     MissingVector, NewAuditEntry, NewEvent, NewNotifyDecision, NotifyDecisionRow, RevisitQueued,
     SPAM_SYNCED_AT_KEY, SealedBody, SealedMessage, SearchDiagnostics, SearchFilter, SearchSort,
-    SeedVerdict, SenderDigestRow, SenderEntry, SenderHistory, SentMessage, SitrepBand, SpamScope,
-    Stage1Applied, Stage1Queued, Stage2Applied, Stage2CapOverrides, Stage2Queued, Stage2Usage,
-    Stage2UsageDay, Store, SyncState, TermDf, ThreadSibling, TrackedMessage, TriageDebug,
-    TriagedMessage, UsageTokens,
+    SeedVerdict, SenderDigestRow, SenderDomainEntry, SenderEntry, SenderHistory, SentMessage,
+    SitrepBand, SpamScope, Stage1Applied, Stage1Queued, Stage2Applied, Stage2CapOverrides,
+    Stage2Queued, Stage2Usage, Stage2UsageDay, Store, SyncState, TermDf, ThreadSibling,
+    TrackedMessage, TriageDebug, TriagedMessage, UsageTokens,
 };
 use crate::types::{
     AccountId, AttachmentInfo, AttentionStatus, AttentionUpdate, AuditEntry, BandCounts, Banking,
@@ -884,6 +884,15 @@ impl Store for SqliteStore {
         limit: u32,
     ) -> Result<Vec<SenderEntry>> {
         self.search_senders(account_id, q, limit)
+    }
+
+    fn search_sender_domains(
+        &self,
+        account_id: AccountId,
+        q: &str,
+        limit: u32,
+    ) -> Result<Vec<SenderDomainEntry>> {
+        self.search_sender_domains(account_id, q, limit)
     }
 
     fn sync_state(&self, account_id: AccountId, mailbox: &str) -> Result<Option<SyncState>> {

@@ -2422,6 +2422,43 @@ pub async fn get_senders(
     Ok((no_store(), Json(items)))
 }
 
+#[derive(Debug, Serialize)]
+pub struct SenderDomainView {
+    domain: String,
+    sender_count: i64,
+    msg_count: i64,
+    last_received_at: String,
+}
+
+/// GET /client/sender-domains?q=fragment — the rule editor's `*@` suggestions:
+/// the sender directory rolled up by host, ranked for a typed fragment of one.
+/// `get_senders` answers "who", this answers "everyone at where".
+///
+/// HUMAN DOOR ONLY, `no-store`, and capped the same way for the same reason.
+/// An empty fragment answers here too (the busiest hosts): the owner has typed
+/// `*@` and not said which domain yet.
+pub async fn get_sender_domains(
+    State(state): State<ApiState>,
+    Query(params): Query<SendersQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let q = params.q.trim().to_string();
+    let limit = params.limit.unwrap_or(8).min(25);
+    let hits = store_call(&state, move |store, account_id| {
+        store.search_sender_domains(account_id, &q, limit)
+    })
+    .await?;
+    let items: Vec<SenderDomainView> = hits
+        .into_iter()
+        .map(|d| SenderDomainView {
+            domain: d.domain,
+            sender_count: d.sender_count,
+            msg_count: d.msg_count,
+            last_received_at: d.last_received_at.to_rfc3339(),
+        })
+        .collect();
+    Ok((no_store(), Json(items)))
+}
+
 // --- GET /client/person ------------------------------------------------------
 
 #[derive(Debug, Deserialize)]

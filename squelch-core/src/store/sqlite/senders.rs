@@ -105,10 +105,7 @@ impl SqliteStore {
         // become `%`, which every row matches: the prefix tier is then a tie
         // for all and volume decides, which is exactly the empty-fragment
         // listing described above.
-        let escaped = q
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
+        let escaped = search::escape_like(q);
         let contains = format!("%{escaped}%");
         let prefix = format!("{escaped}%");
         let budget = limit.saturating_mul(25);
@@ -140,6 +137,75 @@ impl SqliteStore {
                 Ok(SenderEntry {
                     addr: r.get(0)?,
                     display_name: r.get(1)?,
+                    msg_count: r.get(2)?,
+                    last_received_at: dt(r, 3)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// HUMAN-DOOR ONLY: the directory rolled up by host, ranked for a typed
+    /// fragment of a domain. The rule editor's `*@` suggestions: a rule about
+    /// everyone at stripe.com is written against a domain, and the owner
+    /// should not have to remember how it is spelled.
+    ///
+    /// The host is whatever follows the address's `@`, UNFOLDED: a rule's glob
+    /// matches the whole address, so `*@stripe.com` does not cover
+    /// `e.stripe.com` and the two are offered as the two rules they would be.
+    ///
+    /// Ranking and the empty fragment are `search_senders`'s: a host that
+    /// STARTS with the fragment sorts above one that contains it, then volume,
+    /// recency and the host itself; no fragment lists the busiest hosts.
+    ///
+    /// A host is offered only while some sender at it would be (the same
+    /// inbound, non-spam, non-sealed probe), and the probe is lazy in the same
+    /// way: the inner query groups and ranks, the outer one probes ranked
+    /// hosts until `limit` survive. The counts are the directory's, so they
+    /// carry its caveat: sealed mail is counted, a sealed-only host is absent.
+    pub fn search_sender_domains(
+        &self,
+        account_id: AccountId,
+        q: &str,
+        limit: u32,
+    ) -> Result<Vec<SenderDomainEntry>> {
+        let q = q.trim();
+        let escaped = search::escape_like(q);
+        let contains = format!("%{escaped}%");
+        let prefix = format!("{escaped}%");
+        let budget = limit.saturating_mul(25);
+
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT d.domain, d.senders, d.total, d.latest
+             FROM (SELECT lower(substr(s.addr, instr(s.addr, '@') + 1)) AS domain,
+                          COUNT(*) AS senders,
+                          SUM(s.msg_count) AS total,
+                          MAX(s.last_received_at) AS latest
+                   FROM senders s
+                   WHERE s.account_id = ?1 AND instr(s.addr, '@') > 0
+                   GROUP BY domain
+                   HAVING domain LIKE ?2 ESCAPE '\\'
+                   ORDER BY (domain LIKE ?3 ESCAPE '\\') DESC,
+                            total DESC,
+                            latest DESC,
+                            domain ASC
+                   LIMIT ?5) d
+             WHERE EXISTS (SELECT 1 FROM senders s2
+                           JOIN messages m
+                             ON m.account_id = s2.account_id AND m.from_addr = s2.addr
+                           LEFT JOIN triage t ON t.message_id = m.id
+                           WHERE s2.account_id = ?1
+                             AND lower(substr(s2.addr, instr(s2.addr, '@') + 1)) = d.domain
+                             AND m.is_sent = 0 AND m.is_spam = 0
+                             AND COALESCE(t.sensitivity, 'normal') != 'sealed')
+             LIMIT ?4",
+        )?;
+        let rows = stmt
+            .query_map(params![account_id, contains, prefix, limit, budget], |r| {
+                Ok(SenderDomainEntry {
+                    domain: r.get(0)?,
+                    sender_count: r.get(1)?,
                     msg_count: r.get(2)?,
                     last_received_at: dt(r, 3)?,
                 })

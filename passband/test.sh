@@ -484,6 +484,13 @@ run_suite find-in-thread \
   Sources/Passband/Lib/FindInThread.swift \
   Tests/FindInThreadTests.swift
 
+# The reader's dwell clock, driven by hand: paused time, pass-throughs, the
+# forgotten-window cap and which message a click is filed under. Pure, because
+# the numbers end up as reasons shown to somebody about a sender.
+run_suite attention-clock \
+  Sources/Passband/Lib/AttentionClock.swift \
+  Tests/AttentionClockTests.swift
+
 run_suite search-preview \
   Sources/Passband/Model/SubjectText.swift \
   Sources/Passband/Model/WireTypes.swift \

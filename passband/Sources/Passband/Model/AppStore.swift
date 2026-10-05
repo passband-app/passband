@@ -844,6 +844,21 @@ final class AppStore {
     /// the announcement have different rules, and ThreadArrivals is where the
     /// difference lives.
     private var arrivals = ThreadArrivals()
+    /// HOW LONG EACH MESSAGE HAS BEEN IN FRONT OF THE READER, and what was
+    /// clicked in it. Owned here for the reason `arrivals` is: `openThread`
+    /// and `closeThread` are the only two doors a thread goes through, and a
+    /// clock that lived in the reader view would be two clocks during an `S`
+    /// page turn, when two readers are mounted at once.
+    ///
+    /// Untracked, because nothing draws it; a view body that happened to call
+    /// one of the doors below must not become a reader of the dwell ledger.
+    @ObservationIgnored private var attention = AttentionClock()
+    /// The epoch `attention` was last touched under. Message ids are one
+    /// daemon's SQLite ints, so time banked against account A's message 40 is
+    /// a lie about account B's message 40. Compared on every touch rather than
+    /// reset beside each of the dozen places the epoch is bumped: one of those
+    /// would be missed, and the failure would be silent.
+    @ObservationIgnored private var attentionEpoch = 0
     var compose: ComposeState? {
         didSet {
             let open = compose != nil
@@ -2193,7 +2208,14 @@ final class AppStore {
         // described A, and the ask bar would pin B's id under A's subject and
         // A's message id. Same-thread reopens keep it — the viewer is already
         // mounted and may never re-adopt.
-        if self.threadId != threadId { openThreadSummary = nil }
+        if self.threadId != threadId {
+            openThreadSummary = nil
+            // The message that was in focus is not any more, whatever the new
+            // thread turns out to hold. A same-thread reopen (a notification
+            // for the thread already up, an undo) leaves the stint running:
+            // the reader is still looking at it.
+            attentionBlur()
+        }
         // The reader's slot holds one thing: a thread replaces a preview.
         scheduledPreviewId = nil
         self.threadId = threadId
@@ -2265,6 +2287,7 @@ final class AppStore {
         focusedMessageView = nil
         threadId = nil
         arrivals.reset(to: nil)
+        attentionBlur()
         threadQueue = []
         readingMail = false
         readingOrder = []
@@ -2275,6 +2298,79 @@ final class AppStore {
         DraftSaver.shared.flush(.inlineReply, inlineReply)
         inlineReply = nil
         pendingReplyMessageId = nil
+    }
+
+    // MARK: - reading attention
+
+    /// Milliseconds on a clock that only goes forward and does not run while
+    /// the machine sleeps. Wall time does neither: a timezone change or an NTP
+    /// step mid-read would hand the dwell clock a negative or an hour-long
+    /// stint, and a lid closed on an open email would count the night.
+    private static func attentionNow() -> UInt64 {
+        DispatchTime.now().uptimeNanoseconds / 1_000_000
+    }
+
+    /// The clock, for the live epoch. Anything it held for another account is
+    /// dropped unsent: by the time this runs the client is talking to a
+    /// different daemon, and there is no longer anywhere honest to send it.
+    private func withAttention<T>(_ body: (inout AttentionClock, UInt64) -> T) -> T {
+        if attentionEpoch != epoch {
+            attention = AttentionClock()
+            attentionEpoch = epoch
+        }
+        return body(&attention, Self.attentionNow())
+    }
+
+    /// A RECEIVED message is at the reader's focus. Called on every geometry
+    /// tick of the selected card, so the clock answers whether anything
+    /// closed and only then is a flush worth a task.
+    ///
+    /// The practice inbox never starts a stint: its mail is fixtures, and its
+    /// ids would be reported against whatever real message shares them.
+    func attentionFocus(_ messageId: Int) {
+        guard !RehearsalMode.isEnabled else { return }
+        if withAttention({ $0.focus(messageId, now: $1) }) { flushAttention() }
+    }
+
+    /// Nothing that counts is at the focus any more: the reader closed, moved
+    /// to another thread, went to the background, or scrolled onto a message
+    /// the user wrote.
+    func attentionBlur() {
+        if withAttention({ $0.blur(now: $1) }) { flushAttention() }
+    }
+
+    /// The scene stopped being active (another app, another window). The
+    /// stint stays open, and stops earning until `attentionResume`.
+    func attentionPause() { withAttention { $0.pause(now: $1) } }
+
+    func attentionResume() { withAttention { $0.resume(now: $1) } }
+
+    /// A link in a received message's BODY was activated. Sent at once rather
+    /// than with the stint: the click usually hands the user to a browser, and
+    /// "when they come back and close the reader" may be never.
+    func attentionClick(_ messageId: Int) {
+        guard !RehearsalMode.isEnabled else { return }
+        withAttention { clock, _ in clock.click(messageId) }
+        flushAttention()
+    }
+
+    /// Send what is owed, best effort and off to the side: nothing awaits
+    /// this, a failure is dropped inside `reportAttention`, and there is no
+    /// retry. Sequential so an old daemon's first 404 stops the rest; fenced
+    /// on the epoch per report, because the ids mean nothing to the next
+    /// account's daemon.
+    private func flushAttention() {
+        let reports = withAttention { clock, _ in clock.drain() }
+        guard !reports.isEmpty, !RehearsalMode.isEnabled else { return }
+        let e = epoch
+        Task {
+            for report in reports {
+                guard isCurrent(e) else { return }
+                await APIClient.shared.reportAttention(
+                    messageId: report.messageId, dwellMs: report.dwellMs,
+                    linkClicks: report.linkClicks)
+            }
+        }
     }
 
     // MARK: - live arrivals

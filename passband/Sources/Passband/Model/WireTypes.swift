@@ -1408,6 +1408,18 @@ struct Page<T: Codable & Sendable>: Codable, Sendable {
     var next_cursor: String?
 }
 
+/// POST /client/v2/messages/{id}/attention: how long the message was at the
+/// reader's focus and how many links in its body were activated, since the
+/// last report. The daemon ADDS these to what it holds, so either may be 0 and
+/// a message read in three sittings is three bodies.
+///
+/// Two numbers and nothing else, on purpose: which link, where it went and
+/// what the mail said are not the daemon's to learn from this route.
+struct AttentionBody: Encodable, Sendable {
+    var dwell_ms: UInt64
+    var link_clicks: UInt32
+}
+
 struct ArchiveBody: Codable, Sendable {
     var message_id: Int
     var confirm: Bool

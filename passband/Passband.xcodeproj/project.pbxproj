@@ -279,6 +279,7 @@
 		9B9E1CE2873D0D5A50A79486 /* ClientIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1286F3A9C5723C0228031FE /* ClientIdentity.swift */; };
 		9C92F8C76EDAC718182EE03C /* SpamNotice.swift in Sources */ = {isa = PBXBuildFile; fileRef = 848BEC54D1FCD1F0FC5BE1A5 /* SpamNotice.swift */; };
 		9C995D3465CAD68AD186021D /* ProductGuide.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7AB80C57BCADB7324DD70C5F /* ProductGuide.swift */; };
+		9D319E5564F4FAD4B94DE3D9 /* AttentionClock.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02BD7A0A72CB5D63168CA3B6 /* AttentionClock.swift */; };
 		9DA60570A748B7066E7C4125 /* UnsubscribeJobs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25A865EB6EF8703D9C957D2B /* UnsubscribeJobs.swift */; };
 		9EA7C093CFE335E233A6411C /* AuthCodeModal.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A47FA6986F50A4E81628452 /* AuthCodeModal.swift */; };
 		9F54901230BBCD7044B85B48 /* Haptics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DBFA0EDE4D57FC2CB095671 /* Haptics.swift */; };
@@ -401,6 +402,7 @@
 		E3F69438A22E2036CD7742D2 /* ImageFill.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE514B2862480E62EB8936A3 /* ImageFill.swift */; };
 		E4B1EE75A584D999AA58B0E2 /* MarkdownTextViewiOS.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9FAE568A595DDCE359FFA33 /* MarkdownTextViewiOS.swift */; };
 		E4BD52C4675BEEA875C99C89 /* AgentConnect.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4C3328B6DF9AFEF4D1FAF7B /* AgentConnect.swift */; };
+		E55C72C30532AA592B9D5BA7 /* AttentionClock.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02BD7A0A72CB5D63168CA3B6 /* AttentionClock.swift */; };
 		E57A7DC67C6A327B58CA8A99 /* ClearBoard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C77D0AFA3B0B65D2911086A /* ClearBoard.swift */; };
 		E57CFF9853CFE6FF9E5238FA /* OnboardingRehearsal.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9DF678C76B26CD5A3ACF5691 /* OnboardingRehearsal.swift */; };
 		E5C23CAE1C749B9094126854 /* UnsubscribeTray.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9145D0CE3DE4C79CF53CABDD /* UnsubscribeTray.swift */; };
@@ -481,6 +483,7 @@
 /* Begin PBXFileReference section */
 		00D13052ED3A4D60224B1B18 /* MainWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainWindow.swift; sourceTree = "<group>"; };
 		0119D99E10BB97CC572DCA69 /* GroupPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GroupPicker.swift; sourceTree = "<group>"; };
+		02BD7A0A72CB5D63168CA3B6 /* AttentionClock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttentionClock.swift; sourceTree = "<group>"; };
 		04968C0C118F8D82036B5293 /* ZoomSteps.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZoomSteps.swift; sourceTree = "<group>"; };
 		05270E444AAA1678F50EC0F0 /* ImageSchemeHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageSchemeHandler.swift; sourceTree = "<group>"; };
 		06A50E65F84872DFA0504B96 /* DraftSaver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DraftSaver.swift; sourceTree = "<group>"; };
@@ -846,6 +849,7 @@
 				2A46105028AEB554882E2D72 /* Analytics.swift */,
 				AA0089253391F9BC0AE4818B /* AsyncMemo.swift */,
 				8DAF25E856CCAD8284AAA131 /* AttachmentKinds.swift */,
+				02BD7A0A72CB5D63168CA3B6 /* AttentionClock.swift */,
 				BB5FEFF987265DA1E7F85007 /* AuthCode.swift */,
 				40EDDA2423A09A989C77CAED /* AuthLabels.swift */,
 				A19BF25A7D06A8FEDAE42B1F /* CalendarVisibility.swift */,
@@ -1317,6 +1321,7 @@
 				22E02ADE42C027FF43AC6665 /* AttachmentStrip.swift in Sources */,
 				B5D62B99FA378656F0BCF7DD /* AttachmentThumbs.swift in Sources */,
 				7FE470A247D27B7BDD2059A8 /* AttachmentTray.swift in Sources */,
+				E55C72C30532AA592B9D5BA7 /* AttentionClock.swift in Sources */,
 				98449AA2FEF0989C76FA6503 /* AuditView.swift in Sources */,
 				231B88B449E171FE30F25D07 /* AuthCode.swift in Sources */,
 				D1722EF952905C3BCED61CD5 /* AuthCodeModal.swift in Sources */,
@@ -1526,6 +1531,7 @@
 				AA1FDE44601AF70AA151D912 /* AttachmentStrip.swift in Sources */,
 				3E86ED3B31C4CFD8E08695DF /* AttachmentThumbs.swift in Sources */,
 				7F21E797FE1F0BCC24754007 /* AttachmentTray.swift in Sources */,
+				9D319E5564F4FAD4B94DE3D9 /* AttentionClock.swift in Sources */,
 				19AC9992744F5AE1DE0DF040 /* AuditView.swift in Sources */,
 				7D858C1B0E9A02383E35EB56 /* AuthCode.swift in Sources */,
 				9EA7C093CFE335E233A6411C /* AuthCodeModal.swift in Sources */,

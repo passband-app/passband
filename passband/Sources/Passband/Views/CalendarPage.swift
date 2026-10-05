@@ -743,11 +743,11 @@
                 // While the card is up it says all of this itself.
                 if !store.calendarCardUp {
                     if waiting, let wait {
-                        CalendarConnectBanner(route: wait.route, waiting: true, renewing: wait.renewing)
+                        CalendarConnectBanner(waiting: true, renewing: wait.renewing)
                             .padding(.horizontal, Space.scaled(22))
                             .padding(.top, Space.s12)
-                    } else if store.calendarOffer == .banner, let route = store.calendarConnectRoute {
-                        CalendarConnectBanner(route: route, waiting: false, renewing: false)
+                    } else if store.calendarOffer == .banner {
+                        CalendarConnectBanner(waiting: false, renewing: false)
                             .padding(.horizontal, Space.scaled(22))
                             .padding(.top, Space.s12)
                     }
@@ -816,7 +816,6 @@
     /// says it is waiting instead.
     private struct CalendarConnectBanner: View {
         @Environment(AppStore.self) private var store
-        let route: CalendarGate.ConnectRoute
         let waiting: Bool
         /// The wait is for a renewal: "Show again" raises the renewal's card.
         let renewing: Bool
@@ -825,7 +824,7 @@
             HStack(spacing: Space.s10) {
                 if waiting {
                     WaitDots(tone: Palette.inkFaint)
-                    Text(waitingText)
+                    Text("Waiting for Google to finish connecting your calendar.")
                         .font(Typo.rowSub)
                         .foregroundStyle(Palette.inkDim)
                 } else {
@@ -851,13 +850,6 @@
                     .strokeBorder(Palette.hairline, lineWidth: 1)
             )
             .accessibilityElement(children: .combine)
-        }
-
-        private var waitingText: String {
-            switch route {
-            case .link: "Waiting for Google to finish connecting your calendar."
-            case .command: "Waiting for squelchd auth to finish connecting your calendar."
-            }
         }
     }
 #endif

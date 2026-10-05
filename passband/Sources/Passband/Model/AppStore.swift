@@ -625,6 +625,9 @@ final class AppStore {
     /// it is waiting for Google until the grant shows up on the stats poll or
     /// the consent session has certainly died (`CalendarGate.connectWaitWindow`).
     var calendarConnectWait: CalendarConnectWait?
+    /// A self-host daemon has been asked for a consent link and has not
+    /// answered yet: Connect does nothing meanwhile, so one press is one tab.
+    var calendarConnectStarting = false
     /// Bumped by every timeline request and every local write to the feed;
     /// an answer is applied only if nothing newer has started since it was
     /// asked for. Not observed: it is bookkeeping, never drawn.
@@ -1811,6 +1814,7 @@ final class AppStore {
         calendarLoaded = false
         calendarConnectAsk = nil
         calendarConnectWait = nil
+        calendarConnectStarting = false
         calendarLoadGeneration &+= 1
         // The parked refresh tasks go too, not just their results: a joiner
         // arriving after the switch would otherwise wait on — and adopt the

@@ -1113,14 +1113,31 @@ extension KeyedEncodingContainer {
     }
 }
 
-/// The calendar grant off /client/stats. Exactly one of the two ways to
-/// connect is set on a daemon that has the grant path: a link on hosted (the
-/// control plane's consent, with the account pinned), a shell command on
-/// self-host. Both nil is possible while granted, and harmless.
+/// The calendar grant off /client/stats. How a mailbox connects: hosted sends
+/// `connect_url` (the control plane's consent, with the account pinned); a
+/// self-host daemon that can run Google's consent itself says
+/// `self_connect: true`, and the app asks it for the link
+/// (`POST /client/calendar/connect`). Either may be sent while granted (a
+/// renewal is the same consent again); neither means there is nothing to
+/// offer, which is harmless.
 struct CalendarAccess: Codable, Sendable, Hashable {
     var granted: Bool
     var connect_url: String?
+    /// The shell command older self-host daemons send. Decoded so their stats
+    /// still read, and never used: the terminal is a docs hint now, not a
+    /// path in the app.
     var connect_command: String?
+    /// Lenient: absent on an older daemon, and a malformed value must not
+    /// cost the rest of the grant.
+    @LenientDecoded var self_connect: Bool? = nil
+}
+
+/// `POST /client/calendar/connect` on a self-host daemon: Google's authorize
+/// link for this mailbox, good for `expires_in` seconds. Both optional, so a
+/// body without a link reads as "no link" rather than a decode failure.
+struct CalendarConnectStart: Codable, Sendable, Hashable {
+    var url: String?
+    var expires_in: Int?
 }
 
 /// The 30-day re-walk the daemon falls back to when Gmail's history cursor

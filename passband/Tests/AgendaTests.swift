@@ -174,6 +174,26 @@ struct AgendaTests {
             """
         let s2 = try? JSONDecoder().decode(StoreStats.self, from: Data(newStats.utf8))
         expect(s2?.timeline == true && s2?.calendar?.granted == false, "Slice A's stats decode")
+        expect(s2?.calendar?.self_connect == nil, "an older daemon sends no self_connect")
+
+        func access(_ calendar: String) -> CalendarAccess? {
+            let body = #"{"tier_counts":{},"total":0,"sealed":0,"bands":{"standing":0,"new":0,"open":0},"#
+                + #""timeline":true,"calendar":"# + calendar + "}"
+            return (try? JSONDecoder().decode(StoreStats.self, from: Data(body.utf8)))?.calendar
+        }
+        let selfHost = access(#"{"granted":false,"connect_url":null,"connect_command":"squelchd auth --calendar","self_connect":true}"#)
+        expect(selfHost?.self_connect == true && selfHost?.granted == false, "self_connect decodes")
+        expect(CalendarGate.connectRoute(selfHost) == .daemon, "and is the daemon route")
+        let odd = access(#"{"granted":false,"self_connect":"yes"}"#)
+        expect(odd?.granted == false && odd?.self_connect == nil,
+               "a malformed self_connect is absent, and costs nothing else")
+        let start = try? JSONDecoder().decode(
+            CalendarConnectStart.self,
+            from: Data(#"{"url":"https://accounts.google.com/o/oauth2/v2/auth?client_id=x","expires_in":600}"#.utf8))
+        expect(start?.url?.hasPrefix("https://accounts.google.com/") == true && start?.expires_in == 600,
+               "the self-host connect answer decodes")
+        let empty = try? JSONDecoder().decode(CalendarConnectStart.self, from: Data("{}".utf8))
+        expect(empty != nil && CalendarGate.consentURL(empty?.url) == nil, "an answer with no url is no link")
     }
 
     static func wireTimesParse() {
@@ -478,12 +498,33 @@ struct AgendaTests {
                "granted offers nothing")
         expect(CalendarGate.connectRoute(CalendarAccess(granted: false, connect_url: link)) == .link(link),
                "hosted is a link")
+        expect(CalendarGate.connectRoute(CalendarAccess(granted: false, connect_url: link, self_connect: true))
+               == .link(link), "the hosted link wins over self_connect")
+        expect(CalendarGate.connectRoute(CalendarAccess(granted: false, self_connect: true)) == .daemon,
+               "self-host that can run the consent asks its daemon")
         expect(CalendarGate.connectRoute(CalendarAccess(
-            granted: false, connect_url: "javascript:alert(1)", connect_command: "squelchd auth --calendar"))
-               == .command("squelchd auth --calendar"),
+            granted: false, connect_url: "javascript:alert(1)", self_connect: true)) == .daemon,
                "a link that is not http is never opened")
-        expect(CalendarGate.connectRoute(CalendarAccess(granted: false, connect_command: "  ")) == nil,
-               "nothing usable is nothing")
+        expect(CalendarGate.connectRoute(CalendarAccess(
+            granted: false, connect_url: "javascript:alert(1)")) == nil,
+               "and is no route on its own")
+        expect(CalendarGate.connectRoute(CalendarAccess(granted: false, self_connect: false)) == nil,
+               "neither a link nor self_connect: nothing")
+        expect(CalendarGate.connectRoute(CalendarAccess(
+            granted: false, connect_command: "squelchd auth --calendar")) == nil,
+               "an older self-host daemon (command only, no self_connect) offers nothing")
+        expect(CalendarGate.connectRoute(CalendarAccess(granted: true, self_connect: true)) == nil,
+               "granted self-host offers nothing")
+        expect(CalendarGate.offer(route: CalendarGate.connectRoute(CalendarAccess(
+            granted: false, connect_command: "squelchd auth --calendar")), cardSeen: false, practice: false)
+               == .none, "so an older daemon gets no card and no banner")
+        expect(CalendarGate.offer(route: .daemon, cardSeen: false, practice: false) == .card,
+               "self-host gets the same card")
+        expect(CalendarGate.consentURL(" https://accounts.google.com/o/oauth2/auth?x=1 ")
+               == "https://accounts.google.com/o/oauth2/auth?x=1", "the daemon's link is opened, trimmed")
+        expect(CalendarGate.consentURL("file:///etc/passwd") == nil
+               && CalendarGate.consentURL("") == nil && CalendarGate.consentURL(nil) == nil,
+               "a daemon answer with no http link is no link")
 
         expect(CalendarGate.offer(route: .link(link), cardSeen: false, practice: false) == .card,
                "first visit: the card")
@@ -522,8 +563,15 @@ struct AgendaTests {
         let granted = CalendarAccess(granted: true, connect_url: link)
         expect(CalendarGate.connectRoute(granted) == nil && CalendarGate.renewRoute(granted) == .link(link),
                "a granted calendar offers no connect, but can be renewed through the same door")
+        expect(CalendarGate.renewRoute(CalendarAccess(granted: true, self_connect: true)) == .daemon,
+               "self-host renews through its daemon")
         expect(CalendarGate.renewRoute(CalendarAccess(granted: true, connect_command: "squelchd auth --calendar"))
-               == .command("squelchd auth --calendar"), "self-host renews with its command")
+               == nil, "an older self-host daemon has no renewal door")
+        let selfHost = CalendarAccess(granted: false, self_connect: true)
+        expect(CalendarGate.connectRoute(CalendarGate.access(selfHost, statsEpoch: 3, epoch: 4)) == nil,
+               "self-host stats from before the switch are no route either")
+        expect(CalendarGate.connectRoute(CalendarGate.access(selfHost, statsEpoch: 4, epoch: 4)) == .daemon,
+               "the active account's own self-host stats are")
     }
 
     static func syncNotices() {

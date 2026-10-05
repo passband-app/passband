@@ -29,12 +29,11 @@ struct CalendarConnectAsk: Hashable {
     var renewing = false
 }
 
-/// Connect was pressed: since when, for which account, and by which route
-/// (the waiting line says "Google" or "squelchd" by it).
+/// Connect was pressed and Google's consent is open in the browser: since
+/// when, and for which account. The same wait for both routes.
 struct CalendarConnectWait: Hashable {
     let since: Date
     let epoch: Int
-    let route: CalendarGate.ConnectRoute
     let renewing: Bool
 }
 
@@ -236,31 +235,66 @@ extension AppStore {
             renewing: renewing)
     }
 
-    /// Connect: open Google's consent in the browser and wait for the grant
-    /// to show up on the stats poll. The card stays up, saying so.
+    /// Connect (the button or Enter): open Google's consent in the browser
+    /// and wait for the grant to show up on the stats poll. The card stays
+    /// up, saying so.
     func confirmCalendarConnect() {
-        guard let ask = calendarConnectAsk, ask.epoch == epoch, case .link(let url) = ask.route
+        guard let ask = calendarConnectAsk, ask.epoch == epoch, !calendarConnectStarting
         else { return }
-        markCalendarCardSeen(ask)
-        startCalendarWait(ask)
-        Analytics.capture("calendar_connect_clicked", ["self_host": false])
-        Opener.open(url)
+        Analytics.capture("calendar_connect_clicked", ["self_host": ask.route == .daemon])
+        openCalendarConsent(ask)
     }
 
-    /// Self-host's Connect: the command goes on the clipboard, to be run where
-    /// the daemon runs. The card stays up and waits the same way.
-    func copyCalendarCommand() {
-        guard let ask = calendarConnectAsk, ask.epoch == epoch, case .command(let command) = ask.route
-        else { return }
-        markCalendarCardSeen(ask)
-        Clip.copy(command)
-        startCalendarWait(ask)
-        Analytics.capture("calendar_connect_clicked", ["self_host": true])
+    /// "Open Google again" while waiting: the tab was closed or lost. On
+    /// self-host this asks the daemon for a FRESH link, since the one it gave
+    /// before may have expired. Not counted as another click.
+    func reopenCalendarConsent() {
+        guard let ask = calendarConnectAsk, ask.epoch == epoch else { return }
+        openCalendarConsent(ask)
     }
 
-    private func startCalendarWait(_ ask: CalendarConnectAsk) {
+    /// Both routes end here: a consent link in the browser and the wait
+    /// (re)started, since a fresh link is a fresh consent session. The card
+    /// counts as seen only once a link has actually opened.
+    private func openCalendarConsent(_ ask: CalendarConnectAsk) {
+        switch ask.route {
+        case .link(let url):
+            consentOpened(ask, url)
+        case .daemon:
+            // One request at a time: a second Enter while the first is out
+            // would open two consent tabs.
+            guard !calendarConnectStarting else { return }
+            calendarConnectStarting = true
+            Task { await self.startDaemonConsent(ask) }
+        }
+    }
+
+    /// Self-host: the daemon starts the consent and hands back Google's
+    /// link. A refusal (hosted answers 409), a network failure or an answer
+    /// with no usable link is one quiet toast; the card stays as it was, so
+    /// Connect can simply be pressed again. A toast and not an alert: an
+    /// alert would block the key dispatcher.
+    private func startDaemonConsent(_ ask: CalendarConnectAsk) async {
+        let url = CalendarGate.consentURL(try? await APIClient.shared.startCalendarConnect().url)
+        // The answer is for the card that asked. After a switch of account it
+        // is nobody's (the switch already cleared the flag, and the new
+        // account may have a request of its own out); with the card closed
+        // while the request was out, nobody is waiting for a tab.
+        guard isCurrent(ask.epoch) else { return }
+        calendarConnectStarting = false
+        guard calendarConnectAsk == ask else { return }
+        guard let url else {
+            pushToast("Could not start the calendar connection", .error)
+            return
+        }
+        consentOpened(ask, url)
+    }
+
+    private func consentOpened(_ ask: CalendarConnectAsk, _ url: String) {
+        markCalendarCardSeen(ask)
         calendarConnectWait = CalendarConnectWait(
-            since: Date(), epoch: ask.epoch, route: ask.route, renewing: ask.renewing)
+            since: Date(), epoch: ask.epoch, renewing: ask.renewing)
+        Opener.open(url)
     }
 
     /// Any way out of the card: Not now, Escape, the scrim, or Close while

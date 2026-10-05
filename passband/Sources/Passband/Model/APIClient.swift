@@ -524,6 +524,14 @@ actor APIClient {
         try await postNoContent("/client/timeline/refresh")
     }
 
+    /// `POST /client/calendar/connect`: a self-host daemon starts Google's
+    /// consent for its mailbox and answers with the authorize link. Hosted
+    /// answers 409 (its link is `connect_url` on the stats instead), which
+    /// throws like any other refusal.
+    func startCalendarConnect() async throws -> CalendarConnectStart {
+        try await post("/client/calendar/connect", body: EmptyBody())
+    }
+
     /// `PATCH /client/timeline/ghosts/{id}`. nil CLEARS the user's mark, which
     /// is an explicit JSON `null` on the wire: the shared encoder drops nil
     /// optionals, and a dropped key here means "leave it alone".

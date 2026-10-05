@@ -13,10 +13,12 @@
 //   - which account to pick, because Google's chooser lists every account in
 //     the browser and the wrong one is refused at the callback.
 //
-// TWO ROUTES, as the disconnected banner has: hosted opens the control plane's
-// consent; self-host is `squelchd auth --calendar` at a shell, which no button
-// can run, so the card hands over the command instead. Either way the card
-// then WAITS, and the stats poll ends the wait (`AppStore.calendarGrantArrived`).
+// ONE BUTTON, two routes behind it: hosted opens the control plane's consent;
+// a self-host daemon is asked for Google's link and that is opened. The user
+// sees the same card either way, and the card then WAITS, and the stats poll
+// ends the wait (`AppStore.calendarGrantArrived`). The terminal path
+// (`squelchd auth --calendar`, for a headless box) is a line of fine print
+// pointing at the docs, never a button.
 
 #if os(macOS)
     import SwiftUI
@@ -24,7 +26,6 @@
     struct CalendarConnectCard: View {
         @Environment(AppStore.self) private var store
         let ask: CalendarConnectAsk
-        @State private var copied = false
 
         var body: some View {
             OverlayScrim(onDismiss: { store.dismissCalendarConnect() }) {
@@ -55,20 +56,8 @@
         private func primary() {
             if store.calendarWaiting() {
                 store.dismissCalendarConnect()
-                return
-            }
-            switch ask.route {
-            case .link: store.confirmCalendarConnect()
-            case .command: copy()
-            }
-        }
-
-        private func copy() {
-            store.copyCalendarCommand()
-            copied = true
-            Task {
-                try? await Task.sleep(for: Clip.flashWindow)
-                copied = false
+            } else {
+                store.confirmCalendarConnect()
             }
         }
 
@@ -83,46 +72,31 @@
                 .font(Typo.rowSub)
                 .foregroundStyle(Palette.inkDim)
                 .fixedSize(horizontal: false, vertical: true)
-            Text(permissionLine)
+            // Honest about the ask: Google's screen will say see AND edit,
+            // and this wave of Passband only reads.
+            Text("Google will ask to let Passband see and edit your calendar events. For now Passband only reads them.")
                 .font(Typo.micro)
                 .foregroundStyle(Palette.inkFaint)
                 .fixedSize(horizontal: false, vertical: true)
-
-            switch ask.route {
-            case .link:
-                if let email = ask.email {
-                    accountBox(label: "Pick this account when Google asks", email: email)
-                }
-                HStack(spacing: Space.s8) {
-                    Spacer(minLength: 0)
-                    Button("Not now") { store.dismissCalendarConnect() }
-                        .buttonStyle(.glass)
-                    Button("Connect calendar") { store.confirmCalendarConnect() }
-                        .buttonStyle(.glassProminent)
-                }
-            case .command(let command):
-                commandBox(command)
-                if let email = ask.email {
-                    accountBox(label: "Sign in as this account when the browser opens", email: email)
-                }
-                HStack(spacing: Space.s8) {
-                    Spacer(minLength: 0)
-                    Button("Not now") { store.dismissCalendarConnect() }
-                        .buttonStyle(.glass)
-                    Button(copied ? "Copied" : "Copy command") { copy() }
-                        .buttonStyle(.glassProminent)
-                }
+            if ask.route == .daemon {
+                // For the box with no browser: where the shell route is
+                // written down. Fine print, never a button.
+                Text("Running your own daemon on a headless box? The self-host docs cover `squelchd auth --calendar`.")
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.inkFaintest)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-        }
-
-        /// Honest about the ask: Google's screen will say see AND edit, and
-        /// this wave of Passband only reads.
-        private var permissionLine: String {
-            switch ask.route {
-            case .link:
-                "Google will ask to let Passband see and edit your calendar events. For now Passband only reads them."
-            case .command:
-                "Run this where your daemon runs. Google will ask to let Passband see and edit your calendar events. For now Passband only reads them."
+            if let email = ask.email {
+                accountBox(label: "Pick this account when Google asks", email: email)
+            }
+            HStack(spacing: Space.s8) {
+                Spacer(minLength: 0)
+                Button("Not now") { store.dismissCalendarConnect() }
+                    .buttonStyle(.glass)
+                Button("Connect calendar") { store.confirmCalendarConnect() }
+                    .buttonStyle(.glassProminent)
+                    // A self-host daemon is being asked for the link.
+                    .disabled(store.calendarConnectStarting)
             }
         }
 
@@ -132,40 +106,30 @@
         private var waitingBody: some View {
             HStack(spacing: Space.s8) {
                 WaitDots(tone: Palette.inkFaint)
-                Text(ask.route.isLink ? "Finish in your browser" : "Waiting for squelchd")
+                Text("Finish in your browser")
                     .font(Typo.ui(14, weight: .semibold))
                     .foregroundStyle(Palette.ink)
             }
-            Text(waitingLine)
+            Text("Google is asking for permission in your browser. This closes on its own once your calendar is connected.")
                 .font(Typo.rowSub)
                 .foregroundStyle(Palette.inkDim)
                 .fixedSize(horizontal: false, vertical: true)
-            if case .command(let command) = ask.route {
-                commandBox(command)
-            } else if let email = ask.email {
+            if let email = ask.email {
                 accountBox(label: "Pick this account", email: email)
             }
             HStack(spacing: Space.s8) {
                 Spacer(minLength: 0)
-                if case .link(let url) = ask.route {
-                    Button("Open Google again") { Opener.open(url) }
-                        .buttonStyle(.glass)
-                }
+                // Self-host asks the daemon for a fresh link: the first may
+                // have expired.
+                Button("Open Google again") { store.reopenCalendarConsent() }
+                    .buttonStyle(.glass)
+                    .disabled(store.calendarConnectStarting)
                 Button("Close") { store.dismissCalendarConnect() }
                     .buttonStyle(.glassProminent)
             }
         }
 
-        private var waitingLine: String {
-            switch ask.route {
-            case .link:
-                "Google is asking for permission in your browser. This closes on its own once your calendar is connected."
-            case .command:
-                "Run the command where your daemon runs. This closes on its own once your calendar is connected."
-            }
-        }
-
-        // MARK: boxes
+        // MARK: the account
 
         /// The address to pick, set the way the reconnect prompt sets it, but
         /// on a neutral well: this is a choice to get right, not a warning.
@@ -184,36 +148,6 @@
                     .padding(.vertical, Space.scaled(7))
                     .background(Palette.hairline.opacity(0.6), in: RoundedRectangle(cornerRadius: 7))
             }
-        }
-
-        private func commandBox(_ command: String) -> some View {
-            HStack(spacing: Space.s8) {
-                Text(verbatim: command)
-                    .font(Typo.mono(12.5, weight: .medium))
-                    .foregroundStyle(Palette.ink)
-                    .textSelection(.enabled)
-                    .lineLimit(1)
-                Spacer(minLength: Space.s8)
-                Button {
-                    copy()
-                } label: {
-                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                        .font(Typo.ui(11))
-                }
-                .buttonStyle(.textAction)
-                .help("Copy")
-                .accessibilityLabel("Copy command")
-            }
-            .padding(.horizontal, Space.s10)
-            .padding(.vertical, Space.scaled(7))
-            .background(Palette.hairline.opacity(0.6), in: RoundedRectangle(cornerRadius: 7))
-        }
-    }
-
-    extension CalendarGate.ConnectRoute {
-        fileprivate var isLink: Bool {
-            if case .link = self { return true }
-            return false
         }
     }
 #endif

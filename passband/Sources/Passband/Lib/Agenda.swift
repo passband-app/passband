@@ -32,13 +32,17 @@ enum CalendarGate {
         timeline == true && developerMode
     }
 
-    /// The two ways a calendar gets connected. The daemon decides which by
-    /// which field it sent; the app never guesses.
+    /// Where the one "Connect calendar" button gets Google's consent link.
+    /// The daemon decides which by what it sent; the app never guesses. Both
+    /// end the same way: a browser on Google's consent, and the grant showing
+    /// up on the stats poll.
     enum ConnectRoute: Hashable, Sendable {
         /// Hosted: the control plane's consent page, account pinned.
         case link(String)
-        /// Self-host: `squelchd auth --calendar`, at a shell.
-        case command(String)
+        /// Self-host whose daemon can run the consent itself: ask it for a
+        /// fresh link (`POST /client/calendar/connect`) on each press, since
+        /// a link it gave earlier may have expired.
+        case daemon
     }
 
     /// THE CALENDAR HALF OF /client/stats, BUT ONLY THE ACTIVE ACCOUNT'S.
@@ -63,22 +67,29 @@ enum CalendarGate {
 
     /// The same door for a calendar that IS granted but whose token Google
     /// has stopped accepting (the timeline's sync status says `auth`): the
-    /// daemon sends its consent link or command whether or not it is
+    /// daemon sends its consent link or `self_connect` whether or not it is
     /// granted, and renewing is the same consent over again.
+    ///
+    /// A hosted link wins; then a daemon that says it can run the consent;
+    /// otherwise nothing. `connect_command` is NOT a route: an older
+    /// self-host daemon that sends only the command gets no card and no
+    /// banner, and the terminal path lives in the self-host docs.
     static func renewRoute(_ access: CalendarAccess?) -> ConnectRoute? {
         guard let access else { return nil }
-        if let url = access.connect_url?.trimmingCharacters(in: .whitespaces),
+        if let url = consentURL(access.connect_url) { return .link(url) }
+        if access.self_connect == true { return .daemon }
+        return nil
+    }
+
+    /// A consent link worth opening: http(s) only, as every link the app
+    /// hands to the browser. Shared by the stats' `connect_url` and the
+    /// self-host daemon's answer.
+    static func consentURL(_ raw: String?) -> String? {
+        guard let url = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
             let scheme = URL(string: url)?.scheme?.lowercased(),
             scheme == "https" || scheme == "http"
-        {
-            return .link(url)
-        }
-        if let command = access.connect_command?.trimmingCharacters(in: .whitespacesAndNewlines),
-            !command.isEmpty
-        {
-            return .command(command)
-        }
-        return nil
+        else { return nil }
+        return url
     }
 
     /// What the page offers about connecting.

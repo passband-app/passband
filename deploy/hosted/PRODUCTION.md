@@ -227,6 +227,22 @@ monthly dollar budget and installed through the warden as that tenant's
 `<label>-llm` Secret. Bifrost swaps in the real key, meters the spend on its
 volume, and refuses a tenant that has blown its budget.
 
+**A tenant that runs out mid-month** shows up on the dashboard's "LLM config
+failures" panel and stops getting verdicts; its mail queues and nothing is
+lost. Unblock it with
+
+```sh
+squelch-control llm topup <label>            # a full month's allowance again
+squelch-control llm topup <label> --usd 25   # or a specific amount
+squelch-control llm topup <label> --clear
+```
+
+That adds to this month's limit on the key the tenant already holds: no new
+key, no warden install, no pod restart, and the spend ledger stays intact. It
+expires by itself at the budget's next reset. `llm mint <label>` also
+unblocks a tenant, but it rotates the key and starts the ledger from zero, so
+keep it for a key that is actually wrong.
+
 **Content logging stays OFF.** Every request through this gateway is the text
 of somebody's mail, and Bifrost's defaults are to log it: `enable_logging` on,
 `disable_content_logging` off, `log_retention_days` 365, all into

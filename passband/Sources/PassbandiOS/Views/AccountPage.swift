@@ -334,7 +334,7 @@ struct AccountPage: View {
         case .general: "your name, theme, chime"
         case .mail: "images, search order, signature, read tracking"
         case .assistant: "your own api key, and which model"
-        case .agents: "connect OpenClaw, Claude Code and others"
+        case .agents: "connect Claude, OpenClaw, Hermes Agent and others"
         case .privacy: "what telemetry leaves the app"
         case .audit: "what the agent and this app have done"
         case .account: "the mailboxes this install knows"

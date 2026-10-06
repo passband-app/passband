@@ -241,6 +241,13 @@ run_suite share-nudge \
   Sources/Passband/Lib/ShareNudge.swift \
   Tests/ShareNudgeTests.swift
 
+# The discovery ledger: found on the first move, kept on the third distinct
+# day, never regressing, and a blob from another build costing nobody their
+# ring. Foundation only; the UserDefaults shell around it is Discovery.swift.
+run_suite discovery-ledger \
+  Sources/Passband/Lib/DiscoveryLedger.swift \
+  Tests/DiscoveryLedgerTests.swift
+
 # When the iPhone ask fires: two days in, never to somebody whose mailbox has
 # seen the phone app, never on a daemon that has not said, and once.
 run_suite testflight-nudge \
@@ -477,6 +484,7 @@ run_suite rule-pattern-suggest \
 # The actual onboarding controller with in-memory collaborators: the store
 # stub flips the real RehearsalMode flag the way the real one does.
 run_suite tour-controller \
+  Sources/Passband/Lib/DiscoveryLedger.swift \
   Sources/Passband/Model/PracticeTourStep.swift \
   Sources/Passband/Model/TourController.swift \
   Tests/TourControllerTests.swift

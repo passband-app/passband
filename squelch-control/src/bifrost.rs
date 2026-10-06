@@ -202,6 +202,27 @@ pub struct VirtualKeyState {
     /// The union of every provider config's `allowed_models`. There is one
     /// provider config today (anthropic), so this is that config's list.
     pub allowed_models: Vec<String>,
+    /// The key's own budgets. A minted key has exactly one (monthly).
+    pub budgets: Vec<BudgetState>,
+}
+
+/// One budget on a virtual key: the limit, what has been spent against it in
+/// the current window, and any top-up riding on top of the limit.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BudgetState {
+    pub id: String,
+    pub max_limit: f64,
+    pub current_usage: f64,
+    /// Extra allowance ADDED to `max_limit` while a top-up is active; zero
+    /// when there is none. The gateway omits the field then.
+    pub override_amount: f64,
+}
+
+impl BudgetState {
+    /// What the key may still spend in this window.
+    pub fn headroom(&self) -> f64 {
+        (self.max_limit + self.override_amount - self.current_usage).max(0.0)
+    }
 }
 
 /// The model list a PROVIDER key must carry, derived from the virtual-key
@@ -369,6 +390,27 @@ struct WireVirtualKey {
     name: String,
     #[serde(default)]
     provider_configs: Vec<WireProviderConfig>,
+    #[serde(default)]
+    budgets: Vec<WireBudget>,
+}
+
+#[derive(Deserialize)]
+struct WireBudget {
+    id: String,
+    #[serde(default)]
+    max_limit: f64,
+    #[serde(default)]
+    current_usage: f64,
+    #[serde(default)]
+    override_amount: f64,
+}
+
+/// `PUT /api/governance/virtual-keys/{vk}/budgets/{budget}/override` body.
+#[derive(Serialize)]
+struct BudgetOverrideBody {
+    amount: f64,
+    mode: &'static str,
+    cycles: u32,
 }
 
 #[derive(Deserialize)]
@@ -574,9 +616,88 @@ impl BifrostClient {
                             .into_iter()
                             .flat_map(|p| p.allowed_models)
                             .collect(),
+                        budgets: k
+                            .budgets
+                            .into_iter()
+                            .map(|b| BudgetState {
+                                id: b.id,
+                                max_limit: b.max_limit,
+                                current_usage: b.current_usage,
+                                override_amount: b.override_amount,
+                            })
+                            .collect(),
                     })
                     .collect())
             }
+            401 | 403 => Err(BifrostError::Unauthorized),
+            _ => Err(BifrostError::Failed),
+        }
+    }
+
+    /// Add `amount_usd` to a budget's limit until its current window closes.
+    ///
+    /// This is the gateway's budget OVERRIDE, in `cycles` mode with one cycle:
+    /// the base limit, the spend ledger and the key itself are all untouched,
+    /// and the extra allowance expires by itself at the budget's next reset.
+    /// So a tenant that ran out mid-month is unblocked without a new key, a
+    /// warden install or a pod restart, and next month it is back on the
+    /// ordinary limit with nothing to remember to undo.
+    ///
+    /// A second call REPLACES the first rather than stacking on it.
+    ///
+    /// The route and body are read from the gateway's source at v1.6.9
+    /// (`mutateVirtualKeyBudgetOverride`). That version declares a
+    /// `reset_budget_usage` field on the key update and never reads it, so
+    /// there is no way to zero `current_usage` short of a new key.
+    pub async fn set_budget_override(
+        &self,
+        vk_id: &str,
+        budget_id: &str,
+        amount_usd: f64,
+    ) -> Result<(), BifrostError> {
+        if !is_id(vk_id) || !is_id(budget_id) {
+            return Err(BifrostError::BadId);
+        }
+        if !amount_usd.is_finite() || amount_usd <= 0.0 {
+            return Err(BifrostError::Failed);
+        }
+        let resp = self
+            .http
+            .put(self.url(&budget_override_path(vk_id, budget_id)))
+            .header(reqwest::header::AUTHORIZATION, &self.auth_header)
+            .json(&BudgetOverrideBody {
+                amount: amount_usd,
+                mode: "cycles",
+                cycles: 1,
+            })
+            .send()
+            .await
+            .map_err(|_| BifrostError::Unreachable)?;
+        match resp.status().as_u16() {
+            200 | 201 | 204 => Ok(()),
+            401 | 403 => Err(BifrostError::Unauthorized),
+            _ => Err(BifrostError::Failed),
+        }
+    }
+
+    /// Remove a budget's top-up, returning it to its base limit now.
+    pub async fn clear_budget_override(
+        &self,
+        vk_id: &str,
+        budget_id: &str,
+    ) -> Result<(), BifrostError> {
+        if !is_id(vk_id) || !is_id(budget_id) {
+            return Err(BifrostError::BadId);
+        }
+        let resp = self
+            .http
+            .delete(self.url(&budget_override_path(vk_id, budget_id)))
+            .header(reqwest::header::AUTHORIZATION, &self.auth_header)
+            .send()
+            .await
+            .map_err(|_| BifrostError::Unreachable)?;
+        match resp.status().as_u16() {
+            200 | 202 | 204 => Ok(()),
             401 | 403 => Err(BifrostError::Unauthorized),
             _ => Err(BifrostError::Failed),
         }
@@ -723,6 +844,10 @@ impl BifrostClient {
     }
 }
 
+fn budget_override_path(vk_id: &str, budget_id: &str) -> String {
+    format!("/api/governance/virtual-keys/{vk_id}/budgets/{budget_id}/override")
+}
+
 /// The shape of a key id: what UUIDs and slugs are made of, and NOTHING that
 /// could restructure a URL path or a log line.
 fn is_id(id: &str) -> bool {
@@ -811,6 +936,10 @@ mod tests {
         provider_puts: Vec<(String, Value)>,
         /// What the virtual-key LISTING route answers.
         listing: Option<Value>,
+        /// Budget-override writes: (method, vk id, budget id, body).
+        overrides: Vec<(&'static str, String, String, Value)>,
+        /// When set, the budget-override route answers this status.
+        override_status: Option<u16>,
     }
 
     type Shared = Arc<Mutex<Recorder>>;
@@ -921,6 +1050,35 @@ mod tests {
                         r.revoked_ids.push(id);
                         r.auths.push(auth_of(&headers));
                         StatusCode::from_u16(r.revoke_status.unwrap_or(200)).unwrap()
+                    },
+                ),
+            )
+            .route(
+                "/api/governance/virtual-keys/{id}/budgets/{budget}/override",
+                axum::routing::put(
+                    |AxumState(rec): AxumState<Shared>,
+                     axum::extract::Path((id, budget)): axum::extract::Path<(String, String)>,
+                     headers: HeaderMap,
+                     body: String| async move {
+                        let mut r = rec.lock().unwrap();
+                        r.auths.push(auth_of(&headers));
+                        r.overrides.push((
+                            "PUT",
+                            id,
+                            budget,
+                            serde_json::from_str(&body).unwrap_or(Value::Null),
+                        ));
+                        StatusCode::from_u16(r.override_status.unwrap_or(200)).unwrap()
+                    },
+                )
+                .delete(
+                    |AxumState(rec): AxumState<Shared>,
+                     axum::extract::Path((id, budget)): axum::extract::Path<(String, String)>,
+                     headers: HeaderMap| async move {
+                        let mut r = rec.lock().unwrap();
+                        r.auths.push(auth_of(&headers));
+                        r.overrides.push(("DELETE", id, budget, Value::Null));
+                        StatusCode::from_u16(r.override_status.unwrap_or(200)).unwrap()
                     },
                 ),
             )
@@ -1336,6 +1494,12 @@ mod tests {
                         "provider_configs": [{
                             "allowed_models": ["claude-opus-5", "anthropic/claude-opus-5 "],
                         }],
+                        "budgets": [{
+                            "id": "b-1",
+                            "max_limit": 75,
+                            "current_usage": 75.04,
+                            "override_amount": 20,
+                        }],
                     },
                     { "id": "vk-2", "name": "Canary", "value": "sk-bf-ANOTHER" },
                 ],
@@ -1355,5 +1519,59 @@ mod tests {
         // than failing the whole listing.
         assert_eq!(keys[1].name, "Canary");
         assert!(keys[1].allowed_models.is_empty());
+        // The budget, with the top-up counted into what is left to spend. A
+        // key the listing shows no budgets for parses to none.
+        assert_eq!(keys[0].budgets.len(), 1);
+        assert_eq!(keys[0].budgets[0].id, "b-1");
+        assert!((keys[0].budgets[0].headroom() - 19.96).abs() < 1e-9);
+        assert!(keys[1].budgets.is_empty());
+    }
+
+    /// A top-up is one cycle of extra allowance on the budget's own route: it
+    /// names the key and the budget in the path and carries nothing that could
+    /// replace the key's limit, models or providers.
+    #[tokio::test]
+    async fn a_budget_override_is_one_cycle_on_the_budgets_own_route() {
+        let rec: Shared = Arc::new(Mutex::new(Recorder::default()));
+        let c = client_for(&rec).await;
+
+        c.set_budget_override("vk-1", "b-1", 75.04).await.unwrap();
+        c.clear_budget_override("vk-1", "b-1").await.unwrap();
+
+        let r = rec.lock().unwrap();
+        assert_eq!(r.overrides.len(), 2);
+        let (method, vk, budget, body) = &r.overrides[0];
+        assert_eq!(
+            (*method, vk.as_str(), budget.as_str()),
+            ("PUT", "vk-1", "b-1")
+        );
+        assert_eq!(
+            body,
+            &json!({ "amount": 75.04, "mode": "cycles", "cycles": 1 })
+        );
+        assert_eq!(r.overrides[1].0, "DELETE");
+        assert!(r.auths.iter().all(|a| a == &expected_auth()));
+    }
+
+    /// Nothing is sent for an amount that is not a positive number or an id
+    /// that could restructure the path, and a gateway refusal is an error.
+    #[tokio::test]
+    async fn a_budget_override_refuses_bad_input_and_reports_a_refusal() {
+        let rec: Shared = Arc::new(Mutex::new(Recorder::default()));
+        let c = client_for(&rec).await;
+
+        for amount in [0.0, -5.0, f64::NAN, f64::INFINITY] {
+            assert!(c.set_budget_override("vk-1", "b-1", amount).await.is_err());
+        }
+        let err = c
+            .set_budget_override("vk-1", "../b", 5.0)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, BifrostError::BadId), "{err:?}");
+        assert!(rec.lock().unwrap().overrides.is_empty());
+
+        rec.lock().unwrap().override_status = Some(404);
+        let err = c.set_budget_override("vk-1", "b-1", 5.0).await.unwrap_err();
+        assert!(matches!(err, BifrostError::Failed), "{err:?}");
     }
 }

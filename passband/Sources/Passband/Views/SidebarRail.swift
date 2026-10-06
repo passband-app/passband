@@ -14,6 +14,7 @@ private let railSpace = "sidebar-rail"
 
 struct SidebarRail: View {
     @Environment(AppStore.self) private var store
+    @Environment(\.colorScheme) private var colorScheme
     let namespace: Namespace.ID
 
     /// Where each icon sits in the rail's own space, written by the buttons as
@@ -278,9 +279,23 @@ struct SidebarRail: View {
     }
 
     /// The live account's profile photo, or its initial when none was imported.
+    ///
+    /// THE PHOTO GOES IN AS A BITMAP. This view is a `Menu`'s label, and AppKit
+    /// draws an image in a menu button at its natural size with no regard for
+    /// a SwiftUI frame or clip shape: a resizable photo here came out as a
+    /// 256pt square over the bottom of the rail. A bitmap that is already a
+    /// 26pt circle has nothing left to get wrong. The initial stays a real
+    /// view, as it always was: text in a menu label is laid out by SwiftUI.
+    @ViewBuilder
     private var accountMark: some View {
-        AccountMark(
-            account: AccountManager.shared.active, font: Typo.ui(13, weight: .semibold))
+        let active = AccountManager.shared.active
+        if let active, AccountPhotos.shared.image(for: active.id) != nil,
+            let bitmap = markBitmap(active, size: 26, font: Typo.ui(13, weight: .semibold))
+        {
+            Image(nsImage: bitmap).renderingMode(.original)
+        } else {
+            AccountMark(account: active, font: Typo.ui(13, weight: .semibold))
+        }
     }
 
     /// One row of the switcher menu: the account's mark beside its name, with
@@ -301,18 +316,22 @@ struct SidebarRail: View {
             Label {
                 Text(account.displayName)
             } icon: {
-                if let mark = Self.menuMark(account) { Image(nsImage: mark) }
+                if let mark = markBitmap(account, size: 18, font: Typo.ui(10, weight: .semibold)) {
+                    Image(nsImage: mark).renderingMode(.original)
+                }
             }
         }
     }
 
-    /// The account's mark as a bitmap. An AppKit menu draws a row's image as
-    /// handed over and ignores SwiftUI shapes and clipping, so the circle has
-    /// to be IN the pixels; rendering the same `AccountMark` the rail wears is
-    /// what keeps the two from drifting apart.
-    private static func menuMark(_ account: AccountRecord) -> NSImage? {
+    /// An account's mark as a bitmap, for the two places AppKit draws it
+    /// instead of SwiftUI (see `accountMark`). Rendering the same `AccountMark`
+    /// the rest of the app wears is what keeps them from drifting apart; the
+    /// color scheme is handed over because a renderer has no window to inherit
+    /// one from and would draw the light palette into a dark rail.
+    private func markBitmap(_ account: AccountRecord, size: CGFloat, font: Font) -> NSImage? {
         let renderer = ImageRenderer(
-            content: AccountMark(account: account, size: 18, font: Typo.ui(10, weight: .semibold)))
+            content: AccountMark(account: account, size: size, font: font)
+                .environment(\.colorScheme, colorScheme))
         renderer.scale = NSScreen.main?.backingScaleFactor ?? 2
         return renderer.nsImage
     }

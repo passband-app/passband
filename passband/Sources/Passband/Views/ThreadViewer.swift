@@ -2318,7 +2318,12 @@ struct ThreadViewer: View {
             private func rehearseBar() async {
                 guard let script = FixtureStage.takeBarScript() else { return }
                 // The thread has to be here: the button is dead until it is.
-                while thread == nil { try? await Task.sleep(for: .milliseconds(50)) }
+                while thread == nil {
+                    // A cancelled sleep returns at once; without this a reader
+                    // popped before its thread loads spins here for good.
+                    if Task.isCancelled { return }
+                    try? await Task.sleep(for: .milliseconds(50))
+                }
                 try? await Task.sleep(for: .milliseconds(600))
                 switch script {
                 case .pinned:

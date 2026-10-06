@@ -2024,7 +2024,14 @@ final class AppStore {
         if view != activeView { Analytics.screen(view.rawValue) }
         routeWasPointer = viaPointer
         activeView = view
+        routeAsks &+= 1
     }
+
+    /// Bumped by every route. The phone's shell answers a route with a tab and
+    /// has to hear the call itself: it keeps `activeView` true only for the
+    /// tabs that have one, so a route to the view already named changes
+    /// nothing else (the same reason `searchAsks` exists).
+    private(set) var routeAsks = 0
 
     func setView(_ view: MainView, viaPointer: Bool = false) {
         guard !RehearsalMode.isEnabled || view == .sitrep else { return }
@@ -3223,9 +3230,15 @@ final class AppStore {
         sideView = .none
     }
 
+    /// Bumped by every `openSearch`. The Mac answers that call with
+    /// `sideView`; the phone's shell answers it with a tab, and needs to hear
+    /// the call itself, since a repeat of the same seed changes nothing else.
+    private(set) var searchAsks = 0
+
     /// Open search. By default it RESUMES the last one; `seed` forces a fresh
     /// term (`f` on a row or in the reader, seeding `from:<address>`).
     func openSearch(seed: String? = nil) {
+        searchAsks &+= 1
         // Give wide search the window; closing the reader saves its draft.
         if threadId != nil { closeThread() }
         // A seed matching what is ALREADY fetched keeps the session: the hits

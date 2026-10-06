@@ -362,7 +362,7 @@
         static let scenes: Set<String> = [
             "account", "rules", "rules-empty", "rule-new", "rule-edit",
             "groups", "groups-empty", "group", "group-new", "group-edit", "group-thread",
-            "group-back", "group-crowd", "general", "agents",
+            "group-back", "group-crowd", "group-swap", "general", "agents",
         ]
 
         /// Sitrep to Account. Watched by the sitrep tab's stack (MobileRootView).
@@ -397,7 +397,7 @@
                 store.openRuleEditor(RuleEditorRequest(rule: Self.rules[3]))
             case "group-new":
                 store.openGroupEditor(GroupEditorRequest(group: nil))
-            case "group", "group-edit", "group-thread", "group-back", "group-crowd":
+            case "group", "group-edit", "group-thread", "group-back", "group-crowd", "group-swap":
                 group = 1
                 try? await Task.sleep(for: .milliseconds(700))
                 switch scene {
@@ -409,6 +409,12 @@
                         GroupMember(addr: "partner\($0)@fund\($0).example", display_name: nil)
                     }
                     store.openGroupEditor(GroupEditorRequest(group: crowd))
+                case "group-swap":
+                    // A second thread arriving over the first (a banner tap):
+                    // the reader should end up on the second, over the group.
+                    store.openThread("practice-1", from: .groups)
+                    try? await Task.sleep(for: .milliseconds(1500))
+                    store.openThread("practice-2", from: .groups)
                 case "group-thread", "group-back":
                     store.openThread("practice-1", from: .groups)
                     guard scene == "group-back" else { break }

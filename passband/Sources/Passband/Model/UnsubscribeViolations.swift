@@ -106,6 +106,7 @@ final class UnsubscribeViolations {
     ) async {
         guard !busy else { return }
         busy = true
+        let gen = generation
         // Mark acted immediately so a refresh mid-flight can't re-surface it.
         acted.insert(record.sender)
         do {
@@ -113,6 +114,9 @@ final class UnsubscribeViolations {
         } catch {
             if let failure { store.pushToast(errText(error, failure), .error) }
         }
+        // An account switch while this was in flight already cleared the
+        // notice; what is up now, if anything, is the new mailbox's.
+        guard gen == generation else { return }
         busy = false
         prompt = nil
     }

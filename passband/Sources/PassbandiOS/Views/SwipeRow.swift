@@ -275,9 +275,11 @@ struct SwipeRow<Content: View>: View {
     /// never reported at all.
     private func pan(_ recognizer: UIPanGestureRecognizer, at point: CGPoint) {
         let raw = recognizer.translation(in: recognizer.view).x
+        // Every event of a pan this row took, not only its first: the page's
+        // own drag can start counting well after a slow pan began.
+        SwipeRowActivity.lastActive = Date()
         switch recognizer.state {
         case .began:
-            SwipeRowActivity.lastBegan = Date()
             // Only a pan that OPENS a rail says where its labels go: one that
             // starts on a rail already out is adjusting it, and labels that
             // jumped to the new finger would be buttons that dodge.
@@ -415,10 +417,10 @@ private struct RailPan: UIGestureRecognizerRepresentable {
     }
 }
 
-/// When a row's rail last took a pan. A page that has a sideways gesture of
+/// When a row's rail was last being panned. A page that has a sideways gesture of
 /// its own (the sitrep's swipe to the account page) reads this to know the
 /// drag it is also hearing belonged to a row, and leaves it alone.
 @MainActor
 enum SwipeRowActivity {
-    static var lastBegan = Date.distantPast
+    static var lastActive = Date.distantPast
 }

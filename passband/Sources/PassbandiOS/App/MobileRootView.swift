@@ -122,6 +122,13 @@ struct MobileRootView: View {
                 // offer two ways to connect at once, the front one adding an
                 // account to an install that no longer has any.
                 store.addAccountSheetOpen = false
+                // And the account panes, for the shell they are drawn over is
+                // gone. The door is a singleton and outlives it: left open, the
+                // next connect (after a sign out, or the last mailbox removed
+                // from the Account page) would mount the shell with the Account
+                // page already covering the sitrep, and What's New would never
+                // be asked, since it only raises over a bare board.
+                AccountDoor.shared.close()
                 // The gate, on an install that knows no mailbox: whoever is
                 // here is new, and is owed the cold open rather than release
                 // notes. Not every `.disconnected` is that: a keychain that
@@ -270,8 +277,11 @@ private struct MobileShell: View {
         // `openSearch` from a row's "search this sender"), and on the Mac the
         // rail and the side panel answer. Here the answer is a tab, and until
         // this watched for it those calls changed state no screen was showing.
-        .onChange(of: store.activeView) { _, view in
-            switch view {
+        .onChange(of: store.routeAsks) { _, _ in
+            // The ASK, not the value: this shell only keeps `activeView` true
+            // for the two tabs that have one, so on Quick Look or Search a
+            // route to the view it already names would change nothing.
+            switch store.activeView {
             case .sitrep: tab = .sitrep
             case .emails: tab = .mail
             default: break
@@ -302,17 +312,26 @@ private struct MobileShell: View {
                 }
             if let view, store.activeView != view { store.activeView = view }
         }
-        // WHAT'S NEW, after an update: asked once, when the first sync of a
+        // WHAT'S NEW, after an update: asked when the first sync of a
         // session lands, and only over the Sitrep. The Mac asks from the same
         // moment (RootView); the rule itself is the model's.
+        //
+        // AND ASKED AGAIN WHENEVER THE BOARD COMES BACK INTO VIEW, which the
+        // Mac does not need: a phone is often opened by a banner, straight
+        // into a reader, and a session here lasts days. Once at first sync
+        // would mean an update whose notes never came. The model still shows
+        // them once (its stamp, and its own once-a-session flag).
         .onChange(of: store.lastRefresh) { old, new in
-            if old == nil, new != nil {
-                store.whatsNew.maybeShowOnPhone(sitrepShowing: tab == .sitrep && door.pane == nil)
-            }
+            if old == nil, new != nil { askWhatsNew() }
         }
-        // A seeded search is a request to be shown the search.
-        .onChange(of: store.search.query) { _, query in
-            if tab != .search, !query.trimmed.isEmpty { tab = .search }
+        .onChange(of: bareSitrep) { _, bare in
+            if bare, store.lastRefresh != nil { askWhatsNew() }
+        }
+        // A request to be shown the search. The ASK, not the query: "search
+        // this sender" twice for one sender seeds the term the field already
+        // holds, and a watch on the term would hear nothing the second time.
+        .onChange(of: store.searchAsks) { _, _ in
+            if tab != .search { tab = .search }
         }
     }
 
@@ -462,6 +481,16 @@ private struct MobileShell: View {
     }
 
     private var door: AccountDoor { .shared }
+
+    /// The Sitrep with nothing over it, which is the only place What's New is
+    /// raised. The model checks the modals itself; this is the shell's half.
+    private var bareSitrep: Bool {
+        tab == .sitrep && door.pane == nil && store.threadId == nil && store.compose == nil
+    }
+
+    private func askWhatsNew() {
+        store.whatsNew.maybeShowOnPhone(sitrepShowing: tab == .sitrep && door.pane == nil)
+    }
 
     /// Exactly one stack may take a thread the store opens. While the Account
     /// page is up that is ITS stack, not the tab under it.
@@ -670,7 +699,23 @@ private struct ThreadDestination: ViewModifier {
     private var takes: Bool {
         guard active else { return false }
         if mine != nil || visible { return true }
-        return root && reader.hostsOnScreen == 0
+        // Not while a pushed page HOLDS a reader either: that page is covered
+        // by it, so it is not "on screen", and without this the root would
+        // push a second reader under the first whenever the thread changed.
+        return root && reader.hostsOnScreen == 0 && reader.holders == 0
+    }
+
+    /// The one writer of `mine`, so a pushed page's hold on the reader is
+    /// counted exactly when it starts and when it ends.
+    private func hold(_ thread: String?) {
+        if !root {
+            if mine == nil, thread != nil {
+                reader.holders += 1
+            } else if mine != nil, thread == nil {
+                reader.holders = max(0, reader.holders - 1)
+            }
+        }
+        mine = thread
     }
 
     func body(content: Content) -> some View {
@@ -705,7 +750,14 @@ private struct ThreadDestination: ViewModifier {
             }
             .onAppear {
                 visible = true
-                if !root { reader.hostsOnScreen += 1 }
+                if root {
+                    // The first page is on screen, so nothing above it holds a
+                    // reader. Heals a count left behind by a host torn down
+                    // with its reader still up (the Account pane closing).
+                    reader.holders = 0
+                } else {
+                    reader.hostsOnScreen += 1
+                }
             }
             .onDisappear {
                 visible = false
@@ -715,12 +767,12 @@ private struct ThreadDestination: ViewModifier {
                 if takes {
                     // Frontmost: this tab drives. Opening claims the thread,
                     // closing (from anywhere: pop, account teardown) releases it.
-                    mine = newValue
+                    hold(newValue)
                 } else if newValue != mine {
                     // Another tab opened a different thread, or the thread was
                     // closed while this tab held it off-screen: this stack's
                     // reader describes state that is gone, so it pops silently.
-                    mine = nil
+                    hold(nil)
                 }
             }
     }
@@ -741,11 +793,23 @@ private struct ThreadDestination: ViewModifier {
             get: { mine },
             set: { newValue in
                 guard newValue == nil, let owned = mine else { return }
-                mine = nil
+                hold(nil)
                 // A user-driven pop closes the store's thread only when it is
                 // still the one this stack owned; a stack releasing a stale
                 // reader must not close what another tab is showing.
-                if active, store.threadId == owned { store.closeThread() }
+                if active, store.threadId == owned {
+                    store.closeThread()
+                } else if !root, active, let next = store.threadId {
+                    // A DIFFERENT THREAD ARRIVED OVER A PUSHED PAGE'S READER
+                    // (a banner tapped while reading mail opened from a group).
+                    // That reader has just dismissed itself, which is this
+                    // call, and the page under it never heard the change; so
+                    // it takes the new thread here, one turn later, once the
+                    // pop that called this has finished.
+                    Task { @MainActor in
+                        if mine == nil, active, store.threadId == next { hold(next) }
+                    }
+                }
             })
     }
 }
@@ -782,6 +846,8 @@ final class ReaderTab {
     var active = false
     /// Pushed pages on screen right now that can hold the reader themselves.
     var hostsOnScreen = 0
+    /// Pushed pages that have a reader up right now, and so are covered by it.
+    var holders = 0
 }
 
 extension View {

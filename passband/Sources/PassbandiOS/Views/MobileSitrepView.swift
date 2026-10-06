@@ -84,9 +84,10 @@ struct MobileSitrepView: View {
                 dragBegan = nil
                 let dx = value.translation.width, dy = value.translation.height
                 guard dx > 90, abs(dy) < dx * 0.5 else { return }
-                // A little slack before the start: the row's recognizer and
-                // this one do not begin on the same event.
-                guard SwipeRowActivity.lastBegan < began.addingTimeInterval(-0.3) else { return }
+                // A row that was panned at any point during this drag took
+                // it. A little slack before the start: the row's recognizer
+                // and this one do not begin on the same event.
+                guard SwipeRowActivity.lastActive < began.addingTimeInterval(-0.3) else { return }
                 Haptics.tick()
                 AccountDoor.shared.pane = .picker
             }

@@ -194,6 +194,50 @@ fn photo_tag(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// Google's machine-readable reasons for a refusal (`error.details[].reason`),
+/// which is where it says WHY a 403 is a 403. Each is an enum constant; only
+/// that shape is kept, so nothing from a response body reaches a log line
+/// except capitals and underscores.
+fn refusal_reasons(body: &[u8]) -> Vec<String> {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    v["error"]["details"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|d| d["reason"].as_str())
+        .filter(|r| {
+            !r.is_empty() && r.len() <= 64 && r.bytes().all(|b| b.is_ascii_uppercase() || b == b'_')
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// What to tell the operator about a 401/403 from the People API. The two
+/// common causes look identical by status and are fixed in different places:
+/// one on Google's consent screen, one in the Cloud console.
+fn refusal_message(status: u16, body: &[u8]) -> String {
+    let reasons = refusal_reasons(body);
+    let has = |want: &str| reasons.iter().any(|r| r == want);
+    if has("SERVICE_DISABLED") {
+        "the People API is not enabled on the OAuth client's Google Cloud project; enable it \
+         under APIs & Services, then restart the daemon"
+            .to_string()
+    } else if has("ACCESS_TOKEN_SCOPE_INSUFFICIENT") {
+        "the Google grant does not include name and photo; re-run `squelchd auth` with this \
+         build, or reconnect the mailbox, to add them"
+            .to_string()
+    } else if reasons.is_empty() {
+        format!("the People API refused with {status} and gave no reason")
+    } else {
+        format!(
+            "the People API refused with {status}: {}",
+            reasons.join(", ")
+        )
+    }
+}
+
 /// Read a body up to `cap` bytes, refusing one that runs past it rather than
 /// truncating: half a JPEG is not a smaller JPEG.
 async fn read_capped(
@@ -273,14 +317,14 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         let status = resp.status().as_u16();
         match status {
             200 => {}
-            // No scope on the grant, or the People API is not enabled on the
-            // OAuth client's Cloud project. Either way the fix is not here.
+            // Two different problems share these statuses, and the fix for
+            // each is in a different place, so Google's own reason is read
+            // rather than guessed at.
             401 | 403 => {
-                return Err(
-                    "the Google grant does not include name and photo; re-run `squelchd auth` \
-                     or reconnect the mailbox to add them"
-                        .to_string(),
-                );
+                let body = read_capped(resp, MAX_PERSON_BYTES, "the People API refusal")
+                    .await
+                    .unwrap_or_default();
+                return Err(refusal_message(status, &body));
             }
             other => return Err(format!("the People API answered {other}")),
         }
@@ -429,6 +473,28 @@ mod tests {
         assert_eq!(sniff_image(b"<svg onload=alert(1)>"), None);
         assert_eq!(sniff_image(b"<!doctype html>"), None);
         assert_eq!(sniff_image(b""), None);
+    }
+
+    #[test]
+    fn a_refusal_says_which_of_the_two_fixes_it_needs() {
+        let disabled = br#"{"error":{"code":403,"status":"PERMISSION_DENIED","message":"People API has not been used in project 1234 before or it is disabled.","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"SERVICE_DISABLED","domain":"googleapis.com"}]}}"#;
+        let msg = refusal_message(403, disabled);
+        assert!(msg.contains("not enabled"), "{msg}");
+        // The project number in Google's prose never reaches the log line.
+        assert!(!msg.contains("1234"), "{msg}");
+
+        let scope =
+            br#"{"error":{"code":403,"details":[{"reason":"ACCESS_TOKEN_SCOPE_INSUFFICIENT"}]}}"#;
+        assert!(refusal_message(403, scope).contains("squelchd auth"));
+
+        // Anything else is reported as Google named it, and only if it is
+        // shaped like one of Google's constants.
+        let other = br#"{"error":{"details":[{"reason":"RATE_LIMIT_EXCEEDED"},{"reason":"<b>not a reason</b>"}]}}"#;
+        assert_eq!(
+            refusal_message(403, other),
+            "the People API refused with 403: RATE_LIMIT_EXCEEDED"
+        );
+        assert!(refusal_message(401, b"<html>").contains("gave no reason"));
     }
 
     /// What the mock People API and image host answer with, and what they saw.

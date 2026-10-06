@@ -113,7 +113,8 @@ and decrypt fine and then deserialize into an empty slot map, which surfaces as
 
 Signup asks for `gmail.readonly`, `gmail.modify`, and `gmail.send` **in one
 consent** (squelch-core's `GMAIL_READONLY_SCOPE` + `WRITE_SCOPES`, never spelled
-out here), and seals the resulting grant into **both** credential slots: `email`
+out here), plus the optional `GOOGLE_PROFILE_SCOPE` for the account's name and
+photo, which a grant may omit, and seals the resulting grant into **both** credential slots: `email`
 for the Read side and `email#write` for the Write side. Hosted Passband ships
 compose, archive, and label, and the daemon's action path loads the Write slot,
 which nothing else on a hosted box can fill: there is no second consent screen a

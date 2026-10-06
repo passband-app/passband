@@ -62,13 +62,18 @@ struct AccountPage: View {
         .account, .general, .mail, .assistant, .agents, .privacy, .audit,
     ]
 
-    private var accounts: [AccountRecord] { AccountManager.shared.accounts }
-
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 masthead
-                switcher
+                // Which mailbox the panes below are about. Adding is NOT here:
+                // it lives in the Account pane, one row down, where removing
+                // and renaming already live.
+                //
+                // A DIFFERENT mailbox closes the page: choosing one is asking
+                // to see it, and its board is behind this pane. The one already
+                // live stays put, since a tap on it is a look, not a move.
+                AccountSwitcher { changed in if changed { AccountDoor.shared.close() } }
                 pages
                 index
             }
@@ -78,6 +83,21 @@ struct AccountPage: View {
         .background(Palette.canvas)
         .navigationTitle("Account")
         .navigationBarTitleDisplayMode(.inline)
+        // THE WAY BACK OUT, on the side it came in from. This page is the
+        // first screen of a pane that slid in from the left (AccountDoor), so
+        // it has no stack to pop: the chevron sends the pane back, and so does
+        // dragging it that way. Both are on THIS screen only; a page pushed
+        // from here has the stack's own back.
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button { AccountDoor.shared.close() } label: {
+                    Image(systemName: "chevron.left")
+                }
+                .accessibilityLabel("Close")
+            }
+        }
+        .simultaneousGesture(
+            LeadingPaneClose.drag { close in if close { AccountDoor.shared.close() } })
         #if DEBUG
             // A screenshot's way in; see FixtureRoute.
             .navigationDestination(item: stagedPage) { page in
@@ -115,83 +135,6 @@ struct AccountPage: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.top, 4)
-    }
-
-    /// WHICH MAILBOX THE PANES BELOW ARE ABOUT, and the tap that changes it.
-    ///
-    /// It renders for a single account too. One row is not a switcher, but it is
-    /// still the answer to "who am I signed in as" — and a control that appears
-    /// only once a second account exists is one nobody finds before they need
-    /// it. Adding is NOT here: it lives in the Account pane, one row down, where
-    /// removing and renaming already live. This surface answers which, not how
-    /// many.
-    private var switcher: some View {
-        VStack(spacing: 0) {
-            ForEach(accounts) { account in
-                let isActive = account.id == AccountManager.shared.activeId
-                Button {
-                    // `switchTo` declines the account already live, so a tap on
-                    // the checked row costs nothing — no flush, no epoch bump,
-                    // no world rebuilt to arrive where it started. Which is why
-                    // the row is not `.disabled`: dimming the ACTIVE account
-                    // would say the opposite of what the checkmark says.
-                    Task { await AccountManager.shared.switchTo(account.id) }
-                } label: {
-                    accountRow(account, isActive: isActive)
-                }
-                .buttonStyle(.plain)
-                if account.id != accounts.last?.id { Hairline() }
-            }
-        }
-        .padding(.vertical, 4)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .passbandGlass(.pane, cornerRadius: 18, tint: Palette.glassTint)
-    }
-
-    private func accountRow(_ account: AccountRecord, isActive: Bool) -> some View {
-        HStack(spacing: 12) {
-            // The same initial-in-a-circle the Mac's rail wears, so one person
-            // on both devices recognizes an account by the same mark.
-            Text(account.initial)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Palette.accent)
-                .frame(width: 26, height: 26)
-                .background(Circle().fill(Palette.accentSoft))
-            VStack(alignment: .leading, spacing: 2) {
-                Text(account.displayName)
-                    .font(Typo.rowSub)
-                    .foregroundStyle(Palette.ink)
-                    .lineLimit(1)
-                // Only when it would SAY something new: `displayName` already
-                // falls back to the host, and a row reading "baddiebox:8848"
-                // twice is noise dressed as detail.
-                if let host = subtitle(account) {
-                    Text(host)
-                        .font(Typo.micro)
-                        .foregroundStyle(Palette.inkFaintest)
-                        .lineLimit(1)
-                }
-            }
-            Spacer(minLength: 8)
-            if isActive {
-                Image(systemName: "checkmark")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Palette.accent)
-                    .accessibilityLabel("Active account")
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 11)
-        .contentShape(Rectangle())
-    }
-
-    /// The daemon behind a NAMED account. Nil when the name is already the host
-    /// (or when the host is not known yet, which is a record written before the
-    /// field existed — `noteDisplayHost` fills those in at boot).
-    private func subtitle(_ account: AccountRecord) -> String? {
-        let named = account.label.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !named.isEmpty, !account.displayHost.isEmpty else { return nil }
-        return account.displayHost
     }
 
     /// WHAT THIS MAILBOX HAS BEEN TOLD: the two pages the Mac keeps on its

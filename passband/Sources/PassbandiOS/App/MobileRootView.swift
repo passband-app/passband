@@ -156,6 +156,8 @@ private struct MobileShell: View {
     @State private var showAuth = false
     /// One per tab's stack: whether that tab is frontmost, and how many pages
     /// pushed onto it are able to hold the reader themselves. See `ReaderTab`.
+    /// The Account page's own stack, which is no tab's.
+    @State private var accountReader = ReaderTab()
     @State private var readers: [MobileTab: ReaderTab] = [
         .sitrep: ReaderTab(), .records: ReaderTab(), .mail: ReaderTab(), .search: ReaderTab(),
     ]
@@ -176,18 +178,17 @@ private struct MobileShell: View {
     // No `@Bindable` shadow here: every modal below is presented off a derived
     // Binding that funnels dismissal through the store's own close verb, so
     // nothing needs to write a store flag directly.
-    var body: some View {
+    var body: some View { layered }
+
+    /// The tabs, and everything that follows where the human and the store
+    /// say they are. Split from `layered` only because one chain holding both
+    /// is more than the type checker will solve in a sitting.
+    private var routed: some View {
         TabView(selection: $tab) {
             Tab("Sitrep", systemImage: MainView.sitrep.symbol, value: MobileTab.sitrep) {
                 NavigationStack {
                     MobileSitrepView()
                         .threadDestination(root: true)
-                        #if DEBUG
-                            // A screenshot's way onto the Account page, which
-                            // is otherwise behind a link nothing can tap; see
-                            // FixtureRoute.
-                            .navigationDestination(isPresented: stagedAccount) { AccountPage() }
-                        #endif
                 }
                 .tabSlide(.sitrep, selection: tab)
                 .environment(readers[.sitrep])
@@ -276,9 +277,19 @@ private struct MobileShell: View {
             default: break
             }
         }
-        .onChange(of: tab, initial: true) { _, tab in
-            for (key, reader) in readers { reader.active = key == tab }
+        .onChange(of: tab, initial: true) { _, _ in syncReaders() }
+        .onChange(of: door.pane) { _, _ in syncReaders() }
+        // Mail opened from somewhere else (a banner) while the drawer is out:
+        // the drawer is in front of the stack that mail is about to push on.
+        .onChange(of: store.threadId) { _, thread in
+            if thread != nil, door.pane == .picker { door.close() }
         }
+        #if DEBUG
+            // A screenshot's way onto the Account page; see FixtureRoute.
+            .onChange(of: FixtureRoute.shared.account, initial: true) { _, staged in
+                if staged { door.pane = .page }
+            }
+        #endif
         // And the other way, so the store's idea of where the human is stays
         // true for the next request. Written directly rather than through
         // `setView`, which closes the reader: a tab switch here parks it.
@@ -296,13 +307,22 @@ private struct MobileShell: View {
         // moment (RootView); the rule itself is the model's.
         .onChange(of: store.lastRefresh) { old, new in
             if old == nil, new != nil {
-                store.whatsNew.maybeShowOnPhone(sitrepShowing: tab == .sitrep)
+                store.whatsNew.maybeShowOnPhone(sitrepShowing: tab == .sitrep && door.pane == nil)
             }
         }
         // A seeded search is a request to be shown the search.
         .onChange(of: store.search.query) { _, query in
             if tab != .search, !query.trimmed.isEmpty { tab = .search }
         }
+    }
+
+    /// Everything drawn OVER the tabs: panes, toasts, modals, sheets.
+    private var layered: some View {
+        routed
+        // THE ACCOUNT PANES, from the left, over the tab bar and under every
+        // toast and modal below: a rule editor raised from the Account page's
+        // Rules has to land on top of the pane it was raised from.
+        .overlay { accountPanes }
         // Toasts ride ABOVE the tab bar, where the Mac's stack rides above the
         // rail. The offset clears the bar at rest; when the bar minimizes on
         // scroll the stack simply sits a little higher than it needs to, which is
@@ -441,13 +461,49 @@ private struct MobileShell: View {
         }
     }
 
-    #if DEBUG
-        private var stagedAccount: Binding<Bool> {
-            Binding(
-                get: { FixtureRoute.shared.account },
-                set: { FixtureRoute.shared.account = $0 })
+    private var door: AccountDoor { .shared }
+
+    /// Exactly one stack may take a thread the store opens. While the Account
+    /// page is up that is ITS stack, not the tab under it.
+    private func syncReaders() {
+        let onPage = door.pane == .page
+        for (key, reader) in readers { reader.active = key == tab && !onPage }
+        accountReader.active = onPage
+    }
+
+    /// The drawer and the page (Views/AccountDoor.swift). The page gets a
+    /// stack of its own, so its panes push the ordinary way inside a pane that
+    /// itself came from the left, and that stack hosts the reader for mail
+    /// opened from in there (a group's history).
+    private var accountPanes: some View {
+        ZStack(alignment: .leading) {
+            if door.pane == .picker {
+                Color.black.opacity(0.42)
+                    .ignoresSafeArea()
+                    .onTapGesture { door.close() }
+                    .transition(.opacity)
+                    .accessibilityLabel("Close accounts")
+                    .accessibilityAddTraits(.isButton)
+                GeometryReader { screen in
+                    LeadingPane(width: min(340, screen.size.width * 0.84), onClose: door.close) {
+                        AccountPicker()
+                    }
+                }
+                .transition(.move(edge: .leading))
+            }
+            if door.pane == .page {
+                LeadingPane(width: nil, dragCloses: false, onClose: door.close) {
+                    NavigationStack {
+                        AccountPage()
+                            .threadDestination(root: true)
+                    }
+                    .environment(accountReader)
+                }
+                .transition(.move(edge: .leading))
+            }
         }
-    #endif
+        .animation(Motion.pane, value: door.pane)
+    }
 
     /// The share sheet's flag, as a Binding, so this file keeps its rule: no
     /// `@Bindable` shadow, every modal presented off a derived binding. There is

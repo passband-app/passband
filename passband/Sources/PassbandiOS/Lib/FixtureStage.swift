@@ -116,6 +116,8 @@
                 }
             case "compose":
                 store.openComposeNew()
+            case "accounts":
+                AccountDoor.shared.pane = .picker
             // THE SENT PAGE, which the practice mailbox leaves empty: nothing
             // in a rehearsal sends. `sent` is the list with an outbox pinned
             // above it (one mail waiting, one that failed); `sent-plain` is

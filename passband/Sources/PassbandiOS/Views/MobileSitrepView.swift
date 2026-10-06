@@ -60,15 +60,12 @@ struct MobileSitrepView: View {
     private static let eyesVisible = 4
     @State private var expanded = false
 
-    /// The account page, pushed. State rather than a link's own, because two
-    /// things open it: the person glyph, and a swipe from left to right.
-    @State private var showAccount = false
     /// When the drag now in flight started, to tell a page swipe from a row's.
     @State private var dragBegan: Date?
 
-    /// LEFT TO RIGHT ANYWHERE ON THE BOARD OPENS THE ACCOUNT PAGE, where the
-    /// mailboxes are: the phone's answer to the Mac's rail of accounts, one
-    /// gesture from the screen the app opens on.
+    /// LEFT TO RIGHT ANYWHERE ON THE BOARD OPENS THE ACCOUNT PICKER: a drawer
+    /// from the left with the mailboxes in it, the phone's answer to the Mac's
+    /// rail of accounts, one gesture from the screen the app opens on.
     ///
     /// EXCEPT ON A MAIL ROW, which has its own use for that direction (reply,
     /// remind, archive). The row's rail is a UIKit pan and this is a SwiftUI
@@ -91,7 +88,7 @@ struct MobileSitrepView: View {
                 // this one do not begin on the same event.
                 guard SwipeRowActivity.lastBegan < began.addingTimeInterval(-0.3) else { return }
                 Haptics.tick()
-                showAccount = true
+                AccountDoor.shared.pane = .picker
             }
     }
 
@@ -148,8 +145,10 @@ struct MobileSitrepView: View {
         // that a glyph is a door and the reason a bare icon still looks tappable.
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
+                // The whole Account page, which arrives from the same side
+                // the glyph is on (see AccountDoor).
                 Button {
-                    showAccount = true
+                    AccountDoor.shared.pane = .page
                 } label: {
                     Image(systemName: "person.crop.circle")
                         .foregroundStyle(Palette.accent)
@@ -177,7 +176,6 @@ struct MobileSitrepView: View {
             }
             .sharedBackgroundVisibility(.hidden)
         }
-        .navigationDestination(isPresented: $showAccount) { AccountPage() }
         .simultaneousGesture(accountSwipe)
         .refreshable {
             _ = await SitrepPoller.shared.pull()

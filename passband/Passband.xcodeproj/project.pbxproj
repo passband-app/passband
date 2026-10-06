@@ -467,6 +467,7 @@
 		F38B78086DC5EBF798FFE3A1 /* Assistant.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1EC7EBBF801C0364D402F94D /* Assistant.swift */; };
 		F407EADA69EC6BA6001EBD5B /* AgentNudge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77F7A4B36E2DEA7F8B1AC50B /* AgentNudge.swift */; };
 		F4D434105490FF1F19B89986 /* AttachmentKinds.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DAF25E856CCAD8284AAA131 /* AttachmentKinds.swift */; };
+		F6478DB23F517992C1B1F5FF /* AccountDoor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6956B39387CC9395FCCBECD2 /* AccountDoor.swift */; };
 		F6CCF6C021CD68BA6BED3944 /* HeroCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20CA62DECFED05021D0C9964 /* HeroCache.swift */; };
 		F7AE2C449EEB366EF93429A1 /* AuthLabels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40EDDA2423A09A989C77CAED /* AuthLabels.swift */; };
 		F7F2772B8DCFEA19D81F022E /* WhatsNewCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0AFCAEC0D83E0E01D0074CE7 /* WhatsNewCard.swift */; };
@@ -635,6 +636,7 @@
 		673B876D08EF2BB9C1FA0E19 /* SettingsSearch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsSearch.swift; sourceTree = "<group>"; };
 		67C63ACC5CBA08B09ABA71B2 /* SearchIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchIntent.swift; sourceTree = "<group>"; };
 		6895E072B54D7FEA646D6903 /* UpdateVerbs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateVerbs.swift; sourceTree = "<group>"; };
+		6956B39387CC9395FCCBECD2 /* AccountDoor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountDoor.swift; sourceTree = "<group>"; };
 		6AB8DA26906DE820ED1255EA /* ShortcutCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShortcutCatalog.swift; sourceTree = "<group>"; };
 		6C9F46E8DA615783DD2BEAF6 /* WireTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WireTypes.swift; sourceTree = "<group>"; };
 		6D18C66DBE79E1F7D55CD6DD /* AppStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStore.swift; sourceTree = "<group>"; };
@@ -1084,6 +1086,7 @@
 		952377540EA52F5885EA1510 /* Views */ = {
 			isa = PBXGroup;
 			children = (
+				6956B39387CC9395FCCBECD2 /* AccountDoor.swift */,
 				FA2F8E5310BCCF203247E428 /* AccountPage.swift */,
 				5A1CE9442DCA54FF7863D7C5 /* AttachmentPreviewiOS.swift */,
 				D284E1994D90CF7CFF06983C /* ChainFoot.swift */,
@@ -1632,6 +1635,7 @@
 				BFBC16B9E116B690313D1B5C /* APIClient.swift in Sources */,
 				93FFF0E02F7D65ADCF4824D9 /* APIError.swift in Sources */,
 				C364DD346E23B1C8E2D85E8C /* APNsEnvironment.swift in Sources */,
+				F6478DB23F517992C1B1F5FF /* AccountDoor.swift in Sources */,
 				542F16866D729BD1E30B6AA6 /* AccountPage.swift in Sources */,
 				57D260FC9FFF00F0F3DB336E /* Accounts.swift in Sources */,
 				778A9FBEDBA350092B770844 /* Actions.swift in Sources */,

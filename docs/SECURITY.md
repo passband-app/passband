@@ -672,6 +672,14 @@ reason), never a title, place or description. The `calendar:` prefix keeps the
 audit listing's join to `messages` (a numeric target) from matching a calendar id
 that starts with digits. The in-app assistant has no tool for any of it.
 
+**What the event pane sends to Apple (client).** The location line of the
+client's event pane suggests places from Apple's MapKit
+(`MKLocalSearchCompleter`, then `MKLocalSearch` for the one picked). The text
+typed into that one field leaves the device for Apple, from the client and
+only once it is two characters long; the title, the times, the notes, the
+calendar and the account do not, the daemon is not involved, and no location
+permission is requested. Google's Places API is not used.
+
 **The token is the union; the slot is the boundary.** Self-host
 `squelchd auth --calendar` stores its token in its own credential slot
 (`CredentialKind::Calendar`). Google unions grants per Cloud project and the consent

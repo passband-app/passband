@@ -1,6 +1,6 @@
 // SIDEBAR — the slim icon rail: Sitrep / Emails / Auth / Rules / Groups on the
-// 1..5 keys, with Calendar second when it is offered (⇧C, off the digits; see
-// `MainView.railViews`); Share + Usage + Settings sit below a divider, out of that sequence
+// digit keys, with Calendar second when it is offered (2, and every later page
+// one higher; see `MainView.railViews`); Share + Usage + Settings sit below a divider, out of that sequence
 // so adding one never renumbers it. Share is the odd one there: it opens a sheet
 // rather than routing, so it carries no selector (see `shareButton`). ONE long-lived pane behind the icons is the selector,
 // moved by GEOMETRY not identity: per-icon glass drags the glyph along and
@@ -316,7 +316,7 @@ private struct RailEdge: Shape {
 private struct RailButton: View {
     @Environment(AppStore.self) private var store
     let view: MainView
-    /// The key the tooltip teaches: a digit, ⇧C, or nothing.
+    /// The key the tooltip teaches: a digit, or nothing.
     let keyHint: String?
     let active: Bool
     let showRings: Bool

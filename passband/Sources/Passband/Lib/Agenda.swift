@@ -26,10 +26,24 @@ enum CalendarGate {
     /// must be on. The second condition is a STOPGAP for a feature flag
     /// system that does not exist yet (docs/CALENDAR.md §11): when it lands,
     /// this line becomes the flag's question and nothing else moves. The rail,
-    /// the Go menu, ⇧C and the route all read it through
+    /// the Go menu, the number keys, ⇧C and the route all read it through
     /// `AppStore.calendarPageAvailable`, so it hides everywhere at once.
     static func pageAvailable(timeline: Bool?, developerMode: Bool) -> Bool {
         timeline == true && developerMode
+    }
+
+    /// THE NUMBER KEYS, WITH THE CALENDAR IN THEM (wave 4, the founder: "make
+    /// calendar 2, all mail 3, etc"). The calendar is second on the rail, so
+    /// while it is offered it is second in the count and every later page is
+    /// one higher. While it is NOT offered the numbers are exactly the ones
+    /// from before it existed: nobody's fingers are renumbered by a page
+    /// they cannot see. Generic so the rule is held by a test without the
+    /// app's own page list.
+    static func numbered<Page>(_ pages: [Page], calendar: Page, offered: Bool) -> [Page] {
+        guard offered, !pages.isEmpty else { return pages }
+        var out = pages
+        out.insert(calendar, at: 1)
+        return out
     }
 
     /// Where the one "Connect calendar" button gets Google's consent link.

@@ -75,6 +75,22 @@ run_suite event-draft \
   Sources/Passband/Lib/EventDraft.swift \
   Tests/EventDraftTests.swift
 
+# Drag to create on the day column: a press and a drag become a span of time.
+# The snap to the quarter hour, the quarter-hour minimum, dragging upward, the
+# clamp at the day's ends, the folded night's own scale, and what counts as a
+# click rather than a sweep.
+run_suite day-sweep \
+  Sources/Passband/Lib/DaySweep.swift \
+  Tests/DaySweepTests.swift
+
+# The location field's lookup, with a fake where MapKit goes: what is asked
+# and when (debounce, two characters), stale answers dropped, arrows and
+# Enter, Escape closing the list and not the pane, and the rule that typed
+# text is replaced only by a pick.
+run_suite place-lookup \
+  Sources/Passband/Lib/PlaceLookup.swift \
+  Tests/PlaceLookupTests.swift
+
 # The real poller against a cancellation-oblivious transport: mailbox switches
 # must detach old requests before the next mailbox starts warming.
 run_suite sitrep-poller \

@@ -2,7 +2,7 @@
 // then stacks, bottom to top: rail + routed main view, side panels, the
 // fullscreen thread viewer, the action layer (toasts, compose, palettes).
 //
-// The global 1..5 / ⌘[ / ⌘] / ⌘K bindings register HERE in the "global"
+// The global digits (1..5, or 1..6 with the calendar) / ⌘[ / ⌘] / ⌘K bindings register HERE in the "global"
 // context, so they compose with whatever context is active rather than being
 // gated by it — nav must work even from inside a modal panel.
 
@@ -285,7 +285,7 @@ private struct ShellWatchers: View {
             .onChange(of: store.activeView) { _, view in
                 if view != .calendar {
                     store.closeCalendarConnectForNavigation()
-                    // So do the event editor and the delete question: they
+                    // So do the event pane and the delete question: they
                     // are about the page being left.
                     store.closeEventEditor()
                     store.cancelDeleteEvent()
@@ -324,7 +324,14 @@ struct MainShell: View {
             // How much of the page's width is spoken for by a surface beside
             // it, named only so its change can be told NOT to animate — see
             // the `.animation(nil, value:)` on the page and on the reader.
-            let pageInset: CGFloat = store.composeOpen && !store.composeExpanded ? composeWidth : 0
+            //
+            // ONE PANE BESIDE THE PAGE AT A TIME: the composer (unless it is
+            // opened out over everything), or the calendar's event pane, which
+            // takes the same half the same way. The store keeps them from
+            // both being open (`AppStore.openEventPane`,
+            // `yieldEventPaneToCompose`).
+            let paneBeside = (store.composeOpen && !store.composeExpanded) || store.eventPaneOpen
+            let pageInset: CGFloat = paneBeside ? composeWidth : 0
             let readerInset: CGFloat = (store.sideView.isOpen ? sidePanelWidth : 0) + pageInset
 
         ZStack(alignment: .topLeading) {
@@ -377,7 +384,8 @@ struct MainShell: View {
                 // so that opening it out to full screen moves ONE view rather
                 // than swapping in a second one (which would drop the caret,
                 // the focus and the editor's undo stack on every toggle).
-                if store.composeOpen && !store.composeExpanded {
+                // The calendar's event pane reserves the same strip.
+                if paneBeside {
                     Color.clear
                         .frame(width: composeWidth)
                         .allowsHitTesting(false)
@@ -520,8 +528,10 @@ struct MainShell: View {
                     }
                     // Same reservation for the compose pane: `c` from the reader
                     // opens it in the layout BELOW this layer, and the reader
-                    // insetting past it is what keeps it visible.
-                    if store.composeOpen && !store.composeExpanded {
+                    // insetting past it is what keeps it visible. The same
+                    // for the event pane, when a ghost's mail is opened from
+                    // the month beside it.
+                    if paneBeside {
                         Color.clear
                             .frame(width: composeWidth)
                             .allowsHitTesting(false)
@@ -561,6 +571,22 @@ struct MainShell: View {
                 .transition(.move(edge: .trailing).combined(with: .opacity))
                 .zIndex(store.composeExpanded ? 25 : 5)
             }
+
+            // THE CALENDAR'S EVENT PANE, in the composer's strip and the
+            // composer's layer, arriving the composer's way: a new event or
+            // an edit is written beside the month, not over it. Keyed by the
+            // request, so a new one is a fresh form and not the last one's
+            // fields. Only for the account it was opened under.
+            if let request = store.calendarEditor, store.eventPaneOpen {
+                HStack(spacing: 0) {
+                    Spacer(minLength: 0)
+                    CalendarEventPane(request: request)
+                        .id(request.id)
+                        .frame(width: composeWidth)
+                }
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+                .zIndex(5)
+            }
             }
             .blur(radius: store.modalOverlayOpen ? 9 : 0)
 
@@ -582,6 +608,7 @@ struct MainShell: View {
         // keystroke, and animating that would smear typing.
         .animation(.smooth(duration: 0.22), value: store.composeOpen)
         .animation(.smooth(duration: 0.22), value: store.composeExpanded)
+        .animation(.smooth(duration: 0.22), value: store.eventPaneOpen)
         // threadId is deliberately NOT animated HERE — opening a thread is a
         // jump. The one motion it has is the done+next flight, and that one is
         // animated at the call site, where the direction is known.
@@ -609,7 +636,7 @@ struct MainShell: View {
         }
     }
 
-    /// 1..5 view nav + ⌘[ back / ⌘] forward + ⌘K ask bar. The ⌘ chords use the
+    /// Digit view nav + ⌘[ back / ⌘] forward + ⌘K ask bar. The ⌘ chords use the
     /// `meta` flag so a bare "[" / "]" never triggers them; `allowInInput` keeps
     /// them working with a search/compose field focused, since a chord is not a
     /// typed character.
@@ -633,15 +660,28 @@ struct MainShell: View {
                 KeyBinding("\\", "toggle light/dark theme") { Prefs.shared.flipTheme() },
             ]
         }
-        var bindings: [KeyBinding] = MainView.mainViews.enumerated().map { index, view in
-            KeyBinding("\(index + 1)", "go to \(view.rawValue)") { store.setView(view) }
+        // THE DIGITS FOLLOW THE RAIL: Sitrep 1, then Calendar 2 while it is
+        // offered and every later page one higher; with the gate closed the
+        // numbers are the ones from before the calendar existed
+        // (`MainView.numberedViews`). DECLINING, and the order is asked for
+        // AT KEY TIME rather than built here: reading the gate in this body
+        // would make the whole shell a reader of the stats poll. One more
+        // digit is bound than there are pages without the calendar; it
+        // passes on while the calendar is not offered.
+        var bindings: [KeyBinding] = (1...MainView.numberKeyCount).map { number in
+            KeyBinding(declining: "\(number)", "go to page \(number)") {
+                let pages = MainView.numberedViews(calendar: store.calendarPageAvailable)
+                guard pages.indices.contains(number - 1) else { return false }
+                store.setView(pages[number - 1])
+                return true
+            }
         }
-        // ⇧C OPENS THE CALENDAR, off the digits so nothing renumbers. EXACT
-        // CASE, so a bare `c` (compose) is untouched; the shifted letter used
-        // to reach compose only through the dispatcher's case fold, and now
-        // means this instead wherever the page is offered. DECLINING, and the
-        // gate is asked at key time rather than here: reading it in this body
-        // would make the whole shell a reader of the stats poll. With the gate
+        // ⇧C OPENS THE CALENDAR TOO, as it did before the page had a digit.
+        // EXACT CASE, so a bare `c` (compose) is untouched; the shifted
+        // letter used to reach compose only through the dispatcher's case
+        // fold, and now means this instead wherever the page is offered.
+        // DECLINING, the gate asked at key time for the same reason as the
+        // digits above. With the gate
         // closed, and while a sign-in code is on screen (whose modal copies on
         // `c`, and so on ⇧C through the fold), the key passes on as before.
         bindings.append(

@@ -57,20 +57,28 @@ enum MainView: String, Sendable, Hashable, CaseIterable {
     /// The BOTTOM rail group, pinned below a divider.
     static let bottomViews: [MainView] = [.usage, .settings]
 
-    /// THE TOP RAIL AS DRAWN, which is `mainViews` plus whatever sits in it
-    /// without a digit. Calendar is the one such: second on the rail (under
-    /// Sitrep, above Emails) and in the Go menu, but OFF the numbering, so
-    /// showing it renumbers nothing and the bare digits keep landing where
-    /// they always have. Its key is ⇧C. `key` is the hint the rail's tooltip
-    /// prints; the digit bindings themselves are still built from `mainViews`
-    /// alone (RootView.globalBindings).
+    /// THE NUMBER KEYS AS THEY ARE RIGHT NOW: `mainViews`, with Calendar
+    /// second while it is offered (Sitrep 1, Calendar 2, Emails 3 and every
+    /// later page one higher), and exactly `mainViews` while it is not, so
+    /// the gate being closed renumbers nobody. The rule is
+    /// `CalendarGate.numbered`. ⇧C opens the calendar as well, as it did
+    /// before it had a digit.
     ///
-    /// `calendar` is `AppStore.calendarPageAvailable`, passed in so the rail
-    /// and the menu ask the gate the same way and hide it together.
+    /// `calendar` is `AppStore.calendarPageAvailable`, passed in so the rail,
+    /// the menu and the keys ask the gate the same way and move together.
+    static func numberedViews(calendar: Bool) -> [MainView] {
+        CalendarGate.numbered(mainViews, calendar: .calendar, offered: calendar)
+    }
+
+    /// The most digits the keys ever bind: one per numbered page with the
+    /// calendar offered. The last one declines while it is not.
+    static var numberKeyCount: Int { mainViews.count + 1 }
+
+    /// THE TOP RAIL AS DRAWN, each page with the digit that opens it: the
+    /// hint the rail's tooltip prints, in the same order the keys are bound
+    /// in (RootView.globalBindings).
     static func railViews(calendar: Bool) -> [(view: MainView, key: String)] {
-        var rows = mainViews.enumerated().map { (view: $0.element, key: "\($0.offset + 1)") }
-        if calendar { rows.insert((view: .calendar, key: "⇧C"), at: 1) }
-        return rows
+        numberedViews(calendar: calendar).enumerated().map { (view: $0.element, key: "\($0.offset + 1)") }
     }
 
     var label: String {
@@ -639,9 +647,21 @@ final class AppStore {
     /// A self-host daemon has been asked for a consent link and has not
     /// answered yet: Connect does nothing meanwhile, so one press is one tab.
     var calendarConnectStarting = false
-    /// The event editor, while it is up (`CalendarEditorRequest`): a modal
-    /// card in the action layer, registered in `modalOverlayOpen`.
+    /// The event pane, while it is open (`CalendarEditorRequest`): which
+    /// event, and what its fields opened with. A PANE beside the page, like
+    /// the composer (Views/CalendarEventPane.swift), so it is NOT in
+    /// `modalOverlayOpen`: nothing blurs and the month beside it stays live.
+    /// Written only on open and close, so the shell may read it
+    /// (`eventPaneOpen`).
     var calendarEditor: CalendarEditorRequest?
+    /// The pane's fields as they stand, rewritten on every keystroke. Apart
+    /// from the request for the reason `compose` is apart from `composeOpen`:
+    /// the shell must not re-evaluate while somebody types a title. Read by
+    /// the pane, and by the calendar page for the draft's chip on the grid.
+    var calendarDraft: EventDraft?
+    /// A sweep is live on the day column (drag to create): Escape cancels it
+    /// through this before it does anything else. Bookkeeping, never drawn.
+    @ObservationIgnored var calendarSweepCancel: (() -> Void)?
     /// The one-question card before an event is deleted from Google, raised
     /// from the detail pane (the editor asks in its own footer instead).
     var calendarDeleteAsk: CalendarDeleteAsk?
@@ -1841,6 +1861,8 @@ final class AppStore {
         // The editor and the delete question were about the last mailbox's
         // calendars, and a write still out answers into nothing.
         calendarEditor = nil
+        calendarDraft = nil
+        calendarSweepCancel = nil
         calendarDeleteAsk = nil
         calendarWriting = false
         calendarLoadGeneration &+= 1
@@ -2314,8 +2336,8 @@ final class AppStore {
     /// True while a modal owns the screen; the surfaces under it blur so the modal
     /// reads as focus rather than as a new page. Toasts are deliberately absent (a
     /// toast must never defocus the app), as are the side panels, the thread
-    /// viewer, and the compose pane — those are surfaces you work beside, not
-    /// overlays on one. The reader's `inlineReply` is absent for the same reason:
+    /// viewer, the compose pane and the calendar's event pane: those are
+    /// surfaces you work beside, not overlays on one. The reader's `inlineReply` is absent for the same reason:
     /// it is part of the viewer, and blurring the email you are answering would
     /// be absurd.
     /// The tour joins on `wantsBlur` alone: its three talking steps are modals
@@ -2328,7 +2350,7 @@ final class AppStore {
             || groupEditor != nil
             || !authQueue.isEmpty || retriage != nil || retriageAsk != nil
             || reconnectAsk != nil || calendarCardUp
-            || calendarEditor != nil || calendarDeleteAsk != nil
+            || calendarDeleteAsk != nil
             || tour.wantsBlur || whatsNew.active
     }
 
@@ -3443,6 +3465,9 @@ final class AppStore {
     }
 
     func openCompose(_ state: ComposeState) {
+        // ONE PANE AT A TIME: the composer and the calendar's event pane
+        // claim the same half of the window (`yieldEventPaneToCompose`).
+        guard yieldEventPaneToCompose() else { return }
         var next = state
         // Seeded HERE rather than by the caller, so every way into a composer
         // starts at the account's default and none can forget to.
@@ -3509,6 +3534,9 @@ final class AppStore {
             }
             return
         }
+        // Asked here as well as in `openCompose`: a composer the event pane
+        // refused must not go looking for a draft to restore into nothing.
+        guard yieldEventPaneToCompose() else { return }
         let state = ComposeState()
         openCompose(state)
         let opened = state.page

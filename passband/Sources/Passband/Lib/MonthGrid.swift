@@ -10,10 +10,18 @@
 // arguments; nothing here reads `Date()` or `Calendar.current`.
 //
 // A CONVENTIONAL MONTH (wave 3, the founder: "lets do top down like gmail
-// does"). Each cell lists its day top-down: trips and stays first, as named
-// bars across the cells they cover, in lanes every cell of the row keeps
-// free; then the day's own all-day items; then its timed items by start, one
-// row each. Whatever does not fit folds into "+N more", which opens the day.
+// does"). Each cell lists its day top-down: trips and stays as named bars
+// across the cells they cover, each in a lane of its week row; the day's own
+// all-day items; then its timed items by start, one row each. Whatever does
+// not fit folds into "+N more", which opens the day.
+//
+// NO GAP UNDER THE DATE (wave 4, the founder: "why do some events start right
+// under the date and others have a gap? no gap pls"). A bar holds its lane
+// only over the days it covers. A cell's own items take the rows left free,
+// top-down, so a day a trip does not reach starts directly under its date,
+// and a day under a bar in the second lane fills the first. The one hole
+// left is a day with a bar lower down and nothing of its own to put above
+// it: the bar stays straight rather than jogging up (`MonthGrid.holes`).
 // The hour strips of wave 2 are gone from the grid; their arithmetic lives on
 // for the day column (`segments`, `nowMark`), whose hours are still a picture
 // of a wall clock.
@@ -81,11 +89,15 @@ struct MonthDay: Hashable, Sendable, Identifiable {
     let day: Date
     /// False for the greyed days of the month before and after.
     let inMonth: Bool
-    /// What the cell lists under its row's span lanes, top-down: this day's
-    /// own all-day items, then the timed items that START this day, by start.
-    /// A timed item that runs past midnight is listed once, where it begins
-    /// (the day column shows its tail the morning after).
+    /// What the cell lists of its own, top-down: this day's all-day items,
+    /// then the timed items that START this day, by start. A timed item that
+    /// runs past midnight is listed once, where it begins (the day column
+    /// shows its tail the morning after).
     let items: [AgendaItem]
+    /// The row under the date each of `items` takes, in step with it and
+    /// ascending: the rows no span's bar covers on this day, from the top.
+    /// Row 0 is directly under the date.
+    let rows: [Int]
     /// Unlikely ghosts that start this day: not drawn, counted.
     let unlikely: [AgendaItem]
 
@@ -93,11 +105,13 @@ struct MonthDay: Hashable, Sendable, Identifiable {
 }
 
 /// What one cell shows in the room it has: the first `shown` of its items,
-/// then "+`more` more" when anything is left over (items that did not fit,
-/// and trips that found no lane over this day).
+/// then "+`more` more" in row `moreRow` when anything is left over (items
+/// that did not fit, and trips that found no lane over this day).
 struct CellFold: Hashable, Sendable {
     let shown: Int
     let more: Int
+    /// The row the fold's own line takes; nil when nothing folds.
+    let moreRow: Int?
 }
 
 /// One span's bar inside one week row.
@@ -121,8 +135,8 @@ struct MonthWeek: Hashable, Sendable, Identifiable {
     /// Per column: spans covering that day that found no lane, so the cell
     /// can count them in its "+N more".
     let overflow: [Int]
-    /// The span lanes this row uses: every cell in it lists its own items
-    /// below them, so a trip's bar never lands on a dinner.
+    /// The span lanes this row uses anywhere along it. A cell keeps a lane
+    /// free only where a bar actually covers its day (`MonthDay.rows`).
     let lanes: Int
 
     var id: Date { days.first?.day ?? .distantPast }
@@ -179,8 +193,15 @@ enum MonthGrid {
     /// The daemon's default window after `from` (1 day behind + 90 ahead),
     /// which is what the agenda asks for by sending `from` alone.
     static let agendaWindowDays = 91
-    /// Span lanes a row may use; more than this is counted, not drawn.
-    static let maxLanes = 2
+    /// Span lanes a row may ASSIGN. A ceiling against a pathological month,
+    /// not the layout's rule: how many bars a row actually draws is decided
+    /// by the room its cells have (`fit`). It was 2 while every cell kept the
+    /// row's lanes free; a third trip was then counted as "+1 more" over
+    /// cells with rows to spare.
+    static let maxLanes = 6
+    /// The lanes the grid's minimum row height makes room for. More bars than
+    /// this are drawn only when the cells are tall enough for them.
+    static let floorLanes = 2
 
     // MARK: days
 
@@ -300,7 +321,10 @@ enum MonthGrid {
     }
 
     /// The order spans claim lanes in: earliest first, the longer of two
-    /// starting together first, then the agenda's own order.
+    /// starting together first, then the agenda's own order. GREEDY BY START,
+    /// and a lane is free again the day after the span in it ends, in the
+    /// same week row: a trip that ends on the 9th and one that starts on the
+    /// 10th share the first lane.
     private static func spanPrecedes(_ a: AgendaItem, _ b: AgendaItem) -> Bool {
         if a.start != b.start { return a.start < b.start }
         if a.effectiveEnd != b.effectiveEnd { return a.effectiveEnd > b.effectiveEnd }
@@ -398,26 +422,100 @@ enum MonthGrid {
         spans.sort(by: spanPrecedes)
         var weeks: [MonthWeek] = []
         for row in stride(from: 0, to: days.count, by: 7) {
-            let rowDays = (row..<min(row + 7, days.count)).map { i in
-                MonthDay(
-                    day: days[i],
-                    inMonth: calendar.isDate(days[i], equalTo: first, toGranularity: .month),
-                    items: listed[i].sorted(by: Agenda.precedes),
-                    unlikely: unlikely[i].sorted(by: Agenda.precedes))
-            }
             let (bars, overflow) = spanRow(
                 spans, rowStart: days[row], calendar: calendar, maxLanes: maxLanes)
+            let rowDays = (row..<min(row + 7, days.count)).map { i in
+                let own = listed[i].sorted(by: Agenda.precedes)
+                return MonthDay(
+                    day: days[i],
+                    inMonth: calendar.isDate(days[i], equalTo: first, toGranularity: .month),
+                    items: own,
+                    rows: cellRows(count: own.count, taken: barLanes(bars, column: i - row)),
+                    unlikely: unlikely[i].sorted(by: Agenda.precedes))
+            }
             let lanes = (bars.map(\.lane).max() ?? -1) + 1
             weeks.append(MonthWeek(days: rowDays, spans: bars, overflow: overflow, lanes: lanes))
         }
         return MonthModel(month: first, weeks: weeks)
     }
 
+    // MARK: a cell's rows
+
+    /// The lanes a week row's bars take over one of its columns.
+    static func barLanes(_ bars: [SpanSegment], column: Int) -> [Int] {
+        bars.filter { $0.firstColumn <= column && column <= $0.lastColumn }.map(\.lane).sorted()
+    }
+
+    /// The rows a cell's own items take: the first `count` rows that no bar
+    /// covers, top-down. With no bar over the day that is 0, 1, 2...; under
+    /// a bar in the second lane the first item goes ABOVE it, in the first.
+    static func cellRows(count: Int, taken: [Int]) -> [Int] {
+        var out: [Int] = []
+        out.reserveCapacity(count)
+        let taken = Set(taken)
+        var row = 0
+        while out.count < count {
+            if !taken.contains(row) { out.append(row) }
+            row += 1
+        }
+        return out
+    }
+
+    /// Rows left empty ABOVE something in a cell: the hole that cannot be
+    /// packed away. It needs a bar in a lower lane, a free lane above it, and
+    /// too few items of the day's own to fill that lane (lane 0's trip ended
+    /// yesterday, lane 1's runs on, and today has nothing else). The bar is
+    /// kept straight rather than jogged up a lane mid-row.
+    static func holes(rows: [Int], barLanes: [Int]) -> Int {
+        let used = Set(rows).union(barLanes)
+        guard let last = used.max() else { return 0 }
+        return (last + 1) - used.count
+    }
+
+    /// The same, per day of a week row.
+    static func holes(_ week: MonthWeek) -> [Int] {
+        week.days.indices.map { c in
+            holes(rows: week.days[c].rows, barLanes: barLanes(week.spans, column: c))
+        }
+    }
+
+    // MARK: a week row in the room it has
+
+    /// A week row as drawn at one cell height: the bars that fit, the trips
+    /// that did not (per column, for "+N more"), and each day's own rows
+    /// around the bars that are drawn.
+    struct WeekFit: Hashable, Sendable {
+        let bars: [SpanSegment]
+        let overflow: [Int]
+        let rows: [[Int]]
+    }
+
+    /// A CELL FOLDS ONLY WHEN ITS ROWS RUN OUT. Every bar whose lane fits is
+    /// drawn; the cell's last row is never a bar's (it is where "+N more"
+    /// goes when a day overflows), so a bar is drawn in lanes 0 to slots - 2.
+    /// A bar past that is hidden for its whole length and counted on each day
+    /// it covers, and the days' own rows are laid around the bars that ARE
+    /// drawn, so a hidden bar leaves no hole.
+    static func fit(_ week: MonthWeek, slots: Int) -> WeekFit {
+        let limit = max(0, slots - 1)
+        let bars = week.spans.filter { $0.lane < limit }
+        var overflow = week.days.indices.map { $0 < week.overflow.count ? week.overflow[$0] : 0 }
+        for hidden in week.spans where hidden.lane >= limit {
+            for c in hidden.firstColumn...hidden.lastColumn where c < overflow.count { overflow[c] += 1 }
+        }
+        let rows = week.days.indices.map { c in
+            cellRows(count: week.days[c].items.count, taken: barLanes(bars, column: c))
+        }
+        return WeekFit(bars: bars, overflow: overflow, rows: rows)
+    }
+
     // MARK: a cell's room
 
-    /// How many rows fit under a cell's span lanes: the cell's height less
-    /// its date band, its foot and the lanes, in whole rows. Every number is
-    /// in points, as drawn (the view's metrics, scaled with density).
+    /// How many rows fit in a cell: its height less its date band and its
+    /// foot (and `lanes` rows kept back, which the month no longer does: a
+    /// bar is one of the cell's rows now, so it passes 0), in whole rows.
+    /// Every number is in points, as drawn (the view's metrics, scaled with
+    /// density).
     static func slots(
         cellHeight: Double, lanes: Int, numberBand: Double, rowHeight: Double, rowGap: Double,
         foot: Double
@@ -428,16 +526,21 @@ enum MonthGrid {
         return max(0, Int(((room + rowGap) / step).rounded(.down)))
     }
 
-    /// What a cell shows. Everything, when everything fits; otherwise all but
-    /// one of its rows and "+N more" in the last, N counting the items left
-    /// and the trips that found no lane. A cell with no room shows nothing
-    /// and still counts.
-    static func fold(items: Int, hiddenSpans: Int, slots: Int) -> CellFold {
-        let total = items + hiddenSpans
-        guard total > 0 else { return CellFold(shown: 0, more: 0) }
-        if hiddenSpans == 0, items <= slots { return CellFold(shown: items, more: 0) }
-        let shown = max(0, min(items, slots - 1))
-        return CellFold(shown: shown, more: total - shown)
+    /// What a cell shows. Everything, when everything fits: its own items in
+    /// their `rows`, around the bars in `barLanes`. Otherwise the fold takes
+    /// a row of its own ("+N more", N counting the items left and the trips
+    /// that found no lane): the cell's last row, or the first row under
+    /// everything when there is still room and only lane-less trips are left
+    /// over. Items in rows above it stay shown. A cell with no room shows
+    /// nothing and still counts.
+    static func fold(rows: [Int], barLanes: [Int] = [], hiddenSpans: Int, slots: Int) -> CellFold {
+        let total = rows.count + hiddenSpans
+        guard total > 0 else { return CellFold(shown: 0, more: 0, moreRow: nil) }
+        let used = max(rows.last ?? -1, barLanes.max() ?? -1) + 1
+        if hiddenSpans == 0, used <= slots { return CellFold(shown: rows.count, more: 0, moreRow: nil) }
+        let moreRow = max(0, min(used, slots - 1))
+        let shown = rows.prefix { $0 < moreRow }.count
+        return CellFold(shown: shown, more: total - shown, moreRow: moreRow)
     }
 
     /// A cell's width: a seventh of the grid's, whatever that is now. The

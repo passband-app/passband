@@ -104,12 +104,9 @@ struct ActionLayer: View {
             if let ask = store.calendarConnectAsk, store.calendarCardUp {
                 CalendarConnectCard(ask: ask)
             }
-            // The event editor and the delete question, the calendar page's
-            // own cards, for the account they were raised under. Keyed by the
-            // request: a new one is a fresh form, not the last one's fields.
-            if let request = store.calendarEditor, request.epoch == store.epoch {
-                CalendarEventEditor(request: request).id(request.id)
-            }
+            // The delete question, the calendar page's own card, for the
+            // account it was raised under. (The event editor is not here any
+            // more: it is a pane in the shell's layout, like the composer.)
             if let ask = store.calendarDeleteAsk, ask.epoch == store.epoch {
                 CalendarDeleteConfirm(ask: ask)
             }
@@ -383,13 +380,18 @@ struct ShortcutsOverlay: View {
             ]),
     ]
 
-    /// The fixed list, plus ⇧C under Navigate and the page's own keys when
-    /// the calendar is offered, so neither is advertised where it does nothing.
+    /// The fixed list, with the calendar in the digits (and ⇧C) under
+    /// Navigate and the page's own keys when the calendar is offered, so
+    /// nothing is advertised where it does nothing.
     private var groups: [Group] {
         guard calendar else { return Self.groups }
         var out = Self.groups.map { group in
             guard group.title == "Navigate" else { return group }
             var g = group
+            // The digits follow the rail: Calendar is 2 and the rest move up.
+            g.items[0] = (
+                ["1", "2", "3", "4", "5", "6"], "sitrep · calendar · emails · auth · rules · groups"
+            )
             g.items.insert((["⇧C"], "calendar"), at: 1)
             return g
         }
@@ -404,6 +406,7 @@ struct ShortcutsOverlay: View {
                     (["x"], "dismiss"),
                     (["n"], "new event"),
                     (["e"], "edit event"),
+                    (["⌘↵"], "save the event"),
                     (["⌫"], "delete event"),
                     (["←", "→", "↑", "↓"], "month: move the day"),
                     (["[", "]"], "month: previous / next"),

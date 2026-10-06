@@ -31,6 +31,9 @@ struct EventDraftTests {
         validation()
         summaries()
         newDrafts()
+        sweptDrafts()
+        aClickedDayMovesTheDraft()
+        theDraftOnTheGrid()
         editingRoundTrips()
         patchesSendOnlyWhatMoved()
         writePaths()
@@ -243,6 +246,91 @@ struct EventDraftTests {
         for d in [today, later, next] {
             expect(problem(d.withTitle("x")) == nil, "a new draft saves as soon as it has a title")
         }
+    }
+
+    // MARK: wave 4: the pane's draft
+
+    /// A span swept on the day column opens the pane with those times.
+    static func sweptDrafts() {
+        func swept(_ a: Int, _ b: Int) -> EventDraft {
+            EventForm.newDraft(
+                day: day("2026-10-08"), startMinutes: a, endMinutes: b, now: now, calendarId: "primary",
+                calendar: cal)
+        }
+        let afternoon = swept(14 * 60 + 15, 15 * 60 + 30)
+        expect(afternoon.date == "Thu Oct 8" && afternoon.start == "2:15pm" && afternoon.end == "3:30pm",
+               "the day and the two times, as the form prints them")
+        expect(afternoon.calendarId == "primary" && !afternoon.allDay && afternoon.endDate.isEmpty,
+               "timed, on the default calendar")
+        let w = wire(afternoon.withTitle("x"))
+        expect(w?.start == "2026-10-08T14:15:00-07:00" && w?.end == "2026-10-08T15:30:00-07:00",
+               "and it saves exactly the span swept")
+        let late = swept(23 * 60, 1440)
+        expect(late.start == "11pm" && late.end == "12am", "a sweep to the day's foot ends at midnight")
+        expect(wire(late.withTitle("x"))?.end == "2026-10-09T00:00:00-07:00", "which is the next day's first instant")
+        let early = swept(0, 15)
+        expect(early.start == "12am" && early.end == "12:15am" && problem(early.withTitle("x")) == nil,
+               "the day's first quarter hour saves")
+    }
+
+    /// A day clicked on the grid beside the pane sets the draft's date.
+    static func aClickedDayMovesTheDraft() {
+        func moved(_ d: EventDraft, _ to: String) -> EventDraft {
+            EventForm.moved(d, to: day(to), today: now, calendar: cal)
+        }
+        let dinner = moved(draft(), "2026-10-14")
+        expect(dinner.date == "Wed Oct 14" && dinner.start == "7:45pm" && dinner.end == "9pm",
+               "the day moves and the times stay")
+        expect(dinner.title == "Dreamers Dinner" && dinner.endDate.isEmpty, "nothing else changes")
+        let trip = moved(draft(date: "Oct 14", allDay: true, endDate: "Oct 19"), "2026-10-21")
+        expect(trip.date == "Wed Oct 21" && trip.endDate == "Mon Oct 26", "a run of days keeps its length")
+        let oneDay = moved(draft(allDay: true), "2026-10-21")
+        expect(oneDay.endDate.isEmpty, "a single all-day stays single")
+        let broken = moved(draft(date: "Oct 14", allDay: true, endDate: "Octember"), "2026-10-21")
+        expect(broken.date == "Wed Oct 21" && broken.endDate == "Octember",
+               "an end day that does not read is left for the form to say so")
+        let nextYear = moved(draft(), "2027-01-05")
+        expect(nextYear.date == "Tue Jan 5 2027", "another year says its year")
+        let overnight = moved(draft(date: "Oct 14", start: "6:05pm", end: "8am", endDate: "Oct 16"), "2026-10-20")
+        expect(overnight.date == "Tue Oct 20" && overnight.endDate == "Thu Oct 22", "a timed run of days moves whole")
+    }
+
+    /// The draft is drawn on the month as a row of its own, where it would
+    /// land, and stands in for the event being edited.
+    static func theDraftOnTheGrid() {
+        func row(_ d: EventDraft, color: String? = "#039be5") -> AgendaItem? {
+            EventForm.provisional(d, color: color, today: now, calendar: cal)
+        }
+        let dinner = row(draft())
+        expect(dinner?.id == EventForm.provisionalId, "one id, whatever is typed")
+        expect(dinner?.title == "Dreamers Dinner" && dinner?.start == at("2026-10-08T19:45:00-07:00")
+               && dinner?.end == at("2026-10-08T21:00:00-07:00") && dinner?.allDay == false,
+               "on the day and at the times the fields say")
+        expect(dinner?.event?.color == "#039be5", "in the chosen calendar's colour")
+        expect(dinner?.fill == .outline && dinner?.isGhost == false,
+               "an empty container: it is not on the calendar yet")
+        expect(row(draft(""))?.title == "New event", "an untitled draft still has a name on its chip")
+        expect(row(draft(date: "Oct 14"))?.start == at("2026-10-14T19:45:00-07:00"), "it moves with the date")
+        expect(row(draft(start: "8pm", end: "10pm"))?.start == at("2026-10-08T20:00:00-07:00"), "and the time")
+        expect(row(draft(), color: "#f4511e")?.event?.color == "#f4511e", "and recolours with the calendar")
+        expect(row(draft(date: "someday")) == nil && row(draft(start: "7pm", end: "7pm")) == nil,
+               "while the times do not read there is no chip, not a wrong one")
+        let trip = row(draft(date: "Oct 14", allDay: true, endDate: "Oct 19"))
+        expect(trip?.allDay == true && trip?.start == day("2026-10-14") && trip?.end == day("2026-10-20"),
+               "an all-day run covers through its last day")
+
+        let lunch = event("l", title: "Lunch", start: "2026-10-08T12:00:00-07:00", end: "2026-10-08T13:00:00-07:00")
+        let original = event(start: "2026-10-08T19:45:00-07:00", end: "2026-10-08T21:00:00-07:00")
+        let feed = [lunch, original].compactMap { Agenda.item($0, calendar: cal) }
+        let creating = EventForm.withProvisional(feed, dinner, editing: nil)
+        expect(creating.map(\.id) == feed.map(\.id) + [EventForm.provisionalId], "a new event's chip is added")
+        let editing = EventForm.withProvisional(feed, row(draft(date: "Oct 9")), editing: original)
+        expect(editing.map(\.id) == [Agenda.itemId(lunch), EventForm.provisionalId],
+               "an edit's chip stands in for the event, which is not drawn twice")
+        expect(EventForm.withProvisional(feed, nil, editing: original).map(\.id) == feed.map(\.id),
+               "and with no chip (the times do not read) the event stays where it was")
+        expect(EventForm.withProvisional(creating, dinner, editing: nil).filter { $0.id == EventForm.provisionalId }.count == 1,
+               "never two drafts")
     }
 
     // MARK: editing

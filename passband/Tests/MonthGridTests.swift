@@ -50,6 +50,10 @@ struct MonthGridTests {
         theRequestedRange()
         nowOnTheStrip()
         aCellListsTopDown()
+        aLaneIsFreeTheDayAfterItsSpanEnds()
+        noGapUnderTheDate()
+        aHoleThatCannotBePacked()
+        aCellFoldsOnlyWhenItsRowsRunOut()
         theCellFold()
         cellsFollowTheContainersWidth()
         nowInTodaysList()
@@ -354,12 +358,13 @@ struct MonthGridTests {
     /// cells it would have covered; one that starts after the first ends
     /// takes the first lane back.
     static func spanLanesAndOverflow() {
-        let model = build([
+        // With the ceiling at two, as it was: the third is counted.
+        let model = MonthGrid.build(items([
             ghost(1, "Tahoe", start: "2026-10-19", end: "2026-10-22", allDay: true, commitment: .committed),
             ghost(2, "Conference", start: "2026-10-20", end: "2026-10-21", allDay: true, commitment: .committed),
             ghost(3, "Guests", start: "2026-10-21", end: "2026-10-23", allDay: true, commitment: .committed),
             ghost(4, "Camping", start: "2026-10-24", end: "2026-10-25", allDay: true, commitment: .committed),
-        ])
+        ]), month: month("2026-10-15"), calendar: cal, maxLanes: 2)
         let row = model.weeks[3]
         func lane(_ t: String) -> Int? { row.spans.first { $0.item.title == t }?.lane }
         expect(lane("Tahoe") == 0, "the earliest takes the first lane")
@@ -555,20 +560,266 @@ struct MonthGridTests {
                "at exactly the threshold the time stays")
     }
 
+    // MARK: no gap under the date (wave 4)
+
+    static func trip(_ id: Int, _ title: String, _ from: String, _ to: String) -> TimelineGhost {
+        ghost(id, title, start: from, end: to, allDay: true, commitment: .committed)
+    }
+
+    static func dinner(_ id: Int, _ title: String, on d: String, at time: String = "19:00") -> TimelineGhost {
+        ghost(id, title, start: "\(d)T\(time):00-07:00", commitment: .committed)
+    }
+
+    /// The founder's screenshot: one trip ends on Friday the 9th and another
+    /// starts on Saturday the 10th. They share the first lane, in the same
+    /// week row, and both sit directly under their dates.
+    static func aLaneIsFreeTheDayAfterItsSpanEnds() {
+        let model = build([
+            trip(1, "Conference", "2026-10-07", "2026-10-09"),
+            trip(2, "Tahoe", "2026-10-10", "2026-10-11"),
+        ])
+        let row = model.weeks[1]
+        func bar(_ t: String) -> SpanSegment? { row.spans.first { $0.item.title == t } }
+        expect(bar("Conference")?.lane == 0 && bar("Tahoe")?.lane == 0,
+               "a span ending on the 9th and one starting on the 10th share lane 0")
+        expect(bar("Conference")?.lastColumn == 4 && bar("Tahoe")?.firstColumn == 5, "Friday, then Saturday")
+        expect(row.lanes == 1, "so the row uses one lane, not two")
+
+        // Greedy by start, the longer first when two start together.
+        let together = build([
+            trip(1, "Short", "2026-10-06", "2026-10-07"),
+            trip(2, "Long", "2026-10-06", "2026-10-09"),
+            trip(3, "Later", "2026-10-08", "2026-10-10"),
+        ]).weeks[1]
+        func lane(_ t: String) -> Int? { together.spans.first { $0.item.title == t }?.lane }
+        expect(lane("Long") == 0 && lane("Short") == 1, "starting together, the longer takes the first lane")
+        expect(lane("Later") == 1, "and the third takes the lane the short one left the day before")
+        // Touching is not free: a span that starts the day another ENDS
+        // overlaps it on that day.
+        let touching = build([
+            trip(1, "A", "2026-10-06", "2026-10-08"),
+            trip(2, "B", "2026-10-08", "2026-10-09"),
+        ]).weeks[1]
+        expect(touching.spans.map(\.lane).sorted() == [0, 1], "sharing a day is two lanes")
+    }
+
+    /// A bar holds its lane only over the days it covers, and a day's own
+    /// items fill what is free above before going below.
+    static func noGapUnderTheDate() {
+        // What was on screen: a trip on Sat and Sun, a dinner on Friday. The
+        // dinner used to sit one lane down, under a lane kept for a bar that
+        // never reached Friday.
+        let model = build([
+            trip(1, "Tahoe", "2026-10-10", "2026-10-11"),
+            dinner(2, "Dinner", on: "2026-10-09"),
+            dinner(3, "Brunch", on: "2026-10-10", at: "11:00"),
+        ])
+        expect(cell(model, "2026-10-09")?.rows == [0], "a day the bar does not cover starts under its date")
+        expect(cell(model, "2026-10-10")?.rows == [1], "and a day it does cover lists under the bar")
+        expect(cell(model, "2026-10-05")?.rows == [], "an empty day takes no rows")
+
+        // Two bars, and the first one ends: Thursday is under lane 1 only,
+        // so its own first item goes ABOVE that bar and the rest below.
+        let two = build([
+            trip(1, "Conference", "2026-10-05", "2026-10-07"),
+            trip(2, "Guests", "2026-10-06", "2026-10-09"),
+            dinner(3, "Standup", on: "2026-10-08", at: "09:30"),
+            dinner(4, "Lunch", on: "2026-10-08", at: "12:00"),
+            dinner(5, "Dinner", on: "2026-10-08"),
+            dinner(6, "Call", on: "2026-10-06", at: "10:00"),
+        ])
+        let row = two.weeks[1]
+        expect(row.spans.first { $0.item.title == "Guests" }?.lane == 1, "the second trip is in lane 1")
+        expect(cell(two, "2026-10-08")?.items.map(\.title) == ["Standup", "Lunch", "Dinner"]
+               && cell(two, "2026-10-08")?.rows == [0, 2, 3],
+               "the hole above the bar is filled first, top-down, then the rows below it")
+        expect(cell(two, "2026-10-06")?.rows == [2], "under two bars the day lists below both")
+        expect(MonthGrid.holes(row) == [0, 0, 0, 0, 1, 0, 0],
+               "the only hole left is Friday, which has the bar and nothing of its own")
+
+        // All-day single days are the cell's own and fill holes like any row.
+        let bill = build([
+            trip(1, "A", "2026-10-05", "2026-10-06"),
+            trip(2, "B", "2026-10-06", "2026-10-08"),
+            ghost(3, "Rent", start: "2026-10-07", allDay: true, commitment: .committed),
+        ])
+        expect(cell(bill, "2026-10-07")?.rows == [0], "an all-day item fills the lane above the bar")
+        expect(MonthGrid.holes(bill.weeks[1]) == [0, 0, 0, 1, 0, 0, 0], "and Thursday, with nothing, keeps its hole")
+
+        expect(MonthGrid.cellRows(count: 3, taken: []) == [0, 1, 2], "no bar: straight down from the date")
+        expect(MonthGrid.cellRows(count: 3, taken: [0]) == [1, 2, 3], "under one bar")
+        expect(MonthGrid.cellRows(count: 3, taken: [1]) == [0, 2, 3], "around a bar in the second lane")
+        expect(MonthGrid.cellRows(count: 2, taken: [0, 1]) == [2, 3], "under two")
+        expect(MonthGrid.cellRows(count: 0, taken: [1]) == [], "nothing to place")
+    }
+
+    /// The hole that stays: the day's only content is a bar in lane 1, and
+    /// lane 0's bar ended the day before. The bar is kept straight (one lane
+    /// per week row), and the hole is counted so it can be watched.
+    static func aHoleThatCannotBePacked() {
+        let model = build([
+            trip(1, "Conference", "2026-10-05", "2026-10-07"),
+            trip(2, "Guests", "2026-10-06", "2026-10-09"),
+        ])
+        let row = model.weeks[1]
+        let guests = row.spans.filter { $0.item.title == "Guests" }
+        expect(guests.count == 1 && guests[0].lane == 1 && guests[0].firstColumn == 1 && guests[0].lastColumn == 4,
+               "one straight bar in lane 1, Tuesday to Friday: it does not jog up on Thursday")
+        expect(MonthGrid.holes(row) == [0, 0, 0, 1, 1, 0, 0], "Thursday and Friday each keep one empty lane")
+        expect(MonthGrid.holes(rows: [], barLanes: [1]) == 1, "a bar in lane 1 and nothing else: one hole")
+        expect(MonthGrid.holes(rows: [0], barLanes: [1]) == 0, "one item of its own fills it")
+        expect(MonthGrid.holes(rows: [0, 1, 2], barLanes: []) == 0, "no bar, no hole")
+        expect(MonthGrid.holes(rows: [], barLanes: [0]) == 0 && MonthGrid.holes(rows: [], barLanes: []) == 0,
+               "a bar in the first lane, or an empty day, has none")
+
+        // HOW OFTEN. A month shaped like the mock's (docs/calendar-ux-preview.html):
+        // the Lisbon stay and its flight, Tahoe and its guests, and a
+        // working month of single-day rows. Printed, so the count is in the
+        // suite's output for whoever asks.
+        let mock = build(mockMonth)
+        let perDay = mock.weeks.flatMap { MonthGrid.holes($0) }
+        let holed = perDay.filter { $0 > 0 }.count
+        let barred = mock.weeks.reduce(0) { n, week in
+            n + week.days.indices.filter { !MonthGrid.barLanes(week.spans, column: $0).isEmpty }.count
+        }
+        print("  holes in the mock month: \(holed) of \(perDay.count) cells (\(barred) under a bar)")
+        expect(holed == 1 && cell(mock, "2026-10-25").map { $0.rows.isEmpty } == true,
+               "the fixture month keeps one hole: Sunday the 25th, under Tahoe once the guests have gone")
+    }
+
+    /// The coordinator's catch on the first wave-4 screenshot: with the lane
+    /// ceiling at two, a third trip was "+1 more" over cells with three empty
+    /// rows under it. Three trips at once are three bars when the cells have
+    /// the rows, and nothing folds until a cell's rows run out.
+    static func aCellFoldsOnlyWhenItsRowsRunOut() {
+        let model = build([
+            trip(1, "Japan Trip", "2026-10-10", "2026-10-19"),
+            trip(2, "Stay", "2026-10-11", "2026-10-16"),
+            trip(3, "Parents visiting", "2026-10-13", "2026-10-25"),
+            dinner(4, "Columbus Day", on: "2026-10-12", at: "09:00"),
+            dinner(5, "Sweeping", on: "2026-10-12", at: "12:00"),
+            dinner(6, "Bills", on: "2026-10-12", at: "17:15"),
+            dinner(7, "Late", on: "2026-10-12", at: "21:00"),
+            dinner(8, "Brunch", on: "2026-10-18", at: "11:00"),
+            dinner(9, "Supper", on: "2026-10-18", at: "19:00"),
+        ])
+        let week = model.weeks[2]
+        expect(week.lanes == 3 && week.overflow == [0, 0, 0, 0, 0, 0, 0], "the third trip is given a lane, not counted")
+        func fold(_ f: MonthGrid.WeekFit, _ c: Int, _ slots: Int) -> CellFold {
+            MonthGrid.fold(
+                rows: f.rows[c], barLanes: MonthGrid.barLanes(f.bars, column: c), hiddenSpans: f.overflow[c],
+                slots: slots)
+        }
+        // Six rows a cell, as on the screenshot.
+        let six = MonthGrid.fit(week, slots: 6)
+        expect(six.bars.count == 3 && six.overflow == [0, 0, 0, 0, 0, 0, 0], "six rows: all three bars are drawn")
+        // Monday first here: column 0 is the 12th, 1 the 13th, 5 the 17th.
+        expect(fold(six, 1, 6) == CellFold(shown: 0, more: 0, moreRow: nil),
+               "Tuesday the 13th, three bars and nothing else: no +1 more over empty rows")
+        expect(fold(six, 5, 6) == CellFold(shown: 0, more: 0, moreRow: nil), "nor Saturday the 17th")
+        expect(six.rows[0] == [2, 3, 4, 5] && fold(six, 0, 6) == CellFold(shown: 4, more: 0, moreRow: nil),
+               "Monday: two bars and four rows fill six exactly, so nothing folds")
+        for slots in 2...8 {
+            let f = MonthGrid.fit(week, slots: slots)
+            for c in 0..<7 {
+                let cell = fold(f, c, slots)
+                let lanes = MonthGrid.barLanes(f.bars, column: c)
+                let used = max(f.rows[c].last ?? -1, lanes.max() ?? -1) + 1
+                // Out of rows, or under a bar the whole ROW was too short
+                // to draw (kept whole and counted, never drawn in part).
+                expect(cell.more == 0 || used > slots || f.overflow[c] > 0,
+                       "a cell folds only when it is out of rows (\(slots) rows, column \(c))")
+                expect(slots <= week.lanes || f.overflow[c] == 0,
+                       "and with a row to spare past the lanes, every bar is drawn (\(slots) rows, column \(c))")
+                expect(cell.moreRow.map { !lanes.contains($0) } ?? true,
+                       "and its fold line is never on a bar (\(slots) rows, column \(c))")
+                expect(cell.shown + cell.more == week.days[c].items.count + f.overflow[c],
+                       "everything is shown or counted (\(slots) rows, column \(c))")
+            }
+        }
+        // Three rows: lanes 0 and 1 are drawn, the third bar is hidden for
+        // its whole length and counted, and the days lay out around two bars.
+        let three = MonthGrid.fit(week, slots: 3)
+        expect(three.bars.map(\.lane).sorted() == [0, 1] && three.overflow == [0, 1, 1, 1, 1, 1, 1],
+               "three rows: the third bar is counted on each day it covers")
+        expect(three.rows[6] == [1, 2] && six.rows[6] == [1, 3],
+               "Sunday's rows go around the bars that are DRAWN: straight down when the third is hidden")
+        expect(MonthGrid.holes(rows: three.rows[6], barLanes: MonthGrid.barLanes(three.bars, column: 6)) == 0,
+               "and a hidden bar leaves no hole where it would have been")
+        expect(fold(three, 1, 3) == CellFold(shown: 0, more: 1, moreRow: 2), "+1 more in the last row, under two bars")
+        expect(MonthGrid.maxLanes > MonthGrid.floorLanes, "the ceiling is above what the floor height holds")
+    }
+
+    /// October 2026, shaped like the mock's month.
+    static var mockMonth: [TimelineGhost] {
+        [
+            trip(1, "Lisbon", "2026-10-14", "2026-10-19"),
+            ghost(2, "Flight to Lisbon", start: "2026-10-14T18:05:00-07:00", end: "2026-10-16T08:00:00+01:00",
+                  commitment: .committed),
+            trip(3, "Tahoe", "2026-10-22", "2026-10-25"),
+            trip(4, "Guests", "2026-10-21", "2026-10-23"),
+            ghost(5, "Rent due", start: "2026-10-05", allDay: true, commitment: .committed),
+            ghost(6, "Electric bill", start: "2026-10-08", allDay: true, commitment: .committed),
+            dinner(7, "Standup", on: "2026-10-05", at: "09:30"),
+            dinner(8, "Dentist", on: "2026-10-06", at: "14:00"),
+            dinner(9, "Dreamers Dinner", on: "2026-10-08", at: "19:45"),
+            dinner(10, "Halloween party", on: "2026-10-10", at: "22:00"),
+            dinner(11, "Board prep", on: "2026-10-14", at: "10:00"),
+            dinner(12, "Fado night", on: "2026-10-15", at: "21:00"),
+            dinner(13, "Museum", on: "2026-10-16", at: "11:00"),
+            dinner(14, "Team lunch", on: "2026-10-21", at: "12:00"),
+            dinner(15, "Ski rental", on: "2026-10-22", at: "08:00"),
+            dinner(16, "Recital", on: "2026-10-24", at: "17:00"),
+            dinner(17, "Flight home", on: "2026-10-19", at: "13:00"),
+        ]
+    }
+
     /// What fits and what folds. The last row is "+N more" only when
     /// something is left over; a cell that holds everything shows everything.
     static func theCellFold() {
+        // A day no bar covers: its items take rows 0, 1, 2...
         func fold(_ items: Int, _ spans: Int, _ slots: Int) -> CellFold {
-            MonthGrid.fold(items: items, hiddenSpans: spans, slots: slots)
+            MonthGrid.fold(
+                rows: MonthGrid.cellRows(count: items, taken: []), hiddenSpans: spans, slots: slots)
         }
-        expect(fold(3, 0, 5) == CellFold(shown: 3, more: 0), "three in five: all shown")
-        expect(fold(5, 0, 5) == CellFold(shown: 5, more: 0), "exactly full: all shown, no fold")
-        expect(fold(6, 0, 5) == CellFold(shown: 4, more: 2), "one over: four shown and +2 more")
-        expect(fold(2, 1, 5) == CellFold(shown: 2, more: 1), "a trip with no lane is counted in the fold")
-        expect(fold(0, 2, 3) == CellFold(shown: 0, more: 2), "only lane-less trips: +2 more")
-        expect(fold(4, 0, 1) == CellFold(shown: 0, more: 4), "one slot is the fold itself")
-        expect(fold(4, 0, 0) == CellFold(shown: 0, more: 4), "no room shows nothing and still counts")
-        expect(fold(0, 0, 0) == CellFold(shown: 0, more: 0), "an empty day is empty")
+        expect(fold(3, 0, 5) == CellFold(shown: 3, more: 0, moreRow: nil), "three in five: all shown")
+        expect(fold(5, 0, 5) == CellFold(shown: 5, more: 0, moreRow: nil), "exactly full: all shown, no fold")
+        expect(fold(6, 0, 5) == CellFold(shown: 4, more: 2, moreRow: 4),
+               "one over: four shown and +2 more in the last row")
+        expect(fold(2, 1, 5) == CellFold(shown: 2, more: 1, moreRow: 2),
+               "a trip with no lane is counted in the fold, right under the rows")
+        expect(fold(0, 2, 3) == CellFold(shown: 0, more: 2, moreRow: 0), "only lane-less trips: +2 more")
+        expect(fold(4, 0, 1) == CellFold(shown: 0, more: 4, moreRow: 0), "one slot is the fold itself")
+        expect(fold(4, 0, 0) == CellFold(shown: 0, more: 4, moreRow: 0), "no room shows nothing and still counts")
+        expect(fold(0, 0, 0) == CellFold(shown: 0, more: 0, moreRow: nil), "an empty day is empty")
+
+        // THE COUNTS UNDER A BAR. A bar is one of the cell's rows now, so
+        // what fits is counted around it, not under a block kept for it.
+        func under(_ lanes: [Int], _ items: Int, _ slots: Int, hidden: Int = 0) -> CellFold {
+            MonthGrid.fold(
+                rows: MonthGrid.cellRows(count: items, taken: lanes), barLanes: lanes, hiddenSpans: hidden,
+                slots: slots)
+        }
+        expect(under([0], 4, 5) == CellFold(shown: 4, more: 0, moreRow: nil),
+               "a bar and four rows fill five exactly: no fold")
+        expect(under([0], 5, 5) == CellFold(shown: 3, more: 2, moreRow: 4),
+               "a bar and five rows in five: the bar, three rows, +2 more")
+        expect(under([1], 4, 5) == CellFold(shown: 4, more: 0, moreRow: nil),
+               "a bar in the second lane: one row above it, three below, all shown")
+        expect(under([1], 5, 5) == CellFold(shown: 3, more: 2, moreRow: 4),
+               "one more than fits: +2 more, counting the row it displaced")
+        expect(under([0, 1], 3, 5) == CellFold(shown: 3, more: 0, moreRow: nil), "two bars and three rows")
+        expect(under([0, 1], 4, 5) == CellFold(shown: 2, more: 2, moreRow: 4), "two bars, four rows: +2 more")
+        expect(under([0, 1], 0, 5, hidden: 1) == CellFold(shown: 0, more: 1, moreRow: 2),
+               "a third trip over two bars: +1 more under them")
+        expect(under([1], 0, 5) == CellFold(shown: 0, more: 0, moreRow: nil),
+               "a bar alone folds nothing (it is drawn by its row)")
+        for (lanes, items, slots) in [([0], 7, 5), ([1], 9, 4), ([0, 1], 6, 6), ([], 12, 3)] {
+            let f = under(lanes, items, slots)
+            expect(f.shown + f.more == items, "every item is shown or counted (\(lanes), \(items) in \(slots))")
+            expect(f.moreRow.map { row in !lanes.contains(row) } ?? true,
+                   "the fold's line never lands on a bar (\(lanes), \(items) in \(slots))")
+        }
 
         func slots(_ h: Double, lanes: Int = 0) -> Int {
             MonthGrid.slots(cellHeight: h, lanes: lanes, numberBand: 26, rowHeight: 17, rowGap: 2, foot: 4)
@@ -576,7 +827,7 @@ struct MonthGridTests {
         // 140pt (five rows down an 800pt window): 110 left, five 17pt rows
         // and their gaps take 93, a sixth would need 112.
         expect(slots(140) == 5, "a 140pt cell holds five rows")
-        expect(slots(140, lanes: 2) == 3, "two trip lanes take two of them")
+        expect(slots(140, lanes: 2) == 3, "rows kept back come off the count")
         expect(slots(121) == 4 && slots(123) == 5, "a row fits the moment its height does, gap and all")
         expect(slots(30) == 0, "a sliver of a cell holds none")
         expect(slots(200) > slots(140), "a taller cell holds more")

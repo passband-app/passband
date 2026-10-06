@@ -1,7 +1,10 @@
 // THE CALENDAR PAGE: the month (Views/CalendarMonth.swift), which it opens
 // on, and an agenda, switched with `m` / `a` and the header's control. From
 // either, `n` makes an event on one of the user's own Google calendars and
-// `e` changes one (Views/CalendarEventEditor.swift).
+// `e` changes one, in a pane that takes half the window the way the composer
+// does (Views/CalendarEventPane.swift). While that pane is open this page has
+// the other half: the month keeps its grid and puts the day column and the
+// detail away, the agenda keeps its list, and both stay live.
 //
 // The agenda: today and the days after it, real events
 // and the ghosts Passband found in mail in one time order, with the next
@@ -59,9 +62,11 @@
         /// The same for the month: its grid and the selected day's column.
         @State private var monthMemo = MonthMemo()
 
-        /// Two columns once the list's measure and the detail both fit.
+        /// Two columns once the list's measure and the detail both fit. Never
+        /// while the event pane is open: the detail is away until it closes.
         private var twoColumns: Bool {
-            pageWidth >= Self.listMeasure + Self.detailWidth + Space.scaled(18) + Space.scaled(44)
+            !store.eventPaneOpen
+                && pageWidth >= Self.listMeasure + Self.detailWidth + Space.scaled(18) + Space.scaled(44)
         }
         private static var listMeasure: CGFloat { Typo.measure(560) }
         private static var detailWidth: CGFloat { Typo.measure(340) }
@@ -124,7 +129,13 @@
 
         private func monthPage(now: Date, cal: Calendar) -> some View {
             let place = store.calendarMonthPlace(now: now, calendar: cal)
-            let model = monthMemo.month(store.calendarFeed, month: place.month, calendar: cal)
+            let drafting = store.eventPaneOpen
+            // The pane's draft, as a row of its own on the grid: where its
+            // fields would put it, standing in for the event being edited.
+            let model = monthMemo.month(
+                store.calendarFeed, month: place.month, calendar: cal,
+                provisional: store.calendarProvisional(now: now, calendar: cal),
+                editing: drafting ? store.calendarEditor?.event : nil)
             let column = monthMemo.column(day: place.day, calendar: cal)
             let unlikelyKey = "u\(place.day.timeIntervalSince1970)"
             let unlikelyOpen = openFolds.contains(unlikelyKey)
@@ -134,7 +145,7 @@
                 CalendarStatusLines()
                 CalendarMonthView(
                     model: model, column: column, place: place, item: item,
-                    twoPanes: monthTwoPanes, paneWidth: Self.detailWidth,
+                    twoPanes: monthTwoPanes, drafting: drafting, paneWidth: Self.detailWidth,
                     unlikelyOpen: unlikelyOpen, toggleUnlikely: { toggle(unlikelyKey) },
                     now: now, calendar: cal)
             }
@@ -299,8 +310,9 @@
                         selected: isSelected
                     ) { select(item) }
                     // NARROW WINDOWS: the detail opens in place, under its
-                    // row, rather than in a column there is no room for.
-                    if !twoColumns, isSelected {
+                    // row, rather than in a column there is no room for. Not
+                    // beside the event pane, where the list is all there is.
+                    if !twoColumns, isSelected, !store.eventPaneOpen {
                         CalendarDetail(item: item, calendar: cal)
                             .padding(.leading, Space.scaled(11))
                             .padding(.bottom, Space.s8)
@@ -336,9 +348,12 @@
         /// x itself would otherwise let x dismiss a ghost behind it. The
         /// overlay's own keys are untouched; declining hands them on.
         private func bindings(rows: [AgendaItem], selected: AgendaItem?) -> [KeyBinding] {
-            let free = { !store.modalOverlayOpen }
+            // The verbs on the selected row also decline beside the event
+            // pane: its detail is away, and a ghost must not be dismissed by
+            // a letter meant for a field the caret had just left.
+            let free = { !store.modalOverlayOpen && !store.eventPaneOpen }
             func step(_ delta: Int) -> Bool {
-                guard free(), !rows.isEmpty else { return false }
+                guard !store.modalOverlayOpen, !rows.isEmpty else { return false }
                 let at = selected.flatMap { s in rows.firstIndex { $0.id == s.id } } ?? -1
                 let i = max(0, min(rows.count - 1, at + delta))
                 selection = rows[i].id
@@ -373,7 +388,7 @@
         /// deleted. Each declines where it does not apply: a daemon that lists
         /// no writable calendar, a ghost, an event that is not the user's.
         private func writeBindings(selected: AgendaItem?, day: Date?) -> [KeyBinding] {
-            let free = { !store.modalOverlayOpen }
+            let free = { !store.modalOverlayOpen && !store.eventPaneOpen }
             return [
                 KeyBinding(declining: "n", "new event") {
                     guard free(), store.calendarCanCreate else { return false }
@@ -416,9 +431,12 @@
         /// first item, then that item's mail, as the detail's own hint says.
         /// Escape is the routed host's (`AppStore.calendarMonthBack`).
         private func monthBindings(order: [AgendaItem], item: AgendaItem?, day: Date) -> [KeyBinding] {
-            let free = { !store.modalOverlayOpen }
+            // Beside the event pane the grid still MOVES (arrows, `t`, the
+            // months), but nothing steps through or acts on the day's items:
+            // the column and the detail they live in are away.
+            let free = { !store.modalOverlayOpen && !store.eventPaneOpen }
             func move(_ m: MonthMove) -> Bool {
-                guard free() else { return false }
+                guard !store.modalOverlayOpen else { return false }
                 store.moveCalendarMonth(m)
                 return true
             }
@@ -905,11 +923,16 @@
         private(set) var items: [AgendaItem] = []
         private var month: Date?
         private var firstWeekday: Int?
+        private var provisional: AgendaItem?
+        private var editing: TimelineEvent?
         private var built = MonthModel(month: .distantPast, weeks: [])
         private var day: Date?
         private var builtColumn: DayColumn?
 
-        func month(_ feed: TimelineFeed?, month: Date, calendar: Calendar) -> MonthModel {
+        func month(
+            _ feed: TimelineFeed?, month: Date, calendar: Calendar, provisional: AgendaItem? = nil,
+            editing: TimelineEvent? = nil
+        ) -> MonthModel {
             var stale = false
             if feed != self.feed || calendar.timeZone != zone {
                 items = feed.map { Agenda.items($0, calendar: calendar) } ?? []
@@ -917,8 +940,18 @@
                 builtColumn = nil
                 stale = true
             }
+            // The event pane's draft is one more row, re-placed as it is
+            // typed: the grid is rebuilt when the row itself changes (its
+            // day, its times, its title, its colour), not on every keystroke
+            // in the notes.
+            if provisional != self.provisional || editing != self.editing {
+                (self.provisional, self.editing) = (provisional, editing)
+                stale = true
+            }
             if stale || month != self.month || calendar.firstWeekday != firstWeekday {
-                built = MonthGrid.build(items, month: month, calendar: calendar)
+                built = MonthGrid.build(
+                    EventForm.withProvisional(items, provisional, editing: editing), month: month,
+                    calendar: calendar)
                 (self.month, firstWeekday) = (month, calendar.firstWeekday)
             }
             return built

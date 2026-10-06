@@ -41,6 +41,7 @@ struct KeyDispatchTests {
         aCancelledHoldSaysSo()
         aHoldOutlivesTheSurfaceThatStartedIt()
         theCalendarKeyTakesShiftCOnlyWhenOffered()
+        theDigitsAreAskedAtKeyTime()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -212,6 +213,53 @@ struct KeyDispatchTests {
             equal(press("C", editing: true), [], "a capital C typed into a field is just typed")
         }
         registry.unregister(global)
+    }
+
+    /// THE DIGITS, as RootView binds them: one DECLINING binding per digit in
+    /// the GLOBAL set, each asking for the page order when it is pressed. So
+    /// the gate opening renumbers without anything re-registering, and the
+    /// extra digit (6) passes on to whatever else binds it while the calendar
+    /// is not offered.
+    static func theDigitsAreAskedAtKeyTime() {
+        let registry = KeyRegistry.shared
+        let base = ["sitrep", "emails", "auth", "rules", "groups"]
+        var offered = false
+        func pages() -> [String] {
+            var out = base
+            if offered { out.insert("calendar", at: 1) }
+            return out
+        }
+        var under: [String] = []
+        let below = registry.register(
+            .global,
+            box: KeyRegistry.BindingsBox([KeyBinding("6", "an older six") { under.append("older six") }]))
+        // Registered after it, so asked first.
+        let digits = registry.register(
+            .global,
+            box: KeyRegistry.BindingsBox(
+                (1...base.count + 1).map { n in
+                    KeyBinding(declining: "\(n)", "page \(n)") {
+                        guard pages().indices.contains(n - 1) else { return false }
+                        ran.append(pages()[n - 1])
+                        return true
+                    }
+                }))
+        stage([[]]) {
+            equal(press("2"), ["emails"], "gate closed: 2 is emails, as it always was")
+            equal(press("5"), ["groups"], "and 5 is groups")
+            equal(press("6"), [], "6 opens no page")
+            equal(under, ["older six"], "and passes on to whatever else binds it")
+            offered = true
+            under = []
+            equal(press("1"), ["sitrep"], "offered: sitrep is still 1")
+            equal(press("2"), ["calendar"], "calendar is 2")
+            equal(press("3"), ["emails"], "all mail is 3")
+            equal(press("6"), ["groups"], "and groups is 6")
+            equal(under, [], "held, not passed on")
+            equal(press("2", editing: true), [], "a 2 typed into a field is just typed")
+        }
+        registry.unregister(digits)
+        registry.unregister(below)
     }
 
     /// A declining binding: records that it was ASKED, then holds or passes.

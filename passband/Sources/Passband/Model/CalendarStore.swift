@@ -1,6 +1,6 @@
 // The calendar page's half of the store: the gate, the timeline load, the
-// user's word on a ghost, the connect card's lifecycle, and the three writes
-// to a real calendar (create, edit, delete). The stored state
+// user's word on a ghost, the connect card's lifecycle, the event pane's
+// lifecycle, and the three writes to a real calendar (create, edit, delete). The stored state
 // it works on is declared in AppStore itself (an @Observable class keeps its
 // stored properties in its own body); everything here is behaviour.
 //
@@ -38,7 +38,7 @@ struct CalendarConnectWait: Hashable {
     let renewing: Bool
 }
 
-/// The event editor, while it is up: new, or an event being changed.
+/// The event pane, while it is open: new, or an event being changed.
 struct CalendarEditorRequest: Hashable, Identifiable {
     enum Mode: Hashable {
         case create
@@ -47,7 +47,8 @@ struct CalendarEditorRequest: Hashable, Identifiable {
 
     let id = UUID()
     let mode: Mode
-    /// What the card opened with. An edit sends only what moved from this.
+    /// What the pane opened with. An edit sends only what moved from this,
+    /// and a draft that still equals it has not been touched.
     let initial: EventDraft
     /// The account it is for, as the connect card's is.
     let epoch: Int
@@ -228,10 +229,18 @@ extension AppStore {
     }
 
     /// A cell clicked: that day selected and, where the grid and the column
-    /// cannot both show, opened.
+    /// cannot both show, opened. With the event pane open the click is the
+    /// draft's: its date becomes that day, and nothing opens (the column is
+    /// away while the pane is up).
     func selectCalendarDay(_ day: Date, open: Bool, now: Date = Date()) {
         let cal = Calendar.current
         calendarPlace = MonthGrid.select(day, in: calendarMonthPlace(now: now, calendar: cal), calendar: cal)
+        if eventPaneOpen {
+            if let draft = calendarDraft {
+                calendarDraft = EventForm.moved(draft, to: day, today: now, calendar: cal)
+            }
+            return
+        }
         calendarMonthItem = nil
         if open { calendarDayOpen = true }
     }
@@ -249,6 +258,12 @@ extension AppStore {
     /// "back to the sitrep".
     func calendarMonthBack() -> Bool {
         guard activeView == .calendar, calendarMode == .month else { return false }
+        // A sweep under way on the day column is the first thing Escape ends.
+        if let cancel = calendarSweepCancel {
+            calendarSweepCancel = nil
+            cancel()
+            return true
+        }
         if calendarMonthItem != nil {
             calendarMonthItem = nil
             return true
@@ -323,34 +338,92 @@ extension AppStore {
         !RehearsalMode.isEnabled && CalendarWrite.canCreate(calendarFeed)
     }
 
-    /// `n` and "New event": the editor, on `day` (the month's selected day;
+    /// The event pane is open, for the account on screen. What the shell
+    /// lays out beside, as `composeOpen` is for the composer: it changes on
+    /// open and close only, never while a field is typed in.
+    var eventPaneOpen: Bool { calendarEditor?.epoch == epoch }
+
+    /// The pane's fields differ from what it opened with.
+    var eventDraftTouched: Bool {
+        guard let request = calendarEditor, let draft = calendarDraft else { return false }
+        return draft != request.initial
+    }
+
+    /// `n` and "New event": the pane, on `day` (the month's selected day;
     /// today from the agenda).
     func openEventEditor(day: Date?, now: Date = Date()) {
         guard calendarCanCreate, calendarEditor == nil, calendarDeleteAsk == nil else { return }
         let cal = Calendar.current
         let draft = EventForm.newDraft(
             day: day ?? now, now: now, calendarId: calendarWritable.first?.id, calendar: cal)
-        calendarEditor = CalendarEditorRequest(mode: .create, initial: draft, epoch: epoch)
+        openEventPane(CalendarEditorRequest(mode: .create, initial: draft, epoch: epoch))
     }
 
-    /// `e` and the detail's Edit: the same card, filled in. Only for an event
+    /// A span swept on the day column (drag to create): the pane, on that
+    /// day, with those times. Minutes after midnight.
+    func openEventEditor(day: Date, startMinutes: Int, endMinutes: Int, now: Date = Date()) {
+        guard calendarCanCreate, calendarEditor == nil, calendarDeleteAsk == nil else { return }
+        let draft = EventForm.newDraft(
+            day: day, startMinutes: startMinutes, endMinutes: endMinutes, now: now,
+            calendarId: calendarWritable.first?.id, calendar: .current)
+        openEventPane(CalendarEditorRequest(mode: .create, initial: draft, epoch: epoch))
+    }
+
+    /// `e` and the detail's Edit: the same pane, filled in. Only for an event
     /// the daemon called editable.
     func openEventEditor(editing event: TimelineEvent, now: Date = Date()) {
         guard !RehearsalMode.isEnabled, CalendarWrite.canEdit(event), calendarEditor == nil,
             calendarDeleteAsk == nil
         else { return }
         let draft = EventForm.draft(editing: event, today: now, calendar: .current)
-        calendarEditor = CalendarEditorRequest(mode: .edit(event), initial: draft, epoch: epoch)
+        openEventPane(CalendarEditorRequest(mode: .edit(event), initial: draft, epoch: epoch))
+    }
+
+    /// ONE PANE AT A TIME. The event pane takes the half of the window the
+    /// composer and the side panel use, so both step aside for it. A composer
+    /// is closed the way Escape closes it: its mail is kept in drafts and the
+    /// usual toast says so, so nothing is lost by the swap.
+    private func openEventPane(_ request: CalendarEditorRequest) {
+        if compose != nil { closeCompose() }
+        if sideView.isOpen { closeSide() }
+        calendarDraft = request.initial
+        calendarEditor = request
+    }
+
+    /// THE OTHER HALF OF THE RULE: a composer asked for while the event pane
+    /// is open. An untouched pane simply gives way. One with something typed
+    /// in it does NOT: an event has no drafts folder to be kept in, so the
+    /// composer is refused with one quiet line rather than the event thrown
+    /// away. True when the composer may open.
+    func yieldEventPaneToCompose() -> Bool {
+        guard calendarEditor != nil else { return true }
+        if eventDraftTouched, eventPaneOpen {
+            pushToast("Save or close the event first")
+            return false
+        }
+        closeEventEditor()
+        return true
     }
 
     func closeEventEditor() {
         calendarEditor = nil
+        calendarDraft = nil
     }
 
-    /// Save the card. True when the daemon took it: the answer is laid into
-    /// the page at once and the card closes. False keeps the card up with
+    /// The draft's chip on the month: where the pane's fields would put the
+    /// event, in the colour of the calendar picked (an edit keeps its
+    /// event's own). Nil with no pane, and while the times do not read.
+    func calendarProvisional(now: Date, calendar: Calendar) -> AgendaItem? {
+        guard eventPaneOpen, let request = calendarEditor, let draft = calendarDraft else { return nil }
+        let color = request.event?.color
+            ?? calendarFeed?.calendars?.first { $0.id == draft.calendarId }?.color
+        return EventForm.provisional(draft, color: color, today: now, calendar: calendar)
+    }
+
+    /// Save the pane. True when the daemon took it: the answer is laid into
+    /// the page at once and the pane closes. False keeps the pane open with
     /// everything typed in it, after one quiet toast saying why; a draft that
-    /// cannot be saved yet is said on the card itself and sends nothing.
+    /// cannot be saved yet is said on the pane itself and sends nothing.
     @discardableResult
     func saveEvent(_ draft: EventDraft, _ request: CalendarEditorRequest) async -> Bool {
         guard request.epoch == epoch, !calendarWriting else { return false }
@@ -381,7 +454,7 @@ extension AppStore {
             else { return false }
             // Nothing moved: nothing to send, and nothing to say.
             if patch.isEmpty {
-                calendarEditor = nil
+                closeEventEditor()
                 return true
             }
             calendarWriting = true
@@ -409,7 +482,7 @@ extension AppStore {
     private func landEvent(_ event: TimelineEvent) {
         retireCalendarLoads()
         calendarFeed = CalendarWrite.applying(event, to: calendarFeed)
-        calendarEditor = nil
+        closeEventEditor()
         let cal = Calendar.current
         if let item = Agenda.item(event, calendar: cal) {
             calendarPlace = MonthGrid.select(
@@ -445,7 +518,7 @@ extension AppStore {
                 calendarId: event.calendar_id, id: event.id, from: calendarFeed)
             if calendarMonthItem == Agenda.itemId(event) { calendarMonthItem = nil }
             calendarDeleteAsk = nil
-            if calendarEditor?.event.map(Agenda.itemId) == Agenda.itemId(event) { calendarEditor = nil }
+            if calendarEditor?.event.map(Agenda.itemId) == Agenda.itemId(event) { closeEventEditor() }
             Analytics.capture("calendar_event_deleted", ["all_day": event.all_day])
             pushToast("Deleted from Google Calendar", .success)
             return true

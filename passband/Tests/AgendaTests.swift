@@ -39,6 +39,7 @@ struct AgendaTests {
         dayTitles()
         todaysStrip()
         theGate()
+        theNumberKeysCountTheCalendarOnlyWhenOffered()
         theGateIsTheActiveAccounts()
         syncNotices()
         ghostStanding()
@@ -543,6 +544,23 @@ struct AgendaTests {
 
     /// FINDING 1 OF THE REVIEW: stats outlive an account switch, so until the
     /// active account's own poll lands, nothing about connecting is offered.
+    /// Wave 4: "make calendar 2, all mail 3, etc". With the page offered it
+    /// is second in the count; without it the numbers are the old ones.
+    static func theNumberKeysCountTheCalendarOnlyWhenOffered() {
+        let pages = ["sitrep", "emails", "auth", "rules", "groups"]
+        let offered = CalendarGate.numbered(pages, calendar: "calendar", offered: true)
+        expect(offered == ["sitrep", "calendar", "emails", "auth", "rules", "groups"],
+               "offered: sitrep 1, calendar 2, emails 3, and every later page one higher")
+        expect(offered.firstIndex(of: "calendar") == 1 && offered.firstIndex(of: "emails") == 2,
+               "calendar is 2 and all mail is 3")
+        expect(offered.count == pages.count + 1, "one more digit, and no page lost")
+        let hidden = CalendarGate.numbered(pages, calendar: "calendar", offered: false)
+        expect(hidden == pages, "not offered: the numbers are exactly as they were")
+        expect(!hidden.contains("calendar"), "and no digit opens a page that is not there")
+        expect(CalendarGate.numbered([String](), calendar: "calendar", offered: true).isEmpty,
+               "an empty rail stays empty")
+    }
+
     static func theGateIsTheActiveAccounts() {
         let link = "https://console.passband.app/reconnect?calendar=1&hint=a%40b.example"
         let previous = CalendarAccess(granted: false, connect_url: link)

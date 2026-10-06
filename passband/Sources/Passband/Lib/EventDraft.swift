@@ -118,6 +118,75 @@ enum EventForm {
         return d
     }
 
+    /// A new event from a span swept on the day column: that day, those
+    /// minutes after midnight. An end at 1440 is midnight, which the form
+    /// reads as the day's end ("11pm to 12am").
+    static func newDraft(
+        day: Date, startMinutes: Int, endMinutes: Int, now: Date, calendarId: String?, calendar: Calendar
+    ) -> EventDraft {
+        var d = EventDraft()
+        d.calendarId = calendarId
+        d.date = dateText(calendar.startOfDay(for: day), today: now, calendar: calendar)
+        d.start = clockText(max(0, min(1439, startMinutes)))
+        d.end = clockText(max(0, endMinutes) % 1440)
+        return d
+    }
+
+    /// The draft moved to another day (a day clicked on the grid beside the
+    /// pane). A run of days keeps its length: the end day moves with the
+    /// start. An end day that does not read is left for the form to say so.
+    static func moved(_ d: EventDraft, to day: Date, today: Date, calendar: Calendar) -> EventDraft {
+        let day = calendar.startOfDay(for: day)
+        var out = d
+        out.date = dateText(day, today: today, calendar: calendar)
+        let endText = trimmed(d.endDate)
+        if !endText.isEmpty, let from = parseDate(d.date, today: today, calendar: calendar),
+            let last = parseDate(endText, today: today, calendar: calendar), last >= from
+        {
+            let length = calendar.dateComponents([.day], from: from, to: last).day ?? 0
+            out.endDate = dateText(addDays(length, day, calendar), today: today, calendar: calendar)
+        }
+        return out
+    }
+
+    // MARK: the draft on the grid
+
+    /// The row id the draft is drawn under while the pane is open. Not an
+    /// event's id (`Agenda.itemId` always has a calendar and a bar in it).
+    static let provisionalId = "draft"
+
+    /// The draft as a row for the month: where it would land, in its
+    /// calendar's colour, so the grid shows it move as the fields change.
+    /// Nil while the times do not read. `color` is the chosen calendar's (or,
+    /// for an edit, the event's own).
+    static func provisional(
+        _ d: EventDraft, color: String?, today: Date, calendar: Calendar
+    ) -> AgendaItem? {
+        guard case .success(let w) = when(d, today: today, calendar: calendar) else { return nil }
+        let title = trimmed(d.title)
+        let (start, end) = wireTimes(w, calendar)
+        let event = TimelineEvent(
+            id: provisionalId, calendar_id: d.calendarId ?? "", calendar_name: nil,
+            title: title.isEmpty ? "New event" : title, start: start, end: end, all_day: w.allDay,
+            start_timezone: nil, location: nil, status: .tentative, self_response: nil, busy: true,
+            organizer: nil, html_link: nil, color: color, editable: false, description: nil)
+        guard let item = Agenda.item(event, calendar: calendar) else { return nil }
+        return AgendaItem(
+            id: provisionalId, origin: item.origin, title: item.title, location: nil, start: item.start,
+            end: item.end, allDay: item.allDay, endEstimated: false, fill: .outline, band: nil,
+            cancelled: false, unverified: false, folded: false)
+    }
+
+    /// The rows the month draws while the pane is open: the feed's own, less
+    /// the event being edited (the draft stands in for it), plus the draft.
+    static func withProvisional(
+        _ items: [AgendaItem], _ provisional: AgendaItem?, editing: TimelineEvent?
+    ) -> [AgendaItem] {
+        guard let provisional else { return items }
+        let hidden = editing.map(Agenda.itemId)
+        return items.filter { $0.id != hidden && $0.id != provisionalId } + [provisional]
+    }
+
     /// The card filled in from an event on screen. Prints only what the
     /// parsers read back, so an untouched field saves what was there.
     static func draft(editing event: TimelineEvent, today: Date, calendar: Calendar) -> EventDraft {

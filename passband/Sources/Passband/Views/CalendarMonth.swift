@@ -17,6 +17,20 @@
 //   - Blue is state only: today's date and the now line. Selection is an even
 //     1pt edge in ink, all the way round, on a cell or on a chip.
 //
+// WAVE 4:
+//   - NO GAP UNDER THE DATE. A trip's bar keeps its lane only over the days
+//     it covers, and a cell's own rows fill what is free above before going
+//     below (`MonthDay.rows`), so every cell is laid out by row number, not
+//     stacked under a block kept for the bars.
+//   - THE EVENT PANE (Views/CalendarEventPane.swift) takes half the window
+//     the way the composer does. While it is open the column and the detail
+//     are away, the grid has the other half to itself and stays live, a
+//     click on a day sets the draft's date, and the draft is on the grid as
+//     a dashed chip in its calendar's colour.
+//   - DRAG TO CREATE. A press and a drag down the day column's hours sweeps
+//     a span, snapped to the quarter hour and labelled as it goes; letting
+//     go opens the pane with it (Lib/DaySweep.swift).
+//
 // THE LEVELS. The month is a stack: the grid, the selected day's column, the
 // selected item's detail (`CalendarDetail`, the agenda's own). A wide window
 // shows the grid and one pane beside it, which is the column, or the detail
@@ -98,8 +112,24 @@
         let inks: ChipInks
         let shape: S
         var stripeSpacing: CGFloat = 6
+        /// The event pane's draft: not on the calendar yet, so a wash of its
+        /// calendar's colour inside an even DASHED edge. Unlike any ghost's
+        /// fill, so it is never read as one of the bands.
+        var provisional = false
 
         var body: some View {
+            ZStack {
+                if provisional {
+                    shape.fill(inks.fill.opacity(0.5))
+                    shape.strokeBorder(inks.edge, style: StrokeStyle(lineWidth: 1, dash: [3, 2.5]))
+                } else {
+                    bands
+                }
+            }
+        }
+
+        @ViewBuilder
+        private var bands: some View {
             ZStack {
                 switch style.thin ? .outline : style.fill {
                 case .solid:
@@ -152,6 +182,9 @@
         let item: AgendaItem?
         /// The grid and a pane side by side; otherwise one level at a time.
         let twoPanes: Bool
+        /// The event pane is open beside the page: the grid alone, whatever
+        /// levels were open, until it closes.
+        let drafting: Bool
         let paneWidth: CGFloat
         let unlikelyOpen: Bool
         let toggleUnlikely: () -> Void
@@ -162,12 +195,12 @@
             VStack(spacing: 0) {
                 MonthBar(title: MonthGrid.title(place.month, calendar: calendar), day: place.day)
                 HStack(alignment: .top, spacing: Space.scaled(18)) {
-                    if twoPanes || (item == nil && !store.calendarDayOpen) {
+                    if drafting || twoPanes || (item == nil && !store.calendarDayOpen) {
                         MonthGridView(
-                            model: model, place: place, item: item, twoPanes: twoPanes,
+                            model: model, place: place, item: drafting ? nil : item, twoPanes: twoPanes,
                             now: now, calendar: calendar)
                     }
-                    if twoPanes || item != nil || store.calendarDayOpen {
+                    if !drafting, twoPanes || item != nil || store.calendarDayOpen {
                         pane
                             .frame(width: twoPanes ? paneWidth : nil)
                             .frame(maxWidth: twoPanes ? paneWidth : .infinity, maxHeight: .infinity, alignment: .top)
@@ -256,7 +289,8 @@
                 Spacer(minLength: 0)
                 // Only where the daemon lists a calendar the user can write
                 // to: an older one never shows the control at all.
-                if store.calendarCanCreate {
+                // Not while the pane it opens is already open.
+                if store.calendarCanCreate, !store.eventPaneOpen {
                     ChromeChip(text: "New event", icon: "plus", tone: Palette.ink, help: "New event ( n )") {
                         store.openEventEditor(day: day)
                     }
@@ -289,7 +323,9 @@
                 let width = geo.size.width
                 let cellWidth = CGFloat(MonthGrid.cellWidth(gridWidth: Double(width)))
                 let rows = max(1, model.weeks.count)
-                let busiest = model.weeks.map(\.lanes).max() ?? 0
+                // The floor makes room for two bars; a third and more are
+                // drawn when the cells are tall enough (`MonthGrid.fit`).
+                let busiest = min(MonthGrid.floorLanes, model.weeks.map(\.lanes).max() ?? 0)
                 // The rows share the height there is, and never go below what
                 // a cell needs; past that the grid scrolls.
                 let rowHeight = max(
@@ -312,7 +348,9 @@
                     .frame(width: width)
                     .frame(maxHeight: .infinity)
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { visibleHeight = $0 }
-                    MonthFooter(loading: !store.calendarLoaded, canCreate: store.calendarCanCreate)
+                    MonthFooter(
+                        loading: !store.calendarLoaded, canCreate: store.calendarCanCreate,
+                        drafting: store.eventPaneOpen)
                 }
                 .frame(width: width, height: geo.size.height, alignment: .topLeading)
             }
@@ -341,6 +379,8 @@
     private struct MonthFooter: View {
         let loading: Bool
         let canCreate: Bool
+        /// The event pane is open: the grid's one job beside it is said.
+        let drafting: Bool
 
         var body: some View {
             HStack(spacing: Space.s12) {
@@ -351,11 +391,18 @@
                         .lineLimit(1)
                 }
                 Spacer(minLength: Space.s8)
-                if canCreate {
-                    KeyHint("n", "new event")
+                if drafting {
+                    Text("Click a day to move the event there")
+                        .font(Typo.micro)
+                        .foregroundStyle(Palette.inkFaintest)
+                        .lineLimit(1)
+                } else {
+                    if canCreate {
+                        KeyHint("n", "new event")
+                    }
+                    KeyHint(["←", "→", "↑", "↓"], "move")
+                    KeyHint("↵", "open")
                 }
-                KeyHint(["←", "→", "↑", "↓"], "move")
-                KeyHint("↵", "open")
             }
             .padding(.vertical, Space.s10)
         }
@@ -376,10 +423,17 @@
         let calendar: Calendar
 
         var body: some View {
+            // A bar is one of a cell's rows now, so no rows are kept back for
+            // the lanes: each cell counts around the bars over its own day.
             let slots = MonthGrid.slots(
-                cellHeight: Double(height), lanes: week.lanes,
+                cellHeight: Double(height), lanes: 0,
                 numberBand: Double(MonthMetrics.numberBand), rowHeight: Double(MonthMetrics.rowHeight),
                 rowGap: Double(MonthMetrics.rowGap), foot: Double(MonthMetrics.foot))
+            // The pane's draft is being placed: a click anywhere in a cell,
+            // on a chip or beside it, is that day.
+            let drafting = store.eventPaneOpen
+            // The bars that fit at this height, and each day's rows around them.
+            let fit = MonthGrid.fit(week, slots: slots)
             ZStack(alignment: .topLeading) {
                 HStack(spacing: 0) {
                     ForEach(Array(week.days.enumerated()), id: \.element.id) { i, day in
@@ -388,12 +442,14 @@
                             label: MonthGrid.cellLabel(day.day, month: month, calendar: calendar),
                             selected: day.day == place.day,
                             today: calendar.isDate(day.day, inSameDayAs: now),
+                            rows: fit.rows[i],
                             fold: MonthGrid.fold(
-                                items: day.items.count,
-                                hiddenSpans: i < week.overflow.count ? week.overflow[i] : 0,
+                                rows: fit.rows[i],
+                                barLanes: MonthGrid.barLanes(fit.bars, column: i),
+                                hiddenSpans: fit.overflow[i],
                                 slots: slots),
-                            lanes: week.lanes,
                             selectedItem: item?.id,
+                            drafting: drafting,
                             width: cellWidth,
                             now: now,
                             calendar: calendar,
@@ -401,7 +457,7 @@
                             pick: { picked in store.selectCalendarItem(picked.id, on: day.day) })
                     }
                 }
-                ForEach(week.spans) { span in
+                ForEach(fit.bars) { span in
                     SpanBar(
                         segment: span,
                         label: MonthGrid.spanLabel(span, calendar: calendar),
@@ -416,6 +472,9 @@
                     .offset(
                         x: CGFloat(span.firstColumn) * cellWidth + MonthMetrics.inset,
                         y: MonthMetrics.numberBand + CGFloat(span.lane) * MonthMetrics.step)
+                    // Through to the cell under the pointer while drafting,
+                    // so the click lands on the day it was aimed at.
+                    .allowsHitTesting(!drafting)
                 }
             }
             .frame(width: cellWidth * 7, height: height, alignment: .topLeading)
@@ -430,24 +489,36 @@
         let label: String
         let selected: Bool
         let today: Bool
+        /// The row each of the day's items takes, around the bars drawn at
+        /// this height (`MonthGrid.fit`).
+        let rows: [Int]
         let fold: CellFold
-        let lanes: Int
         let selectedItem: String?
+        /// The event pane is open: chips do not take the click, the cell does.
+        let drafting: Bool
         let width: CGFloat
         let now: Date
         let calendar: Calendar
         let open: () -> Void
         let pick: (AgendaItem) -> Void
 
+        /// Where row `n` under the date starts. The week row's bars use the
+        /// same sum, so a bar and the rows around it share one grid.
+        private func top(_ row: Int) -> CGFloat {
+            MonthMetrics.numberBand + CGFloat(row) * MonthMetrics.step
+        }
+
         var body: some View {
             let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
             let shown = Array(day.items.prefix(fold.shown))
             let nowAt = today ? MonthGrid.nowSlot(day.items, now: now) : nil
-            VStack(alignment: .leading, spacing: MonthMetrics.rowGap) {
+            // EVERY ROW AT ITS OWN NUMBER, not stacked: the day's items take
+            // the rows no bar covers (`MonthDay.rows`), which may be above a
+            // bar as well as below it, so the first thing in a cell is
+            // directly under its date whenever there is anything to put there.
+            ZStack(alignment: .topLeading) {
                 numberRow
                     .frame(height: MonthMetrics.numberBand - MonthMetrics.rowGap, alignment: .center)
-                    // The trips' lanes: room kept, drawn by the row above.
-                    .padding(.bottom, CGFloat(lanes) * MonthMetrics.step)
                 ForEach(Array(shown.enumerated()), id: \.element.id) { i, item in
                     CellRow(
                         item: item,
@@ -457,6 +528,7 @@
                         selected: selectedItem == item.id,
                         width: width - 2 * MonthMetrics.inset
                     ) { pick(item) }
+                    .allowsHitTesting(!drafting)
                     // The now line, in the gap above the first row still to
                     // come (or under the last when every row has begun).
                     .overlay(alignment: .top) {
@@ -467,8 +539,9 @@
                             NowRule().offset(y: MonthMetrics.rowGap / 2 + 0.75)
                         }
                     }
+                    .offset(y: top(i < rows.count ? rows[i] : i))
                 }
-                if fold.more > 0 {
+                if fold.more > 0, let moreRow = fold.moreRow {
                     Button(action: open) {
                         Text("+\(fold.more) more")
                             .font(Typo.ui(10, weight: .medium))
@@ -478,8 +551,13 @@
                     .buttonStyle(.textAction)
                     .pointingHand()
                     .help("Open \(Agenda.format(day.day, "EEE MMM d", calendar))")
+                    .allowsHitTesting(!drafting)
+                    .offset(y: top(moreRow))
                 }
             }
+            // The stack is the whole cell, so a row moved down by its number
+            // is still inside what it is drawn and hit in.
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .padding(.horizontal, MonthMetrics.inset)
             .frame(width: width, alignment: .topLeading)
             .frame(maxHeight: .infinity, alignment: .top)
@@ -557,6 +635,8 @@
             let style = CalendarColor.style(item)
             let inks = ChipColors.inks(style.hue)
             let shape = RoundedRectangle(cornerRadius: 4, style: .continuous)
+            // The event pane's draft, where its fields would put it.
+            let draft = item.id == EventForm.provisionalId
             Button(action: action) {
                 HStack(alignment: .firstTextBaseline, spacing: Space.s4) {
                     if let time {
@@ -573,7 +653,9 @@
                             .foregroundStyle(inks.ink)
                     }
                     Text(item.title)
-                        .font(Typo.ui(10.5, weight: item.fill == .outline || style.thin ? .regular : .medium))
+                        .font(
+                            Typo.ui(
+                                10.5, weight: !draft && (item.fill == .outline || style.thin) ? .regular : .medium))
                         .foregroundStyle(Palette.ink)
                         .strikethrough(style.struck, color: Palette.inkFaint)
                         .lineLimit(1)
@@ -581,7 +663,9 @@
                 }
                 .padding(.horizontal, Space.s4)
                 .frame(width: max(0, width), height: MonthMetrics.rowHeight, alignment: .leading)
-                .background { ChipFill(style: style, inks: inks, shape: shape, stripeSpacing: 5) }
+                .background {
+                    ChipFill(style: style, inks: inks, shape: shape, stripeSpacing: 5, provisional: draft)
+                }
                 .overlay(shape.strokeBorder(Palette.ink.opacity(selected ? 0.7 : 0), lineWidth: 1))
                 .contentShape(shape)
             }
@@ -645,7 +729,11 @@
                 .lineLimit(1)
                 .padding(.horizontal, Space.s6)
                 .frame(width: width, height: MonthMetrics.rowHeight, alignment: .leading)
-                .background { ChipFill(style: style, inks: inks, shape: shape, stripeSpacing: 5) }
+                .background {
+                    ChipFill(
+                        style: style, inks: inks, shape: shape, stripeSpacing: 5,
+                        provisional: item.id == EventForm.provisionalId)
+                }
                 .overlay(shape.strokeBorder(Palette.ink.opacity(selected ? 0.7 : 0), lineWidth: 1))
                 .clipShape(shape)
                 .contentShape(shape)
@@ -804,6 +892,14 @@
     }
 
     /// The hours: a gutter of times, and the well they label.
+    ///
+    /// DRAG TO CREATE. A press on the empty well and a drag down (or up) it
+    /// sweeps a span of time: a dashed block follows the pointer, snapped to
+    /// the quarter hour, saying its times as it goes; letting go opens the
+    /// event pane with that day and those times. The arithmetic is
+    /// Lib/DaySweep.swift. A plain click on the well does nothing new, a
+    /// press on a block is that block's click, and Escape mid-drag drops the
+    /// sweep (`AppStore.calendarMonthBack`).
     private struct HoursGrid: View {
         @Environment(AppStore.self) private var store
         let column: DayColumn
@@ -814,9 +910,22 @@
         let calendar: Calendar
 
         @State private var width: CGFloat = 0
+        /// The sweep under way: where the press landed and where the pointer
+        /// is, in the well's own points. Nil when there is none.
+        @State private var sweep: Sweep?
+        /// Escape was pressed mid-drag: the rest of this drag is ignored.
+        @State private var sweepCancelled = false
+
+        private struct Sweep: Equatable {
+            var from: CGFloat
+            var to: CGFloat
+        }
 
         private var gutter: CGFloat { Typo.measure(38) }
         private var from: Int { MonthGrid.dayFromHour }
+        private var scale: DaySweepScale {
+            DaySweepScale(nightHeight: Double(nightHeight), pointsPerHour: Double(pph), fromHour: from)
+        }
 
         var body: some View {
             let hours = CGFloat(MonthGrid.dayHours)
@@ -835,14 +944,24 @@
                 .frame(width: gutter, height: total, alignment: .topTrailing)
 
                 ZStack(alignment: .topLeading) {
+                    // The empty well itself, UNDER everything drawn on it: a
+                    // block above it keeps its own click, and a press that
+                    // starts on one never starts a sweep.
+                    Color.clear
+                        .frame(maxWidth: .infinity)
+                        .frame(height: total)
+                        .contentShape(Rectangle())
+                        .gesture(sweepGesture)
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
                         .fill(Palette.hairline.opacity(0.4))
                         .frame(height: nightHeight - 2)
+                        .allowsHitTesting(false)
                     ForEach(from...24, id: \.self) { h in
                         Rectangle()
                             .fill(Palette.hairline)
                             .frame(height: 0.5)
                             .offset(y: nightHeight + CGFloat(h - from) * pph)
+                            .allowsHitTesting(false)
                     }
                     ForEach(column.night) { block in
                         nightBlock(block)
@@ -859,6 +978,9 @@
                             .offset(y: y - 1)
                             .allowsHitTesting(false)
                     }
+                    if let sweep {
+                        sweptBlock(sweep)
+                    }
                 }
                 // The well's width comes from the pane, never from its blocks.
                 .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -869,6 +991,66 @@
 
         private func hourLabel(_ h: Int) -> String {
             h == 12 ? "noon" : (h < 12 ? "\(h)am" : "\(h - 12)pm")
+        }
+
+        // MARK: drag to create
+
+        /// Only where a new event can be made at all, as `n` is.
+        private var canSweep: Bool { store.calendarCanCreate && !store.eventPaneOpen }
+
+        private var sweepGesture: some Gesture {
+            DragGesture(minimumDistance: CGFloat(DaySweep.clickSlop), coordinateSpace: .local)
+                .onChanged { value in
+                    guard canSweep, !sweepCancelled else { return }
+                    if sweep == nil {
+                        // Not until it has travelled DOWN or UP: a sideways
+                        // wobble on a click is still a click.
+                        guard
+                            DaySweep.isDrag(from: Double(value.startLocation.y), to: Double(value.location.y))
+                        else { return }
+                        store.calendarSweepCancel = {
+                            sweepCancelled = true
+                            sweep = nil
+                        }
+                    }
+                    sweep = Sweep(from: value.startLocation.y, to: value.location.y)
+                }
+                .onEnded { value in
+                    let swept = sweepCancelled ? nil : sweep
+                    sweep = nil
+                    sweepCancelled = false
+                    store.calendarSweepCancel = nil
+                    guard let swept, canSweep else { return }
+                    let span = DaySweep.span(from: Double(swept.from), to: Double(value.location.y), scale)
+                    store.openEventEditor(day: column.day, startMinutes: span.start, endMinutes: span.end)
+                }
+        }
+
+        /// The span being swept: the draft's own dashed chip, in the colour
+        /// of the calendar a new event goes on, saying its times.
+        private func sweptBlock(_ sweep: Sweep) -> some View {
+            let span = DaySweep.span(from: Double(sweep.from), to: Double(sweep.to), scale)
+            let top = CGFloat(DaySweep.y(of: span.start, scale))
+            let height = max(14, CGFloat(DaySweep.y(of: span.end, scale)) - top - 2)
+            let hue = CalendarColor.parse(store.calendarWritable.first?.color).map(ChipHue.calendar) ?? .plain
+            let inks = ChipColors.inks(hue)
+            let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
+            return Text(DaySweep.label(span))
+                .font(Typo.ui(10.5, weight: .medium))
+                .monospacedDigit()
+                .foregroundStyle(inks.ink)
+                .lineLimit(1)
+                .padding(.horizontal, Space.s6)
+                .padding(.top, height < 30 ? 1 : Space.scaled(3))
+                .frame(width: max(0, width - 2), height: height, alignment: .topLeading)
+                .background {
+                    ChipFill(
+                        style: ChipStyle(hue: hue, fill: .outline, thin: false, struck: false), inks: inks,
+                        shape: shape, provisional: true)
+                }
+                .offset(y: top)
+                .allowsHitTesting(false)
+                .accessibilityLabel("New event, \(DaySweep.label(span))")
         }
 
         private func lane(_ block: ColumnBlock) -> (x: CGFloat, w: CGFloat) {

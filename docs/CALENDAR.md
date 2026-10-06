@@ -7,9 +7,10 @@ manage, and gives mail the one thing it has never known: what the user's time
 looks like.
 
 DRAFT, started 2026-09-30. BUILT so far: the ghost engine (§3.6), the
-optional calendar grant and a read-only calendar sync (§8), and a first
-Calendar page in the Mac client with the connect card (§5, "Built so far").
-Nothing writes to a real calendar. Sections marked DECIDED carry a product
+optional calendar grant and a calendar sync (§8), creating, editing and
+deleting events on the user's own calendars (§8), and the Calendar page in the
+Mac client (§5, "Built so far"). Nothing is written to a real calendar except
+by the user's own hand, one event at a time. Sections marked DECIDED carry a product
 decision; everything else is a proposal. §14 lists what is still open.
 
 ## 1. The bar
@@ -526,17 +527,61 @@ founder says otherwise:
   and suggested slots.
 
 **Built so far** (Mac client, behind Developer mode): a Calendar destination
-second in the rail, opened with `⇧C` and outside the number-key order; an
-agenda page (a "Next" callout, today's strip, days with ghosts and real events
-in time order, "N earlier today" and "N unlikely" folds); a detail pane with
-the mail behind each item and the model's own words shown as attributed
-quotes; going and dismiss on ghosts; the connect card (shown once per account
-as a modal, then a quiet banner), its waiting state, and a line for the sync
-state; a month view (Agenda / Month in the header, `m` and `a`), drawn as the
-shape of the month: a strip of hours per day with a folded night cap, named
-spans for trips and stays across the top, no titles in cells, a selected day's
-column beside the grid, and the item detail in that same pane. It has never
-been seen on screen by the people who built it.
+second in the rail. The page opens on a conventional month (Month | Agenda in
+the header, `m` and `a`): each cell lists its day top-down as chips in the
+calendar's colour, trips and stays as named bars across the cells they cover,
+"+N more" for what does not fit, the selected day's column of hours beside the
+grid, and the item detail in that same pane. The agenda is a "Next" callout,
+today's strip, and days with ghosts and real events in time order ("N earlier
+today" and "N unlikely" folded). The detail shows the mail behind each item
+and the model's own words as attributed quotes; ghosts take going and dismiss.
+The connect card is shown once per account as a modal, then a quiet banner,
+with a waiting state and a line for the sync state.
+
+Wave 4, from the founder using wave 3 on screen:
+
+- **Number keys.** While the page is offered, Calendar is `2` and every later
+  page is one higher (Sitrep 1, Calendar 2, All mail 3, Auth 4, Rules 5,
+  Groups 6). While it is not offered the numbers are the ones from before it
+  existed. `⇧C` still opens it.
+- **No gap under the date.** A bar holds its lane only over the days it
+  covers. A lane is free again the day after the span in it ends, in the same
+  week row. A cell's own items fill any row left free above a bar before going
+  below it, so the first thing in a cell sits directly under its date. The one
+  hole left is a day whose only content is a bar in a lower lane after the bar
+  above it has ended: the bar is kept straight rather than jogged up
+  (`MonthGrid.holes` counts these).
+- **The event pane.** `n` (and "New event") and `e` open a pane that takes
+  half the window the way the compose pane does, with its chrome, its motion
+  and its Esc. Title, calendar (every writable calendar as a tag in its
+  colour, the primary one picked), all day, the day and times as typed fields
+  with the line saying what will be saved, location, notes. `⌘↵` saves from
+  anywhere, `↵` from a single-line field. While it is open the day column and
+  the detail are away, the month keeps the other half and stays live, a click
+  on a day sets the draft's date, and the draft is on the grid as a dashed
+  chip in its calendar's colour that moves as the fields change. In Agenda
+  mode the list takes the other half. A refused save keeps the pane and its
+  contents and says why in one toast; delete asks once.
+- **One pane at a time.** The event pane and the composer use the same half.
+  Opening the event pane closes an open composer the way Esc does (its mail is
+  kept in drafts). Opening a composer closes an untouched event pane; an event
+  with something typed in it is not thrown away, and the composer is refused
+  with one line ("Save or close the event first").
+- **Location lookup.** The location line suggests places as it is typed, from
+  Apple's MapKit (§8). Arrows and `↵` pick, Esc closes the list and not the
+  pane, and typed text is replaced only by a pick.
+- **Drag to create.** A press and a drag on the day column's hours sweeps a
+  span, snapped to 15 minutes and labelled as it goes; letting go opens the
+  event pane with that day and those times. A plain click does nothing new, a
+  press on an existing block is that block's click, and Esc mid-drag drops it.
+
+**Keymap as built.** `1` to `6` the rail (Calendar `2` while offered), `⇧C`
+the calendar; on the page `m` / `a` month and agenda, `j` / `k` the selection,
+`↵` open, `y` going, `x` dismiss, `n` new event, `e` edit, `⌫` delete; in the
+month the arrows move the day, `[` `]` (or `,` `.`) the month, `t` today, Esc
+closes the item, then the day; in the event pane `⌘↵` saves, `↵` saves from a
+single-line field or picks a highlighted place, `↑` `↓` move in the place
+list, Esc closes the place list, then the delete question, then the pane.
 
 - **Sitrep agenda.** Replaces the Calendar zone: today and the next few days,
   real events and ghosts together, with the next commitment called out. This
@@ -554,10 +599,10 @@ been seen on screen by the people who built it.
   column and month views follow in the parity pass.
 
 A calendar destination joins the rail, directly under Sitrep and above All
-mail (DECIDED). Keys start as the preview drew them (`⇧C` opens the calendar;
+mail (DECIDED). Keys started as the preview drew them (`⇧C` opens the calendar;
 `d` / `w` / `m` switch views; `y` / `n` / `x` answer an invitation) and are
-adjusted after use; each is checked against the existing keymap before it is
-bound. The time pane is NOT a `SidePanel`
+adjusted after use ("Keymap as built" above is what is bound today); each is
+checked against the existing keymap before it is bound. The time pane is NOT a `SidePanel`
 view: that panel takes the modal key context, and composer plus side panel is
 already a known sore spot (#265). The pane sits beside the composer.
 
@@ -993,6 +1038,26 @@ promoting a ghost to a real event is later work.
 - **Not here.** No agent route, no MCP tool, no assistant tool. No guests, no
   RSVP, no moving an event between calendars, no recurring-series edits (an
   edit to an instance changes that instance).
+
+### Location lookup (BUILT in wave 4, client only)
+
+The event pane's location line suggests places as it is typed. Google
+Calendar's own field is the Places Autocomplete API from Google Maps Platform:
+a billed product with its own key, unrelated to the Calendar OAuth grant. It
+is NOT used. The client asks Apple instead: `MKLocalSearchCompleter` for names
+and addresses, and `MKLocalSearch` for the one picked, which is written into
+the field as plain text, "Name, full address" (what Google stores in an
+event's location too). No key, no bill, the same on Mac and iOS.
+
+- The text typed into the location field goes to Apple, from the client,
+  once it is two characters long. Nothing else about the event does, and the
+  daemon is not involved.
+- No location permission is requested and no region is set: MapKit biases
+  results as it does by default.
+- Free text is always allowed. A suggestion replaces what was typed only when
+  the user picks it.
+- The rules live apart from MapKit (`Lib/PlaceLookup.swift`, tested with a
+  fake provider); `Lib/MapKitPlaces.swift` only talks to MapKit.
 
 ### Verification and disclosure
 

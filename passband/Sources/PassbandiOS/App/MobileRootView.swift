@@ -128,6 +128,7 @@ private struct MobileLoadingGate: View {
                 .foregroundStyle(Palette.ink)
             ProgressView()
                 .controlSize(.small)
+            SavedConnectionWait()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

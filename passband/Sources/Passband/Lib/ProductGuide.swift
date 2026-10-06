@@ -470,6 +470,7 @@ enum ProductGuide {
         - Switch with ⌘1 to ⌘9, in the order listed in Settings > Account, or from the account badge at the bottom of the rail once there are two or more. Switching starts a fresh assistant chat.
         - Rename an account by editing its name in Settings > Account. "remove", then confirm, takes it off this Mac. On the last account the button reads "disconnect".
         - Notifications arrive for every account, not only the one on screen.
+        - If the account's server is not answering at launch, Passband keeps retrying on its own. After a couple of seconds the loading screen offers "Try again now", "Switch to" each other account, and "Connect a different server". The Accounts menu and ⌘1 to ⌘9 switch from there too. Nothing is removed: the Connect screen's "Try saved connection again" goes back to the saved account.
         - If the Google sign-in expires, a banner on the Sitrep says Passband cannot read the mail. On a hosted account it has a Reconnect button.
 
         Notifications:

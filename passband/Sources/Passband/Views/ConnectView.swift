@@ -1322,6 +1322,85 @@ private struct WelcomeActions: View {
     }
 }
 
+/// The way out of the loading gate when it is up because a saved account's
+/// daemon is not answering. The store keeps asking on its own, and that wait
+/// has no end: without this the window is a spinner until the daemon comes
+/// back, with every other account and the Connect form behind it.
+///
+/// Draws nothing for the first moments, so a daemon that answers at once
+/// never flashes a panel it did not need.
+struct SavedConnectionWait: View {
+    @Environment(AppStore.self) private var store
+    @State private var accounts = AccountManager.shared
+    @State private var patienceSpent = false
+
+    private var waiting: Bool { store.restoringSavedConnection && !store.accountActionsBlocked }
+    private var others: [AccountRecord] { accounts.accounts.filter { $0.id != accounts.activeId } }
+
+    var body: some View {
+        VStack(spacing: Space.s12) {
+            if waiting, patienceSpent {
+                VStack(spacing: Space.s4) {
+                    Text("Still trying to reach \(accounts.active?.displayName ?? "your server").")
+                        .font(Typo.ui(13, weight: .medium))
+                        .foregroundStyle(Palette.ink)
+                    if let error = store.connError {
+                        Text(error)
+                            .font(Typo.ui(12))
+                            .foregroundStyle(Palette.inkDim)
+                    }
+                }
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+
+                VStack(spacing: Space.s8) {
+                    choice("Try again now", symbol: "arrow.clockwise") {
+                        store.retrySavedConnectionNow()
+                    }
+                    ForEach(others) { account in
+                        choice("Switch to \(account.displayName)", symbol: "arrow.left.arrow.right") {
+                            Task { await accounts.switchTo(account.id) }
+                        }
+                    }
+                    choice("Connect a different server", symbol: "server.rack") {
+                        store.stopWaitingForSavedConnection()
+                    }
+                }
+                .disabled(store.switching)
+                .padding(.top, Space.s8)
+            }
+        }
+        .frame(maxWidth: 300)
+        .padding(.horizontal, Space.s24)
+        .animation(.easeOut(duration: 0.25), value: waiting && patienceSpent)
+        .task(id: store.restoringSavedConnection) {
+            patienceSpent = false
+            guard store.restoringSavedConnection else { return }
+            try? await Task.sleep(for: .seconds(2))
+            patienceSpent = !Task.isCancelled
+        }
+    }
+
+    private func choice(_ title: String, symbol: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: Space.scaled(9)) {
+                Image(systemName: symbol).frame(width: Space.scaled(18))
+                Text(title).lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 0)
+            }
+            .font(Typo.ui(13, weight: .medium))
+            .foregroundStyle(Palette.inkDim)
+            .padding(.vertical, Space.s10)
+            .padding(.horizontal, Space.s16)
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Palette.canvas.opacity(0.3)))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
+    }
+}
+
 /// Self-hosting stays inside Passband: the shortest complete path from no
 /// daemon to a pairing code, with copyable commands and an explicit handoff to
 /// the form once the server is running.

@@ -223,6 +223,7 @@ private struct LoadingGate: View {
                 .foregroundStyle(Palette.ink)
             ProgressView()
                 .controlSize(.small)
+            SavedConnectionWait()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

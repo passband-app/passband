@@ -517,8 +517,17 @@ final class AppStore {
     var connStatus: ConnStatus = .loading {
         didSet {
             if connStatus == .connected { Notifier.shared.connectionBecameReady() }
+            if connStatus != .loading { restoringSavedConnection = false }
         }
     }
+    /// The loading gate is up because a saved account's daemon is being
+    /// waited on (`recoverSavedConnection`), not because of a keychain read or
+    /// a practice swap. That wait has no end of its own, so this is what lets
+    /// the gate and the Accounts menu offer a way out of it.
+    private(set) var restoringSavedConnection = false
+    /// Switching is offered from a working mailbox, and from the wait for one
+    /// that is not answering. Not from the Connect gate (see PassbandCommands).
+    var canSwitchAccounts: Bool { connStatus == .connected || restoringSavedConnection }
     var settings: ConnectionSettings? {
         didSet {
             capabilityRecoveryTask?.cancel()
@@ -1328,6 +1337,7 @@ final class AppStore {
         capabilityRecoveryTask?.cancel()
         let recoveryEpoch = epoch
         connStatus = .loading
+        restoringSavedConnection = true
         capabilityRecoveryTask = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
@@ -1363,6 +1373,31 @@ final class AppStore {
                 }
             }
         }
+    }
+
+    /// Ask the saved daemon again now instead of sitting out the loop's sleep:
+    /// the person has just started it and should not wait half a minute to be
+    /// believed.
+    func retrySavedConnectionNow() {
+        guard restoringSavedConnection, !accountActionsBlocked, !switching,
+            let settings, let id = AccountManager.shared.activeId
+        else { return }
+        connError = nil
+        recoverSavedConnection(settings, accountId: id)
+    }
+
+    /// Stop waiting on the saved daemon and hand the window to the Connect
+    /// gate. Nothing is forgotten: the account stays in the index with its
+    /// credentials, and the gate's "Try saved connection again" comes straight
+    /// back here. Leaves the same state a daemon that answers with a refusal
+    /// does, so the gate opens on its form rather than on the first-run intro.
+    func stopWaitingForSavedConnection() {
+        guard restoringSavedConnection, !accountActionsBlocked, !switching else { return }
+        capabilityRecoveryTask?.cancel()
+        capabilityRecoveryTask = nil
+        let name = AccountManager.shared.active?.displayName ?? "Your saved server"
+        connError = "\(name) is not answering. Connect another server, or try the saved connection again."
+        connStatus = .error
     }
 
     /// Verify candidate credentials and triage capabilities, then persist and connect.
@@ -1713,7 +1748,7 @@ final class AppStore {
                 // so. A toast, not `connError`: that field renders only on
                 // ConnectView, so writing it here would show nothing now and
                 // then greet the next Add Account sheet with a stale failure.
-                pushToast(why, .error)
+                reportSwitchFailure(why, for: record)
                 return false
             }
             // The removal path: the account on screen is already gone from the
@@ -1733,7 +1768,7 @@ final class AppStore {
             if currentWorldGone {
                 await tearDownToGate(error: why)
             } else {
-                pushToast(why, .error)
+                reportSwitchFailure(why, for: record)
             }
             return false
         }
@@ -1796,7 +1831,22 @@ final class AppStore {
         Task { await refreshMail(.inbox) }
         Task { await refreshTrackingConfig() }
         Notifier.shared.connectionBecameReady()
+        // A switch made from the wait for a daemon that is not answering: the
+        // shell was never mounted, so this is also what mounts it. The starts
+        // above repeat on that transition, and all of them are idempotent.
+        if connStatus != .connected { connStatus = .connected }
         return true
+    }
+
+    /// A refused switch leaves the world it started from, and says why where
+    /// that world can show it. Toasts are the shell's; from the wait for a
+    /// saved daemon there is no shell, and the loading gate reads `connError`.
+    private func reportSwitchFailure(_ why: String, for record: AccountRecord) {
+        if connStatus == .connected {
+            pushToast(why, .error)
+        } else {
+            connError = "\(record.displayName): \(why)"
+        }
     }
 
     /// Tear the world down to the Connect gate: the shared tail of "the

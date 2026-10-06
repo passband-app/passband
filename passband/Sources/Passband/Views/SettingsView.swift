@@ -239,41 +239,66 @@ struct SettingsView: View {
     }
 
     private var nav: some View {
-        @Bindable var prefs = prefs
-        return VStack(alignment: .leading, spacing: Space.s2) {
+        VStack(alignment: .leading, spacing: Space.s2) {
             search
                 .padding(.bottom, Space.s10)
-            ForEach(SettingsSection.allCases, id: \.self) { section in
-                // Nothing is selected while a search is up, because nothing IS:
-                // the pane on the right is the query's, not this section's, and
-                // a lit row beside it would be claiming otherwise.
-                let active = !searching && prefs.settingsSection == section
-                Button {
-                    // Picking a category is how you leave a search, so it
-                    // clears the field rather than selecting underneath it.
-                    query = ""
-                    searchFocused = false
-                    prefs.settingsSection = section
-                } label: {
-                    Text(section.label)
-                        .font(Typo.ui(12, weight: .medium))
-                        .foregroundStyle(active ? Palette.accent : Palette.inkFaint)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+            ForEach(Array(Self.navGroups.enumerated()), id: \.offset) { index, group in
+                if index > 0 {
+                    Rectangle()
+                        .fill(Palette.hairline)
+                        .frame(height: 0.5)
                         .padding(.horizontal, Space.scaled(11))
-                        .padding(.vertical, Space.s6)
-                        .contentShape(Rectangle())
+                        .padding(.vertical, Space.s8)
                 }
-                .buttonStyle(.plain)
-                .background(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(active ? Palette.accentSoft : .clear)
-                )
+                ForEach(group, id: \.self) { section in
+                    navRow(section)
+                }
             }
             Spacer()
         }
         .frame(width: Typo.measure(158))
         .padding(.horizontal, Space.s12)
         .padding(.vertical, Space.scaled(18))
+    }
+
+    /// THE SUB-NAV IS TWO LISTS WITH A RULE BETWEEN THEM. Above it, the things
+    /// you come here to WORK ON: your mailboxes, your sender rules, your groups.
+    /// Below it, the settings proper, which you change once and forget. Mixed
+    /// into one column they read as nine equal preferences, and three of them
+    /// are not preferences at all.
+    ///
+    /// Its own order, not `SettingsSection.allCases`: the enum is a taxonomy
+    /// the search index and the phone share, and neither wants this grouping.
+    private static let navGroups: [[SettingsSection]] = [
+        [.account, .rules, .groups],
+        [.general, .mail, .assistant, .agents, .privacy, .audit],
+    ]
+
+    private func navRow(_ section: SettingsSection) -> some View {
+        // Nothing is selected while a search is up, because nothing IS: the
+        // pane on the right is the query's, not this section's, and a lit row
+        // beside it would be claiming otherwise.
+        let active = !searching && prefs.settingsSection == section
+        return Button {
+            // Picking a category is how you leave a search, so it clears the
+            // field rather than selecting underneath it.
+            query = ""
+            searchFocused = false
+            prefs.settingsSection = section
+        } label: {
+            Text(section.label)
+                .font(Typo.ui(12, weight: .medium))
+                .foregroundStyle(active ? Palette.accent : Palette.inkFaint)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, Space.scaled(11))
+                .padding(.vertical, Space.s6)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(active ? Palette.accentSoft : .clear)
+        )
     }
 
     /// The field above the categories. It sits HERE, in the column that lists

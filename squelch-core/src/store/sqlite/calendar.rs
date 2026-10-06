@@ -1,6 +1,8 @@
 //! Google Calendar, the stored half: `calendar_calendars` (which calendars are
-//! read, and each one's sync token and last outcome) and `calendar_events`
-//! (the events in the synced window). Written by the sync loop
+//! read, and each one's sync token and last outcome), `calendar_events`
+//! (the events in the synced window) and `calendar_event_guests` (each
+//! event's attendees, replaced whole with the event and deleted with it by a
+//! trigger). Written by the sync loop
 //! ([`crate::gcal::sync`]) and, one event at a time, by the human door after
 //! Google accepted the user's own create, edit or delete; read only by the
 //! human door. HUMAN DOOR ONLY: no agent route and no triage prompt reads
@@ -17,8 +19,9 @@
 use super::ghosts::{in_range, listing_order, sort_key};
 use super::*;
 use crate::gcal::{
-    AccessRole, CalendarErrorKind, CalendarMeta, CalendarStatus, EventItem, EventRow,
-    MAX_EVENTS_PER_CALENDAR, PRIMARY, PageApplied, SelfResponse, StoredCalendar, SyncedEvent,
+    AccessRole, CalendarErrorKind, CalendarMeta, CalendarStatus, EventItem, EventRow, Guest,
+    GuestResponse, MAX_EVENTS_PER_CALENDAR, MAX_GUESTS, PRIMARY, PageApplied, SelfResponse,
+    StoredCalendar, SyncedEvent,
 };
 use crate::triage::ghost::EventTime;
 use chrono::FixedOffset;
@@ -28,7 +31,8 @@ use std::collections::HashSet;
 /// listing says when it cut.
 pub const LIST_CAP: usize = 5000;
 
-/// Delete every event of a calendar and forget how far it was synced, so the
+/// Delete every event of a calendar (their guests go with them, by the
+/// trigger) and forget how far it was synced, so the
 /// next time it is read it is read in full.
 fn forget_calendar(tx: &Connection, account: AccountId, calendar_id: &str) -> Result<()> {
     tx.execute(
@@ -428,6 +432,35 @@ impl SqliteStore {
             near.sort_by_key(|(_, e)| distance(e));
             near.truncate(cap);
         }
+        // Every guest list in the padded range in one read, then handed to
+        // the events that were kept.
+        let mut guests = {
+            let mut stmt = conn.prepare(
+                "SELECT g.calendar_id,g.event_id,g.email,g.name,g.response,g.is_organizer,g.is_self
+                 FROM calendar_event_guests g
+                 JOIN calendar_events e ON e.account_id=g.account_id
+                      AND e.calendar_id=g.calendar_id AND e.event_id=g.event_id
+                 WHERE g.account_id=?1 AND e.start_sort>=?2 AND e.start_sort<=?3
+                 ORDER BY g.calendar_id, g.event_id, g.position",
+            )?;
+            let mut by_event: std::collections::HashMap<(String, String), Vec<Guest>> =
+                Default::default();
+            let mut rows = stmt.query(params![account, low, high])?;
+            while let Some(r) = rows.next()? {
+                by_event
+                    .entry((r.get(0)?, r.get(1)?))
+                    .or_default()
+                    .push(guest(r, 2)?);
+            }
+            by_event
+        };
+        for (_, event) in &mut near {
+            if let Some(list) =
+                guests.remove(&(event.calendar_id.clone(), event.row.event_id.clone()))
+            {
+                event.row.guests = list;
+            }
+        }
         let offset = *from.offset();
         near.sort_by(|(pa, a), (pb, b)| {
             (
@@ -465,7 +498,17 @@ impl SqliteStore {
         let found = conn
             .query_row(&sql, params![account, calendar_id, event_id], synced_event)
             .optional()?;
-        Ok(found.flatten().map(|(_, event)| event))
+        let Some((_, mut event)) = found.flatten() else {
+            return Ok(None);
+        };
+        let mut stmt = conn.prepare(
+            "SELECT email,name,response,is_organizer,is_self FROM calendar_event_guests
+             WHERE account_id=?1 AND calendar_id=?2 AND event_id=?3 ORDER BY position",
+        )?;
+        event.row.guests = stmt
+            .query_map(params![account, calendar_id, event_id], |r| guest(r, 0))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(Some(event))
     }
 
     /// THE USER'S OWN WRITE, after Google accepted it: store Google's answer
@@ -479,8 +522,9 @@ impl SqliteStore {
         calendar_id: &str,
         row: &EventRow,
     ) -> Result<bool> {
-        let conn = self.lock()?;
-        let selected: Option<bool> = conn
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let selected: Option<bool> = tx
             .query_row(
                 "SELECT selected FROM calendar_calendars WHERE account_id=?1 AND calendar_id=?2",
                 params![account, calendar_id],
@@ -490,7 +534,9 @@ impl SqliteStore {
         if selected != Some(true) {
             return Ok(false);
         }
-        upsert_event(&conn, account, calendar_id, row)?;
+        // The event and its guest list land together or not at all.
+        upsert_event(&tx, account, calendar_id, row)?;
+        tx.commit()?;
         Ok(true)
     }
 
@@ -515,10 +561,24 @@ impl SqliteStore {
 const EVENT_COLUMNS: &str = "e.calendar_id,c.summary,e.event_id,e.ical_uid,e.status,e.summary,
     e.location,e.starts_at,e.ends_at,e.start_timezone,e.organizer_email,e.self_response,
     e.transparent,e.html_link,e.updated_at,c.is_primary,c.color,c.access_role,e.color_id,
-    e.organizer_self,e.description";
+    e.organizer_self,e.description,e.guests_truncated";
+
+/// One guest read from `email,name,response,is_organizer,is_self` starting
+/// at column `at`.
+fn guest(r: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<Guest> {
+    let response: String = r.get(at + 2)?;
+    Ok(Guest {
+        email: r.get(at)?,
+        name: r.get(at + 1)?,
+        response: GuestResponse::parse(&response),
+        organizer: r.get(at + 3)?,
+        is_self: r.get(at + 4)?,
+    })
+}
 
 /// One event read by [`EVENT_COLUMNS`], with whether its calendar is the
 /// primary one. None for a start that does not parse (never written so).
+/// Its guests are read apart, by the caller.
 fn synced_event(r: &rusqlite::Row<'_>) -> rusqlite::Result<Option<(bool, SyncedEvent)>> {
     let starts_at: String = r.get(7)?;
     let Some(start) = EventTime::parse(&starts_at) else {
@@ -528,13 +588,15 @@ fn synced_event(r: &rusqlite::Row<'_>) -> rusqlite::Result<Option<(bool, SyncedE
     let ends_at: Option<String> = r.get(8)?;
     let response: Option<String> = r.get(11)?;
     let role: Option<String> = r.get(17)?;
+    let primary: bool = r.get(15)?;
     Ok(Some((
-        r.get(15)?,
+        primary,
         SyncedEvent {
             calendar_id: r.get(0)?,
             calendar_name: r.get(1)?,
             calendar_color: r.get(16)?,
             calendar_access: role.as_deref().and_then(AccessRole::parse),
+            calendar_primary: primary,
             row: EventRow {
                 event_id: r.get(2)?,
                 ical_uid: r.get(3)?,
@@ -552,6 +614,8 @@ fn synced_event(r: &rusqlite::Row<'_>) -> rusqlite::Result<Option<(bool, SyncedE
                 updated_at: r.get(14)?,
                 color_id: r.get(18)?,
                 description: r.get(20)?,
+                guests: Vec::new(),
+                guests_truncated: r.get(21)?,
             },
         },
     )))
@@ -566,8 +630,8 @@ fn upsert_event(
     tx.execute(
         "INSERT INTO calendar_events(account_id,calendar_id,event_id,ical_uid,status,summary,location,
              starts_at,start_sort,ends_at,all_day,start_timezone,organizer_email,self_response,
-             transparent,html_link,updated_at,color_id,organizer_self,description)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)
+             transparent,html_link,updated_at,color_id,organizer_self,description,guests_truncated)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)
          ON CONFLICT(account_id,calendar_id,event_id) DO UPDATE SET
              ical_uid=excluded.ical_uid, status=excluded.status, summary=excluded.summary,
              location=excluded.location, starts_at=excluded.starts_at,
@@ -576,7 +640,7 @@ fn upsert_event(
              self_response=excluded.self_response, transparent=excluded.transparent,
              html_link=excluded.html_link, updated_at=excluded.updated_at,
              color_id=excluded.color_id, organizer_self=excluded.organizer_self,
-             description=excluded.description",
+             description=excluded.description, guests_truncated=excluded.guests_truncated",
         params![
             account,
             calendar_id,
@@ -598,7 +662,31 @@ fn upsert_event(
             row.color_id,
             row.organizer_self,
             row.description,
+            row.guests_truncated,
         ],
     )?;
+    // The guest list is replaced whole: what Google sent is what is held.
+    tx.execute(
+        "DELETE FROM calendar_event_guests WHERE account_id=?1 AND calendar_id=?2 AND event_id=?3",
+        params![account, calendar_id, row.event_id],
+    )?;
+    for (position, guest) in row.guests.iter().take(MAX_GUESTS).enumerate() {
+        tx.execute(
+            "INSERT INTO calendar_event_guests(account_id,calendar_id,event_id,position,email,name,
+                 response,is_organizer,is_self)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![
+                account,
+                calendar_id,
+                row.event_id,
+                position as i64,
+                guest.email,
+                guest.name,
+                guest.response.as_str(),
+                guest.organizer,
+                guest.is_self,
+            ],
+        )?;
+    }
     Ok(())
 }

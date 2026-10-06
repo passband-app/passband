@@ -649,6 +649,26 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
         "INTEGER NOT NULL DEFAULT 0",
     )?;
     add_column_if_missing(conn, "calendar_events", "description", "TEXT")?;
+    // Guests (calendar wave 5). An events table from before them was filled
+    // by reads that asked Google for one attendee per event, and its sync
+    // tokens were minted by those requests ("All other query parameters
+    // should be the same as for the initial synchronization to avoid
+    // undefined behavior"). So when the column is new, every calendar forgets
+    // its token and its last full read: the next pass reads each in full with
+    // the new parameters and fills the guest lists. Until it has, a stored
+    // event reads as having no guests, and a guest edit still builds its list
+    // from a fresh read of Google, never from these rows.
+    if add_column_if_missing(
+        conn,
+        "calendar_events",
+        "guests_truncated",
+        "INTEGER NOT NULL DEFAULT 0",
+    )? {
+        conn.execute(
+            "UPDATE calendar_calendars SET sync_token=NULL, full_synced_at=NULL",
+            [],
+        )?;
+    }
 
     // STRANDED FAN-OUTS. A group send settles its recipients from a background
     // task, and no task survives the process. So any recipient still 'pending'

@@ -23,10 +23,22 @@
 //! happens on the way IN: Google's answer goes through [`super::read_event`]
 //! like any synced event, so the stored and served copy is cleaned exactly as
 //! every other event's is, while Google holds the full text.
+//!
+//! GUESTS AND WHO IS TOLD. A create or an edit may carry `guests`, a list of
+//! plain addresses ([`addr_spec`]: no display names, no quoting, nothing a
+//! mail header could be smuggled in), at most [`GUEST_CAP`], no duplicates.
+//! Whether the calendar may invite and whether the event's list may be
+//! changed are the door's questions ([`super::SyncedEvent::guest_editable`]).
+//! `notify` is read by [`notify`] alone: ONLY the JSON value `true` makes
+//! Google mail the guests; absent or `false` is silence, and anything else
+//! is refused rather than guessed at.
+
+use std::collections::HashSet;
 
 use serde_json::{Map, Value, json};
 
 use super::EventRow;
+use super::client::Notify;
 use crate::triage::ghost::{self, EventTime};
 use crate::triage::order_link::plain;
 use crate::triage::text::truncate_trimmed;
@@ -57,6 +69,15 @@ pub const MISSING: Invalid = Invalid("calendar_id, title, start, end and all_day
 pub const NOTHING: Invalid = Invalid("nothing to change");
 pub const NO_END: Invalid = Invalid("this event has no end: send end with start");
 pub const MOVE: Invalid = Invalid("an event cannot be moved to another calendar");
+pub const BAD_GUESTS: Invalid = Invalid("guests must be a list of email addresses");
+pub const TOO_MANY_GUESTS: Invalid = Invalid("an event takes at most 50 guests");
+pub const BAD_GUEST: Invalid = Invalid("each guest must be one plain email address");
+pub const DUPLICATE_GUEST: Invalid = Invalid("a guest is listed twice");
+pub const GUEST_IS_OWNER: Invalid = Invalid("the calendar's owner cannot be its own guest");
+pub const BAD_NOTIFY: Invalid = Invalid("notify must be true or false");
+
+/// The most guests one request may name.
+pub const GUEST_CAP: usize = 50;
 
 /// A field of an edit: left alone, cleared (`null`), or set.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +103,9 @@ pub struct NewEvent {
     pub times: EventTimes,
     pub location: Option<String>,
     pub description: Option<String>,
+    /// Checked addresses, as typed. Empty: no guests.
+    pub guests: Vec<String>,
+    pub notify: Notify,
 }
 
 /// An edit, its fields checked one by one. The times are checked against the
@@ -94,6 +118,10 @@ pub struct EventEdit {
     pub all_day: Option<bool>,
     pub location: Change<String>,
     pub description: Change<String>,
+    /// None leaves the guest list alone; Some is the FULL new list (empty
+    /// removes every guest).
+    pub guests: Option<Vec<String>>,
+    pub notify: Notify,
 }
 
 /// Check a pair of times: one precision (dates when `all_day`, instants
@@ -160,6 +188,133 @@ fn text(
     }
 }
 
+/// One guest address: a plain `local@domain` and nothing else. ASCII only;
+/// the local part is dot-separated runs of RFC 5322 atom characters (at most
+/// 64), the domain two or more dot-separated labels of letters, digits and
+/// inner hyphens (at most 253). No display name, angle brackets, quoted
+/// local part, comment, address literal, whitespace or control character,
+/// so the value can only ever be read as one mailbox. Returned trimmed, as
+/// typed.
+pub fn addr_spec(raw: &str) -> Option<String> {
+    let addr = raw.trim();
+    let (local, domain) = addr.split_once('@')?;
+    let atom = |c: char| c.is_ascii_alphanumeric() || "!#$%&'*+/=?^_`{|}~-".contains(c);
+    let local_ok = !local.is_empty()
+        && local.len() <= 64
+        && local
+            .split('.')
+            .all(|run| !run.is_empty() && run.chars().all(atom));
+    let label = |label: &str| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    };
+    let domain_ok = domain.len() <= 253 && domain.contains('.') && domain.split('.').all(label);
+    (local_ok && domain_ok).then(|| addr.to_string())
+}
+
+/// A guest list as sent: an array of at most [`GUEST_CAP`] strings, each an
+/// [`addr_spec`], no two the same once case is folded.
+fn guests(value: &Value) -> Result<Vec<String>, Invalid> {
+    let list = value.as_array().ok_or(BAD_GUESTS)?;
+    if list.len() > GUEST_CAP {
+        return Err(TOO_MANY_GUESTS);
+    }
+    let mut seen = HashSet::new();
+    let mut out = Vec::with_capacity(list.len());
+    for entry in list {
+        let addr = entry.as_str().and_then(addr_spec).ok_or(BAD_GUEST)?;
+        if !seen.insert(addr.to_ascii_lowercase()) {
+            return Err(DUPLICATE_GUEST);
+        }
+        out.push(addr);
+    }
+    Ok(out)
+}
+
+/// THE NOTIFY DEFAULT. Whether Google mails the guests: ONLY the JSON value
+/// `true`. Absent is silence, `false` is silence, and anything else (`null`,
+/// `"true"`, `1`) is refused, never read as a yes.
+pub fn notify(value: Option<&Value>) -> Result<Notify, Invalid> {
+    match value {
+        None | Some(Value::Bool(false)) => Ok(Notify::Nobody),
+        Some(Value::Bool(true)) => Ok(Notify::Guests),
+        Some(_) => Err(BAD_NOTIFY),
+    }
+}
+
+/// [`notify`] for a delete, whose `notify` is a query parameter: exactly
+/// `true` tells the guests, absent or exactly `false` tells nobody.
+pub fn notify_query(value: Option<&str>) -> Result<Notify, Invalid> {
+    match value {
+        None | Some("false") => Ok(Notify::Nobody),
+        Some("true") => Ok(Notify::Guests),
+        Some(_) => Err(BAD_NOTIFY),
+    }
+}
+
+/// No guest may be one of `owners` (the mailbox's address, the calendar's
+/// own id): the organizer is not their own guest, and Google would fold the
+/// two entries into one whose answer the app then overwrote.
+pub fn check_not_owner(guests: &[String], owners: &[&str]) -> Result<(), Invalid> {
+    let owned = guests.iter().any(|guest| {
+        owners
+            .iter()
+            .any(|owner| guest.eq_ignore_ascii_case(owner.trim()))
+    });
+    if owned { Err(GUEST_IS_OWNER) } else { Ok(()) }
+}
+
+/// THE FULL ATTENDEE LIST a guest edit sends, since `events.patch` replaces
+/// the array ("Array fields, if specified, overwrite the existing arrays;
+/// this discards any previous array elements").
+///
+/// `current` is Google's own list, read a moment ago, each entry whole.
+/// Kept, EXACTLY as Google gave it (its `responseStatus`, comment, optional
+/// flag and the rest): the user's own entry and the organizer's, which this
+/// door never removes, and every guest still in `wanted`. Dropped: every
+/// other entry. Added, bare (`{"email"}`, so Google starts it at
+/// `needsAction`): each address in `wanted` that `current` does not hold.
+/// Addresses compare with case folded.
+///
+/// None when `current` holds an entry that is neither the user's nor the
+/// organizer's and has no address (Google's `email` is there "if
+/// available"): it could not be asked for by address, so it would be
+/// removed without the user ever having seen it. The edit is refused.
+pub fn merge_attendees(current: &[Value], wanted: &[String]) -> Option<Vec<Value>> {
+    let fold = |addr: &str| addr.trim().to_ascii_lowercase();
+    let wanted_set: HashSet<String> = wanted.iter().map(|w| fold(w)).collect();
+    let flag = |entry: &Value, key| entry.get(key).and_then(Value::as_bool) == Some(true);
+    let mut held = HashSet::new();
+    let mut out = Vec::new();
+    for entry in current {
+        let email = entry
+            .get("email")
+            .and_then(Value::as_str)
+            .map(fold)
+            .filter(|e| !e.is_empty());
+        let own = flag(entry, "self") || flag(entry, "organizer");
+        if !own && email.is_none() {
+            return None;
+        }
+        let asked = email.as_ref().is_some_and(|e| wanted_set.contains(e));
+        if own || asked {
+            if let Some(email) = email {
+                held.insert(email);
+            }
+            out.push(entry.clone());
+        }
+    }
+    for addr in wanted {
+        if held.insert(fold(addr)) {
+            out.push(json!({ "email": addr }));
+        }
+    }
+    Some(out)
+}
+
 /// A calendar id as sent: non-empty text of a bounded length. Whether it
 /// names a calendar the user may write to is the store's question.
 pub fn calendar_id(value: &Value) -> Result<String, Invalid> {
@@ -170,7 +325,8 @@ pub fn calendar_id(value: &Value) -> Result<String, Invalid> {
 }
 
 /// Read a create: `{"calendar_id", "title", "start", "end", "all_day",
-/// "location"?, "description"?}`. Unknown keys are ignored.
+/// "location"?, "description"?, "guests"?, "notify"?}`. Unknown keys are
+/// ignored.
 pub fn parse_create(body: &Value) -> Result<NewEvent, Invalid> {
     let body = object(body)?;
     let need = |key| body.get(key).filter(|v| !v.is_null()).ok_or(MISSING);
@@ -188,13 +344,19 @@ pub fn parse_create(body: &Value) -> Result<NewEvent, Invalid> {
         times,
         location: set(text(body.get("location"), outgoing_location)?),
         description: set(text(body.get("description"), outgoing_description)?),
+        guests: match body.get("guests") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(list) => guests(list)?,
+        },
+        notify: notify(body.get("notify"))?,
     })
 }
 
 /// Read an edit: any subset of the create's fields. A `calendar_id`, if sent,
 /// must be the event's own (moving an event is not offered); `location` and
 /// `description` take `null` to clear; `title`, `start`, `end` and `all_day`
-/// cannot be cleared.
+/// cannot be cleared. `guests`, when present, is the full new list (`[]`
+/// removes them all; `null` is refused).
 pub fn parse_edit(body: &Value, event_calendar: &str) -> Result<EventEdit, Invalid> {
     let body = object(body)?;
     if let Some(cal) = body.get("calendar_id")
@@ -209,13 +371,17 @@ pub fn parse_edit(body: &Value, event_calendar: &str) -> Result<EventEdit, Inval
         all_day: body.get("all_day").map(all_day).transpose()?,
         location: text(body.get("location"), outgoing_location)?,
         description: text(body.get("description"), outgoing_description)?,
+        guests: body.get("guests").map(guests).transpose()?,
+        notify: notify(body.get("notify"))?,
     };
+    // `notify` alone changes nothing: there is no "tell them again".
     let empty = edit.title.is_none()
         && edit.start.is_none()
         && edit.end.is_none()
         && edit.all_day.is_none()
         && edit.location == Change::Keep
-        && edit.description == Change::Keep;
+        && edit.description == Change::Keep
+        && edit.guests.is_none();
     if empty { Err(NOTHING) } else { Ok(edit) }
 }
 
@@ -279,15 +445,32 @@ pub fn insert_body(event: &NewEvent) -> Result<Value, Invalid> {
     if let Some(description) = &event.description {
         body["description"] = json!(description);
     }
+    if !event.guests.is_empty() {
+        let attendees: Vec<Value> = event
+            .guests
+            .iter()
+            .map(|addr| json!({ "email": addr }))
+            .collect();
+        body["attendees"] = Value::Array(attendees);
+    }
     Ok(body)
 }
 
 /// The `events.patch` body: only what the edit changes, its text as typed
 /// (see [`insert_body`]). Times, when any
 /// changes, go as a pair (`times`, from [`EventEdit::times`]), since a new
-/// start can only be checked against an end.
-pub fn patch_body(edit: &EventEdit, times: Option<&EventTimes>) -> Result<Value, Invalid> {
+/// start can only be checked against an end. `attendees` is the full list
+/// from [`merge_attendees`] when the edit changes the guests, and None
+/// otherwise: the key is then NOT SENT, which leaves Google's list alone.
+pub fn patch_body(
+    edit: &EventEdit,
+    times: Option<&EventTimes>,
+    attendees: Option<Vec<Value>>,
+) -> Result<Value, Invalid> {
     let mut body = Map::new();
+    if let Some(attendees) = attendees {
+        body.insert("attendees".into(), Value::Array(attendees));
+    }
     if let Some(title) = &edit.title {
         body.insert("summary".into(), json!(title));
     }
@@ -348,6 +531,8 @@ mod tests {
             updated_at: None,
             color_id: None,
             description: None,
+            guests: Vec::new(),
+            guests_truncated: false,
         }
     }
 
@@ -494,7 +679,7 @@ mod tests {
         assert_eq!(edit.location, Change::Clear);
         assert_eq!(edit.description, Change::Keep);
         assert_eq!(
-            patch_body(&edit, None).unwrap(),
+            patch_body(&edit, None, None).unwrap(),
             json!({"summary": "New", "location": null})
         );
         assert_eq!(parse_edit(&json!({}), "primary"), Err(NOTHING));
@@ -534,7 +719,7 @@ mod tests {
         let to_day = edit(json!({"all_day": true, "start": "2026-10-05", "end": "2026-10-06"}));
         let times = to_day.times(&timed).unwrap();
         assert_eq!(
-            patch_body(&to_day, times.as_ref()).unwrap(),
+            patch_body(&to_day, times.as_ref(), None).unwrap(),
             json!({
                 "start": {"date": "2026-10-05", "dateTime": null},
                 "end": {"date": "2026-10-07", "dateTime": null},
@@ -561,5 +746,240 @@ mod tests {
         );
         // No time field: no times.
         assert_eq!(edit(json!({"title": "x"})).times(&timed), Ok(None));
+    }
+
+    #[test]
+    fn a_guest_is_one_plain_address_and_nothing_else() {
+        for good in [
+            "sam@example.com",
+            "  Sam.Lee+cal@Mail.Example.co.uk ",
+            "o'brien@example.com",
+            "a_b-c@x-y.io",
+        ] {
+            assert_eq!(addr_spec(good).as_deref(), Some(good.trim()), "{good}");
+        }
+        for bad in [
+            "",
+            "sam",
+            "sam@",
+            "@example.com",
+            "sam@localhost",
+            "sam@example",
+            "Sam <sam@example.com>",
+            "<sam@example.com>",
+            "sam@example.com, pat@example.com",
+            "sam@example.com;pat@example.com",
+            "sam @example.com",
+            "sam@exam ple.com",
+            "sam@@example.com",
+            "sam@a@example.com",
+            ".sam@example.com",
+            "sam.@example.com",
+            "sa..m@example.com",
+            "\"sam\"@example.com",
+            "sam(comment)@example.com",
+            "sam@[127.0.0.1]",
+            "sam@-example.com",
+            "sam@example-.com",
+            "sam@example..com",
+            "sam@example.com.",
+            "sam@exa_mple.com",
+            "sam@example.com\r\nBcc: x@y.com",
+            "sam\u{200B}@example.com",
+            "s\u{00E4}m@example.com",
+            "sam@ex\u{00E4}mple.com",
+            "mailto:sam@example.com",
+        ] {
+            assert_eq!(addr_spec(bad), None, "{bad:?}");
+        }
+        let long_local = format!("{}@example.com", "a".repeat(65));
+        assert_eq!(addr_spec(&long_local), None);
+        let long_domain = format!("a@{}.com", "b.".repeat(130));
+        assert_eq!(addr_spec(&long_domain), None);
+    }
+
+    #[test]
+    fn a_guest_list_is_bounded_and_has_no_duplicates() {
+        let with = |guests: Value| create(|b| b["guests"] = guests);
+        assert_eq!(
+            with(json!(["a@x.com", " B@x.com "])).unwrap().guests,
+            ["a@x.com", "B@x.com"],
+            "as typed, trimmed"
+        );
+        assert!(create(|_| {}).unwrap().guests.is_empty(), "absent");
+        assert!(with(Value::Null).unwrap().guests.is_empty());
+        assert!(with(json!([])).unwrap().guests.is_empty());
+        let many = |n: usize| json!((0..n).map(|i| format!("g{i}@x.com")).collect::<Vec<_>>());
+        assert_eq!(with(many(50)).unwrap().guests.len(), 50);
+        assert_eq!(with(many(51)), Err(TOO_MANY_GUESTS));
+        assert_eq!(with(json!("a@x.com")), Err(BAD_GUESTS));
+        assert_eq!(with(json!({"email": "a@x.com"})), Err(BAD_GUESTS));
+        assert_eq!(with(json!(["a@x.com", 7])), Err(BAD_GUEST));
+        assert_eq!(with(json!([{"email": "a@x.com"}])), Err(BAD_GUEST));
+        assert_eq!(with(json!(["Sam <a@x.com>"])), Err(BAD_GUEST));
+        assert_eq!(with(json!(["a@x.com", "A@X.COM"])), Err(DUPLICATE_GUEST));
+        // An edit: absent leaves the list alone, a list replaces it, null is
+        // not a list.
+        let edit = |body: Value| parse_edit(&body, "primary");
+        assert_eq!(edit(json!({"title": "x"})).unwrap().guests, None);
+        assert_eq!(
+            edit(json!({"guests": []})).unwrap().guests,
+            Some(Vec::new())
+        );
+        assert_eq!(
+            edit(json!({"guests": ["a@x.com"]})).unwrap().guests,
+            Some(vec!["a@x.com".to_string()])
+        );
+        assert_eq!(edit(json!({"guests": null})), Err(BAD_GUESTS));
+        assert_eq!(edit(json!({"guests": many(51)})), Err(TOO_MANY_GUESTS));
+        assert_eq!(
+            edit(json!({"guests": ["a@x.com", "a@x.com"]})),
+            Err(DUPLICATE_GUEST)
+        );
+    }
+
+    /// THE NOTIFY DEFAULT, at the parser: only `true` tells anyone.
+    #[test]
+    fn only_the_value_true_tells_the_guests() {
+        assert_eq!(notify(None), Ok(Notify::Nobody));
+        assert_eq!(notify(Some(&json!(false))), Ok(Notify::Nobody));
+        assert_eq!(notify(Some(&json!(true))), Ok(Notify::Guests));
+        for odd in [
+            json!(null),
+            json!("true"),
+            json!(1),
+            json!("all"),
+            json!([true]),
+        ] {
+            assert_eq!(notify(Some(&odd)), Err(BAD_NOTIFY), "{odd}");
+        }
+        assert_eq!(notify_query(None), Ok(Notify::Nobody));
+        assert_eq!(notify_query(Some("false")), Ok(Notify::Nobody));
+        assert_eq!(notify_query(Some("true")), Ok(Notify::Guests));
+        for odd in ["", "1", "TRUE", "True", "yes", "all", "true "] {
+            assert_eq!(notify_query(Some(odd)), Err(BAD_NOTIFY), "{odd:?}");
+        }
+        // Through the parsers.
+        assert_eq!(create(|_| {}).unwrap().notify, Notify::Nobody);
+        assert_eq!(
+            create(|b| b["notify"] = json!(false)).unwrap().notify,
+            Notify::Nobody
+        );
+        assert_eq!(
+            create(|b| b["notify"] = json!(true)).unwrap().notify,
+            Notify::Guests
+        );
+        assert_eq!(create(|b| b["notify"] = json!("true")), Err(BAD_NOTIFY));
+        let edit = |body: Value| parse_edit(&body, "primary");
+        assert_eq!(edit(json!({"title": "x"})).unwrap().notify, Notify::Nobody);
+        assert_eq!(
+            edit(json!({"title": "x", "notify": true})).unwrap().notify,
+            Notify::Guests
+        );
+        assert_eq!(edit(json!({"title": "x", "notify": 1})), Err(BAD_NOTIFY));
+        // Telling the guests is not itself a change.
+        assert_eq!(edit(json!({"notify": true})), Err(NOTHING));
+    }
+
+    #[test]
+    fn the_owner_is_never_a_guest() {
+        let guests = vec!["sam@x.com".to_string(), "ME@Example.com".to_string()];
+        assert_eq!(
+            check_not_owner(&guests, &["me@example.com"]),
+            Err(GUEST_IS_OWNER)
+        );
+        assert_eq!(
+            check_not_owner(&guests, &["other@example.com", " sam@X.com "]),
+            Err(GUEST_IS_OWNER)
+        );
+        assert_eq!(check_not_owner(&guests, &["other@example.com"]), Ok(()));
+        assert_eq!(check_not_owner(&[], &["me@example.com"]), Ok(()));
+    }
+
+    #[test]
+    fn a_create_sends_its_guests_bare_and_none_when_it_has_none() {
+        let event = create(|b| b["guests"] = json!(["sam@x.com", "Pat@x.com"])).unwrap();
+        assert_eq!(
+            insert_body(&event).unwrap()["attendees"],
+            json!([{"email": "sam@x.com"}, {"email": "Pat@x.com"}])
+        );
+        let none = create(|b| b["guests"] = json!([])).unwrap();
+        assert!(
+            !insert_body(&none)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("attendees")
+        );
+    }
+
+    /// THE RESPONSE-STATUS PRESERVATION: a kept guest goes back exactly as
+    /// Google gave it.
+    #[test]
+    fn a_guest_edit_keeps_what_google_holds_about_everyone_who_stays() {
+        let current = vec![
+            json!({"email": "me@example.com", "self": true, "organizer": true,
+                   "responseStatus": "accepted"}),
+            json!({"email": "Sam@x.com", "displayName": "Sam", "responseStatus": "accepted",
+                   "comment": "See you there", "additionalGuests": 2, "optional": true}),
+            json!({"email": "pat@x.com", "responseStatus": "declined"}),
+            json!({"email": "room@resource.calendar.google.com", "resource": true,
+                   "responseStatus": "accepted"}),
+        ];
+        let wanted = vec!["sam@X.com".to_string(), "new@x.com".to_string()];
+        let merge =
+            |current: &[Value], wanted: &[String]| merge_attendees(current, wanted).unwrap();
+        assert_eq!(
+            merge(&current, &wanted),
+            vec![
+                current[0].clone(),
+                current[1].clone(),
+                json!({"email": "new@x.com"}),
+            ],
+            "own entry kept unasked, Sam whole, Pat and the room dropped, the new one bare"
+        );
+        // Removing everyone leaves the user's own entry.
+        assert_eq!(merge(&current, &[]), vec![current[0].clone()]);
+        // An organizer entry that is not `self` is kept too.
+        let organized = vec![json!({"email": "boss@x.com", "organizer": true})];
+        assert_eq!(merge(&organized, &[]), organized);
+        // An address already held as the user's own entry is not added twice.
+        assert_eq!(
+            merge(&current[..1], &["ME@example.com".to_string()]),
+            vec![current[0].clone()]
+        );
+        // From nothing: all bare, in the order asked.
+        assert_eq!(
+            merge(&[], &wanted),
+            vec![json!({"email": "sam@X.com"}), json!({"email": "new@x.com"})]
+        );
+        // A guest with no address cannot be kept by address: no list at all.
+        let nameless = vec![
+            current[0].clone(),
+            json!({"displayName": "Someone", "responseStatus": "accepted"}),
+        ];
+        assert_eq!(merge_attendees(&nameless, &wanted), None);
+        assert_eq!(
+            merge_attendees(&[json!({"email": "", "responseStatus": "accepted"})], &[]),
+            None
+        );
+        // The user's own entry needs none.
+        assert!(merge_attendees(&[json!({"self": true})], &[]).is_some());
+        // In the patch: present when given, the key absent otherwise.
+        let edit = parse_edit(&json!({"guests": ["a@x.com"]}), "primary").unwrap();
+        assert_eq!(
+            patch_body(&edit, None, Some(vec![json!({"email": "a@x.com"})])).unwrap(),
+            json!({"attendees": [{"email": "a@x.com"}]})
+        );
+        let title = parse_edit(&json!({"title": "x"}), "primary").unwrap();
+        assert_eq!(
+            patch_body(&title, None, None).unwrap(),
+            json!({"summary": "x"})
+        );
+        // Emptying the list sends an empty array, which is not "absent".
+        assert_eq!(
+            patch_body(&edit, None, Some(Vec::new())).unwrap(),
+            json!({"attendees": []})
+        );
     }
 }

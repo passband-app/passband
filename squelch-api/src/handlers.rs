@@ -1915,9 +1915,10 @@ fn ghost_view(
 /// `{ "ghosts": [...], "events": [...], "calendars": [...], "calendar":
 /// {granted, synced_at, error, truncated} }`. Events and calendars are served
 /// only while calendar is granted. `calendars` is every calendar being read,
-/// the primary first: `{id, name, color, primary, writable}`, `writable`
-/// being whether the app may create events on it (the user is `owner` or
-/// `writer`).
+/// the primary first: `{id, name, color, primary, writable, can_invite}`,
+/// `writable` being whether the app may create events on it (the user is
+/// `owner` or `writer`) and `can_invite` whether an event on it may carry
+/// guests (the user's own: the primary calendar, or one they are `owner` of).
 /// `error` is the credential's or the PRIMARY calendar's (a shared calendar
 /// that cannot be read is not an account error). `truncated` is true when
 /// the listing hit its cap (it keeps the events nearest now) or a calendar
@@ -2008,6 +2009,7 @@ pub async fn get_timeline(
                 "color": c.color,
                 "primary": c.is_primary,
                 "writable": c.writable(),
+                "can_invite": c.can_invite(),
             })
         })
         .collect();
@@ -2038,7 +2040,13 @@ pub async fn get_timeline(
 /// hides them. `color` is the event's own colour or its calendar's
 /// (`#rrggbb`, or null when Google gave neither), `editable` the edit guard
 /// ([`squelch_core::gcal::SyncedEvent::editable`]) for `account_email`, and
-/// `description` laundered text of at most 2000 characters.
+/// `description` laundered text of at most 2000 characters. `guests` is the
+/// event's attendees as Google lists them (`{email, name, response,
+/// organizer, self}`, `response` one of `accepted` / `declined` /
+/// `tentative` / `pending`), at most 100 and `[]` when it has none;
+/// `guests_truncated` says Google holds more than are listed, and
+/// `guest_editable` is the guest guard
+/// ([`squelch_core::gcal::SyncedEvent::guest_editable`]).
 pub(crate) fn calendar_event_view(
     event: &squelch_core::gcal::SyncedEvent,
     account_email: &str,
@@ -2062,6 +2070,15 @@ pub(crate) fn calendar_event_view(
         "color": event.color(),
         "editable": event.editable(account_email),
         "description": row.description,
+        "guests": row.guests.iter().map(|g| json!({
+            "email": g.email,
+            "name": g.name,
+            "response": g.response.as_str(),
+            "organizer": g.organizer,
+            "self": g.is_self,
+        })).collect::<Vec<_>>(),
+        "guests_truncated": row.guests_truncated,
+        "guest_editable": event.guest_editable(account_email),
     })
 }
 

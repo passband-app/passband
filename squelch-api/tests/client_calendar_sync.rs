@@ -71,6 +71,10 @@ struct Google {
     write_raw: Option<String>,
     /// Ids handed to inserted events: `new-1`, `new-2`, ...
     inserted: usize,
+    /// (calendar id, event id, query) of every one-event read, in order.
+    reads: Vec<(String, String, HashMap<String, String>)>,
+    /// Answer every one-event read with this status instead.
+    read_fail: Option<u16>,
 }
 type Fake = Arc<Mutex<Google>>;
 
@@ -105,6 +109,43 @@ fn merge(target: &mut Value, patch: &Value) {
             }
         }
     }
+}
+
+/// Google's `maxAttendees` on one event of an answer: "If there are more than
+/// the specified number of attendees, only the participant is returned", and
+/// the event is marked `attendeesOmitted`.
+fn omit_attendees(event: &mut Value, q: &HashMap<String, String>) {
+    let Some(max) = q.get("maxAttendees").and_then(|m| m.parse::<usize>().ok()) else {
+        return;
+    };
+    let Some(attendees) = event.get_mut("attendees").and_then(Value::as_array_mut) else {
+        return;
+    };
+    if attendees.len() > max {
+        attendees.retain(|a| a["self"] == true);
+        event["attendeesOmitted"] = json!(true);
+    }
+}
+
+/// `events.get`, as a guest edit reads it: the attendees the fake holds.
+async fn get_route(
+    State(g): State<Fake>,
+    Path((calendar, id)): Path<(String, String)>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let mut g = g.lock().unwrap();
+    g.bearers.push(bearer(&headers));
+    g.reads.push((calendar.clone(), id.clone(), q.clone()));
+    if let Some(status) = g.read_fail {
+        return StatusCode::from_u16(status).unwrap().into_response();
+    }
+    let Some(event) = g.find(&calendar, &id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let mut event = event.clone();
+    omit_attendees(&mut event, &q);
+    Json(event).into_response()
 }
 
 impl Google {
@@ -158,7 +199,7 @@ async fn insert_route(
     Json(body): Json<Value>,
 ) -> Response {
     let mut g = g.lock().unwrap();
-    if let Some(failed) = g.record("POST", &calendar, None, q, body.clone(), &headers) {
+    if let Some(failed) = g.record("POST", &calendar, None, q.clone(), body.clone(), &headers) {
         return failed;
     }
     g.inserted += 1;
@@ -175,6 +216,7 @@ async fn insert_route(
         pages.push(Vec::new());
     }
     pages.last_mut().unwrap().push(event.clone());
+    omit_attendees(&mut event, &q);
     Json(event).into_response()
 }
 
@@ -187,7 +229,15 @@ async fn patch_route(
     Json(body): Json<Value>,
 ) -> Response {
     let mut g = g.lock().unwrap();
-    if let Some(failed) = g.record("PATCH", &calendar, Some(&id), q, body.clone(), &headers) {
+    let recorded = g.record(
+        "PATCH",
+        &calendar,
+        Some(&id),
+        q.clone(),
+        body.clone(),
+        &headers,
+    );
+    if let Some(failed) = recorded {
         return failed;
     }
     let Some(event) = g.find(&calendar, &id) else {
@@ -195,7 +245,9 @@ async fn patch_route(
     };
     merge(event, &body);
     event["updated"] = json!("2026-10-05T11:00:00.000Z");
-    Json(event.clone()).into_response()
+    let mut event = event.clone();
+    omit_attendees(&mut event, &q);
+    Json(event).into_response()
 }
 
 /// `events.delete`: "an empty response body", or 410 for one already gone.
@@ -315,7 +367,11 @@ fn answer(g: &Google, calendar: &str, q: &HashMap<String, String>) -> Response {
         return Json(body).into_response();
     }
     let pages = g.full.get(&calendar).cloned().unwrap_or_default();
-    body["items"] = json!(pages.get(n).cloned().unwrap_or_default());
+    let mut items = pages.get(n).cloned().unwrap_or_default();
+    for item in &mut items {
+        omit_attendees(item, q);
+    }
+    body["items"] = json!(items);
     if n + 1 < pages.len() {
         body["nextPageToken"] = json!((n + 1).to_string());
     } else {
@@ -333,7 +389,9 @@ async fn spawn_google(g: Fake) -> String {
         )
         .route(
             "/calendars/{id}/events/{event}",
-            axum::routing::patch(patch_route).delete(delete_route),
+            axum::routing::get(get_route)
+                .patch(patch_route)
+                .delete(delete_route),
         )
         .with_state(g);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -679,6 +737,9 @@ async fn a_first_sync_reads_the_window_in_full_and_serves_every_field() {
             "description",
             "editable",
             "end",
+            "guest_editable",
+            "guests",
+            "guests_truncated",
             "html_link",
             "id",
             "location",
@@ -712,6 +773,16 @@ async fn a_first_sync_reads_the_window_in_full_and_serves_every_field() {
             "color": null,
             "editable": false,
             "description": null,
+            // The guest list as Google sent it; an invitation is not the
+            // user's to re-invite.
+            "guests": [
+                {"email": "boss@example.com", "name": null, "response": "accepted",
+                 "organizer": false, "self": false},
+                {"email": "me@example.com", "name": null, "response": "tentative",
+                 "organizer": false, "self": true},
+            ],
+            "guests_truncated": false,
+            "guest_editable": false,
         })
     );
     // The all-day ones: dates, the INCLUSIVE last day as the end (Google
@@ -2041,10 +2112,10 @@ async fn a_quota_answer_from_any_calendar_fails_the_pass() {
 }
 
 /// ASK GOOGLE FOR LESS. Every events request, the first full one, a later
-/// page of it and an incremental one, carries `maxAttendees=1` and the same
+/// page of it and an incremental one, carries `maxAttendees=100` and the same
 /// `fields` mask; the calendar list carries its own mask.
 #[tokio::test]
-async fn every_request_names_the_fields_it_reads_and_one_attendee() {
+async fn every_request_names_the_fields_it_reads_and_bounds_the_attendees() {
     use squelch_core::gcal::client::{EVENTS_FIELDS, LIST_FIELDS};
     let w = world("fields", GRANTED_WITH_LIST).await;
     let start = minute(Utc::now() + Duration::days(2));
@@ -2080,7 +2151,7 @@ async fn every_request_names_the_fields_it_reads_and_one_attendee() {
         "first, paged, incremental"
     );
     for (_, query) in &g.requests {
-        assert_eq!(query["maxAttendees"], "1", "{query:?}");
+        assert_eq!(query["maxAttendees"], "100", "{query:?}");
         assert_eq!(query["fields"], EVENTS_FIELDS, "{query:?}");
         assert_eq!(query["singleEvents"], "true");
         assert_eq!(query["maxResults"], "250");
@@ -2088,14 +2159,20 @@ async fn every_request_names_the_fields_it_reads_and_one_attendee() {
     for field in [
         "nextPageToken",
         "nextSyncToken",
-        "attendees(self,responseStatus)",
+        "attendeesOmitted",
+        "attendees(email,displayName,responseStatus,organizer,self)",
     ] {
         assert!(EVENTS_FIELDS.contains(field), "{field}");
     }
     for field in ["description", "colorId", "organizer(email,self)"] {
         assert!(EVENTS_FIELDS.contains(field), "{field}");
     }
-    for never in ["attachments", "conferenceData", "attendees(email"] {
+    for never in [
+        "attachments",
+        "conferenceData",
+        "comment",
+        "additionalGuests",
+    ] {
         assert!(!EVENTS_FIELDS.contains(never), "{never}");
     }
     assert_eq!(g.list_requests.len(), 2);
@@ -2104,8 +2181,8 @@ async fn every_request_names_the_fields_it_reads_and_one_attendee() {
     }
 }
 
-/// With `maxAttendees=1` an invitation comes back with the user's entry
-/// alone (`attendeesOmitted`), and the user's answer still reads from it.
+/// Past `maxAttendees` an invitation comes back with the user's entry alone
+/// (`attendeesOmitted`), and the user's answer still reads from it.
 #[tokio::test]
 async fn the_users_answer_reads_from_the_lone_attendee_google_sends() {
     let w = world("one-attendee", GRANTED).await;
@@ -2156,6 +2233,8 @@ fn row_at(id: String, now: DateTime<Utc>, minutes: i64) -> squelch_core::gcal::E
         updated_at: None,
         color_id: None,
         description: None,
+        guests: Vec::new(),
+        guests_truncated: false,
     }))
 }
 
@@ -2497,6 +2576,9 @@ async fn creating_an_event_goes_to_google_then_the_store_and_is_served() {
             "color": "#9fe1e7",
             "editable": true,
             "description": "Bring wine\nmeet.example/x",
+            "guests": [],
+            "guests_truncated": false,
+            "guest_editable": true,
         })
     );
     // Stored at once, served by the timeline as answered, and the next sync
@@ -2525,7 +2607,7 @@ async fn creating_an_event_goes_to_google_then_the_store_and_is_served() {
     assert_eq!(row.actor, "client-api");
     assert_eq!(row.action, "calendar_event_create");
     assert_eq!(row.target.as_deref(), Some("calendar:primary/new-1"));
-    assert_eq!(row.detail.as_deref(), Some("ok"));
+    assert_eq!(row.detail.as_deref(), Some("ok guests=0 notified=false"));
     assert_eq!(row.target_sender, None);
     let text = serde_json::to_string(&rows).unwrap();
     for secret in ["Dinner", "Lilia", "wine", "meet.example"] {
@@ -2767,7 +2849,8 @@ async fn an_edit_patches_each_field_and_tells_absent_from_null() {
         .collect::<Vec<_>>();
     assert_eq!(edits.len(), 7);
     assert!(edits.iter().all(|(_, target, detail)| {
-        target.as_deref() == Some("calendar:primary/own") && detail.as_deref() == Some("ok")
+        target.as_deref() == Some("calendar:primary/own")
+            && detail.as_deref() == Some("ok guests=0 notified=false")
     }));
 }
 
@@ -2794,7 +2877,7 @@ async fn a_delete_removes_the_event_at_google_and_here() {
         (
             "calendar_event_delete".into(),
             Some("calendar:primary/own".into()),
-            Some("ok".into())
+            Some("ok guests=0 notified=false".into())
         )
     );
 
@@ -2901,19 +2984,19 @@ async fn every_bad_request_is_a_400_and_reaches_nobody() {
         == &(
             "calendar_event_create".to_string(),
             None,
-            Some("rejected:calendar".to_string())
+            Some("rejected:calendar guests=0 notified=false".to_string())
         )));
     assert!(rows.iter().any(|r| r
         == &(
             "calendar_event_create".to_string(),
             Some(format!("calendar:{HOLIDAYS}")),
-            Some("rejected:read_only".to_string())
+            Some("rejected:read_only guests=0 notified=false".to_string())
         )));
     assert!(rows.iter().any(|r| r
         == &(
             "calendar_event_edit".to_string(),
             Some("calendar:primary/own".to_string()),
-            Some("rejected:body".to_string())
+            Some("rejected:body guests=0 notified=false".to_string())
         )));
     let text = format!("{rows:?}");
     assert!(!text.contains("Zanzibar") && !text.contains("zanzibar"));
@@ -2985,7 +3068,7 @@ async fn an_event_that_is_not_the_users_own_cannot_be_changed() {
         (
             "calendar_event_delete".into(),
             Some(format!("calendar:{HOLIDAYS}/h1")),
-            Some("rejected:not_editable".into())
+            Some("rejected:not_editable guests=0 notified=false".into())
         )
     );
 }
@@ -3052,9 +3135,9 @@ async fn a_google_failure_leaves_every_row_as_it_was() {
     }
     assert_eq!(writes(&w).len(), 12, "each was sent once, never retried");
     assert!(
-        audit(&w)
-            .iter()
-            .all(|(_, _, detail)| detail.as_deref() == Some("failed:google"))
+        audit(&w).iter().all(
+            |(_, _, detail)| detail.as_deref() == Some("failed:google guests=0 notified=false")
+        )
     );
     // Google said yes but with an event the daemon cannot read: nothing is
     // stored, and the answer says the change happened.
@@ -3073,7 +3156,10 @@ async fn a_google_failure_leaves_every_row_as_it_was() {
         "Google Calendar saved the change, but its answer could not be read"
     );
     assert_eq!(w.events().await, before);
-    assert_eq!(audit(&w)[0].2.as_deref(), Some("failed:answer"));
+    assert_eq!(
+        audit(&w)[0].2.as_deref(),
+        Some("failed:answer guests=0 notified=false")
+    );
 }
 
 /// Colours and roles from the list, the event's own colour over its
@@ -3089,10 +3175,12 @@ async fn colours_and_writable_calendars_are_served() {
     assert_eq!(
         body["calendars"],
         json!([
-            {"id": "primary", "name": "Me", "color": "#9fe1e7", "primary": true, "writable": true},
+            {"id": "primary", "name": "Me", "color": "#9fe1e7", "primary": true, "writable": true,
+             "can_invite": true},
             {"id": HOLIDAYS, "name": "Holidays", "color": "#16a765", "primary": false,
-             "writable": false},
-            {"id": TEAM, "name": "Team", "color": "#f83a22", "primary": false, "writable": true},
+             "writable": false, "can_invite": false},
+            {"id": TEAM, "name": "Team", "color": "#f83a22", "primary": false, "writable": true,
+             "can_invite": false},
         ])
     );
     assert_eq!(served(&w, "own").await.unwrap()["color"], "#9fe1e7");
@@ -3106,7 +3194,7 @@ async fn colours_and_writable_calendars_are_served() {
     assert_eq!(
         plain.timeline().await["calendars"],
         json!([{"id": "primary", "name": "Calendar primary", "color": null, "primary": true,
-                "writable": true}])
+                "writable": true, "can_invite": true}])
     );
     // A list role that drops to reader stops the calendar being writable.
     w.google().list[1]["accessRole"] = json!("reader");
@@ -3196,4 +3284,1040 @@ async fn the_agent_door_has_no_calendar_write() {
         );
     }
     assert!(writes(&w).is_empty());
+}
+
+// --- guests, invited by Google -------------------------------------------------
+
+const FAMILY: &str = "family@group.calendar.google.com";
+const SAM: &str = "Sam.Lee@example.com";
+
+/// Every address a guest test puts anywhere, for "the audit log names none".
+const GUEST_ADDRESSES: [&str; 8] = [
+    "sam.lee", "pat@", "lee@", "kim@", "new@", "crowd", "boss@", "nia@",
+];
+
+fn me_entry() -> Value {
+    json!({"email": "me@example.com", "self": true, "organizer": true,
+           "responseStatus": "accepted"})
+}
+
+/// Sam as Google holds him: an answer, and fields the daemon never stores.
+fn sam_entry() -> Value {
+    json!({"email": SAM, "displayName": "Sam \u{202E}Lee", "responseStatus": "accepted",
+           "comment": "See you there", "optional": true, "additionalGuests": 1})
+}
+
+/// [`write_world`], plus on the primary calendar: `party` (the user's own,
+/// with four guests), `big` (the user's own, 101 guests and the user),
+/// `orphan` (names no organizer); and a calendar the user OWNS that is not
+/// the primary one (`FAMILY`, with `fam-1`).
+async fn guest_world(tag: &str) -> (World, DateTime<Utc>) {
+    let (w, start) = write_world(tag).await;
+    let own = json!({"email": "me@example.com", "self": true});
+    let mut party = timed("party", "Party", start + Duration::hours(8), 60);
+    party["organizer"] = own.clone();
+    party["attendees"] = json!([
+        me_entry(),
+        sam_entry(),
+        {"email": "pat@example.com", "responseStatus": "declined"},
+        {"email": "lee@example.com", "responseStatus": "tentative"},
+        {"email": "kim@example.com", "responseStatus": "needsAction"},
+    ]);
+    let mut big = timed("big", "All hands", start + Duration::hours(10), 60);
+    big["organizer"] = own.clone();
+    let mut crowd: Vec<Value> = (0..101)
+        .map(|i| json!({"email": format!("crowd{i}@example.com"), "responseStatus": "accepted"}))
+        .collect();
+    crowd.push(me_entry());
+    big["attendees"] = json!(crowd);
+    let orphan = timed("orphan", "Orphan", start + Duration::hours(12), 60);
+    let mut fam = timed("fam-1", "Family dinner", start + Duration::hours(14), 60);
+    fam["organizer"] = json!({"email": FAMILY, "self": true});
+    {
+        let mut g = w.google();
+        let mut family = list_entry(FAMILY, "Family", true, false);
+        family["accessRole"] = json!("owner");
+        g.list.push(family);
+        g.full
+            .get_mut(PRIMARY)
+            .unwrap()
+            .last_mut()
+            .unwrap()
+            .extend([party, big, orphan]);
+        g.full.insert(FAMILY.into(), vec![vec![fam]]);
+        g.requests.clear();
+    }
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    (w, start)
+}
+
+fn guest_emails(event: &Value) -> Vec<String> {
+    event["guests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["email"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// No audit row, of any account action so far, names a guest.
+fn audit_names_no_guest(w: &World) {
+    let text = serde_json::to_string(&w.store.list_audit(w.acct, 200).unwrap())
+        .unwrap()
+        .to_lowercase();
+    for address in GUEST_ADDRESSES {
+        assert!(!text.contains(address), "the audit log carries {address}");
+    }
+}
+
+/// The sync stores an event's guests and the timeline serves them, laundered,
+/// with each one's answer; a list past the cap is marked truncated and keeps
+/// the user's own answer.
+#[tokio::test]
+async fn the_timeline_serves_an_events_guests() {
+    let (w, _) = guest_world("guests-served").await;
+    let party = served(&w, "party").await.unwrap();
+    eprintln!(
+        "served guests: {}",
+        serde_json::to_string_pretty(&party["guests"]).unwrap()
+    );
+    assert_eq!(
+        party["guests"],
+        json!([
+            {"email": "me@example.com", "name": null, "response": "accepted",
+             "organizer": true, "self": true},
+            {"email": SAM, "name": "Sam Lee", "response": "accepted",
+             "organizer": false, "self": false},
+            {"email": "pat@example.com", "name": null, "response": "declined",
+             "organizer": false, "self": false},
+            {"email": "lee@example.com", "name": null, "response": "tentative",
+             "organizer": false, "self": false},
+            {"email": "kim@example.com", "name": null, "response": "pending",
+             "organizer": false, "self": false},
+        ]),
+        "Google's order, the bidi override gone from the name, needsAction as pending"
+    );
+    assert_eq!(party["guests_truncated"], false);
+    assert_eq!(party["guest_editable"], true);
+    assert_eq!(party["self_response"], "accepted");
+    // What Google holds beyond the address, name and answer is not served
+    // (nor stored: the fields mask never asks for it).
+    let text = party.to_string();
+    assert!(!text.contains("See you there") && !text.contains("additionalGuests"));
+
+    // 102 attendees at Google: only the user's entry comes back, marked.
+    let big = served(&w, "big").await.unwrap();
+    assert_eq!(guest_emails(&big), ["me@example.com"]);
+    assert_eq!(big["guests_truncated"], true);
+    assert_eq!(
+        big["guest_editable"], false,
+        "a truncated list is read-only"
+    );
+    assert_eq!(
+        big["editable"], true,
+        "the event itself is still the user's"
+    );
+    assert_eq!(big["self_response"], "accepted");
+
+    // No guests: an empty list, and whether one may be added.
+    let own = served(&w, "own").await.unwrap();
+    assert_eq!(own["guests"], json!([]));
+    assert_eq!(own["guest_editable"], true);
+    // Someone else's invitation, an event that names no organizer, an event
+    // on a calendar the user only writes to: not the user's to invite to.
+    for id in ["invite", "orphan", "team-1", "h1"] {
+        let event = served(&w, id).await.unwrap();
+        assert_eq!(event["guest_editable"], false, "{id}");
+    }
+    assert_eq!(served(&w, "orphan").await.unwrap()["editable"], true);
+    assert_eq!(served(&w, "team-1").await.unwrap()["editable"], true);
+    // A calendar the user owns invites like the primary one.
+    assert_eq!(served(&w, "fam-1").await.unwrap()["guest_editable"], true);
+    let calendars = w.timeline().await["calendars"].clone();
+    let can: Vec<(String, bool)> = calendars
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            (
+                c["id"].as_str().unwrap().to_string(),
+                c["can_invite"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        can,
+        [
+            ("primary".to_string(), true),
+            (FAMILY.to_string(), true),
+            (HOLIDAYS.to_string(), false),
+            (TEAM.to_string(), false),
+        ]
+    );
+
+    // A guest list that shrinks at Google shrinks here; an event that goes
+    // takes its guests with it.
+    {
+        let mut g = w.google();
+        let party = g.find(PRIMARY, "party").unwrap();
+        party["attendees"] = json!([me_entry(), sam_entry()]);
+        g.changes.clear();
+    }
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    assert_eq!(
+        guest_emails(&served(&w, "party").await.unwrap()),
+        ["me@example.com", SAM]
+    );
+    // An event that goes and comes back under the same id without guests
+    // has none: no guest list outlives its event (the store's trigger, which
+    // the store's own tests read directly).
+    w.google().find(PRIMARY, "party").unwrap()["status"] = json!("cancelled");
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    assert!(served(&w, "party").await.is_none());
+    {
+        let mut g = w.google();
+        let party = g.find(PRIMARY, "party").unwrap();
+        party["status"] = json!("confirmed");
+        party.as_object_mut().unwrap().remove("attendees");
+    }
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    assert_eq!(served(&w, "party").await.unwrap()["guests"], json!([]));
+}
+
+/// THE NOTIFY DEFAULT, on the wire, for all three routes: Google is told
+/// `sendUpdates=all` ONLY when the request says `notify: true`; absent and
+/// false both send `none`, and no other value is ever sent.
+#[tokio::test]
+async fn google_is_asked_to_mail_guests_only_when_the_request_says_notify_true() {
+    let (w, start) = guest_world("guests-notify").await;
+    let create = |notify: Option<bool>| {
+        let mut body = json!({"calendar_id": "primary", "title": "Lunch",
+            "start": rfc(start + Duration::days(2)),
+            "end": rfc(start + Duration::days(2) + Duration::hours(1)),
+            "all_day": false, "guests": ["nia@example.com"]});
+        if let Some(notify) = notify {
+            body["notify"] = json!(notify);
+        }
+        body
+    };
+    let edit = |notify: Option<bool>| {
+        let mut body = json!({"title": "Renamed"});
+        if let Some(notify) = notify {
+            body["notify"] = json!(notify);
+        }
+        body
+    };
+    for (notify, want) in [(None, "none"), (Some(false), "none"), (Some(true), "all")] {
+        let before = writes(&w).len();
+        // Create.
+        let (status, made, _) = send(
+            &w.app,
+            "POST",
+            "/client/calendar/events",
+            Some(create(notify)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{made}");
+        // Edit (no guest change: the event's guests hear of a new title).
+        let (status, _, _) = send(
+            &w.app,
+            "PATCH",
+            &event_uri("primary", "party"),
+            Some(edit(notify)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        // Delete, with the flag in the query.
+        let id = made["id"].as_str().unwrap();
+        let uri = match notify {
+            None => event_uri("primary", id),
+            Some(flag) => format!("{}?notify={flag}", event_uri("primary", id)),
+        };
+        let (status, _, _) = send(&w.app, "DELETE", &uri, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let sent = writes(&w)[before..].to_vec();
+        let methods: Vec<_> = sent.iter().map(|s| s.method).collect();
+        assert_eq!(methods, ["POST", "PATCH", "DELETE"]);
+        for write in &sent {
+            eprintln!(
+                "notify={notify:?}: {} sendUpdates={}",
+                write.method, write.query["sendUpdates"]
+            );
+            assert_eq!(
+                write.query["sendUpdates"], want,
+                "{} with notify={notify:?}",
+                write.method
+            );
+            assert!(!write.query.contains_key("sendNotifications"));
+        }
+        // The audit rows say whether guests were told, and how many there
+        // were: the three newest are the delete, the edit and the create.
+        let told = notify == Some(true);
+        let rows = audit(&w);
+        assert_eq!(
+            rows[0].2.as_deref(),
+            Some(format!("ok guests=1 notified={told}").as_str()),
+            "delete"
+        );
+        assert_eq!(
+            rows[1].2.as_deref(),
+            Some(format!("ok guests=4 notified={told}").as_str()),
+            "edit"
+        );
+        assert_eq!(
+            rows[2].2.as_deref(),
+            Some(format!("ok guests=1 notified={told}").as_str()),
+            "create"
+        );
+    }
+    // Every write this test made named sendUpdates, as one of two values.
+    let all: Vec<String> = writes(&w)
+        .iter()
+        .map(|write| write.query["sendUpdates"].clone())
+        .collect();
+    assert_eq!(all.len(), 9);
+    assert!(all.iter().all(|v| v == "none" || v == "all"));
+    assert_eq!(all.iter().filter(|v| *v == "all").count(), 3);
+    audit_names_no_guest(&w);
+}
+
+/// A `notify` that is not exactly true or false is a 400 that reaches nobody:
+/// it is never read as a yes, and never silently as a no.
+#[tokio::test]
+async fn a_notify_that_is_not_a_boolean_is_refused_and_reaches_nobody() {
+    let (w, start) = guest_world("guests-badnotify").await;
+    let before = w.events().await;
+    for odd in [
+        json!("true"),
+        json!(1),
+        json!(null),
+        json!("all"),
+        json!([true]),
+    ] {
+        let (status, answer, _) = send(
+            &w.app,
+            "POST",
+            "/client/calendar/events",
+            Some(
+                json!({"calendar_id": "primary", "title": "x", "start": rfc(start),
+                "end": rfc(start + Duration::hours(1)), "all_day": false,
+                "guests": ["nia@example.com"], "notify": odd.clone()}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "create {odd}: {answer}");
+        let (status, _, _) = send(
+            &w.app,
+            "PATCH",
+            &event_uri("primary", "party"),
+            Some(json!({"title": "x", "notify": odd.clone()})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "edit {odd}");
+    }
+    // `notify` alone is not a change.
+    let (status, _, _) = send(
+        &w.app,
+        "PATCH",
+        &event_uri("primary", "party"),
+        Some(json!({"notify": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    for query in [
+        "notify=1",
+        "notify=TRUE",
+        "notify=yes",
+        "notify=",
+        "notify=all",
+        "notify=false&notify=true",
+        "notify=true&notify=true",
+    ] {
+        let uri = format!("{}?{query}", event_uri("primary", "party"));
+        let (status, _, _) = send(&w.app, "DELETE", &uri, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
+    }
+    {
+        let g = w.google();
+        assert!(g.writes.is_empty(), "Google was never written to");
+        assert!(g.reads.is_empty(), "nor read");
+    }
+    assert_eq!(w.events().await, before);
+}
+
+#[tokio::test]
+async fn creating_an_event_with_guests_sends_them_bare_and_stores_googles_answer() {
+    let (w, start) = guest_world("guests-create").await;
+    let begin = start + Duration::days(2);
+    let (status, body, _) = send(
+        &w.app,
+        "POST",
+        "/client/calendar/events",
+        Some(
+            json!({"calendar_id": "primary", "title": "Lunch", "start": rfc(begin),
+            "end": rfc(begin + Duration::hours(1)), "all_day": false,
+            "guests": [" nia@example.com ", "New@Example.com"]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let write = writes(&w).pop().unwrap();
+    assert_eq!(write.query["sendUpdates"], "none");
+    assert_eq!(write.query["maxAttendees"], "100");
+    assert_eq!(
+        write.body["attendees"],
+        json!([{"email": "nia@example.com"}, {"email": "New@Example.com"}]),
+        "bare: an address and nothing else"
+    );
+    assert_eq!(
+        body["guests"],
+        json!([
+            {"email": "nia@example.com", "name": null, "response": "pending",
+             "organizer": false, "self": false},
+            {"email": "New@Example.com", "name": null, "response": "pending",
+             "organizer": false, "self": false},
+        ])
+    );
+    assert_eq!(body["guest_editable"], true);
+    // Stored at once, and the next sync changes nothing.
+    assert_eq!(served(&w, "new-1").await.as_ref(), Some(&body));
+    w.google().changes.clear();
+    assert_eq!(w.pass().await, PassOutcome::Synced);
+    assert_eq!(served(&w, "new-1").await.as_ref(), Some(&body));
+    assert_eq!(
+        audit(&w)[0],
+        (
+            "calendar_event_create".to_string(),
+            Some("calendar:primary/new-1".to_string()),
+            Some("ok guests=2 notified=false".to_string())
+        )
+    );
+    // On a calendar the user owns that is not the primary one.
+    let (status, fam, _) = send(
+        &w.app,
+        "POST",
+        "/client/calendar/events",
+        Some(
+            json!({"calendar_id": FAMILY, "title": "Picnic", "start": rfc(begin),
+            "end": rfc(begin + Duration::hours(1)), "all_day": false,
+            "guests": ["nia@example.com"], "notify": true}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{fam}");
+    assert_eq!(writes(&w).pop().unwrap().query["sendUpdates"], "all");
+    // No guests: no `attendees` key.
+    let (status, _, _) = send(
+        &w.app,
+        "POST",
+        "/client/calendar/events",
+        Some(
+            json!({"calendar_id": "primary", "title": "Solo", "start": rfc(begin),
+            "end": rfc(begin + Duration::hours(1)), "all_day": false, "guests": []}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(
+        !writes(&w)
+            .pop()
+            .unwrap()
+            .body
+            .as_object()
+            .unwrap()
+            .contains_key("attendees")
+    );
+    audit_names_no_guest(&w);
+}
+
+/// A guest edit sends the FULL list, built from what Google holds NOW: kept
+/// guests exactly as Google has them (THE RESPONSE-STATUS PRESERVATION),
+/// removed ones gone, new ones bare. An edit with no `guests` sends no
+/// `attendees` at all.
+#[tokio::test]
+async fn a_guest_edit_sends_the_full_list_keeping_what_google_holds() {
+    use squelch_core::gcal::client::ATTENDEES_FIELDS;
+    let (w, _) = guest_world("guests-edit").await;
+    // Since the last sync Sam changed his answer at Google. The stored row
+    // still says accepted; the list sent back must say declined.
+    {
+        let mut g = w.google();
+        let party = g.find(PRIMARY, "party").unwrap();
+        party["attendees"][1]["responseStatus"] = json!("declined");
+    }
+    let stored = served(&w, "party").await.unwrap();
+    assert_eq!(stored["guests"][1]["response"], "accepted", "stale here");
+
+    // Keep Sam (typed in another case) and Kim, drop Pat and Lee, add one.
+    let (status, body, _) = send(
+        &w.app,
+        "PATCH",
+        &event_uri("primary", "party"),
+        Some(json!({"guests": ["sam.lee@EXAMPLE.com", "kim@example.com", "new@example.com"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    {
+        let g = w.google();
+        // One fresh read of the event's attendees, whole, then one patch.
+        assert_eq!(g.reads.len(), 1);
+        let (calendar, id, query) = &g.reads[0];
+        assert_eq!((calendar.as_str(), id.as_str()), ("primary", "party"));
+        assert_eq!(query["fields"], ATTENDEES_FIELDS);
+        assert_eq!(query["maxAttendees"], "100");
+        assert_eq!(g.writes.len(), 1);
+        let write = &g.writes[0];
+        eprintln!("PATCH body: {}", write.body);
+        assert_eq!(write.query["sendUpdates"], "none");
+        let mut sam = sam_entry();
+        sam["responseStatus"] = json!("declined");
+        assert_eq!(
+            write.body,
+            json!({"attendees": [
+                me_entry(),
+                sam,
+                {"email": "kim@example.com", "responseStatus": "needsAction"},
+                {"email": "new@example.com"},
+            ]}),
+            "the user's entry unasked, Sam whole with the answer Google holds now \
+             (his comment, optional flag and extra guests too), Kim as she was, \
+             Pat and Lee gone, the new guest bare"
+        );
+    }
+    assert_eq!(
+        guest_emails(&body),
+        ["me@example.com", SAM, "kim@example.com", "new@example.com"]
+    );
+    assert_eq!(body["guests"][1]["response"], "declined");
+    assert_eq!(body["guests"][3]["response"], "pending");
+    assert_eq!(served(&w, "party").await.as_ref(), Some(&body));
+    assert_eq!(
+        audit(&w)[0].2.as_deref(),
+        Some("ok guests=3 notified=false")
+    );
+
+    // ABSENT: a title edit reads nothing and sends no `attendees` key, so
+    // Google's list is untouched.
+    let (status, body, _) = send(
+        &w.app,
+        "PATCH",
+        &event_uri("primary", "party"),
+        Some(json!({"title": "Bigger party"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    {
+        let g = w.google();
+        assert_eq!(g.reads.len(), 1, "no second read");
+        assert_eq!(g.writes[1].body, json!({"summary": "Bigger party"}));
+    }
+    assert_eq!(guest_emails(&body).len(), 4);
+
+    // PRESENT AND EMPTY: every guest removed; the user's own entry stays.
+    // Told this time.
+    let (status, body, _) = send(
+        &w.app,
+        "PATCH",
+        &event_uri("primary", "party"),
+        Some(json!({"guests": [], "notify": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    {
+        let g = w.google();
+        assert_eq!(g.reads.len(), 2);
+        assert_eq!(g.writes[2].body, json!({"attendees": [me_entry()]}));
+        assert_eq!(g.writes[2].query["sendUpdates"], "all");
+    }
+    assert_eq!(guest_emails(&body), ["me@example.com"]);
+    assert_eq!(audit(&w)[0].2.as_deref(), Some("ok guests=0 notified=true"));
+
+    // Guests and another field in one edit, on an event that had none.
+    let (status, body, _) = send(
+        &w.app,
+        "PATCH",
+        &event_uri("primary", "own"),
+        Some(json!({"guests": ["nia@example.com"], "location": null})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        writes(&w).pop().unwrap().body,
+        json!({"attendees": [{"email": "nia@example.com"}], "location": null})
+    );
+    audit_names_no_guest(&w);
+}
+
+/// THE TRUNCATED GUARD. Google replaces the attendee array, so a list the
+/// daemon holds only part of must never be sent back: the guest edit is a 400
+/// that reaches nobody, while a title edit of the same event still works and
+/// carries no `attendees`.
+#[tokio::test]
+async fn a_truncated_guest_list_refuses_a_guest_edit_but_not_a_title_edit() {
+    let (w, _) = guest_world("guests-truncated").await;
+    assert_eq!(served(&w, "big").await.unwrap()["guests_truncated"], true);
+    for guests in [json!(["new@example.com"]), json!([])] {
+        let (status, answer, _) = send(
+            &w.app,
+            "PATCH",
+            &event_uri("primary", "big"),
+            Some(json!({"guests": guests, "title": "Renamed"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+        assert!(!answer.to_string().contains("new@"));
+    }
+    {
+        let g = w.google();
+        assert!(
+            g.writes.is_empty() && g.reads.is_empty(),
+            "nobody was asked"
+        );
+        assert_eq!(
+            g.full[PRIMARY]
+                .iter()
+                .flatten()
+                .find(|e| e["id"] == "big")
+                .unwrap()["attendees"]
+                .as_array()
+                .unwrap()
+                .len(),
+            102,
+            "Google's list is whole"
+        );
+    }
+    assert_eq!(
+        audit(&w)[0],
+        (
+            "calendar_event_edit".to_string(),
+            Some("calendar:primary/big".to_string()),
+            Some("rejected:guests_read_only guests=0+ notified=false".to_string())
+        )
+    );
+    assert_eq!(served(&w, "big").await.unwrap()["title"], "All hands");
+
+    // The title alone: allowed, no read, no `attendees`.
+    let (status, body, _) = send(
+        &w.app,
+        "PATCH",
+        &event_uri("primary", "big"),
+        Some(json!({"title": "All hands, moved"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    {
+        let mut g = w.google();
+        assert!(g.reads.is_empty());
+        assert_eq!(g.writes.len(), 1);
+        assert_eq!(g.writes[0].body, json!({"summary": "All hands, moved"}));
+        assert_eq!(
+            g.find(PRIMARY, "big").unwrap()["attendees"]
+                .as_array()
+                .unwrap()
+                .len(),
+            102
+        );
+    }
+    assert_eq!(body["guests_truncated"], true, "still truncated");
+    assert_eq!(body["guest_editable"], false);
+
+    // The list grew past the cap at Google AFTER the last sync: the stored
+    // row looks whole, the fresh read does not, and nothing is patched.
+    {
+        let mut g = w.google();
+        let party = g.find(PRIMARY, "party").unwrap();
+        let mut crowd: Vec<Value> = (0..120)
+            .map(|i| json!({"email": format!("crowd{i}@example.com")}))
+            .collect();
+        crowd.push(me_entry());
+        party["attendees"] = json!(crowd);
+    }
+    assert_eq!(served(&w, "party").await.unwrap()["guest_editable"], true);
+    let (status, _, _) = send(
+        &w.app,
+        "PATCH",
+        &event_uri("primary", "party"),
+        Some(json!({"guests": ["new@example.com"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    {
+        let mut g = w.google();
+        assert_eq!(g.reads.len(), 1, "it was read");
+        assert_eq!(g.writes.len(), 1, "and not patched");
+        assert_eq!(
+            g.find(PRIMARY, "party").unwrap()["attendees"]
+                .as_array()
+                .unwrap()
+                .len(),
+            121
+        );
+    }
+    // A guest Google names no address for cannot be kept by address either.
+    {
+        let mut g = w.google();
+        g.find(PRIMARY, "party").unwrap()["attendees"] = json!([
+            me_entry(),
+            {"displayName": "No address", "responseStatus": "accepted"},
+        ]);
+    }
+    let (status, _, _) = send(
+        &w.app,
+        "PATCH",
+        &event_uri("primary", "party"),
+        Some(json!({"guests": ["new@example.com"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(w.google().writes.len(), 1, "not patched");
+    audit_names_no_guest(&w);
+}
+
+/// Every guest request that is a 400, each reaching nobody and echoing
+/// nothing. THE OWNER-CALENDAR GUARD is among them.
+#[tokio::test]
+async fn every_bad_guest_request_is_a_400_and_reaches_nobody() {
+    let (w, start) = guest_world("guests-400").await;
+    let before = w.events().await;
+    let many: Vec<String> = (0..51)
+        .map(|i| format!("zanzibar{i}@example.com"))
+        .collect();
+    let lists = [
+        ("more than 50", json!(many)),
+        ("not a list", json!("zanzibar@example.com")),
+        ("a display name", json!(["Zanzibar <zanzibar@example.com>"])),
+        (
+            "two in one",
+            json!(["zanzibar@example.com, other@example.com"]),
+        ),
+        ("no domain dot", json!(["zanzibar@localhost"])),
+        (
+            "a header smuggle",
+            json!(["zanzibar@example.com\r\nBcc: x@y.com"]),
+        ),
+        ("not text", json!([{"email": "zanzibar@example.com"}])),
+        (
+            "a duplicate after case folding",
+            json!(["zanzibar@example.com", "Zanzibar@EXAMPLE.com"]),
+        ),
+        (
+            "the calendar's owner",
+            json!(["zanzibar@example.com", "ME@example.com"]),
+        ),
+    ];
+    let create = |calendar: &str, guests: Value| {
+        json!({"calendar_id": calendar, "title": "x", "start": rfc(start + Duration::days(2)),
+            "end": rfc(start + Duration::days(2) + Duration::hours(1)), "all_day": false,
+            "guests": guests, "notify": true})
+    };
+    let refused = |case: String, status: StatusCode, answer: Value| {
+        eprintln!("400 {case}: {answer}");
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{case}: {answer}");
+        let text = answer.to_string().to_lowercase();
+        assert!(!text.contains("zanzibar"), "{case} echoes input: {text}");
+    };
+    for (case, guests) in &lists {
+        let (status, answer, _) = send(
+            &w.app,
+            "POST",
+            "/client/calendar/events",
+            Some(create("primary", guests.clone())),
+        )
+        .await;
+        refused(format!("create, {case}"), status, answer);
+        let (status, answer, _) = send(
+            &w.app,
+            "PATCH",
+            &event_uri("primary", "party"),
+            Some(json!({"guests": guests, "notify": true})),
+        )
+        .await;
+        refused(format!("edit, {case}"), status, answer);
+    }
+    // `null` is not a list on an edit.
+    let (status, answer, _) = send(
+        &w.app,
+        "PATCH",
+        &event_uri("primary", "party"),
+        Some(json!({"guests": null})),
+    )
+    .await;
+    refused("edit, null".into(), status, answer);
+    // The calendar's own id is its owner too (a calendar the user owns).
+    let (status, answer, _) = send(
+        &w.app,
+        "POST",
+        "/client/calendar/events",
+        Some(create(FAMILY, json!([FAMILY]))),
+    )
+    .await;
+    refused("create, the calendar itself".into(), status, answer);
+
+    // THE OWNER-CALENDAR GUARD: a calendar the user writes to but does not
+    // own takes events, and takes no guests. Create and edit.
+    let good = json!(["zanzibar@example.com"]);
+    let (status, answer, _) = send(
+        &w.app,
+        "POST",
+        "/client/calendar/events",
+        Some(create(TEAM, good.clone())),
+    )
+    .await;
+    refused(
+        "create on a calendar that is not the user's".into(),
+        status,
+        answer,
+    );
+    assert_eq!(
+        audit(&w)[0],
+        (
+            "calendar_event_create".to_string(),
+            Some(format!("calendar:{TEAM}")),
+            Some("rejected:cannot_invite guests=1 notified=true".to_string())
+        )
+    );
+    let (status, answer, _) = send(
+        &w.app,
+        "PATCH",
+        &event_uri(TEAM, "team-1"),
+        Some(json!({"guests": good, "notify": true})),
+    )
+    .await;
+    refused(
+        "edit on a calendar that is not the user's".into(),
+        status,
+        answer,
+    );
+    assert_eq!(
+        audit(&w)[0].2.as_deref(),
+        Some("rejected:cannot_invite guests=0 notified=true")
+    );
+    // Even an empty list is a guest edit there.
+    let (status, answer, _) = send(
+        &w.app,
+        "PATCH",
+        &event_uri(TEAM, "team-1"),
+        Some(json!({"guests": []})),
+    )
+    .await;
+    refused(
+        "edit, an empty list, not the user's calendar".into(),
+        status,
+        answer,
+    );
+
+    // An event that is editable but whose guest list is not the user's to
+    // change: one that names no organizer.
+    let (status, answer, _) = send(
+        &w.app,
+        "PATCH",
+        &event_uri("primary", "orphan"),
+        Some(json!({"guests": good})),
+    )
+    .await;
+    refused("edit, not guest_editable".into(), status, answer);
+    assert_eq!(
+        audit(&w)[0].2.as_deref(),
+        Some("rejected:guests_read_only guests=0 notified=false")
+    );
+    // Someone else's invitation stays what it was: 403, whatever it carries.
+    let (status, _, _) = send(
+        &w.app,
+        "PATCH",
+        &event_uri("primary", "invite"),
+        Some(json!({"guests": good, "notify": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    {
+        let g = w.google();
+        assert!(g.writes.is_empty(), "Google was never written to");
+        assert!(g.reads.is_empty(), "nor read");
+    }
+    assert_eq!(w.events().await, before, "no row changed");
+    let text = format!("{:?}", audit(&w)).to_lowercase();
+    assert!(
+        !text.contains("zanzibar"),
+        "the audit log carries an address"
+    );
+
+    // The same create without guests is fine on that calendar, told or not.
+    let mut plain = create(TEAM, json!([]));
+    plain["notify"] = json!(false);
+    let (status, _, _) = send(&w.app, "POST", "/client/calendar/events", Some(plain)).await;
+    assert_eq!(status, StatusCode::CREATED);
+}
+
+/// Deleting an event with guests: silent unless asked, and gone here with
+/// its guest rows either way.
+#[tokio::test]
+async fn deleting_an_event_with_guests_tells_them_only_when_asked() {
+    let (w, _) = guest_world("guests-delete").await;
+    let (status, _, _) = send(&w.app, "DELETE", &event_uri("primary", "party"), None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(writes(&w)[0].query["sendUpdates"], "none");
+    assert_eq!(
+        audit(&w)[0],
+        (
+            "calendar_event_delete".to_string(),
+            Some("calendar:primary/party".to_string()),
+            Some("ok guests=4 notified=false".to_string())
+        )
+    );
+    assert!(served(&w, "party").await.is_none());
+    // A truncated event may be deleted, and its guests told: the audit row
+    // says the count is a floor.
+    let uri = format!("{}?notify=true", event_uri("primary", "big"));
+    let (status, _, _) = send(&w.app, "DELETE", &uri, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let write = writes(&w).pop().unwrap();
+    assert_eq!(write.query["sendUpdates"], "all");
+    assert!(!write.query.contains_key("fields"));
+    assert_eq!(
+        audit(&w)[0].2.as_deref(),
+        Some("ok guests=0+ notified=true")
+    );
+    audit_names_no_guest(&w);
+}
+
+/// Google first, then local: a failed read or a failed patch leaves the guest
+/// list here exactly as it was, and the audit row still says what was asked.
+#[tokio::test]
+async fn a_google_failure_during_a_guest_edit_changes_nothing_here() {
+    let (w, _) = guest_world("guests-fail").await;
+    let before = w.events().await;
+    let edit = json!({"guests": ["new@example.com"], "notify": true});
+    w.google().read_fail = Some(500);
+    let (status, answer, _) = send(
+        &w.app,
+        "PATCH",
+        &event_uri("primary", "party"),
+        Some(edit.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{answer}");
+    assert!(w.google().writes.is_empty(), "no patch after a failed read");
+    assert_eq!(w.events().await, before);
+    {
+        let mut g = w.google();
+        g.read_fail = None;
+        g.write_fail = Some(503);
+    }
+    let (status, _, _) = send(&w.app, "PATCH", &event_uri("primary", "party"), Some(edit)).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(w.events().await, before);
+    assert_eq!(
+        audit(&w)[0].2.as_deref(),
+        Some("failed:google guests=4 notified=true"),
+        "a write that asked Google to mail guests says so even when it failed"
+    );
+    audit_names_no_guest(&w);
+}
+
+/// Guests are scoped to their account: another account sees none of them and
+/// can change none of them.
+#[tokio::test]
+async fn guests_are_scoped_to_their_account() {
+    let (w, _) = guest_world("guests-isolated").await;
+    let other = w.store.ensure_account("other@example.com").unwrap();
+    let path = cred_path("guests-isolated-other");
+    write_grant(&path, GRANTED);
+    // The grant file is keyed by this address: the other account is granted
+    // too, so what it is refused is refused by the account scope alone.
+    let other_creds = CalendarCredentials::new(
+        other,
+        "me@example.com".into(),
+        CredentialBackend::File,
+        path.clone(),
+        OAuthClientConfig {
+            client_id: "id".into(),
+            client_secret: "secret".into(),
+        },
+    );
+    let app = router(
+        squelch_api::ApiState::new(w.store.clone(), other, TOKEN)
+            .with_calendar_credentials(other_creds)
+            .with_calendar_api_base(w.base.clone()),
+    );
+    let uri = format!(
+        "/client/timeline?from={}&to={}",
+        q(Utc::now() - Duration::days(40)),
+        q(Utc::now() + Duration::days(359)),
+    );
+    let body = get(&app, &uri).await;
+    assert_eq!(body["calendar"]["granted"], true);
+    assert_eq!(body["events"], json!([]));
+    assert!(!body.to_string().to_lowercase().contains("sam.lee"));
+    assert!(
+        w.store
+            .calendar_event(other, "primary", "party")
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        w.store
+            .calendar_event(w.acct, "primary", "party")
+            .unwrap()
+            .unwrap()
+            .row
+            .guests
+            .len(),
+        5
+    );
+    let (status, _, _) = send(
+        &app,
+        "PATCH",
+        &event_uri("primary", "party"),
+        Some(json!({"guests": [], "notify": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let uri = format!("{}?notify=true", event_uri("primary", "party"));
+    let (status, _, _) = send(&app, "DELETE", &uri, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    {
+        let g = w.google();
+        assert!(g.writes.is_empty() && g.reads.is_empty());
+    }
+    assert_eq!(
+        guest_emails(&served(&w, "party").await.unwrap()).len(),
+        5,
+        "the owner's list is untouched"
+    );
+    std::fs::remove_file(&path).ok();
+}
+
+/// The agent door can neither read a guest nor cause one to be mailed.
+#[tokio::test]
+async fn the_agent_door_has_no_guests_and_no_notify() {
+    let (w, start) = guest_world("guests-agent").await;
+    let body = json!({"calendar_id": "primary", "title": "x", "start": rfc(start),
+        "end": rfc(start + Duration::hours(1)), "all_day": false,
+        "guests": ["nia@example.com"], "notify": true});
+    for (method, uri) in [
+        ("POST", "/client/agent/calendar/events"),
+        ("PATCH", "/client/agent/calendar/events/primary/party"),
+        (
+            "DELETE",
+            "/client/agent/calendar/events/primary/party?notify=true",
+        ),
+        ("GET", "/client/agent/calendar/events/primary/party"),
+        ("GET", "/client/agent/timeline"),
+        ("POST", "/mcp/calendar/events"),
+        ("DELETE", "/mcp/calendar/events/primary/party?notify=true"),
+    ] {
+        let (status, answer, _) = send(&w.app, method, uri, Some(body.clone())).await;
+        assert!(
+            matches!(
+                status,
+                StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED | StatusCode::UNAUTHORIZED
+            ),
+            "{method} {uri}: {status}"
+        );
+        assert!(!answer.to_string().to_lowercase().contains("sam.lee"));
+    }
+    let g = w.google();
+    assert!(g.writes.is_empty() && g.reads.is_empty());
 }

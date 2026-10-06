@@ -2,7 +2,8 @@
 //! editing events").
 //!
 //! Four parts: [`client`] calls the Calendar API, [`sync`] decides when to
-//! read, [`write`] checks a user's create or edit before anything is sent, and
+//! read, [`write`] checks a user's create or edit (and its guests) before
+//! anything is sent, and
 //! this module turns what Google sends into rows that are safe to store
 //! ([`read_event`], [`read_calendar_entry`]) and holds the timeline's display
 //! match between a ghost and a real event ([`ghost_matches`]).
@@ -11,6 +12,13 @@
 //! door, one event at a time. Nothing here writes to a calendar on its own,
 //! and Google's answer to a write goes through [`read_event`] like any synced
 //! item, so one event shape exists.
+//!
+//! GUESTS. An event's attendees are read (at most [`MAX_GUESTS`], and marked
+//! truncated past it), stored and served on the human door, and the user may
+//! set the guest list of an event they organize on their own calendar
+//! ([`SyncedEvent::guest_editable`]). Google sends the invitation, update and
+//! cancellation mail itself, and only when the write asks for it
+//! ([`client::Notify`]): nothing here composes or sends mail.
 //!
 //! HUMAN DOOR ONLY. Event titles, places, organizers and links are personal
 //! data: they are served on `/client/timeline` and nowhere else, never logged,
@@ -23,8 +31,8 @@
 //! invisible characters out, 200 characters at most, a meeting link without
 //! its query), and the number of calendars and of events per calendar is
 //! capped. Google is asked for less in the first place: a `fields` mask names
-//! only what [`read_event`] reads, and `maxAttendees=1` leaves out every guest
-//! but the user ([`client`]).
+//! only what [`read_event`] reads, and `maxAttendees` bounds the guest list
+//! at [`MAX_GUESTS`] ([`client`]).
 
 pub mod client;
 pub mod sync;
@@ -49,6 +57,12 @@ pub const MAX_CALENDARS: usize = 25;
 /// in a window of a month back and 400 days ahead means far-future events go
 /// first. The calendar is then marked truncated until a full read fits.
 pub const MAX_EVENTS_PER_CALENDAR: i64 = 5000;
+
+/// Guests read, stored and served per event at most. It is also the
+/// `maxAttendees` every events request carries: past it Google returns "only
+/// the participant" and marks the event `attendeesOmitted`, which is stored
+/// as the event's truncated mark and makes its guest list read-only.
+pub const MAX_GUESTS: usize = 100;
 
 /// The stored id of the user's primary calendar, whatever Google calls it.
 /// Google accepts `primary` as an alias on every events call, and without the
@@ -229,6 +243,20 @@ impl StoredCalendar {
     pub fn writable(&self) -> bool {
         self.selected && self.access_role.is_some_and(AccessRole::writable)
     }
+
+    /// THE INVITE GUARD, calendar half: whether an event on this calendar
+    /// may carry guests set from the app. See [`may_invite`].
+    pub fn can_invite(&self) -> bool {
+        self.selected && may_invite(self.is_primary, self.access_role)
+    }
+}
+
+/// THE INVITE GUARD: guests may be set only on the user's OWN calendar, the
+/// primary one or one they are `owner` of. A calendar the user merely writes
+/// to (`writer`) belongs to someone else, and an invitation from it would go
+/// out under that calendar's name on the user's say-so.
+pub fn may_invite(is_primary: bool, access: Option<AccessRole>) -> bool {
+    is_primary || access == Some(AccessRole::Owner)
 }
 
 /// The timeline's `calendar` status, from the stored rows.
@@ -273,6 +301,53 @@ impl SelfResponse {
     }
 }
 
+/// A guest's answer to the invitation: Google's `responseStatus`, whose
+/// "Possible values are: `needsAction`, `declined`, `tentative`, `accepted`".
+/// `needsAction` (and anything unreadable) is served as `pending`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuestResponse {
+    Accepted,
+    Declined,
+    Tentative,
+    Pending,
+}
+
+impl GuestResponse {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::Declined => "declined",
+            Self::Tentative => "tentative",
+            Self::Pending => "pending",
+        }
+    }
+    pub fn parse(raw: &str) -> Self {
+        match raw {
+            "accepted" => Self::Accepted,
+            "declined" => Self::Declined,
+            "tentative" => Self::Tentative,
+            _ => Self::Pending,
+        }
+    }
+}
+
+/// One attendee of an event as stored and served: an address, a name, an
+/// answer. Other people's data written by other people, so laundered like
+/// every other calendar text. What else Google holds about an attendee (a
+/// comment, extra guests, optional) is never stored: a guest edit reads it
+/// fresh from Google and hands it back untouched ([`write::merge_attendees`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Guest {
+    pub email: String,
+    pub name: Option<String>,
+    pub response: GuestResponse,
+    /// Google's `attendees[].organizer`.
+    pub organizer: bool,
+    /// Google's `attendees[].self`: "Whether this entry represents the
+    /// calendar on which this copy of the event appears."
+    pub is_self: bool,
+}
+
 /// One event, laundered and ready to store. `status` is `confirmed` or
 /// `tentative`: a cancelled event is never a row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -305,11 +380,22 @@ pub struct EventRow {
     /// Laundered like a location, line breaks kept, at most
     /// [`ghost::DESCRIPTION_CAP`] characters.
     pub description: Option<String>,
+    /// The attendees Google sent, in its order, at most [`MAX_GUESTS`].
+    pub guests: Vec<Guest>,
+    /// Google holds more attendees than `guests` (`attendeesOmitted`, or a
+    /// list past the cap). The guest list is then read-only.
+    pub guests_truncated: bool,
 }
 
 impl EventRow {
     pub fn all_day(&self) -> bool {
         !self.start.has_clock()
+    }
+
+    /// The guests other than the user's own entry: who a notification
+    /// would reach.
+    pub fn other_guests(&self) -> usize {
+        self.guests.iter().filter(|g| !g.is_self).count()
     }
 }
 
@@ -339,6 +425,7 @@ pub struct SyncedEvent {
     pub calendar_name: Option<String>,
     pub calendar_color: Option<String>,
     pub calendar_access: Option<AccessRole>,
+    pub calendar_primary: bool,
     pub row: EventRow,
 }
 
@@ -369,6 +456,26 @@ impl SyncedEvent {
                 .as_deref()
                 .is_none_or(|org| org.eq_ignore_ascii_case(account_email.trim()));
         writable && own
+    }
+
+    /// THE GUEST GUARD: whether the app offers to change this event's guest
+    /// list. The event is [`Self::editable`]; the list is whole (never
+    /// rebuild a guest list from a truncated one: Google replaces the array,
+    /// so everyone not in it would be removed); the user ORGANIZES it (Google
+    /// says so, or the organizer is the mailbox's own address: an event that
+    /// names no organizer is editable but not a thing to invite people to);
+    /// and it sits on a calendar that may invite ([`may_invite`]).
+    pub fn guest_editable(&self, account_email: &str) -> bool {
+        let organizes = self.row.organizer_self
+            || self
+                .row
+                .organizer_email
+                .as_deref()
+                .is_some_and(|org| org.eq_ignore_ascii_case(account_email.trim()));
+        self.editable(account_email)
+            && !self.row.guests_truncated
+            && organizes
+            && may_invite(self.calendar_primary, self.calendar_access)
     }
 }
 
@@ -427,6 +534,50 @@ fn google_link(raw: Option<&str>) -> Option<String> {
     let google = host == "google.com" || host.ends_with(".google.com");
     (url.scheme() == "https" && google && url.username().is_empty() && url.password().is_none())
         .then(|| url.to_string())
+}
+
+/// An event's attendees as stored: at most [`MAX_GUESTS`] entries with a
+/// usable address, in Google's order, and whether Google holds more than
+/// that (`attendeesOmitted`: "Whether attendees may have been omitted from
+/// the event's representation", or a list longer than the cap, or an entry
+/// that could not be read). The user's own entry is never the one cut.
+fn read_guests(item: &Value) -> (Vec<Guest>, bool) {
+    let omitted = item.get("attendeesOmitted").and_then(Value::as_bool) == Some(true);
+    let Some(entries) = item.get("attendees").and_then(Value::as_array) else {
+        return (Vec::new(), omitted);
+    };
+    let flag = |entry: &Value, key| entry.get(key).and_then(Value::as_bool) == Some(true);
+    let mut guests: Vec<Guest> = entries
+        .iter()
+        .filter_map(|entry| {
+            Some(Guest {
+                email: address(entry.get("email").and_then(Value::as_str))?,
+                name: entry
+                    .get("displayName")
+                    .and_then(Value::as_str)
+                    .and_then(ghost::clean_text),
+                response: GuestResponse::parse(
+                    entry
+                        .get("responseStatus")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                ),
+                organizer: flag(entry, "organizer"),
+                is_self: flag(entry, "self"),
+            })
+        })
+        .collect();
+    let unread = guests.len() < entries.len();
+    let over = guests.len() > MAX_GUESTS;
+    if over {
+        // Keep the user's own entry whatever its position.
+        let own = guests.iter().position(|g| g.is_self);
+        if let Some(own) = own.filter(|at| *at >= MAX_GUESTS) {
+            guests.swap(MAX_GUESTS - 1, own);
+        }
+        guests.truncate(MAX_GUESTS);
+    }
+    (guests, omitted || unread || over)
 }
 
 /// An organizer's address, only when it looks like one.
@@ -493,6 +644,7 @@ pub fn read_event(
         .and_then(SelfResponse::parse);
     let updated_at = text(item, "updated")
         .filter(|u| u.len() <= STAMP_CAP && chrono::DateTime::parse_from_rfc3339(u).is_ok());
+    let (guests, guests_truncated) = read_guests(item);
     let end = end.and_then(|end| match end {
         EventTime::Date(day) => day
             .pred_opt()
@@ -540,6 +692,8 @@ pub fn read_event(
             .get("description")
             .and_then(Value::as_str)
             .and_then(ghost::launder_description),
+        guests,
+        guests_truncated,
     })))
 }
 
@@ -711,6 +865,8 @@ mod tests {
             updated_at: None,
             color_id: None,
             description: None,
+            guests: Vec::new(),
+            guests_truncated: false,
         }
     }
 
@@ -791,6 +947,7 @@ mod tests {
             calendar_name: None,
             calendar_color: None,
             calendar_access: None,
+            calendar_primary: true,
             row: EventRow {
                 summary: Some(title.into()),
                 event_id: format!("{cal}-{title}"),
@@ -1119,6 +1276,167 @@ mod tests {
         }
     }
 
+    #[test]
+    fn an_events_guests_are_read_laundered_and_bounded() {
+        let start = now() + chrono::Duration::days(1);
+        let item = |attendees: Value, omitted: bool| {
+            let mut item = json!({
+                "id": "e",
+                "start": {"dateTime": start.to_rfc3339()},
+                "end": {"dateTime": (start + chrono::Duration::hours(1)).to_rfc3339()},
+                "attendees": attendees,
+            });
+            if omitted {
+                item["attendeesOmitted"] = json!(true);
+            }
+            item
+        };
+        let row = upsert(item(
+            json!([
+                {"email": "me@example.com", "self": true, "organizer": true,
+                 "responseStatus": "tentative"},
+                {"email": " Sam@Example.com ", "displayName": "Sam\u{202E} \u{200B}Lee",
+                 "responseStatus": "accepted", "comment": "never read"},
+                {"email": "pat@example.com", "responseStatus": "declined"},
+                {"email": "kim@example.com", "responseStatus": "needsAction"},
+                {"email": "odd@example.com", "responseStatus": "somethingNew"},
+                {"email": "bare@example.com"},
+            ]),
+            false,
+        ));
+        let read: Vec<_> = row
+            .guests
+            .iter()
+            .map(|g| {
+                (
+                    g.email.as_str(),
+                    g.name.as_deref(),
+                    g.response.as_str(),
+                    g.organizer,
+                    g.is_self,
+                )
+            })
+            .collect();
+        assert_eq!(
+            read,
+            [
+                ("me@example.com", None, "tentative", true, true),
+                ("Sam@Example.com", Some("Sam Lee"), "accepted", false, false),
+                ("pat@example.com", None, "declined", false, false),
+                ("kim@example.com", None, "pending", false, false),
+                ("odd@example.com", None, "pending", false, false),
+                ("bare@example.com", None, "pending", false, false),
+            ]
+        );
+        assert!(!row.guests_truncated);
+        assert_eq!(row.other_guests(), 5);
+        // The user's own answer is still read from their entry.
+        assert_eq!(row.self_response, Some(SelfResponse::Tentative));
+        // No attendees: none, not truncated.
+        let none = upsert(json!({"id": "e", "start": {"dateTime": start.to_rfc3339()}}));
+        assert!(none.guests.is_empty() && !none.guests_truncated);
+        // Google says it left some out.
+        let omitted = upsert(item(
+            json!([{"email": "me@example.com", "self": true, "responseStatus": "accepted"}]),
+            true,
+        ));
+        assert_eq!(omitted.guests.len(), 1);
+        assert!(omitted.guests_truncated);
+        assert_eq!(omitted.other_guests(), 0);
+        // An entry that cannot be read (no address, or not one) means the
+        // list held here is not the whole list.
+        for bad in [
+            json!({"displayName": "No address"}),
+            json!({"email": "not an address"}),
+            json!({"email": "x".repeat(400) + "@example.com"}),
+        ] {
+            let row = upsert(item(json!([{"email": "a@example.com"}, bad]), false));
+            assert_eq!(row.guests.len(), 1);
+            assert!(row.guests_truncated);
+        }
+        // A list past the cap that Google sent anyway: cut to the cap, marked,
+        // and the user's own entry kept though it came last.
+        let mut crowd: Vec<Value> = (0..MAX_GUESTS + 5)
+            .map(|i| json!({"email": format!("g{i}@example.com")}))
+            .collect();
+        crowd.push(json!({"email": "me@example.com", "self": true,
+                          "responseStatus": "accepted"}));
+        let row = upsert(item(json!(crowd), false));
+        assert_eq!(row.guests.len(), MAX_GUESTS);
+        assert!(row.guests_truncated);
+        assert!(row.guests.iter().any(|g| g.is_self));
+        assert_eq!(row.self_response, Some(SelfResponse::Accepted));
+        // Exactly the cap is whole.
+        let full: Vec<Value> = (0..MAX_GUESTS)
+            .map(|i| json!({"email": format!("g{i}@example.com")}))
+            .collect();
+        let row = upsert(item(json!(full), false));
+        assert_eq!(row.guests.len(), MAX_GUESTS);
+        assert!(!row.guests_truncated);
+    }
+
+    /// THE GUEST GUARD and THE INVITE GUARD, every arm.
+    #[test]
+    fn a_guest_list_is_editable_only_on_the_users_own_whole_organized_event() {
+        let event = |primary: bool,
+                     access: Option<AccessRole>,
+                     organizer: Option<&str>,
+                     own: bool,
+                     truncated: bool| SyncedEvent {
+            calendar_id: "c".into(),
+            calendar_name: None,
+            calendar_color: None,
+            calendar_access: access,
+            calendar_primary: primary,
+            row: EventRow {
+                organizer_email: organizer.map(str::to_string),
+                organizer_self: own,
+                guests_truncated: truncated,
+                ..row("2026-10-05T09:00:00Z")
+            },
+        };
+        let me = "Me@Example.com";
+        let owner = Some(AccessRole::Owner);
+        let writer = Some(AccessRole::Writer);
+        assert!(event(true, owner, None, true, false).guest_editable(me));
+        assert!(
+            event(true, owner, Some("me@example.com"), false, false).guest_editable(me),
+            "organized by the mailbox's own address"
+        );
+        assert!(
+            event(false, owner, None, true, false).guest_editable(me),
+            "a calendar the user owns that is not the primary one"
+        );
+        // Truncated: never, whatever else holds.
+        assert!(!event(true, owner, None, true, true).guest_editable(me));
+        assert!(event(true, owner, None, true, true).editable(me));
+        // Not the organizer: an event that names none is editable, and still
+        // not one to invite people to.
+        let orphan = event(true, owner, None, false, false);
+        assert!(orphan.editable(me) && !orphan.guest_editable(me));
+        // Someone else's.
+        assert!(!event(true, owner, Some("boss@x.com"), false, false).guest_editable(me));
+        // A calendar the user writes to but does not own.
+        let team = event(false, writer, None, true, false);
+        assert!(team.editable(me) && !team.guest_editable(me));
+        // A calendar the user cannot write to at all.
+        assert!(!event(false, Some(AccessRole::Reader), None, true, false).guest_editable(me));
+        assert!(!event(false, None, None, true, false).guest_editable(me));
+
+        assert!(may_invite(true, None), "the primary calendar is the user's");
+        assert!(may_invite(true, writer));
+        assert!(may_invite(false, owner));
+        for role in [
+            None,
+            writer,
+            Some(AccessRole::WriterWithoutPrivateAccess),
+            Some(AccessRole::Reader),
+            Some(AccessRole::FreeBusyReader),
+        ] {
+            assert!(!may_invite(false, role), "{role:?}");
+        }
+    }
+
     /// THE EDIT GUARD, every arm.
     #[test]
     fn an_event_is_editable_on_a_writable_calendar_when_it_is_the_users_own() {
@@ -1127,6 +1445,7 @@ mod tests {
             calendar_name: None,
             calendar_color: Some("#123456".into()),
             calendar_access: access,
+            calendar_primary: true,
             row: EventRow {
                 organizer_email: organizer.map(str::to_string),
                 organizer_self: own,

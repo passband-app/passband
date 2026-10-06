@@ -2,8 +2,13 @@
 //! sync, and `events.insert`, `events.patch` and `events.delete` for the
 //! user's own writes from the human door.
 //!
-//! Every write sends `sendUpdates=none` ("No notifications are sent"): nobody
-//! is invited or told by this wave. An all-day event's `end.date` is
+//! EVERY WRITE NAMES `sendUpdates`, and the value is [`Notify`]'s: `none`
+//! ("No notifications are sent") unless the caller passed [`Notify::Guests`],
+//! which sends `all` ("Notifications are sent to all guests"). Those are the
+//! only two values this client can put on the wire, and `Notify::default()`
+//! is the silent one, so a caller that says nothing mails nobody. The mail is
+//! Google's own invitation, update or cancellation; nothing here writes one.
+//! An all-day event's `end.date` is
 //! exclusive at Google (the Events resource: `end` is "The (exclusive) end
 //! time of the event"); the conversion to and from the inclusive last day the
 //! app uses lives in [`super::write`] and [`super::read_event`].
@@ -19,14 +24,21 @@
 //!   including the initial request": `singleEvents`, `maxResults`,
 //!   `maxAttendees` and `fields` go on every request, full and incremental.
 //! - `maxAttendees`: "If there are more than the specified number of
-//!   attendees, only the participant is returned." At 1, an invitation with
-//!   any number of guests comes back carrying the user's own entry alone,
-//!   which is all [`super::read_event`] reads (its `self` and
-//!   `responseStatus`).
+//!   attendees, only the participant is returned." At [`MAX_ATTENDEES`] an
+//!   event's whole guest list comes back when it has that many or fewer, and
+//!   a larger one comes back as the user's own entry alone with
+//!   `attendeesOmitted` set, which is stored as the event's truncated mark.
+//!   Either way [`super::read_event`] still finds the user's own answer.
 //! - `fields` (partial response) names only what the daemon reads, so an
-//!   invitation anyone can send cannot fill a page with its guest list,
-//!   attachments or conference data. Its description is read (the app shows
-//!   it), laundered and cut to 2000 characters as it is stored.
+//!   invitation anyone can send cannot fill a page with attachments,
+//!   conference data or its guests' comments: of each attendee only the
+//!   address, the name, the answer and the two flags are asked for. Its
+//!   description is read (the app shows it), laundered and cut to 2000
+//!   characters as it is stored.
+//! - `events.patch`: "Array fields, if specified, overwrite the existing
+//!   arrays; this discards any previous array elements." So a guest edit
+//!   sends the FULL attendee list, built from a fresh read of the event
+//!   ([`CalendarApi::event_attendees`]), never from a partial one.
 //! - `nextSyncToken` arrives on the LAST page only; every earlier page carries
 //!   `nextPageToken`.
 //! - 410 Gone means the sync token is invalid: clear it and sync in full.
@@ -53,16 +65,19 @@ pub const EVENTS_PAGE_SIZE: u32 = 250;
 /// Calendars per `calendarList` page: Google's maximum.
 const LIST_PAGE_SIZE: u32 = 250;
 
-/// Attendees per event: Google then returns only the user's own entry.
-pub const MAX_ATTENDEES: u32 = 1;
+/// Attendees per event ([`super::MAX_GUESTS`]): past it Google returns only
+/// the user's own entry and marks the event `attendeesOmitted`.
+pub const MAX_ATTENDEES: u32 = super::MAX_GUESTS as u32;
 
 /// Of one event, exactly what [`super::read_event`] reads. Anything else an
-/// event carries (attachments, conference data, the other guests) is never
-/// sent. One macro so a listed event and a written one are asked for alike.
+/// event carries (attachments, conference data, what a guest wrote when
+/// answering) is never sent. One macro so a listed event and a written one
+/// are asked for alike.
 macro_rules! event_fields {
     () => {
         "id,status,iCalUID,summary,description,location,colorId,start,end,\
-organizer(email,self),attendees(self,responseStatus),transparency,htmlLink,updated"
+organizer(email,self),attendeesOmitted,\
+attendees(email,displayName,responseStatus,organizer,self),transparency,htmlLink,updated"
     };
 }
 
@@ -84,10 +99,42 @@ pub const LIST_FIELDS: &str = "nextPageToken,\
 items(id,summary,summaryOverride,primary,selected,deleted,hidden,timeZone,\
 backgroundColor,colorId,accessRole)";
 
-/// `sendUpdates` on every write: "`none`: No notifications are sent." This
-/// wave invites nobody, and an edit to an event with guests must not mail
-/// them on the user's behalf from a calendar page.
-pub const SEND_UPDATES: &str = "none";
+/// The partial response of the read a guest edit starts with
+/// ([`CalendarApi::event_attendees`]): the attendee entries WHOLE, every
+/// field Google holds about each, because the patch that follows hands the
+/// kept ones back and whatever it left out Google would drop. Held in memory
+/// for that one request, never stored, logged or served.
+pub const ATTENDEES_FIELDS: &str = "attendeesOmitted,attendees";
+
+/// WHO GOOGLE TELLS about a write: the `sendUpdates` parameter. The ONLY two
+/// values this client sends; `externalOnly` is not offered.
+///
+/// THE DEFAULT IS SILENCE. `Guests` makes Google email every guest of the
+/// event (an invitation, an update or a cancellation), which cannot be
+/// unsent, so it is only ever built from a request that said `notify: true`
+/// ([`super::write::notify`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Notify {
+    /// `sendUpdates=none`: "No notifications are sent."
+    #[default]
+    Nobody,
+    /// `sendUpdates=all`: "Notifications are sent to all guests."
+    Guests,
+}
+
+impl Notify {
+    /// The value on the wire.
+    pub fn send_updates(self) -> &'static str {
+        match self {
+            Self::Nobody => "none",
+            Self::Guests => "all",
+        }
+    }
+    /// Whether guests are told.
+    pub fn tells_guests(self) -> bool {
+        self == Self::Guests
+    }
+}
 
 /// The most bytes read from one response. 250 events of the largest shape
 /// Google sends stay far below it.
@@ -251,58 +298,104 @@ impl CalendarApi {
         })
     }
 
-    /// `events.insert`: create `event` (Google's event shape) on the calendar,
-    /// telling no one. Google's answer, the event as stored, carries its id,
-    /// its link and the times as Google normalized them.
+    /// The attendees of one event as Google holds them now, each entry whole
+    /// ([`ATTENDEES_FIELDS`]), and whether Google left any out. What a guest
+    /// edit builds its full list from: the stored copy is minutes old, and a
+    /// guest who answered since would have that answer overwritten by it.
+    pub async fn event_attendees(
+        &self,
+        token: &str,
+        calendar_id: &str,
+        event_id: &str,
+    ) -> Result<(Vec<Value>, bool), CallError> {
+        let mut url = self.url(&["calendars", calendar_id, "events", event_id])?;
+        url.query_pairs_mut()
+            .append_pair("maxAttendees", &MAX_ATTENDEES.to_string())
+            .append_pair("fields", ATTENDEES_FIELDS);
+        let body = self.get(url, token).await?;
+        let attendees = body
+            .get("attendees")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let omitted = body.get("attendeesOmitted").and_then(Value::as_bool) == Some(true);
+        Ok((attendees, omitted))
+    }
+
+    /// `events.insert`: create `event` (Google's event shape) on the calendar.
+    /// Google's answer, the event as stored, carries its id, its link and the
+    /// times as Google normalized them. With [`Notify::Guests`] Google mails
+    /// an invitation to each attendee in `event`.
     pub async fn insert_event(
         &self,
         token: &str,
         calendar_id: &str,
         event: &Value,
+        notify: Notify,
     ) -> Result<Value, CallError> {
-        let url = self.write_url(&["calendars", calendar_id, "events"], true)?;
+        let url = self.write_url(&["calendars", calendar_id, "events"], notify, true)?;
         self.call(reqwest::Method::POST, url, token, Some(event))
             .await
     }
 
     /// `events.patch`: "field values you specify replace the existing
     /// values. Fields that you don't specify in the request remain
-    /// unchanged", and a field set to `null` is deleted. Telling no one.
+    /// unchanged", and a field set to `null` is deleted. An `attendees` array
+    /// in it REPLACES the event's. With [`Notify::Guests`] Google mails the
+    /// event's guests about the change.
     pub async fn patch_event(
         &self,
         token: &str,
         calendar_id: &str,
         event_id: &str,
         patch: &Value,
+        notify: Notify,
     ) -> Result<Value, CallError> {
-        let url = self.write_url(&["calendars", calendar_id, "events", event_id], true)?;
+        let url = self.write_url(
+            &["calendars", calendar_id, "events", event_id],
+            notify,
+            true,
+        )?;
         self.call(reqwest::Method::PATCH, url, token, Some(patch))
             .await
     }
 
-    /// `events.delete`, telling no one. Success is "an empty response body".
-    /// A 410 (the event is already deleted at Google) is [`CallError::Gone`],
-    /// which the caller reads as done.
+    /// `events.delete`. Success is "an empty response body". A 410 (the event
+    /// is already deleted at Google) is [`CallError::Gone`], which the caller
+    /// reads as done. With [`Notify::Guests`] Google mails the event's guests
+    /// a cancellation.
     pub async fn delete_event(
         &self,
         token: &str,
         calendar_id: &str,
         event_id: &str,
+        notify: Notify,
     ) -> Result<(), CallError> {
-        let url = self.write_url(&["calendars", calendar_id, "events", event_id], false)?;
+        let url = self.write_url(
+            &["calendars", calendar_id, "events", event_id],
+            notify,
+            false,
+        )?;
         self.call(reqwest::Method::DELETE, url, token, None)
             .await
             .map(|_| ())
     }
 
-    /// A write's URL: `sendUpdates=none` always, and the one-event fields
-    /// mask when an event comes back.
-    fn write_url(&self, segments: &[&str], answers: bool) -> Result<url::Url, CallError> {
+    /// A write's URL. `sendUpdates` is ALWAYS named (never left to Google's
+    /// default) and is `notify`'s value; when an event comes back, the
+    /// one-event fields mask and the same attendee bound the sync uses.
+    fn write_url(
+        &self,
+        segments: &[&str],
+        notify: Notify,
+        answers: bool,
+    ) -> Result<url::Url, CallError> {
         let mut url = self.url(segments)?;
         {
             let mut q = url.query_pairs_mut();
-            q.append_pair("sendUpdates", SEND_UPDATES);
+            q.append_pair("sendUpdates", notify.send_updates());
             if answers {
+                q.append_pair("maxAttendees", &MAX_ATTENDEES.to_string());
                 q.append_pair("fields", EVENT_FIELDS);
             }
         }
@@ -448,5 +541,34 @@ mod tests {
         );
         let api = CalendarApi::new("http://127.0.0.1:9").unwrap();
         assert_eq!(api.url(&["users", "me"]).unwrap().path(), "/users/me");
+    }
+
+    /// THE NOTIFY DEFAULT: a write that was told nothing tells nobody, and
+    /// the wire only ever carries `none` or `all`.
+    #[test]
+    fn a_write_tells_nobody_unless_asked_and_always_says_which() {
+        assert_eq!(Notify::default(), Notify::Nobody);
+        assert_eq!(Notify::default().send_updates(), "none");
+        assert_eq!(Notify::Guests.send_updates(), "all");
+        assert!(!Notify::Nobody.tells_guests() && Notify::Guests.tells_guests());
+        let api = CalendarApi::new("http://127.0.0.1:9").unwrap();
+        let sent = |notify, answers| {
+            let url = api
+                .write_url(&["calendars", "primary", "events"], notify, answers)
+                .unwrap();
+            let pairs: Vec<(String, String)> = url.query_pairs().into_owned().collect();
+            let values: Vec<String> = pairs
+                .iter()
+                .filter(|(key, _)| key == "sendUpdates")
+                .map(|(_, value)| value.clone())
+                .collect();
+            assert!(!pairs.iter().any(|(key, _)| key == "sendNotifications"));
+            values
+        };
+        for answers in [true, false] {
+            assert_eq!(sent(Notify::default(), answers), ["none"]);
+            assert_eq!(sent(Notify::Nobody, answers), ["none"]);
+            assert_eq!(sent(Notify::Guests, answers), ["all"]);
+        }
     }
 }

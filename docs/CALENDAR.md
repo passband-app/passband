@@ -885,14 +885,15 @@ Read only (slice B). The only writes are the user's own, described under
 - **What is asked for.** Every `events.list` request, the first full one, its
   later pages and every incremental one alike (Google: "Each list request
   should use the same set of query parameters, including the initial
-  request"), carries `maxAttendees=1`, so an invitation with any number of
-  guests comes back with the user's own entry alone, and a `fields` mask
-  naming only what the daemon reads: the paging and sync tokens, the
-  calendar's title and zone, and of each event its id, status, iCal id,
-  title, description, place, colour id, start, end, organizer address and
-  `self` flag, the attendee entry's `self` and `responseStatus`,
-  transparency, link and update time. Attachments, conference data and the
-  other guests are never sent. The description (added in wave 3, which shows
+  request"), carries `maxAttendees=100` (it was 1 until wave 5 read guests;
+  see "Guests, invited by Google" below), and a `fields` mask naming only
+  what the daemon reads: the paging and sync tokens, the calendar's title and
+  zone, and of each event its id, status, iCal id, title, description, place,
+  colour id, start, end, organizer address and `self` flag,
+  `attendeesOmitted`, of each attendee the address, name, `responseStatus`,
+  `organizer` and `self`, transparency, link and update time. Attachments,
+  conference data and what a guest wrote when answering are never sent. The
+  description (added in wave 3, which shows
   it) is laundered and cut to 2000 characters as it is stored.
   `calendarList.list` carries a mask of its own, which since wave 3 includes
   each calendar's `backgroundColor`, `colorId` and `accessRole`.
@@ -1035,9 +1036,129 @@ promoting a ghost to a real event is later work.
   only one, the user's own (`writable`), with no colour. Google's palettes are
   held in the daemon because `colors.get` does not accept the
   `calendar.events` scope.
-- **Not here.** No agent route, no MCP tool, no assistant tool. No guests, no
-  RSVP, no moving an event between calendars, no recurring-series edits (an
-  edit to an instance changes that instance).
+- **Not here.** No agent route, no MCP tool, no assistant tool. No RSVP, no
+  moving an event between calendars, no recurring-series edits (an edit to an
+  instance changes that instance). Guests came in wave 5, below.
+
+### Guests, invited by Google (BUILT in wave 5)
+
+An event can carry guests, and Google Calendar, not Passband, writes and
+sends the invitation, the update and the cancellation. Passband composes no
+email for this and sends none through Gmail; the existing `calendar.events`
+scope covers it. This is the first calendar write that reaches OTHER PEOPLE,
+and it cannot be unsent, so the daemon half is built so that nobody is mailed
+by accident. The daemon half is BUILT and tested against a fake Calendar
+server only: no request of this wave has been sent to the real Google API.
+
+- **What Google's reference says** (read 2026-10-05; the sentences this is
+  built on):
+  - `sendUpdates`, on insert, patch and delete: "`all`: Notifications are
+    sent to all guests." "`externalOnly`: Notifications are sent to
+    non-Google Calendar guests only." "`none`: No notifications are sent."
+  - `events.patch`: "The field values you specify replace the existing
+    values. Fields that you don't specify in the request remain unchanged.
+    Array fields, if specified, overwrite the existing arrays; this discards
+    any previous array elements."
+  - `maxAttendees`: "The maximum number of attendees to include in the
+    response. If there are more than the specified number of attendees, only
+    the participant is returned."
+  - `attendeesOmitted`: "Whether attendees may have been omitted from the
+    event's representation."
+  - `attendees[].responseStatus`: "Possible values are: `needsAction`,
+    `declined`, `tentative`, `accepted`." `attendees[].email`: "This field
+    must be present when adding an attendee."
+  - The reference also says of the deprecated `sendNotifications` that
+    "some emails might still be sent even if you set the value to `false`".
+    So `sendUpdates=none` is the daemon asking for silence, not a proof of
+    it. See "Not verified" below.
+- **The one switch.** A write tells Google `sendUpdates=all` ONLY when the
+  request carries the JSON value `notify: true` (`?notify=true` on a
+  delete). Absent or `false` sends `none`. Anything else (`null`, `"true"`,
+  `1`, two `notify` parameters) is a 400, never read as yes and never
+  silently as no. `sendUpdates` is always named, and the client type
+  (`gcal/client.rs:Notify`) can only say `none` or `all`, defaulting to
+  `none`; `externalOnly` is not offered. `notify` alone is not an edit
+  ("nothing to change"): there is no "tell them again".
+- **Wire.** `POST /client/calendar/events` takes `"guests": ["a@b.c", ...]`
+  (optional, at most 50) and `"notify": bool`. `PATCH` takes `"guests"`
+  (absent leaves Google's list alone; present is the FULL new list, `[]`
+  removes every guest, `null` is refused) and `"notify"`. `DELETE` takes
+  `?notify=true|false`. `GET /client/timeline` serves per event
+  `guests: [{email, name, response, organizer, self}]` (`response` is
+  `accepted`, `declined`, `tentative` or `pending`; always present, `[]`
+  when none), `guests_truncated` and `guest_editable`, and per calendar
+  `can_invite`.
+- **Who may be a guest.** One plain address each (`gcal/write.rs:addr_spec`):
+  ASCII `local@domain` with a dotted domain; no display name, angle
+  brackets, quoting, comment, address literal, whitespace or control
+  character, so a value can only ever be one mailbox. No duplicates once
+  case is folded. Never the calendar's owner (the mailbox's own address, or
+  the calendar's own id). Each is a 400 with a fixed message.
+- **Which calendar may invite** (`gcal/mod.rs:may_invite`). The user's own:
+  the primary calendar, or one whose `accessRole` is `owner`. A calendar the
+  user merely writes to (`writer`) takes events and takes no guests: an
+  invitation from it would go out under someone else's calendar on the
+  user's say-so. 400 on create and on edit.
+- **Which event's guests may change** (`SyncedEvent::guest_editable`).
+  `editable`, AND the list is not truncated, AND the user organizes it
+  (`organizer.self`, or the organizer is the mailbox's address; an event
+  that names no organizer is editable but not one to invite people to), AND
+  its calendar may invite. Otherwise a `guests` edit is a 400. (The contract
+  named the first three; the calendar condition is folded in so that
+  `guest_editable: true` always means the edit will be accepted.)
+- **Truncation.** Every events request carries `maxAttendees=100`. Past
+  that, Google returns the user's own entry alone and sets
+  `attendeesOmitted`; the event is stored with that one entry and
+  `guests_truncated`, and its guest list is read-only. So is one with an
+  attendee the daemon could not read (no address). A title, time or place
+  edit of such an event still works and sends no `attendees` key, so
+  Google's list is untouched.
+- **A guest edit sends the full list, from Google's own copy.** Because
+  patch replaces the array, the edit first reads the event's attendees from
+  Google (`events.get`, `fields=attendeesOmitted,attendees`,
+  `maxAttendees=100`), then sends: the user's own entry and the organizer's
+  exactly as read (this door never removes them), every guest still wanted
+  exactly as read (its `responseStatus`, comment, optional flag, extra
+  guests), and each new address bare (`{"email"}`), which Google starts at
+  `needsAction`. Reading fresh rather than from the stored rows matters: the
+  stored copy can be five minutes old, and a guest who answered since would
+  have their answer overwritten by the old one. If the fresh read is
+  truncated or holds an address-less guest, the edit is refused and nothing
+  is patched. Those raw entries live for the one request; only the address,
+  name, answer and two flags are ever stored. A guest who answers in the
+  instant between the read and the patch can still lose that answer (no
+  `If-Match` is sent); the next sync shows what Google holds.
+- **Storage.** `calendar_event_guests` (account, calendar, event, position;
+  address, name, answer, organizer and self flags), replaced whole with its
+  event in one transaction and deleted with it by a trigger, whichever path
+  deletes the event. `calendar_events.guests_truncated`. A store from before
+  this wave was synced one attendee at a time: the migration clears every
+  calendar's sync token so the next pass reads in full with the new
+  parameters (Google: "All other query parameters should be the same as for
+  the initial synchronization to avoid undefined behavior").
+- **Audit.** The row's detail gains ` guests=<n> notified=<true|false>`: the
+  number of guests other than the user after the write (before it for a
+  delete or a refusal; `<n>+` when the stored list is truncated) and whether
+  Google was asked to mail them. On a failure too: a write that timed out
+  may have happened. Never an address. Two new reasons:
+  `rejected:cannot_invite`, `rejected:guests_read_only`.
+- **Not here.** No agent route, MCP tool or assistant tool. No RSVP to other
+  people's invitations. No `externalOnly`. No optional guests, no guest
+  permissions (`guestsCanModify` and the rest keep Google's defaults).
+- **Not verified** (the fake Calendar server is the daemon's own reading of
+  the reference, and nothing here has called Google):
+  - that `sendUpdates=none` on an insert or patch that ADDS a guest sends
+    that guest nothing at all. The reference's "some emails might still be
+    sent" is written beside the deprecated parameter; test with a real
+    account before the client offers "save without telling" to anyone;
+  - whether Google adds the organizer to `attendees` on an insert that
+    names guests (the daemon handles either: it keeps a `self` or
+    `organizer` entry when one is there and does not need one);
+  - that Google accepts attendee entries handed back with their read-only
+    fields (`self`, `organizer`, `id`) in a patch, as its "get followed by
+    an update" advice implies;
+  - what the invitation looks like when the organizer is a secondary
+    calendar the user owns rather than the primary one.
 
 ### Location lookup (BUILT in wave 4, client only)
 
@@ -1075,8 +1196,16 @@ event's location too). No key, no bill, the same on Mac and iOS.
 
 ### Before anything writes to a real calendar
 
-Wave 1's ghosts only ever show. Before wave 4 lets one become a real event,
-or lets mail move or delete one, these exist:
+Wave 1's ghosts only ever show. Before a later wave lets one become a real
+event, or lets mail move or delete one, these exist:
+
+- **Nothing derived from mail may notify.** Since wave 5 a write can make
+  Google email an event's guests (`notify: true`). That switch belongs to a
+  human pressing a control that says so. A ghost promoted to a real event, an
+  update or cancellation applied from mail, and anything else the daemon
+  decides on its own must send `sendUpdates=none` and must never set, add to
+  or rebuild a guest list: mail anyone can send would otherwise be able to
+  make the user's calendar email third parties, or strip an event's guests.
 
 - **"This mail is wrong."** The user can detach one source from a ghost, so a
   bad message stops feeding it without dismissing the whole event.

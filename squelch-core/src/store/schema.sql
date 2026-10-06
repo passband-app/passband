@@ -1789,6 +1789,9 @@ CREATE TABLE IF NOT EXISTS calendar_calendars (
 -- `organizer_self` Google's `organizer.self` (this calendar organizes it),
 -- `description` laundered text of at most 2000 characters. Also written,
 -- one row at a time, after Google accepts the user's own create or edit.
+-- `guests_truncated` says Google holds more attendees than
+-- `calendar_event_guests` does for this event (Google's `attendeesOmitted`,
+-- set past 100): its guest list is then read-only.
 CREATE TABLE IF NOT EXISTS calendar_events (
     account_id      INTEGER NOT NULL,
     calendar_id     TEXT NOT NULL,
@@ -1810,9 +1813,35 @@ CREATE TABLE IF NOT EXISTS calendar_events (
     color_id        TEXT,
     organizer_self  INTEGER NOT NULL DEFAULT 0,
     description     TEXT,
+    guests_truncated INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(account_id, calendar_id, event_id)
 );
 CREATE INDEX IF NOT EXISTS idx_calendar_events_start ON calendar_events(account_id, start_sort);
+-- An event's attendees as Google lists them, at most 100, in Google's order
+-- (`position`). OTHER PEOPLE'S ADDRESSES: HUMAN-DOOR ONLY like the event
+-- itself, never logged, never in the audit log (which carries a count).
+-- `response` is `accepted` / `declined` / `tentative` / `pending`;
+-- `is_organizer` and `is_self` are Google's `organizer` and `self` flags.
+-- Replaced whole each time the event is written, and gone with it, whoever
+-- deletes it (the trigger), so no path can leave a guest list behind.
+CREATE TABLE IF NOT EXISTS calendar_event_guests (
+    account_id   INTEGER NOT NULL,
+    calendar_id  TEXT NOT NULL,
+    event_id     TEXT NOT NULL,
+    position     INTEGER NOT NULL,
+    email        TEXT NOT NULL,
+    name         TEXT,
+    response     TEXT NOT NULL,
+    is_organizer INTEGER NOT NULL DEFAULT 0,
+    is_self      INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(account_id, calendar_id, event_id, position)
+);
+CREATE TRIGGER IF NOT EXISTS calendar_event_guests_follow_event
+AFTER DELETE ON calendar_events BEGIN
+    DELETE FROM calendar_event_guests
+    WHERE account_id = OLD.account_id AND calendar_id = OLD.calendar_id
+      AND event_id = OLD.event_id;
+END;
 
 -- A CORRESPONDENT'S TIMEZONE (docs/CALENDAR.md §7), inferred at ingest and
 -- served on the contact card. HUMAN-DOOR ONLY. `addr` is COLLATE NOCASE in

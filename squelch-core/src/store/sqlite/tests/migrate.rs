@@ -2213,6 +2213,21 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
                 "color_id",
                 "organizer_self",
                 "description",
+                "guests_truncated",
+            ]
+        );
+        assert_eq!(
+            columns(&conn, "calendar_event_guests"),
+            [
+                "account_id",
+                "calendar_id",
+                "event_id",
+                "position",
+                "email",
+                "name",
+                "response",
+                "is_organizer",
+                "is_self",
             ]
         );
         assert!(index_exists(&conn));
@@ -2229,13 +2244,17 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
         triaged_row(acct, "g-1", "t-1", None, false, Sensitivity::Normal).ingest(&old);
         old.lock()
             .unwrap()
-            .execute_batch("DROP TABLE calendar_events; DROP TABLE calendar_calendars;")
+            .execute_batch(
+                "DROP TABLE calendar_event_guests; DROP TABLE calendar_events;
+                 DROP TABLE calendar_calendars;",
+            )
             .unwrap();
     }
     {
         let upgraded = SqliteStore::open(&path).unwrap();
         let conn = upgraded.lock().unwrap();
-        assert_eq!(columns(&conn, "calendar_events").len(), 20);
+        assert_eq!(columns(&conn, "calendar_events").len(), 21);
+        assert_eq!(columns(&conn, "calendar_event_guests").len(), 9);
         assert!(index_exists(&conn));
         let mail: i64 = conn
             .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
@@ -2269,7 +2288,10 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
              ALTER TABLE calendar_calendars DROP COLUMN access_role;
              ALTER TABLE calendar_events DROP COLUMN color_id;
              ALTER TABLE calendar_events DROP COLUMN organizer_self;
-             ALTER TABLE calendar_events DROP COLUMN description;",
+             ALTER TABLE calendar_events DROP COLUMN description;
+             ALTER TABLE calendar_events DROP COLUMN guests_truncated;
+             UPDATE calendar_calendars SET sync_token='minted-with-one-attendee',
+                    full_synced_at='2026-10-01T00:00:00+00:00', synced_at='2026-10-01T00:00:00+00:00';",
         )
         .unwrap();
     drop(reopened);
@@ -2277,7 +2299,21 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
     {
         let conn = reopened.lock().unwrap();
         assert_eq!(columns(&conn, "calendar_calendars").len(), 15);
-        assert_eq!(columns(&conn, "calendar_events").len(), 20);
+        assert_eq!(columns(&conn, "calendar_events").len(), 21);
+        // A store from before guests was synced one attendee at a time: its
+        // tokens are forgotten, so the next pass reads every calendar in full
+        // with the new parameters.
+        let sync: (Option<String>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT sync_token, full_synced_at, synced_at FROM calendar_calendars",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((sync.0, sync.1), (None, None));
+        assert!(sync.2.is_some(), "when it was last read is kept");
+        conn.execute("UPDATE calendar_calendars SET sync_token='fresh'", [])
+            .unwrap();
         let row: (i64, Option<String>, i64) = conn
             .query_row(
                 "SELECT failures, retry_at, truncated FROM calendar_calendars",
@@ -2288,5 +2324,182 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
         assert_eq!(row, (0, None, 0));
     }
     drop(reopened);
+    // A later open, with the column there, leaves the token alone.
+    let reopened = SqliteStore::open(&path).unwrap();
+    let token: Option<String> = reopened
+        .lock()
+        .unwrap()
+        .query_row("SELECT sync_token FROM calendar_calendars", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(token.as_deref(), Some("fresh"));
+    drop(reopened);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A guest list is stored with its event, replaced whole when the event is
+/// written again, read back in Google's order, scoped by account, and GONE
+/// with the event whichever path deletes it (the trigger).
+#[test]
+fn an_events_guests_are_stored_with_it_and_go_with_it() {
+    use crate::gcal::{
+        CalendarMeta, EventItem, EventRow, Guest, GuestResponse, MAX_GUESTS, PRIMARY,
+    };
+    use crate::triage::ghost::EventTime;
+    let (store, acct) = store();
+    let other = store.ensure_account("other@example.com").unwrap();
+    let now: DateTime<Utc> = "2026-10-05T12:00:00Z".parse().unwrap();
+    let guest = |email: &str, response: GuestResponse, is_self: bool| Guest {
+        email: email.into(),
+        name: (!is_self).then(|| "A Guest".to_string()),
+        response,
+        organizer: is_self,
+        is_self,
+    };
+    let event = |id: &str, guests: Vec<Guest>, truncated| EventRow {
+        event_id: id.into(),
+        ical_uid: None,
+        tentative: false,
+        summary: Some("Party".into()),
+        location: None,
+        start: EventTime::parse("2026-10-06T19:00:00-04:00").unwrap(),
+        end: None,
+        start_timezone: None,
+        organizer_email: None,
+        organizer_self: true,
+        self_response: None,
+        transparent: false,
+        html_link: None,
+        updated_at: None,
+        color_id: None,
+        description: None,
+        guests,
+        guests_truncated: truncated,
+    };
+    let count = |id: &str| -> i64 {
+        store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM calendar_event_guests WHERE event_id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    for account in [acct, other] {
+        store
+            .calendar_set_selection(account, &[CalendarMeta::primary_only()])
+            .unwrap();
+    }
+    let three = vec![
+        guest("me@example.com", GuestResponse::Accepted, true),
+        guest("zed@example.com", GuestResponse::Declined, false),
+        guest("amy@example.com", GuestResponse::Pending, false),
+    ];
+    assert!(
+        store
+            .calendar_put_event(acct, PRIMARY, &event("a", three.clone(), false))
+            .unwrap()
+    );
+    store
+        .calendar_put_event(acct, PRIMARY, &event("b", three[..2].to_vec(), true))
+        .unwrap();
+    // Read back whole, in the order given (not by address), one event or a
+    // listing.
+    let one = store.calendar_event(acct, PRIMARY, "a").unwrap().unwrap();
+    assert_eq!(one.row.guests, three);
+    assert!(!one.row.guests_truncated);
+    assert_eq!(one.row.other_guests(), 2);
+    let from = (now - chrono::Duration::days(1)).fixed_offset();
+    let to = (now + chrono::Duration::days(30)).fixed_offset();
+    let (listed, _) = store.list_calendar_events(acct, from, to, now).unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed[0].row.guests, three);
+    assert_eq!(listed[1].row.guests, three[..2]);
+    assert!(listed[1].row.guests_truncated);
+    // Another account holds none of it.
+    assert!(store.calendar_event(other, PRIMARY, "a").unwrap().is_none());
+    assert!(
+        store
+            .list_calendar_events(other, from, to, now)
+            .unwrap()
+            .0
+            .is_empty()
+    );
+    // The same event id under another account keeps its own list.
+    store
+        .calendar_put_event(other, PRIMARY, &event("a", three[..1].to_vec(), false))
+        .unwrap();
+    assert_eq!(
+        store
+            .calendar_event(acct, PRIMARY, "a")
+            .unwrap()
+            .unwrap()
+            .row
+            .guests
+            .len(),
+        3
+    );
+    // Written again with fewer: replaced, not added to.
+    store
+        .calendar_put_event(acct, PRIMARY, &event("a", three[..2].to_vec(), false))
+        .unwrap();
+    assert_eq!(
+        store
+            .calendar_event(acct, PRIMARY, "a")
+            .unwrap()
+            .unwrap()
+            .row
+            .guests,
+        three[..2]
+    );
+    // Never more than the cap, whatever it is handed.
+    let crowd: Vec<Guest> = (0..MAX_GUESTS + 20)
+        .map(|i| {
+            guest(
+                &format!("g{i}@example.com"),
+                GuestResponse::Tentative,
+                false,
+            )
+        })
+        .collect();
+    store
+        .calendar_put_event(acct, PRIMARY, &event("c", crowd, true))
+        .unwrap();
+    assert_eq!(count("c"), MAX_GUESTS as i64);
+
+    // GONE WITH THE EVENT, by each path that deletes one.
+    assert_eq!(count("a"), 3, "two here, one under the other account");
+    assert!(store.calendar_remove_event(acct, PRIMARY, "a").unwrap());
+    assert_eq!(
+        count("a"),
+        1,
+        "the user's delete; the other account's stays"
+    );
+    store
+        .calendar_apply_page(acct, PRIMARY, &[EventItem::Remove("b".into())], now)
+        .unwrap();
+    assert_eq!(count("b"), 0, "a cancelled event in a synced page");
+    store
+        .calendar_finish_sync(
+            acct,
+            PRIMARY,
+            Some("t"),
+            now,
+            Some((&Default::default(), false)),
+        )
+        .unwrap();
+    assert_eq!(count("c"), 0, "a full read's sweep");
+    store.calendar_set_selection(other, &[]).unwrap();
+    assert_eq!(count("a"), 0, "a calendar that stops being read");
+    let left: i64 = store
+        .lock()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM calendar_event_guests", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(left, 0);
 }

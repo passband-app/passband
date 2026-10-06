@@ -51,6 +51,23 @@
                         .foregroundStyle(Palette.inkFaint)
                         .padding(.top, Space.s8)
                 }
+                if receipt.items?.isEmpty == false {
+                    Button {
+                        store.openSmartDoneList()
+                    } label: {
+                        HStack(spacing: Space.s4) {
+                            Text(SmartDoneCopy.viewList)
+                                .font(Typo.ui(11.5, weight: .semibold))
+                            Image(systemName: "chevron.right")
+                                .font(Typo.ui(8.5, weight: .bold))
+                        }
+                        .foregroundStyle(Palette.accentInk)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Every email this cleared, with why. The undo timer waits while you look.")
+                    .padding(.top, Space.s10)
+                }
                 if receipt.batchId != nil {
                     Rectangle()
                         .fill(Palette.hairline)
@@ -149,9 +166,7 @@
                             .font(Typo.ui(12, weight: .semibold))
                             .foregroundStyle(Palette.ink)
                         if !receipt.undoing {
-                            UndoCountdown(
-                                startedAt: receipt.createdAt, expiresAt: receipt.expiresAt,
-                                tint: Palette.accent)
+                            SmartDoneRing(clock: receipt.clock)
                         }
                     }
                     .padding(.horizontal, Space.s10)
@@ -171,6 +186,168 @@
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaintest)
             }
+        }
+    }
+
+    /// The undo window as a ring, drawn FROM THE CLOCK: it drains with it
+    /// and holds still exactly while the clock is stopped.
+    struct SmartDoneRing: View {
+        let clock: SmartDoneClock
+        private static let size: CGFloat = 11
+
+        var body: some View {
+            TimelineView(.animation(minimumInterval: 1 / 30, paused: clock.isPaused)) { ctx in
+                ZStack {
+                    Circle()
+                        .stroke(Palette.hairlineStrong, lineWidth: 1.75)
+                    Circle()
+                        .trim(from: 0, to: clock.fraction(at: ctx.date))
+                        .stroke(Palette.accent, style: StrokeStyle(lineWidth: 1.75, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                }
+                .frame(width: Self.size, height: Self.size)
+            }
+            .accessibilityHidden(true)
+        }
+    }
+
+    // MARK: - the full list
+
+    /// EVERYTHING ONE SMART DONE CLEARED, to audit: subject, sender and why,
+    /// grouped by why. A full-window page in the purge's family. Not a
+    /// reader: nothing here opens.
+    ///
+    /// THE UNDO CLOCK IS STOPPED WHILE THIS IS UP (the store stops it on the
+    /// way in and starts it on the way out, by every route, including this
+    /// view simply going away). Undo takes the whole batch back, as the
+    /// receipt's does. Confirm, and Esc, go back to the board with the
+    /// receipt still up and its countdown carrying on from where it stopped:
+    /// leaving must never undo, and must never cost the window either.
+    struct SmartDoneListPage: View {
+        @Environment(AppStore.self) private var store
+        let receipt: AppStore.SmartDoneReceipt
+
+        private var groups: [SmartDoneList.Group] { SmartDoneList.groups(receipt.items ?? []) }
+
+        var body: some View {
+            FullPage(symbol: "checkmark.rectangle.stack", title: "Smart done") {
+                Text(SmartDoneCopy.headline(cleared: receipt.cleared))
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.inkFaint)
+            } content: {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: Space.s24) {
+                        Text(SmartDoneCopy.listTitle)
+                            .font(Typo.serif(30, weight: .medium))
+                            .foregroundStyle(Palette.ink)
+                        ForEach(groups) { group in
+                            section(group)
+                        }
+                    }
+                    .frame(maxWidth: Typo.measure(680), alignment: .leading)
+                    .padding(.horizontal, Space.s24)
+                    .padding(.vertical, Space.s32)
+                    .frame(maxWidth: .infinity)
+                }
+            } bottom: {
+                HStack(spacing: Space.s12) {
+                    if receipt.batchId != nil {
+                        SmartDoneRing(clock: receipt.clock)
+                        Text(SmartDoneCopy.listPaused)
+                            .font(Typo.micro)
+                            .foregroundStyle(Palette.inkFaint)
+                    }
+                    Spacer(minLength: Space.s8)
+                    if receipt.batchId != nil {
+                        PageButton(key: "u", label: receipt.undoing ? "Bringing them back" : "Undo all") {
+                            undo()
+                        }
+                        .disabled(receipt.undoing)
+                    }
+                    PageButton(key: "return", label: "Confirm", role: .primary) {
+                        store.closeSmartDoneList()
+                    }
+                }
+            }
+            .keyContext(.modal)
+            .keyBindings(.modal, [
+                KeyBinding("u", "undo all of it") { undo() },
+                KeyBinding("Enter", "confirm") { store.closeSmartDoneList() },
+                KeyBinding("Escape", "confirm") { store.closeSmartDoneList() },
+            ] + ["1", "2", "3", "4", "5"].map { KeyBinding($0, "nothing") {} })
+            // Left by a route nobody named: the clock still starts again.
+            .onDisappear { store.closeSmartDoneList() }
+            .transition(.opacity)
+        }
+
+        private func undo() {
+            guard receipt.batchId != nil, !receipt.undoing else { return }
+            Task { await store.undoSmartDone() }
+        }
+
+        private func section(_ group: SmartDoneList.Group) -> some View {
+            VStack(alignment: .leading, spacing: Space.s8) {
+                Text(group.heading)
+                    .font(Typo.ui(13, weight: .semibold))
+                    .foregroundStyle(Palette.ink)
+                VStack(spacing: 0) {
+                    ForEach(Array(group.items.enumerated()), id: \.element.id) { i, item in
+                        if i > 0 { Rectangle().fill(Palette.hairline).frame(height: 1) }
+                        row(item)
+                    }
+                }
+                .background(RoundedRectangle(cornerRadius: 13, style: .continuous).fill(pagePaper))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        .strokeBorder(Palette.hairline, lineWidth: 1)
+                )
+            }
+        }
+
+        /// Subject and sender are email-derived: Text only, never markup.
+        private func row(_ item: SmartDoneItem) -> some View {
+            let subject = item.subject?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return HStack(alignment: .center, spacing: Space.s10) {
+                Avatar(sender: "\(item.displayName) <\(item.sender)>", size: Space.scaled(24))
+                VStack(alignment: .leading, spacing: Space.s2) {
+                    Text(verbatim: subject.isEmpty ? SmartDoneCopy.noSubject : subject)
+                        .font(Typo.row)
+                        .foregroundStyle(Palette.ink)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    HStack(alignment: .firstTextBaseline, spacing: Space.s6) {
+                        Text(verbatim: item.displayName)
+                            .font(Typo.micro)
+                            .foregroundStyle(Palette.inkDim)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        if item.displayName != item.sender {
+                            Text(verbatim: item.sender)
+                                .font(Typo.micro)
+                                .foregroundStyle(Palette.inkFaintest)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .layoutPriority(-1)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                VStack(alignment: .trailing, spacing: Space.s2) {
+                    Text(SmartDoneCopy.why(item.reason))
+                        .font(Typo.micro)
+                        .foregroundStyle(Palette.inkDim)
+                    if item.receivedAt != nil {
+                        Text(Fmt.relAge(item.receivedAt))
+                            .font(Typo.micro)
+                            .foregroundStyle(Palette.inkFaintest)
+                    }
+                }
+                .fixedSize()
+            }
+            .padding(.horizontal, Space.s12)
+            .padding(.vertical, Space.s8)
+            .help(subject)
+            .accessibilityElement(children: .combine)
         }
     }
 #endif

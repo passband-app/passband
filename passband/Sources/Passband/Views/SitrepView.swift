@@ -602,7 +602,7 @@ struct SitrepView: View {
             // sent from the deck it opens until a confirming press. Declines
             // where the pill is not drawn.
             KeyBinding(declining: "p", "purge reading") {
-                guard !readingSenders.isEmpty, !RehearsalMode.isEnabled else { return false }
+                guard !readingSenders.isEmpty, store.purgeOffered else { return false }
                 Task { await store.beginPurge() }
                 return true
             },

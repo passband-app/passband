@@ -520,10 +520,14 @@ run_suite capability-probe \
 # evidence is put in. Purge.swift is Foundation-only so this builds with just
 # the wire types, which ride along so the page is decoded from real JSON: an
 # unknown reason code from a newer daemon must cost one reason, not the deck.
+# The canned senders ride along so the suite can say that everything worth
+# keeping or unsure in them is absent from the deck.
 run_suite purge \
   Sources/Passband/Model/SubjectText.swift \
   Sources/Passband/Model/WireTypes.swift \
   Sources/Passband/Lib/Purge.swift \
+  Sources/Passband/Lib/SmartDone.swift \
+  Sources/Passband/Lib/PurgeFixture.swift \
   Tests/PurgeTests.swift
 
 # The smart done receipt: the headline, one line per reason in good-news

@@ -1,112 +1,199 @@
-// THE PURGE, ON SCREEN: a deck through the Reading zone one SENDER at a time
-// (Lib/Purge.swift is the deck, AppStore the half that acts, this is what is
-// seen and pressed).
+// THE PURGE, ON SCREEN: a full-window walk through the Reading senders the
+// owner has all but stopped reading (Lib/Purge.swift is the deck, AppStore
+// the half that acts, this is what is seen and pressed).
 //
-// THE EVIDENCE IS THE HERO. Each card leads with what the person actually did
-// with this sender's mail, in sentences and in small drawings of the same
-// numbers, and the four choices sit under it. Nothing on the card is a count
-// of what is left: the only numbers are evidence, and a tally of what has
-// been decided, which only grows.
+// A PAGE, NOT A CARD. Each sender gets the whole window in two columns. On
+// the left is who they are and what they send: their icon, their name, and
+// one card per email of theirs in Reading, so the mail is recognised before
+// anything is decided about it. On the right is the argument and the
+// decision: what the person actually did with that mail ("Your reading"),
+// the one way to end it, the rules that would keep part of it, and a way to
+// say the deck got this one wrong.
+//
+// Nothing on the page is a count of what is left. The only numbers are
+// evidence, and a tally of what has been decided, which only grows.
 //
 // EACH CHOICE LEAVES ITS OWN WAY, because at speed the exit is the only
-// confirmation anybody reads: skip turns aside, clear lifts away under a
-// check, mute greys and sinks, and unsubscribe is cut in two and dropped.
-// Stepping back plays the same motion in reverse.
+// confirmation anybody reads. Unsubscribe lets the mail go: a bright cut
+// under the sender and every email card drops away in turn. Block greys the
+// whole page and sinks it as one slab. A rule sifts: every other card falls
+// out and the rest rise away. Keep turns the page aside, untouched.
 //
-// A SOLID CARD, NOT GLASS, on purpose. The exits mask, desaturate, rotate and
-// fade the card, and a glass effect does none of those gracefully: it cannot
-// be cut by a mask and it pops rather than fades. The card that is decided on
-// and the ghost that leaves are the same drawing, so nothing changes material
-// at the moment of the press.
+// SOLID SURFACES, NOT GLASS, on purpose: the page stands on the app's own
+// canvas with nothing behind it to refract, and the exits desaturate, rotate
+// and fade their pieces, which a glass effect does not do gracefully.
 //
-// NOTHING IS SENT FROM HERE. Decisions are staged in the store's session and
-// the confirm card (below) is the one press that applies them.
+// NOTHING IS SENT FROM THE DECK. Decisions are staged in the store's session;
+// the confirm page names every sender under what will happen to it, and its
+// one press applies them. Then the end page stays with the work: who is
+// unsubscribed, who is still running, and who needs a person.
 
 #if os(macOS)
     import SwiftUI
 
+    // MARK: - the page scaffold
+
+    /// A full-window page on the app's canvas: a bar across the top, the
+    /// content, a bar across the bottom. Opaque, so nothing of the board
+    /// under it shows through. Shared with the smart done list, so the two
+    /// read as one family.
+    struct FullPage<Top: View, Content: View, Bottom: View>: View {
+        let symbol: String
+        let title: String
+        @ViewBuilder var top: Top
+        @ViewBuilder var content: Content
+        @ViewBuilder var bottom: Bottom
+
+        var body: some View {
+            VStack(spacing: 0) {
+                HStack(spacing: Space.s12) {
+                    HStack(spacing: Space.scaled(5)) {
+                        Image(systemName: symbol)
+                            .font(Typo.ui(10, weight: .semibold))
+                        Text(title)
+                            .font(Typo.ui(9.5, weight: .bold).width(.expanded))
+                            .tracking(0.7)
+                            .textCase(.uppercase)
+                    }
+                    .foregroundStyle(Palette.accent)
+                    .fixedSize()
+                    top
+                    Spacer(minLength: 0)
+                }
+                // Clear of the window's traffic lights.
+                .padding(.leading, 86)
+                .padding(.trailing, Space.s24)
+                .frame(height: 46)
+                Rectangle().fill(Palette.hairline).frame(height: 1)
+                content
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                Rectangle().fill(Palette.hairline).frame(height: 1)
+                bottom
+                    .padding(.horizontal, Space.s24)
+                    .frame(height: Space.scaled(54))
+            }
+            .background(Palette.canvas.ignoresSafeArea())
+            .ignoresSafeArea(edges: .top)
+        }
+    }
+
+    /// The paper the page's cards are drawn on, a step up from the canvas.
+    let pagePaper = Color(light: 0xF8FAFD, dark: 0x151E2A)
+
+    /// The text that sits on the accent fill of a primary action.
+    private let onAccent = Color(light: 0xFFFFFF, dark: 0x06111D)
+
+    /// A key hint in a page's bars.
+    struct PageHint: View {
+        let key: String
+        let label: String
+        var body: some View {
+            HStack(spacing: Space.s6) {
+                Kbd(key)
+                Text(label)
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.inkDim)
+            }
+        }
+    }
+
+    /// A page's buttons: one filled primary, the rest quiet, all the same
+    /// height. Borders are lit evenly all the way round.
+    struct PageButton: View {
+        enum Role { case primary, plain, danger }
+        let key: String
+        let label: String
+        var role: Role = .plain
+        var wide = false
+        let action: () -> Void
+
+        @State private var hovering = false
+
+        var body: some View {
+            Button(action: action) {
+                HStack(spacing: Space.s8) {
+                    if role == .primary { PurgeKey(key, style: .onAccent) } else { Kbd(key) }
+                    Text(label)
+                        .font(Typo.ui(12.5, weight: .semibold))
+                        .foregroundStyle(
+                            role == .primary ? onAccent : (role == .danger ? Palette.danger : Palette.ink))
+                        .lineLimit(1)
+                }
+                .padding(.horizontal, Space.s16)
+                .frame(maxWidth: wide ? .infinity : nil)
+                .frame(height: Space.scaled(34))
+                .background(
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .fill(
+                            role == .primary
+                                ? Palette.accent.opacity(hovering ? 0.88 : 1)
+                                : (role == .danger
+                                    ? Palette.dangerSoft : Palette.hairline.opacity(hovering ? 1 : 0.6)))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .strokeBorder(role == .primary ? Color.clear : Palette.hairline, lineWidth: 1)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .onHover { hovering = $0 }
+            .accessibilityLabel(label)
+        }
+    }
+
     // MARK: - the overlay
 
     /// Everything a purge session draws: the deck while deciding, then the
-    /// confirm card, which stays up through the apply.
+    /// confirm page, which stays up through the apply.
     struct PurgeOverlay: View {
         let session: AppStore.PurgeSession
 
         var body: some View {
             ZStack {
-                // A CLICK ON THE DIM DOES NOTHING. Every other overlay closes
-                // on it, and this one holds decisions somebody spent a minute
-                // making: a stray click must not be a way to lose them.
-                Color.black.opacity(0.2)
-                    .ignoresSafeArea()
-                    .contentShape(Rectangle())
-                    .onTapGesture {}
                 switch session.phase {
                 case .deciding:
                     PurgeDeckView(session: session)
-                        .transition(.opacity.combined(with: .scale(scale: 0.97)))
+                        .transition(.opacity)
                 case .confirming, .applying:
-                    PurgeConfirmCard(session: session)
-                        .transition(.opacity.combined(with: .scale(scale: 0.95)))
+                    PurgeConfirmPage(session: session)
+                        .transition(.opacity)
                 }
             }
-            .animation(.smooth(duration: 0.28), value: session.phase == .deciding)
+            .animation(.smooth(duration: 0.26), value: session.phase == .deciding)
             .keyContext(.modal)
             .transition(.opacity)
         }
     }
 
-    /// The surface the deck's cards are drawn on (see the file header for why
-    /// it is not glass). Lit evenly all the way round.
-    private struct PurgeSurface: ViewModifier {
-        var radius: CGFloat = 22
-        func body(content: Content) -> some View {
-            content
-                .background(
-                    RoundedRectangle(cornerRadius: radius, style: .continuous)
-                        .fill(purgeSurface)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: radius, style: .continuous)
-                        .strokeBorder(Palette.hairlineStrong, lineWidth: 1)
-                )
-        }
-    }
-
-    private enum PurgeMetrics {
-        @MainActor static var width: CGFloat { Typo.measure(456) }
-        /// The room the card sits in. Fixed, so a short card and a tall one
-        /// do not move the tally above or the hints below.
-        @MainActor static var stage: CGFloat { Space.scaled(452) }
-    }
-
-    /// The deck's own paper: what its cards, and the chips above them, are
-    /// drawn on. The same in both so the chips read as cut from the card.
-    private let purgeSurface = Color(light: 0xF7FAFD, dark: 0x121A25)
-
-    /// The text that sits on the accent fill of a primary action.
-    private let onAccent = Color(light: 0xFFFFFF, dark: 0x06111D)
-
     // MARK: - the deck
 
-    /// How a card leaves.
+    /// How a sender's page leaves.
     private enum PurgeExit: Equatable {
-        case decided(PurgeDecision)
-        /// Back under the deck: the card on screen when `z` brings the
+        case decided(PurgeDecision.Kind)
+        /// Back under the deck: the page on screen when `z` brings the
         /// previous one back over it.
         case under
     }
 
-    /// How a card arrives.
+    /// How a sender's page arrives.
     private enum PurgeArrive: Equatable {
         /// The deck opening.
         case first
-        /// The next card, which was underneath all along.
+        /// The next sender, which was underneath all along.
         case under
-        /// After a skip: in from the right as the skipped one turns aside.
+        /// After a keep: in from the right as the kept page turns aside.
         case right
-        /// `z`: the exit of the decision being taken back, played backwards.
-        case reverse(PurgeDecision)
+        /// `z`: back along the way the decision being undone left.
+        case reverse(PurgeDecision.Kind)
+    }
+
+    /// A page in motion: which exit, how far through it (0 to 1), and how
+    /// far through the mark that plays first.
+    private struct PurgeMotion: Equatable {
+        var exit: PurgeExit
+        var t: CGFloat
+        var mark: CGFloat
     }
 
     private struct PurgeDeckView: View {
@@ -126,13 +213,16 @@
         private var anythingStaged: Bool { !session.summary.isEmpty }
 
         var body: some View {
-            VStack(spacing: Space.s14) {
+            FullPage(symbol: "scissors", title: "Purge") {
                 PurgeTally(summary: session.summary)
+            } content: {
                 ZStack {
                     if let card = deck.current {
-                        PurgeCardFace(
+                        PurgeSenderPage(
                             card: card, ledgerDays: session.ledgerDays,
-                            summaries: store.purgeSummaries(for: card.id), decide: decide
+                            emails: store.purgeEmails(for: card),
+                            suggestions: store.purgeSuggestions[card.id], motion: nil,
+                            decide: decide
                         )
                         .modifier(PurgeArrival(style: arrive, reduceMotion: reduceMotion))
                         .id(card.id)
@@ -141,101 +231,108 @@
                     ForEach(ghosts) { ghost in
                         PurgeGhost(
                             card: ghost.card, ledgerDays: session.ledgerDays,
-                            summaries: store.purgeSummaries(for: ghost.card.id),
+                            emails: store.purgeEmails(for: ghost.card),
+                            suggestions: store.purgeSuggestions[ghost.card.id],
                             exit: ghost.exit, reduceMotion: reduceMotion
                         )
                         .allowsHitTesting(false)
                         .accessibilityHidden(true)
                     }
                 }
-                .frame(width: PurgeMetrics.width, height: PurgeMetrics.stage)
-                footer
+                .clipped()
+            } bottom: {
+                HStack(spacing: Space.s16) {
+                    PageHint(key: "z", label: "back")
+                        .opacity(deck.progress.position > 1 ? 1 : 0.35)
+                    // Where the deck is, as a line with no numbers on it.
+                    GeometryReader { geo in
+                        let p = deck.progress
+                        let done = CGFloat(max(0, p.position - 1)) / CGFloat(max(1, p.total))
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(Palette.hairlineStrong)
+                            Capsule().fill(Palette.accent.opacity(0.8))
+                                .frame(width: max(2, geo.size.width * done))
+                        }
+                        .frame(height: 2)
+                        .frame(maxHeight: .infinity)
+                    }
+                    .animation(.smooth(duration: 0.3), value: deck.progress)
+                    .accessibilityHidden(true)
+                    PageHint(key: "esc", label: anythingStaged ? "review and confirm" : "leave")
+                }
             }
             .keyBindings(.modal, bindings)
-        }
-
-        /// Where the deck is, as a line with no numbers on it, and the two
-        /// ways out.
-        private var footer: some View {
-            VStack(spacing: Space.s10) {
-                GeometryReader { geo in
-                    let p = deck.progress
-                    let done = CGFloat(max(0, p.position - 1)) / CGFloat(max(1, p.total))
-                    ZStack(alignment: .leading) {
-                        Capsule().fill(Palette.hairlineStrong)
-                        Capsule().fill(Palette.accent.opacity(0.8))
-                            .frame(width: max(2, geo.size.width * done))
-                    }
-                }
-                .frame(height: 2)
-                .animation(.smooth(duration: 0.3), value: deck.progress)
-                .accessibilityHidden(true)
-                HStack(spacing: Space.s6) {
-                    hint("z", "back")
-                        .opacity(deck.progress.position > 1 ? 1 : 0.35)
-                    Spacer(minLength: Space.s8)
-                    hint("esc", anythingStaged ? "review and confirm" : "leave")
-                }
-            }
-            .frame(width: PurgeMetrics.width)
-        }
-
-        private func hint(_ key: String, _ label: String) -> some View {
-            HStack(spacing: Space.s6) {
-                Kbd(key)
-                Text(label)
-                    .font(Typo.micro)
-                    .foregroundStyle(Palette.inkDim)
+            // THE SUGGESTIONS FOR THIS SENDER AND THE NEXT, and no further:
+            // each is a model call against a shared daily cap.
+            .task(id: deck.current?.id) {
+                guard let card = deck.current else { return }
+                async let here: Void = store.loadPurgeSuggestions(for: card)
+                if let next = deck.next { await store.loadPurgeSuggestions(for: next) }
+                await here
             }
         }
 
         // MARK: keys
 
-        /// HOLDS, NOT TAPS, for the four decisions: a hold swallows its own
-        /// autorepeat, so a key leaned on decides one card and not a blur of
-        /// them. Each also answers when its choice is not on offer (and does
-        /// nothing), so `u` here can never fall through to the global undo.
+        /// HOLDS, NOT TAPS, for the decisions: a hold swallows its own
+        /// autorepeat, so a key leaned on decides one sender and not a blur
+        /// of them. Each also answers when its choice is not on offer (and
+        /// does nothing), so `u` here can never fall through to the global
+        /// undo, nor a digit to the rail's page keys.
         private var bindings: [KeyBinding] {
             [
-                KeyBinding("u", "unsubscribe", onRelease: { _ in }) { decide(.unsubscribe) },
-                KeyBinding("m", "mute", onRelease: { _ in }) { decide(.mute) },
-                KeyBinding("e", "clear", onRelease: { _ in }) { decide(.clear) },
-                KeyBinding("s", "skip", onRelease: { _ in }) { decide(.skip) },
-                KeyBinding("z", "back one card", onRelease: { _ in }) { back() },
-                KeyBinding("Backspace", "back one card", onRelease: { _ in }) { back() },
-                KeyBinding("Delete", "back one card", onRelease: { _ in }) { back() },
+                KeyBinding("u", "unsubscribe or block", onRelease: { _ in }) {
+                    if let card = deck.current { decide(card.ending) }
+                },
+                KeyBinding("1", "first rule", onRelease: { _ in }) { pick(0) },
+                KeyBinding("2", "second rule", onRelease: { _ in }) { pick(1) },
+                KeyBinding("3", "third rule", onRelease: { _ in }) { pick(2) },
+                KeyBinding("4", "nothing") {},
+                KeyBinding("5", "nothing") {},
+                KeyBinding("s", "keep", onRelease: { _ in }) { decide(.keep) },
+                KeyBinding("z", "back one sender", onRelease: { _ in }) { back() },
+                KeyBinding("Backspace", "back one sender", onRelease: { _ in }) { back() },
+                KeyBinding("Delete", "back one sender", onRelease: { _ in }) { back() },
                 KeyBinding("Escape", "leave or review") { leave() },
-                // Return decides nothing here: the confirm step owns it, and
-                // a habit of pressing it must not pick the suggested choice.
+                // Return decides nothing here: the confirm page owns it.
                 KeyBinding("Enter", "nothing") {},
             ]
         }
 
+        /// A rule by its number, only once its sentence is on screen.
+        private func pick(_ index: Int) {
+            guard let card = deck.current,
+                case .loaded(let found)? = store.purgeSuggestions[card.id],
+                found.indices.contains(index)
+            else { return }
+            decide(.rule(found[index]))
+        }
+
         private func decide(_ decision: PurgeDecision) {
-            guard let card = deck.current, card.allowed.contains(decision) else { return }
-            arrive = decision == .skip ? .right : .under
-            push(Ghost(card: card, exit: .decided(decision)))
+            guard let card = deck.current, card.allows(decision) else { return }
+            arrive = decision == .keep ? .right : .under
+            push(Ghost(card: card, exit: .decided(decision.kind)))
             guard store.purgeDecide(decision) else { return }
-            if decision != .skip {
+            if decision != .keep {
                 NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
             }
             AccessibilityNotification.Announcement(
-                PurgeCopy.staged(decision, name: PurgeCardFace.name(card))
+                PurgeCopy.staged(decision, name: PurgeSenderPage.name(card))
             ).post()
         }
 
         private func back() {
-            let index = deck.progress.position - 1
-            guard deck.current != nil, index > 0 else { return }
-            let previous = deck.cards[index - 1]
-            arrive = .reverse(deck.decision(for: previous.id) ?? .skip)
+            guard deck.current != nil, let previous = deck.previous else { return }
+            arrive = .reverse(previous.decision.kind)
             if let current = deck.current { push(Ghost(card: current, exit: .under)) }
             store.purgeBack()
-            AccessibilityNotification.Announcement("Back to \(PurgeCardFace.name(previous)).").post()
+            AccessibilityNotification.Announcement(
+                "Back to \(PurgeSenderPage.name(previous.card))."
+            ).post()
         }
 
         /// Esc never throws decisions away: with something staged it goes to
-        /// the confirm step, which is where discarding is asked about.
+        /// the confirm page, which is where discarding is asked about.
         private func leave() {
             if anythingStaged {
                 store.purgeFinishEarly()
@@ -248,7 +345,7 @@
             ghosts.append(ghost)
             let id = ghost.id
             Task {
-                try? await Task.sleep(for: .milliseconds(760))
+                try? await Task.sleep(for: .milliseconds(950))
                 ghosts.removeAll { $0.id == id }
             }
         }
@@ -264,16 +361,17 @@
 
         var body: some View {
             HStack(spacing: Space.s8) {
-                let ending = summary.unsubscribed + summary.onTheirSite
-                if ending > 0 { TallyChip(count: ending, label: "to unsubscribe") }
-                if summary.muted > 0 { TallyChip(count: summary.muted, label: "to mute") }
-                if summary.cleared > 0 { TallyChip(count: summary.cleared, label: "to clear") }
+                if summary.ending > 0 { TallyChip(count: summary.ending, label: "to unsubscribe") }
+                if summary.blocked > 0 { TallyChip(count: summary.blocked, label: "to block") }
+                if summary.rules > 0 {
+                    TallyChip(count: summary.rules, label: summary.rules == 1 ? "new rule" : "new rules")
+                }
+                if summary.kept > 0 { TallyChip(count: summary.kept, label: "kept") }
                 Text(summary.isEmpty ? "Nothing is sent until you confirm at the end." : "nothing sent yet")
                     .font(Typo.micro)
-                    .foregroundStyle(Palette.inkDim)
+                    .foregroundStyle(Palette.inkFaint)
                     .padding(.leading, summary.isEmpty ? 0 : Space.s4)
             }
-            .frame(height: Space.scaled(26))
             .animation(.spring(response: 0.34, dampingFraction: 0.8), value: summary)
             .accessibilityElement(children: .combine)
         }
@@ -297,14 +395,13 @@
             .foregroundStyle(Palette.ink)
             .padding(.horizontal, Space.s10)
             .padding(.vertical, Space.scaled(3))
-            .background(Capsule(style: .continuous).fill(purgeSurface))
+            .background(Capsule(style: .continuous).fill(pagePaper))
             .background(Capsule(style: .continuous).fill(Palette.accent.opacity(glow ? 0.5 : 0)))
             // The whole border, evenly, brightening for a moment when the
             // number goes up.
             .overlay(
                 Capsule(style: .continuous)
-                    .strokeBorder(
-                        glow ? Palette.accent : Palette.hairlineStrong, lineWidth: 1)
+                    .strokeBorder(glow ? Palette.accent : Palette.hairlineStrong, lineWidth: 1)
             )
             .shadow(color: Palette.accent.opacity(glow ? 0.8 : 0), radius: 10)
             .transition(.scale(scale: 0.8).combined(with: .opacity))
@@ -318,14 +415,16 @@
         }
     }
 
-    // MARK: - a card
+    // MARK: - one sender's page
 
-    /// One sender, drawn. Used for the card being decided on (with `decide`)
-    /// and for the ghost of one leaving (without).
-    private struct PurgeCardFace: View {
+    /// One sender, drawn across the window. Used for the page being decided
+    /// on (with `decide`) and for the ghost of one leaving (with `motion`).
+    private struct PurgeSenderPage: View {
         let card: PurgeCard
         let ledgerDays: Int
-        let summaries: [String]
+        let emails: [PurgeEmail]
+        let suggestions: AppStore.PurgeSuggestions?
+        let motion: PurgeMotion?
         var decide: ((PurgeDecision) -> Void)?
 
         static func name(_ card: PurgeCard) -> String {
@@ -333,238 +432,328 @@
             return given.isEmpty ? SenderCache.resolved(card.sender.sender).displayName : given
         }
 
-        private enum Mood { case evidence, keep, unknown }
-
-        private var mood: Mood {
-            if case .readClosely = card.sender.reasons.first { return .keep }
-            let known = card.sender.reasons.contains { $0 != .notEnoughHistory }
-            return known ? .evidence : .unknown
-        }
+        static func avatar(_ card: PurgeCard) -> String { "\(name(card)) <\(card.sender.sender)>" }
 
         /// At most four: the daemon sends them strongest first, and a fifth
-        /// line is a card somebody has to read rather than see.
+        /// line is a column somebody has to read rather than see.
         private var reasons: [PurgeReason] { Array(card.sender.reasons.prefix(4)) }
 
         var body: some View {
-            VStack(alignment: .leading, spacing: Space.s14) {
-                who
-                why
-                if !summaries.isEmpty { lately }
-                choices
+            HStack(alignment: .top, spacing: Space.s32) {
+                left
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                ScrollView {
+                    right
+                        .padding(.bottom, Space.s20)
+                }
+                .scrollIndicators(.never)
+                .frame(width: Typo.measure(380))
+                .opacity(fade)
             }
-            .padding(Space.scaled(18))
-            .frame(width: PurgeMetrics.width, alignment: .leading)
-            .modifier(PurgeSurface())
-            .shadow(color: .black.opacity(0.3), radius: 34, y: 16)
+            .padding(.horizontal, Space.scaled(36))
+            .padding(.top, Space.s24)
             .accessibilityElement(children: .contain)
             .accessibilityLabel(Self.name(card))
         }
 
-        // MARK: who
-
-        private var who: some View {
-            HStack(alignment: .center, spacing: Space.s12) {
-                Avatar(sender: "\(Self.name(card)) <\(card.sender.sender)>", size: Space.scaled(40))
-                VStack(alignment: .leading, spacing: Space.s2) {
-                    Text(Self.name(card))
-                        .font(Typo.serif(22, weight: .medium))
-                        .foregroundStyle(Palette.ink)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                    Text(card.sender.sender)
-                        .font(Typo.micro)
-                        .foregroundStyle(Palette.inkFaint)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .help(Self.name(card))
-                switch mood {
-                case .keep: verdict("worth keeping", Palette.positive, Palette.positiveSoft)
-                case .unknown: verdict("too new to say", Palette.inkFaint, Palette.hairline)
-                case .evidence: EmptyView()
-                }
+        /// The right column and the header fade through an unsubscribe and a
+        /// rule while the email cards do the moving.
+        private var fade: Double {
+            guard let motion else { return 1 }
+            switch motion.exit {
+            case .decided(.unsubscribe), .decided(.rule): return Double(1 - min(1, motion.t * 1.4))
+            default: return 1
             }
-            .accessibilityElement(children: .combine)
         }
 
-        private func verdict(_ text: String, _ ink: Color, _ fill: Color) -> some View {
-            Text(text)
-                .font(Typo.micro)
-                .foregroundStyle(ink)
-                .padding(.horizontal, Space.s8)
-                .padding(.vertical, Space.scaled(3))
-                .background(Capsule(style: .continuous).fill(fill))
-                .fixedSize()
-        }
+        // MARK: left: who, and what they send
 
-        // MARK: why
-
-        private var why: some View {
-            VStack(alignment: .leading, spacing: Space.s10) {
-                if mood != .unknown {
-                    HStack(spacing: Space.s6) {
-                        Text("Your reading")
-                            .font(Typo.ui(9, weight: .bold).width(.expanded))
-                            .tracking(0.5)
-                            .textCase(.uppercase)
-                            .foregroundStyle(mood == .keep ? Palette.positive : Palette.accent)
-                        Spacer(minLength: Space.s8)
-                        // Once, quietly: what span every number here is about.
-                        Text(PurgeCopy.window(ledgerDays: ledgerDays))
-                            .font(Typo.micro)
-                            .foregroundStyle(Palette.inkFaintest)
-                    }
-                }
-                if mood == .unknown {
-                    VStack(alignment: .leading, spacing: Space.s4) {
-                        Text(PurgeCopy.sentence(.notEnoughHistory))
-                            .font(Typo.serif(18))
-                            .foregroundStyle(Palette.inkDim)
-                        Text("There is too little to go on, so nothing is suggested.")
-                            .font(Typo.micro)
+        private var left: some View {
+            VStack(alignment: .leading, spacing: Space.s16) {
+                HStack(alignment: .center, spacing: Space.s14) {
+                    Avatar(sender: Self.avatar(card), size: Space.scaled(56))
+                        .overlay { stamp }
+                    VStack(alignment: .leading, spacing: Space.s2) {
+                        Text(Self.name(card))
+                            .font(Typo.serif(28, weight: .medium))
+                            .foregroundStyle(Palette.ink)
+                            .lineLimit(2)
+                            .truncationMode(.tail)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text(card.sender.sender)
+                            .font(Typo.rowSub)
                             .foregroundStyle(Palette.inkFaint)
-                    }
-                } else {
-                    ForEach(Array(reasons.enumerated()), id: \.offset) { i, reason in
-                        PurgeReasonRow(reason: reason, lead: i == 0, keep: mood == .keep)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                     }
                 }
-            }
-            .padding(Space.s12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 13, style: .continuous)
-                    .fill(
-                        mood == .keep
-                            ? Palette.positiveSoft
-                            : (mood == .unknown ? Color.clear : Palette.accentSoft.opacity(0.6)))
-            )
-            .overlay {
-                // "We do not know yet" is drawn as an open question: a
-                // dashed outline round nothing, where the others are filled.
-                if mood == .unknown {
-                    RoundedRectangle(cornerRadius: 13, style: .continuous)
-                        .strokeBorder(
-                            Palette.hairlineStrong,
-                            style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
-                }
-            }
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel(spokenWhy)
-        }
+                .help(Self.name(card))
+                .overlay(alignment: .bottom) { cut }
+                .opacity(fade)
+                .accessibilityElement(children: .combine)
 
-        private var spokenWhy: String {
-            let lines = reasons.map(PurgeCopy.sentence)
-            guard mood != .unknown else { return lines.joined(separator: ". ") }
-            return (lines + [PurgeCopy.window(ledgerDays: ledgerDays)]).joined(separator: ". ")
-        }
-
-        // MARK: what it is
-
-        private var lately: some View {
-            VStack(alignment: .leading, spacing: Space.s4) {
-                Text("Lately")
+                Text("In Reading now")
                     .font(Typo.ui(9, weight: .bold).width(.expanded))
                     .tracking(0.5)
                     .textCase(.uppercase)
                     .foregroundStyle(Palette.inkFaint)
-                ForEach(summaries, id: \.self) { line in
-                    Text(line)
-                        .font(Typo.rowSub)
-                        .foregroundStyle(Palette.inkDim)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    .opacity(fade)
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: Space.s8) {
+                        ForEach(Array(emails.enumerated()), id: \.element.id) { i, email in
+                            PurgeEmailCard(email: email)
+                                .modifier(Falling(index: i, motion: motion))
+                        }
+                        // The daemon's count is the authority on how many
+                        // there are; the board may hold fewer.
+                        let more = card.sender.open_count - emails.count
+                        if emails.isEmpty {
+                            Text(
+                                card.sender.open_count == 1
+                                    ? "1 email of theirs is in Reading."
+                                    : "\(card.sender.open_count) emails of theirs are in Reading."
+                            )
+                            .font(Typo.rowSub)
+                            .foregroundStyle(Palette.inkFaint)
+                        } else if more > 0 {
+                            Text(more == 1 ? "and 1 more like these" : "and \(more) more like these")
+                                .font(Typo.micro)
+                                .foregroundStyle(Palette.inkFaint)
+                                .padding(.leading, Space.s4)
+                                .opacity(fade)
+                        }
+                    }
+                    .padding(.bottom, Space.s24)
                 }
+                .scrollIndicators(.automatic)
+                // A ghost's cards fall out of the list, not behind its edge.
+                .scrollClipDisabled(motion != nil)
             }
-            .padding(.horizontal, Space.s2)
-            .accessibilityElement(children: .combine)
         }
 
-        // MARK: the choices
+        /// The unsubscribe's cut: one bright line drawn under the sender,
+        /// the thread their mail hangs from.
+        @ViewBuilder private var cut: some View {
+            if let motion, motion.exit == .decided(.unsubscribe) {
+                GeometryReader { geo in
+                    Capsule()
+                        .fill(.white)
+                        .frame(width: geo.size.width * motion.mark, height: 2)
+                        .shadow(color: Palette.accent, radius: 5)
+                        .shadow(color: Palette.accent.opacity(0.8), radius: 12)
+                        .opacity(Double(1 - motion.t))
+                }
+                .frame(height: 2)
+                .offset(y: Space.s8)
+            }
+        }
 
-        private static let keys: [(PurgeDecision, String)] = [
-            (.unsubscribe, "u"), (.mute, "m"), (.clear, "e"), (.skip, "s"),
-        ]
+        /// What was decided, stamped on the sender's icon as it goes.
+        @ViewBuilder private var stamp: some View {
+            if let motion, case .decided(let kind) = motion.exit, kind != .keep {
+                let look: (String, Color) =
+                    switch kind {
+                    case .unsubscribe: ("scissors", Palette.accent)
+                    case .block: ("nosign", Palette.inkFaint)
+                    case .rule: ("line.3.horizontal.decrease", Palette.accent)
+                    case .keep: ("checkmark", Palette.positive)
+                    }
+                ZStack {
+                    Circle().fill(pagePaper.opacity(0.9))
+                    Circle().strokeBorder(look.1, lineWidth: 2)
+                    Image(systemName: look.0)
+                        .font(.system(size: 20, weight: .bold))
+                        .foregroundStyle(look.1)
+                }
+                .scaleEffect(0.6 + 0.4 * motion.mark)
+                .opacity(Double(motion.mark))
+            }
+        }
 
-        private var choices: some View {
-            HStack(alignment: .top, spacing: Space.s8) {
-                ForEach(Self.keys, id: \.0) { decision, key in
-                    PurgeChoice(
-                        decision: decision, key: key,
-                        caption: PurgeCopy.caption(decision, on: card),
-                        allowed: card.allowed.contains(decision),
-                        primary: card.recommended == decision,
-                        action: decide.map { run in { run(decision) } })
+        // MARK: right: the argument and the decision
+
+        private var right: some View {
+            VStack(alignment: .leading, spacing: Space.s16) {
+                why
+                ending
+                rules
+                keep
+            }
+        }
+
+        private var why: some View {
+            VStack(alignment: .leading, spacing: Space.s10) {
+                HStack(spacing: Space.s6) {
+                    Text("Your reading")
+                        .font(Typo.ui(9, weight: .bold).width(.expanded))
+                        .tracking(0.5)
+                        .textCase(.uppercase)
+                        .foregroundStyle(Palette.accent)
+                    Spacer(minLength: Space.s8)
+                    // Once, quietly: what span every number here is about.
+                    Text(PurgeCopy.window(ledgerDays: ledgerDays))
+                        .font(Typo.micro)
+                        .foregroundStyle(Palette.inkFaintest)
+                }
+                ForEach(Array(reasons.enumerated()), id: \.offset) { i, reason in
+                    PurgeReasonRow(reason: reason, lead: i == 0, keep: false)
+                }
+            }
+            .padding(Space.s14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Palette.accentSoft.opacity(0.6))
+            )
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(
+                (reasons.map(PurgeCopy.sentence) + [PurgeCopy.window(ledgerDays: ledgerDays)])
+                    .joined(separator: ". "))
+        }
+
+        /// The one way to end it, on one key, in one place: unsubscribe when
+        /// there is a link, block when there is not, and the line beside it
+        /// says which and why.
+        private var ending: some View {
+            VStack(alignment: .leading, spacing: Space.s8) {
+                PageButton(
+                    key: "u", label: PurgeCopy.title(card.ending), role: .primary, wide: true
+                ) { decide?(card.ending) }
+                Text(PurgeCopy.explains(card))
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.inkDim)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, Space.s2)
+            }
+        }
+
+        /// The narrowing rules. A quiet placeholder while they load, and
+        /// NOTHING AT ALL when none come back: an empty box headed
+        /// "suggestions" would be a question with no answers under it.
+        @ViewBuilder private var rules: some View {
+            switch suggestions {
+            case .loading?:
+                VStack(alignment: .leading, spacing: Space.s8) {
+                    Text(PurgeCopy.rulesLoading)
+                        .font(Typo.micro)
+                        .foregroundStyle(Palette.inkFaint)
+                    ForEach(0..<2, id: \.self) { _ in
+                        RoundedRectangle(cornerRadius: 11, style: .continuous)
+                            .fill(Palette.hairline.opacity(0.45))
+                            .frame(height: Space.scaled(34))
+                    }
+                }
+                .transition(.opacity)
+            case .loaded(let found)? where !found.isEmpty && card.offersRules:
+                VStack(alignment: .leading, spacing: Space.s8) {
+                    Text(PurgeCopy.rulesLead)
+                        .font(Typo.micro)
+                        .foregroundStyle(Palette.inkDim)
+                    ForEach(Array(found.prefix(3).enumerated()), id: \.offset) { i, want in
+                        PurgeRuleChoice(key: "\(i + 1)", want: want) { decide?(.rule(want)) }
+                    }
+                    Text(PurgeCopy.rulesNote)
+                        .font(Typo.micro)
+                        .foregroundStyle(Palette.inkFaint)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .transition(.opacity)
+            default:
+                EmptyView()
+            }
+        }
+
+        private var keep: some View {
+            VStack(alignment: .leading, spacing: Space.s8) {
+                Rectangle().fill(Palette.hairline).frame(height: 1)
+                HStack(alignment: .center, spacing: Space.s12) {
+                    PageButton(key: "s", label: PurgeCopy.title(.keep)) { decide?(.keep) }
+                    Text(PurgeCopy.keepCaption)
+                        .font(Typo.micro)
+                        .foregroundStyle(Palette.inkFaint)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
     }
 
-    /// One of the four choices: a keycap, the verb, and a few words on what
-    /// it does (or why it is not on offer).
-    private struct PurgeChoice: View {
-        let decision: PurgeDecision
-        let key: String
-        let caption: String
-        let allowed: Bool
-        let primary: Bool
-        let action: (() -> Void)?
+    /// One email, as a card to recognise: its line and when it came. Not a
+    /// button: nothing here opens.
+    private struct PurgeEmailCard: View {
+        let email: PurgeEmail
 
+        var body: some View {
+            HStack(alignment: .firstTextBaseline, spacing: Space.s12) {
+                Text(email.line.isEmpty ? "(no summary)" : email.line)
+                    .font(Typo.row)
+                    .foregroundStyle(Palette.ink)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if email.arrivedAt != nil {
+                    Text(Fmt.relAge(email.arrivedAt))
+                        .font(Typo.micro)
+                        .foregroundStyle(Palette.inkFaintest)
+                        .fixedSize()
+                }
+            }
+            .padding(.horizontal, Space.s14)
+            .padding(.vertical, Space.s10)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous).fill(pagePaper)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(Palette.hairline, lineWidth: 1)
+            )
+            .accessibilityElement(children: .combine)
+        }
+    }
+
+    /// A suggested rule: its number and the sentence, VERBATIM. It is
+    /// model-written from sender-written subjects, so it is shown whole (it
+    /// wraps rather than truncates) before the key that saves it is pressed.
+    private struct PurgeRuleChoice: View {
+        let key: String
+        let want: String
+        let action: () -> Void
         @State private var hovering = false
 
         var body: some View {
-            Button {
-                action?()
-            } label: {
-                VStack(spacing: Space.s4) {
-                    HStack(spacing: Space.scaled(5)) {
-                        PurgeKey(key, style: primary ? .onAccent : .plain)
-                        Text(PurgeCopy.title(decision))
-                            .font(Typo.ui(11.5, weight: .semibold))
-                            .foregroundStyle(primary ? onAccent : Palette.ink)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.85)
-                    }
-                    Text(caption)
-                        .font(Typo.ui(9.5, weight: .medium))
-                        .foregroundStyle(primary ? onAccent.opacity(0.82) : Palette.inkFaint)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
+            Button(action: action) {
+                HStack(alignment: .firstTextBaseline, spacing: Space.s10) {
+                    Kbd(key)
+                    Text(want)
+                        .font(Typo.rowSub)
+                        .foregroundStyle(Palette.ink)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding(.horizontal, Space.s4)
-                // A set height and an equal share of the row: the four are
-                // one control, and the suggested one differs by colour alone.
-                .frame(maxWidth: .infinity)
-                .frame(height: Space.scaled(50))
+                .padding(.horizontal, Space.s12)
+                .padding(.vertical, Space.scaled(9))
                 .background(
                     RoundedRectangle(cornerRadius: 11, style: .continuous)
-                        .fill(
-                            primary
-                                ? Palette.accent.opacity(hovering ? 0.88 : 1)
-                                : Palette.hairline.opacity(hovering && allowed ? 1 : 0.55))
+                        .fill(hovering ? Palette.accentSoft : pagePaper)
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 11, style: .continuous)
-                        .strokeBorder(primary ? Color.clear : Palette.hairline, lineWidth: 1)
+                        .strokeBorder(
+                            hovering ? Palette.accent.opacity(0.5) : Palette.hairlineStrong,
+                            lineWidth: 1)
                 )
                 .contentShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
             }
             .buttonStyle(.plain)
-            .disabled(!allowed)
-            .opacity(allowed ? 1 : 0.42)
             .onHover { hovering = $0 }
-            .accessibilityLabel(
-                "\(PurgeCopy.title(decision)), \(caption)"
-                    + (allowed ? ", key \(key.uppercased())" : "")
-                    + (primary ? ", suggested" : ""))
+            .accessibilityLabel("Rule \(key): \(want)")
         }
     }
 
     /// A keycap that can sit on the card or on an accent fill. `Kbd` is
     /// drawn for the first of those only.
-    private struct PurgeKey: View {
+    struct PurgeKey: View {
         enum Style { case plain, onAccent }
         let label: String
         let style: Style
@@ -675,15 +864,61 @@
 
     // MARK: - motion
 
-    /// How far a card travels sideways and down when it goes.
-    private enum Travel {
-        static let aside: CGFloat = 360
-        static let lift: CGFloat = 150
-        static let sink: CGFloat = 110
-        static let drop: CGFloat = 250
+    /// One email card's part in an exit. ANIMATABLE, so it is asked for
+    /// every frame: the cards leave one after another, and a stagger worked
+    /// out from the page's progress only exists if each frame works it out.
+    private struct Falling: ViewModifier, @preconcurrency Animatable {
+        let index: Int
+        let exit: PurgeExit?
+        var t: CGFloat
+
+        init(index: Int, motion: PurgeMotion?) {
+            self.index = index
+            exit = motion?.exit
+            t = motion?.t ?? 0
+        }
+
+        var animatableData: CGFloat {
+            get { t }
+            set { t = newValue }
+        }
+
+        private func clamp(_ x: CGFloat) -> CGFloat { min(1, max(0, x)) }
+
+        func body(content: Content) -> some View {
+            switch exit {
+            case .decided(.unsubscribe):
+                // LET GO, top first: each card tips and drops under its own
+                // weight a beat after the one above it.
+                let p = clamp(t * 1.9 - CGFloat(min(index, 9)) * 0.085)
+                content
+                    .rotationEffect(.degrees(Double(index % 2 == 0 ? -4 : 5) * p), anchor: .topLeading)
+                    .offset(y: 300 * p * p)
+                    .opacity(Double(1 - p * p))
+            case .decided(.rule):
+                // SIFTED: every other card falls out of the list, then what
+                // is left rises away.
+                if index % 2 == 1 {
+                    let p = clamp(t * 2.2)
+                    content.scaleEffect(1 - 0.12 * p).offset(x: 36 * p).opacity(Double(1 - p))
+                } else {
+                    let p = clamp(t * 2.2 - 1.1)
+                    content.offset(y: -70 * p).opacity(Double(1 - p))
+                }
+            default:
+                content
+            }
+        }
     }
 
-    /// The card arriving. Reduce Motion: a fade and nothing else.
+    /// How far a page travels when it goes.
+    private enum Travel {
+        static let aside: CGFloat = 560
+        static let sink: CGFloat = 90
+        static let rise: CGFloat = 120
+    }
+
+    /// The page arriving. Reduce Motion: a fade and nothing else.
     private struct PurgeArrival: ViewModifier {
         let style: PurgeArrive
         let reduceMotion: Bool
@@ -697,22 +932,19 @@
                 } else {
                     switch style {
                     case .first:
-                        content.scaleEffect(0.92 + 0.08 * a).opacity(a)
+                        content.offset(y: 16 * away).opacity(a)
                     case .under:
-                        content.scaleEffect(0.94 + 0.06 * a).offset(y: 12 * away).opacity(a)
+                        content.scaleEffect(0.985 + 0.015 * a).offset(y: 14 * away).opacity(a)
                     case .right:
-                        content.offset(x: Travel.aside * 0.8 * away).opacity(a)
-                    case .reverse(.skip):
-                        content.offset(x: -Travel.aside * away).scaleEffect(0.95 + 0.05 * a)
-                            .opacity(a)
-                    case .reverse(.clear):
-                        content.offset(y: -Travel.lift * away).opacity(a)
-                    case .reverse(.mute):
-                        content.offset(y: Travel.sink * away).scaleEffect(0.9 + 0.1 * a)
-                            .saturation(a).opacity(a)
+                        content.offset(x: Travel.aside * 0.6 * away).opacity(a)
+                    case .reverse(.keep):
+                        content.offset(x: -Travel.aside * 0.6 * away).opacity(a)
+                    case .reverse(.rule):
+                        content.offset(y: -Travel.rise * away).opacity(a)
+                    case .reverse(.block):
+                        content.offset(y: Travel.sink * away).saturation(a).opacity(a)
                     case .reverse(.unsubscribe):
-                        content.rotationEffect(.degrees(8 * away)).offset(y: Travel.drop * away)
-                            .opacity(a)
+                        content.offset(y: Travel.rise * away).opacity(a)
                     }
                 }
             }
@@ -721,9 +953,9 @@
                 if reduceMotion {
                     animation = .easeOut(duration: 0.2)
                 } else if case .under = style {
-                    // A beat behind the card leaving, so the two are read
-                    // as one going and one coming and not as a swap.
-                    animation = Motion.deckCard.delay(0.09)
+                    // Behind the page leaving, so the two are read as one
+                    // going and one coming and not as a swap.
+                    animation = Motion.deckCard.delay(0.22)
                 } else {
                     animation = Motion.deckCard
                 }
@@ -732,95 +964,54 @@
         }
     }
 
-    /// A card on its way out. Not interactive, not read aloud.
+    /// A page on its way out. Not interactive, not read aloud.
     private struct PurgeGhost: View {
         let card: PurgeCard
         let ledgerDays: Int
-        let summaries: [String]
+        let emails: [PurgeEmail]
+        let suggestions: AppStore.PurgeSuggestions?
         let exit: PurgeExit
         let reduceMotion: Bool
 
-        /// The exit itself, 0 to 1.
         @State private var t: CGFloat = 0
-        /// What plays first: the cut across an unsubscribe, the check on a
-        /// clear, the mark on a mute.
         @State private var mark: CGFloat = 0
 
-        private var face: some View {
-            PurgeCardFace(card: card, ledgerDays: ledgerDays, summaries: summaries)
+        private func page(moving: Bool) -> some View {
+            PurgeSenderPage(
+                card: card, ledgerDays: ledgerDays, emails: emails, suggestions: suggestions,
+                motion: moving ? PurgeMotion(exit: exit, t: t, mark: mark) : nil)
         }
 
         var body: some View {
             Group {
                 if reduceMotion {
-                    face.opacity(1 - t)
+                    page(moving: false).opacity(1 - t)
                 } else {
                     switch exit {
                     case .under:
-                        face.scaleEffect(1 - 0.06 * t).offset(y: 12 * t).opacity(1 - t)
-                    case .decided(.skip):
+                        page(moving: false).scaleEffect(1 - 0.02 * t).opacity(1 - t)
+                    case .decided(.keep):
                         // THE PAGE TURN, as the reader's S does it: aside to
-                        // the left, receding and dimming as it goes.
-                        face.scaleEffect(1 - 0.05 * t)
+                        // the left, untouched, dimming as it goes.
+                        page(moving: false)
                             .offset(x: -Travel.aside * t)
                             .opacity(1 - t)
-                    case .decided(.clear):
-                        // Stamped with a check, then lifted off the top.
-                        face.overlay { stamp("checkmark", Palette.positive) }
-                            .offset(y: -Travel.lift * t)
-                            .scaleEffect(1 - 0.04 * t)
-                            .opacity(1 - t * t)
-                    case .decided(.mute):
-                        // The colour drains first, then it sinks out of sight.
-                        face.overlay { stamp("speaker.slash.fill", Palette.inkFaint) }
+                    case .decided(.block):
+                        // SHUT OUT: the colour drains from the whole page,
+                        // then it sinks as one slab.
+                        page(moving: true)
                             .saturation(1 - mark)
-                            .brightness(-0.12 * mark)
-                            .scaleEffect(1 - 0.1 * t)
+                            .brightness(-0.08 * mark)
+                            .scaleEffect(1 - 0.05 * t)
                             .offset(y: Travel.sink * t)
                             .opacity(1 - t)
-                    case .decided(.unsubscribe):
-                        severed
+                    case .decided(.unsubscribe), .decided(.rule):
+                        // The cards do the leaving (see `Falling`).
+                        page(moving: true)
                     }
                 }
             }
             .onAppear(perform: run)
-        }
-
-        /// LETTING GO. A bright line is drawn across the card, and the two
-        /// halves it leaves come apart: the top drifts up and fades, the
-        /// bottom tips and falls away under its own weight.
-        private var severed: some View {
-            ZStack {
-                face
-                    .mask { CutHalf(top: true) }
-                    .rotationEffect(.degrees(-2.5 * t), anchor: .topLeading)
-                    .offset(x: -8 * t, y: -26 * t)
-                    .opacity(1 - t)
-                face
-                    .mask { CutHalf(top: false) }
-                    .rotationEffect(.degrees(9 * t), anchor: .bottomLeading)
-                    .offset(x: 14 * t, y: Travel.drop * t * t)
-                    .opacity(1 - t * t)
-                CutLine()
-                    .trim(from: 0, to: mark)
-                    .stroke(.white, style: StrokeStyle(lineWidth: 2, lineCap: .round))
-                    .shadow(color: Palette.accent, radius: 6)
-                    .shadow(color: Palette.accent.opacity(0.8), radius: 14)
-                    .opacity(Double(1 - t) * (mark > 0 ? 1 : 0))
-            }
-        }
-
-        private func stamp(_ symbol: String, _ color: Color) -> some View {
-            ZStack {
-                Circle().fill(color.opacity(0.16))
-                Circle().strokeBorder(color, lineWidth: 2)
-                Image(systemName: symbol)
-                    .font(.system(size: 24, weight: .bold))
-                    .foregroundStyle(color)
-            }
-            .frame(width: 64, height: 64)
-            .scaleEffect(0.6 + 0.4 * mark)
-            .opacity(Double(mark))
         }
 
         private func run() {
@@ -831,300 +1022,184 @@
             switch exit {
             case .under:
                 withAnimation(.easeIn(duration: 0.2)) { t = 1 }
-            case .decided(.skip):
-                withAnimation(.easeInOut(duration: 0.34)) { t = 1 }
-            case .decided(.clear):
-                withAnimation(.spring(response: 0.22, dampingFraction: 0.6)) { mark = 1 }
-                withAnimation(.easeIn(duration: 0.34).delay(0.16)) { t = 1 }
-            case .decided(.mute):
-                withAnimation(.easeOut(duration: 0.22)) { mark = 1 }
-                withAnimation(.easeIn(duration: 0.44).delay(0.14)) { t = 1 }
+            case .decided(.keep):
+                withAnimation(.easeInOut(duration: 0.36)) { t = 1 }
+            case .decided(.block):
+                withAnimation(.easeOut(duration: 0.2)) { mark = 1 }
+                withAnimation(.easeIn(duration: 0.42).delay(0.14)) { t = 1 }
             case .decided(.unsubscribe):
-                withAnimation(.easeOut(duration: 0.14)) { mark = 1 }
-                withAnimation(.easeIn(duration: 0.5).delay(0.13)) { t = 1 }
+                withAnimation(.easeOut(duration: 0.16)) { mark = 1 }
+                // Linear, because each card makes its own curve out of it.
+                withAnimation(.linear(duration: 0.72).delay(0.1)) { t = 1 }
+            case .decided(.rule):
+                withAnimation(.spring(response: 0.22, dampingFraction: 0.6)) { mark = 1 }
+                withAnimation(.linear(duration: 0.62).delay(0.06)) { t = 1 }
             }
-        }
-    }
-
-    /// Where an unsubscribed card is cut: a little above the middle, on a
-    /// slight slope, so the two halves read as torn apart rather than as two
-    /// tidy boxes.
-    private enum Cut {
-        static let left: CGFloat = 0.5
-        static let right: CGFloat = 0.4
-    }
-
-    private struct CutHalf: Shape {
-        let top: Bool
-        func path(in rect: CGRect) -> Path {
-            let l = CGPoint(x: rect.minX, y: rect.minY + rect.height * Cut.left)
-            let r = CGPoint(x: rect.maxX, y: rect.minY + rect.height * Cut.right)
-            var p = Path()
-            if top {
-                p.move(to: CGPoint(x: rect.minX, y: rect.minY - 40))
-                p.addLine(to: CGPoint(x: rect.maxX, y: rect.minY - 40))
-                p.addLine(to: r)
-                p.addLine(to: l)
-            } else {
-                p.move(to: l)
-                p.addLine(to: r)
-                p.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY + 40))
-                p.addLine(to: CGPoint(x: rect.minX, y: rect.maxY + 40))
-            }
-            p.closeSubpath()
-            return p
-        }
-    }
-
-    private struct CutLine: Shape {
-        func path(in rect: CGRect) -> Path {
-            var p = Path()
-            p.move(to: CGPoint(x: rect.minX - 10, y: rect.minY + rect.height * Cut.left))
-            p.addLine(to: CGPoint(x: rect.maxX + 10, y: rect.minY + rect.height * Cut.right))
-            return p
         }
     }
 
     // MARK: - confirm and apply
 
-    /// THE ONE PRESS. What was staged, in the person's terms, and Return to
-    /// apply it. The same card stays up through the apply: the senders
-    /// gathered at its top are what fly away when the press lands.
-    private struct PurgeConfirmCard: View {
+    /// THE ONE PRESS. Every staged decision, grouped by what will happen and
+    /// with the senders NAMED under each, so Return is pressed looking at
+    /// exactly who it is about. The same page stays up through the apply.
+    private struct PurgeConfirmPage: View {
         @Environment(AppStore.self) private var store
         @Environment(\.accessibilityReduceMotion) private var reduceMotion
         let session: AppStore.PurgeSession
 
-        /// Esc was pressed once: the card is asking before it discards.
+        /// Esc was pressed once: the page is asking before it discards.
         @State private var asking = false
-        /// The pile has been let go.
-        @State private var released = false
-        @State private var shown = false
 
         private var applying: Bool { session.phase == .applying }
         private var summary: PurgeSummary { session.summary }
-        private var staged: [PurgeCard] {
-            session.deck.plan.filter { $0.decision != .skip }.map(\.card)
-        }
+        private var groups: [PurgePlan.Group] { PurgePlan.groups(session.deck) }
 
         var body: some View {
-            VStack(spacing: Space.s16) {
-                pile
-                VStack(spacing: Space.s4) {
-                    ForEach(PurgeCopy.plan(summary), id: \.self) { line in
-                        Text(line)
-                            .font(Typo.serif(24, weight: .medium))
+            FullPage(symbol: "scissors", title: "Purge") {
+                Text(applying ? "Sending your choices" : "Nothing has been sent yet.")
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.inkFaint)
+            } content: {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: Space.s24) {
+                        Text("Here is what will happen")
+                            .font(Typo.serif(30, weight: .medium))
                             .foregroundStyle(Palette.ink)
-                            .multilineTextAlignment(.center)
+                        ForEach(groups) { group in
+                            section(group)
+                        }
                     }
+                    .frame(maxWidth: Typo.measure(620), alignment: .leading)
+                    .padding(.horizontal, Space.s24)
+                    .padding(.vertical, Space.s32)
+                    .frame(maxWidth: .infinity)
                 }
-                .opacity(applying ? 0.45 : 1)
-                details
-                    .opacity(applying ? 0.45 : 1)
-                Rectangle().fill(Palette.hairline).frame(height: 1)
+                .opacity(applying ? 0.55 : 1)
+            } bottom: {
                 actions
             }
-            .padding(Space.scaled(22))
-            .frame(width: Typo.measure(400))
-            .modifier(PurgeSurface())
-            .overlay {
-                // Alive while the requests are out, and no spinner: the flow
-                // hint's glint, all the way round the card.
-                if applying { FlowBorder(radius: 22, moving: !reduceMotion) }
-            }
-            .shadow(color: .black.opacity(0.3), radius: 34, y: 16)
-            .scaleEffect(shown ? 1 : (reduceMotion ? 1 : 0.94))
-            .opacity(shown ? 1 : 0)
-            .onAppear {
-                withAnimation(reduceMotion ? .easeOut(duration: 0.2) : Motion.deckCard) {
-                    shown = true
-                }
-                // Mounted straight into the apply (a relaunch mid-flight, or
-                // the fixture): the pile has already gone.
-                if applying { release() }
-                AccessibilityNotification.Announcement(spoken).post()
-            }
-            .onChange(of: applying) { _, now in
-                if now { release() } else { released = false }
-            }
+            .animation(.easeOut(duration: 0.2), value: asking)
+            .animation(.easeOut(duration: 0.25), value: applying)
             .keyBindings(.modal, bindings)
-            .accessibilityElement(children: .contain)
-            .accessibilityLabel(spoken)
+            .onAppear { AccessibilityNotification.Announcement(spoken).post() }
         }
 
         private var spoken: String {
-            var parts = PurgeCopy.plan(summary)
-            if let note = PurgeCopy.siteNote(summary) { parts.append(note) }
-            if let leaving = PurgeCopy.leaving(summary.emailsCleared) { parts.append(leaving) }
-            if let fewer = PurgeCopy.fewer(summary.fewerPerMonth) { parts.append(fewer) }
+            var parts: [String] = []
+            for group in groups {
+                let names = group.entries.map { PurgeSenderPage.name($0.card) }.joined(separator: ", ")
+                parts.append("\(PurgeCopy.heading(group.kind)): \(names)")
+            }
             parts.append("Nothing has been sent. Press Return to confirm, Z to go back.")
             return parts.joined(separator: ". ")
         }
 
-        // MARK: the pile
-
-        private static let pileLimit = 11
-
-        /// The senders being let go, gathered. On the press every one of them
-        /// flies out and away at once, each on its own heading.
-        private var pile: some View {
-            let shownCards = Array(staged.prefix(Self.pileLimit))
-            let more = staged.count - shownCards.count
-            return HStack(spacing: -Space.scaled(7)) {
-                ForEach(Array(shownCards.enumerated()), id: \.element.id) { i, card in
-                    Avatar(
-                        sender: "\(PurgeCardFace.name(card)) <\(card.sender.sender)>",
-                        size: Space.scaled(30)
-                    )
-                    .background(
-                        Circle().fill(purgeSurface).padding(-2.5)
-                    )
-                    .modifier(Flown(index: i, of: shownCards.count, released: released, still: reduceMotion))
-                    .zIndex(Double(shownCards.count - i))
+        private func section(_ group: PurgePlan.Group) -> some View {
+            let quiet = group.kind == .keep
+            return VStack(alignment: .leading, spacing: Space.s8) {
+                VStack(alignment: .leading, spacing: Space.s2) {
+                    Text(PurgeCopy.heading(group.kind))
+                        .font(Typo.ui(13, weight: .semibold))
+                        .foregroundStyle(quiet ? Palette.inkDim : Palette.ink)
+                    if let note = PurgeCopy.note(group.kind) {
+                        Text(note)
+                            .font(Typo.micro)
+                            .foregroundStyle(Palette.inkFaint)
+                    }
                 }
-                if more > 0 {
-                    Text("+\(more)")
-                        .font(Typo.num(11, weight: .semibold))
-                        .foregroundStyle(Palette.inkDim)
-                        .padding(.leading, Space.s14)
-                        .opacity(released ? 0 : 1)
+                VStack(spacing: 0) {
+                    ForEach(Array(group.entries.enumerated()), id: \.element.id) { i, entry in
+                        if i > 0 { Rectangle().fill(Palette.hairline).frame(height: 1) }
+                        row(entry, kind: group.kind)
+                    }
                 }
-            }
-            .frame(height: Space.scaled(34))
-            .accessibilityHidden(true)
-        }
-
-        /// One avatar leaving: out along its own heading, spinning a little,
-        /// shrinking to nothing. The headings fan across the upper half so
-        /// the whole pile bursts up and outward from the card.
-        private struct Flown: ViewModifier {
-            let index: Int
-            let of: Int
-            let released: Bool
-            let still: Bool
-
-            func body(content: Content) -> some View {
-                let spread = of > 1 ? Double(index) / Double(of - 1) : 0.5
-                // 200 degrees to -20: left, up and over, right.
-                let angle = (200 - 220 * spread) * .pi / 180
-                let reach: Double = 240 + Double((index * 53) % 120)
-                let dx = released && !still ? cos(angle) * reach : 0
-                let dy = released && !still ? -sin(angle) * reach : 0
-                content
-                    .scaleEffect(released ? (still ? 1 : 0.3) : 1)
-                    .rotationEffect(.degrees(released && !still ? Double((index % 2 == 0 ? 1 : -1) * 70) : 0))
-                    .offset(x: dx, y: dy)
-                    .opacity(released ? 0 : 1)
-                    .animation(
-                        still
-                            ? .easeOut(duration: 0.25)
-                            : .easeOut(duration: 0.62).delay(Double(index) * 0.022),
-                        value: released)
+                .background(
+                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        .fill(quiet ? Color.clear : pagePaper)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        .strokeBorder(Palette.hairline, lineWidth: 1)
+                )
             }
         }
 
-        private func release() {
-            guard !released else { return }
-            released = true
-        }
-
-        // MARK: the small print
-
-        private var details: some View {
-            VStack(spacing: Space.s8) {
-                if let note = PurgeCopy.siteNote(summary) {
-                    Text(note)
-                        .font(Typo.rowSub)
-                        .foregroundStyle(Palette.inkDim)
-                        .multilineTextAlignment(.center)
-                        .fixedSize(horizontal: false, vertical: true)
+        private func row(_ entry: PurgePlan.Entry, kind: PurgeDecision.Kind) -> some View {
+            HStack(alignment: .center, spacing: Space.s10) {
+                Avatar(sender: PurgeSenderPage.avatar(entry.card), size: Space.scaled(26))
+                VStack(alignment: .leading, spacing: Space.s2) {
+                    HStack(alignment: .firstTextBaseline, spacing: Space.s8) {
+                        Text(PurgeSenderPage.name(entry.card))
+                            .font(Typo.ui(13, weight: .medium))
+                            .foregroundStyle(Palette.ink)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Text(entry.card.sender.sender)
+                            .font(Typo.micro)
+                            .foregroundStyle(Palette.inkFaintest)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .layoutPriority(-1)
+                    }
+                    if let detail = entry.detail {
+                        // A rule's sentence is shown whole; the site note is
+                        // set apart in the warning colour.
+                        Text(detail)
+                            .font(Typo.rowSub)
+                            .foregroundStyle(kind == .rule ? Palette.inkDim : Palette.warn)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
-                let facts = [
-                    PurgeCopy.leaving(summary.emailsCleared), PurgeCopy.fewer(summary.fewerPerMonth),
-                ].compactMap { $0 }
-                if !facts.isEmpty {
-                    Text(facts.joined(separator: "  ·  "))
-                        .font(Typo.micro)
-                        .foregroundStyle(Palette.inkFaint)
-                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .padding(.horizontal, Space.s12)
+            .padding(.vertical, Space.s8)
+            .accessibilityElement(children: .combine)
         }
 
         // MARK: the actions
 
         @ViewBuilder private var actions: some View {
             if applying {
-                Text("Sending your choices")
-                    .font(Typo.ui(12, weight: .semibold))
-                    .foregroundStyle(Palette.inkDim)
-                    .frame(height: Space.scaled(34))
-                    .transition(.opacity)
+                HStack {
+                    Spacer()
+                    Text("Sending your choices")
+                        .font(Typo.ui(12, weight: .semibold))
+                        .foregroundStyle(Palette.inkDim)
+                        .padding(.horizontal, Space.s20)
+                        .frame(height: Space.scaled(34))
+                        // Alive while the requests are out, and no spinner:
+                        // the flow hint's glint, all the way round.
+                        .overlay { FlowBorder(radius: 11, moving: !reduceMotion) }
+                    Spacer()
+                }
             } else if asking {
-                VStack(spacing: Space.s8) {
+                HStack(spacing: Space.s12) {
                     Text("Throw these choices away? Nothing has been sent.")
                         .font(Typo.rowSub)
                         .foregroundStyle(Palette.ink)
-                    HStack(spacing: Space.s8) {
-                        secondary("esc", "Discard", danger: true) { store.cancelPurge() }
-                        secondary("z", "Keep them") { asking = false }
-                    }
+                    Spacer(minLength: Space.s8)
+                    PageButton(key: "z", label: "Keep them") { asking = false }
+                    PageButton(key: "esc", label: "Discard", role: .danger) { store.cancelPurge() }
                 }
-                .transition(.opacity)
             } else {
-                HStack(spacing: Space.s8) {
-                    secondary("z", "Back") { store.purgeBack() }
-                    Button(action: confirm) {
-                        HStack(spacing: Space.s8) {
-                            PurgeKey("return", style: .onAccent)
-                            Text("Confirm")
-                                .font(Typo.ui(13, weight: .semibold))
-                                .foregroundStyle(onAccent)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .frame(height: Space.scaled(34))
-                        .background(
-                            RoundedRectangle(cornerRadius: 11, style: .continuous)
-                                .fill(Palette.accent)
-                        )
-                        .contentShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                HStack(spacing: Space.s12) {
+                    if let fewer = PurgeCopy.fewer(summary.fewerPerMonth) {
+                        Text(fewer)
+                            .font(Typo.micro)
+                            .foregroundStyle(Palette.inkFaint)
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Confirm")
+                    Spacer(minLength: Space.s8)
+                    PageButton(key: "z", label: "Back") { store.purgeBack() }
+                    PageButton(key: "return", label: "Confirm", role: .primary) { confirm() }
                 }
-                .transition(.opacity)
             }
-        }
-
-        private func secondary(
-            _ key: String, _ label: String, danger: Bool = false, action: @escaping () -> Void
-        ) -> some View {
-            Button(action: action) {
-                HStack(spacing: Space.s6) {
-                    Kbd(key)
-                    Text(label)
-                        .font(Typo.ui(12, weight: .semibold))
-                        .foregroundStyle(danger ? Palette.danger : Palette.ink)
-                }
-                .padding(.horizontal, Space.s14)
-                .frame(height: Space.scaled(34))
-                .background(
-                    RoundedRectangle(cornerRadius: 11, style: .continuous)
-                        .fill(danger ? Palette.dangerSoft : Palette.hairline.opacity(0.55))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 11, style: .continuous)
-                        .strokeBorder(Palette.hairline, lineWidth: 1)
-                )
-                .contentShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(label)
         }
 
         private func confirm() {
             guard !applying, !asking else { return }
             NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now)
-            release()
             Task { await store.commitPurge() }
         }
 
@@ -1132,16 +1207,17 @@
         /// question (keep them) and that is all: a Return aimed at a prompt
         /// about discarding must not send nine unsubscribes instead.
         private var bindings: [KeyBinding] {
+            // Held so the rail's page keys and the global undo stay out.
+            let inert = ["1", "2", "3", "4", "5", "u", "s"].map { KeyBinding($0, "nothing") {} }
             if applying {
                 // No way back and no cancel: what has been asked of a sender
-                // has been asked. The keys are held so nothing underneath
-                // takes them.
-                return [
+                // has been asked.
+                return inert + [
                     KeyBinding("Escape", "nothing") {}, KeyBinding("Enter", "nothing") {},
-                    KeyBinding("z", "nothing") {}, KeyBinding("u", "nothing") {},
+                    KeyBinding("z", "nothing") {},
                 ]
             }
-            return [
+            return inert + [
                 KeyBinding("Enter", "confirm", onRelease: { _ in }) {
                     if asking { asking = false } else { confirm() }
                 },
@@ -1154,257 +1230,237 @@
                 KeyBinding("Escape", "discard") {
                     if asking { store.cancelPurge() } else { asking = true }
                 },
-                // The deck's `u` is over; do not let it reach the global undo.
-                KeyBinding("u", "nothing") {},
             ]
         }
     }
 
-    // MARK: - the end
+    // MARK: - the end: a status board
 
-    /// A PURGE, DONE. The walk's own celebration (`WalkComplete`): the P7
-    /// squelch across the top of a card, a lock beam, a ring and check, and
-    /// what it came to counting up, with the chime.
+    /// AFTER THE PRESS. Not a celebration that walks away: a board that
+    /// stays with the work. Each unsubscribe is running, then done, or needs
+    /// a person; blocks and rules are simply done.
     ///
-    /// The headline is the best true thing: the mail that stops arriving.
-    /// Under the stats, plainly and small, anything that did not go through,
-    /// and the unsubscribes that are the person's to finish on the sender's
-    /// own site. With those on it the card waits to be dismissed; without, it
-    /// leaves by itself like the walk's.
-    struct PurgeComplete: View {
+    /// When everything automatic has settled and nothing needs hands, THEN
+    /// the walk's own reward plays (the P7 squelch, the lock beam, the ring
+    /// and check, the chime) and the page leaves by itself. If anything needs
+    /// hands it says so first and largest, lists each sender with the button
+    /// that opens their page, and waits: the reward comes when the last one
+    /// has been opened, and the page is the person's to close.
+    struct PurgeBoard: View {
         @Environment(AppStore.self) private var store
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
         let finish: AppStore.PurgeFinish
         let dismiss: () -> Void
 
-        @Environment(\.accessibilityReduceMotion) private var reduceMotion
-        @State private var shown = false
         @State private var beam: CGFloat = -0.3
-        @State private var ring: CGFloat = 0
         @State private var check: CGFloat = 0
         @State private var pulse = false
-        @State private var counted = false
-        @State private var leaving = false
-        /// There was something to finish when the card went up, so it stays
-        /// until dismissed, even once every row has been visited.
+        @State private var celebrated = false
+        @State private var alerted = false
+        @State private var alertGlow = false
+        /// Something needed a person at some point, so the page never
+        /// leaves by itself.
         @State private var stays = false
+        @State private var leaving = false
 
         private static let phosphor = Color(hex: 0x82BAF5)
-        private static let width: CGFloat = 372
 
-        private var summary: PurgeSummary { finish.summary }
-        private var headline: String { PurgeCopy.finished(summary) }
-
-        private var spoken: String {
-            var parts = [headline]
-            if summary.unsubscribed > 0 { parts.append("\(summary.unsubscribed) unsubscribed") }
-            if summary.muted > 0 { parts.append("\(summary.muted) muted") }
-            if summary.cleared > 0 { parts.append("\(summary.cleared) cleared") }
-            if let failed = PurgeCopy.failedNote(summary.failed) { parts.append(failed) }
-            if !finish.sites.isEmpty {
-                parts.append("\(finish.sites.count) to finish on their site")
-            }
-            return parts.joined(separator: ". ")
-        }
+        private var statuses: [(card: PurgeCard, status: PurgeStatus)] { store.purgeStatuses(finish) }
 
         var body: some View {
-            ZStack {
-                Color.black.opacity(shown && !leaving ? 0.45 : 0)
-                    .ignoresSafeArea()
-                    .onTapGesture { if !stays { leave() } }
-                card
-                    .scaleEffect(shown && !leaving ? 1 : (reduceMotion ? 1 : 0.88))
-                    .opacity(shown && !leaving ? 1 : 0)
+            let statuses = statuses
+            let summary = PurgeSummary(statuses: statuses)
+            let waiting = statuses.filter { if case .needsYou = $0.status { true } else { false } }
+            FullPage(symbol: "scissors", title: "Purge") {
+                EmptyView()
+            } content: {
+                ScrollView {
+                    VStack(spacing: Space.s20) {
+                        hero(summary)
+                        if !waiting.isEmpty { needsYou(waiting) }
+                        ledger(statuses)
+                    }
+                    .frame(maxWidth: Typo.measure(560))
+                    .padding(.horizontal, Space.s24)
+                    .padding(.vertical, Space.s24)
+                    .frame(maxWidth: .infinity)
+                }
+            } bottom: {
+                HStack(spacing: Space.s12) {
+                    if !waiting.isEmpty {
+                        Text(PurgeCopy.laterNote)
+                            .font(Typo.micro)
+                            .foregroundStyle(Palette.inkFaint)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else if let failed = PurgeCopy.failedNote(summary.failed) {
+                        Text(failed)
+                            .font(Typo.micro)
+                            .foregroundStyle(Palette.inkFaint)
+                    }
+                    Spacer(minLength: Space.s8)
+                    PageButton(
+                        key: "return", label: waiting.isEmpty ? "Done" : "Later",
+                        role: waiting.isEmpty && summary.isSettled ? .primary : .plain
+                    ) { leave() }
+                }
             }
-            .task { await run() }
+            .opacity(leaving ? 0 : 1)
             .keyContext(.modal)
             .keyBindings(.modal, [
                 KeyBinding("Escape", "close") { leave() },
                 KeyBinding("Enter", "close") { leave() },
-            ])
+            ] + ["1", "2", "3", "4", "5", "u", "s", "z"].map { KeyBinding($0, "nothing") {} })
+            .task(id: Phase(summary)) { await react(summary) }
+            .animation(.smooth(duration: 0.3), value: summary)
         }
 
-        private var card: some View {
-            VStack(spacing: 0) {
-                hero
+        /// What the page should be doing, as one value to react to.
+        private enum Phase: Hashable {
+            case running, needsYou, clear
+            init(_ s: PurgeSummary) {
+                self = !s.isSettled ? .running : (s.needsYou > 0 ? .needsYou : .clear)
+            }
+        }
+
+        private func react(_ summary: PurgeSummary) async {
+            switch Phase(summary) {
+            case .running:
+                break
+            case .needsYou:
+                stays = true
+                guard !alerted else { return }
+                alerted = true
+                // SAID, not only shown: a list at the bottom of a page of
+                // good news is exactly what gets missed.
+                NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
+                AccessibilityNotification.Announcement(
+                    "\(PurgeCopy.headline(summary)) \(PurgeCopy.needsYouLead)"
+                ).post()
+                alertGlow = true
+                withAnimation(.easeOut(duration: 1.4)) { alertGlow = false }
+            case .clear:
+                guard !celebrated else { return }
+                celebrated = true
+                ClearChime.play()
+                AccessibilityNotification.Announcement(spoken(summary)).post()
+                if reduceMotion {
+                    check = 1
+                } else {
+                    withAnimation(.easeInOut(duration: 0.55)) { beam = 1.1 }
+                    try? await Task.sleep(for: .milliseconds(380))
+                    pulse = true
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.55)) { check = 1 }
+                }
+                // The person's to close once anything needed them, or
+                // anything failed: a line about a failure is not read in
+                // the time three good numbers are.
+                guard !stays, summary.failed == 0 else { return }
+                try? await Task.sleep(for: .milliseconds(4200))
+                guard !Task.isCancelled else { return }
+                leave()
+            }
+        }
+
+        private func spoken(_ s: PurgeSummary) -> String {
+            var parts = [PurgeCopy.headline(s)]
+            if s.unsubscribed > 0 { parts.append("\(s.unsubscribed) unsubscribed") }
+            if s.blocked > 0 { parts.append("\(s.blocked) blocked") }
+            if s.rules > 0 { parts.append("\(s.rules) new rules") }
+            if let failed = PurgeCopy.failedNote(s.failed) { parts.append(failed) }
+            return parts.joined(separator: ". ")
+        }
+
+        // MARK: the hero
+
+        private func hero(_ summary: PurgeSummary) -> some View {
+            let jobs = summary.unsubscribed + summary.running + summary.needsYou + summary.opened
+            let settled = jobs == 0 ? 1 : CGFloat(jobs - summary.running) / CGFloat(jobs)
+            return VStack(spacing: 0) {
+                ZStack {
+                    Group {
+                        if PhosphorScene.purgeDone.isUnavailable {
+                            IntroSceneBackdrop(engaged: true, wide: true, paused: false)
+                        } else {
+                            PhosphorBackdrop(scene: .purgeDone)
+                        }
+                    }
+                    .accessibilityHidden(true)
+                    LinearGradient(
+                        colors: [.clear, .black.opacity(0.3)], startPoint: .center, endPoint: .bottom)
+                    GeometryReader { geo in
+                        LinearGradient(
+                            colors: [.clear, Self.phosphor.opacity(0.55), .white.opacity(0.85),
+                                     Self.phosphor.opacity(0.55), .clear],
+                            startPoint: .leading, endPoint: .trailing
+                        )
+                        .frame(width: geo.size.width * 0.28)
+                        .blur(radius: 6)
+                        .offset(x: beam * geo.size.width)
+                        .blendMode(.plusLighter)
+                    }
+                    .allowsHitTesting(false)
+                    ZStack {
+                        if !reduceMotion {
+                            ForEach(0..<3) { i in
+                                Circle()
+                                    .stroke(Self.phosphor.opacity(0.7), lineWidth: 1.5)
+                                    .frame(width: 58, height: 58)
+                                    .scaleEffect(pulse ? 2.8 : 1)
+                                    .opacity(pulse ? 0 : (celebrated ? 0.9 : 0))
+                                    .animation(
+                                        .easeOut(duration: 1.2).delay(Double(i) * 0.2), value: pulse)
+                            }
+                        }
+                        Circle()
+                            .fill(.black.opacity(0.35))
+                            .frame(width: 58, height: 58)
+                        // THE RING CLOSES AS THE WORK DOES: its arc is the
+                        // share of unsubscribes that have settled, so the
+                        // wait has a shape and no number.
+                        Circle()
+                            .trim(from: 0, to: max(0.04, settled))
+                            .stroke(Self.phosphor, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                            .rotationEffect(.degrees(-90))
+                            .frame(width: 58, height: 58)
+                            .shadow(color: Self.phosphor.opacity(0.9), radius: 6)
+                            .animation(.easeInOut(duration: 0.5), value: settled)
+                        PurgeCheck()
+                            .trim(from: 0, to: check)
+                            .stroke(
+                                .white,
+                                style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round)
+                            )
+                            .frame(width: 22, height: 16)
+                            .shadow(color: Self.phosphor, radius: 5)
+                    }
+                }
+                .frame(height: 124)
+                .frame(maxWidth: .infinity)
+                .clipShape(UnevenRoundedRectangle(topLeadingRadius: 18, topTrailingRadius: 18))
+
                 VStack(spacing: Space.s14) {
-                    Text(headline)
-                        .font(Typo.hero(27))
+                    Text(PurgeCopy.headline(summary))
+                        .font(Typo.hero(28))
                         .foregroundStyle(Palette.ink)
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
+                        .contentTransition(.opacity)
                     HStack(spacing: 0) {
-                        stat(counted ? summary.unsubscribed : 0, "unsubscribed")
+                        stat(summary.unsubscribed, "unsubscribed")
                         divider
-                        stat(counted ? summary.muted : 0, "muted")
+                        stat(summary.blocked, "blocked")
                         divider
-                        stat(counted ? summary.cleared : 0, "cleared")
-                    }
-                    if let failed = PurgeCopy.failedNote(summary.failed) {
-                        Text(failed)
-                            .font(Typo.micro)
-                            .foregroundStyle(Palette.inkFaint)
-                            .multilineTextAlignment(.center)
-                    }
-                    if stays {
-                        sites
+                        stat(summary.rules, summary.rules == 1 ? "new rule" : "new rules")
                     }
                 }
-                .padding(.horizontal, Space.scaled(22))
-                .padding(.top, Space.scaled(18))
-                .padding(.bottom, Space.scaled(20))
+                .padding(.horizontal, Space.s20)
+                .padding(.vertical, Space.s16)
             }
-            .frame(width: Self.width)
-            .passbandGlass(.pane, cornerRadius: 22, tint: Palette.glassTintStrong)
-            .shadow(color: .black.opacity(0.32), radius: 40, y: 18)
-            .accessibilityElement(children: .contain)
-            .accessibilityLabel(spoken)
-        }
-
-        // MARK: finish on their site
-
-        private var sites: some View {
-            VStack(alignment: .leading, spacing: Space.s8) {
-                Rectangle().fill(Palette.hairline).frame(height: 1)
-                if finish.sites.isEmpty {
-                    Text("Nothing left to finish.")
-                        .font(Typo.rowSub)
-                        .foregroundStyle(Palette.inkDim)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                } else {
-                    VStack(alignment: .leading, spacing: Space.s2) {
-                        Text("Finish on their site")
-                            .font(Typo.ui(12, weight: .semibold))
-                            .foregroundStyle(Palette.ink)
-                        Text(
-                            finish.sites.count == 1
-                                ? "Their mail is cleared. You are still subscribed until you do."
-                                : "Their mail is cleared. You are still subscribed to these until you do."
-                        )
-                        .font(Typo.micro)
-                        .foregroundStyle(Palette.inkFaint)
-                        .fixedSize(horizontal: false, vertical: true)
-                    }
-                    ForEach(finish.sites) { site in
-                        siteRow(site)
-                    }
-                }
-                HStack {
-                    Spacer()
-                    Button(action: leave) {
-                        HStack(spacing: Space.s6) {
-                            Kbd("esc")
-                            Text(finish.sites.isEmpty ? "Done" : "Later")
-                                .font(Typo.ui(12, weight: .semibold))
-                                .foregroundStyle(Palette.ink)
-                        }
-                        .padding(.horizontal, Space.s12)
-                        .padding(.vertical, Space.s6)
-                        .background(Capsule(style: .continuous).fill(Palette.hairline.opacity(0.7)))
-                        .contentShape(Capsule())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(finish.sites.isEmpty ? "Done" : "Later")
-                }
-                .padding(.top, Space.s2)
-            }
-            .animation(.smooth(duration: 0.26), value: finish.sites)
-        }
-
-        private func siteRow(_ site: AppStore.PurgeFinish.Site) -> some View {
-            let opening = finish.opening.contains(site.id)
-            return HStack(spacing: Space.s8) {
-                Avatar(sender: "\(site.displayName) <\(site.sender)>", size: Space.scaled(22))
-                Text(site.displayName)
-                    .font(Typo.rowSub)
-                    .foregroundStyle(Palette.ink)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .help(site.displayName)
-                Button {
-                    Task { await store.openPurgeSite(site) }
-                } label: {
-                    HStack(spacing: Space.s4) {
-                        Text(opening ? "Opening" : "Open")
-                            .font(Typo.ui(11, weight: .semibold))
-                        Image(systemName: "arrow.up.right")
-                            .font(Typo.ui(9, weight: .bold))
-                    }
-                    .foregroundStyle(Palette.accentInk)
-                    .padding(.horizontal, Space.s10)
-                    .padding(.vertical, Space.s4)
-                    .background(Capsule(style: .continuous).fill(Palette.accentSoft))
-                    .contentShape(Capsule())
-                }
-                .buttonStyle(.plain)
-                .disabled(opening)
-                .opacity(opening ? 0.6 : 1)
-                .help("Opens their unsubscribe page in your browser")
-                .accessibilityLabel("Open \(site.displayName)'s unsubscribe page")
-            }
-            .transition(.opacity)
-        }
-
-        // MARK: the hero (the walk's, on this card's own renderer)
-
-        private var hero: some View {
-            ZStack {
-                Group {
-                    if PhosphorScene.purgeDone.isUnavailable {
-                        IntroSceneBackdrop(engaged: true, wide: true, paused: false)
-                    } else {
-                        PhosphorBackdrop(scene: .purgeDone)
-                    }
-                }
-                .accessibilityHidden(true)
-                LinearGradient(
-                    colors: [.clear, .black.opacity(0.3)], startPoint: .center, endPoint: .bottom)
-                GeometryReader { geo in
-                    LinearGradient(
-                        colors: [.clear, Self.phosphor.opacity(0.55), .white.opacity(0.85),
-                                 Self.phosphor.opacity(0.55), .clear],
-                        startPoint: .leading, endPoint: .trailing
-                    )
-                    .frame(width: geo.size.width * 0.28)
-                    .blur(radius: 6)
-                    .offset(x: beam * geo.size.width)
-                    .blendMode(.plusLighter)
-                }
-                .allowsHitTesting(false)
-                ZStack {
-                    if !reduceMotion {
-                        ForEach(0..<3) { i in
-                            Circle()
-                                .stroke(Self.phosphor.opacity(0.7), lineWidth: 1.5)
-                                .frame(width: 58, height: 58)
-                                .scaleEffect(pulse ? 2.8 : 1)
-                                .opacity(pulse ? 0 : 0.9)
-                                .animation(
-                                    .easeOut(duration: 1.2).delay(Double(i) * 0.2), value: pulse)
-                        }
-                    }
-                    Circle()
-                        .fill(.black.opacity(0.35))
-                        .frame(width: 58, height: 58)
-                    Circle()
-                        .trim(from: 0, to: ring)
-                        .stroke(Self.phosphor, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
-                        .rotationEffect(.degrees(-90))
-                        .frame(width: 58, height: 58)
-                        .shadow(color: Self.phosphor.opacity(0.9), radius: 6)
-                    PurgeCheck()
-                        .trim(from: 0, to: check)
-                        .stroke(
-                            .white,
-                            style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round)
-                        )
-                        .frame(width: 22, height: 16)
-                        .shadow(color: Self.phosphor, radius: 5)
-                }
-            }
-            .frame(height: 140)
-            .frame(maxWidth: .infinity)
-            .clipShape(UnevenRoundedRectangle(topLeadingRadius: 22, topTrailingRadius: 22))
+            .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(pagePaper))
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(Palette.hairlineStrong, lineWidth: 1)
+            )
         }
 
         private func stat(_ n: Int, _ name: String) -> some View {
@@ -1427,42 +1483,173 @@
             Rectangle().fill(Palette.hairline).frame(width: 1, height: 28)
         }
 
-        private func run() async {
-            stays = !finish.sites.isEmpty
-            ClearChime.play()
-            AccessibilityNotification.Announcement(spoken).post()
-            withAnimation(
-                reduceMotion ? .easeOut(duration: 0.2) : .spring(response: 0.42, dampingFraction: 0.66)
-            ) { shown = true }
-            if reduceMotion {
-                ring = 1
-                check = 1
-                counted = true
-            } else {
-                try? await Task.sleep(for: .milliseconds(160))
-                withAnimation(.easeInOut(duration: 0.55)) { beam = 1.1 }
-                try? await Task.sleep(for: .milliseconds(320))
-                withAnimation(.easeInOut(duration: 0.4)) { ring = 1 }
-                pulse = true
-                try? await Task.sleep(for: .milliseconds(300))
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.55)) { check = 1 }
-                withAnimation(.easeOut(duration: 0.7)) { counted = true }
+        // MARK: these need you
+
+        private func needsYou(_ waiting: [(card: PurgeCard, status: PurgeStatus)]) -> some View {
+            VStack(alignment: .leading, spacing: Space.s10) {
+                HStack(spacing: Space.s8) {
+                    Image(systemName: "hand.raised.fill")
+                        .font(Typo.ui(12, weight: .semibold))
+                        .foregroundStyle(Palette.warn)
+                    Text(PurgeCopy.needsYouTitle)
+                        .font(Typo.ui(14, weight: .semibold))
+                        .foregroundStyle(Palette.ink)
+                }
+                Text(PurgeCopy.needsYouLead)
+                    .font(Typo.rowSub)
+                    .foregroundStyle(Palette.inkDim)
+                    .fixedSize(horizontal: false, vertical: true)
+                ForEach(waiting, id: \.card.id) { card, status in
+                    HStack(spacing: Space.s10) {
+                        Avatar(sender: PurgeSenderPage.avatar(card), size: Space.scaled(26))
+                        VStack(alignment: .leading, spacing: Space.s2) {
+                            Text(PurgeSenderPage.name(card))
+                                .font(Typo.ui(13, weight: .medium))
+                                .foregroundStyle(Palette.ink)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                            Text(PurgeCopy.status(status))
+                                .font(Typo.micro)
+                                .foregroundStyle(Palette.inkDim)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        let opening = finish.opening.contains(card.id)
+                        Button {
+                            Task { await store.openPurgeRow(card.id) }
+                        } label: {
+                            HStack(spacing: Space.s4) {
+                                Text(opening ? "Opening" : "Open their page")
+                                    .font(Typo.ui(12, weight: .semibold))
+                                Image(systemName: "arrow.up.right")
+                                    .font(Typo.ui(9, weight: .bold))
+                            }
+                            .foregroundStyle(onAccent)
+                            .padding(.horizontal, Space.s12)
+                            .frame(height: Space.scaled(28))
+                            .background(Capsule(style: .continuous).fill(Palette.accent))
+                            .contentShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(opening)
+                        .opacity(opening ? 0.6 : 1)
+                        .help("Opens their unsubscribe page in your browser")
+                        .accessibilityLabel("Open \(PurgeSenderPage.name(card))'s unsubscribe page")
+                    }
+                    .padding(.vertical, Space.s2)
+                    .transition(.opacity)
+                }
             }
-            // Something to finish: the card is the person's to close. A line
-            // about a failure earns a longer look than three good numbers.
-            guard !stays else { return }
-            try? await Task.sleep(for: .milliseconds(summary.failed > 0 ? 6000 : 3200))
-            guard !Task.isCancelled else { return }
-            leave()
+            .padding(Space.s16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Palette.warnSoft))
+            // The whole border, evenly, flaring once when the list appears.
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(Palette.warn.opacity(alertGlow ? 1 : 0.55), lineWidth: alertGlow ? 2 : 1)
+            )
+            .shadow(color: Palette.warn.opacity(alertGlow ? 0.6 : 0), radius: 16)
+            .transition(.opacity.combined(with: .scale(scale: 0.98)))
+        }
+
+        // MARK: every sender
+
+        private func ledger(_ statuses: [(card: PurgeCard, status: PurgeStatus)]) -> some View {
+            VStack(spacing: 0) {
+                ForEach(Array(statuses.enumerated()), id: \.element.card.id) { i, entry in
+                    if i > 0 { Rectangle().fill(Palette.hairline).frame(height: 1) }
+                    HStack(spacing: Space.s10) {
+                        Avatar(sender: PurgeSenderPage.avatar(entry.card), size: Space.scaled(22))
+                        Text(PurgeSenderPage.name(entry.card))
+                            .font(Typo.rowSub)
+                            .foregroundStyle(Palette.ink)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Text(statusLine(entry.status))
+                            .font(Typo.micro)
+                            .foregroundStyle(statusInk(entry.status))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .frame(maxWidth: Typo.measure(230), alignment: .trailing)
+                        StatusGlyph(status: entry.status, still: reduceMotion)
+                    }
+                    .padding(.horizontal, Space.s12)
+                    .padding(.vertical, Space.s8)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(
+                        "\(PurgeSenderPage.name(entry.card)): \(PurgeCopy.status(entry.status))")
+                }
+            }
+            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(pagePaper))
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(Palette.hairline, lineWidth: 1)
+            )
+        }
+
+        /// The board's short form: the reason a sender is waiting is said in
+        /// the list above, not twice.
+        private func statusLine(_ status: PurgeStatus) -> String {
+            if case .needsYou = status { return "Needs you" }
+            return PurgeCopy.status(status)
+        }
+
+        private func statusInk(_ status: PurgeStatus) -> Color {
+            switch status {
+            case .needsYou: Palette.warn
+            case .failed: Palette.danger
+            case .running: Palette.accent
+            default: Palette.inkDim
+            }
         }
 
         private func leave() {
             guard !leaving else { return }
-            withAnimation(.easeIn(duration: 0.28)) { leaving = true }
+            withAnimation(.easeIn(duration: 0.22)) { leaving = true }
             Task {
-                try? await Task.sleep(for: .milliseconds(300))
+                try? await Task.sleep(for: .milliseconds(240))
                 dismiss()
             }
+        }
+    }
+
+    /// The mark at the end of a board row. A running job breathes; it does
+    /// not spin.
+    private struct StatusGlyph: View {
+        let status: PurgeStatus
+        let still: Bool
+        @State private var breathe = false
+
+        var body: some View {
+            Group {
+                switch status {
+                case .running:
+                    Circle()
+                        .fill(Palette.accent)
+                        .frame(width: 7, height: 7)
+                        .scaleEffect(breathe ? 1.25 : 0.75)
+                        .opacity(breathe ? 1 : 0.45)
+                        .onAppear {
+                            guard !still else { return }
+                            withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
+                                breathe = true
+                            }
+                        }
+                case .unsubscribed, .blocked, .ruled:
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(Palette.positive)
+                case .kept:
+                    Image(systemName: "checkmark.circle").foregroundStyle(Palette.inkFaint)
+                case .opened:
+                    Image(systemName: "arrow.up.right.circle.fill").foregroundStyle(Palette.inkFaint)
+                case .needsYou:
+                    Image(systemName: "hand.raised.fill").foregroundStyle(Palette.warn)
+                case .failed:
+                    Image(systemName: "exclamationmark.circle.fill").foregroundStyle(Palette.danger)
+                }
+            }
+            .font(Typo.ui(13))
+            .frame(width: Space.scaled(18))
+            .accessibilityHidden(true)
         }
     }
 

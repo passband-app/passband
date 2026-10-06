@@ -748,15 +748,26 @@ struct ReadingZone: View {
                 ) {
                     Task { await store.runSmartDone() }
                 }
-                ZonePill(
-                    symbol: "scissors", label: "purge", key: "p",
-                    help: "Go through your senders one at a time and decide what stays (P)",
-                    accessibilityName: "Purge",
-                    working: store.purgeStarting, workingLabel: "gathering"
-                ) {
-                    Task { await store.beginPurge() }
+                // ONLY WITH A FEW CANDIDATES. The deck holds just the senders
+                // the evidence is confident about; with fewer than a handful
+                // there is no flow worth opening, so there is no door to it.
+                if store.purgeOffered {
+                    ZonePill(
+                        symbol: "scissors", label: "purge", key: "p",
+                        help: "Go through the senders you have stopped reading, one at a time (P)",
+                        accessibilityName: "Purge",
+                        working: store.purgeStarting, workingLabel: "gathering"
+                    ) {
+                        Task { await store.beginPurge() }
+                    }
+                    .transition(.opacity)
                 }
             }
+            .animation(.easeOut(duration: 0.25), value: store.purgeOffered)
+            // The count behind the pill. Asked when the board first shows
+            // and then on the poll's tick, where the store lets it through
+            // at most every ten minutes: the route is not a cheap one.
+            .task(id: store.lastRefresh) { await store.refreshPurgeCandidates() }
         }
     }
 #endif

@@ -1,8 +1,8 @@
-// The purge deck: who is offered, what each card may be asked, what is
-// suggested, what a set of decisions comes to, and the sentences the evidence
-// is put in. Everything here ends as either a request to a third party that
-// cannot be recalled or a claim about somebody's own reading, so each rule is
-// pinned rather than read.
+// The purge deck: who is offered (only the senders the evidence is confident
+// about), what each may be asked, what a set of decisions comes to, how the
+// confirm page groups them, and the sentences all of it is put in. Everything
+// here ends as either a request to a third party that cannot be recalled or a
+// claim about somebody's own reading, so each rule is pinned rather than read.
 
 import Foundation
 
@@ -17,27 +17,6 @@ struct PurgeTests {
         anAlreadyAskedSenderIsOffTheDeck()
         aRecentlyKeptSenderIsOffTheDeck()
         try decodesKeptAtAndTheTotal()
-        try aYoungLedgerHasNoMonthlyRate()
-        siteBoundIsTheStagedUnsubscribesTheDaemonWillNotDo()
-        theStagedSummarySplitsOutTheirSite()
-        theCommittedSummarySplitsOutTheirSite()
-        theDeckKeepsTheDaemonsOrder()
-        unsubscribeNeedsALink()
-        aMutedSenderIsNotOfferedMute()
-        aHighScoreSuggestsEndingIt()
-        aHighScoreWithNoWayOutSuggestsClearing()
-        aMiddlingScoreSuggestsClearing()
-        aLowOrMissingScoreSuggestsNothing()
-        readCloselyNeverSuggestsLeaving()
-        decidingStagesAndAdvances()
-        aDisallowedDecisionIsRefused()
-        backUnstagesThePreviousCard()
-        finishingEarlyLeavesTheRestUntouched()
-        progressIsAPositionThatStopsAtTheTotal()
-        theStagedSummaryAddsUp()
-        aSummaryOfSkipsIsEmpty()
-        perMonthIsRoundedOnce()
-        theCommittedSummaryCountsOnlyWhatLanded()
         everyReasonHasItsSentence()
         durationsReadAsSecondsThenMinutes()
         wordsAreRoundedToWhatSomeoneWouldSay()
@@ -47,13 +26,57 @@ struct PurgeTests {
         marksAreOneEachUntilTheCap()
         cappedMarksKeepTheirShare()
         aMonthIsThirtyDays()
-        captionsSayWhatAChoiceDoesOrWhyNot()
-        thePlanNamesEachKindOnce()
-        theSiteNoteIsPlainAboutWhoIsStillSubscribed()
-        theEndCardLeadsWithTheBestTrueThing()
-        failuresAndCountsReadAsSentences()
+        onlyConfidentSendersAreOnTheDeck()
+        readCloselyOnTopKeepsASenderOffTheDeck()
+        noLinkAndAlreadyMutedIsNothingToOffer()
+        theDeckKeepsTheDaemonsOrder()
+        theFixtureShowsOnlyTheSendersWorthAsking()
+        aFewCandidatesAreNeededBeforeItIsOffered()
+        aLinkMeansUnsubscribeAndNoLinkMeansBlock()
+        aRuleNeedsASentenceAndAnUnruledSender()
+        decidingStagesAndAdvances()
+        aChoiceNotOnOfferIsRefused()
+        aRuleSurvivesBackAndConfirm()
+        finishingEarlyLeavesTheRestUntouched()
+        progressIsAPositionThatStopsAtTheTotal()
+        theStagedSummaryAddsUp()
+        onlyKeepsChangesNothing()
+        perMonthIsRoundedOnce()
+        aStatusIsWhatTheJobSaysNow()
+        theLiveSummaryCountsOnlyWhatHappened()
+        thePlanNamesEverySenderUnderWhatHappensToIt()
+        blockExplainsItself()
+        aSuggestionIsNeverBuiltIntoASentence()
+        needsYouLinesSayWhy()
+        theHeadlineFollowsWhereThingsStand()
+        countsReadAsSentences()
         noDeckCopyCarriesADash()
+        try smartDoneRowsDecodeLeniently()
         print("purge: ok")
+    }
+
+    /// The smart done answer's `rows`: optional, and tolerant row by row.
+    static func smartDoneRowsDecodeLeniently() throws {
+        func decode(_ json: String) throws -> SmartDoneResult {
+            try JSONDecoder().decode(SmartDoneResult.self, from: Data(json.utf8))
+        }
+        let old = try decode(#"{"batch_id":"b","cleared":2,"senders":1,"by_reason":{},"message_ids":[1,2],"model":"ok"}"#)
+        precondition(old.rows == nil, "a daemon without rows: no list, never a faked one")
+        let got = try decode(#"""
+            {"batch_id":"b","cleared":3,"senders":2,"by_reason":{"offer_ended":2},"message_ids":[912,913,914],
+             "rows":[
+              {"message_id":912,"reason":"offer_ended","sender":"news@example.com","sender_name":"Example Weekly",
+               "subject":"48 hours only","received_at":"2026-09-28T03:09:44.036873+00:00"},
+              {"message_id":913,"reason":"from_a_newer_daemon","sender":"a@example.com","sender_name":"",
+               "subject":null,"received_at":null},
+              {"message_id":"not a number","sender":"b@example.com"}
+             ]}
+            """#)
+        precondition(got.rows?.count == 2, "a row that cannot be read costs itself, not the answer")
+        precondition(got.rows?[0].received_at == "2026-09-28T03:09:44.036873+00:00", "kept as the string sent")
+        precondition(got.rows?[1].reason == "from_a_newer_daemon", "an unknown reason still decodes")
+        precondition(got.rows?[1].sender_name == "" && got.rows?[1].subject == nil)
+        precondition(got.cleared == 3)
     }
 
     // MARK: fixtures
@@ -109,8 +132,6 @@ struct PurgeTests {
         } ] }
         """
     }
-
-    // MARK: the wire
 
     static func decodesTheDaemonsPage() throws {
         let all = """
@@ -180,8 +201,6 @@ struct PurgeTests {
         precondition(got.senders[0].reasons == [.neverClicked(opened: 3)])
     }
 
-    // MARK: who is on the deck
-
     static func aKnownContactIsNeverOnTheDeck() {
         precondition(PurgeCard(sender("mum@example.com", known: true, score: 99)) == nil)
         precondition(PurgeCard(sender("shop@example.com")) != nil)
@@ -226,279 +245,6 @@ struct PurgeTests {
         let quiet = try decode(page(reasons: "[]").replacingOccurrences(of: "\"total_senders\": 1,", with: ""))
         precondition(quiet.total_senders == nil && quiet.totalSenders == 1)
     }
-
-    static func aYoungLedgerHasNoMonthlyRate() throws {
-        let json = """
-            { "window_days": 90, "ledger_days": 3, "senders": [ {
-                "sender": "a@b.c", "display_name": "A", "open_count": 4, "open_message_ids": [5],
-                "signals": { "received": 5, "opened": 0, "cleared_unopened": 0, "dwell_sample": 0,
-                    "median_dwell_ms": null, "clicks": 0, "read_sample": 0,
-                    "median_read_fraction": null, "median_words": null, "per_month": null },
-                "known_contact": false, "rule": null,
-                "unsubscribe": {"message_id": 5, "auto": true}, "unsubscribed": null,
-                "score": null, "reasons": [ {"code": "not_enough_history"} ] } ] }
-            """
-        let got = try decode(json)
-        precondition(got.senders[0].signals.per_month == nil, "null must decode, not fail the page")
-        var deck = PurgeDeck(senders: got.senders)
-        precondition(deck.decide(.unsubscribe))
-        let summary = PurgeSummary(deck: deck)
-        precondition(summary.unsubscribed == 1 && summary.fewerPerMonth == 0, "no rate is no saving claimed")
-    }
-
-    static func siteBoundIsTheStagedUnsubscribesTheDaemonWillNotDo() {
-        precondition(!card(sender("a@x.com", auto: true)).unsubscribeIsOnTheirSite)
-        precondition(card(sender("a@x.com", auto: false)).unsubscribeIsOnTheirSite)
-        precondition(!card(sender("a@x.com", link: false)).unsubscribeIsOnTheirSite, "no link is not a site")
-        var deck = PurgeDeck(senders: [
-            sender("auto@x.com", auto: true), sender("site@x.com", auto: false),
-            sender("muted@x.com", auto: false), sender("site2@x.com", auto: false),
-            sender("later@x.com", auto: false),
-        ])
-        precondition(deck.siteBound.isEmpty, "nothing staged")
-        deck.decide(.unsubscribe)
-        deck.decide(.unsubscribe)
-        deck.decide(.mute)  // a site sender, but not asked to unsubscribe
-        deck.decide(.unsubscribe)
-        precondition(deck.siteBound.map(\.id) == ["site@x.com", "site2@x.com"], "in deck order")
-    }
-
-    static func theStagedSummarySplitsOutTheirSite() {
-        var deck = PurgeDeck(senders: [
-            sender("auto@x.com", open: 3, perMonth: 10, auto: true),
-            sender("site@x.com", open: 5, perMonth: 30, auto: false),
-        ])
-        deck.decide(.unsubscribe)
-        deck.decide(.unsubscribe)
-        let s = PurgeSummary(deck: deck)
-        precondition(s.unsubscribed == 1 && s.onTheirSite == 1, "not claimed until it has happened")
-        precondition(s.fewerPerMonth == 10, "the site sender's 30 a month is still arriving")
-        precondition(s.emailsCleared == 8, "their open mail is cleared all the same")
-        // Alone, it is still something to confirm: mail gets cleared.
-        var only = PurgeDeck(senders: [sender("site@x.com", auto: false)])
-        only.decide(.unsubscribe)
-        precondition(!PurgeSummary(deck: only).isEmpty)
-        // A MUTE of a site sender is a mute.
-        var muted = PurgeDeck(senders: [sender("site@x.com", perMonth: 6, auto: false)])
-        muted.decide(.mute)
-        precondition(PurgeSummary(deck: muted).onTheirSite == 0 && PurgeSummary(deck: muted).fewerPerMonth == 6)
-    }
-
-    static func theCommittedSummarySplitsOutTheirSite() {
-        var deck = PurgeDeck(senders: [
-            sender("auto@x.com", open: 3, perMonth: 10, auto: true),
-            sender("site@x.com", open: 5, perMonth: 30, auto: false),
-            sender("refused@x.com", open: 2, perMonth: 8, auto: true),
-        ])
-        for _ in 0..<3 { deck.decide(.unsubscribe) }
-        let s = PurgeSummary(
-            deck: deck,
-            outcomes: [
-                "auto@x.com": .applied(.unsubscribe, emailsCleared: 3),
-                "site@x.com": .onTheirSite(emailsCleared: 4),
-                // Promised automatic, handed back a page at request time.
-                "refused@x.com": .onTheirSite(emailsCleared: 2),
-            ])
-        precondition(s.unsubscribed == 1 && s.onTheirSite == 2 && s.failed == 0)
-        precondition(s.fewerPerMonth == 10 && s.emailsCleared == 9)
-        let none = PurgeSummary(deck: deck, outcomes: ["site@x.com": .onTheirSite(emailsCleared: 0)])
-        precondition(!none.isEmpty && none.failed == 2)
-    }
-
-    static func theDeckKeepsTheDaemonsOrder() {
-        let deck = PurgeDeck(senders: [
-            sender("c@x.com", score: 90), sender("known@x.com", known: true),
-            sender("a@x.com", score: 20), sender("b@x.com", score: 50),
-        ])
-        precondition(deck.cards.map(\.id) == ["c@x.com", "a@x.com", "b@x.com"], "filtered, not re-sorted")
-        precondition(PurgeDeck(senders: [sender("k@x.com", known: true)]).isEmpty)
-    }
-
-    // MARK: what a card may be asked
-
-    static func unsubscribeNeedsALink() {
-        precondition(card(sender("a@x.com", link: true)).allowed == [.unsubscribe, .mute, .clear, .skip])
-        precondition(card(sender("a@x.com", link: false)).allowed == [.mute, .clear, .skip])
-    }
-
-    static func aMutedSenderIsNotOfferedMute() {
-        precondition(card(sender("a@x.com", rule: .squelch)).allowed == [.unsubscribe, .clear, .skip])
-        precondition(card(sender("a@x.com", rule: .filtered)).allowed.contains(.mute))
-    }
-
-    // MARK: what is suggested
-
-    static func aHighScoreSuggestsEndingIt() {
-        precondition(card(sender("a@x.com", score: 70)).recommended == .unsubscribe, "70 is in")
-        precondition(card(sender("a@x.com", link: false, score: 95)).recommended == .mute)
-    }
-
-    static func aHighScoreWithNoWayOutSuggestsClearing() {
-        precondition(card(sender("a@x.com", rule: .squelch, link: false, score: 95)).recommended == .clear)
-    }
-
-    static func aMiddlingScoreSuggestsClearing() {
-        precondition(card(sender("a@x.com", score: 69)).recommended == .clear)
-        precondition(card(sender("a@x.com", score: 40)).recommended == .clear, "40 is in")
-    }
-
-    static func aLowOrMissingScoreSuggestsNothing() {
-        precondition(card(sender("a@x.com", score: 39)).recommended == nil)
-        precondition(card(sender("a@x.com", score: nil)).recommended == nil)
-    }
-
-    static func readCloselyNeverSuggestsLeaving() {
-        let read: [PurgeReason] = [.readClosely(medianReadFraction: 0.9), .highVolume(perMonth: 30)]
-        precondition(card(sender("a@x.com", score: 95, reasons: read)).recommended == .clear)
-        precondition(card(sender("a@x.com", link: false, score: 95, reasons: read)).recommended == .clear)
-        // Only as the TOP reason: further down it lost the argument.
-        let buried: [PurgeReason] = [.highVolume(perMonth: 30), .readClosely(medianReadFraction: 0.9)]
-        precondition(card(sender("a@x.com", score: 95, reasons: buried)).recommended == .unsubscribe)
-    }
-
-    // MARK: the deck
-
-    static func three() -> PurgeDeck {
-        PurgeDeck(senders: [
-            sender("a@x.com", open: 3, perMonth: 10), sender("b@x.com", open: 5, perMonth: 2.4, link: false),
-            sender("c@x.com", open: 1, perMonth: 7),
-        ])
-    }
-
-    static func decidingStagesAndAdvances() {
-        var deck = three()
-        precondition(deck.current?.id == "a@x.com" && !deck.isFinished && deck.staged.isEmpty)
-        precondition(deck.decide(.unsubscribe))
-        precondition(deck.current?.id == "b@x.com" && deck.decision(for: "a@x.com") == .unsubscribe)
-        precondition(deck.decide(.skip) && deck.decide(.clear))
-        precondition(deck.isFinished && deck.current == nil)
-        precondition(deck.plan.map(\.card.id) == ["a@x.com", "b@x.com", "c@x.com"])
-        precondition(deck.plan.map(\.decision) == [.unsubscribe, .skip, .clear])
-        precondition(!deck.decide(.skip), "nothing to decide past the end")
-        precondition(deck.staged.count == 3)
-    }
-
-    static func aDisallowedDecisionIsRefused() {
-        var deck = three()
-        deck.decide(.skip)
-        let before = deck
-        precondition(!deck.decide(.unsubscribe), "b has no link")
-        precondition(deck == before, "a refusal stages nothing and does not advance")
-        precondition(deck.decide(.mute))
-    }
-
-    static func backUnstagesThePreviousCard() {
-        var deck = three()
-        precondition(!deck.back(), "nothing behind the first card")
-        deck.decide(.unsubscribe)
-        deck.decide(.mute)
-        precondition(deck.back())
-        precondition(deck.current?.id == "b@x.com")
-        precondition(deck.decision(for: "b@x.com") == nil, "asked again, not shown pre-answered")
-        precondition(deck.decision(for: "a@x.com") == .unsubscribe, "only the one stepped onto")
-        // From the far end.
-        deck.decide(.mute)
-        deck.decide(.clear)
-        precondition(deck.isFinished && deck.back() && !deck.isFinished)
-        precondition(deck.current?.id == "c@x.com" && deck.decision(for: "c@x.com") == nil)
-    }
-
-    static func finishingEarlyLeavesTheRestUntouched() {
-        var deck = three()
-        deck.decide(.mute)
-        deck.finishEarly()
-        precondition(deck.isFinished && deck.current == nil)
-        precondition(deck.staged == ["a@x.com": .mute], "b and c were never looked at")
-        precondition(!deck.decide(.clear), "a left deck takes no more decisions")
-        let summary = PurgeSummary(deck: deck)
-        precondition(summary.muted == 1 && summary.skipped == 0, "untouched is not skipped")
-        // Back from the confirm step: the card they left on, nothing undone.
-        precondition(deck.back())
-        precondition(!deck.isFinished && deck.current?.id == "b@x.com")
-        precondition(deck.staged == ["a@x.com": .mute])
-    }
-
-    static func progressIsAPositionThatStopsAtTheTotal() {
-        var deck = three()
-        precondition(deck.progress == PurgeDeck.Progress(position: 1, total: 3))
-        deck.decide(.skip)
-        precondition(deck.progress == PurgeDeck.Progress(position: 2, total: 3))
-        deck.decide(.skip)
-        deck.decide(.skip)
-        precondition(deck.progress == PurgeDeck.Progress(position: 3, total: 3), "never 4 of 3")
-    }
-
-    // MARK: the summary
-
-    static func theStagedSummaryAddsUp() {
-        var deck = PurgeDeck(senders: [
-            sender("a@x.com", open: 3, perMonth: 10), sender("b@x.com", open: 5, perMonth: 2.4),
-            sender("c@x.com", open: 1, perMonth: 7), sender("d@x.com", open: 40, perMonth: 99),
-            sender("e@x.com", open: 2, perMonth: 1),
-        ])
-        deck.decide(.unsubscribe)
-        deck.decide(.mute)
-        deck.decide(.clear)
-        deck.decide(.skip)
-        deck.decide(.unsubscribe)
-        let s = PurgeSummary(deck: deck)
-        precondition(s.unsubscribed == 2 && s.muted == 1 && s.cleared == 1 && s.skipped == 1)
-        precondition(s.failed == 0)
-        precondition(s.emailsCleared == 3 + 5 + 1 + 2, "every decision but the skip's 40")
-        precondition(s.fewerPerMonth == 13, "10 + 2.4 + 1; not the cleared 7, not the skipped 99")
-        precondition(!s.isEmpty)
-    }
-
-    static func aSummaryOfSkipsIsEmpty() {
-        var deck = three()
-        precondition(PurgeSummary(deck: deck).isEmpty, "nothing decided")
-        deck.decide(.skip)
-        deck.decide(.skip)
-        precondition(PurgeSummary(deck: deck).isEmpty && PurgeSummary(deck: deck).skipped == 2)
-        deck.decide(.clear)
-        precondition(!PurgeSummary(deck: deck).isEmpty, "a clear alone is something to confirm")
-    }
-
-    static func perMonthIsRoundedOnce() {
-        var deck = PurgeDeck(senders: (0..<5).map { sender("s\($0)@x.com", perMonth: 0.4) })
-        for _ in 0..<5 { deck.decide(.mute) }
-        precondition(PurgeSummary(deck: deck).fewerPerMonth == 2, "five at 0.4 are two, not five zeros")
-        // To the NEAREST: 2.6 fewer is three, where cutting the fraction off
-        // (or rounding each 1.3 down first) would say two.
-        var pair = PurgeDeck(senders: (0..<2).map { sender("p\($0)@x.com", perMonth: 1.3) })
-        for _ in 0..<2 { pair.decide(.unsubscribe) }
-        precondition(PurgeSummary(deck: pair).fewerPerMonth == 3)
-    }
-
-    static func theCommittedSummaryCountsOnlyWhatLanded() {
-        var deck = PurgeDeck(senders: [
-            sender("a@x.com", open: 3, perMonth: 10), sender("b@x.com", open: 5, perMonth: 4),
-            sender("c@x.com", open: 6, perMonth: 7), sender("d@x.com", open: 2, perMonth: 3),
-            sender("e@x.com", open: 9, perMonth: 50), sender("f@x.com", open: 1, perMonth: 1),
-        ])
-        deck.decide(.unsubscribe)  // lands
-        deck.decide(.unsubscribe)  // no link after all: muted instead
-        deck.decide(.clear)  // 4 of its 6 marks landed
-        deck.decide(.mute)  // fails
-        deck.decide(.skip)
-        deck.decide(.unsubscribe)  // never tried
-        let s = PurgeSummary(
-            deck: deck,
-            outcomes: [
-                "a@x.com": .applied(.unsubscribe, emailsCleared: 3),
-                "b@x.com": .applied(.mute, emailsCleared: 5),
-                "c@x.com": .applied(.clear, emailsCleared: 4),
-                "d@x.com": .failed,
-            ])
-        precondition(s.unsubscribed == 1 && s.muted == 1 && s.cleared == 1, "counted as what was DONE")
-        precondition(s.skipped == 1 && s.failed == 2, "the failure and the one never tried")
-        precondition(s.emailsCleared == 3 + 5 + 4)
-        precondition(s.fewerPerMonth == 14, "a and b; not the failed d or the untried f")
-        precondition(PurgeSummary(deck: deck, outcomes: [:]).isEmpty, "nothing landed")
-        precondition(PurgeSummary(deck: deck, outcomes: [:]).failed == 5)
-    }
-
-    // MARK: the sentences
 
     static let everyReason: [(PurgeReason, String)] = [
         (.rarelyOpened(opened: 1, received: 23), "Opened 1 of 23"),
@@ -579,8 +325,6 @@ struct PurgeTests {
         }
     }
 
-    // MARK: marks
-
     static func marksAreOneEachUntilTheCap() {
         precondition(PurgeMarks.split(lit: 1, of: 23) == (1, 23))
         precondition(PurgeMarks.split(lit: 0, of: 24) == (0, 24))
@@ -602,110 +346,345 @@ struct PurgeTests {
         precondition(PurgeMarks.days(perMonth: 0.2) == (0, 30))
     }
 
-    // MARK: deck, confirm and end copy
+    // MARK: who is on the deck
 
-    static func captionsSayWhatAChoiceDoesOrWhyNot() {
-        let auto = card(sender("a@x.com"))
-        precondition(PurgeCopy.caption(.unsubscribe, on: auto) == "ask them to stop")
-        precondition(PurgeCopy.caption(.mute, on: auto) == "hide what they send")
-        precondition(PurgeCopy.caption(.clear, on: auto) == "stay subscribed")
-        precondition(PurgeCopy.caption(.skip, on: auto) == "leave as is")
-        let site = card(sender("b@x.com", auto: false))
-        precondition(PurgeCopy.caption(.unsubscribe, on: site) == "you finish on their site")
-        let noLink = card(sender("c@x.com", link: false))
-        precondition(PurgeCopy.caption(.unsubscribe, on: noLink) == "no link found")
-        let muted = card(sender("d@x.com", rule: .squelch))
-        precondition(PurgeCopy.caption(.mute, on: muted) == "already muted")
-        precondition(PurgeCopy.staged(.unsubscribe, name: "Ox") == "Will unsubscribe from Ox.")
-        precondition(PurgeCopy.staged(.skip, name: "Ox") == "Skipped Ox.")
+    static func onlyConfidentSendersAreOnTheDeck() {
+        precondition(PurgeCard(sender("a@x.com", score: PurgeCard.endAt)) != nil, "at the line is in")
+        precondition(PurgeCard(sender("b@x.com", score: PurgeCard.endAt - 1)) == nil, "one under is out")
+        precondition(PurgeCard(sender("c@x.com", score: nil)) == nil, "no score is unsure")
+        precondition(PurgeCard(sender("d@x.com", score: 99, reasons: [.notEnoughHistory])) != nil)
+        precondition(PurgeCard.endAt == 70)
     }
 
-    static func summary(
-        unsubscribed: Int = 0, muted: Int = 0, cleared: Int = 0, onTheirSite: Int = 0,
-        emails: Int = 0, fewer: Int = 0
-    ) -> PurgeSummary {
-        var s = PurgeSummary(deck: PurgeDeck(senders: []))
-        s.unsubscribed = unsubscribed
-        s.muted = muted
-        s.cleared = cleared
-        s.onTheirSite = onTheirSite
-        s.emailsCleared = emails
-        s.fewerPerMonth = fewer
-        return s
+    static func readCloselyOnTopKeepsASenderOffTheDeck() {
+        let top = sender(
+            "e@x.com", score: 95, reasons: [.readClosely(medianReadFraction: 0.9), .highVolume(perMonth: 30)])
+        precondition(PurgeCard(top) == nil, "worth keeping, whatever volume did to the score")
+        let lower = sender(
+            "f@x.com", score: 95, reasons: [.highVolume(perMonth: 30), .readClosely(medianReadFraction: 0.9)])
+        precondition(PurgeCard(lower) != nil, "only the TOP reason speaks for the sender")
     }
 
-    static func thePlanNamesEachKindOnce() {
-        precondition(
-            PurgeCopy.plan(summary(unsubscribed: 7, muted: 3, cleared: 14, onTheirSite: 2))
-                == ["Unsubscribe from 9", "Mute 3", "Clear 14 and stay subscribed"],
-            "site-bound unsubscribes are still unsubscribes the person chose")
-        precondition(PurgeCopy.plan(summary(cleared: 1)) == ["Clear 1 and stay subscribed"])
-        precondition(PurgeCopy.plan(summary(onTheirSite: 1)) == ["Unsubscribe from 1"])
-        precondition(PurgeCopy.plan(summary()).isEmpty)
+    static func noLinkAndAlreadyMutedIsNothingToOffer() {
+        precondition(PurgeCard(sender("g@x.com", rule: .squelch, link: false)) == nil)
+        precondition(PurgeCard(sender("h@x.com", rule: .squelch, link: true)) != nil, "a link is still a way out")
+        precondition(PurgeCard(sender("i@x.com", rule: .filtered, link: false)) != nil, "a filtered sender can be blocked")
+        precondition(PurgeCard(sender("j@x.com", link: false)) != nil)
     }
 
-    static func theSiteNoteIsPlainAboutWhoIsStillSubscribed() {
-        precondition(PurgeCopy.siteNote(summary(unsubscribed: 3)) == nil)
-        precondition(
-            PurgeCopy.siteNote(summary(onTheirSite: 1))
-                == "That one needs a visit to the sender's site afterwards. Until then you are still subscribed.")
-        precondition(
-            PurgeCopy.siteNote(summary(unsubscribed: 7, onTheirSite: 2))
-                == "2 of them need a visit to the sender's site afterwards. Until then you are still subscribed to those.")
-        precondition(
-            PurgeCopy.siteNote(summary(unsubscribed: 7, onTheirSite: 1))
-                == "1 of them needs a visit to the sender's site afterwards. Until then you are still subscribed to that one.")
-        precondition(
-            PurgeCopy.siteNote(summary(onTheirSite: 2))
-                == "Both need a visit to the sender's site afterwards. Until then you are still subscribed to those.")
-        precondition(
-            PurgeCopy.siteNote(summary(onTheirSite: 3))
-                == "All 3 need a visit to the sender's site afterwards. Until then you are still subscribed to those.")
+    static func theDeckKeepsTheDaemonsOrder() {
+        let deck = PurgeDeck(senders: [
+            sender("c@x.com", score: 90), sender("known@x.com", known: true),
+            sender("a@x.com", score: 71), sender("low@x.com", score: 50), sender("b@x.com", score: 99),
+        ])
+        precondition(deck.cards.map(\.id) == ["c@x.com", "a@x.com", "b@x.com"], "filtered, not re-sorted")
+        precondition(PurgeDeck(senders: [sender("k@x.com", known: true)]).isEmpty)
     }
 
-    static func theEndCardLeadsWithTheBestTrueThing() {
-        precondition(
-            PurgeCopy.finished(summary(unsubscribed: 2, emails: 9, fewer: 60))
-                == "About 60 fewer emails a month.")
-        precondition(PurgeCopy.finished(summary(muted: 1, fewer: 1)) == "About 1 fewer email a month.")
-        precondition(PurgeCopy.finished(summary(cleared: 2, emails: 14)) == "14 emails cleared.")
-        precondition(PurgeCopy.finished(summary(cleared: 1, emails: 1)) == "1 email cleared.")
-        precondition(PurgeCopy.finished(summary(cleared: 1)) == "Reading is lighter.")
+    static func theFixtureShowsOnlyTheSendersWorthAsking() {
+        let deck = PurgeDeck(senders: PurgeFixture.wanted + PurgeFixture.unwanted)
+        precondition(deck.cards.map(\.id) == PurgeFixture.wanted.map(\.sender), "\(deck.cards.map(\.id))")
+        precondition(PurgeFixture.unwanted.count >= 5)
+        for s in PurgeFixture.unwanted { precondition(PurgeCard(s) == nil, "\(s.sender) must not be shown") }
+        precondition(PurgeFixture.staged.count == deck.cards.count)
+        var walked = deck
+        for d in PurgeFixture.staged { precondition(walked.decide(d), "fixture decision \(d) must be on offer") }
     }
 
-    static func failuresAndCountsReadAsSentences() {
+    static func aFewCandidatesAreNeededBeforeItIsOffered() {
+        precondition(PurgeDeck.minimumCandidates == 3)
+        let two = PurgeDeck(senders: [sender("a@x.com"), sender("b@x.com"), sender("low@x.com", score: 10)])
+        precondition(!two.isWorthOffering, "senders the deck would not show do not count")
+        let three = PurgeDeck(senders: [sender("a@x.com"), sender("b@x.com"), sender("c@x.com")])
+        precondition(three.isWorthOffering)
+        precondition(!PurgeDeck(senders: []).isWorthOffering)
+    }
+
+    // MARK: what a card offers
+
+    static func aLinkMeansUnsubscribeAndNoLinkMeansBlock() {
+        let linked = card(sender("a@x.com"))
+        precondition(linked.ending == .unsubscribe)
+        precondition(linked.allows(.unsubscribe) && !linked.allows(.block))
+        let bare = card(sender("b@x.com", link: false))
+        precondition(bare.ending == .block)
+        precondition(bare.allows(.block) && !bare.allows(.unsubscribe))
+        precondition(linked.allows(.keep) && bare.allows(.keep))
+        precondition(card(sender("c@x.com", auto: false)).unsubscribeIsOnTheirSite)
+        precondition(!linked.unsubscribeIsOnTheirSite && !bare.unsubscribeIsOnTheirSite)
+    }
+
+    static func aRuleNeedsASentenceAndAnUnruledSender() {
+        let plain = card(sender("a@x.com"))
+        precondition(plain.offersRules && plain.allows(.rule("only receipts")))
+        precondition(!plain.allows(.rule("")) && !plain.allows(.rule("  \n")))
+        let ruled = card(sender("b@x.com", rule: .filtered))
+        precondition(!ruled.offersRules && !ruled.allows(.rule("only receipts")))
+    }
+
+    // MARK: the deck
+
+    static func threeSenders() -> PurgeDeck {
+        PurgeDeck(senders: [sender("a@x.com"), sender("b@x.com", link: false), sender("c@x.com")])
+    }
+
+    static func decidingStagesAndAdvances() {
+        var deck = threeSenders()
+        precondition(deck.current?.id == "a@x.com" && deck.next?.id == "b@x.com")
+        precondition(deck.previous == nil)
+        precondition(deck.decide(.unsubscribe))
+        precondition(deck.decision(for: "a@x.com") == .unsubscribe && deck.current?.id == "b@x.com")
+        precondition(deck.previous?.card.id == "a@x.com" && deck.previous?.decision == .unsubscribe)
+        precondition(deck.decide(.block) && deck.decide(.keep))
+        precondition(deck.isFinished && deck.current == nil && deck.next == nil)
+        precondition(deck.plan.map(\.decision) == [.unsubscribe, .block, .keep])
+    }
+
+    static func aChoiceNotOnOfferIsRefused() {
+        var deck = threeSenders()
+        precondition(!deck.decide(.block), "a sender with a link is unsubscribed from, not blocked")
+        precondition(!deck.decide(.rule("")))
+        precondition(deck.current?.id == "a@x.com" && deck.plan.isEmpty, "nothing staged, nothing moved")
+        precondition(deck.decide(.keep))
+        precondition(!deck.decide(.unsubscribe), "no link: there is nothing to unsubscribe with")
+    }
+
+    static func aRuleSurvivesBackAndConfirm() {
+        var deck = threeSenders()
+        let want = "only order confirmations and delivery updates"
+        precondition(deck.decide(.rule(want)))
+        precondition(deck.decide(.block))
+        precondition(deck.decision(for: "a@x.com") == .rule(want), "the sentence rides with the decision")
+        precondition(deck.back())
+        precondition(deck.current?.id == "b@x.com" && deck.decision(for: "b@x.com") == nil)
+        precondition(deck.decision(for: "a@x.com") == .rule(want), "back un-stages one card only")
+        deck.finishEarly()
+        let groups = PurgePlan.groups(deck)
+        precondition(groups.map(\.kind) == [.rule])
+        precondition(groups[0].entries.map(\.detail) == [want], "and reaches the confirm page whole")
+        precondition(deck.back() && deck.current?.id == "b@x.com", "back from confirm returns to the card left on")
+        precondition(deck.back() && deck.current?.id == "a@x.com" && deck.plan.isEmpty)
+        precondition(!deck.back(), "false at the first card")
+    }
+
+    static func finishingEarlyLeavesTheRestUntouched() {
+        var deck = threeSenders()
+        deck.decide(.unsubscribe)
+        deck.finishEarly()
+        precondition(deck.isFinished && deck.plan.count == 1)
+        precondition(deck.decision(for: "b@x.com") == nil && deck.decision(for: "c@x.com") == nil)
+    }
+
+    static func progressIsAPositionThatStopsAtTheTotal() {
+        var deck = threeSenders()
+        precondition(deck.progress == .init(position: 1, total: 3))
+        deck.decide(.keep)
+        deck.decide(.keep)
+        deck.decide(.keep)
+        precondition(deck.progress == .init(position: 3, total: 3))
+    }
+
+    // MARK: what it comes to
+
+    static func theStagedSummaryAddsUp() {
+        var deck = PurgeDeck(senders: [
+            sender("a@x.com", perMonth: 10), sender("site@x.com", perMonth: 7, auto: false),
+            sender("b@x.com", perMonth: 5.4, link: false), sender("c@x.com", perMonth: 30),
+            sender("d@x.com", perMonth: 40), sender("untouched@x.com", perMonth: 99),
+        ])
+        precondition(PurgeSummary(deck: deck).isEmpty)
+        deck.decide(.unsubscribe)
+        deck.decide(.unsubscribe)
+        deck.decide(.block)
+        deck.decide(.rule("only receipts"))
+        deck.decide(.keep)
+        let s = PurgeSummary(deck: deck)
+        precondition(s.unsubscribed == 1 && s.needsYou == 1 && s.blocked == 1 && s.rules == 1 && s.kept == 1)
+        precondition(s.ending == 2, "a site-bound unsubscribe is still one the person chose")
+        precondition(s.fewerPerMonth == 15, "10 + 5.4: not the site one, the rule or the keep. got \(s.fewerPerMonth)")
+        precondition(!s.isEmpty && !s.changesNothing && s.isSettled)
+    }
+
+    static func onlyKeepsChangesNothing() {
+        var deck = threeSenders()
+        deck.decide(.keep)
+        let s = PurgeSummary(deck: deck)
+        precondition(!s.isEmpty && s.changesNothing && s.kept == 1 && s.fewerPerMonth == 0)
+        var ruled = threeSenders()
+        ruled.decide(.rule("only receipts"))
+        precondition(!PurgeSummary(deck: ruled).changesNothing, "a rule alone changes what arrives")
+    }
+
+    static func perMonthIsRoundedOnce() {
+        var deck = PurgeDeck(senders: (0..<5).map { sender("s\($0)@x.com", perMonth: 0.4) })
+        for _ in 0..<5 { deck.decide(.unsubscribe) }
+        precondition(PurgeSummary(deck: deck).fewerPerMonth == 2, "five at 0.4 are two, not zero")
+    }
+
+    static func aStatusIsWhatTheJobSaysNow() {
+        precondition(PurgeStatus.resolve(.unsubscribing, job: nil, opened: false) == .running, "accepted, no row yet")
+        precondition(PurgeStatus.resolve(.unsubscribing, job: .running, opened: false) == .running)
+        precondition(PurgeStatus.resolve(.unsubscribing, job: .done, opened: false) == .unsubscribed)
+        precondition(
+            PurgeStatus.resolve(.unsubscribing, job: .needsYou(reason: "choose_topics"), opened: false)
+                == .needsYou(reason: "choose_topics"))
+        precondition(
+            PurgeStatus.resolve(.unsubscribing, job: .needsYou(reason: nil), opened: true) == .opened)
+        precondition(
+            PurgeStatus.resolve(.onTheirSite, job: nil, opened: false)
+                == .needsYou(reason: PurgeStatus.siteOnly))
+        precondition(PurgeStatus.resolve(.onTheirSite, job: .done, opened: true) == .opened)
+        precondition(PurgeStatus.resolve(.blocked, job: nil, opened: false) == .blocked)
+        precondition(PurgeStatus.resolve(.ruled("x"), job: nil, opened: false) == .ruled("x"))
+        precondition(PurgeStatus.resolve(.kept, job: nil, opened: false) == .kept)
+        precondition(PurgeStatus.resolve(.failed, job: .done, opened: false) == .failed)
+    }
+
+    static func theLiveSummaryCountsOnlyWhatHappened() {
+        let cards = (0..<8).map { card(sender("s\($0)@x.com", perMonth: 10)) }
+        let statuses: [PurgeStatus] = [
+            .running, .unsubscribed, .needsYou(reason: nil), .opened, .blocked, .ruled("x"), .kept,
+            .failed,
+        ]
+        let s = PurgeSummary(statuses: zip(cards, statuses).map { (card: $0, status: $1) })
+        precondition(s.running == 1 && s.unsubscribed == 1 && s.needsYou == 1 && s.opened == 1)
+        precondition(s.blocked == 1 && s.rules == 1 && s.kept == 1 && s.failed == 1)
+        precondition(s.fewerPerMonth == 20, "the one that went through and the block, nothing else")
+        precondition(!s.isSettled)
+        let done = PurgeSummary(statuses: [(card: cards[0], status: .unsubscribed)])
+        precondition(done.isSettled && done.fewerPerMonth == 10)
+    }
+
+    // MARK: the confirm page
+
+    static func thePlanNamesEverySenderUnderWhatHappensToIt() {
+        var deck = PurgeDeck(senders: [
+            sender("keep@x.com"), sender("a@x.com"), sender("b@x.com", link: false),
+            sender("site@x.com", auto: false), sender("r@x.com"), sender("c@x.com"),
+            sender("untouched@x.com"),
+        ])
+        deck.decide(.keep)
+        deck.decide(.unsubscribe)
+        deck.decide(.block)
+        deck.decide(.unsubscribe)
+        deck.decide(.rule("just the invoices"))
+        deck.decide(.unsubscribe)
+        deck.finishEarly()
+        let groups = PurgePlan.groups(deck)
+        precondition(groups.map(\.kind) == [.unsubscribe, .block, .rule, .keep], "in the order they matter")
+        precondition(groups[0].entries.map(\.id) == ["a@x.com", "site@x.com", "c@x.com"], "deck order within")
+        precondition(groups[0].entries.map(\.detail) == [nil, PurgeCopy.siteDetail, nil])
+        precondition(groups[1].entries.map(\.id) == ["b@x.com"] && groups[1].entries[0].detail == nil)
+        precondition(groups[2].entries.map(\.detail) == ["just the invoices"])
+        precondition(groups[3].entries.map(\.id) == ["keep@x.com"])
+        precondition(!groups.flatMap(\.entries).contains { $0.id == "untouched@x.com" })
+        precondition(PurgePlan.groups(PurgeDeck(senders: [sender("z@x.com")])).isEmpty, "empty groups are left out")
+    }
+
+    // MARK: copy
+
+    static func blockExplainsItself() {
+        let bare = card(sender("b@x.com", link: false))
+        precondition(PurgeCopy.title(bare.ending) == "Block")
+        precondition(
+            PurgeCopy.explains(bare)
+                == "None of their emails carry an unsubscribe link, so the only way to stop them is to block them.")
+        precondition(PurgeCopy.note(.block) == "No unsubscribe link in any of their emails.")
+        let linked = card(sender("a@x.com"))
+        precondition(PurgeCopy.title(linked.ending) == "Unsubscribe")
+        precondition(PurgeCopy.explains(linked) == "Passband asks them to stop and tells you how it went.")
+        precondition(
+            PurgeCopy.explains(card(sender("s@x.com", auto: false)))
+                == "Their unsubscribe only works on their own site. You will get the link at the end.")
+        precondition(PurgeCopy.title(.keep) == "Keep them", "keeping, not skipping")
+    }
+
+    static func aSuggestionIsNeverBuiltIntoASentence() {
+        // In the owner's voice and any grammatical shape: nothing here may
+        // assume it starts with "only".
+        for want in ["only order confirmations", "mute the marketing", "just the invoices"] {
+            precondition(PurgeCopy.staged(.rule(want), name: "Ox") == "Will add a rule for Ox: \(want)")
+            precondition(PurgeCopy.status(.ruled(want)) == "Rule: \(want)")
+        }
+        precondition(!PurgeCopy.rulesLead.lowercased().contains("only show"))
+        precondition(PurgeCopy.rulesLead.hasSuffix(":") && PurgeCopy.rulesNote.hasSuffix("."))
+    }
+
+    static func needsYouLinesSayWhy() {
+        precondition(PurgeCopy.needsYou(PurgeStatus.siteOnly) == "Their unsubscribe only works on their site.")
+        precondition(PurgeCopy.needsYou("choose_topics") == "Their page asks which emails to stop.")
+        precondition(PurgeCopy.needsYou("needs_browser") == "Their page only works in a browser.")
+        precondition(PurgeCopy.needsYou("link_error") == "Their link didn't work from here.")
+        precondition(PurgeCopy.needsYou(nil) == "We couldn't confirm it went through.")
+        precondition(PurgeCopy.needsYou("from_the_future") == "We couldn't confirm it went through.")
+        precondition(PurgeCopy.status(.needsYou(reason: "choose_topics")) == "Their page asks which emails to stop.")
+        precondition(PurgeCopy.status(.running) == "Unsubscribing" && PurgeCopy.status(.unsubscribed) == "Unsubscribed")
+    }
+
+    static func theHeadlineFollowsWhereThingsStand() {
+        var s = PurgeSummary()
+        s.running = 1
+        s.unsubscribed = 2
+        s.fewerPerMonth = 40
+        precondition(PurgeCopy.headline(s) == "Working through them.", "not a claim while jobs run")
+        s.running = 0
+        s.needsYou = 2
+        precondition(PurgeCopy.headline(s) == "2 need you to finish.", "hands before good news")
+        s.needsYou = 1
+        precondition(PurgeCopy.headline(s) == "1 needs you to finish.")
+        s.needsYou = 0
+        precondition(PurgeCopy.headline(s) == "About 40 fewer emails a month.")
+        s.fewerPerMonth = 1
+        precondition(PurgeCopy.headline(s) == "About 1 fewer email a month.")
+        s.fewerPerMonth = 0
+        s.rules = 2
+        precondition(PurgeCopy.headline(s) == "2 new rules.")
+        s.rules = 1
+        precondition(PurgeCopy.headline(s) == "1 new rule.")
+        s.rules = 0
+        precondition(PurgeCopy.headline(s) == "All done.")
+    }
+
+    static func countsReadAsSentences() {
         precondition(PurgeCopy.failedNote(0) == nil)
-        precondition(PurgeCopy.failedNote(1) == "1 did not go through and is still in Reading.")
-        precondition(PurgeCopy.failedNote(3) == "3 did not go through and are still in Reading.")
-        precondition(PurgeCopy.leaving(0) == nil)
-        precondition(PurgeCopy.leaving(1) == "1 email leaves Reading")
-        precondition(PurgeCopy.leaving(31) == "31 emails leave Reading")
+        precondition(PurgeCopy.failedNote(1) == "1 did not go through. Nothing changed for that sender.")
+        precondition(PurgeCopy.failedNote(3) == "3 did not go through. Nothing changed for those senders.")
         precondition(PurgeCopy.fewer(0) == nil)
-        precondition(PurgeCopy.fewer(60) == "about 60 fewer a month")
+        precondition(PurgeCopy.fewer(1) == "about 1 fewer email a month")
+        precondition(PurgeCopy.fewer(60) == "about 60 fewer emails a month")
+        precondition(PurgeCopy.keptOnly(1) == "Kept 1 sender." && PurgeCopy.keptOnly(4) == "Kept 4 senders.")
     }
 
     static func noDeckCopyCarriesADash() {
         let cards = [
             card(sender("a@x.com")), card(sender("b@x.com", auto: false)),
-            card(sender("c@x.com", link: false)), card(sender("d@x.com", rule: .squelch)),
+            card(sender("c@x.com", link: false)),
         ]
-        var all: [String] = []
-        for c in cards {
-            for d in PurgeDecision.allCases {
-                all += [PurgeCopy.caption(d, on: c), PurgeCopy.title(d), PurgeCopy.staged(d, name: "x")]
-            }
-        }
-        for s in [
-            summary(unsubscribed: 7, muted: 3, cleared: 14, onTheirSite: 2, emails: 31, fewer: 60),
-            summary(onTheirSite: 1), summary(onTheirSite: 2), summary(cleared: 1),
+        var all: [String] = [
+            PurgeCopy.keepCaption, PurgeCopy.rulesLead, PurgeCopy.rulesNote, PurgeCopy.rulesLoading,
+            PurgeCopy.siteDetail, PurgeCopy.needsYouTitle, PurgeCopy.needsYouLead, PurgeCopy.laterNote,
+            PurgeCopy.tooFew, PurgeCopy.keptOnly(1), PurgeCopy.keptOnly(2),
+            PurgeCopy.failedNote(1) ?? "", PurgeCopy.failedNote(2) ?? "",
+            PurgeCopy.fewer(1) ?? "", PurgeCopy.fewer(2) ?? "",
+        ]
+        let decisions: [PurgeDecision] = [.unsubscribe, .block, .rule("x"), .keep]
+        for c in cards { all.append(PurgeCopy.explains(c)) }
+        for d in decisions { all += [PurgeCopy.title(d), PurgeCopy.staged(d, name: "x")] }
+        for k in PurgeDecision.Kind.allCases { all += [PurgeCopy.heading(k), PurgeCopy.note(k) ?? ""] }
+        let statuses: [PurgeStatus] = [
+            .running, .unsubscribed, .needsYou(reason: nil), .needsYou(reason: PurgeStatus.siteOnly),
+            .needsYou(reason: "choose_topics"), .needsYou(reason: "needs_browser"),
+            .needsYou(reason: "link_error"), .opened, .blocked, .ruled("x"), .kept, .failed,
+        ]
+        for s in statuses { all.append(PurgeCopy.status(s)) }
+        var s = PurgeSummary()
+        for mutate: (inout PurgeSummary) -> Void in [
+            { $0.running = 1 }, { $0.running = 0; $0.needsYou = 2 }, { $0.needsYou = 0; $0.fewerPerMonth = 9 },
+            { $0.fewerPerMonth = 0; $0.rules = 2 }, { $0.rules = 0 },
         ] {
-            all += PurgeCopy.plan(s)
-            all += [
-                PurgeCopy.siteNote(s) ?? "", PurgeCopy.finished(s),
-                PurgeCopy.leaving(s.emailsCleared) ?? "", PurgeCopy.fewer(s.fewerPerMonth) ?? "",
-            ]
+            mutate(&s)
+            all.append(PurgeCopy.headline(s))
         }
-        all += [PurgeCopy.failedNote(1) ?? "", PurgeCopy.failedNote(2) ?? ""]
         for line in all {
             precondition(!line.contains("\u{2014}") && !line.contains("\u{2013}"), line)
             precondition(!line.contains(" - "), line)

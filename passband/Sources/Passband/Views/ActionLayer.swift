@@ -71,18 +71,22 @@ struct ActionLayer: View {
                 .animation(.smooth(duration: 0.26), value: showsUnsubscribeTray)
             }
 
-            // THE PURGE: the deck and its confirm step over the blurred
-            // board, then the end card. Here and not on the sitrep because
-            // everything under this layer is blurred while a deck is up.
+            // THE PURGE: the deck, its confirm page and its end page, each
+            // the whole window. Here and not on the sitrep because this layer
+            // is above everything else and owns the modal key context.
             if let session = store.purge {
                 PurgeOverlay(session: session)
             }
             if let finish = store.purgeFinished {
                 // Clears only ITS OWN finish, as the walk's card does.
-                PurgeComplete(finish: finish) {
+                PurgeBoard(finish: finish) {
                     if store.purgeFinished?.id == finish.id { store.dismissPurgeFinished() }
                 }
                 .id(finish.id)
+            }
+            // The smart done receipt's full list: the same kind of page.
+            if store.smartDoneListOpen, let receipt = store.smartDoneReceipt {
+                SmartDoneListPage(receipt: receipt)
             }
 
             if let request = store.ruleEditor {
@@ -160,7 +164,9 @@ struct ActionLayer: View {
         store.showsSitrepCorner && !purgeUp && store.smartDoneReceipt != nil
     }
 
-    private var purgeUp: Bool { store.purge != nil || store.purgeFinished != nil }
+    private var purgeUp: Bool {
+        store.purge != nil || store.purgeFinished != nil || store.smartDoneListOpen
+    }
 
     // MARK: - toasts
 

@@ -204,12 +204,14 @@ enum ProductGuide {
         - Hover a package and press e to clear it until its next update. Right-click has "Clear this package".
         - Hover a Reading card and press e to mark everything from that sender done. That one cannot be undone.
 
-        Clearing out Reading (two pills at the top right of the Reading card, on the Mac):
+        Clearing out Reading (pills at the top right of the Reading card, on the Mac):
         - "smart done" clears what has plainly run its course in one press: events that already happened, offers that ended, mail that is no longer current, and promotions and senders the user never opens. It can take up to about 20 seconds. A receipt card at the bottom right then says how many emails were cleared and why, with an Undo button. Undo, or the u key, puts all of it back, and stays for 30 seconds.
-        - "purge", or the p key, goes through Reading one sender at a time, starting with the ones the user reads least. Each card shows what the user did with that sender's mail (how many were opened, how long they were read, how many arrive a month) and that sender's latest subjects.
-        - On a purge card: u unsubscribes, m mutes the sender (a rule hides their future mail), e clears their mail and stays subscribed, s skips and leaves everything as it is. A choice the card cannot offer is greyed out with the reason. The suggested choice is the blue one. z or Delete goes back a card.
-        - Nothing is sent while going through the cards. Esc, or the last card, opens a summary of the choices. Return on that summary applies them, z goes back, and Esc asks before throwing them away.
-        - Some senders can only be unsubscribed from on their own website. Their card says "you finish on their site". Their mail is cleared, and the card at the end lists them under "Finish on their site" with an Open button each. The user stays subscribed to those until they finish there.
+        - "View full list" on that receipt opens a page listing every email that was cleared: its subject, its sender and why. The undo timer is paused while that page is open. On it, u undoes everything, and Return or Esc confirms and goes back with the timer carrying on from where it stopped.
+        - "purge", or the p key, goes through the senders the user has all but stopped reading, one sender per page. The pill only appears when there are at least three such senders. Senders the user reads, and ones Passband is unsure about, are never shown.
+        - A purge page shows the sender and each of their emails in Reading on the left. On the right is "Your reading": what the user did with that sender's mail (how many were opened, how long they were read, how many arrive a month).
+        - On a purge page: u unsubscribes. If none of that sender's emails has an unsubscribe link, u blocks the sender instead, and the page says so. 1, 2 and 3 pick one of up to three suggested rules that keep part of what the sender sends. s keeps the sender, and Passband does not ask about them again for a while. z or Delete goes back a sender.
+        - Nothing is sent while going through the pages. Esc, or the last sender, opens a page that names every sender under what will happen to it: unsubscribe, block, new rules, keeping. Return on that page applies it, z goes back, and Esc asks before throwing the choices away.
+        - After confirming, a status page shows each unsubscribe as it runs and finishes. Some senders can only be unsubscribed from on their own website. Those are listed under "These need you", each with an "Open their page" button, and the user stays subscribed to them until they finish there. "Later" leaves that list: ones Passband already asked show in the unsubscribe tray, and the rest come up again in the next purge.
 
         Other things on the page:
         - Clicking the headline asks for a different one. The name in the greeting is set in Settings > General > You.

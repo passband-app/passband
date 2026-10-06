@@ -181,6 +181,13 @@ final class UnsubscribeJobs {
         Task { try? await APIClient.shared.setUnsubResolution(sender: item.sender, resolution: .dismissed) }
     }
 
+    /// These senders' outcomes have already been shown somewhere else (the
+    /// purge's end page), so the tray's "Unsubscribed from" for them is old
+    /// news: drop it rather than replay it as that page closes.
+    func settleCelebrations(for senders: [String]) {
+        for sender in senders where celebrating[sender] != nil { celebrating[sender] = nil }
+    }
+
     private func ensurePolling() {
         guard poll == nil else { return }
         let gen = generation

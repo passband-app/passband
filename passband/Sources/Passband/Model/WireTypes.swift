@@ -787,6 +787,9 @@ struct CreateRuleBody: Codable, Sendable {
 /// history, or no clear pattern.
 struct RuleSuggestion: Codable, Sendable {
     var suggestion: String?
+    /// Several, when `count` was asked for. Absent on a daemon that predates
+    /// the parameter, which the purge reads as none.
+    var suggestions: [String]?
 }
 
 /// `GET /client/unsubscribes/smart_block`. Null when the sender sends nothing
@@ -912,15 +915,37 @@ struct SmartDoneResult: Decodable, Sendable, Hashable {
     var message_ids: [Int]
     /// Whether the model pass ran: `ok`, or one of the `skipped_` codes.
     var model: String?
+    /// One per cleared message, for the full list. nil on a daemon that
+    /// does not send them: the list is then not offered, never faked.
+    var rows: [Row]?
+
+    /// One cleared message. Everything but the id and the sender is
+    /// optional, and `reason` stays a string: a code from a newer daemon
+    /// must cost a heading, not the decode.
+    struct Row: Decodable, Sendable, Hashable {
+        var message_id: Int
+        var reason: String?
+        var sender: String
+        var sender_name: String?
+        var subject: String?
+        var received_at: String?
+    }
+
+    /// A row that cannot be decoded is dropped by itself.
+    private struct RowSlot: Decodable {
+        var row: Row?
+        init(from decoder: Decoder) throws { row = try? Row(from: decoder) }
+    }
 
     private enum CodingKeys: String, CodingKey {
-        case batch_id, cleared, senders, by_reason, message_ids, model
+        case batch_id, cleared, senders, by_reason, message_ids, model, rows
     }
 
     init(
         batch_id: String?, cleared: Int, senders: Int, by_reason: [String: Int],
-        message_ids: [Int], model: String? = "ok"
+        message_ids: [Int], model: String? = "ok", rows: [Row]? = nil
     ) {
+        self.rows = rows
         self.batch_id = batch_id
         self.cleared = cleared
         self.senders = senders
@@ -940,6 +965,7 @@ struct SmartDoneResult: Decodable, Sendable, Hashable {
         by_reason = try c.decodeIfPresent([String: Int].self, forKey: .by_reason) ?? [:]
         message_ids = try c.decodeIfPresent([Int].self, forKey: .message_ids) ?? []
         model = try c.decodeIfPresent(String.self, forKey: .model)
+        rows = (try? c.decodeIfPresent([RowSlot].self, forKey: .rows))?.compactMap(\.row)
     }
 }
 

@@ -90,3 +90,177 @@ enum SmartDoneCopy {
         reopened == 1 ? "1 email is back in Reading." : "\(reopened) emails are back in Reading."
     }
 }
+
+// MARK: - the full list
+
+/// One email a smart done cleared, as the full list shows it. The subject is
+/// mail content: it lives with the receipt and nowhere else.
+struct SmartDoneItem: Identifiable, Hashable, Sendable {
+    var id: Int
+    /// The daemon's reason code, kept as sent: a code from a newer daemon
+    /// still has a row, under a neutral heading.
+    var reason: String
+    /// Bare address.
+    var sender: String
+    var senderName: String?
+    var subject: String?
+    /// RFC 3339.
+    var receivedAt: String?
+
+    /// The name to show: the sender's own, else the address.
+    /// The daemon sends an empty string for a sender with no name.
+    var displayName: String {
+        let name = senderName?.trimmingCharacters(in: .whitespaces) ?? ""
+        return name.isEmpty ? sender : name
+    }
+}
+
+/// The full list's shape: a list to AUDIT, so it is grouped by why (the same
+/// order the receipt's lines use), each sender's emails together inside a
+/// reason, newest first.
+enum SmartDoneList {
+    struct Group: Identifiable, Hashable, Sendable {
+        /// A known reason code, or `other` for every code this build has no
+        /// words for.
+        var reason: String
+        var heading: String
+        var items: [SmartDoneItem]
+        var id: String { reason }
+    }
+
+    static let other = "other"
+
+    static func groups(_ items: [SmartDoneItem]) -> [Group] {
+        var by: [String: [SmartDoneItem]] = [:]
+        for item in items {
+            let key = SmartDoneCopy.order.contains(item.reason) ? item.reason : other
+            by[key, default: []].append(item)
+        }
+        return (SmartDoneCopy.order + [other]).compactMap { reason in
+            guard let rows = by[reason], !rows.isEmpty else { return nil }
+            return Group(
+                reason: reason, heading: SmartDoneCopy.heading(reason, count: rows.count),
+                items: sorted(rows))
+        }
+    }
+
+    /// Senders together, the sender with the newest email first, and each
+    /// sender's own emails newest first. Ties fall back to the address and
+    /// the id so the order never shuffles between two draws.
+    static func sorted(_ items: [SmartDoneItem]) -> [SmartDoneItem] {
+        var newest: [String: Date] = [:]
+        for item in items {
+            let at = date(item.receivedAt)
+            if at > (newest[item.sender] ?? .distantPast) || newest[item.sender] == nil {
+                newest[item.sender] = max(at, newest[item.sender] ?? .distantPast)
+            }
+        }
+        return items.sorted { a, b in
+            if a.sender != b.sender {
+                let na = newest[a.sender] ?? .distantPast
+                let nb = newest[b.sender] ?? .distantPast
+                return na != nb ? na > nb : a.sender < b.sender
+            }
+            let da = date(a.receivedAt)
+            let db = date(b.receivedAt)
+            return da != db ? da > db : a.id > b.id
+        }
+    }
+
+    /// An undated row sorts as oldest rather than failing the list.
+    ///
+    /// The daemon sends its stored string, with sub-second digits and a
+    /// numeric offset (`2026-09-28T03:09:44.036873+00:00`). The fraction is
+    /// cut before parsing rather than trusted to a formatter option: whole
+    /// seconds are all a sort needs, and how many digits a formatter accepts
+    /// is not something to find out from a list in the wrong order.
+    static func date(_ iso: String?) -> Date {
+        guard let iso else { return .distantPast }
+        let whole = iso.replacing(/\.\d+/, with: "")
+        return ISO8601DateFormatter().date(from: whole) ?? .distantPast
+    }
+}
+
+extension SmartDoneCopy {
+    /// A group's heading on the full list: the receipt's own line for that
+    /// reason, count first, so the page and the card say one thing.
+    static func heading(_ reason: String, count: Int) -> String {
+        if let line = lines(byReason: [reason: count]).first, order.contains(reason) {
+            return line.spoken
+        }
+        return count == 1 ? "1 other" : "\(count) others"
+    }
+
+    /// Why ONE email was cleared, for its row. A code from a newer daemon
+    /// gets a neutral line rather than a guess.
+    static func why(_ reason: String) -> String {
+        switch reason {
+        case "event_passed": "The event already happened"
+        case "offer_ended": "The offer ended"
+        case "expired": "No longer current"
+        case "ignored_sender": "From a sender you never open"
+        case "stale_promo": "A promotion you never opened"
+        default: "Cleared"
+        }
+    }
+
+    static let viewList = "View full list"
+    static let listTitle = "What smart done cleared"
+    static let listPaused = "The undo timer is paused while you look."
+    static let noSubject = "(no subject)"
+}
+
+/// THE UNDO WINDOW, AS A CLOCK THAT CAN STOP. Looking at the full list must
+/// not cost any of the time there is to undo, so the pause is real: the
+/// deadline moves by exactly the time spent paused, and the ring is drawn
+/// from this, never the other way round.
+struct SmartDoneClock: Hashable, Sendable {
+    /// Moves with the deadline on resume, so elapsed over total stays what
+    /// it was at the pause.
+    private(set) var startedAt: Date
+    private(set) var expiresAt: Date
+    private(set) var pausedAt: Date?
+
+    init(startedAt: Date, lasting seconds: TimeInterval) {
+        self.startedAt = startedAt
+        expiresAt = startedAt.addingTimeInterval(seconds)
+    }
+
+    var isPaused: Bool { pausedAt != nil }
+
+    /// Seconds left at `now`. Frozen while paused.
+    func remaining(at now: Date) -> TimeInterval {
+        max(0, expiresAt.timeIntervalSince(pausedAt ?? now))
+    }
+
+    func isExpired(at now: Date) -> Bool { remaining(at: now) <= 0 }
+
+    /// The share of the window left, 1 down to 0, for the ring.
+    func fraction(at now: Date) -> Double {
+        let total = expiresAt.timeIntervalSince(startedAt)
+        guard total > 0 else { return 0 }
+        return min(1, remaining(at: now) / total)
+    }
+
+    /// Stop the clock. False, and nothing changes, when it is already
+    /// stopped (the first pause stands) or has already run out (there is no
+    /// window left to protect, and a pause must not bring one back).
+    @discardableResult
+    mutating func pause(at now: Date) -> Bool {
+        guard pausedAt == nil, !isExpired(at: now) else { return false }
+        pausedAt = now
+        return true
+    }
+
+    /// Start it again: the deadline moves by exactly the time spent paused.
+    /// False when it was not paused.
+    @discardableResult
+    mutating func resume(at now: Date) -> Bool {
+        guard let paused = pausedAt else { return false }
+        let spent = max(0, now.timeIntervalSince(paused))
+        startedAt = startedAt.addingTimeInterval(spent)
+        expiresAt = expiresAt.addingTimeInterval(spent)
+        pausedAt = nil
+        return true
+    }
+}

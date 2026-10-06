@@ -677,6 +677,27 @@ actor APIClient {
     }
 
     @discardableResult
+    /// Up to `count` narrowing rules for one sender ("only order
+    /// confirmations and delivery updates"), for the purge. Empty when the
+    /// daemon has none, predates `count`, or predates the route.
+    ///
+    /// ONE SMALL-MODEL CALL EACH, against a shared daily cap: the caller
+    /// asks only for the sender on screen and the one after.
+    func suggestRules(sender: String, count: Int) async throws -> [String] {
+        guard !RehearsalMode.isEnabled else { return [] }
+        do {
+            let answer: RuleSuggestion = try await get(
+                "/client/rules/suggest", query: ["sender": sender, "count": String(count)])
+            var seen = Set<String>()
+            return (answer.suggestions ?? [])
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty && seen.insert($0.lowercased()).inserted }
+                .prefix(count).map { $0 }
+        } catch let error as APIError where error.status == 404 {
+            return []
+        }
+    }
+
     func createRule(_ body: CreateRuleBody) async throws -> CreatedRule {
         try await post("/client/rules", body: body)
     }

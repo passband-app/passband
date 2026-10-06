@@ -207,7 +207,10 @@ private struct DiscoveryMomentHost: View {
 
     var body: some View {
         Button(action: open) {
-            DiscoveryMoment(set: set, live: live)
+            // ON ITS POSTER until hovered, like every row on the page: the
+            // still is the frame that explains the gesture, and a loop caught
+            // mid-way (a stack already cleared) is an empty box.
+            DiscoveryMoment(set: set, live: live && hovering)
                 .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         }
         .buttonStyle(.plain)

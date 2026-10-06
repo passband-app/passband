@@ -730,6 +730,35 @@ pub async fn get_attachment(
     ))
 }
 
+/// The account's own profile photo, as the sync loop last fetched it from
+/// Google. 404 when there is none: no profile scope on the grant, or a person
+/// who never set a picture.
+///
+/// Served through [`attachment_response`] like every other byte this door
+/// hands out. The type was sniffed from the bytes at fetch time and is one of
+/// four image types, but the header discipline costs nothing and means there
+/// is one rule for bytes on this door rather than two.
+pub async fn get_account_photo(State(state): State<ApiState>) -> Result<Response, ApiError> {
+    let photo = store_call(&state, |store, account_id| store.account_photo(account_id))
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    // REVALIDATE EVERY TIME. The URL is not versioned, so a cache that kept
+    // these bytes for a day would hand yesterday's face to a client that had
+    // just been told, by the tag on stats, that there is a new one. The tag is
+    // the ETag, for any client that wants to ask cheaply.
+    let etag = header::HeaderValue::from_str(&format!("\"{}\"", photo.tag)).ok();
+    let mut resp = attachment_response(
+        "profile-photo",
+        &photo.mime,
+        photo.bytes,
+        "private, no-cache",
+    );
+    if let Some(etag) = etag {
+        resp.headers_mut().insert(header::ETAG, etag);
+    }
+    Ok(resp)
+}
+
 /// One attachment's bytes as a response, under the header discipline that IS
 /// the byte door's security story (see [`safe_content_type`]). Shared by the
 /// inbound door above and the staged-upload door below: a file the user
@@ -3061,16 +3090,26 @@ pub async fn get_stats(State(state): State<ApiState>) -> Result<impl IntoRespons
     let day = Utc::now().format("%Y-%m-%d").to_string();
     // Band counts run under the same default window as the lists they head.
     let bands_since = Utc::now() - chrono::Duration::days(DEFAULT_UPDATES_WINDOW_DAYS);
-    let (stats, usage, unread, email, jobs, parked, ios_connected) =
+    let (stats, usage, unread, email, identity, jobs, parked, ios_connected) =
         store_call(&state, move |store, account_id| {
             let stats = store.stats(account_id, bands_since)?;
             let usage = store.stage2_usage_today(account_id, &day)?;
             let unread = store.inbox_unread(account_id)?;
             let email = store.account_email(account_id)?;
+            let identity = store.account_identity(account_id)?;
             let jobs = store.triage_waiting_counts(account_id, Utc::now())?;
             let parked = store.triage_budget_parked(account_id)?;
             let ios_connected = ios_app_connected(store, account_id)?;
-            Ok((stats, usage, unread, email, jobs, parked, ios_connected))
+            Ok((
+                stats,
+                usage,
+                unread,
+                email,
+                identity,
+                jobs,
+                parked,
+                ios_connected,
+            ))
         })
         .await?;
 
@@ -3105,6 +3144,24 @@ pub async fn get_stats(State(state): State<ApiState>) -> Result<impl IntoRespons
     // send path already puts in `From` — so no confidence is spent telling the
     // human door about it. ALWAYS PRESENT: absence means an older daemon.
     body["account_email"] = json!(email);
+    // WHO THAT IS, as Google's profile last described them: the name to greet
+    // and label the account with, and a tag for the photo served at
+    // `/client/account/photo`. Each key is OMITTED when unknown (a grant
+    // without the profile scope, a nameless account, no picture), so a client
+    // reads absence and keeps the initial and the local part it already shows.
+    // The tag is the photo's version: a client holding bytes under the same tag
+    // has nothing to fetch.
+    if let Some(identity) = identity {
+        if let Some(name) = identity.name {
+            body["account_name"] = json!(name);
+        }
+        if let Some(given) = identity.given_name {
+            body["account_given_name"] = json!(given);
+        }
+        if let Some(tag) = identity.photo_tag {
+            body["account_photo"] = json!(tag);
+        }
+    }
     // Gmail's own unread counts, as of the sync loop's last successful fetch.
     // The key is OMITTED when the counts were never fetched (older DB, or the
     // fetch has never succeeded) so a client reads absence, not "0 unread" —

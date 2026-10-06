@@ -212,7 +212,7 @@ enum ProductGuide {
         - Hover a Reading card and press e to mark everything from that sender done. That one cannot be undone.
 
         Other things on the page:
-        - Clicking the headline asks for a different one. The name in the greeting is set in Settings > General > You.
+        - Clicking the headline asks for a different one. The name in the greeting starts as the first name on the mailbox's Google profile (or the first part of the address when that is not available) and is changed in Settings > General > You.
         - With nothing in For your eyes the page says there is no important mail, shows the day's tally and links to all mail.
         - "ingesting" in the top bar means new mail is still being sorted and will land on the next refresh.
         - Unsubscribes Passband is carrying out show in a tray at the bottom right.
@@ -488,6 +488,7 @@ enum ProductGuide {
         - Add one from the Accounts menu ("Add Account…") or Settings > Account: sign in with Gmail, or connect a self-hosted server with a pairing code or an API token.
         - Switch with ⌘1 to ⌘9, in the order listed in Settings > Account, or from the account badge at the bottom of the rail once there are two or more. Switching starts a fresh assistant chat.
         - Rename an account by editing its name in Settings > Account. "remove", then confirm, takes it off this Mac. On the last account the button reads "disconnect".
+        - The account badge and the switcher show the photo from the mailbox's Google profile when Passband has been allowed to read it, and the account's initial otherwise. An account connected before this existed shows its initial until it is reconnected.
         - Notifications arrive for every account, not only the one on screen.
         - If the Google sign-in expires, a banner on the Sitrep says Passband cannot read the mail. On a hosted account it has a Reconnect button.
 

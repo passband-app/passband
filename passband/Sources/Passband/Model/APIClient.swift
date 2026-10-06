@@ -379,6 +379,16 @@ actor APIClient {
 
     func getStats() async throws -> StoreStats { try await get("/client/stats") }
 
+    /// The account's own profile photo, as the daemon imported it from Google.
+    /// Throws (a 404) when there is none; callers ask only after stats named a
+    /// tag for it. See `AccountPhotos`.
+    func accountPhoto() async throws -> Data {
+        let req = try buildRequest(
+            path: "/client/account/photo", method: .GET, query: [:], body: nil,
+            timeout: Self.requestTimeout)
+        return try await perform(req).0
+    }
+
     /// Tell the daemon a thread was OPENED. Fire and forget: it is a ledger
     /// write with nothing to show for it, and a failed one costs a rounding
     /// error in a statistic, never anything the user sees.

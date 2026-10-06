@@ -60,6 +60,9 @@ struct MobileAgentView: View {
         transcript
             .background(Palette.canvas)
             .navigationTitle("Agent")
+            // A citation or an email card opens mail, and leaving it should
+            // come back to the conversation, not to the search field under it.
+            .readerHost()
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {

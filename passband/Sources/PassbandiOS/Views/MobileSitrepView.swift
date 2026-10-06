@@ -60,6 +60,39 @@ struct MobileSitrepView: View {
     private static let eyesVisible = 4
     @State private var expanded = false
 
+    /// When the drag now in flight started, to tell a page swipe from a row's.
+    @State private var dragBegan: Date?
+
+    /// LEFT TO RIGHT ANYWHERE ON THE BOARD OPENS THE ACCOUNT PICKER: a drawer
+    /// from the left with the mailboxes in it, the phone's answer to the Mac's
+    /// rail of accounts, one gesture from the screen the app opens on.
+    ///
+    /// EXCEPT ON A MAIL ROW, which has its own use for that direction (reply,
+    /// remind, archive). The row's rail is a UIKit pan and this is a SwiftUI
+    /// one, so both hear the drag; the row stamps `SwipeRowActivity` when it
+    /// takes it, and a drag a row took is not a page swipe.
+    ///
+    /// Simultaneous, so the scroll never waits on it, and judged only when the
+    /// finger lifts: mostly sideways, and far enough to have been meant.
+    private var accountSwipe: some Gesture {
+        DragGesture(minimumDistance: 24)
+            .onChanged { value in
+                if dragBegan == nil { dragBegan = value.time }
+            }
+            .onEnded { value in
+                let began = dragBegan ?? value.time
+                dragBegan = nil
+                let dx = value.translation.width, dy = value.translation.height
+                guard dx > 90, abs(dy) < dx * 0.5 else { return }
+                // A row that was panned at any point during this drag took
+                // it. A little slack before the start: the row's recognizer
+                // and this one do not begin on the same event.
+                guard SwipeRowActivity.lastActive < began.addingTimeInterval(-0.3) else { return }
+                Haptics.tick()
+                AccountDoor.shared.pane = .picker
+            }
+    }
+
     var body: some View {
         // Preserve the server order on every device.
         let ranked = store.sitrep.standing
@@ -68,14 +101,25 @@ struct MobileSitrepView: View {
 
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                // ABOVE THE HERO, because it outranks it, as on the Mac: "what
+                // needs you today" is worthless while the mailbox behind it
+                // has been frozen since Tuesday.
+                banner
                 hero
                 if !ranked.isEmpty {
                     forYourEyes(visible: visible, overflow: overflow, queue: ranked)
+                } else if isClear {
+                    // An empty board is the best state this app has, and it
+                    // should not look like a broken one.
+                    ClearNote()
+                        .padding(.horizontal, 4)
+                        .transition(.opacity)
                 }
-                ReadingZone(
-                    senders: Reading.prune(
-                        store.zones.reading, resolved: store.resolvedIds),
-                    cursor: cursor)
+                // Empty reading still stands beside a live For-your-eyes, but
+                // on a board with nothing else it is one more absence.
+                if !(reading.isEmpty && ranked.isEmpty) {
+                    ReadingZone(senders: reading, cursor: cursor)
+                }
                 footnote
             }
             .padding(.horizontal, 16)
@@ -102,8 +146,10 @@ struct MobileSitrepView: View {
         // that a glyph is a door and the reason a bare icon still looks tappable.
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
-                NavigationLink {
-                    AccountPage()
+                // The whole Account page, which arrives from the same side
+                // the glyph is on (see AccountDoor).
+                Button {
+                    AccountDoor.shared.pane = .page
                 } label: {
                     Image(systemName: "person.crop.circle")
                         .foregroundStyle(Palette.accent)
@@ -131,6 +177,7 @@ struct MobileSitrepView: View {
             }
             .sharedBackgroundVisibility(.hidden)
         }
+        .simultaneousGesture(accountSwipe)
         .refreshable {
             _ = await SitrepPoller.shared.pull()
             await store.refreshZones(force: true)
@@ -147,6 +194,36 @@ struct MobileSitrepView: View {
         .onChange(of: visible.count) { _, count in
             if count == 0 { expanded = false }
         }
+    }
+
+    // MARK: - what is wrong, when something is
+
+    /// The Mac's banner slot: a dead Google sign in with its way back, or
+    /// whatever else is keeping mail from arriving or being sorted. Not
+    /// dismissible on either platform, because neither goes away by wishing.
+    @ViewBuilder
+    private var banner: some View {
+        if store.gmailDisconnected {
+            GmailDisconnectedBanner()
+        } else if store.syncStatus.showsBanner {
+            SyncStatusBanner(status: store.syncStatus)
+        }
+    }
+
+    private var bannerShowing: Bool {
+        store.gmailDisconnected || store.syncStatus.showsBanner
+    }
+
+    private var reading: [ReadingSender] {
+        Reading.prune(store.zones.reading, resolved: store.resolvedIds)
+    }
+
+    /// Nothing for your eyes, and truly so: the board has loaded, and it is
+    /// not empty only because sync or triage is stuck.
+    private var isClear: Bool {
+        store.stats != nil && store.sitrep.standing.isEmpty
+            && store.syncStatus.emptyHero(
+                queued: store.triageWaiting, lastSync: store.daemonLastSync) == nil
     }
 
     // MARK: - hero
@@ -258,7 +335,7 @@ struct MobileSitrepView: View {
                 .font(Typo.micro)
                 .foregroundStyle(Palette.warn)
                 .frame(maxWidth: .infinity, alignment: .leading)
-        } else if let line = store.syncStatus.oneLine() {
+        } else if !bannerShowing, let line = store.syncStatus.oneLine() {
             // The same derived status the Mac's banner shows, in one line.
             Label(line, systemImage: "clock")
                 .font(Typo.micro)

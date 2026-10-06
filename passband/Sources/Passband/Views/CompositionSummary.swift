@@ -33,6 +33,20 @@ struct CompositionSummary<Trailing: View>: View {
     /// recipient then; an outbox row does (a fan-out, or bcc only), and says
     /// so through `ScheduledRowCopy.emptyRecipient`.
     var emptyTo = "no recipient"
+    #if !os(macOS)
+        /// What stands where a sent row has its recipient's avatar. Set (by
+        /// `phoneRow`) only on the Sent page's outbox, and its presence is
+        /// what turns this into the phone's two-line row: a drafts-page row
+        /// leaves it nil and keeps the shape below.
+        struct PhoneMark {
+            var symbol: String
+            var tint: Color
+        }
+        var phoneMark: PhoneMark?
+        /// "tomorrow 9am", under the words: the half of the outbox cell that
+        /// does not fit on the name line (`ScheduledRowCopy.phoneCells`).
+        var phoneWhen: String?
+    #endif
     @ViewBuilder let trailing: () -> Trailing
 
     private enum Kind { case new, reply, forward }
@@ -67,6 +81,14 @@ struct CompositionSummary<Trailing: View>: View {
     }
 
     var body: some View {
+        #if os(macOS)
+            line
+        #else
+            if let phoneMark { phoneBody(phoneMark) } else { line }
+        #endif
+    }
+
+    private var line: some View {
         HStack(alignment: .firstTextBaseline, spacing: Space.scaled(9)) {
             Text(slot)
                 .font(Typo.micro)
@@ -88,20 +110,112 @@ struct CompositionSummary<Trailing: View>: View {
         }
     }
 
+    // MARK: - phone
+
+    #if !os(macOS)
+        /// The outbox row as `SentRow.phoneGuts` draws a sent one, so the
+        /// scheduled mail pinned above the sent mail reads as the same list:
+        /// a mark, who and the stamp, then the words at the row's full width.
+        /// What is its own is the mark (a state, where a sent row has a
+        /// person) and a third line for the time it goes or why it did not.
+        func phoneRow(mark: PhoneMark, when: String?) -> Self {
+            var row = self
+            row.phoneMark = mark
+            row.phoneWhen = when
+            return row
+        }
+
+        private func phoneBody(_ mark: PhoneMark) -> some View {
+            HStack(alignment: .top, spacing: PhoneRow.gap) {
+                Image(systemName: mark.symbol)
+                    .font(Typo.ui(11, weight: .semibold))
+                    .foregroundStyle(mark.tint)
+                    .frame(width: PhoneRow.mark, height: PhoneRow.mark)
+                    .background(Circle().fill(mark.tint.opacity(0.14)))
+                    .accessibilityHidden(true)
+
+                VStack(alignment: .leading, spacing: PhoneRow.lineGap) {
+                    HStack(alignment: .firstTextBaseline, spacing: Space.s6) {
+                        Text(slot)
+                            .font(Typo.micro)
+                            .foregroundStyle(Palette.inkFaintest)
+                            .textCase(.uppercase)
+                        who
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        trailingCell
+                    }
+                    if let words = phoneWords {
+                        words
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    // The notice gets a line of its own here rather than the
+                    // snippet's place: there is room for both, and a mail that
+                    // failed is the one whose words you want to see.
+                    if phoneWhen != nil || notice != nil {
+                        HStack(spacing: Space.scaled(7)) {
+                            if let phoneWhen {
+                                Chip(text: phoneWhen, tone: Palette.inkFaint, symbol: "clock")
+                            }
+                            if let notice {
+                                Text(notice)
+                                    .font(Typo.micro)
+                                    .foregroundStyle(noticeColor)
+                                    .lineLimit(1)
+                            }
+                        }
+                        .padding(.top, 1)
+                    }
+                }
+            }
+        }
+
+        /// Subject, then the first line of the body, as ONE `Text` so the
+        /// snippet is what truncates (see `UpdateRow.summary`). Nil when
+        /// there is neither, which is a reply nobody has typed into.
+        private var phoneWords: Text? {
+            let own = subject.trimmed
+            let showSubject = !own.isEmpty || kind == .new
+            let head = showSubject
+                ? Text(verbatim: own.isEmpty ? "(no subject)" : own)
+                    .font(Typo.rowSub)
+                    .foregroundStyle(own.isEmpty ? Palette.inkFaintest : Palette.inkDim)
+                : nil
+            let tail = snippet.isEmpty
+                ? nil
+                : Text(verbatim: snippet).font(Typo.rowSub).foregroundStyle(Palette.inkFaintest)
+            // The gap between them wears the row's font too: a bare literal
+            // here would be body-sized and open the line spacing up.
+            let gap = Text(verbatim: "  ").font(Typo.rowSub)
+            switch (head, tail) {
+            case let (head?, tail?): return Text("\(head)\(gap)\(tail)")
+            case let (head?, nil): return head
+            case let (nil, tail?): return tail
+            case (nil, nil): return nil
+            }
+        }
+
+        private var nameFont: Font { phoneMark == nil ? Typo.ui(12, weight: .medium) : PhoneRow.name }
+    #else
+        private var nameFont: Font { Typo.ui(12, weight: .medium) }
+    #endif
+
     /// Line one: who it is to, or what it answers.
     @ViewBuilder
     private var who: some View {
         switch kind {
         case .new:
             Text(names.isEmpty ? emptyTo : names)
-                .font(Typo.ui(12, weight: .medium))
+                .font(nameFont)
                 .foregroundStyle(names.isEmpty ? Palette.inkFaintest : Palette.ink)
                 .lineLimit(1)
                 .truncationMode(.middle)
         case .reply, .forward:
             HStack(alignment: .firstTextBaseline, spacing: Space.scaled(5)) {
                 Text(parentSubjectText)
-                    .font(Typo.ui(12, weight: .medium))
+                    .font(nameFont)
                     .foregroundStyle(Palette.ink)
                     .lineLimit(1)
                     .truncationMode(.tail)

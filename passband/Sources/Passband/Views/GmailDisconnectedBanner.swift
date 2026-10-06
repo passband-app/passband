@@ -52,14 +52,28 @@ struct GmailDisconnectedBanner: View {
                     .font(Typo.rowSub)
                     .foregroundStyle(Palette.inkDim)
                     .fixedSize(horizontal: false, vertical: true)
+                // UNDER THE SENTENCE ON A PHONE. Beside it, the button takes
+                // a quarter of a column that has no quarter to give, and the
+                // sentence wraps to five lines to make room.
+                #if !os(macOS)
+                    if store.gmailReconnectURL != nil {
+                        Button("Reconnect") { store.askReconnect() }
+                            .buttonStyle(.glassProminent)
+                            .tint(Palette.warn)
+                            .controlSize(.small)
+                            .padding(.top, Space.s6)
+                    }
+                #endif
             }
 
             Spacer(minLength: Space.s8)
 
-            if store.gmailReconnectURL != nil {
-                Button("Reconnect") { store.askReconnect() }
-                    .controlSize(.small)
-            }
+            #if os(macOS)
+                if store.gmailReconnectURL != nil {
+                    Button("Reconnect") { store.askReconnect() }
+                        .controlSize(.small)
+                }
+            #endif
         }
         .padding(.horizontal, Space.scaled(13))
         .padding(.vertical, Space.s10)

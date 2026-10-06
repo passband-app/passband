@@ -30,7 +30,7 @@ fn draft_select() -> String {
     format!(
         "SELECT d.id, d.account_id, d.reply_to_message_id,
         d.forward_of_message_id, d.to_addr, d.cc_addr, d.bcc_addr, d.subject, d.body,
-        d.created_at, d.updated_at, {PARENT_COLS}
+        d.created_at, d.updated_at, {PARENT_COLS}, d.from_agent
     FROM drafts d
     {}",
         parent_join(
@@ -61,6 +61,7 @@ fn map_draft(r: &rusqlite::Row<'_>) -> rusqlite::Result<Draft> {
         parent_subject: r.get(12)?,
         parent_from_addr: r.get(13)?,
         parent_from_name: r.get(14)?,
+        from_agent: r.get(15)?,
     })
 }
 
@@ -189,6 +190,54 @@ impl SqliteStore {
             }
         };
         read_draft(&conn, account_id, id)
+    }
+
+    /// AGENT DOOR'S ONE DRAFT WRITE (issue #394), reached only through
+    /// squelch-api's `AgentMailer`: insert a draft marked `from_agent`, as a
+    /// reply to `reply_to` or as a new message.
+    ///
+    /// INSERT ONLY, NEVER AN EDIT. [`Self::upsert_draft`] edits the one reply
+    /// draft a message has, which is right for the owner's composer and wrong
+    /// here: the row it would overwrite is something the owner is in the middle
+    /// of writing, and an agent cannot read drafts to know it is there. So a
+    /// reply whose message already has a draft returns `None` and writes
+    /// nothing; the caller tells the agent to ask its human.
+    pub fn create_agent_draft(
+        &self,
+        account_id: AccountId,
+        reply_to: Option<i64>,
+        fields: DraftFields<'_>,
+        now: DateTime<Utc>,
+    ) -> Result<Option<Draft>> {
+        let conn = self.lock()?;
+        if let Some(parent) = reply_to {
+            let taken: Option<i64> = conn
+                .query_row(
+                    "SELECT id FROM drafts WHERE account_id = ?1 AND reply_to_message_id = ?2",
+                    params![account_id, parent],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if taken.is_some() {
+                return Ok(None);
+            }
+        }
+        conn.execute(
+            "INSERT INTO drafts(account_id, reply_to_message_id, to_addr, cc_addr, bcc_addr,
+                 subject, body, from_agent, created_at, updated_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,1,?8,?8)",
+            params![
+                account_id,
+                reply_to,
+                fields.to_addr,
+                fields.cc_addr,
+                fields.bcc_addr,
+                fields.subject,
+                fields.body,
+                now.to_rfc3339(),
+            ],
+        )?;
+        read_draft(&conn, account_id, conn.last_insert_rowid())
     }
 
     /// One draft by id, files included. `None` for an unknown id and for

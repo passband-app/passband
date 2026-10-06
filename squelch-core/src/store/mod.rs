@@ -696,6 +696,10 @@ pub struct Draft {
     pub parent_subject: Option<String>,
     pub parent_from_addr: Option<String>,
     pub parent_from_name: Option<String>,
+    /// An agent on the agent door wrote this draft (issue #394). Set at insert
+    /// by [`SqliteStore::create_agent_draft`](sqlite::SqliteStore::create_agent_draft)
+    /// and kept through every later edit.
+    pub from_agent: bool,
 }
 
 /// Which draft row a save addresses. Taken by

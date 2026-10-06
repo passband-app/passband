@@ -2348,6 +2348,10 @@ struct DraftView {
     parent_subject: Option<String>,
     parent_from: Option<String>,
     parent_from_addr: Option<String>,
+    /// An agent wrote this draft through Agent MCP (issue #394). Always
+    /// present; the composer marks such a draft so the owner knows whose words
+    /// they are about to send.
+    from_agent: bool,
 }
 
 impl From<Draft> for DraftView {
@@ -2377,6 +2381,7 @@ impl From<Draft> for DraftView {
             parent_subject: d.parent_subject,
             parent_from,
             parent_from_addr: d.parent_from_addr,
+            from_agent: d.from_agent,
         }
     }
 }
@@ -3748,8 +3753,9 @@ pub async fn set_triage_config(
 // EVERY action, attempted or completed, appends an audit row. Without a write
 // credential the action is a 403 — sync/triage/MCP never load the write token.
 
-/// Actor written into the audit log for all write actions.
-const ACTION_ACTOR: &str = "client-api";
+/// Actor written into the audit log for the human door's write actions. An
+/// agent's writes carry `agent` instead (see `ApiState::audit_actor`).
+pub(crate) const ACTION_ACTOR: &str = "client-api";
 
 /// The `confirm` contract message returned on a missing/false confirm.
 const CONFIRM_HINT: &str = "this action requires an explicit \"confirm\": true in the request body";
@@ -3763,7 +3769,7 @@ pub(crate) async fn audit_action(
     outcome: &str,
 ) {
     let entry = NewAuditEntry {
-        actor: ACTION_ACTOR.to_string(),
+        actor: state.audit_actor.to_string(),
         action: action.to_string(),
         target,
         detail: Some(outcome.to_string()),

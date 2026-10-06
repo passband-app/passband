@@ -116,7 +116,9 @@ enum Analytics {
         // connect card's two answers, the user's word on a ghost, and the
         // three writes to a real calendar. Bools and a closed state word;
         // never a title, a place, a time, a calendar or an address. A write
-        // carries `all_day` alone.
+        // carries three bools: `all_day`, `guests` (the event has any) and
+        // `notified` (Google was asked to email them). Never how many
+        // guests, and never who.
         "calendar_opened", "calendar_connect_clicked", "calendar_connect_dismissed",
         "calendar_ghost_marked",
         "calendar_event_created", "calendar_event_edited", "calendar_event_deleted",

@@ -18,6 +18,20 @@ struct EventWrite: Encodable, Hashable, Sendable {
     let all_day: Bool
     let location: String?
     let description: String?
+    /// Wave 5. Who to put on it, bare addresses. Nil is no key.
+    var guests: [String]?
+    /// Wave 5. `true` has Google email those guests the invitation. Nil is
+    /// no key, which the daemon reads as "tell nobody". Set in one place:
+    /// `stamped(notify:)`, from `EventGuests.notify`.
+    var notify: Bool?
+
+    /// The body with what a labelled control decided about telling people.
+    /// True is written only onto a body that names somebody.
+    func stamped(notify: Bool) -> EventWrite {
+        var out = self
+        out.notify = notify && !(guests ?? []).isEmpty ? true : nil
+        return out
+    }
 }
 
 /// `PATCH /client/calendar/events/{calendar_id}/{id}`: only what changed.
@@ -35,12 +49,20 @@ struct EventPatch: Hashable, Sendable {
     var all_day: Bool?
     var location: Text?
     var description: Text?
+    /// Wave 5. The WHOLE new guest list (it replaces the event's), or nil to
+    /// leave the guests alone. An empty list takes everyone off.
+    var guests: [String]?
 
     var isEmpty: Bool { self == EventPatch() }
 
-    /// The body: changed keys only, and NSNull for a cleared text.
-    func json() -> [String: Any] {
+    /// The body: changed keys only, and NSNull for a cleared text. `notify`
+    /// is not a field of the patch (a patch that changes nothing must stay
+    /// empty): it is said here, by the caller that holds a labelled
+    /// control's answer, and written only when it is true.
+    func json(notify: Bool = false) -> [String: Any] {
         var out: [String: Any] = [:]
+        if let guests { out["guests"] = guests }
+        if notify { out["notify"] = true }
         if let title { out["title"] = title }
         if let start { out["start"] = start }
         if let end { out["end"] = end }
@@ -95,6 +117,12 @@ enum CalendarWrite {
         "/client/calendar/events/\(segment(calendarId))/\(segment(eventId))"
     }
 
+    /// A delete's query: `notify=true` when a labelled control said to tell
+    /// the guests, and nothing at all otherwise.
+    static func deleteQuery(notify: Bool) -> [String: String?] {
+        notify ? ["notify": "true"] : [:]
+    }
+
     static func segment(_ s: String) -> String {
         s.addingPercentEncoding(withAllowedCharacters: segmentAllowed) ?? s
     }
@@ -126,7 +154,10 @@ enum CalendarWrite {
     /// A refusal, as one quiet toast. Fixed sentences: the daemon's own error
     /// text is for logs, and none of this echoes what was typed. `status` 0
     /// is a request that never reached the daemon.
-    static func failureText(status: Int, _ action: CalendarWriteAction) -> String {
+    ///
+    /// `guests` says the write named guests: the daemon's 400 then may be
+    /// about one of them, and the sentence says where to look.
+    static func failureText(status: Int, _ action: CalendarWriteAction, guests: Bool = false) -> String {
         let deleting = action == .delete
         switch status {
         case 0:
@@ -136,7 +167,9 @@ enum CalendarWrite {
         case 400:
             return deleting
                 ? "Passband could not delete that event."
-                : "Passband could not save that event. Check the times and the calendar."
+                : (guests
+                    ? "Passband could not save that event. Check the times, the calendar and the guests."
+                    : "Passband could not save that event. Check the times and the calendar.")
         case 403:
             return "That calendar does not let you change its events."
         case 404:

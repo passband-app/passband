@@ -17,17 +17,28 @@
 // saying exactly what will be saved. The draft itself lives in the store
 // (`AppStore.calendarDraft`), which is how the page can draw it.
 //
-// SMALL ON PURPOSE. Title, calendar, when, where, notes. No attendees, no
+// SMALL ON PURPOSE. Title, calendar, when, guests, where, notes. No
 // reminders, no repeat: those are Google Calendar's, one ↵ away from the
 // detail pane.
+//
+// GUESTS (wave 5, Lib/EventGuests.swift). The guests line is the composer's
+// own recipient field. An invitation, an update and a cancellation are Google
+// Calendar's mail, sent by Google, and cannot be unsent, so the pane holds
+// three rules: the control that saves says what it will do ("add and invite
+// 3", "save and tell guests") and is the only thing that tells anyone; with a
+// guest on either side of a save, plain ↵ saves nothing; and a guest list
+// that is not the user's to change, or that the daemon holds only part of,
+// is shown and never sent back.
 //
 // WHERE (Lib/PlaceLookup.swift): the location line suggests places as it is
 // typed, from Apple's MapKit. The typed text goes to Apple and nothing else
 // does; free text is always allowed and is replaced only by a pick.
 //
-// KEYS. ⌘↵ saves from anywhere in the pane. ↵ saves from a single-line field,
-// picks a highlighted place, and is a new line in the notes. Esc closes the
-// place list, then the delete question, then the pane.
+// KEYS. ⌘↵ presses the footer's main control from anywhere in the pane. ↵
+// saves from a single-line field ONLY when the save tells nobody; it also
+// picks a highlighted place or contact, makes a typed address a guest, and is
+// a new line in the notes. Esc closes the place list, then the delete
+// question, then the pane.
 
 #if os(macOS)
     import SwiftUI
@@ -41,10 +52,19 @@
         /// The location line's lookup. Made when the pane appears, so a
         /// re-render of the shell never builds a second MapKit completer.
         @State private var places: PlaceLookup?
+        /// What the daemon knows of each guest typed so far, by address
+        /// (case-folded): a name to call them, and their zone when it has
+        /// one. Filled in behind the pane; nothing waits on it.
+        @State private var guestPlaces: [String: GuestPlace] = [:]
         @FocusState private var focus: Field?
 
         private enum Field: Hashable {
-            case title, date, endDate, start, end, location, notes
+            case title, date, endDate, start, end, guests, location, notes
+        }
+
+        private struct GuestPlace: Equatable {
+            let name: String
+            let zone: TimeZone?
         }
 
         private var draft: EventDraft { store.calendarDraft ?? request.initial }
@@ -54,14 +74,15 @@
             // "Today" for a typed "fri" or "tomorrow", read once a render.
             let now = Date()
             let cal = Calendar.current
-            let problem = blocking(now: now, cal: cal)
+            let plan = store.guestPlan(draft, request)
+            let problem = blocking(plan: plan, now: now, cal: cal)
             VStack(alignment: .leading, spacing: 0) {
                 header
-                card(now: now, cal: cal)
+                card(plan: plan, problem: problem, now: now, cal: cal)
                     .padding(.horizontal, Space.scaled(18))
                     .padding(.vertical, Space.s14)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                footer(problem: problem)
+                footer(problem: problem, plan: plan)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             // The composer's own edge: glass, and a shadow thrown left over
@@ -69,7 +90,9 @@
             .passbandGlass(.pane, cornerRadius: 0, tint: Palette.glassTintStrong)
             .shadow(color: .black.opacity(0.24), radius: 40, x: -14)
             .keyContext(.modal)
-            .keyBindings(.modal, bindings(problem: problem))
+            .keyBindings(.modal, bindings(problem: problem, plan: plan))
+            // Where each guest is, asked of the daemon as they are added.
+            .task(id: guestKeys(plan)) { await lookUpGuests(plan) }
             .onAppear {
                 let lookup = PlaceLookup(provider: MapKitPlaces())
                 lookup.write = { text in patch { $0.location = text } }
@@ -107,7 +130,7 @@
 
         /// ONE CARD, as the composer's is: the title, then the labelled lines
         /// ruled apart, then the notes on the same ground taking what is left.
-        private func card(now: Date, cal: Calendar) -> some View {
+        private func card(plan: GuestPlan, problem: EventDraftProblem?, now: Date, cal: Calendar) -> some View {
             VStack(alignment: .leading, spacing: 0) {
                 TextField("Title", text: bind(\.title))
                     .textFieldStyle(.plain)
@@ -120,6 +143,7 @@
                 InlineFieldRow(label: "calendar") { calendarPicker }
                 Hairline()
                 InlineFieldRow(label: "when") { whenFields(now: now, cal: cal) }
+                guestsSection(plan: plan, problem: problem, now: now, cal: cal)
                 Hairline()
                 InlineFieldRow(label: "where") {
                     TextField("Add a place", text: bind(\.location))
@@ -338,6 +362,132 @@
                 .padding(.leading, Space.s2)
         }
 
+        // MARK: guests
+
+        /// THE GUESTS LINE, between when and where: the composer's own
+        /// recipient field (pills, contacts as you type, several addresses
+        /// pasted at once, backspace to take one off), and under it what is
+        /// true about the people on it. Closed, it lists who is on the event
+        /// and says in one line why they cannot be changed here. On a daemon
+        /// older than guests there is no line at all.
+        @ViewBuilder
+        private func guestsSection(
+            plan: GuestPlan, problem: EventDraftProblem?, now: Date, cal: Calendar
+        ) -> some View {
+            switch plan.access {
+            case .none:
+                EmptyView()
+            case .field:
+                Hairline()
+                RecipientField(
+                    text: bind(\.guests), focus: $focus, field: Field.guests, label: "guests",
+                    placeholder: "Add people by email", inline: true)
+                guestNotes(plan: plan, problem: problem, now: now, cal: cal)
+            case .closed(let bar):
+                Hairline()
+                InlineFieldRow(label: "guests") {
+                    VStack(alignment: .leading, spacing: Space.s4) {
+                        if let names = editing.flatMap({ EventGuests.names($0) }) {
+                            // Google's text about other people: plain Text.
+                            Text(verbatim: names)
+                                .lineLimit(2)
+                        }
+                        Text(bar.text)
+                            .font(Typo.micro)
+                            .foregroundStyle(Palette.inkFaint)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+        }
+
+        /// Under the field, in the value column: what is wrong with the line
+        /// (in the warning ink, as the times say theirs), when the event is
+        /// for each guest whose zone the daemon knows, and the one sentence
+        /// about email. Nothing at all with no guests typed.
+        @ViewBuilder
+        private func guestNotes(
+            plan: GuestPlan, problem: EventDraftProblem?, now: Date, cal: Calendar
+        ) -> some View {
+            let wrong = problem.flatMap { Self.guestProblems.contains($0) ? $0.text : nil }
+            let times = guestTimes(now: now, cal: cal)
+            let email = EventGuests.emailLine(
+                editing: editing != nil, guests: plan.after, account: store.calendarAccountEmail)
+            if wrong != nil || times != nil || email != nil {
+                VStack(alignment: .leading, spacing: Space.s2) {
+                    if let wrong {
+                        Text(wrong).foregroundStyle(Palette.warn)
+                    }
+                    if let times {
+                        // Names are email-derived: plain Text, never markup.
+                        Text(verbatim: times).foregroundStyle(Palette.inkDim)
+                    }
+                    if let email {
+                        Text(verbatim: email).foregroundStyle(Palette.inkFaint)
+                    }
+                }
+                .font(Typo.micro)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                // The field's own line ends in its padding; these belong to
+                // it, so they sit up under the pills.
+                .padding(.top, -Space.s4)
+                .modifier(InlineFieldTuck(active: true))
+            }
+        }
+
+        /// "10am ET for Sam · 4pm GMT+1 for Ana": the start, where each
+        /// guest is. Only guests whose zone the daemon knows, only when
+        /// their clock differs from the user's, and never for an all-day
+        /// event.
+        private func guestTimes(now: Date, cal: Calendar) -> String? {
+            guard case .success(let when) = EventForm.when(draft, today: now, calendar: cal), !when.allDay
+            else { return nil }
+            let parts = EventGuests.read(draft.guests).addresses.compactMap { address -> String? in
+                guard let place = guestPlaces[EventGuests.key(address)], let zone = place.zone else { return nil }
+                return EventGuests.localTime(start: when.start, zone: zone, name: place.name, calendar: cal)
+            }
+            return parts.isEmpty ? nil : parts.joined(separator: " \u{00B7} ")
+        }
+
+        /// The guests typed so far, as the lookup's identity: it runs again
+        /// when somebody is added, and not when a title is typed.
+        private func guestKeys(_ plan: GuestPlan) -> [String] {
+            guard plan.access == .field else { return [] }
+            return EventGuests.read(draft.guests).addresses.map(EventGuests.key).sorted()
+        }
+
+        /// Ask the daemon's contact card for each guest not asked about yet
+        /// (`/client/person` carries an inferred timezone). Behind the pane:
+        /// a guest it knows nothing of simply gets no line, and a failure is
+        /// tried again the next time the list changes.
+        private func lookUpGuests(_ plan: GuestPlan) async {
+            let missing = guestKeys(plan).filter { guestPlaces[$0] == nil }
+            guard !missing.isEmpty else { return }
+            // A beat, so an address still being typed is not looked up at
+            // every letter of its domain.
+            try? await Task.sleep(for: .milliseconds(350))
+            for key in missing {
+                guard !Task.isCancelled else { return }
+                guard let card = try? await APIClient.shared.person(key) else { continue }
+                guestPlaces[key] = GuestPlace(
+                    name: EventGuests.shortName(name: card.display_name, email: key),
+                    zone: card.timezone?.zone.flatMap { TimeZone(identifier: $0) })
+            }
+        }
+
+        /// ↵ in the guests line with a whole address typed and no list up:
+        /// the address becomes a guest, as a comma would make it. The field
+        /// re-reads an outside write, and a list ending in a comma is all
+        /// pills.
+        private func commitTypedGuest() {
+            let text = draft.guests.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let last = EventGuests.split(text).last, !text.hasSuffix(","),
+                EventGuests.isAddress(EventGuests.bare(last))
+            else { return }
+            patch { $0.guests = text + "," }
+        }
+
         // MARK: notes
 
         /// The free text, on the card's own ground and taking what is left of
@@ -370,12 +520,12 @@
         // MARK: footer
 
         @ViewBuilder
-        private func footer(problem: EventDraftProblem?) -> some View {
+        private func footer(problem: EventDraftProblem?, plan: GuestPlan) -> some View {
             Group {
                 if confirmingDelete {
                     deleteQuestion
                 } else {
-                    verbs(problem: problem)
+                    verbs(problem: problem, plan: plan)
                 }
             }
             .padding(.horizontal, Space.scaled(18))
@@ -385,12 +535,21 @@
 
         /// One statement per verb, its key beside it, as in the composer. No
         /// cancel button: Esc closes this pane like every other panel.
-        private func verbs(problem: EventDraftProblem?) -> some View {
-            // The time's problems are said on the line under the times, and
-            // a missing title by the empty title itself; the footer says the
-            // rest (a calendar, a title or notes too long).
+        ///
+        /// THE CONTROL SAYS WHAT IT DOES (`EventGuests.controls`). "add and
+        /// invite 3" invites; an edit to an event with guests offers "save
+        /// and tell guests" and, quieter beside it, "save without telling".
+        /// Whichever is pressed is handed to the store as itself, and that
+        /// is the only way Google is ever asked to email anyone.
+        private func verbs(problem: EventDraftProblem?, plan: GuestPlan) -> some View {
+            // The time's problems are said on the line under the times, the
+            // guests' under the guests, and a missing title by the empty
+            // title itself; the footer says the rest (a calendar, a title or
+            // notes too long).
             let note = problem.flatMap { Self.saidElsewhere.contains($0) ? nil : $0.text }
-            return HStack(spacing: Space.s8) {
+            let controls = plan.controls
+            let blocked = problem != nil || store.calendarWriting
+            let remove = Group {
                 if editing != nil {
                     Button("delete event") { confirmingDelete = true }
                         .buttonStyle(.textAction)
@@ -404,36 +563,92 @@
                         .foregroundStyle(Palette.warn)
                         .lineLimit(1)
                 }
-                Spacer()
-                Button { save(problem: problem) } label: { keyed(saveLabel, "⌘↵") }
-                    .buttonStyle(.glassProminent)
-                    .tint(Palette.accent)
-                    .disabled(problem != nil || store.calendarWriting)
             }
-        }
-
-        private var saveLabel: String {
-            if store.calendarWriting { return "saving…" }
-            return editing == nil ? "add event" : "save"
+            let saves = Group {
+                if let quiet = controls.quiet {
+                    Button(quiet.label) { save(quiet, problem: problem) }
+                        .buttonStyle(.glass)
+                        .disabled(blocked)
+                }
+                Button { save(controls.primary, problem: problem) } label: {
+                    keyed(store.calendarWriting ? "saving…" : controls.primary.label, "⌘↵")
+                }
+                .buttonStyle(.glassProminent)
+                .tint(Palette.accent)
+                .disabled(blocked)
+            }
+            return VStack(alignment: .trailing, spacing: Space.s8) {
+                // ENTER DOES NOT SEND, said where the eye is when it matters.
+                if !EventGuests.enterMaySave(controls) {
+                    Text("With guests, only ⌘↵ or a click saves.")
+                        .font(Typo.micro)
+                        .foregroundStyle(Palette.inkFaintest)
+                }
+                // One line where the pane is wide enough for three controls,
+                // the saves under the delete where it is not.
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: Space.s8) {
+                        remove
+                        Spacer(minLength: Space.s8)
+                        saves
+                    }
+                    VStack(alignment: .trailing, spacing: Space.s8) {
+                        HStack(spacing: Space.s8) {
+                            remove
+                            Spacer(minLength: 0)
+                        }
+                        HStack(spacing: Space.s8) { saves }
+                    }
+                }
+            }
         }
 
         /// The delete question, in the pane's own footer: asked once, the
-        /// fields still there above it, Escape back to them.
+        /// fields still there above it, Escape back to them. An event with
+        /// guests asks about telling them, and offers both answers by name:
+        /// plain ↵ then deletes nothing.
         private var deleteQuestion: some View {
-            VStack(alignment: .leading, spacing: Space.s10) {
-                DeleteQuestion()
-                HStack(spacing: Space.s8) {
-                    Spacer()
-                    Button { confirmingDelete = false } label: { keyed("keep it", "esc") }
-                        .buttonStyle(.glass)
-                    Button { deleteNow() } label: {
-                        keyed(store.calendarWriting ? "deleting…" : "delete event", "↵")
+            let wording = deleteWording
+            return VStack(alignment: .leading, spacing: Space.s10) {
+                DeleteQuestion(wording: wording)
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: Space.s8) {
+                        Spacer(minLength: 0)
+                        deleteAnswers(wording)
                     }
-                    .buttonStyle(.glassProminent)
-                    .tint(Palette.danger)
-                    .disabled(store.calendarWriting)
+                    VStack(alignment: .trailing, spacing: Space.s8) { deleteAnswers(wording) }
+                        .frame(maxWidth: .infinity, alignment: .trailing)
                 }
             }
+        }
+
+        @ViewBuilder
+        private func deleteAnswers(_ wording: DeleteWording) -> some View {
+            Button { confirmingDelete = false } label: { keyed("keep it", "esc") }
+                .buttonStyle(.glass)
+            if let tell = wording.tell {
+                Button(wording.quiet) { deleteNow(tellGuests: false) }
+                    .buttonStyle(.glass)
+                    .disabled(store.calendarWriting)
+                Button { deleteNow(tellGuests: true) } label: {
+                    keyed(store.calendarWriting ? "deleting…" : tell, "⌘↵")
+                }
+                .buttonStyle(.glassProminent)
+                .tint(Palette.danger)
+                .disabled(store.calendarWriting)
+            } else {
+                Button { deleteNow(tellGuests: false) } label: {
+                    keyed(store.calendarWriting ? "deleting…" : wording.quiet, "↵")
+                }
+                .buttonStyle(.glassProminent)
+                .tint(Palette.danger)
+                .disabled(store.calendarWriting)
+            }
+        }
+
+        /// The question for the event being edited, by its guests.
+        private var deleteWording: DeleteWording {
+            editing.map { EventGuests.deleteWording($0) } ?? EventGuests.deleteWording(guests: 0, truncated: false)
         }
 
         /// A footer verb with its key beside it, dimmer, in the key chip's
@@ -449,31 +664,46 @@
 
         // MARK: keys
 
-        private func bindings(problem: EventDraftProblem?) -> [KeyBinding] {
+        private func bindings(problem: EventDraftProblem?, plan: GuestPlan) -> [KeyBinding] {
             [
                 // The innermost thing open closes first: the place list, the
                 // delete question, then the pane.
                 KeyBinding("Escape", "close", allowInInput: true) { escape() },
-                // ⌘↵ FROM ANYWHERE, the notes included. Declines under a
-                // modal raised over the pane (the ask bar, the shortcuts
+                // ⌘↵ FROM ANYWHERE, the notes included: the footer's main
+                // control, by name, exactly as a click on it. Declines under
+                // a modal raised over the pane (the ask bar, the shortcuts
                 // card), whose field the chord was typed into.
                 KeyBinding(declining: "Enter", "save", meta: true, allowInInput: true) {
                     guard !store.modalOverlayOpen else { return false }
-                    if confirmingDelete { deleteNow() } else { save(problem: problem) }
+                    if confirmingDelete {
+                        deleteNow(tellGuests: deleteWording.tell != nil)
+                    } else {
+                        save(plan.controls.primary, problem: problem)
+                    }
                     return true
                 },
-                // ↵: a highlighted place is picked; the delete question is
-                // answered; a single-line field saves. In the notes it is a
+                // ↵: a highlighted place is picked; a typed address becomes
+                // a guest; a single-line field saves. In the notes it is a
                 // new line, so it is declined there and the text view has it.
+                //
+                // ↵ NEVER TELLS ANYONE. With a guest on either side of the
+                // save (`EventGuests.enterMaySave`), or guests to tell about
+                // a delete, it is swallowed and nothing happens: only ⌘↵ or
+                // a click on the control that says so does that.
                 KeyBinding(declining: "Enter", "save", allowInInput: true) {
                     guard !store.modalOverlayOpen else { return false }
                     if focus == .location, places?.pick() == true { return true }
                     if confirmingDelete {
-                        deleteNow()
+                        if deleteWording.tell == nil { deleteNow(tellGuests: false) }
                         return true
                     }
                     if focus == .notes { return false }
-                    save(problem: problem)
+                    if focus == .guests {
+                        commitTypedGuest()
+                        return true
+                    }
+                    guard EventGuests.enterMaySave(plan.controls) else { return true }
+                    save(plan.controls.primary, problem: problem)
                     return true
                 },
                 // The arrows are the place list's only while it is up and the
@@ -499,32 +729,42 @@
 
         // MARK: verbs
 
-        private static let saidElsewhere: Set<EventDraftProblem> = [
+        /// Said under the guests line.
+        private static let guestProblems: Set<EventDraftProblem> = [.badGuest, .guestIsYou, .tooManyGuests]
+
+        private static let saidElsewhere: Set<EventDraftProblem> = guestProblems.union([
             .noTitle, .badDate, .badEndDate, .badStart, .badEnd, .noLength, .endsBeforeStart,
-        ]
+        ])
 
         /// The first thing in the way of saving, or nil.
-        private func blocking(now: Date, cal: Calendar) -> EventDraftProblem? {
+        private func blocking(plan: GuestPlan, now: Date, cal: Calendar) -> EventDraftProblem? {
+            let terms = plan.terms(owner: store.calendarAccountEmail)
             switch request.mode {
             case .create:
-                return EventForm.problem(draft, today: now, calendar: cal)
+                return EventForm.problem(draft, today: now, calendar: cal, guests: terms)
             case .edit:
-                if case .failure(let p) = EventForm.patch(draft, from: request.initial, today: now, calendar: cal) {
+                if case .failure(let p) = EventForm.patch(
+                    draft, from: request.initial, today: now, calendar: cal, guests: terms)
+                {
                     return p
                 }
                 return nil
             }
         }
 
-        private func save(problem: EventDraftProblem?) {
+        /// Save, AS the control that asked: the store decides from the
+        /// control itself whether the guests are told.
+        private func save(_ control: SaveControl, problem: EventDraftProblem?) {
             guard problem == nil, !store.calendarWriting else { return }
             let draft = draft
-            Task { await store.saveEvent(draft, request) }
+            Task { await store.saveEvent(draft, request, via: control) }
         }
 
-        private func deleteNow() {
+        /// `tellGuests` is true from "delete and tell guests" and its ⌘↵,
+        /// and from nowhere else.
+        private func deleteNow(tellGuests: Bool) {
             guard let event = editing, !store.calendarWriting else { return }
-            Task { await store.deleteEvent(event) }
+            Task { await store.deleteEvent(event, tellGuests: tellGuests) }
         }
 
         // MARK: state helpers

@@ -73,7 +73,25 @@ run_suite event-draft \
   Sources/Passband/Lib/Agenda.swift \
   Sources/Passband/Lib/CalendarWrite.swift \
   Sources/Passband/Lib/EventDraft.swift \
+  Sources/Passband/Lib/EventGuests.swift \
   Tests/EventDraftTests.swift
+
+# Guests on an event (wave 5), the first write that makes Google email other
+# people: how the guests line is read (bare addresses, one per person, the
+# cap), which calendars may invite and when the line is closed, which save
+# controls a draft shows and in what words, that Enter never saves a draft
+# whose save would tell anyone, that `notify` is true only from a control
+# that says so, the bodies on the wire (the whole list on a patch, nothing
+# from a closed line), the delete question by count, a guest's local time,
+# and the wave-5 wire decoding.
+run_suite event-guests \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Agenda.swift \
+  Sources/Passband/Lib/CalendarWrite.swift \
+  Sources/Passband/Lib/EventDraft.swift \
+  Sources/Passband/Lib/EventGuests.swift \
+  Tests/EventGuestsTests.swift
 
 # Drag to create on the day column: a press and a drag become a span of time.
 # The snap to the quarter hour, the quarter-hour minimum, dragging upward, the

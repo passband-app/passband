@@ -16,49 +16,91 @@
     /// ⌫ or the detail's "delete" on an event: the same question as the
     /// event pane's footer, on a card of its own. Asked once; Enter deletes,
     /// Escape keeps it.
+    ///
+    /// AN EVENT WITH GUESTS (wave 5) asks "Delete and tell 3 guests?" and
+    /// offers both answers by name. Google's cancellation mail cannot be
+    /// unsent, so plain Enter answers nothing then: "delete and tell guests"
+    /// is a click or ⌘↵, and "delete without telling" is a click.
     struct CalendarDeleteConfirm: View {
         @Environment(AppStore.self) private var store
         let ask: CalendarDeleteAsk
 
         var body: some View {
+            let wording = EventGuests.deleteWording(ask.event)
             OverlayScrim(onDismiss: { store.cancelDeleteEvent() }) {
-                ModalCard(width: 380) {
-                    DeleteQuestion()
+                ModalCard(width: wording.tell == nil ? 380 : 460) {
+                    DeleteQuestion(wording: wording)
                     EventStub(event: ask.event)
                     HStack(spacing: Space.s8) {
                         Spacer(minLength: 0)
                         Button("Keep it") { store.cancelDeleteEvent() }
                             .buttonStyle(.glass)
-                        Button(store.calendarWriting ? "Deleting…" : "Delete event") { deleteNow() }
+                        if let tell = wording.tell {
+                            Button(Self.sentence(wording.quiet)) { deleteNow(tellGuests: false) }
+                                .buttonStyle(.glass)
+                                .disabled(store.calendarWriting)
+                            Button { deleteNow(tellGuests: true) } label: {
+                                HStack(spacing: Space.s6) {
+                                    Text(store.calendarWriting ? "Deleting…" : Self.sentence(tell))
+                                    Text("⌘↵")
+                                        .font(Typo.mono(10, weight: .medium))
+                                        .opacity(0.6)
+                                }
+                            }
                             .buttonStyle(.glassProminent)
                             .tint(Palette.danger)
                             .disabled(store.calendarWriting)
+                        } else {
+                            Button(store.calendarWriting ? "Deleting…" : "Delete event") {
+                                deleteNow(tellGuests: false)
+                            }
+                            .buttonStyle(.glassProminent)
+                            .tint(Palette.danger)
+                            .disabled(store.calendarWriting)
+                        }
                     }
                 }
             }
             .keyContext(.modal)
             .keyBindings(.modal, [
                 KeyBinding("Escape", "keep it", allowInInput: true) { store.cancelDeleteEvent() },
-                KeyBinding("Enter", "delete", allowInInput: true) { deleteNow() },
+                // Swallowed when there are guests to tell: Enter alone
+                // never has Google email anyone.
+                KeyBinding("Enter", "delete", allowInInput: true) {
+                    if wording.tell == nil { deleteNow(tellGuests: false) }
+                },
+                KeyBinding("Enter", "delete and tell guests", meta: true, allowInInput: true) {
+                    deleteNow(tellGuests: wording.tell != nil)
+                },
             ])
         }
 
-        private func deleteNow() {
+        /// The card's buttons start with a capital, as its others do.
+        private static func sentence(_ s: String) -> String {
+            s.prefix(1).uppercased() + s.dropFirst()
+        }
+
+        /// `tellGuests` is true from "Delete and tell guests" and its ⌘↵,
+        /// and from nowhere else.
+        private func deleteNow(tellGuests: Bool) {
             guard !store.calendarWriting else { return }
             let event = ask.event
-            Task { await store.deleteEvent(event) }
+            Task { await store.deleteEvent(event, tellGuests: tellGuests) }
         }
     }
 
-    /// The question both delete paths ask, in the same words.
+    /// The question both delete paths ask, in the same words: by the
+    /// event's guests (`EventGuests.deleteWording`).
     struct DeleteQuestion: View {
+        let wording: DeleteWording
+
         var body: some View {
             VStack(alignment: .leading, spacing: Space.s4) {
-                Text("Delete this event from Google Calendar?")
+                Text(wording.title)
                     .font(Typo.ui(13, weight: .semibold))
                     .foregroundStyle(Palette.ink)
                     .fixedSize(horizontal: false, vertical: true)
-                Text("It goes from your calendar everywhere, and Passband cannot put it back.")
+                Text(wording.detail)
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaint)
                     .fixedSize(horizontal: false, vertical: true)

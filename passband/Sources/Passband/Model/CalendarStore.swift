@@ -420,39 +420,76 @@ extension AppStore {
         return EventForm.provisional(draft, color: color, today: now, calendar: calendar)
     }
 
+    /// The account's own address, for this account's stats only: who Google
+    /// sends an invitation from, and the one address that is never a guest.
+    var calendarAccountEmail: String? {
+        let email = (statsEpoch == epoch ? stats?.account_email : nil)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (email?.isEmpty ?? true) ? nil : email
+    }
+
+    /// What the pane's draft may do about guests, and which controls save it
+    /// (`EventGuests.plan`). The pane draws from this and `saveEvent` checks
+    /// against it, so the control pressed is judged by the draft as it
+    /// stands when the save runs.
+    func guestPlan(_ draft: EventDraft, _ request: CalendarEditorRequest) -> GuestPlan {
+        EventGuests.plan(draft, editing: request.event, feed: calendarFeed)
+    }
+
     /// Save the pane. True when the daemon took it: the answer is laid into
     /// the page at once and the pane closes. False keeps the pane open with
     /// everything typed in it, after one quiet toast saying why; a draft that
     /// cannot be saved yet is said on the pane itself and sends nothing.
+    ///
+    /// `control` is the footer control that asked (a click on it, or its
+    /// ⌘↵). It is the ONLY thing that can make Google email the guests:
+    /// `EventGuests.notify` answers true for a control that says so and is
+    /// on offer for this draft, and a control that is not on offer saves
+    /// nothing at all.
     @discardableResult
-    func saveEvent(_ draft: EventDraft, _ request: CalendarEditorRequest) async -> Bool {
+    func saveEvent(_ draft: EventDraft, _ request: CalendarEditorRequest, via control: SaveControl) async -> Bool {
         guard request.epoch == epoch, !calendarWriting else { return false }
         let e = epoch
         let now = Date()
         let cal = Calendar.current
+        let plan = guestPlan(draft, request)
+        guard let notify = EventGuests.notify(control, offered: plan.controls) else { return false }
+        let terms = plan.terms(owner: calendarAccountEmail)
         switch request.mode {
         case .create:
-            guard case .success(let body) = EventForm.wire(draft, today: now, calendar: cal) else { return false }
+            guard case .success(let made) = EventForm.wire(draft, today: now, calendar: cal, guests: terms)
+            else { return false }
+            let body = made.stamped(notify: notify)
+            let invited = body.guests?.count ?? 0
             calendarWriting = true
             do {
                 let event = try await APIClient.shared.createCalendarEvent(body)
                 guard isCurrent(e) else { return false }
                 calendarWriting = false
                 landEvent(event)
-                Analytics.capture("calendar_event_created", ["all_day": body.all_day])
+                Analytics.capture(
+                    "calendar_event_created",
+                    ["all_day": body.all_day, "guests": invited > 0, "notified": body.notify == true])
+                // A daemon that took the event and dropped the guests must
+                // not pass for an invitation sent.
+                if invited > 0, EventGuests.others(event).count < invited {
+                    pushToast("The event was added, but this Passband server did not add its guests.", .error)
+                }
                 return true
             } catch {
                 guard isCurrent(e) else { return false }
                 calendarWriting = false
-                pushToast(CalendarWrite.failureText(status: writeStatus(error), .create), .error)
+                pushToast(
+                    CalendarWrite.failureText(status: writeStatus(error), .create, guests: invited > 0), .error)
                 return false
             }
         case .edit(let original):
             guard
                 case .success(let patch) = EventForm.patch(
-                    draft, from: request.initial, today: now, calendar: cal)
+                    draft, from: request.initial, today: now, calendar: cal, guests: terms)
             else { return false }
-            // Nothing moved: nothing to send, and nothing to say.
+            // Nothing moved: nothing to send, nothing to say, and nobody
+            // to tell, whichever control was pressed.
             if patch.isEmpty {
                 closeEventEditor()
                 return true
@@ -460,16 +497,20 @@ extension AppStore {
             calendarWriting = true
             do {
                 let event = try await APIClient.shared.patchCalendarEvent(
-                    calendarId: original.calendar_id, id: original.id, patch)
+                    calendarId: original.calendar_id, id: original.id, patch, notify: notify)
                 guard isCurrent(e) else { return false }
                 calendarWriting = false
                 landEvent(event)
-                Analytics.capture("calendar_event_edited", ["all_day": event.all_day])
+                Analytics.capture(
+                    "calendar_event_edited",
+                    ["all_day": event.all_day, "guests": plan.before > 0 || plan.after > 0, "notified": notify])
                 return true
             } catch {
                 guard isCurrent(e) else { return false }
                 calendarWriting = false
-                pushToast(CalendarWrite.failureText(status: writeStatus(error), .edit), .error)
+                pushToast(
+                    CalendarWrite.failureText(status: writeStatus(error), .edit, guests: patch.guests != nil),
+                    .error)
                 return false
             }
         }
@@ -504,13 +545,20 @@ extension AppStore {
     /// Delete at Google, then off the page. There is no undo (a recreated
     /// event would be a different event, its invitations and id gone), which
     /// is why this is only ever reached through the question.
+    ///
+    /// `tellGuests` is true only from the question's "delete and tell
+    /// guests" control (or its ⌘↵), and counts only for an event that has
+    /// guests to tell: then Google emails them the cancellation.
     @discardableResult
-    func deleteEvent(_ event: TimelineEvent) async -> Bool {
+    func deleteEvent(_ event: TimelineEvent, tellGuests: Bool = false) async -> Bool {
         guard CalendarWrite.canEdit(event), !calendarWriting else { return false }
         let e = epoch
+        let hasGuests = EventGuests.count(event) > 0
+        let notify = tellGuests && hasGuests
         calendarWriting = true
         do {
-            try await APIClient.shared.deleteCalendarEvent(calendarId: event.calendar_id, id: event.id)
+            try await APIClient.shared.deleteCalendarEvent(
+                calendarId: event.calendar_id, id: event.id, notify: notify)
             guard isCurrent(e) else { return false }
             calendarWriting = false
             retireCalendarLoads()
@@ -519,7 +567,8 @@ extension AppStore {
             if calendarMonthItem == Agenda.itemId(event) { calendarMonthItem = nil }
             calendarDeleteAsk = nil
             if calendarEditor?.event.map(Agenda.itemId) == Agenda.itemId(event) { closeEventEditor() }
-            Analytics.capture("calendar_event_deleted", ["all_day": event.all_day])
+            Analytics.capture(
+                "calendar_event_deleted", ["all_day": event.all_day, "guests": hasGuests, "notified": notify])
             pushToast("Deleted from Google Calendar", .success)
             return true
         } catch {

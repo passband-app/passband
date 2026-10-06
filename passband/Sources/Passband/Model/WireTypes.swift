@@ -1398,6 +1398,58 @@ struct TimelineEvent: Codable, Sendable, Hashable, Identifiable {
     var editable: Bool?
     /// Wave 3. The event's notes, laundered and capped like `location`.
     var description: String?
+    /// Wave 5. Who is on the event, the user included when Google lists
+    /// them. Nil from an older daemon and on an event with nobody on it.
+    var guests: [TimelineGuest]?
+    /// Wave 5. Google holds more guests than the daemon stored. The list is
+    /// then a part of the truth and is never sent back as the whole of it.
+    var guests_truncated: Bool?
+    /// Wave 5. The user may change who is on it: editable, not truncated,
+    /// and theirs to organize. Nil (an older daemon) is NO, and is also how
+    /// the client knows a daemon cannot invite at all (Lib/EventGuests.swift).
+    var guest_editable: Bool?
+}
+
+/// How a guest answered, in the daemon's four words.
+enum GuestResponse: String, LenientRawEnum {
+    case accepted, declined, tentative, pending
+    static var unknownFallback: GuestResponse { .pending }
+}
+
+/// Wave 5: one person on an event. Only the address is required; a row
+/// without one is dropped, and it costs the event nothing.
+struct TimelineGuest: Codable, Sendable, Hashable {
+    var email: String
+    var name: String?
+    var response: GuestResponse?
+    var organizer: Bool?
+    /// The user's own row. `self` on the wire.
+    var isSelf: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case email, name, response, organizer
+        case isSelf = "self"
+    }
+
+    init(
+        email: String, name: String? = nil, response: GuestResponse? = nil, organizer: Bool? = nil,
+        isSelf: Bool? = nil
+    ) {
+        self.email = email
+        self.name = name
+        self.response = response
+        self.organizer = organizer
+        self.isSelf = isSelf
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        email = try c.decode(String.self, forKey: .email)
+        name = try? c.decodeIfPresent(String.self, forKey: .name)
+        response = try? c.decodeIfPresent(GuestResponse.self, forKey: .response)
+        organizer = try? c.decodeIfPresent(Bool.self, forKey: .organizer)
+        isSelf = try? c.decodeIfPresent(Bool.self, forKey: .isSelf)
+    }
 }
 
 extension TimelineEvent {
@@ -1425,6 +1477,15 @@ extension TimelineEvent {
         color = try? c.decodeIfPresent(String.self, forKey: .color)
         editable = try? c.decodeIfPresent(Bool.self, forKey: .editable)
         description = try? c.decodeIfPresent(String.self, forKey: .description)
+        // Each guest decodes alone, and a `guests` of the wrong shape is nil.
+        guests = (try? c.decodeIfPresent([OneGuest].self, forKey: .guests))?.compactMap(\.value)
+        guests_truncated = try? c.decodeIfPresent(Bool.self, forKey: .guests_truncated)
+        guest_editable = try? c.decodeIfPresent(Bool.self, forKey: .guest_editable)
+    }
+
+    private struct OneGuest: Decodable {
+        let value: TimelineGuest?
+        init(from decoder: Decoder) throws { value = try? TimelineGuest(from: decoder) }
     }
 }
 
@@ -1436,6 +1497,9 @@ struct TimelineCalendar: Codable, Sendable, Hashable, Identifiable {
     var color: String?
     var primary: Bool?
     var writable: Bool?
+    /// Wave 5. Events on it may carry guests: the primary calendar, or one
+    /// the user owns. Nil from an older daemon (`EventGuests.mayInvite`).
+    var can_invite: Bool?
 }
 
 enum TimelineSyncError: String, LenientRawEnum {
@@ -1898,6 +1962,24 @@ struct PersonCard: Codable, Sendable, Equatable {
     var rule: Rule?
     var groups: [Group]
     var recent_threads: [RecentThread]
+    /// Where the daemon thinks they are, or where the user said. Absent when
+    /// it has no idea, and on a daemon older than the inference.
+    var timezone: Timezone?
+
+    /// Only the zone's name is read here: the event pane wants the hour of
+    /// an event that may be months off, and the name is what knows that
+    /// date's offset. Never throws, so a shape this client does not know
+    /// costs the card nothing.
+    struct Timezone: Codable, Sendable, Equatable {
+        var zone: String?
+
+        init(zone: String?) { self.zone = zone }
+
+        init(from decoder: Decoder) throws {
+            let c = try? decoder.container(keyedBy: CodingKeys.self)
+            zone = c.flatMap { try? $0.decodeIfPresent(String.self, forKey: .zone) }
+        }
+    }
 }
 
 struct StatusResult: Codable, Sendable {

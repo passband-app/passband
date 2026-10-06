@@ -143,7 +143,16 @@
                     }
                 }
                 if let event = item.event {
-                    if let organizer = event.organizer, !organizer.isEmpty {
+                    let guests = event.guests ?? []
+                    // The guest list marks its own organizer and has the
+                    // user's own answer on their row; the two lines below
+                    // are for an event that lists nobody.
+                    if !guests.isEmpty || event.guests_truncated == true {
+                        FactRow(label: "Guests") { GuestRows(event: event) }
+                    }
+                    if let organizer = event.organizer, !organizer.isEmpty,
+                        !guests.contains(where: { $0.organizer == true })
+                    {
                         FactRow(label: "Organizer") {
                             Text(verbatim: organizer)
                                 .font(Typo.rowSub)
@@ -151,7 +160,7 @@
                                 .textSelection(.enabled)
                         }
                     }
-                    if let response = event.self_response {
+                    if let response = event.self_response, !guests.contains(where: { $0.isSelf == true }) {
                         FactRow(label: "You") { plain(responseText(response)) }
                     }
                     if event.busy == false {
@@ -292,6 +301,43 @@
                     .frame(width: Typo.measure(70), alignment: .leading)
                 value
                     .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    /// Who is on an event (wave 5): a name, how they answered, and the
+    /// organizer marked, each in words. Read-only: guests are changed in the
+    /// event pane, and only where the daemon says they are the user's to
+    /// change. The list is Google's text about other people: plain Text.
+    private struct GuestRows: View {
+        let event: TimelineEvent
+
+        var body: some View {
+            let list = EventGuests.rows(event)
+            VStack(alignment: .leading, spacing: Space.s4) {
+                ForEach(list.rows) { row in
+                    HStack(alignment: .firstTextBaseline, spacing: Space.s8) {
+                        Text(verbatim: row.name)
+                            .font(Typo.rowSub)
+                            .foregroundStyle(Palette.ink)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                        Text(row.organizer ? "organizer, \(row.response)" : row.response)
+                            .font(Typo.micro)
+                            // The answers given read a step stronger than
+                            // the one still owed; no colour, which on this
+                            // page belongs to calendars.
+                            .foregroundStyle(row.response == "no reply" ? Palette.inkFaintest : Palette.inkFaint)
+                            .fixedSize()
+                        Spacer(minLength: 0)
+                    }
+                }
+                if let more = list.more {
+                    Text(more)
+                        .font(Typo.micro)
+                        .foregroundStyle(Palette.inkFaintest)
+                }
             }
         }
     }

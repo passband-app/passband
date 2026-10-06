@@ -250,9 +250,9 @@ actor APIClient {
         _ = try await perform(req)
     }
 
-    private func deleteNoContent(_ path: String) async throws {
+    private func deleteNoContent(_ path: String, query: [String: String?] = [:]) async throws {
         let req = try buildRequest(
-            path: path, method: .DELETE, query: [:], body: nil, timeout: Self.requestTimeout)
+            path: path, method: .DELETE, query: query, body: nil, timeout: Self.requestTimeout)
         _ = try await perform(req)
     }
 
@@ -560,8 +560,13 @@ actor APIClient {
     /// `PATCH /client/calendar/events/{calendar_id}/{id}` with only the
     /// changed fields. Built by hand, as `setGhostState` is, because a cleared
     /// location or note is an explicit JSON null.
-    func patchCalendarEvent(calendarId: String, id: String, _ patch: EventPatch) async throws -> TimelineEvent {
-        let body = try JSONSerialization.data(withJSONObject: patch.json())
+    ///
+    /// `notify` (wave 5) has Google email the event's guests about the
+    /// change. False, the default, sends no such key.
+    func patchCalendarEvent(
+        calendarId: String, id: String, _ patch: EventPatch, notify: Bool = false
+    ) async throws -> TimelineEvent {
+        let body = try JSONSerialization.data(withJSONObject: patch.json(notify: notify))
         let req = try buildRequest(
             path: CalendarWrite.path(calendarId: calendarId, eventId: id), method: .PATCH, query: [:],
             body: body, timeout: Self.requestTimeout)
@@ -569,9 +574,13 @@ actor APIClient {
         return try decode(TimelineEvent.self, from: data)
     }
 
-    /// `DELETE /client/calendar/events/{calendar_id}/{id}`: 204.
-    func deleteCalendarEvent(calendarId: String, id: String) async throws {
-        try await deleteNoContent(CalendarWrite.path(calendarId: calendarId, eventId: id))
+    /// `DELETE /client/calendar/events/{calendar_id}/{id}`: 204. `notify`
+    /// (wave 5) has Google email the guests the cancellation; false, the
+    /// default, sends no query at all.
+    func deleteCalendarEvent(calendarId: String, id: String, notify: Bool = false) async throws {
+        try await deleteNoContent(
+            CalendarWrite.path(calendarId: calendarId, eventId: id),
+            query: CalendarWrite.deleteQuery(notify: notify))
     }
 
     /// RFC3339 in the user's current offset, seconds precision: "2026-10-04T00:00:00-07:00".

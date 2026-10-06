@@ -39,6 +39,9 @@ struct EventDraft: Hashable, Sendable {
     var end = ""
     var location = ""
     var notes = ""
+    /// Wave 5. The guests line, as the recipient field holds it: addresses
+    /// joined by commas, a half-typed one last (read by `EventGuests.read`).
+    var guests = ""
 }
 
 /// Why a draft cannot be saved yet, in the card's own words. One at a time,
@@ -54,6 +57,9 @@ enum EventDraftProblem: Error, Equatable, Sendable {
     case noLength
     case endsBeforeStart
     case notesTooLong
+    case badGuest
+    case guestIsYou
+    case tooManyGuests
 
     var text: String {
         switch self {
@@ -67,6 +73,9 @@ enum EventDraftProblem: Error, Equatable, Sendable {
         case .noLength: "It ends when it starts"
         case .endsBeforeStart: "It ends before it starts"
         case .notesTooLong: "Notes stop at 2,000 characters"
+        case .badGuest: "A guest needs a whole email address"
+        case .guestIsYou: "You are on it already. Take your own address off"
+        case .tooManyGuests: "An event takes 50 guests at most"
         }
     }
 }
@@ -195,6 +204,7 @@ enum EventForm {
         d.calendarId = event.calendar_id
         d.location = event.location ?? ""
         d.notes = event.description ?? ""
+        d.guests = EventGuests.fieldText(event)
         guard let item = Agenda.item(event, calendar: calendar) else { return d }
         d.allDay = item.allDay
         d.date = dateText(item.start, today: today, calendar: calendar)
@@ -258,8 +268,10 @@ enum EventForm {
     }
 
     /// The first thing in the way of saving a NEW event, in field order.
-    static func problem(_ d: EventDraft, today: Date, calendar: Calendar) -> EventDraftProblem? {
-        if case .failure(let p) = wire(d, today: today, calendar: calendar) { return p }
+    static func problem(
+        _ d: EventDraft, today: Date, calendar: Calendar, guests: GuestTerms = .closed
+    ) -> EventDraftProblem? {
+        if case .failure(let p) = wire(d, today: today, calendar: calendar, guests: guests) { return p }
         return nil
     }
 
@@ -271,8 +283,13 @@ enum EventForm {
 
     // MARK: writing
 
-    /// A new event's body.
-    static func wire(_ d: EventDraft, today: Date, calendar: Calendar) -> Result<EventWrite, EventDraftProblem> {
+    /// A new event's body. `guests` says whether the guests line is open for
+    /// this draft; closed (the default), the body names nobody whatever the
+    /// line holds. `notify` is never set here: `EventGuests.notify` decides
+    /// it, at the moment a labelled control is pressed.
+    static func wire(
+        _ d: EventDraft, today: Date, calendar: Calendar, guests: GuestTerms = .closed
+    ) -> Result<EventWrite, EventDraftProblem> {
         let title = trimmed(d.title)
         if let p = titleProblem(title) { return .failure(p) }
         guard let calendarId = d.calendarId, !calendarId.isEmpty else { return .failure(.noCalendar) }
@@ -281,6 +298,12 @@ enum EventForm {
         case .failure(let p): return .failure(p)
         case .success(let w): when = w
         }
+        var invited: [String]?
+        if guests.open {
+            let list = EventGuests.read(d.guests)
+            if let p = EventGuests.problem(list, owner: guests.owner) { return .failure(p) }
+            if !list.addresses.isEmpty { invited = list.addresses }
+        }
         let notes = trimmed(d.notes)
         if length(notes) > maxNotes { return .failure(.notesTooLong) }
         let location = trimmed(d.location)
@@ -288,7 +311,8 @@ enum EventForm {
         return .success(
             EventWrite(
                 calendar_id: calendarId, title: title, start: start, end: end, all_day: when.allDay,
-                location: location.isEmpty ? nil : location, description: notes.isEmpty ? nil : notes))
+                location: location.isEmpty ? nil : location, description: notes.isEmpty ? nil : notes,
+                guests: invited))
     }
 
     /// An edit's body: only the fields that moved from what the card opened
@@ -297,8 +321,13 @@ enum EventForm {
     /// touched, so an event the form cannot fully say (a timed run of days)
     /// keeps its times when only its title changes. Empty means nothing
     /// changed.
+    ///
+    /// GUESTS go only when the line is open (`guests.open`) AND who is on it
+    /// changed, and then as the WHOLE new list: the daemon replaces the
+    /// event's guests with it. Order and case are not a change.
     static func patch(
-        _ d: EventDraft, from initial: EventDraft, today: Date, calendar: Calendar
+        _ d: EventDraft, from initial: EventDraft, today: Date, calendar: Calendar,
+        guests: GuestTerms = .closed
     ) -> Result<EventPatch, EventDraftProblem> {
         var p = EventPatch()
         let title = trimmed(d.title)
@@ -317,6 +346,11 @@ enum EventForm {
                 (p.start, p.end) = wireTimes(w, calendar)
                 p.all_day = w.allDay
             }
+        }
+        if guests.open {
+            let list = EventGuests.read(d.guests)
+            if let problem = EventGuests.problem(list, owner: guests.owner) { return .failure(problem) }
+            if list.keys != EventGuests.read(initial.guests).keys { p.guests = list.addresses }
         }
         let location = trimmed(d.location)
         if location != trimmed(initial.location) {

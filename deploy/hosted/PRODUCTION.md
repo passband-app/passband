@@ -243,6 +243,24 @@ expires by itself at the budget's next reset. `llm mint <label>` also
 unblocks a tenant, but it rotates the key and starts the ledger from zero, so
 keep it for a key that is actually wrong.
 
+**A tenant that hits its daily triage cap** is a different limit: a count of
+model jobs per UTC day (1000 in total, 200 of them for background work), held
+by the daemon rather than the gateway. The dashboard's "Triage held by the
+daily cap" panel shows it. A `new mail` line means today's arrivals are going
+untriaged; a `background` line is a backlog draining at 200 a day, which is the
+design. To lift either for the rest of the day:
+
+```sh
+kubectl -n tenants exec deploy/<label> -- squelchd triage status
+kubectl -n tenants exec deploy/<label> -- squelchd triage grant 500
+kubectl -n tenants exec deploy/<label> -- squelchd triage grant 500 --background
+```
+
+No restart: the worker reads the grant on its next job, and the grant lapses at
+midnight UTC. It is spend, about 3 cents a run against the tenant's monthly LLM
+budget, so 500 runs is roughly $15 and a large grant can turn a daily-cap
+problem into the budget problem above. Needs daemon >= 0.0.13.
+
 **Content logging stays OFF.** Every request through this gateway is the text
 of somebody's mail, and Bifrost's defaults are to log it: `enable_logging` on,
 `disable_content_logging` off, `log_retention_days` 365, all into

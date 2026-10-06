@@ -126,6 +126,22 @@ usage-page and warden controls to a dollar budget is [follow-up #216](https://gi
 and protected arrival capacity. When the true total is exhausted, mail stays
 human-readable and visibly pending until the next UTC day.
 
+To see where a mailbox stands and to lift a cap for the rest of the day:
+
+```sh
+squelchd triage status
+squelchd triage grant 500                # 500 more runs today, for new mail
+squelchd triage grant 500 --background   # 500 more background runs today
+squelchd triage grant 0                  # take the grant back
+```
+
+A grant works on a running daemon, lasts until midnight UTC, replaces any
+earlier grant for the day, and releases the jobs the cap was holding. Background
+runs still count toward the total, so a background grant only helps while the
+total has room. Each run is a model job, so a grant is spend. The scrape exports
+the same numbers as `squelchd_triage_daily_runs`,
+`squelchd_triage_daily_run_cap` and `squelchd_triage_jobs_held`.
+
 A sender rule applies to mail that arrives after it is written. Creating,
 editing, or deleting one re-triages nothing already stored: every re-triage is a
 full investigation, and a catch-all `*` rule (a content filter) once queued the

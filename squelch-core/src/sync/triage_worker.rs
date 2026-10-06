@@ -744,7 +744,7 @@ fn investigation_budget_limits(config: &Config, job: &AgentJob) -> Vec<(String, 
     let mut limits = vec![(GLOBAL_BUDGET_KEY.into(), config.triage.agent.daily_run_cap)];
     if !job.foreground || job.kind == "access" {
         limits.push((
-            "__agent_background__".into(),
+            crate::triage::agent_config::BACKGROUND_BUDGET_KEY.into(),
             config.triage.agent.effective_background_daily_run_cap(),
         ));
     }

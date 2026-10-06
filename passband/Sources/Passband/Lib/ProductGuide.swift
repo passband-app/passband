@@ -80,7 +80,7 @@ enum ProductGuide {
             case .triage:
                 "how mail gets sorted, what done means, fixing a wrong call"
             case .senderRules:
-                "rules for a sender (allow, mute, filter) and the Rules page"
+                "rules for a sender (allow, mute, filter) and the Rules pane in Settings"
             case .reminders:
                 "remind me later: parking an email until a time"
             case .search:
@@ -151,9 +151,8 @@ enum ProductGuide {
         - 1 Sitrep: the home board. What needs the user, what there is to read, and today's records.
         - 2 Emails: every message in one list, plus sent and spam.
         - 3 Auth: login codes, password resets and security alerts.
-        - 4 Rules: sender rules.
-        - 5 Groups: named sets of recipients.
         - Usage and Settings sit at the bottom of the rail and have no number key. ⌘, opens Settings.
+        - Rules (sender rules) and Groups (named sets of recipients) are panes in Settings, not on the rail. 4 opens Settings > Rules and 5 opens Settings > Groups. Both are also in the Go menu.
 
         Moving:
         - ⌘[ goes back and ⌘] goes forward.
@@ -268,7 +267,7 @@ enum ProductGuide {
 
         Groups:
         - "groups" on the To line addresses a saved group. New messages only, not replies or forwards.
-        - Groups are made on the Groups page (key 5): n new, e or Enter edit, x delete.
+        - Groups are made in Settings > Groups (key 5): n new, e or Enter edit, x delete.
         - Each group is set to go out one way: To (one email, everyone sees the list), Bcc (one email, nobody sees anyone else) or Individually (a separate email per person).
 
         Sending:
@@ -314,7 +313,7 @@ enum ProductGuide {
         - e or d done, r reply, h remind, v fix triage, t write a rule for this sender.
         - f searches everything from this sender.
         - a opens "browse all": a side panel of mail ranked by importance, with a noise filter slider that + and - move.
-        - T goes to Rules, g to Auth, A to the audit log.
+        - T goes to Rules and A to the audit log, both in Settings. g goes to Auth.
 
         Sent:
         - The "sent" segment at the top. Rows show who the mail went to and, if read tracking fired, an eye with the open count.
@@ -364,12 +363,12 @@ enum ProductGuide {
 
         Making one:
         - From an email: press t in the reader, or on a highlighted row on the Sitrep or in the Emails list. The editor opens for that sender and may suggest a sentence; Tab takes the suggestion.
-        - From the Rules page (key 4, or T on the Emails page): n.
+        - From Settings > Rules (key 4, or T on the Emails page): n.
         - In the editor: Enter saves, Option+Enter adds a line, Esc cancels and keeps what was typed. "advanced" (⌘D) shows the match pattern and the disposition picker, and with it open Tab cycles the disposition.
         - This assistant can write one when asked. It only adds rules; it never changes one the user wrote.
 
         Managing them:
-        - On the Rules page: j / k move, e or Enter or a click edits, x deletes (with undo).
+        - In Settings > Rules: j / k move, e or Enter or a click edits, x deletes (with undo).
         - Rules are grouped by what they do (allow, filter, mute) and then by domain.
         - A rule shapes mail from now on. It does not move mail already on the board. The exception is "Block sender", offered when unsubscribing from an email that has no unsubscribe link: it mutes that address and clears their open mail.
         - Rules live in Passband only. They never change anything in Gmail.

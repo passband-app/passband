@@ -72,7 +72,8 @@ enum ShortcutCatalog {
         Group(
             title: "Navigate",
             items: [
-                Item(["1", "2", "3", "4", "5"], "sitrep · emails · auth · rules · groups"),
+                Item(["1", "2", "3"], "sitrep · emails · auth"),
+                Item(["4", "5"], "rules · groups (in settings)"),
                 Item(["⌘["], "back"),
                 Item(["⌘]"], "forward"),
                 Item(["a"], "browse all mail"),
@@ -81,7 +82,7 @@ enum ShortcutCatalog {
                 Item(["⌘⇧K"], "new ask chat"),
                 Item(["⌘,"], "settings"),
                 Item(["g"], "auth messages"),
-                Item(["T"], "rules"),
+                Item(["T"], "rules (in settings)"),
                 Item(["A"], "audit log (in settings)"),
             ]),
         Group(

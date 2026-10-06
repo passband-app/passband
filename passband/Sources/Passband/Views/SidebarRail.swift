@@ -1,5 +1,5 @@
-// SIDEBAR — the slim icon rail: Sitrep / Emails / Auth / Rules / Groups on the
-// 1..5 keys; Update + Share + Usage + Settings sit below a divider, out of that sequence
+// SIDEBAR — the slim icon rail: Sitrep / Emails / Auth on the 1..3 keys (Rules
+// and Groups left for Settings); Update + Share + Usage + Settings sit below a divider, out of that sequence
 // so adding one never renumbers it. Share is the odd one there: it opens a sheet
 // rather than routing, so it carries no selector (see `shareButton`). ONE long-lived pane behind the icons is the selector,
 // moved by GEOMETRY not identity: per-icon glass drags the glyph along and
@@ -152,7 +152,7 @@ struct SidebarRail: View {
 
     /// HAND A FRIEND AN INVITE. Above Usage in the bottom group, because it
     /// belongs with the things that are about your account rather than with the
-    /// five destinations on the number keys.
+    /// destinations on the number keys.
     ///
     /// Deliberately NOT a `RailButton`, for the same reason `accountBadge` is
     /// not: it opens a sheet rather than routing, so it has no `MainView` to be

@@ -45,6 +45,9 @@ struct AccountPage: View {
     /// sub-nav keeps its own order — `SettingsSection.allCases` — since a rail
     /// beside the pane is a map, and a map you can read at a glance has no
     /// reason to lead with anything.
+    ///
+    /// Rules and Groups are NOT here: they are the Mac's two former rail pages,
+    /// built around a keyboard, and the phone has never had either.
     private static let order: [SettingsSection] = [
         .account, .general, .mail, .assistant, .agents, .privacy, .audit,
     ]
@@ -225,6 +228,10 @@ struct AccountPage: View {
                     SearchSection()
                     SignatureSection()
                     ReadTrackingSection()
+                // Mac panes: the phone lists neither (see `order`), so there is
+                // no row that could push one.
+                case .rules, .groups:
+                    EmptyView()
                 case .assistant:
                     AssistantSection()
                 case .agents:
@@ -253,6 +260,8 @@ struct AccountPage: View {
         switch section {
         case .general: "gearshape"
         case .mail: "envelope"
+        case .rules: "slider.horizontal.3"
+        case .groups: "person.2"
         case .assistant: "sparkles"
         case .agents: "point.3.connected.trianglepath.dotted"
         case .privacy: "hand.raised"
@@ -265,6 +274,8 @@ struct AccountPage: View {
         switch section {
         case .general: "your name, theme, chime"
         case .mail: "images, search order, signature, read tracking"
+        case .rules: "how each sender's mail is handled"
+        case .groups: "people you write to together"
         case .assistant: "your own api key, and which model"
         case .agents: "connect OpenClaw, Claude Code and others"
         case .privacy: "what telemetry leaves the app"

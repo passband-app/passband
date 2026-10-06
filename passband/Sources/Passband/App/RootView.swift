@@ -585,15 +585,14 @@ struct MainShell: View {
         case .sitrep: SitrepView()
         case .emails: EmailsView()
         case .auth: RoutedHost(view: .auth) { AuthView() }
-        case .rules: RoutedHost(view: .rules) { RulesView() }
-        case .groups: RoutedHost(view: .groups) { GroupsView() }
         case .usage: UsageView()
         case .settings: SettingsView()
         case .process: RoutedHost(view: .process) { ProcessView() }
         }
     }
 
-    /// 1..5 view nav + ⌘[ back / ⌘] forward + ⌘K ask bar. The ⌘ chords use the
+    /// 1..3 view nav, 4 / 5 for the Rules and Groups panes in Settings, ⌘[ back /
+    /// ⌘] forward + ⌘K ask bar. The ⌘ chords use the
     /// `meta` flag so a bare "[" / "]" never triggers them; `allowInInput` keeps
     /// them working with a search/compose field focused, since a chord is not a
     /// typed character.
@@ -620,6 +619,12 @@ struct MainShell: View {
         var bindings: [KeyBinding] = MainView.mainViews.enumerated().map { index, view in
             KeyBinding("\(index + 1)", "go to \(view.rawValue)") { store.setView(view) }
         }
+        // THE TWO DIGITS THAT OUTLIVED THEIR RAIL SLOTS. Rules and Groups moved
+        // into Settings, and the keys went with them rather than going dead: a
+        // digit somebody already has in their fingers should keep landing on
+        // the page it always did, wherever that page is filed now.
+        bindings.append(KeyBinding("4", "go to rules") { store.openSettings(.rules) })
+        bindings.append(KeyBinding("5", "go to groups") { store.openSettings(.groups) })
         bindings.append(
             KeyBinding("[", "back", meta: true, allowInInput: true) { store.goBack() })
         bindings.append(
@@ -659,7 +664,7 @@ struct MainShell: View {
     }
 }
 
-/// Host for the full main views behind the rail: Auth / Rules / Groups.
+/// Host for the full main views behind the rail: Auth / Process.
 ///
 /// These inner views register their list-style keys into the "modal" KeyContext
 /// and never push a context themselves, so this host pushes it while mounted.
@@ -671,20 +676,6 @@ struct RoutedHost<Content: View>: View {
     let view: MainView
     @ViewBuilder var content: Content
 
-    /// Page name, and the line beside it that says what the page IS.
-    ///
-    /// Two values rather than one string with a dash in it: the subtitle is set
-    /// in the sitrep masthead's own small caps, so it has to reach the header as
-    /// its own text. (It read "Rules — sender rules", which also put an em dash
-    /// in user-facing copy, which this app does not do.)
-    private var heading: (title: String, subtitle: String?) {
-        switch view {
-        case .rules: ("Rules", "sender rules")
-        case .groups: ("Groups", "named audiences")
-        default: (view.label, nil)
-        }
-    }
-
     var body: some View {
         Group {
             if view == .auth {
@@ -693,7 +684,7 @@ struct RoutedHost<Content: View>: View {
                 content
             } else {
                 VStack(alignment: .leading, spacing: 0) {
-                    RoutedHeader(title: heading.title, subtitle: heading.subtitle)
+                    RoutedHeader(title: view.label)
                     content
                 }
             }

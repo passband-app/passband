@@ -58,7 +58,7 @@ struct RulesView: View {
         // children rather than to the group as a whole, and the populated
         // branch below has two: the scrolling body and the bar under it. The
         // `maxHeight: .infinity` on the frame was therefore claimed TWICE, so
-        // the enclosing VStack in RoutedHost split the window between them and
+        // the enclosing VStack (RoutedHost then, the settings pane now) split the window between them and
         // the page rendered at half height with its footer stranded in the
         // middle. One real container means one frame, and the bar keeps its
         // natural height while the body takes what is left.

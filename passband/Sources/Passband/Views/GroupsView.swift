@@ -529,6 +529,8 @@ struct GroupsView: View {
             }
             .refreshable { await loadDetail(for: focus) }
             .task { await loadDetail(for: focus) }
+            // A history row opens mail, and done should come back here.
+            .readerHost()
         }
 
         /// The long press on a row and the bar menu on the detail: one list of

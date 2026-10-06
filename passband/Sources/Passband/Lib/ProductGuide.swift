@@ -277,6 +277,7 @@ enum ProductGuide {
         Groups:
         - "groups" on the To line addresses a saved group. New messages only, not replies or forwards.
         - Groups are made on the Groups page (key 5): n new, e or Enter edit, x delete.
+        - On the iPhone, Groups is under the person icon at the top left of the Sitrep: + makes one, tap opens it, swipe a group to the left to edit or delete it.
         - Each group is set to go out one way: To (one email, everyone sees the list), Bcc (one email, nobody sees anyone else) or Individually (a separate email per person).
 
         Sending:
@@ -378,6 +379,7 @@ enum ProductGuide {
 
         Managing them:
         - On the Rules page: j / k move, e or Enter or a click edits, x deletes (with undo).
+        - On the iPhone, Rules is under the person icon at the top left of the Sitrep: + makes one, tap a rule to edit it, swipe it to the left to delete it (with undo). Swiping a mail row to the left and choosing Tune writes a rule for that sender.
         - Rules are grouped by what they do (allow, filter, mute) and then by domain.
         - A rule shapes mail from now on. It does not move mail already on the board. The exception is "Block sender", offered when unsubscribing from an email that has no unsubscribe link: it mutes that address and clears their open mail.
         - Rules live in Passband only. They never change anything in Gmail.
@@ -388,6 +390,7 @@ enum ProductGuide {
 
         Setting one:
         - Press h on the email: on the Sitrep, in the Emails list, or in the reader, where it then moves on to the next email.
+        - On the iPhone: swipe a mail row to the right and choose Remind, or tap "remind me" under the subject of an open email.
         - Pick a preset (in an hour, this evening, tomorrow morning, tomorrow evening, this weekend, next week, in a week, next month) or type a time: "friday", "aug 30", "in 3 hours", "the 24th". Each choice shows the exact time it means. Enter sets it.
 
         What happens:

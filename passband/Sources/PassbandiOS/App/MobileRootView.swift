@@ -142,6 +142,11 @@ private struct MobileShell: View {
     @Environment(AppStore.self) private var store
     @State private var tab: MobileTab = MobileShell.openingTab
     @State private var showAuth = false
+    /// One per tab's stack: whether that tab is frontmost, and how many pages
+    /// pushed onto it are able to hold the reader themselves. See `ReaderTab`.
+    @State private var readers: [MobileTab: ReaderTab] = [
+        .sitrep: ReaderTab(), .records: ReaderTab(), .mail: ReaderTab(), .search: ReaderTab(),
+    ]
 
     /// Sitrep, always, outside a debug build staged for a screenshot.
     private static var openingTab: MobileTab {
@@ -164,7 +169,7 @@ private struct MobileShell: View {
             Tab("Sitrep", systemImage: MainView.sitrep.symbol, value: MobileTab.sitrep) {
                 NavigationStack {
                     MobileSitrepView()
-                        .threadDestination(active: tab == .sitrep)
+                        .threadDestination(root: true)
                         #if DEBUG
                             // A screenshot's way onto the Account page, which
                             // is otherwise behind a link nothing can tap; see
@@ -173,6 +178,7 @@ private struct MobileShell: View {
                         #endif
                 }
                 .tabSlide(.sitrep, selection: tab)
+                .environment(readers[.sitrep])
             }
             // `square.grid.2x2` and not a box: the tab is a grid of glanceable
             // cards, one per zone, and the icon should say the shape of what is
@@ -181,9 +187,10 @@ private struct MobileShell: View {
             Tab("Quick Look", systemImage: "square.grid.2x2", value: MobileTab.records) {
                 NavigationStack {
                     MobileRecordsView(showAuth: $showAuth)
-                        .threadDestination(active: tab == .records)
+                        .threadDestination(root: true)
                 }
                 .tabSlide(.records, selection: tab)
+                .environment(readers[.records])
             }
             Tab("Mail", systemImage: MainView.emails.symbol, value: MobileTab.mail) {
                 NavigationStack {
@@ -206,9 +213,10 @@ private struct MobileShell: View {
                                 .accessibilityLabel("New message")
                             }
                         }
-                        .threadDestination(active: tab == .mail)
+                        .threadDestination(root: true)
                 }
                 .tabSlide(.mail, selection: tab)
+                .environment(readers[.mail])
             }
             // The search role parks this tab apart from the others in iOS 26's
             // tab bar, next to the minimize affordance, which is where a phone
@@ -225,9 +233,10 @@ private struct MobileShell: View {
             Tab(value: MobileTab.search, role: .search) {
                 NavigationStack {
                     MobileSearchView()
-                        .threadDestination(active: tab == .search)
+                        .threadDestination(root: true)
                 }
                 .tabSlide(.search, selection: tab)
+                .environment(readers[.search])
             }
         }
         // Scrolling down surrenders the bar to the content and brings it back on
@@ -254,6 +263,9 @@ private struct MobileShell: View {
             case .emails: tab = .mail
             default: break
             }
+        }
+        .onChange(of: tab, initial: true) { _, tab in
+            for (key, reader) in readers { reader.active = key == tab }
         }
         // And the other way, so the store's idea of where the human is stays
         // true for the next request. Written directly rather than through
@@ -535,16 +547,41 @@ extension View {
 /// closing the thread the visible tab is showing.
 private struct ThreadDestination: ViewModifier {
     @Environment(AppStore.self) private var store
-    let active: Bool
+    @Environment(ReaderTab.self) private var reader
+    /// The tab's own first page, as against a page pushed onto it.
+    let root: Bool
 
-    /// The thread THIS tab's stack owns. Captured from `store.threadId` only
-    /// while the tab is frontmost, so a store-level thread never leaks onto a
-    /// stack that didn't open it.
+    /// The thread THIS page's stack position owns. Captured from
+    /// `store.threadId` only while it is the page on screen, so a store-level
+    /// thread never leaks onto a stack, or a level of one, that didn't open it.
     @State private var mine: String?
     /// The SCHEDULED MAIL this tab's stack shows read-only (ScheduledPreview),
     /// pushed the way a thread is and owned by the same rule: captured from
     /// `store.scheduledPreviewId` only while this tab is frontmost.
     @State private var minePreview: Int?
+    /// On screen, uncovered. A page under the reader it pushed is not.
+    @State private var visible = false
+
+    private var active: Bool { reader.active }
+
+    /// WHO PUSHES THE READER: THE PAGE YOU ARE LOOKING AT. SwiftUI pops an
+    /// item destination back to the view that DECLARED it, so a reader
+    /// declared on the tab's root and opened from three pages deep (a group's
+    /// history, the agent's citations) closed all the way back to the root:
+    /// finish a thread from a group and you were on the sitrep. So a pushed
+    /// page that opens mail declares the destination too (`readerHost`), and
+    /// exactly one of them takes any given thread:
+    ///
+    ///   - the page already holding the reader keeps it (a stack walk swaps
+    ///     the thread under a page that is, by then, covered);
+    ///   - otherwise the page on screen takes it;
+    ///   - and the root takes it when no page that could is on screen, which
+    ///     is a thread opened over a settings pane by a notification.
+    private var takes: Bool {
+        guard active else { return false }
+        if mine != nil || visible { return true }
+        return root && reader.hostsOnScreen == 0
+    }
 
     func body(content: Content) -> some View {
         content
@@ -569,14 +606,23 @@ private struct ThreadDestination: ViewModifier {
             .navigationDestination(item: openThread) { threadId in
                 ThreadViewer(threadId: threadId)
                     .id(threadId)
+                    .modifier(LeavesWithThread(threadId: threadId, on: !root))
                     // The subject is the first thing under the bar already; a
                     // second copy of it up here, truncated to a phrase, is
                     // noise. The bar stays for its back chevron.
                     .navigationTitle("")
                     .navigationBarTitleDisplayMode(.inline)
             }
+            .onAppear {
+                visible = true
+                if !root { reader.hostsOnScreen += 1 }
+            }
+            .onDisappear {
+                visible = false
+                if !root { reader.hostsOnScreen -= 1 }
+            }
             .onChange(of: store.threadId) { _, newValue in
-                if active {
+                if takes {
                     // Frontmost: this tab drives. Opening claims the thread,
                     // closing (from anywhere: pop, account teardown) releases it.
                     mine = newValue
@@ -614,8 +660,48 @@ private struct ThreadDestination: ViewModifier {
     }
 }
 
+/// A reader pushed by a page that is itself pushed has to leave on its own.
+///
+/// SwiftUI stops updating a pushed page once something covers it: its
+/// `onChange` never hears the store's thread close, so the binding that would
+/// pop the reader never moves, and done left the finished mail on screen. (The
+/// tab's first page is kept live under whatever covers it, which is why the
+/// root's binding has always worked.) The reader is the one view certain to be
+/// awake, so it watches for its own thread going away and dismisses itself,
+/// which pops exactly one level: back to the page that opened it.
+private struct LeavesWithThread: ViewModifier {
+    @Environment(AppStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+    let threadId: String
+    let on: Bool
+
+    func body(content: Content) -> some View {
+        content.onChange(of: store.threadId) { _, now in
+            if on, now != threadId { dismiss() }
+        }
+    }
+}
+
+/// One tab's stack, as the pages on it need to know it. Handed down the
+/// stack's environment so a pushed page can host the reader without being
+/// told which tab it was pushed onto.
+@MainActor
+@Observable
+final class ReaderTab {
+    /// This tab is the one on screen.
+    var active = false
+    /// Pushed pages on screen right now that can hold the reader themselves.
+    var hostsOnScreen = 0
+}
+
 extension View {
-    fileprivate func threadDestination(active: Bool) -> some View {
-        modifier(ThreadDestination(active: active))
+    fileprivate func threadDestination(root: Bool) -> some View {
+        modifier(ThreadDestination(root: root))
+    }
+
+    /// For a page PUSHED onto a tab's stack that opens mail: the reader it
+    /// opens comes back to it, not to the tab's first page.
+    func readerHost() -> some View {
+        modifier(ThreadDestination(root: false))
     }
 }

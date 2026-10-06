@@ -252,6 +252,7 @@ fn client_router(state: ApiState) -> Router {
         .route("/client/marketing", get(handlers::get_marketing))
         .route("/client/audit", get(handlers::get_audit))
         .route("/client/stats", get(handlers::get_stats))
+        .route("/client/account/photo", get(handlers::get_account_photo))
         // SHARING. The GET is a read (may this daemon share, and what could the
         // mail say); the POST spends a quota and sends mail as the user, so it
         // sits with the write routes below rather than here... except it does

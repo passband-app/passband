@@ -137,6 +137,29 @@ pub struct InboxUnread {
     pub fetched_at: DateTime<Utc>,
 }
 
+/// Who the mailbox belongs to, as Google's People API last described them: the
+/// part of [`account_profile`](Store::account_identity) small enough to ride on
+/// every stats answer. The photo's bytes are fetched separately, by tag.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AccountIdentity {
+    /// The full display name ("Ada Lovelace").
+    pub name: Option<String>,
+    /// The given name alone, which is what a greeting wants.
+    pub given_name: Option<String>,
+    /// Present exactly when a photo is stored. A short hash of its bytes, so it
+    /// changes when the picture does and not otherwise.
+    pub photo_tag: Option<String>,
+}
+
+/// The account's profile photo, as stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountPhoto {
+    pub bytes: Vec<u8>,
+    /// Sniffed from the bytes at fetch time, never taken from a header.
+    pub mime: String,
+    pub tag: String,
+}
+
 /// One Sent-derived contact, as both the autocomplete hit shape and the
 /// Sent-history harvest's merge input (same fields either way).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1953,6 +1976,26 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     /// now. Only ever called with numbers that came back from Gmail, so a failed
     /// fetch leaves the previous row in place.
     fn set_inbox_unread(&self, account_id: AccountId, messages: i64, threads: i64) -> Result<()>;
+
+    /// The account's Google name and photo tag, or `None` when the profile was
+    /// never fetched. `None` is "we do not know", not "this person has no
+    /// name": clients fall back to what they showed before.
+    fn account_identity(&self, account_id: AccountId) -> Result<Option<AccountIdentity>>;
+
+    /// The stored profile photo, or `None` when there is none to serve.
+    fn account_photo(&self, account_id: AccountId) -> Result<Option<AccountPhoto>>;
+
+    /// Overwrite the account's profile whole. Only ever called with an answer
+    /// that came back from Google, so a failed fetch leaves the previous row
+    /// standing; a `None` photo CLEARS the stored one, which is how a removed
+    /// picture stops being served.
+    fn set_account_profile(
+        &self,
+        account_id: AccountId,
+        name: Option<&str>,
+        given_name: Option<&str>,
+        photo: Option<&AccountPhoto>,
+    ) -> Result<()>;
 
     /// LOCAL-ONLY (TUI): list sealed messages. This is the ONLY method that
     /// exposes sealed content and must never be reachable from MCP.

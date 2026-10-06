@@ -117,6 +117,20 @@ pub const GMAIL_SEND_SCOPE: &str = "https://www.googleapis.com/auth/gmail.send";
 /// Convenience: the full set of scopes for the write credential.
 pub const WRITE_SCOPES: &[&str] = &[GMAIL_MODIFY_SCOPE, GMAIL_SEND_SCOPE];
 
+/// Google's basic-profile scope: the account's name and profile photo, and
+/// nothing about mail. Non-sensitive in Google's own classification.
+///
+/// REQUESTED, NEVER REQUIRED. It rides along on the Read consent so the client
+/// can show a face and a name instead of an initial and a mailbox local part,
+/// and every check that holds a grant against a request leaves it out: a
+/// person who unticks it, and every credential minted before it existed, has a
+/// token that syncs exactly as well. The only consumer is the sync loop's
+/// profile refresh, which treats a refusal as "no picture" and moves on.
+///
+/// The long spelling, not `profile`: Google accepts either on the request and
+/// echoes this one on the response, so one string serves both directions.
+pub const GOOGLE_PROFILE_SCOPE: &str = "https://www.googleapis.com/auth/userinfo.profile";
+
 /// Which backend persists OAuth tokens: the OS secret service, or a mode-0600
 /// JSON file (the only option on a headless box with no desktop keyring).
 /// Defaults to keyring on macOS, file on Linux.

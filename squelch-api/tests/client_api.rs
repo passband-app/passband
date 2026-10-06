@@ -5614,6 +5614,71 @@ async fn stats_name_the_mailbox_this_daemon_serves() {
 }
 
 #[tokio::test]
+async fn stats_name_the_person_and_the_photo_door_serves_their_picture() {
+    // Never fetched (a grant without the profile scope): every key is ABSENT
+    // and the photo door is a 404, so the client keeps its initial.
+    let Harness { app, .. } = harness(|_, _| {});
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", "/client/stats"))
+        .await
+        .unwrap();
+    let json = body_json(resp).await;
+    for key in ["account_name", "account_given_name", "account_photo"] {
+        assert!(json.get(key).is_none(), "{key} invented");
+    }
+    let resp = app
+        .oneshot(authed("GET", "/client/account/photo"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // Fetched: the name rides on stats, and the tag there is the photo's.
+    let jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3];
+    let Harness { app, .. } = harness(|store, acct| {
+        let photo = squelch_core::store::AccountPhoto {
+            bytes: vec![0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3],
+            mime: "image/jpeg".into(),
+            tag: "abc123".into(),
+        };
+        store
+            .set_account_profile(acct, Some("Ada Lovelace"), Some("Ada"), Some(&photo))
+            .unwrap();
+    });
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", "/client/stats"))
+        .await
+        .unwrap();
+    let json = body_json(resp).await;
+    assert_eq!(json["account_name"], Value::String("Ada Lovelace".into()));
+    assert_eq!(json["account_given_name"], Value::String("Ada".into()));
+    assert_eq!(json["account_photo"], Value::String("abc123".into()));
+
+    // The photo door is the human door: no token, no picture.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/client/account/photo")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    let resp = app
+        .oneshot(authed("GET", "/client/account/photo"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()["content-type"], "image/jpeg");
+    assert_eq!(resp.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(body_bytes(resp).await, jpeg);
+}
+
+#[tokio::test]
 async fn stats_carry_gmail_inbox_unread_only_once_the_sync_loop_has_fetched_it() {
     // Never fetched (old DB, or every fetch so far failed): the key is ABSENT.
     // A zeroed object would read as "your inbox is clear", which is a claim this

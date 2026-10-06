@@ -90,16 +90,16 @@ use crate::error::{CoreError, Result};
 // The ledger's stored lane/decision strings ARE the metric labels; see `notify`.
 use crate::metrics::{NotifyDecision, NotifyLane};
 use crate::store::{
-    AttachmentBytes, BankingApplied, BlankBodyScan, ClientPlatform, ClientSeen, ClientTag,
-    ContactEntry, Device, DeviceToken, Draft, DraftFields, DraftKey, ExtractQueued, FtsQuery,
-    HealScope, InboxUnread, IssuedDeviceToken, LeggedHit, MailActivityDay, MarketingApplied,
-    MarketingOffer, MessageMissingRecipients, MessageOpen, MessageUnsub, MintedPairingCode,
-    MissingVector, NewAuditEntry, NewEvent, NewNotifyDecision, NotifyDecisionRow, RevisitQueued,
-    SPAM_SYNCED_AT_KEY, SealedBody, SealedMessage, SearchDiagnostics, SearchFilter, SearchSort,
-    SeedVerdict, SenderDigestRow, SenderEntry, SenderHistory, SentMessage, SitrepBand, SpamScope,
-    Stage1Applied, Stage1Queued, Stage2Applied, Stage2CapOverrides, Stage2Queued, Stage2Usage,
-    Stage2UsageDay, Store, SyncState, TermDf, ThreadSibling, TrackedMessage, TriageDebug,
-    TriagedMessage, UsageTokens,
+    AccountIdentity, AccountPhoto, AttachmentBytes, BankingApplied, BlankBodyScan, ClientPlatform,
+    ClientSeen, ClientTag, ContactEntry, Device, DeviceToken, Draft, DraftFields, DraftKey,
+    ExtractQueued, FtsQuery, HealScope, InboxUnread, IssuedDeviceToken, LeggedHit, MailActivityDay,
+    MarketingApplied, MarketingOffer, MessageMissingRecipients, MessageOpen, MessageUnsub,
+    MintedPairingCode, MissingVector, NewAuditEntry, NewEvent, NewNotifyDecision,
+    NotifyDecisionRow, RevisitQueued, SPAM_SYNCED_AT_KEY, SealedBody, SealedMessage,
+    SearchDiagnostics, SearchFilter, SearchSort, SeedVerdict, SenderDigestRow, SenderEntry,
+    SenderHistory, SentMessage, SitrepBand, SpamScope, Stage1Applied, Stage1Queued, Stage2Applied,
+    Stage2CapOverrides, Stage2Queued, Stage2Usage, Stage2UsageDay, Store, SyncState, TermDf,
+    ThreadSibling, TrackedMessage, TriageDebug, TriagedMessage, UsageTokens,
 };
 use crate::types::{
     AccountId, AttachmentInfo, AttentionStatus, AttentionUpdate, AuditEntry, BandCounts, Banking,
@@ -905,6 +905,24 @@ impl Store for SqliteStore {
 
     fn set_inbox_unread(&self, account_id: AccountId, messages: i64, threads: i64) -> Result<()> {
         self.set_inbox_unread(account_id, messages, threads)
+    }
+
+    fn account_identity(&self, account_id: AccountId) -> Result<Option<AccountIdentity>> {
+        self.account_identity(account_id)
+    }
+
+    fn account_photo(&self, account_id: AccountId) -> Result<Option<AccountPhoto>> {
+        self.account_photo(account_id)
+    }
+
+    fn set_account_profile(
+        &self,
+        account_id: AccountId,
+        name: Option<&str>,
+        given_name: Option<&str>,
+        photo: Option<&AccountPhoto>,
+    ) -> Result<()> {
+        self.set_account_profile(account_id, name, given_name, photo)
     }
 
     fn sealed_messages(&self, account_id: AccountId) -> Result<Vec<SealedMessage>> {

@@ -165,6 +165,12 @@ private struct MobileShell: View {
                 NavigationStack {
                     MobileSitrepView()
                         .threadDestination(active: tab == .sitrep)
+                        #if DEBUG
+                            // A screenshot's way onto the Account page, which
+                            // is otherwise behind a link nothing can tap; see
+                            // FixtureRoute.
+                            .navigationDestination(isPresented: stagedAccount) { AccountPage() }
+                        #endif
                 }
                 .tabSlide(.sitrep, selection: tab)
             }
@@ -290,6 +296,18 @@ private struct MobileShell: View {
                 .id(request.id)
             }
         }
+        // The group editor, off the same `store.groupEditor` the Mac's action
+        // layer mounts it on. Until this was here the phone had no Groups page
+        // to raise it from; now it has one (under Account), and a flag set with
+        // nothing watching it is a button that does nothing. `.id` for the
+        // reason the rule editor has one: a request swapped under an open card
+        // must not inherit the last one's fields.
+        .overlay {
+            if let request = store.groupEditor {
+                GroupEditor(request: request) { store.closeGroupEditor() }
+                    .id(request.id)
+            }
+        }
         .overlay {
             if !store.authQueue.isEmpty { AuthCodeModal() }
         }
@@ -376,6 +394,14 @@ private struct MobileShell: View {
                 .scrollDismissesKeyboard(.interactively)
         }
     }
+
+    #if DEBUG
+        private var stagedAccount: Binding<Bool> {
+            Binding(
+                get: { FixtureRoute.shared.account },
+                set: { FixtureRoute.shared.account = $0 })
+        }
+    #endif
 
     /// The share sheet's flag, as a Binding, so this file keeps its rule: no
     /// `@Bindable` shadow, every modal presented off a derived binding. There is

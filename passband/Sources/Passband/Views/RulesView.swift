@@ -16,6 +16,11 @@
 // recreates the deleted rule. j/k walk DRAWN order, not fetch order. A click
 // opens the rule: selecting a row has nothing to do on its own that the editor
 // does not, so the pointer goes straight there (#308).
+//
+// ON THE PHONE the same page hangs off the Account page (PassbandiOS/Views/
+// AccountPage.swift) and is a `List` rather than a cursor surface: see `phone`
+// at the foot of the RulesView half of this file. Same fetch, same grouping,
+// same three verbs through the same three functions; only the hand differs.
 
 import SwiftUI
 
@@ -54,6 +59,15 @@ struct RulesView: View {
     }
 
     var body: some View {
+        #if os(macOS)
+            desk
+        #else
+            phone
+        #endif
+    }
+
+    /// The Mac's page: a cursor, a key hint bar, wide columns.
+    private var desk: some View {
         // A VStack, NOT a Group. `Group` applies a modifier to EACH of its
         // children rather than to the group as a whole, and the populated
         // branch below has two: the scrolling body and the bar under it. The
@@ -205,6 +219,250 @@ struct RulesView: View {
         }
     }
 }
+
+#if !os(macOS)
+    // MARK: - the phone's page
+
+    extension RulesView {
+        /// THE SAME PAGE FOR A THUMB. Nothing here is a second implementation:
+        /// the rows come out of the same `sections`, and every gesture ends in
+        /// `create`, `edit` or `delete` above, which are the bodies of the
+        /// Mac's n, e and x.
+        ///
+        ///   tap a row            e / Enter   `edit`
+        ///   swipe left, or hold  x           `delete` (undo in the toast)
+        ///   + in the bar         n           `create`
+        ///   pull down                        `load`
+        ///
+        /// A `List`, for the reason the mail tab is one (EmailsView.phoneList):
+        /// the swipe, its full-swipe commit and its truce with the back
+        /// gesture are the system's, and this page is a push, so a hand-rolled
+        /// rail would be arguing with the edge swipe on every row.
+        ///
+        /// NO CURSOR, so no `index` and no scroll-follow: the row a gesture
+        /// starts on is the selection. And no key hint bar, since there are no
+        /// keys.
+        fileprivate var phone: some View {
+            List {
+                if rulesState.isLoading && rules.isEmpty {
+                    BandNote("loading rules…").plainRow()
+                } else if let error = rulesState.error {
+                    BandNote(error).plainRow()
+                } else if rules.isEmpty {
+                    phoneEmpty.plainRow()
+                } else {
+                    let counts = matchCounts
+                    ForEach(sections) { section in
+                        PhoneRuleSectionHeader(
+                            disposition: section.disposition, count: section.ruleCount,
+                            first: section.id == sections.first?.id
+                        )
+                        .plainRow()
+                        ForEach(section.groups) { group in
+                            if group.showsHeader {
+                                DomainHeaderRow(group: group)
+                                    .padding(.top, Space.s4)
+                                    .plainRow()
+                            }
+                            ForEach(group.rows) { row in
+                                phoneRow(row, in: group, matched: counts[row.rule.id] ?? 0)
+                            }
+                        }
+                    }
+                }
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .environment(\.defaultMinListRowHeight, 0)
+            .background(Palette.canvas)
+            .navigationTitle("Rules")
+            .navigationBarTitleDisplayMode(.inline)
+            // A bare accent glyph, like the two doors on the sitrep's bar: a
+            // glass capsule over a page of rows is chrome competing with them.
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(action: create) {
+                        Image(systemName: "plus").foregroundStyle(Palette.accent)
+                    }
+                    .accessibilityLabel("New rule")
+                }
+                .sharedBackgroundVisibility(.hidden)
+            }
+            .refreshable { await load() }
+            .task {
+                RulesReload.shared.handler = { await load() }
+                await load()
+            }
+            .onDisappear { RulesReload.shared.handler = nil }
+        }
+
+        /// One rule. The tap is the edit, as the Mac's click is. Delete is the
+        /// only swipe and takes the full swipe, because it is the verb with an
+        /// undo behind it; the long press carries both for a hand that does
+        /// not swipe.
+        private func phoneRow(
+            _ row: RuleGrouping.Row, in group: RuleGrouping.DomainGroup, matched: Int
+        ) -> some View {
+            PhoneRuleRow(row: row, group: group, matchCount: matched) { edit(row.rule) }
+                .plainRow()
+                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                    Button {
+                        Haptics.commit()
+                        Task { await delete(row.rule) }
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
+                    .tint(Palette.danger)
+                }
+                .contextMenu {
+                    Button { edit(row.rule) } label: { Label("Edit", systemImage: "pencil") }
+                    // Destructive ROLE on an undoable act, as the mail rows'
+                    // Done is: the role is what puts it last and in red.
+                    Button(role: .destructive) {
+                        Task { await delete(row.rule) }
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
+                }
+        }
+
+        /// Nothing written yet. Says what a rule is, since this is the first
+        /// place most people meet the word, and names both ways to make one:
+        /// here, and from the mail the rule would be about.
+        private var phoneEmpty: some View {
+            VStack(alignment: .leading, spacing: Space.s10) {
+                Text("no rules yet.")
+                    .font(Typo.row)
+                    .foregroundStyle(Palette.inkDim)
+                Text(
+                    "a rule is one line, in your own words, saying what you want from a sender: always show them, mute them, or only let some of it through. write one here, or swipe any message and tap Tune."
+                )
+                .font(Typo.rowSub)
+                .foregroundStyle(Palette.inkFaintest)
+                .fixedSize(horizontal: false, vertical: true)
+                Button("new rule", action: create)
+                    .buttonStyle(.glass)
+                    .padding(.top, Space.s2)
+            }
+            .padding(.horizontal, Space.scaled(11))
+            .padding(.vertical, Space.s24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// The disposition band, with the line the Mac keeps in a tooltip printed
+    /// under it: a phone has no hover, and "filter" is not a word that explains
+    /// itself.
+    private struct PhoneRuleSectionHeader: View {
+        let disposition: Disposition
+        let count: Int
+        let first: Bool
+
+        /// `hint` leads with the label ("mute: keep out of..."), which the line
+        /// above this one has just said.
+        private var hint: String {
+            disposition.hint.split(separator: ": ", maxSplits: 1).last.map(String.init)
+                ?? disposition.hint
+        }
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: Space.s4) {
+                HStack(spacing: Space.s8) {
+                    Text(disposition.label.uppercased())
+                        .font(Typo.ui(10, weight: .semibold))
+                        .tracking(0.9)
+                        .foregroundStyle(disposition.tone)
+                    Text("\(count)")
+                        .font(Typo.num(10))
+                        .foregroundStyle(Palette.inkFaintest)
+                    Rectangle()
+                        .fill(Palette.hairline)
+                        .frame(height: 1)
+                }
+                Text(hint)
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.inkFaintest)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, Space.scaled(11))
+            .padding(.top, first ? Space.s8 : Space.scaled(22))
+            .padding(.bottom, Space.s6)
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
+        }
+    }
+
+    /// A rule at phone width: WHO on the first line, WHAT YOU ASKED FOR under
+    /// it. The Mac lays the two side by side and gives the pattern a fixed
+    /// 218pt column, which on a phone is most of the row and leaves the
+    /// sentence, the part the owner actually wrote, a few words wide.
+    ///
+    /// The sentence is never clamped to one line here: there is no selected
+    /// row to unclamp it on, so the row shows up to three and the editor shows
+    /// the rest.
+    private struct PhoneRuleRow: View {
+        let row: RuleGrouping.Row
+        let group: RuleGrouping.DomainGroup
+        let matchCount: Int
+        let onOpen: () -> Void
+
+        private var rule: SenderRule { row.rule }
+
+        var body: some View {
+            ListRow(
+                selected: false, cornerRadius: 10, hPadding: Space.scaled(11), vPadding: Space.s10,
+                hoverFill: false, action: onOpen
+            ) { _, _ in
+                HStack(alignment: .top, spacing: Space.s10) {
+                    if row.nested {
+                        // Same rail the Mac draws: the header above carries the
+                        // icon, and the line is what makes the indent read as
+                        // belonging to it.
+                        Rectangle()
+                            .fill(Palette.hairline)
+                            .frame(width: 1)
+                            .padding(.leading, 9)
+                            .padding(.trailing, 8)
+                    } else if RuleGrouping.isWildcard(rule.match_pattern) {
+                        RuleIcon(domain: group.domain, eligible: group.iconEligible, size: 20)
+                    } else {
+                        Avatar(sender: rule.match_pattern, size: 20)
+                    }
+                    VStack(alignment: .leading, spacing: Space.scaled(3)) {
+                        HStack(alignment: .firstTextBaseline, spacing: Space.s8) {
+                            Text(row.label)
+                                .font(Typo.mono(12))
+                                .foregroundStyle(Palette.ink)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Spacer(minLength: Space.s4)
+                            // Only when it says something: "0×" down a whole
+                            // column is a tooltip's worth of meaning on the
+                            // Mac and a column of noise without one.
+                            if matchCount > 0 {
+                                Text("\(matchCount)×")
+                                    .font(Typo.num(10))
+                                    .foregroundStyle(Palette.accent)
+                                    .accessibilityLabel("\(matchCount) on the board now")
+                            }
+                            Text(Fmt.relAge(rule.updated_at))
+                                .font(Typo.num(10))
+                                .foregroundStyle(Palette.inkFaintest)
+                        }
+                        Text(rule.want_text.isEmpty ? "no description" : rule.want_text)
+                            .font(Typo.rowSub)
+                            .foregroundStyle(
+                                rule.want_text.isEmpty ? Palette.inkFaintest : Palette.inkDim
+                            )
+                            .lineLimit(3)
+                            .multilineTextAlignment(.leading)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+        }
+    }
+#endif
 
 /// Lets an undo fired from the global toast stack — which outlives this view's
 /// closures — ask the rules list to re-pull if it is still on screen.
@@ -643,8 +901,11 @@ struct RuleEditor: View {
         VStack(alignment: .leading, spacing: Space.scaled(5)) {
             HStack(spacing: Space.s4) {
                 Text("disposition").font(Typo.micro).foregroundStyle(Palette.inkFaint)
-                Kbd("tab")
-                Text("to cycle").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
+                // The key is a Mac's; a phone taps the segment it wants.
+                #if os(macOS)
+                    Kbd("tab")
+                    Text("to cycle").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
+                #endif
                 Spacer()
             }
             GlassSegmented(options: dispositionOptions, selection: $disposition)

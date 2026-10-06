@@ -1,7 +1,8 @@
 // THE ACCOUNT PAGE — the phone's you-space, behind the person glyph at the top
 // left of the sitrep. Everything about the person using the app and the install
-// they are using it on lives here: which mailboxes this install knows first, and
-// then the six settings panes under that.
+// they are using it on lives here: which mailboxes this install knows first,
+// then what that mailbox has been told (its rules, its groups), and then the
+// settings panes under that.
 //
 // WHY THE SETTINGS LIVE UNDER THE PERSON AND NOT BESIDE THE MAIL. A phone settles
 // settings behind whoever is signed in — it is where every other app on the
@@ -31,6 +32,18 @@
 // on the device has — the one place in this app where matching the platform's
 // habit beats having a house style.
 //
+// RULES AND GROUPS ARE HERE TOO, and they are not settings. On the Mac they are
+// pages on the rail, beside Sitrep and Emails; a phone's bar has three tabs and
+// neither of these is somewhere you live. But a rule made from a swipe has to
+// be findable afterwards, and the place a thumb goes looking for "what have I
+// told this thing" is the screen about you. So they get a pane of their own,
+// ABOVE the settings and directly under the switcher: they belong to the
+// mailbox the switcher just named (a second account has different rules),
+// where everything below them belongs to the install. Their rows wear the same
+// shape as the settings rows so the screen still reads as one index, and they
+// are not `SettingsSection` cases, because that enum is the Mac's sub-nav and
+// the Mac already has a door to each.
+//
 // A LIST AND NOT A `List`. The app paints its own canvas and floats glass on it,
 // and `insetGrouped` brings a grouped system background plus separator insets
 // that fight both. This is the same ScrollView-of-cards MobileRecordsView is, and
@@ -56,6 +69,7 @@ struct AccountPage: View {
             VStack(alignment: .leading, spacing: 16) {
                 masthead
                 switcher
+                pages
                 index
             }
             .padding(.horizontal, 16)
@@ -64,9 +78,26 @@ struct AccountPage: View {
         .background(Palette.canvas)
         .navigationTitle("Account")
         .navigationBarTitleDisplayMode(.inline)
+        #if DEBUG
+            // A screenshot's way in; see FixtureRoute.
+            .navigationDestination(item: stagedPage) { page in
+                switch page {
+                case .rules: RulesView()
+                case .groups: GroupsView()
+                }
+            }
+        #endif
     }
 
-    /// The one serif line on the index, same as Quick Look's: says what the six
+    #if DEBUG
+        private var stagedPage: Binding<FixtureRoute.Page?> {
+            Binding(
+                get: { FixtureRoute.shared.page },
+                set: { FixtureRoute.shared.page = $0 })
+        }
+    #endif
+
+    /// The one serif line on the index, same as Quick Look's: says what the
     /// rows have in common so the screen reads as a place, not a menu.
     private var masthead: some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -161,8 +192,37 @@ struct AccountPage: View {
         return account.displayHost
     }
 
-    /// One glass pane, six rows, hairlines between: the inset-grouped shape,
-    /// built out of the app's own material rather than the system's.
+    /// WHAT THIS MAILBOX HAS BEEN TOLD: the two pages the Mac keeps on its
+    /// rail. The views are the Mac's own (`RulesView`, `GroupsView`), each
+    /// with a phone layout inside it, so a rule edited here is edited by the
+    /// same code that edits it there.
+    ///
+    /// Rules first. It is the page a swipe's Tune has been writing to all
+    /// along, and the one a person comes back for.
+    private var pages: some View {
+        VStack(spacing: 0) {
+            NavigationLink { RulesView() } label: {
+                row(
+                    symbol: MainView.rules.symbol, title: MainView.rules.label,
+                    blurb: "what you asked for from each sender")
+            }
+            .buttonStyle(.plain)
+            Hairline()
+            NavigationLink { GroupsView() } label: {
+                row(
+                    symbol: MainView.groups.symbol, title: MainView.groups.label,
+                    blurb: "people you write to together")
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.vertical, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .passbandGlass(.pane, cornerRadius: 18, tint: Palette.glassTint)
+    }
+
+    /// One glass pane, a row per settings pane, hairlines between: the
+    /// inset-grouped shape, built out of the app's own material rather than
+    /// the system's.
     private var index: some View {
         VStack(spacing: 0) {
             ForEach(Self.order, id: \.self) { section in
@@ -177,16 +237,21 @@ struct AccountPage: View {
     }
 
     private func row(_ section: SettingsSection) -> some View {
+        row(symbol: symbol(section), title: section.label, blurb: blurb(section))
+    }
+
+    /// The one row shape on this screen, for a settings pane or a page.
+    private func row(symbol: String, title: String, blurb: String) -> some View {
         HStack(spacing: 12) {
-            Image(systemName: symbol(section))
+            Image(systemName: symbol)
                 .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(Palette.accent)
                 .frame(width: 22)
             VStack(alignment: .leading, spacing: 2) {
-                Text(section.label)
+                Text(title)
                     .font(Typo.rowSub)
                     .foregroundStyle(Palette.ink)
-                Text(blurb(section))
+                Text(blurb)
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaintest)
                     .lineLimit(1)

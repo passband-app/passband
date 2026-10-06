@@ -366,6 +366,7 @@
 		CDD154C0CEFB4D530E29DD34 /* Format.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5883BA424612265657845246 /* Format.swift */; };
 		CDE77DF3DD16A78A9192624E /* EventBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D952F37AD4DF7C050902B19 /* EventBanner.swift */; };
 		CE36E3CB614F3B5BADFCEEC2 /* ImageTrim.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17A72FA204008ACE31765EA1 /* ImageTrim.swift */; };
+		CE7A1954C5F02C1ADB43F8E6 /* ChainFoot.swift in Sources */ = {isa = PBXBuildFile; fileRef = D284E1994D90CF7CFF06983C /* ChainFoot.swift */; };
 		CF0065AF30C9FC626811FF50 /* RetriageModal.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA00E655EE0625FDF367DA22 /* RetriageModal.swift */; };
 		CF2D4E9603C4787015DA65C7 /* ComposeAttachments.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9ED32B3054A31D7933998E59 /* ComposeAttachments.swift */; };
 		CF34A69E15DFE9980A622162 /* WhatsNewCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0AFCAEC0D83E0E01D0074CE7 /* WhatsNewCard.swift */; };
@@ -696,6 +697,7 @@
 		D0318A22219D3A1E36429C76 /* MobileToastHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileToastHost.swift; sourceTree = "<group>"; };
 		D078052FD335EF42C0AF9E8F /* TestFlightNudgeModal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestFlightNudgeModal.swift; sourceTree = "<group>"; };
 		D179CAC9853B13A5FBFD968E /* Updater.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Updater.swift; sourceTree = "<group>"; };
+		D284E1994D90CF7CFF06983C /* ChainFoot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChainFoot.swift; sourceTree = "<group>"; };
 		D2D68A34D5DC11532BE8E359 /* DemoAppearancePicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoAppearancePicker.swift; sourceTree = "<group>"; };
 		D2ED74225D223B07573FEE0C /* MailFilterBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MailFilterBar.swift; sourceTree = "<group>"; };
 		D4382469FC056D0CD54B22F3 /* Raster.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Raster.swift; sourceTree = "<group>"; };
@@ -1040,6 +1042,7 @@
 			children = (
 				FA2F8E5310BCCF203247E428 /* AccountPage.swift */,
 				5A1CE9442DCA54FF7863D7C5 /* AttachmentPreviewiOS.swift */,
+				D284E1994D90CF7CFF06983C /* ChainFoot.swift */,
 				1DD489E941E602E585098D3F /* EmailWebViewiOS.swift */,
 				A9FAE568A595DDCE359FFA33 /* MarkdownTextViewiOS.swift */,
 				35C12A5AFBCED3C55DA7A5D8 /* MobileAgentView.swift */,
@@ -1565,6 +1568,7 @@
 				4D1913697E7DE1A0B25EFDC4 /* Avatar.swift in Sources */,
 				396BF899A7D7540E0DBCBB5B /* Badge.swift in Sources */,
 				4447BE301663F629A86CD500 /* CalendarVisibility.swift in Sources */,
+				CE7A1954C5F02C1ADB43F8E6 /* ChainFoot.swift in Sources */,
 				BDE91DE1BD59B4CD5D50F21D /* Chrome.swift in Sources */,
 				A32CA97991D874737EE663DA /* CidImages.swift in Sources */,
 				EB6FD58A6CF88952C59B8109 /* ClearBand.swift in Sources */,

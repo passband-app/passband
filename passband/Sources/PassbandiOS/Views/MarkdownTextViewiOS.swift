@@ -44,6 +44,13 @@ struct MarkdownTextView: UIViewRepresentable {
     /// caret again after mount (`EditorRefocus.take`).
     var refocus = 0
     var disabled = false
+    /// GROW WITH THE TEXT instead of scrolling it. For an editor that already
+    /// sits in something that scrolls: the reader's reply lives at the end of
+    /// the email chain, in the chain's own scroll view, and a second scroller
+    /// nested in the first is two surfaces answering one thumb. The caller
+    /// gives it a floor with `.frame(minHeight:)` and no ceiling. Phone only;
+    /// the Mac's editor has no such switch.
+    var grows = false
     /// The Mac editor's drop and paste hooks, accepted here so the composers
     /// pass them without forking on platform. A phone has nothing to drop
     /// with; its files come in through the paperclip's document picker.
@@ -68,7 +75,10 @@ struct MarkdownTextView: UIViewRepresentable {
         // The editor scrolls ITSELF. Its callers give it a fixed height (the
         // inline reply) or the rest of a sheet (the pane), and a text view that
         // grew instead would push the send buttons under the keyboard.
-        view.isScrollEnabled = true
+        //
+        // UNLESS IT GROWS (`grows`), where the enclosing scroll view is the
+        // scroller and this view is as tall as its text: see `sizeThatFits`.
+        view.isScrollEnabled = !grows
         view.alwaysBounceVertical = false
         // Curly quotes and en-dashes break markers, exactly as on the Mac.
         view.smartQuotesType = .no
@@ -105,7 +115,24 @@ struct MarkdownTextView: UIViewRepresentable {
             // starts reading — and typing — from the top.
             view.selectedRange = NSRange(location: 0, length: 0)
             view.scrollRangeToVisible(NSRange(location: 0, length: 0))
+            // A restored draft is a different number of lines.
+            if grows { view.invalidateIntrinsicContentSize() }
         }
+    }
+
+    /// THE GROWING EDITOR'S HEIGHT IS ITS TEXT'S, at the width it is offered.
+    /// Answered by hand because a UITextView that does not scroll reports an
+    /// intrinsic size for ONE UNWRAPPED LINE, and SwiftUI believes it: the
+    /// editor comes out as wide as its longest paragraph and one line tall.
+    /// nil hands a scrolling editor back to the default, which takes whatever
+    /// frame its caller gives it.
+    func sizeThatFits(
+        _ proposal: ProposedViewSize, uiView: HighlightingTextView, context: Context
+    ) -> CGSize? {
+        guard grows, let width = proposal.width, width > 0, width.isFinite else { return nil }
+        let fitted = uiView.sizeThatFits(
+            CGSize(width: width, height: .greatestFiniteMagnitude))
+        return CGSize(width: width, height: ceil(fitted.height))
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -126,10 +153,19 @@ struct MarkdownTextView: UIViewRepresentable {
             parent.text = view.text
             view.rehighlight()
             view.syncInputTraits()
+            if parent.grows {
+                // A line was added or taken away: SwiftUI has to ask for the
+                // height again, and the caret has to still be on screen once
+                // it has.
+                view.invalidateIntrinsicContentSize()
+                view.revealCaret()
+            }
         }
 
         func textViewDidChangeSelection(_ textView: UITextView) {
-            (textView as? HighlightingTextView)?.syncInputTraits()
+            guard let view = textView as? HighlightingTextView else { return }
+            view.syncInputTraits()
+            if parent.grows { view.revealCaret() }
         }
 
         func textViewDidBeginEditing(_ textView: UITextView) {
@@ -266,6 +302,32 @@ final class HighlightingTextView: UITextView {
         // with, and UIKit resets typing attributes to the view's font on some
         // edits; restating them keeps a fresh keystroke from landing unstyled.
         typingAttributes = MarkdownStyle.base
+    }
+
+    /// KEEP THE CARET IN THE WINDOW, by asking the scroll view this editor sits
+    /// in. Only a growing editor calls it: a scrolling one is its own scroll
+    /// view and UIKit already follows the caret inside it. A growing one has
+    /// handed the scrolling to an ancestor, which knows nothing about carets,
+    /// so a reply typed past the keyboard's top edge would carry on being
+    /// typed underneath it.
+    ///
+    /// One hop later, because the line the caret just moved to is not laid
+    /// out (and the editor is not yet its new height) inside the delegate call
+    /// that reports it. The margin under the caret is the room the composer's
+    /// own buttons take, so the verb you are typing toward stays in view.
+    func revealCaret() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.isFirstResponder, let end = self.selectedTextRange?.end
+            else { return }
+            var ancestor = self.superview
+            while let view = ancestor, !(view is UIScrollView) { ancestor = view.superview }
+            guard let scroller = ancestor as? UIScrollView else { return }
+            let caret = self.convert(self.caretRect(for: end), to: scroller)
+            guard !caret.isNull, !caret.isInfinite else { return }
+            scroller.scrollRectToVisible(
+                caret.inset(by: UIEdgeInsets(top: -12, left: 0, bottom: -64, right: 0)),
+                animated: true)
+        }
     }
 
     /// Autocapitalize and autocorrect prose; do neither inside a code span. See

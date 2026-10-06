@@ -261,6 +261,7 @@ enum ProductGuide {
         - Forward: press f. It forwards the message selected with j / k, in the side composer, with the original shown under the note. Fill in To and send; the note is optional.
         - From the Sitrep or a row in the Emails list, r opens the email and starts the reply in one step. On a list row f is "search this sender", not forward.
         - The Mac reader has no reply buttons. The keys are the way in.
+        - On the iPhone there are no keys. Scroll to the end of an open email for the reply and reply all buttons, or swipe one message to the left for Reply, Reply all and Forward on that message. The reply is written in a card under the thread and scrolls with it.
 
         New message:
         - c on the Sitrep, the Emails list or the reader, or ⌘N from anywhere.

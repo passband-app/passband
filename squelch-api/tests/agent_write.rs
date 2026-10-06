@@ -213,7 +213,6 @@ async fn the_owner_reads_and_sets_the_level_on_the_human_door() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
     assert_eq!(body["write_access"], "none");
-    assert_eq!(body["sending_available"], true);
 
     let resp = f
         .app
@@ -504,11 +503,4 @@ async fn send_level_without_a_write_credential_says_so() {
         matches!(refused, Err(AgentWriteError::Unavailable(_))),
         "{refused:?}"
     );
-    let resp = f
-        .app
-        .clone()
-        .oneshot(authed("GET", "/client/settings/agent-access"))
-        .await
-        .unwrap();
-    assert_eq!(body_json(resp).await["sending_available"], false);
 }

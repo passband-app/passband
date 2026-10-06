@@ -479,7 +479,8 @@ enum ProductGuide {
 
         Connecting an outside agent (Settings > Agents):
         - Passband has an MCP endpoint (Agent MCP) that Claude, OpenClaw, Hermes Agent, ChatGPT, Claude Code, Codex, Cursor, VS Code or Claude Desktop can connect to. The pane shows the address, a button that adds it where the agent has an install link (Claude, Cursor, VS Code) or copies the setup otherwise, and the setup snippet for each.
-        - Such an agent can read ranked updates and whole threads, search mail, list bills, deadlines and packages, and set sender rules. It cannot send, archive, label or delete, cannot see login codes, and cannot change anything in Gmail.
+        - Such an agent can read ranked updates and whole threads, search mail, list bills, deadlines and packages, and set sender rules. It cannot archive, label or delete, and cannot see login codes.
+        - "What your agent may write" sets whether it can write mail, per mailbox. "Read only" (the default): it cannot. "Drafts only": it can leave drafts, marked "from your agent" in the drafts list, for the user to read, edit and send. "Send, with your approval": it can send from the user's address, and is told to show each message and wait for the user's go-ahead in its own chat first. Passband cannot check that it asked. It blocks anything that looks like a password or key, and every agent send is in the audit log.
         - Hosted Passband does not offer this yet. A self-hosted daemon does.
         """
 

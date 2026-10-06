@@ -225,7 +225,7 @@ cargo run --bin squelch-tui    # ranked digest, squelch line, sender rule tuning
 
 ## The agent door
 
-Seven tools, no mailbox writes, sealed mail structurally absent:
+Seven tools, no mailbox writes unless you turn them on, sealed mail structurally absent:
 
 | Tool | What it returns |
 |---|---|
@@ -237,7 +237,9 @@ Seven tools, no mailbox writes, sealed mail structurally absent:
 | `set_sender_rule` | squelch/surface/filter a sender, natural-language `want_text` supported |
 | `list_sender_rules` | the current rule set |
 
-Sender rules are the one thing an agent can write, and they only shape triage inside squelch's own database. Nothing an agent does can touch your actual mailbox.
+Out of the box, sender rules are the one thing an agent can write, and they only shape triage inside squelch's own database: nothing an agent does can touch your actual mailbox.
+
+You can widen that yourself, per mailbox, in Passband under Settings > Agents. **Drafts only** adds `create_draft`: the agent leaves a draft, marked as its own, and you send it. **Send, with your approval** also adds `send_email`: the agent sends from your address and is told to show you each message and wait for your go-ahead first. That go-ahead happens in the agent's chat, where squelch cannot see it, so treat it as an instruction to the agent and pick Drafts only if you want a hard stop. The agent never holds your Gmail credential either way; its sends run through the same guarded, audited pipeline yours do. See `squelch-mcp/README.md` and `docs/SECURITY.md` §4c.
 
 A rule's `want_text` is a standing instruction in your own words — "the statement total, not the minimum payment" — and it is delivered **with the mail it applies to**, not just stored. Triage has read it since rules shipped; now the agent writing the sentence you read gets it too, resolved against the sender's address at the moment it answers, so a rule you write today applies to mail that arrived last week. The rule's verdict deliberately stays behind: surface/squelch/filtered has already been spent on the update's tier, and a bill outranks a squelch rule on purpose, so what crosses is the instruction and never the judgment.
 

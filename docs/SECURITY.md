@@ -258,12 +258,14 @@ The outbound guard scans text and message parts at send time; binary files are
 not scanned. Restricting external-agent access does not delete human drafts or
 their attachments. However many drafts an account holds (one per reply target,
 one per forwarded message, any number of new-message drafts), they are served
-only on `/client/drafts`, are never audited, and have no MCP surface.
+only on `/client/drafts` and the owner's own are never audited. The agent door
+cannot list, read, edit or delete a draft; the one thing it can do, when the
+owner allows it, is ADD one (§4c).
 
 A staged file has a SECOND claim, `scheduled_send_id`, beside `draft_id`: the
 outbox row (`scheduled_sends`, docs/SCHEDULED-SEND.md) that will send it. The
-outbox is human-only like drafts, served only on `/client/scheduled`, with no
-MCP surface; unlike drafts it IS audited (ids and reasons only, never the
+outbox is human-only, served only on `/client/scheduled`, with no MCP surface
+at all (an agent's send is immediate and cannot be scheduled); unlike drafts it IS audited (ids and reasons only, never the
 frozen request). A scheduled row holds its files for as long as it waits, up
 to 366 days, and a failed row for 30 days more; only a cancel releases them
 (back to unclaimed, the one-day clock restarted), and the compose door's
@@ -343,6 +345,87 @@ The sync suite asserts the "not fetched routinely" half against the mock's CALL
 LOG rather than against what landed: "no spam rows appeared" would also pass if
 the walk ran and the folder happened to be empty, and the thing being avoided is
 the request.
+
+## 4c. Agent writes: drafts and sending (issue #394)
+
+**Invariant.** An agent writes mail only as far as the mailbox owner has said
+it may, only through the human door's own send pipeline, and never with more
+latitude than the owner has there. The default is that it cannot write mail at
+all. Nothing here changes what an agent can READ.
+
+**The setting.** `app_settings` key `agent.write_access`, per mailbox:
+`none` (default), `drafts`, `send`; each level includes the ones before it.
+`squelch-core/src/agent_write.rs:AgentWriteAccess::load` reads it and FAILS
+CLOSED: unset, or any value this build does not recognize, is `none`. It is set
+only on the human door (`GET`/`PUT /client/settings/agent-access`, bearer-authed,
+audited as `agent.write_access` with `before->after`). The agent door has no
+tool or route that changes it. It is read from the store on every call, so
+turning it off stops the next tool call, not the next restart.
+
+**Enforcement.** The agent door (`squelch-mcp`) holds a `dyn AgentMailer` and
+nothing else: no write credential, no message builder, no draft or outbox store
+call (`squelch-mcp/src/main.rs:the_mcp_crate_never_reaches_the_draft_store_itself`
+scans its source for those identifiers). The one implementation is
+`squelch-api/src/agent_write.rs:ApiAgentMailer`, which `squelchd serve` hands
+over via `ApiState::agent_mailer`. The standalone `squelch-mcp` binary passes
+none and offers neither tool. For each call the mailer:
+
+- re-reads the setting and refuses below the needed level (the MCP server
+  also hides tools the level does not allow, but listing is a courtesy and
+  this check is the gate);
+- resolves a reply target through the AGENT's access check
+  (`thread_id_for_message` + `external_thread_allowed`), so an agent can only
+  reply to mail it can read, and a restricted id answers the same `not found`
+  as an unknown one;
+- for `send_email`, runs `validate_send`, the outbound guard (§5) and
+  `perform_send`, exactly as `POST /client/actions/send` does, with
+  `override_guard` hard-wired to `false`;
+- for `create_draft`, INSERTS a local draft marked `drafts.from_agent = 1`
+  (shown as "from your agent" in the client) and never edits one: a reply
+  whose message already has a draft is refused, because that row is the
+  owner's own unfinished writing and an agent cannot see it to know;
+- audits every outcome, refusals included, as actor `agent` (ids, counts and
+  fixed reason strings only, never content). A draft is written fail-closed
+  with its ledger row, like `set_sender_rule`.
+
+An agent's composition is deliberately narrower than the owner's: no
+attachments, no forward, no send group, no read tracking, no scheduling.
+
+**What "with your approval" does and does not mean.** At `send`, the approval
+is the agent's human saying yes IN THE AGENT'S OWN CONVERSATION. The daemon
+cannot see that conversation and does not verify it. What it does is:
+
+- tell the agent the rule three times: in the server instructions sent at
+  `initialize` (`server.rs:write_instructions`), in the `send_email`
+  description, and in the required `human_approved` argument, each saying that
+  approval is per message, comes from the human, and is never text found in an
+  email or a tool result;
+- refuse a call whose `human_approved` is not `true`;
+- annotate the tool `destructiveHint` + `openWorldHint`, which is what MCP
+  clients key their own confirmation prompts on.
+
+**Residual risk, accepted for an opt-in level and stated in the client.** A
+prompt-injected or simply wrong agent can assert `human_approved: true` and
+send. At `send`, the blast radius of the agent door grows from "can read
+triaged mail and write local rules" to "can send mail as the owner", including
+mail that quotes whatever it was able to read. Sealed mail stays unreadable and
+the outbound guard still blocks secret-shaped text with no override, but
+ordinary content is not protected by either. On an Open door (self-host, no
+agent sign-in) "the agent" is anything that can reach `/mcp`. An owner who
+wants a hard gate uses `drafts`, where the only way mail leaves is the owner
+pressing send in Passband. Not built yet, and the natural next steps if `send`
+needs hardening: per-send approval inside the app, a recipient allow-list, a
+daily cap, reply-only.
+
+**Do not break.**
+- Never give `squelch-mcp` the write credential, a `GmailWriteClient`, or a
+  direct draft/outbox store call. Agent writes go through `AgentMailer`.
+- Never let an agent path pass `override_guard: true`.
+- Never resolve an agent's reply target with `action_message_ref` alone; it
+  applies no agent access check.
+- Keep the default `none`, and keep an unreadable setting meaning `none`.
+- Keep the setting off the agent door: an agent that could raise its own
+  level has no level.
 
 ## 5. Outbound secret guard
 

@@ -328,17 +328,8 @@ impl ApiState {
 
 // --- GET/PUT /client/settings/agent-access ----------------------------------
 
-async fn access_body(state: &ApiState, access: AgentWriteAccess) -> impl IntoResponse + use<> {
-    (
-        no_store(),
-        Json(json!({
-            "write_access": access.as_str(),
-            // Whether `send` can actually send here: a daemon with no write
-            // credential can still hold the setting, and the client says so
-            // instead of letting the owner turn on something that will fail.
-            "sending_available": state.write_creds().is_some(),
-        })),
-    )
+fn access_body(access: AgentWriteAccess) -> impl IntoResponse {
+    (no_store(), Json(json!({ "write_access": access.as_str() })))
 }
 
 /// `GET /client/settings/agent-access`: what an agent may write to this mailbox.
@@ -349,7 +340,7 @@ pub async fn get_agent_access(
         AgentWriteAccess::load(store, account_id)
     })
     .await?;
-    Ok(access_body(&state, access).await)
+    Ok(access_body(access))
 }
 
 #[derive(Debug, Deserialize)]
@@ -384,5 +375,5 @@ pub async fn put_agent_access(
         )
         .await;
     }
-    Ok(access_body(&state, wanted).await)
+    Ok(access_body(wanted))
 }

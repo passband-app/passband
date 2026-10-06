@@ -258,15 +258,7 @@ struct SidebarRail: View {
                 // menu in the menu bar owns the ⌘numbers, and a second
                 // registration of the same chord is a conflict, not a shortcut.
                 ForEach(manager.accounts) { account in
-                    Button {
-                        Task { await manager.switchTo(account.id) }
-                    } label: {
-                        if account.id == manager.activeId {
-                            Label(account.displayName, systemImage: "checkmark")
-                        } else {
-                            Text(account.displayName)
-                        }
-                    }
+                    accountMenuRow(account, isActive: account.id == manager.activeId)
                 }
                 Divider()
                 Button("Add Account…") { store.addAccountSheetOpen = true }
@@ -285,13 +277,44 @@ struct SidebarRail: View {
         }
     }
 
+    /// The live account's profile photo, or its initial when none was imported.
     private var accountMark: some View {
-        Text(AccountManager.shared.active?.initial ?? "?")
-            .font(Typo.ui(13, weight: .semibold))
-            .foregroundStyle(Palette.accent)
-            .frame(width: 26, height: 26)
-            .background(Circle().fill(Palette.accentSoft))
-            .overlay(Circle().strokeBorder(Palette.accent.opacity(0.35), lineWidth: 0.75))
+        AccountMark(
+            account: AccountManager.shared.active, font: Typo.ui(13, weight: .semibold))
+    }
+
+    /// One row of the switcher menu: the account's mark beside its name, with
+    /// the menu's own checkmark on the live one.
+    ///
+    /// A `Toggle`, because that is how a SwiftUI menu spells a checked item:
+    /// the tick lands in the state column AppKit reserves for it, which leaves
+    /// the image slot free for the face. Every row gets a mark, photo or
+    /// initial, so the names line up whether or not each account has a picture.
+    private func accountMenuRow(_ account: AccountRecord, isActive: Bool) -> some View {
+        Toggle(
+            isOn: Binding(
+                get: { isActive },
+                // Either direction is "go to this account": `switchTo` already
+                // declines the one that is live.
+                set: { _ in Task { await AccountManager.shared.switchTo(account.id) } })
+        ) {
+            Label {
+                Text(account.displayName)
+            } icon: {
+                if let mark = Self.menuMark(account) { Image(nsImage: mark) }
+            }
+        }
+    }
+
+    /// The account's mark as a bitmap. An AppKit menu draws a row's image as
+    /// handed over and ignores SwiftUI shapes and clipping, so the circle has
+    /// to be IN the pixels; rendering the same `AccountMark` the rail wears is
+    /// what keeps the two from drifting apart.
+    private static func menuMark(_ account: AccountRecord) -> NSImage? {
+        let renderer = ImageRenderer(
+            content: AccountMark(account: account, size: 18, font: Typo.ui(10, weight: .semibold)))
+        renderer.scale = NSScreen.main?.backingScaleFactor ?? 2
+        return renderer.nsImage
     }
 
     /// The one rounded corner the rail owns: the top-trailing shoulder, where

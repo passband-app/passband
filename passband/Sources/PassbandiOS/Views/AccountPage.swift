@@ -117,13 +117,10 @@ struct AccountPage: View {
 
     private func accountRow(_ account: AccountRecord, isActive: Bool) -> some View {
         HStack(spacing: 12) {
-            // The same initial-in-a-circle the Mac's rail wears, so one person
-            // on both devices recognizes an account by the same mark.
-            Text(account.initial)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Palette.accent)
-                .frame(width: 26, height: 26)
-                .background(Circle().fill(Palette.accentSoft))
+            // The same mark the Mac's rail wears (the profile photo, or the
+            // initial in a circle), so one person on both devices recognizes an
+            // account by it.
+            AccountMark(account: account)
             VStack(alignment: .leading, spacing: 2) {
                 Text(account.displayName)
                     .font(Typo.rowSub)

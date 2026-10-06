@@ -984,6 +984,15 @@ struct StoreStats: Codable, Sendable, Hashable {
     /// is not the same as an anonymous mailbox: nothing is seeded and the
     /// greeting stays bare, exactly as it did before this field existed.
     var account_email: String?
+    /// The mailbox owner's given name, from their Google profile. ABSENT when
+    /// the daemon does not know it: an older daemon, or a Google grant from
+    /// before the name was asked for. Seeds the greeting in place of the
+    /// address's local part when it is there.
+    var account_given_name: String?
+    /// The tag of the profile photo the daemon holds for this account, served
+    /// at `/client/account/photo`. ABSENT means there is no photo, and the
+    /// account wears its initial. See `AccountPhotos`.
+    var account_photo: String?
     var total: Int
     var sealed: Int
     /// How many messages the mail PROVIDER filed as spam — its own count, not a

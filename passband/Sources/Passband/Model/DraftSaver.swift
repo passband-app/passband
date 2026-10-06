@@ -177,6 +177,27 @@ final class DraftSaver {
         pruneResolved()
     }
 
+    /// The composer is being THROWN AWAY (the pane's trash can, confirmed):
+    /// the opposite of `flush`. Nothing more is written, and the row an
+    /// earlier save made is deleted.
+    ///
+    /// The delete rides the slot's save chain (`write`), so a save still on
+    /// the wire lands FIRST and the id it comes back with is the one deleted.
+    /// Cancelling the timer alone would miss exactly that row: the mail the
+    /// person just confirmed deleting would be back in the drafts list.
+    /// Tracked with the flushes, so `settle` waits for it.
+    func discard(_ slot: Slot, _ state: ComposeState) {
+        pending[slot]?.cancel()
+        pending[slot] = nil
+        touched.remove(slot)
+        let ticket = nextFlush
+        nextFlush &+= 1
+        flushes[ticket] = Task { [weak self] in
+            await self?.write(slot, state, discarding: true)
+            self?.flushes[ticket] = nil
+        }
+    }
+
     /// The id this composer's draft row has as far as this saver knows: a save
     /// that landed after the slot last changed wins over the slot's copy. For
     /// the store's "is this row the one on screen" test, which must not miss a
@@ -250,7 +271,7 @@ final class DraftSaver {
         }
     }
 
-    private func write(_ slot: Slot, _ state: ComposeState) async {
+    private func write(_ slot: Slot, _ state: ComposeState, discarding: Bool = false) async {
         // Wait out the slot's previous save — see `inflight`.
         //
         // A LOOP, not one wait: two writers can queue behind the same save A
@@ -275,12 +296,22 @@ final class DraftSaver {
             await running.value
             if inflight[slot] == running { inflight[slot] = nil }
         }
-        let task = Task { await save(slot, state) }
+        let task = Task { discarding ? await drop(state) : await save(slot, state) }
         inflight[slot] = task
         await task.value
         // Only our OWN marker: a later save may have replaced it while we were
         // suspended, and nil-ing that one would let the next writer overlap it.
         if inflight[slot] == task { inflight[slot] = nil }
+    }
+
+    /// `discard`'s turn on the wire: delete the row, if there ever was one.
+    /// The id is read HERE, after the wait in `write`, for the reason `save`
+    /// reads it there. Forgotten only once the row is gone, like a
+    /// blank-delete's.
+    private func drop(_ state: ComposeState) async {
+        guard let id = resolved[state.id] ?? state.draftId else { return }
+        guard await store.deleteDiscardedDraft(id) else { return }
+        resolved[state.id] = .some(nil)
     }
 
     private func save(_ slot: Slot, _ state: ComposeState) async {

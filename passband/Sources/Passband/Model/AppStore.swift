@@ -1896,6 +1896,7 @@ final class AppStore {
         triageFix = nil
         remindTarget = nil
         schedulePicker = nil
+        discardAsk = nil
         ruleEditor = nil
         // A draft's pattern names the old account's senders and rule ids.
         ruleDrafts = [:]
@@ -2335,7 +2336,7 @@ final class AppStore {
             || ruleEditor != nil
             || groupEditor != nil
             || !authQueue.isEmpty || retriage != nil || retriageAsk != nil
-            || reconnectAsk != nil
+            || reconnectAsk != nil || discardAsk != nil
             || tour.wantsBlur || whatsNew.active
     }
 
@@ -4140,6 +4141,83 @@ final class AppStore {
                 || closing.page == .drafts
         {
             Task { await refreshDrafts() }
+        }
+    }
+
+    // MARK: - discarding a composer
+
+    /// The trash can's question, on screen: the identity of the composer it
+    /// was asked about. A field here that `ActionLayer` draws, like every
+    /// other modal, because the pane is half a window wide and a scrim
+    /// mounted inside it would dim only the pane.
+    var discardAsk: UUID?
+
+    /// The composer's trash can. Esc keeps the mail (`closeCompose`); this is
+    /// the other door, the one that does not, so it asks first: there is no
+    /// undo behind it. A composer holding nothing has nothing to lose and
+    /// nothing to ask about, and simply closes.
+    func askDiscardCompose() {
+        guard let open = compose, !open.sending else { return }
+        guard DraftSaver.hasContent(open) || !open.attachments.isEmpty else {
+            discardCompose()
+            return
+        }
+        discardAsk = open.id
+    }
+
+    func cancelDiscardAsk() {
+        discardAsk = nil
+    }
+
+    /// Confirmed. Only for the composer the question was about: one that
+    /// was replaced while the card was up never agreed to anything.
+    func confirmDiscard() {
+        guard let asked = discardAsk else { return }
+        discardAsk = nil
+        guard compose?.id == asked else { return }
+        discardCompose()
+    }
+
+    /// Close the pane and keep NOTHING: no close flush, and the row an
+    /// earlier autosave made goes too (`DraftSaver.discard`, which waits out
+    /// a save still on the wire so the row it mints is deleted, not missed).
+    /// `closeCompose` minus the save, plus the delete.
+    private func discardCompose() {
+        guard let closing = compose else { return }
+        let hadContent = DraftSaver.hasContent(closing) || !closing.attachments.isEmpty
+        DraftSaver.shared.discard(.compose, closing)
+        compose = nil
+        if schedulePicker == .compose { schedulePicker = nil }
+        // The mirror of "kept in drafts": the two doors out must not read
+        // alike. Silent for a blank composer, which deleted nothing.
+        if hadContent { pushToast("message deleted") }
+        // Settles first, so it lists what is left once the delete landed.
+        Task { await refreshDrafts() }
+    }
+
+    /// Delete the row a discarded composer had been autosaving into. Called
+    /// by `DraftSaver.discard`, on the slot's own save chain. Immediate, with
+    /// no undo window: the confirm card was the second thought. True once the
+    /// row is gone (a 404 counts: gone is what was asked for).
+    func deleteDiscardedDraft(_ id: Int) async -> Bool {
+        let e = epoch
+        draftsRows.removeAll { $0.id == id }
+        // Hidden from every fetch while on the wire, until it lands.
+        draftTombstones.leaving(id)
+        do {
+            try await APIClient.shared.deleteDraft(id)
+            if e == epoch { noteDraftGone(id) }
+            return true
+        } catch let error as APIError where error.kind == .notFound {
+            if e == epoch { noteDraftGone(id) }
+            return true
+        } catch {
+            guard e == epoch else { return false }
+            // Still on the daemon, so the next list shows it again rather
+            // than the pane having promised a delete that did not happen.
+            draftTombstones.revive(id)
+            pushToast(errText(error, "could not delete that draft"), .error)
+            return false
         }
     }
 

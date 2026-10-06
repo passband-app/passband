@@ -250,6 +250,7 @@ enum ProductGuide {
     private static let writingMail = """
         Reply, reply all and forward all start from an open email:
         - Reply: press r. A composer opens inline under the thread, answering the newest message, addressed to its sender.
+        - On the Mac the inline composer is part of the conversation: it sits under the newest message, scrolls with the thread, and grows taller as the reply gets longer instead of scrolling inside a fixed box.
         - Reply all: press Enter. The same inline composer, addressed to everyone on the newest message. It only works when no reply is already open and no text field has focus. An open reply is never converted, so to turn one into a reply all, close it with Esc and press Enter.
         - Forward: press f. It forwards the message selected with j / k, in the side composer, with the original shown under the note. Fill in To and send; the note is optional.
         - From the Sitrep or a row in the Emails list, r opens the email and starts the reply in one step. On a list row f is "search this sender", not forward.

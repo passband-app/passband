@@ -41,6 +41,15 @@ struct MarkdownTextView: NSViewRepresentable {
     /// pane — AppKit claims the drag here, and SwiftUI's `isTargeted` never
     /// hears about it.
     var onDropHover: ((Bool) -> Void)? = nil
+    /// GROW WITH THE TEXT INSTEAD OF SCROLLING IT. Given this, the editor never
+    /// scrolls inside itself: it reports the height its text needs, on every
+    /// edit and every re-wrap, and the caller sizes the frame to that. The
+    /// wheel passes straight through to whatever scrolls the page around it,
+    /// and the caret is kept in view by scrolling THAT (see `revealCaret`).
+    /// The reader's inline reply is the one caller: its composer is a row of
+    /// the conversation, and a box with its own scroll inside a scrolling
+    /// column is two scrolls fighting over one wheel.
+    var onContentHeight: ((CGFloat) -> Void)? = nil
 
     func makeNSView(context: Context) -> NSScrollView {
         let view = HighlightingTextView()
@@ -65,11 +74,22 @@ struct MarkdownTextView: NSViewRepresentable {
         // at the top, above it, not after it where setString parks it.
         view.setSelectedRange(NSRange(location: 0, length: 0))
 
-        let scroll = EditorScrollView()
+        let fits = onContentHeight != nil
+        if fits {
+            view.fitsContent = true
+            view.isVerticallyResizable = true
+            view.maxSize = NSSize(
+                width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+            view.onContentHeight = { [coordinator = context.coordinator] height in
+                coordinator.deliver(height)
+            }
+        }
+
+        let scroll = fits ? FittedEditorScrollView() : EditorScrollView()
         scroll.documentView = view
-        scroll.hasVerticalScroller = true
+        scroll.hasVerticalScroller = !fits
         scroll.drawsBackground = false
-        scroll.verticalScrollElasticity = .automatic
+        scroll.verticalScrollElasticity = fits ? .none : .automatic
 
         if autofocus {
             // The window exists only after mount; one hop later is soon enough.
@@ -83,6 +103,9 @@ struct MarkdownTextView: NSViewRepresentable {
         // The representable is a fresh value every render; the coordinator is
         // not. Without this the delegate writes into the first render's binding.
         context.coordinator.parent = self
+        // A height measured in here is reported a hop later: see `deliver`.
+        context.coordinator.updating = true
+        defer { context.coordinator.updating = false }
         view.isEditable = !disabled
         // Fresh closures every render, like the binding.
         view.onDropFiles = onDropFiles
@@ -104,6 +127,7 @@ struct MarkdownTextView: NSViewRepresentable {
         if context.coordinator.density != density {
             context.coordinator.density = density
             view.applyDensity()
+            view.noteContentHeight()
         }
         // Only external changes (a draft restore) land here — the coordinator
         // wrote user edits into the binding already, and re-setting the string
@@ -131,6 +155,8 @@ struct MarkdownTextView: NSViewRepresentable {
                 view.rehighlight()
                 view.setSelectedRange(NSRange(location: 0, length: 0))
                 view.scrollRangeToVisible(NSRange(location: 0, length: 0))
+                // `string =` tells no delegate, so nobody else will.
+                view.noteContentHeight()
             } else {
                 view.replaceExternally(with: text)
             }
@@ -146,10 +172,25 @@ struct MarkdownTextView: NSViewRepresentable {
         var focusSeen: Int
         /// The density the text view was last styled at (see `updateNSView`).
         var density: DensityChoice
+        /// True for the length of `updateNSView`.
+        var updating = false
         init(_ parent: MarkdownTextView) {
             self.parent = parent
             self.focusSeen = parent.refocus
             self.density = Prefs.shared.density
+        }
+
+        /// Hand a measured height to the caller, who keeps it in view state.
+        /// A keystroke reports AT ONCE, so the frame grows in the same pass
+        /// that draws the new line and the text never spends a frame clipped.
+        /// A height found during a SwiftUI update (a restore, a density flip)
+        /// waits one hop, because state must not be written from inside one.
+        func deliver(_ height: CGFloat) {
+            if updating {
+                DispatchQueue.main.async { [weak self] in self?.parent.onContentHeight?(height) }
+            } else {
+                parent.onContentHeight?(height)
+            }
         }
 
         /// THIS EDITOR'S OWN HISTORY. Left to itself the text view registers
@@ -165,6 +206,20 @@ struct MarkdownTextView: NSViewRepresentable {
             guard let view = notification.object as? HighlightingTextView else { return }
             parent.text = view.string
             view.rehighlight()
+            view.noteContentHeight()
+            view.revealCaretSoon()
+        }
+
+        /// The arrows, Page Down, ⌘↓: the caret moved and nothing was typed.
+        /// A pointer is left alone. A click lands on text that is on screen
+        /// by definition, and a drag autoscrolls on its own.
+        func textViewDidChangeSelection(_ notification: Notification) {
+            guard let view = notification.object as? HighlightingTextView, view.fitsContent
+            else { return }
+            switch NSApp.currentEvent?.type {
+            case .leftMouseDown, .leftMouseDragged, .leftMouseUp: return
+            default: view.revealCaretSoon()
+            }
         }
     }
 }
@@ -178,7 +233,7 @@ struct MarkdownTextView: NSViewRepresentable {
 /// The decision is made before the event reaches any view or monitor, so it
 /// has to be settled BEFORE the click: the flag goes off while the pointer is
 /// over the editor, and back on when it leaves.
-final class EditorScrollView: NSScrollView {
+class EditorScrollView: NSScrollView {
     private var hover: NSTrackingArea?
 
     override func updateTrackingAreas() {
@@ -209,12 +264,123 @@ final class EditorScrollView: NSScrollView {
     }
 }
 
+/// THE EDITOR THAT GROWS (`MarkdownTextView.onContentHeight`). Its frame is
+/// always at least as tall as its text, so there is nothing in here to scroll
+/// and three things follow from that.
+final class FittedEditorScrollView: EditorScrollView {
+    /// The wheel belongs to the page. A scroll view takes every wheel event
+    /// over it, with or without anywhere to go, so a pointer resting on the
+    /// reply would stop the conversation scrolling.
+    override func scrollWheel(with event: NSEvent) {
+        nextResponder?.scrollWheel(with: event)
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        guard let text = documentView as? HighlightingTextView else { return }
+        // The text view fills the frame even when the text does not, so a
+        // click in the empty part of a short reply still lands the caret.
+        text.minSize = NSSize(width: 0, height: contentSize.height)
+        text.sizeToFit()
+        // AppKit scrolled the new line into view inside here before the frame
+        // had grown to hold it. The frame holds it now.
+        contentView.scroll(to: .zero)
+        reflectScrolledClipView(contentView)
+        text.revealCaretSoon()
+    }
+}
+
 /// The NSTextView half: owns the re-style pass. Attribute changes never touch
 /// the characters, so the selection and undo stack survive every pass.
 final class HighlightingTextView: NSTextView {
     var onDropFiles: (([URL], Int?) -> Void)?
     var onPasteImage: ((Data, Int?) -> Void)?
     var onDropHover: ((Bool) -> Void)?
+
+    // MARK: - growing with the text
+
+    /// See `MarkdownTextView.onContentHeight`. Off for every other editor.
+    var fitsContent = false
+    var onContentHeight: ((CGFloat) -> Void)?
+    private var reportedHeight: CGFloat = -1
+
+    /// Air kept around the caret when the page is scrolled to it, and the
+    /// extra kept under the LAST line, which is where a reply is written: the
+    /// composer's own foot (its files, its send keys) stays on screen with it.
+    private static var caretRoom: CGFloat { Space.scaled(24) }
+    private static var footRoom: CGFloat { Space.scaled(64) }
+
+    /// Measure what the text needs at the width it has, and say so if that
+    /// changed. The used rect counts the empty line after a trailing newline,
+    /// so pressing Return grows the editor before anything is typed on it.
+    func noteContentHeight() {
+        guard fitsContent, let onContentHeight, let layoutManager, let textContainer else { return }
+        layoutManager.ensureLayout(for: textContainer)
+        let height = ceil(
+            layoutManager.usedRect(for: textContainer).height + textContainerInset.height * 2)
+        guard abs(height - reportedHeight) > 0.5 else { return }
+        reportedHeight = height
+        onContentHeight(height)
+    }
+
+    /// A new width is a new wrap. Measured a hop later: this runs inside a
+    /// layout pass, and the measurement lays text out itself.
+    override func setFrameSize(_ newSize: NSSize) {
+        let rewrapped = newSize.width != frame.width
+        super.setFrameSize(newSize)
+        if fitsContent, rewrapped {
+            DispatchQueue.main.async { [weak self] in self?.noteContentHeight() }
+        }
+    }
+
+    /// After the frame has caught up with the edit that moved the caret.
+    func revealCaretSoon() {
+        guard fitsContent else { return }
+        DispatchQueue.main.async { [weak self] in self?.revealCaret() }
+    }
+
+    /// KEEP THE CARET ON SCREEN BY SCROLLING THE PAGE. A text view does this
+    /// for itself inside its own scroll view, and this one has nothing to
+    /// scroll there, so the request goes to the nearest clip view ABOVE the
+    /// editor: the conversation's. Only while this view has the caret, so an
+    /// editor nobody is typing in never moves the mail.
+    private func revealCaret() {
+        guard let window, window.firstResponder === self, let host = enclosingScrollView,
+            var rect = caretLine()
+        else { return }
+        let onLastLine = rect.maxY >= reportedHeight - textContainerInset.height - rect.height
+        rect = rect.insetBy(dx: 0, dy: -Self.caretRoom)
+        if onLastLine { rect.size.height += Self.footRoom }
+        host.scrollToVisible(convert(rect, to: host))
+    }
+
+    /// The line the caret is on, in this view's coordinates. Asked of the
+    /// layout and not of `firstRect(forCharacterRange:)`, which answers only
+    /// for text that is on screen and says zero for the rest: the one case
+    /// this exists for is a caret that is NOT on screen (⌘↓ from the top of a
+    /// long reply).
+    private func caretLine() -> NSRect? {
+        guard let layoutManager, let textContainer else { return nil }
+        layoutManager.ensureLayout(for: textContainer)
+        let caret = selectedRange().location
+        let length = (string as NSString).length
+        var line = NSRect.zero
+        if caret >= length {
+            // After the last character: the empty line a trailing newline
+            // opens (or an empty editor has), else the last line of text.
+            line = layoutManager.extraLineFragmentRect
+            if line.height == 0, length > 0 {
+                line = layoutManager.lineFragmentRect(
+                    forGlyphAt: layoutManager.glyphIndexForCharacter(at: length - 1),
+                    effectiveRange: nil)
+            }
+        } else {
+            line = layoutManager.lineFragmentRect(
+                forGlyphAt: layoutManager.glyphIndexForCharacter(at: caret), effectiveRange: nil)
+        }
+        guard line.height > 0 else { return nil }
+        return line.offsetBy(dx: textContainerOrigin.x, dy: textContainerOrigin.y)
+    }
 
     // MARK: - the binding writing under a live editor
 

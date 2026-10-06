@@ -12,8 +12,9 @@
 // the conversation you are.
 //
 // It is also where you REPLY: `r` (or an `r` pressed on a list row, handed over
-// as `pendingReplyMessageId`) pins InlineReply under the stack, still inside this
-// surface.
+// as `pendingReplyMessageId`) opens InlineReply under the stack. On the Mac that
+// is INSIDE the scroll, as the conversation's next row (`ReplyFoot`); on a phone
+// it is a bar pinned over the keyboard.
 
 import SwiftUI
 
@@ -426,10 +427,12 @@ struct ThreadViewer: View {
     /// Header, mail, composer — and WHERE the composer attaches is the one thing
     /// the two platforms disagree about.
     ///
-    /// The Mac stacks it: a third row of the VStack, under the mail, never over
-    /// it, so the message you are answering stays readable while you answer it.
+    /// The Mac puts it IN the mail: the last row of the scroll, under the
+    /// newest message, growing with what is written in it (`ReplyFoot`, mounted
+    /// by `content`). A reply pinned under the reader took its height out of the
+    /// mail it was answering and then scrolled its own text in a box.
     ///
-    /// A phone cannot stack it, because a keyboard is about to take half the
+    /// A phone cannot do that, because a keyboard is about to take half the
     /// screen. In a VStack SwiftUI lifts the WHOLE stack clear of the keyboard,
     /// which shoves the header off the top and leaves the reader scrolled to
     /// nowhere. As a bottom safe-area inset the composer rides the keyboard on
@@ -486,10 +489,7 @@ struct ThreadViewer: View {
                 let cardWidth = stacked ? max(0, reader.size.width - Self.stackPeekWidth) : reader.size.width
                 // Constrain the scroll viewport to the window. The full-height
                 // preview is decoration and must never size the scroll container.
-                VStack(spacing: 0) {
-                    content
-                    composer
-                }
+                content
                 .frame(width: cardWidth, height: reader.size.height)
                 .clipShape(RoundedRectangle(cornerRadius: stacked ? Self.stackRadius : 0, style: .continuous))
                 // The card's own opaque floor, so it covers the peek as it
@@ -537,16 +537,19 @@ struct ThreadViewer: View {
     /// the draft from this body instead would make every keystroke in the reply
     /// invalidate the entire reader — every message card, every sandboxed web
     /// frame, a full relayout of the column — for a change that only ever
-    /// touches the bar at the bottom. (`@Observable` tracks the property, not the
+    /// touches the composer. (`@Observable` tracks the property, not the
     /// field, so there is no way to read the draft's target here cheaply.)
+    /// The Mac's `ReplyFoot` keeps the same rule.
     ///
     /// With no draft open it renders nothing, which as a safe-area inset means
     /// no inset at all: the reader gets its full height back the moment the
     /// composer closes.
-    private var composer: some View {
-        InlineReply(
-            messages: thread?.messages ?? [], threadSubject: thread?.subject ?? "")
-    }
+    #if !os(macOS)
+        private var composer: some View {
+            InlineReply(
+                messages: thread?.messages ?? [], threadSubject: thread?.subject ?? "")
+        }
+    #endif
 
     // MARK: - chrome
 
@@ -852,8 +855,17 @@ struct ThreadViewer: View {
                                 .onDisappear { map.drop(i) }
                             }
 
-                            Color.clear.frame(height: tailSpace)
+                            // The Mac's tail is under the composer, in
+                            // `ReplyFoot`, and gives the composer its room.
+                            #if !os(macOS)
+                                Color.clear.frame(height: tailSpace)
+                            #endif
                         }
+                        #if os(macOS)
+                            .replyFoot(
+                                messages: messages, threadSubject: thread?.subject ?? "",
+                                tailSpace: tailSpace, proxy: proxy)
+                        #endif
                         // THE WIDTH THE MAIL LAYS OUT AT, taken from the column
                         // rather than derived from the constants around it: it
                         // is what every measured height is an answer FOR, and a
@@ -969,6 +981,14 @@ struct ThreadViewer: View {
                     else { return }
                     proxy.scrollTo(newestIndex, anchor: .top)
                     landed = true
+                    // A reply already open (an `r` from a list row opens the
+                    // reader and the composer together) is what the reader
+                    // came for; the top of a long message would leave it
+                    // below the window. Read in a closure, not in the body:
+                    // see `composer`.
+                    #if os(macOS)
+                        if store.inlineReply != nil { ReplyFoot.reveal(proxy) }
+                    #endif
                 }
                 .onChange(of: messages.last?.id) { _, _ in
                     proxy.scrollTo(index, anchor: .top)
@@ -1294,9 +1314,12 @@ struct ThreadViewer: View {
     }
 
     /// The mail's measure. The dismissible gutter is defined as the complement
-    /// of it, so the two can never drift apart — and the inline composer pins
-    /// itself to the same measure, so the reply sits under the column it answers.
+    /// of it, so the two can never drift apart.
     static let columnWidth: CGFloat = 900
+
+    /// Where a card's body starts inside the column, for the inline composer,
+    /// which is laid out as the next card and has to start on the same line.
+    static var replyInset: CGFloat { MessageCard.bodyInset }
 
     /// The widest a chat bubble is ever drawn. Narrower than the column on
     /// purpose: what makes a conversation readable as one is the empty margin
@@ -2597,6 +2620,92 @@ private struct ReaderColumn: ViewModifier {
 extension View {
     fileprivate func readerColumn() -> some View { modifier(ReaderColumn()) }
 }
+
+#if os(macOS)
+    /// THE FOOT OF THE CONVERSATION: the reply composer, then the tail space.
+    ///
+    /// The composer is a row of the scroll rather than a bar under it, so the
+    /// mail keeps the whole window while a reply is open and a long reply
+    /// scrolls with the thread it answers. It goes under the newest message
+    /// whichever message it answers, because that is where the sent reply
+    /// will appear.
+    ///
+    /// OUTSIDE THE LAZY STACK, in a plain one beside it. A lazy row is torn
+    /// down once it is far enough off screen, and this row holds a text view
+    /// with the caret, its undo history and the composer's key bindings:
+    /// scrolling up to reread the mail being answered would have dropped all
+    /// three, and Escape would then have closed the email instead of the reply.
+    ///
+    /// ITS OWN VIEW so the reader's body never reads the draft (see
+    /// `ThreadViewer.composer`): what changes per keystroke is in here.
+    private struct ReplyFoot: View {
+        let messages: [ClientMessage]
+        let threadSubject: String
+        /// The room the reader keeps under the newest message
+        /// (`ThreadViewer.tailSpace`).
+        let tailSpace: CGFloat
+        let proxy: ScrollViewProxy
+
+        @Environment(AppStore.self) private var store
+        @State private var replyHeight: CGFloat = 0
+
+        static let anchor = "reply"
+
+        var body: some View {
+            VStack(spacing: 0) {
+                InlineReply(messages: messages, threadSubject: threadSubject)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
+                        replyHeight = $0
+                    }
+                    .id(Self.anchor)
+                // THE COMPOSER COMES OUT OF THE TAIL. The tail is the empty
+                // room that lets the newest message rest at the top of the
+                // window, and a composer under that message is already filling
+                // some of it. Left whole, opening a reply would lengthen the
+                // page and let it scroll past its own end into nothing.
+                Color.clear.frame(
+                    height: max(0, tailSpace - (store.inlineReply == nil ? 0 : replyHeight)))
+            }
+            // `initial`, because a reply can be open before this row first
+            // renders: the hand-off from a list row sets it in the same turn
+            // the thread lands.
+            .onChange(of: store.inlineReply?.id, initial: true) { _, open in
+                if open != nil { Self.reveal(proxy) }
+            }
+        }
+
+        /// Bring the whole composer into the window, moving the mail as little
+        /// as that takes: a reply that already fits under the newest message
+        /// moves nothing. A beat late so the composer has a frame to aim at,
+        /// and aimed twice, because the first is animated and an animated
+        /// scroll across rows the lazy stack has never laid out can stop
+        /// short (see the `index` watcher in `content`). The second is a no-op
+        /// when the first arrived.
+        static func reveal(_ proxy: ScrollViewProxy) {
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(60))
+                withAnimation(Motion.scrollFollow) { proxy.scrollTo(anchor) }
+                try? await Task.sleep(for: .milliseconds(220))
+                proxy.scrollTo(anchor)
+            }
+        }
+    }
+
+    extension View {
+        /// The message stack with the reply composer and the tail under it.
+        fileprivate func replyFoot(
+            messages: [ClientMessage], threadSubject: String, tailSpace: CGFloat,
+            proxy: ScrollViewProxy
+        ) -> some View {
+            VStack(alignment: .leading, spacing: 0) {
+                self
+                ReplyFoot(
+                    messages: messages, threadSubject: threadSubject, tailSpace: tailSpace,
+                    proxy: proxy)
+            }
+        }
+    }
+#endif
 
 #if os(macOS)
     /// Passive mail preview: no reader shortcuts, read acknowledgement, or

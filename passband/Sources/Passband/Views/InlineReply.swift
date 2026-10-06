@@ -1,6 +1,13 @@
-// REPLY WHERE YOU READ. A pinned composer under the message stack rather than a
+// REPLY WHERE YOU READ. A composer under the message stack rather than a
 // panel over it: the email you are answering stays on screen, unblurred and
 // scrollable, which is the whole point of answering from the reader.
+//
+// ON THE MAC IT IS THE NEXT ROW OF THE CONVERSATION. It sits in the reader's
+// own scroll, under the newest message, where the reply will be once it is
+// sent (see `ReplyFoot` in ThreadViewer), and its editor is as tall as what
+// has been written in it: no fixed box, no second scroll inside the first.
+// A long reply is read back the way the mail above it is, by scrolling the
+// page.
 //
 // The ceremony is the pane composer's, and LOCKED: ⌘Enter closes the reply and
 // holds it five seconds behind an undo toast (`AppStore.sendWithUndo`), then it
@@ -29,9 +36,9 @@
 // tell "a reply nobody addressed" from "a reply somebody moved to bcc": the
 // first must not mint a draft, the second must.
 //
-// ON A PHONE IT IS THE SAME BAR, pinned by `.safeAreaInset(edge: .bottom)`
-// instead of by a VStack — so the keyboard lifts it and insets the mail behind
-// it rather than squashing the reader (see ThreadViewer). Two things are fenced.
+// ON A PHONE IT IS A BAR, pinned by `.safeAreaInset(edge: .bottom)` — so the
+// keyboard lifts it and insets the mail behind it rather than squashing the
+// reader (see ThreadViewer). Two things are fenced.
 // The KEY HINT BAR becomes real buttons, and that is not decoration: the
 // ceremony is driven ENTIRELY by keys on the Mac, so without them a phone could
 // open a reply and have no way on earth to send it. And the editor is
@@ -75,6 +82,12 @@ struct InlineReply: View {
     /// takes the caret back (`EditorRefocus`): its autofocus fires on mount
     /// alone, and the palette's field had the caret.
     @State private var refocusEditor = 0
+    #if os(macOS)
+        /// What the body needs at the width it has, as the editor last
+        /// measured it (`MarkdownTextView.onContentHeight`). Changes when a
+        /// line is added or lost, not per keystroke.
+        @State private var bodyHeight: CGFloat = 0
+    #endif
     /// The message being answered. nil = nothing to answer, which renders as no
     /// composer at all.
     private var parent: ClientMessage? {
@@ -124,27 +137,32 @@ struct InlineReply: View {
                     if let error = compose.error {
                         Text(error).font(Typo.micro).foregroundStyle(Palette.danger)
                     }
+                    #if os(macOS)
+                        keyLine
+                    #endif
                 }
-                .padding(.horizontal, Self.gutter)
-                .padding(.top, Space.s12)
-                .padding(.bottom, Space.s10)
+                // A MESSAGE CARD'S OWN MEASURE on the Mac: the same inset
+                // from the column's edge and the same air above and below, so
+                // the reply's first line starts where the mail's does.
+                #if os(macOS)
+                    .padding(.leading, Self.gutter)
+                    .padding(.vertical, Space.s16)
+                #else
+                    .padding(.horizontal, Self.gutter)
+                    .padding(.top, Space.s12)
+                    .padding(.bottom, Space.s10)
+                #endif
                 // Anywhere on the composer, same as the pane: see
                 // `composeDropTarget`.
                 .composeDropTarget(.inlineReply, targeted: $dropTargeted)
 
-                #if os(macOS)
-                    // When it goes, just left of the send verb it changes
-                    // (`ScheduleClock`), as in the pane.
-                    KeyHintBar(hints: hints, leading: AnyView(ScheduleClock(slot: .inlineReply)))
-                #else
+                #if !os(macOS)
                     actionBar(compose)
                 #endif
             }
-            // The reader's own measure, so the composer sits under the column it
-            // answers rather than sprawling the full window width. A phone is
-            // narrower than the column will ever be, so there it is inert.
-            .frame(maxWidth: ThreadViewer.columnWidth, alignment: .leading)
-            .frame(maxWidth: .infinity)
+            // The Mac's composer is inside the reader's column and takes its
+            // width from it. A phone's is a bar across the screen.
+            .frame(maxWidth: .infinity, alignment: .leading)
             // A GROUND OF ITS OWN on the phone, and only there. On the Mac this
             // bar sits INSIDE the reader's own material, at the bottom of its
             // stack; as a safe-area inset it floats over scrolling mail, and mail
@@ -340,7 +358,7 @@ struct InlineReply: View {
         // not the bar: the editor also mounts on the way BACK from review (the
         // bar never left), so Esc out of review would otherwise drop the cursor
         // and hand every letter you typed next to the reader's verbs.
-        MarkdownTextView(
+        var body = MarkdownTextView(
             text: bind(\.body), autofocus: true, refocus: refocusEditor,
             disabled: compose.sending,
             // Same two doors the pane's editor has, gated the same way.
@@ -355,7 +373,13 @@ struct InlineReply: View {
                 } : nil,
             onDropHover: { dropTargeted = $0 }
         )
-        .frame(height: Self.editorHeight)
+        // The Mac's editor grows with the reply; a phone's stays a short box
+        // over the keyboard and scrolls inside itself (see `editorHeight`).
+        #if os(macOS)
+            body.onContentHeight = { bodyHeight = $0 }
+        #endif
+        return body
+            .frame(height: editorHeight)
         .padding(Space.s8)
         .background(
             RoundedRectangle(cornerRadius: 9, style: .continuous)
@@ -373,13 +397,17 @@ struct InlineReply: View {
     /// narrower and the mail beside it is inset 18, so the reply lines up with
     /// the message it answers rather than sitting proud of it.
     #if os(macOS)
-        private static var gutter: CGFloat { Space.scaled(22) }
-        private static var editorHeight: CGFloat { Space.scaled(150) }
+        private static var gutter: CGFloat { ThreadViewer.replyInset }
+        /// AS TALL AS THE REPLY. The floor is a few lines, so an empty
+        /// composer reads as somewhere to write rather than a search field;
+        /// past that every line written is a line of height, and the page
+        /// scrolls instead of the box.
+        private var editorHeight: CGFloat { max(Space.scaled(96), bodyHeight) }
     #else
         private static var gutter: CGFloat { Space.scaled(18) }
         /// Short enough that a couple of lines of the email survive above a
         /// raised keyboard. The editor scrolls itself past that.
-        private static var editorHeight: CGFloat { Space.scaled(104) }
+        private var editorHeight: CGFloat { Space.scaled(104) }
     #endif
 
     #if os(macOS)
@@ -390,6 +418,23 @@ struct InlineReply: View {
             }
             hints.append(KeyHint("esc", "dismiss"))
             return hints
+        }
+
+        /// The send keys, as the last line of the composer: the clock just
+        /// left of the send verb it changes (`ScheduleClock`), as in the pane.
+        /// `KeyHintBar` without the bar. That one is a strip across the foot
+        /// of a page with a rule over it, and this is a row in a column that
+        /// has its own.
+        private var keyLine: some View {
+            HStack(spacing: Space.s4) {
+                ScheduleClock(slot: .inlineReply).padding(.trailing, Space.s4)
+                ForEach(Array(hints.enumerated()), id: \.offset) { i, hint in
+                    if i > 0 { Text("·").foregroundStyle(Palette.inkFaintest) }
+                    hint
+                }
+                Spacer()
+            }
+            .padding(.top, Space.s2)
         }
     #endif
 

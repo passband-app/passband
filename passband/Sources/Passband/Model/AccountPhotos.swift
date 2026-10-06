@@ -38,6 +38,11 @@ final class AccountPhotos {
     /// Accounts with a download in flight, so a stats tick every ten seconds
     /// cannot start a second one behind the first.
     @ObservationIgnored private var fetching: Set<UUID> = []
+    /// The tag whose download last FAILED, per account. Stats arrive every ten
+    /// seconds, and without this a photo that will not land (bytes that do not
+    /// decode, a disk that will not take the write) would be downloaded again
+    /// on every one of them. A new tag, or a relaunch, tries again.
+    @ObservationIgnored private var failed: [UUID: String] = [:]
 
     private init() {
         let base =
@@ -80,10 +85,15 @@ final class AccountPhotos {
             forget(id)
             return
         }
-        guard !fetching.contains(id) else { return }
+        guard !fetching.contains(id), failed[id] != tag else { return }
         fetching.insert(id)
         Task {
             defer { fetching.remove(id) }
+            // Assumed failed until the last line says otherwise, so every early
+            // exit below is remembered without having to say so itself. A
+            // switch away mid-flight is the one exit that is not a failure.
+            failed[id] = tag
+            defer { if AccountManager.shared.activeId != id { failed[id] = nil } }
             // THE CLIENT IS THE ACTIVE ACCOUNT'S, so the answer only belongs to
             // `id` if `id` is live on both sides of the request. A switch in
             // between means these bytes may be somebody else's face.
@@ -98,6 +108,7 @@ final class AccountPhotos {
             guard (try? data.write(to: file(for: id), options: .atomic)) != nil else { return }
             UserDefaults.standard.set(tag, forKey: AccountIndex.scopedKey(Self.tagKey, id))
             images[id] = image
+            failed[id] = nil
         }
     }
 

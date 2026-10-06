@@ -10,7 +10,8 @@
 //! anyone who unticked it) answers 403 forever; that is the normal case, said
 //! once per process and then retried quietly, because the day somebody re-runs
 //! `squelchd auth` it starts working with no restart. Nothing in this file can
-//! fail a sync cycle, touch the Gmail quota budget, or move a Gmail metric.
+//! fail a sync cycle, touch the Gmail quota budget, or move a Gmail metric; the
+//! most it can do is hold one poll tick for [`PROFILE_REFRESH_BUDGET`].
 //!
 //! The photo is fetched ONCE HERE and served from the store. Clients never see
 //! Google's URL: it would make every app launch a request to Google that names
@@ -41,9 +42,13 @@ const REFRESH_EVERY_SECS: i64 = 24 * 60 * 60;
 /// that a grant which will never carry it costs 24 small requests a day.
 const RETRY_EVERY_SECS: i64 = 60 * 60;
 
-/// One round trip's budget. This runs on the poll lane ahead of the walk, so a
-/// wedged connection here is mail that is late.
-const PROFILE_HTTP_TIMEOUT: Duration = Duration::from_secs(15);
+/// One round trip's budget.
+const PROFILE_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The whole refresh's budget, both round trips and the token together. This
+/// runs on the poll lane ahead of the walk, so it is also the most a wedged
+/// Google can make mail late: once at start, and then at most once an hour.
+const PROFILE_REFRESH_BUDGET: Duration = Duration::from_secs(15);
 
 /// The People answer is a few hundred bytes of JSON.
 const MAX_PERSON_BYTES: usize = 64 * 1024;
@@ -150,7 +155,10 @@ fn pick(resp: PersonResp) -> Person {
 ///
 /// Sizing: these URLs end in an options suffix after the last `=` ("=s100"),
 /// and the path itself never contains one, so the suffix is replaced when
-/// present and appended when not.
+/// present and appended when not. The exception is the older form that ends
+/// in a file name (".../s100/photo.jpg"), where the size is a path segment and
+/// an appended suffix is a 404: that one is fetched exactly as given, at
+/// whatever size Google named.
 fn photo_fetch_url(raw: &str, allow_loopback: bool) -> Option<url::Url> {
     let parsed = url::Url::parse(raw).ok()?;
     let host = parsed.host_str()?;
@@ -162,6 +170,14 @@ fn photo_fetch_url(raw: &str, allow_loopback: bool) -> Option<url::Url> {
     }
     let base = match raw.rsplit_once('=') {
         Some((base, _options)) => base,
+        None if parsed
+            .path()
+            .rsplit('/')
+            .next()
+            .is_some_and(|f| f.contains('.')) =>
+        {
+            return Some(parsed);
+        }
         None => raw,
     };
     url::Url::parse(&format!("{base}=s{PHOTO_EDGE_PX}-c")).ok()
@@ -222,7 +238,7 @@ fn refusal_message(status: u16, body: &[u8]) -> String {
     let has = |want: &str| reasons.iter().any(|r| r == want);
     if has("SERVICE_DISABLED") {
         "the People API is not enabled on the OAuth client's Google Cloud project; enable it \
-         under APIs & Services, then restart the daemon"
+         under APIs & Services and it is picked up within the hour"
             .to_string()
     } else if has("ACCESS_TOKEN_SCOPE_INSUFFICIENT") {
         "the Google grant does not include name and photo; re-run `squelchd auth` with this \
@@ -271,7 +287,10 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
         if now < self.profile_due.load(Ordering::Relaxed) {
             return;
         }
-        let (next, outcome) = match self.fetch_profile().await {
+        let fetched = tokio::time::timeout(PROFILE_REFRESH_BUDGET, self.fetch_profile())
+            .await
+            .unwrap_or_else(|_| Err("Google did not answer in time".to_string()));
+        let (next, outcome) = match fetched {
             Ok(()) => (REFRESH_EVERY_SECS, Ok(())),
             Err(why) => (RETRY_EVERY_SECS, Err(why)),
         };
@@ -290,8 +309,8 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
     }
 
     /// One whole refresh: ask who this is, download the photo if there is one,
-    /// and only then write. Nothing is stored unless every step worked, so a
-    /// photo that failed to download never blanks the one already held.
+    /// and only then write. A photo that failed to download never blanks the
+    /// one already held.
     ///
     /// Errors are plain strings built here: they carry statuses and sizes,
     /// never a token, a URL's options, or a response body.
@@ -334,9 +353,20 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 .map_err(|_| "the People API answer was not a person".to_string())?,
         );
 
-        let photo = match &person.photo_url {
-            Some(raw) => Some(self.download_photo(raw).await?),
-            None => None,
+        // A PHOTO THAT WILL NOT DOWNLOAD DOES NOT COST THE NAME. The two are
+        // independent facts, and a picture Google's image host refuses (or one
+        // in a type we do not store) can stay refused forever; the greeting
+        // should not wait on it. The name is written with whatever photo is
+        // already held, and the failure is still reported so it is retried.
+        let (photo, photo_failure) = match &person.photo_url {
+            None => (None, None),
+            Some(raw) => match self.download_photo(raw).await {
+                Ok(photo) => (Some(photo), None),
+                Err(why) => (
+                    self.store.account_photo(self.account_id).ok().flatten(),
+                    Some(why),
+                ),
+            },
         };
         self.store
             .set_account_profile(
@@ -345,7 +375,11 @@ impl<S: Store + 'static, C: CredentialStore + 'static + ?Sized> SyncEngine<S, C>
                 person.given_name.as_deref(),
                 photo.as_ref(),
             )
-            .map_err(|e| format!("storing the profile failed ({e})"))
+            .map_err(|e| format!("storing the profile failed ({e})"))?;
+        match photo_failure {
+            Some(why) => Err(why),
+            None => Ok(()),
+        }
     }
 
     /// Download one profile photo. NO BEARER TOKEN on this request: the URL is
@@ -450,6 +484,11 @@ mod tests {
         assert_eq!(
             sized("https://lh3.googleusercontent.com/a-/ALV-abc"),
             Some("https://lh3.googleusercontent.com/a-/ALV-abc=s256-c".to_string())
+        );
+        // The legacy form sizes in the path and ends in a file: left alone.
+        assert_eq!(
+            sized("https://lh3.googleusercontent.com/-abc/AAAA/xyz/s100/photo.jpg"),
+            Some("https://lh3.googleusercontent.com/-abc/AAAA/xyz/s100/photo.jpg".to_string())
         );
         for bad in [
             "http://lh3.googleusercontent.com/a=s100",
@@ -643,13 +682,22 @@ mod tests {
         let before = store.account_identity(acct).unwrap().unwrap();
         assert!(before.photo_tag.is_some());
 
-        // The image host starts answering with something that is not an image:
-        // the whole refresh is abandoned, name included, and the old row stands.
-        script.lock().unwrap().photo = b"<!doctype html>".to_vec();
+        // The image host starts answering with something that is not an image,
+        // on a refresh where the name has also changed: the new name lands, the
+        // old photo stands, and the failure is still retried in an hour.
+        {
+            let mut st = script.lock().unwrap();
+            st.photo = b"<!doctype html>".to_vec();
+            st.person.as_mut().unwrap().1["names"][0]["givenName"] = json!("Augusta");
+        }
         engine.profile_due.store(0, Ordering::Relaxed);
         engine.refresh_profile().await;
-        assert_eq!(store.account_identity(acct).unwrap().unwrap(), before);
+        let kept = store.account_identity(acct).unwrap().unwrap();
+        assert_eq!(kept.given_name.as_deref(), Some("Augusta"));
+        assert_eq!(kept.photo_tag, before.photo_tag);
         assert_eq!(store.account_photo(acct).unwrap().unwrap().bytes, JPEG);
+        let due_in = engine.profile_due.load(Ordering::Relaxed) - Utc::now().timestamp();
+        assert!(due_in <= RETRY_EVERY_SECS, "{due_in}");
 
         // The person removes their picture: Google now reports the default, and
         // the stored photo goes with it while the name stays.

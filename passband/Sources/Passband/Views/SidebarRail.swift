@@ -292,12 +292,31 @@ struct SidebarRail: View {
     /// color scheme is handed over because a renderer has no window to inherit
     /// one from and would draw the light palette into a dark rail.
     private func markBitmap(_ account: AccountRecord, size: CGFloat, font: Font) -> NSImage? {
+        // Read HERE, in the rail's own body, and not only inside the renderer:
+        // a renderer's view graph is not this view's, so a photo that arrived
+        // for a row in the menu would otherwise never redraw it.
+        let photo = AccountPhotos.shared.image(for: account.id)
+        // `body` runs on every hover and slot change, and a rasterisation per
+        // account per pass is not free. The key is everything the bitmap is
+        // drawn from; the photo by identity, since a new one is a new object.
+        let key =
+            "\(account.id)|\(photo.map { "\(ObjectIdentifier($0).hashValue)" } ?? account.initial)|\(size)|\(colorScheme)"
+            as NSString
+        if let hit = Self.markCache.object(forKey: key) { return hit }
         let renderer = ImageRenderer(
             content: AccountMark(account: account, size: size, font: font)
                 .environment(\.colorScheme, colorScheme))
         renderer.scale = NSScreen.main?.backingScaleFactor ?? 2
-        return renderer.nsImage
+        guard let image = renderer.nsImage else { return nil }
+        Self.markCache.setObject(image, forKey: key)
+        return image
     }
+
+    private static let markCache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 64
+        return cache
+    }()
 
     /// The one rounded corner the rail owns: the top-trailing shoulder, where
     /// the material tucks under the top bar. The other three corners meet

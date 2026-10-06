@@ -742,14 +742,21 @@ pub async fn get_account_photo(State(state): State<ApiState>) -> Result<Response
     let photo = store_call(&state, |store, account_id| store.account_photo(account_id))
         .await?
         .ok_or_else(ApiError::not_found)?;
-    // A day, because the stats answer carries the tag that says when to ask
-    // again; a client that honors it never relies on this at all.
-    Ok(attachment_response(
+    // REVALIDATE EVERY TIME. The URL is not versioned, so a cache that kept
+    // these bytes for a day would hand yesterday's face to a client that had
+    // just been told, by the tag on stats, that there is a new one. The tag is
+    // the ETag, for any client that wants to ask cheaply.
+    let etag = header::HeaderValue::from_str(&format!("\"{}\"", photo.tag)).ok();
+    let mut resp = attachment_response(
         "profile-photo",
         &photo.mime,
         photo.bytes,
-        "private, max-age=86400",
-    ))
+        "private, no-cache",
+    );
+    if let Some(etag) = etag {
+        resp.headers_mut().insert(header::ETAG, etag);
+    }
+    Ok(resp)
 }
 
 /// One attachment's bytes as a response, under the header discipline that IS

@@ -5675,6 +5675,9 @@ async fn stats_name_the_person_and_the_photo_door_serves_their_picture() {
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(resp.headers()["content-type"], "image/jpeg");
     assert_eq!(resp.headers()["x-content-type-options"], "nosniff");
+    // Unversioned URL, so it must never be served stale past a tag change.
+    assert_eq!(resp.headers()["cache-control"], "private, no-cache");
+    assert_eq!(resp.headers()["etag"], "\"abc123\"");
     assert_eq!(body_bytes(resp).await, jpeg);
 }
 

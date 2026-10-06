@@ -1358,7 +1358,11 @@ struct SavedConnectionWait: View {
                         store.retrySavedConnectionNow()
                     }
                     ForEach(others) { account in
-                        choice("Switch to \(account.displayName)", symbol: "arrow.left.arrow.right") {
+                        choice(
+                            store.switchingTo == account.id
+                                ? "Switching to \(account.displayName)…" : "Switch to \(account.displayName)",
+                            symbol: "arrow.left.arrow.right"
+                        ) {
                             Task { await accounts.switchTo(account.id) }
                         }
                     }

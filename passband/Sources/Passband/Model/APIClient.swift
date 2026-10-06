@@ -424,7 +424,10 @@ actor APIClient {
     /// `config`, and the answer is decoded rather than merely 200-checked: a
     /// host that answers but is not a daemon must fail the same way it fails at
     /// the Connect gate.
-    func probe(baseURL: String, token: String) async throws {
+    ///
+    /// `retrying: false` asks exactly once, for a caller with a person waiting
+    /// on the answer who can simply ask again.
+    func probe(baseURL: String, token: String, retrying: Bool = true) async throws {
         guard !RehearsalMode.isEnabled else {
             throw APIError(.badRequest, 400, "Finish the practice inbox before changing accounts.")
         }
@@ -435,7 +438,7 @@ actor APIClient {
                 try await probeOnce(baseURL: baseURL, token: token)
                 return
             } catch {
-                guard let delay = retry.delay(after: error) else { throw error }
+                guard retrying, let delay = retry.delay(after: error) else { throw error }
                 try await Task.sleep(for: .seconds(delay))
             }
         }

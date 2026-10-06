@@ -997,6 +997,10 @@ final class AppStore {
         }
     }
     private(set) var practiceTransitioning = false
+    /// The account a switch is asking after, until it lands or is refused.
+    private(set) var switchingTo: UUID?
+    /// Counts switch requests, so the newest one is the only one that lands.
+    @ObservationIgnored private var switchIntent = 0
 
     /// Also enforced by account mutation entry points, not only menu items.
     var accountActionsBlocked: Bool {
@@ -1705,13 +1709,66 @@ final class AppStore {
     /// generation INSIDE APIClient that every request checks and every caller
     /// passes — identified, not built, because it touches all 25 call sites.
     func switchAccount(to record: AccountRecord) async {
-        // (1) Never two at once — the two awaits below are both windows a
-        //     second switch could start in.
-        guard !accountActionsBlocked, !switching else { return }
+        guard !accountActionsBlocked else { return }
+        // THE CHECK COMES BEFORE THE GATE, and outside it. It reads a keychain
+        // slot and asks the target daemon one question; nothing of the live
+        // world is touched. Held inside the gate (the old shape) a target that
+        // was not answering locked every other switch out for the length of
+        // its retries, in silence: one press on a dead account and the app
+        // would not move to a healthy one. So the newest pick wins instead,
+        // and an older one that comes back late is dropped unreported.
+        switchIntent &+= 1
+        let intent = switchIntent
+        switchingTo = record.id
+        defer { if switchIntent == intent { switchingTo = nil } }
+        // One attempt, no retries: somebody is watching this one, and "that
+        // server is not answering" now beats the same sentence in 15 seconds.
+        let checked = await switchPreflight(record, retrying: false)
+        guard switchIntent == intent else { return }
+        guard case .ready(let next) = checked else {
+            if case .refused(let why) = checked { reportSwitchFailure(why, for: record) }
+            return
+        }
+        // (1) Never two at once — the awaits below are windows a second
+        //     switch could start in. The world may also have moved while the
+        //     target was being asked.
+        guard !accountActionsBlocked, !switching, record.id != AccountManager.shared.activeId
+        else { return }
         switching = true
         // (10) Whichever path we leave by.
         defer { switching = false }
-        await performSwitch(to: record)
+        await performSwitch(to: record, preflight: next)
+    }
+
+    private enum SwitchPreflight {
+        case ready(ConnectionSettings)
+        case refused(String)
+    }
+
+    /// Step (2): the target's credentials, and proof its daemon will take
+    /// them, BEFORE anything is torn down — the steps that can fail. Failing
+    /// here, with the old world untouched, keeps the human on a working
+    /// mailbox; checking after the wipe (the old shape) turned a single denied
+    /// access panel into a logout, and the gate it landed on then endangered
+    /// the surviving accounts' credentials. A keychain read can raise the
+    /// access panel, but nothing has been suspended or wiped yet, so blocking
+    /// here is safe. The probe is built from the candidate credentials, so the
+    /// live client is not touched either.
+    private func switchPreflight(_ record: AccountRecord, retrying: Bool) async -> SwitchPreflight {
+        let loaded = await AccountManager.shared.credentialLoad(for: record.id)
+        guard case .ok(let next) = loaded else {
+            if case .unreadable = loaded {
+                return .refused("the keychain refused to unlock \(record.displayName)")
+            }
+            return .refused("no credentials for \(record.displayName) in the keychain")
+        }
+        do {
+            try await APIClient.shared.probe(
+                baseURL: next.serverURL, token: next.apiToken, retrying: retrying)
+        } catch {
+            return .refused(Self.connectErrorText(error))
+        }
+        return .ready(next)
     }
 
     /// Steps (2)–(9), gate already held. Split out so `removeAccount` — which
@@ -1722,55 +1779,34 @@ final class AppStore {
     /// drafts would go to is the one being forgotten. The settle still runs —
     /// a debounced save already in flight must finish before the client is
     /// reconfigured, whoever it was addressed to.
+    ///
+    /// `preflight` is step (2) already done by the caller (`switchAccount`,
+    /// which does it outside the gate).
     @discardableResult
     private func performSwitch(
-        to record: AccountRecord, flushDrafts: Bool = true, currentWorldGone: Bool = false
+        to record: AccountRecord, flushDrafts: Bool = true, currentWorldGone: Bool = false,
+        preflight: ConnectionSettings? = nil
     ) async -> Bool {
-        // (2) The target's credentials, BEFORE anything is torn down — the one
-        //     step that can fail. Failing here, with the old world untouched,
-        //     keeps the human on a working mailbox; checking after the wipe
-        //     (the old shape) turned a single denied access panel into a
-        //     logout, and the gate it landed on then endangered the surviving
-        //     accounts' credentials. A keychain read can raise the access
-        //     panel, but nothing has been suspended or wiped yet, so blocking
-        //     here is safe.
-        let loaded = await AccountManager.shared.credentialLoad(for: record.id)
-        guard case .ok(let next) = loaded else {
-            let why: String
-            if case .unreadable = loaded {
-                why = "the keychain refused to unlock \(record.displayName)"
-            } else {
-                why = "no credentials for \(record.displayName) in the keychain"
-            }
-            guard currentWorldGone else {
-                // A plain switch: the world on screen is intact and the
-                // credentials backing it were never touched. Stay — and say
-                // so. A toast, not `connError`: that field renders only on
-                // ConnectView, so writing it here would show nothing now and
-                // then greet the next Add Account sheet with a stale failure.
-                reportSwitchFailure(why, for: record)
+        let next: ConnectionSettings
+        if let preflight {
+            next = preflight
+        } else {
+            switch await switchPreflight(record, retrying: true) {
+            case .ready(let checked):
+                next = checked
+            case .refused(let why):
+                if currentWorldGone {
+                    // The removal path: the account on screen is already gone
+                    // from the index, so there is no working world to stay in
+                    // — the Connect gate is the honest answer.
+                    await tearDownToGate(error: why)
+                } else {
+                    // The world on screen is intact and the credentials
+                    // backing it were never touched. Stay — and say so.
+                    reportSwitchFailure(why, for: record)
+                }
                 return false
             }
-            // The removal path: the account on screen is already gone from the
-            // index, so there is no working world to stay in — the Connect
-            // gate is the honest answer.
-            await tearDownToGate(error: why)
-            return false
-        }
-
-        // Probe with the candidate credentials before changing the live client
-        // or any account state. Transient failures retry automatically; a
-        // failed switch leaves the working account and its drafts untouched.
-        do {
-            try await APIClient.shared.probe(baseURL: next.serverURL, token: next.apiToken)
-        } catch {
-            let why = Self.connectErrorText(error)
-            if currentWorldGone {
-                await tearDownToGate(error: why)
-            } else {
-                reportSwitchFailure(why, for: record)
-            }
-            return false
         }
 
         // (3) From here, every answer still in flight belongs to the old
@@ -1841,9 +1877,12 @@ final class AppStore {
     /// A refused switch leaves the world it started from, and says why where
     /// that world can show it. Toasts are the shell's; from the wait for a
     /// saved daemon there is no shell, and the loading gate reads `connError`.
+    /// A toast, not `connError`, from the shell: that field renders only on
+    /// the gates, so writing it there would show nothing now and then greet
+    /// the next Add Account sheet with a stale failure.
     private func reportSwitchFailure(_ why: String, for record: AccountRecord) {
         if connStatus == .connected {
-            pushToast(why, .error)
+            pushToast("can’t switch to \(record.displayName): \(why)", .error)
         } else {
             connError = "\(record.displayName): \(why)"
         }

@@ -89,6 +89,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::error::{CoreError, Result};
 // The ledger's stored lane/decision strings ARE the metric labels; see `notify`.
 use crate::metrics::{NotifyDecision, NotifyLane};
+use crate::store::SmartBlockMemo;
 use crate::store::{
     AccountIdentity, AccountPhoto, AttachmentBytes, BankingApplied, BlankBodyScan, ClientPlatform,
     ClientSeen, ClientTag, ContactEntry, Device, DeviceToken, Draft, DraftFields, DraftKey,
@@ -96,11 +97,12 @@ use crate::store::{
     MarketingApplied, MarketingOffer, MessageMissingRecipients, MessageOpen, MessageUnsub,
     MintedPairingCode, MissingVector, NewAuditEntry, NewEvent, NewNotifyDecision,
     NotifyDecisionRow, RevisitQueued, SPAM_SYNCED_AT_KEY, SealedBody, SealedMessage,
-    SearchDiagnostics, SearchFilter, SearchSort, SeedVerdict, SenderDigestRow, SenderEntry,
-    SenderHistory, SentMessage, SitrepBand, SpamScope, Stage1Applied, Stage1Queued, Stage2Applied,
-    Stage2CapOverrides, Stage2Queued, Stage2Usage, Stage2UsageDay, Store, SyncState, TermDf,
-    ThreadSibling, TrackedMessage, TriageDebug, TriagedMessage, UsageTokens,
+    SearchDiagnostics, SearchFilter, SearchSort, SeedVerdict, SenderDigestRow, SenderDomainEntry,
+    SenderEntry, SenderHistory, SentMessage, SitrepBand, SpamScope, Stage1Applied, Stage1Queued,
+    Stage2Applied, Stage2CapOverrides, Stage2Queued, Stage2Usage, Stage2UsageDay, Store, SyncState,
+    TermDf, ThreadSibling, TrackedMessage, TriageDebug, TriagedMessage, UsageTokens,
 };
+use crate::triage::rule_suggest::SmartBlock;
 use crate::types::{
     AccountId, AttachmentInfo, AttentionStatus, AttentionUpdate, AuditEntry, BandCounts, Banking,
     CalendarUpdate, ClientAttachment, ClientMessage, ClientThreadView, Deadline, Disposition,
@@ -886,6 +888,15 @@ impl Store for SqliteStore {
         self.search_senders(account_id, q, limit)
     }
 
+    fn search_sender_domains(
+        &self,
+        account_id: AccountId,
+        q: &str,
+        limit: u32,
+    ) -> Result<Vec<SenderDomainEntry>> {
+        self.search_sender_domains(account_id, q, limit)
+    }
+
     fn sync_state(&self, account_id: AccountId, mailbox: &str) -> Result<Option<SyncState>> {
         self.sync_state(account_id, mailbox)
     }
@@ -1234,6 +1245,23 @@ impl Store for SqliteStore {
         resolution: &str,
     ) -> Result<bool> {
         self.set_unsubscribe_resolution(account_id, sender, resolution)
+    }
+
+    fn unsubscribe_smart_block(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+    ) -> Result<Option<SmartBlockMemo>> {
+        self.unsubscribe_smart_block(account_id, sender)
+    }
+
+    fn set_unsubscribe_smart_block(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+        proposal: Option<&SmartBlock>,
+    ) -> Result<bool> {
+        self.set_unsubscribe_smart_block(account_id, sender, proposal)
     }
 
     fn correct_triage(

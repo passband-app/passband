@@ -279,6 +279,8 @@ impl Harness {
             profile_url: format!("{google}/profile"),
             userinfo_url: format!("{google}/userinfo"),
             alert_webhook_url: None,
+            // No agent door: `/agent/auth` is not mounted.
+            workos: None,
             // Console auth never touches the LLM gateway; feature off.
             bifrost: None,
             // Nor the waitlist: with it off, those routes are not mounted.
@@ -807,6 +809,7 @@ async fn a_cookie_that_claims_an_invite_cannot_drive_a_console_session() {
             invite: Some(1),
             app: false,
             reconnect: false,
+            agent: false,
             iat: chrono::Utc::now().timestamp(),
         },
     );
@@ -1194,6 +1197,7 @@ async fn a_cookie_cannot_change_which_login_a_session_is() {
             invite: None,
             app: false,
             reconnect: false,
+            agent: false,
             iat: chrono::Utc::now().timestamp(),
         },
     );

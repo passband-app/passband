@@ -13,6 +13,19 @@ use squelch_core::triage::rule_suggest::RuleSuggestClient;
 use squelch_core::triage::unsub_page::UnsubPageClient;
 use squelch_core::types::AccountId;
 
+/// The agent door's mode as the console describes it. Mirrors squelch-mcp's
+/// `AgentDoorAuth` without depending on it (the human door does not link the
+/// agent door's crate), carrying only what the page shows.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum AgentDoorStatus {
+    /// No agent sign-in configured: the self-host door, Host guard only.
+    #[default]
+    Open,
+    /// OAuth sign-in configured; agents connect at this public URL.
+    OAuth { public_url: String },
+    /// Half-set or invalid settings: the door refuses everything (503).
+    Unavailable,
+}
 /// A board hash and the headline written for it (`None`: nothing to say).
 pub(crate) type HeadlineCacheEntry = (u64, Option<String>);
 
@@ -131,6 +144,12 @@ pub struct ApiState {
     /// a LINK TARGET and nothing more: no trust flows from here, because whatever
     /// comes back is a pairing code the store adjudicates on its own terms.
     pub(crate) console_sso_url: Option<Arc<str>>,
+    /// What the console tells the owner about the agent door (`/mcp`). Set by
+    /// squelchd from the mode it resolved at startup; the default, Open, is
+    /// the self-host posture and what every test that does not care gets.
+    /// Display only: the door's actual auth lives in squelch-mcp, and nothing
+    /// here can loosen it.
+    pub(crate) agent_door: AgentDoorStatus,
     /// The process's metrics registry, read by `/client/stats` to answer
     /// whether this mailbox's Gmail credential is currently working.
     ///
@@ -171,6 +190,10 @@ pub struct ApiState {
     /// this. `None` (no API key configured, and every test harness) means
     /// inference resolves to `filtered`, which is the safe default. HUMAN DOOR
     /// ONLY, like every other rule write.
+    ///
+    /// A route that AWAITS any of the model handles below before it answers
+    /// owes `ROUTE_CLASSES` in `http_metrics.rs` a row, or its seconds are
+    /// charted as the daemon's own.
     pub(crate) rule_infer: Option<Arc<RuleInferClient>>,
     /// The small model that suggests a rule sentence for the rule card. It
     /// reads the sender's recent subjects, so its output is only ever SHOWN,
@@ -414,6 +437,7 @@ impl ApiState {
                 crate::auth::DEVICE_AUTH_CONCURRENCY,
             )),
             console_sso_url: None,
+            agent_door: AgentDoorStatus::Open,
             sync_metrics: None,
             gmail_budget: None,
             console_allow_insecure_cookie: false,
@@ -604,6 +628,17 @@ impl ApiState {
             })
             .map(|u| Arc::from(u.as_str()));
         self
+    }
+
+    /// Tell the console which mode the agent door is in. See
+    /// [`AgentDoorStatus`].
+    pub fn with_agent_door(mut self, status: AgentDoorStatus) -> Self {
+        self.agent_door = status;
+        self
+    }
+
+    pub(crate) fn agent_door(&self) -> &AgentDoorStatus {
+        &self.agent_door
     }
 
     /// The control plane's origin, if console SSO is configured. `None` => the

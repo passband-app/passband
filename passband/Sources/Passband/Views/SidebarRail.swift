@@ -1,8 +1,9 @@
 // SIDEBAR — the slim icon rail: Sitrep / Emails / Auth / Rules / Groups on the
-// 1..5 keys; Update + Share + Usage + Settings sit below a divider, out of that sequence
-// so adding one never renumbers it. Share is the odd one there: it opens a sheet
-// rather than routing, so it carries no selector (see `shareButton`). ONE long-lived pane behind the icons is the selector,
-// moved by GEOMETRY not identity: per-icon glass drags the glyph along and
+// 1..5 keys; Update + Usage + Settings sit below a divider, out of that sequence
+// so adding one never renumbers it. The discovery ring sits just ABOVE that
+// divider, alone after the spacer: a real destination with no number key, its
+// RailButton drawing the ring where the others draw a symbol. ONE long-lived
+// pane behind the icons is the selector, moved by GEOMETRY not identity: per-icon glass drags the glyph along and
 // swallows clicks, and a GlassEffectContainer would hoist the pane over it.
 
 import SwiftUI
@@ -22,13 +23,10 @@ struct SidebarRail: View {
     @State private var slots: [MainView: CGRect] = [:]
     /// True for the span of a slide, so the pane can firm up while it moves.
     @State private var traveling = false
-    /// The share tile's own hover, which `RailButton` keeps for itself.
-    @State private var shareHovering = false
     @State private var updateHovering = false
     /// Bumped once when the update tile appears, for its single bounce.
     @State private var updateArrived = 0
     @ObservedObject private var updater = Updater.shared
-    @State private var shareDeniedAttempts = 0
     @State private var accountDeniedAttempts = 0
 
     /// THE TILE AND THE RAIL HOLD STILL ACROSS DENSITY. The glyphs grow with
@@ -119,14 +117,25 @@ struct SidebarRail: View {
 
                 Spacer(minLength: Space.s8)
 
+                // WAYS THROUGH YOUR MAIL: the discovery ring, alone between the
+                // spacer and the divider. It is about how you use the five
+                // destinations above, not about your account like the group
+                // below, so it sits on the line between them. A RailButton
+                // like any other, so the selector parks on it when its page
+                // is up; the divider's own vertical padding is the gap under
+                // it, the same gap the bottom group gets above.
+                RailButton(
+                    view: .discovery, keyNumber: nil, active: store.activeView == .discovery,
+                    showRings: false, onSlot: { slots[.discovery] = $0 }
+                ) { _ in DiscoveryRailGlyph() }
+                .accessibilityValue(DiscoveryRailGlyph.spokenValue)
+
                 Rectangle()
                     .fill(Palette.hairline)
                     .frame(width: 22, height: 0.5)
                     .padding(.vertical, Space.s4)
 
                 updateButton
-
-                shareButton
 
                 ForEach(MainView.bottomViews, id: \.self) { view in
                     RailButton(
@@ -149,52 +158,6 @@ struct SidebarRail: View {
             .frame(width: Self.railWidth)
             .frame(maxHeight: .infinity)
             .ignoresSafeArea(edges: .top)
-    }
-
-    /// HAND A FRIEND AN INVITE. Above Usage in the bottom group, because it
-    /// belongs with the things that are about your account rather than with the
-    /// five destinations on the number keys.
-    ///
-    /// Deliberately NOT a `RailButton`, for the same reason `accountBadge` is
-    /// not: it opens a sheet rather than routing, so it has no `MainView` to be
-    /// active for, takes no selector pane, and reports no slot. What it does
-    /// borrow is the tile — the same 44x36 target and the same hover wash — so
-    /// it reads as one of the rail's own rather than as a thing pinned to it.
-    ///
-    /// ABSENT unless the daemon says it can share, like the button in Settings.
-    /// A rail is 60 points wide and its whole argument is that everything in it
-    /// earns the space; an icon that can only refuse does not.
-    @ViewBuilder
-    private var shareButton: some View {
-        if store.shareAvailable {
-            Button {
-                guard !RehearsalMode.isEnabled else {
-                    shareDeniedAttempts += 1
-                    return
-                }
-                store.openShareSheet(from: .rail)
-            } label: {
-                Image(systemName: "gift")
-                    .font(Typo.ui(16))
-                    .foregroundStyle(Palette.inkDim)
-                    .frame(width: Self.iconWidth, height: Self.iconHeight)
-                    // THE WHOLE TILE IS THE TARGET, for the reason RailButton
-                    // spells out: every rail symbol is an outline, and a click
-                    // through the middle of one otherwise lands in a hole.
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .background {
-                RoundedRectangle(cornerRadius: Self.selectorRadius, style: .continuous)
-                    .fill(Palette.hairline.opacity(shareHovering ? 0.7 : 0))
-                    .frame(width: Self.iconWidth, height: Self.iconHeight)
-            }
-            .onHover { shareHovering = $0 }
-            .help("share Passband with a friend")
-            .accessibilityLabel("share Passband")
-            .accessibilityHint(RehearsalMode.isEnabled ? "Available after onboarding." : "")
-            .modifier(PracticeRailFeedback(attempts: shareDeniedAttempts))
-        }
     }
 
     /// A NEWER PASSBAND IS WAITING. First in the bottom group, so it is the
@@ -396,7 +359,10 @@ private struct RailEdge: Shape {
     }
 }
 
-private struct RailButton: View {
+/// One rail tile. The glyph is a parameter, an SF Symbol for every
+/// destination but discovery, which draws its ring: everything else about a
+/// tile (the target, the wash, the slot, the refusal) is the same thing.
+private struct RailButton<Icon: View>: View {
     @Environment(AppStore.self) private var store
     let view: MainView
     let keyNumber: Int?
@@ -405,6 +371,8 @@ private struct RailButton: View {
     /// Where this icon landed, in the rail's space, so the rail can park the
     /// selector on it.
     let onSlot: (CGRect) -> Void
+    /// The glyph, given whether the tile is the active one.
+    @ViewBuilder let icon: (Bool) -> Icon
 
     @State private var hovering = false
     @State private var deniedAttempts = 0
@@ -418,9 +386,7 @@ private struct RailButton: View {
             store.setView(view, viaPointer: true)
         } label: {
             ZStack {
-                Image(systemName: view.symbol)
-                    .font(Typo.ui(17, weight: active ? .semibold : .regular))
-                    .foregroundStyle(active ? Palette.accent : Palette.inkDim)
+                icon(active)
                     .frame(width: SidebarRail.iconWidth, height: SidebarRail.iconHeight)
                     // The rail's selector is placed from this. Nothing about the
                     // glyph changes with selection except weight and colour, so
@@ -457,9 +423,30 @@ private struct RailButton: View {
     }
 }
 
+extension RailButton where Icon == RailSymbol {
+    init(view: MainView, keyNumber: Int?, active: Bool, showRings: Bool, onSlot: @escaping (CGRect) -> Void) {
+        self.init(
+            view: view, keyNumber: keyNumber, active: active, showRings: showRings, onSlot: onSlot
+        ) { RailSymbol(symbol: view.symbol, active: $0) }
+    }
+}
+
+/// The ordinary tile glyph. Nothing about it changes with selection except
+/// weight and colour.
+private struct RailSymbol: View {
+    let symbol: String
+    let active: Bool
+
+    var body: some View {
+        Image(systemName: symbol)
+            .font(Typo.ui(17, weight: active ? .semibold : .regular))
+            .foregroundStyle(active ? Palette.accent : Palette.inkDim)
+    }
+}
+
 /// Keep practice navigation recognizable and responsive without leaving the
 /// lesson. With Reduce Motion the same refusal is a short, stationary outline.
-private struct PracticeRailFeedback: ViewModifier {
+struct PracticeRailFeedback: ViewModifier {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let attempts: Int
     @State private var highlighted = false

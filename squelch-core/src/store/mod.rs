@@ -19,6 +19,7 @@ use crate::error::Result;
 // the type comments in `metrics.rs` and docs/NOTIFY.md §11.4.
 use crate::metrics::{NotifyDecision, NotifyLane};
 use crate::triage::extract::shipments::ShipmentsApplied;
+use crate::triage::rule_suggest::SmartBlock;
 use crate::triage::{CalendarInfo, CarrierTrack, DeadlineHit, ReceiptInfo, ShipmentInfo};
 use crate::types::{
     AccountId, AttachmentInfo, AttentionStatus, AttentionUpdate, AuditEntry, Banking,
@@ -181,6 +182,22 @@ pub struct SenderEntry {
     /// Inbound, non-spam messages from this address. Sealed ones are counted
     /// (sealing is decided after the count is taken); a sender with ONLY sealed
     /// mail is never returned at all.
+    pub msg_count: i64,
+    pub last_received_at: DateTime<Utc>,
+}
+
+/// The sender directory rolled up by host (`/client/sender-domains`): everyone
+/// at one domain who has written to the account, as the rule editor's `*@`
+/// suggestion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SenderDomainEntry {
+    /// The host exactly as the addresses carry it (`e.stripe.com` is not
+    /// `stripe.com`), because a rule's glob matches the whole address and
+    /// `*@stripe.com` would not cover the subdomain.
+    pub domain: String,
+    /// Directory rows at this host.
+    pub sender_count: i64,
+    /// The sum of those rows' `msg_count`, with the same sealed caveat.
     pub msg_count: i64,
     pub last_received_at: DateTime<Utc>,
 }
@@ -989,6 +1006,25 @@ pub struct SenderDigestRow {
     pub status: String,
     /// The owner opened it in Passband.
     pub opened: bool,
+    /// What triage called it (`marketing`, `bill`, ...), when it said.
+    pub category: Option<String>,
+}
+
+/// Whether a smart block has been worked out for a sender, and what it was.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SmartBlockMemo {
+    NotAsked,
+    /// Asked and answered; `None` is "this sender has no line to draw".
+    Asked(Option<SmartBlock>),
+}
+
+impl SmartBlockMemo {
+    /// Read the `unsubscribes.smart_block` column: NULL is never asked, JSON
+    /// `null` is an answered no. Anything unreadable is asked again.
+    pub(crate) fn from_column(raw: Option<String>) -> Self {
+        raw.and_then(|raw| serde_json::from_str::<Option<SmartBlock>>(&raw).ok())
+            .map_or(Self::NotAsked, Self::Asked)
+    }
 }
 
 /// One other message in the escalated row's thread. Verdict and envelope only,
@@ -1959,6 +1995,17 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
         limit: u32,
     ) -> Result<Vec<SenderEntry>>;
 
+    /// HUMAN-DOOR ONLY (`/client/sender-domains`): the sender directory rolled
+    /// up by host and ranked for a typed fragment of one, for the rule
+    /// editor's `*@` suggestions. MUST NOT be reachable from MCP, like
+    /// `search_senders`.
+    fn search_sender_domains(
+        &self,
+        account_id: AccountId,
+        q: &str,
+        limit: u32,
+    ) -> Result<Vec<SenderDomainEntry>>;
+
     /// Read the sync cursor for a mailbox key, if one has been persisted.
     fn sync_state(&self, account_id: AccountId, mailbox: &str) -> Result<Option<SyncState>>;
 
@@ -2484,6 +2531,29 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
         account_id: AccountId,
         sender: &str,
         resolution: &str,
+    ) -> Result<bool>;
+
+    /// What is remembered about a smart block for this sender's ignored
+    /// unsubscribe, so the question is put to a model once. `None` when the
+    /// sender has no unsubscribe row at all.
+    fn unsubscribe_smart_block(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+    ) -> Result<Option<SmartBlockMemo>>;
+
+    /// Remember the answer on the sender's unsubscribe row: a proposal, or
+    /// `None` for "nothing worth keeping apart". `false` when there is no row.
+    /// A proposal is model text about sender-written subjects: it is stored to
+    /// be SHOWN again and becomes a rule only through the owner's click. It
+    /// outlives a resolution and a fresh request, being a reading of the
+    /// sender; a remembered `None` is dropped by a fresh request, so asking
+    /// again gets a second look at a sender whose mail may have changed.
+    fn set_unsubscribe_smart_block(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+        proposal: Option<&SmartBlock>,
     ) -> Result<bool>;
 
     /// Upsert one extracted promotion + stamp `triage.extractor_model_used`.

@@ -444,8 +444,13 @@ enum AgentTools {
                 summary: "no such help topic")
         }
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+        #if os(iOS)
+            let onPhone = true
+        #else
+            let onPhone = false
+        #endif
         return ToolOutcome(
-            content: ProductGuide.text(topic, runningVersion: version), isError: false,
+            content: ProductGuide.text(topic, runningVersion: version, onPhone: onPhone), isError: false,
             summary: "read the guide: \(topic.title)")
     }
 

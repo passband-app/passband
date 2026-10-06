@@ -108,7 +108,7 @@ struct RootView: View {
         // and not before; `askIfEarned` is what decides whether a fortnight has
         // actually been used, and it can only ever say yes once.
         .onChange(of: store.shareAvailable) { _, canShare in
-            guard !TestFlightNudge.shared.showingNudge else { return }
+            guard !TestFlightNudge.shared.showingNudge, !AgentNudge.shared.showingNudge else { return }
             ShareNudge.shared.askIfEarned(canShare: canShare)
         }
         // THE IPHONE ASK, two days in, for a mailbox no phone has ever
@@ -117,14 +117,22 @@ struct RootView: View {
         .overlay { TestFlightNudgeModal() }
         .onChange(of: store.iosConnected) { _, connected in
             TestFlightNudge.shared.askIfEarned(
-                iosConnected: connected, othersShowing: ShareNudge.shared.showingNudge)
+                iosConnected: connected,
+                othersShowing: ShareNudge.shared.showingNudge || AgentNudge.shared.showingNudge)
         }
+        // THE AGENT-DOOR AD, a week in, for a mailbox whose door an agent can
+        // actually use. Asked at the first sync (ShellWatchers, after the tour
+        // and What's New have had their turn) and on every return to the app,
+        // below.
+        .overlay { AgentNudgeModal() }
         // And on every return to the app, because the answer above changes
         // once per launch at most: a Mac left open across the two-day mark
         // would otherwise never hear the rule again until it was quit.
         .onReceive(NotificationCenter.default.publisher(for: Platform.didBecomeActiveNotification)) { _ in
             TestFlightNudge.shared.askIfEarned(
-                iosConnected: store.iosConnected, othersShowing: ShareNudge.shared.showingNudge)
+                iosConnected: store.iosConnected,
+                othersShowing: ShareNudge.shared.showingNudge || AgentNudge.shared.showingNudge)
+            AgentNudge.shared.askIfEarned(store: store)
         }
         .task {
             // Pay WebKit's process-launch cost at boot rather than on the first
@@ -272,12 +280,15 @@ private struct ShellWatchers: View {
                     store.tour.maybeStart()
                     // Onboarding claims the moment before release notes.
                     store.whatsNew.maybeShow()
+                    // The agent-door ad waits out both: it checks for them.
+                    AgentNudge.shared.askIfEarned(store: store)
                 }
             }
     }
 }
 
 struct MainShell: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// The readers on screen: the open thread, plus the one it is turning
     /// away from while an S is in flight (behind it, so it is drawn first).
     /// An undone S turns the other way, with the outgoing card on top.
@@ -336,6 +347,13 @@ struct MainShell: View {
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // DISCOVER COMES OUT OF THE RAIL: it slides in from the left,
+                // where its ring is, and back the same way on Esc. Keyed on
+                // the one bool, so no other page change is animated; clipped,
+                // so the page arrives from under the rail, not across it.
+                .clipped()
+                .animation(
+                    reduceMotion ? nil : .smooth(duration: 0.34), value: store.activeView == .discovery)
                 // INVISIBLE UNDER A SETTLED READER, and still mounted. The
                 // reader is opaque and covers the page, but a covered page is
                 // still composited — six glass cards re-sampling whatever is
@@ -590,6 +608,9 @@ struct MainShell: View {
         case .usage: UsageView()
         case .settings: SettingsView()
         case .process: RoutedHost(view: .process) { ProcessView() }
+        case .discovery:
+            DiscoveryView()
+                .transition(reduceMotion ? .opacity : .move(edge: .leading).combined(with: .opacity))
         }
     }
 

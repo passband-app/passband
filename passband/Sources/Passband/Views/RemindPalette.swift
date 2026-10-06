@@ -67,6 +67,9 @@ struct RemindPalette: View {
             }
         #else
             palette
+                // Clear of the sheet's grabber, which the header's own top
+                // padding was never measured against.
+                .padding(.top, Space.s8)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 .background(Palette.canvas.ignoresSafeArea())
                 .presentationDetents([.large])
@@ -122,6 +125,15 @@ struct RemindPalette: View {
             .focused($focused)
             .autocorrectionDisabled()
             .disabled(busy)
+            #if !os(macOS)
+                // Return sets the highlighted row, which is what Enter does
+                // through the keymap on the Mac. Without it the highlight on a
+                // phone marks a row for a key that never arrives.
+                .submitLabel(.done)
+                .onSubmit {
+                    if let hit = hits[safe: selection] { Task { await apply(hit) } }
+                }
+            #endif
             .padding(.horizontal, Space.s16)
             .padding(.top, Space.s4)
             .padding(.bottom, Space.s12)

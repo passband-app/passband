@@ -54,6 +54,7 @@ pub mod state;
 pub mod store;
 pub mod tenant;
 pub mod warden;
+pub mod workos;
 
 pub use config::{Config, ConfigError};
 pub use state::{ControlState, StateError};
@@ -76,17 +77,22 @@ use axum::{
 /// - `POST /signup` is tight. It validates an invite code, so it is the one
 ///   route where a stranger can guess at a secret, and a real human posts it
 ///   once.
-/// - `GET /console/auth` and `GET /app/auth` are TIGHTER, and share ONE bucket.
-///   They are the only routes that open a server-side session with nothing
-///   presented at all, so they are the cheapest things here to loop; a real
+/// - `GET /console/auth`, `GET /app/auth`, `GET /reconnect` and (when WorkOS is
+///   configured) `GET /agent/auth` are TIGHTER, and share ONE bucket. They are
+///   the only routes that open a server-side session with nothing presented at
+///   all (an `external_auth_id` is a string anybody can make up, so it counts
+///   as nothing), which makes them the cheapest things here to loop; a real
 ///   human hits one of them once per sign in, and anything sustained above the
-///   budget is somebody walking the label space. They share a bucket because
-///   they are the same errand through the same consent: a budget each would let
-///   one client spend twice by alternating them. The pair used to share
-///   signup's budget, which meant login traffic could spend it.
+///   budget is somebody walking the label space or flooding the session table.
+///   They share a bucket because they are the same errand through the same
+///   consent: a budget each would let one client spend four times by rotating
+///   them. The pair used to share signup's budget, which meant login traffic
+///   could spend it.
 /// - `GET /oauth/callback` is the most generous. Refusing it destroys a consent
 ///   the user has ALREADY granted at Google, which they cannot grant twice
 ///   without walking the whole flow again. All three flows come back through it.
+///   `POST /agent/confirm` (mounted with WorkOS) shares this bucket for the
+///   same reason: it is the agent login's second half, after Google.
 /// - `POST /waitlist` is small. It is a stranger-facing WRITE, a person joins
 ///   once, and everything above the budget is rows of junk for an operator to
 ///   read past; a real submitter who is refused loses one retry, because the
@@ -129,25 +135,55 @@ pub fn router(state: ControlState) -> Router {
         ))
         .with_state(state.clone());
 
-    // ALL THREE UNAUTHENTICATED CONSENT HOPS, on ONE bucket. They are the same
+    // ALL THE UNAUTHENTICATED CONSENT HOPS, on ONE bucket. They are the same
     // errand through the same consent, and a limiter each would let the same
-    // client spend three times by rotating them.
+    // client spend once per route by rotating them.
     //
     // `/reconnect` belongs here rather than with signup despite being a grant:
     // what this bucket rations is the ability of a stranger to start consent
     // hops, and a reconnect is reachable with no credential at all.
-    let console = Router::new()
+    //
+    // `/agent/auth` is MOUNTED ONLY WHEN WORKOS IS CONFIGURED, like the
+    // waitlist below: with the feature off there is no door (a 404), so a
+    // deployment that cannot complete an AuthKit login never opens a Google
+    // consent on AuthKit's behalf. When it is mounted it is this bucket's
+    // fourth route rather than a bucket of its own, because it opens exactly
+    // the session the app login opens and is exactly as cheap to loop.
+    let mut console = Router::new()
         .route("/console/auth", get(handlers::console_auth))
         .route("/app/auth", get(handlers::app_auth))
-        .route("/reconnect", get(handlers::reconnect_start))
+        .route("/reconnect", get(handlers::reconnect_start));
+    if state.config().workos.is_some() {
+        console = console.route("/agent/auth", get(handlers::agent_auth));
+    }
+    let console = console
         .layer(middleware::from_fn_with_state(
             state.clone(),
             ratelimit::limit_console_auth,
         ))
         .with_state(state.clone());
 
-    let callback = Router::new()
-        .route("/oauth/callback", get(handlers::oauth_callback))
+    // `POST /agent/confirm` rides the CALLBACK's bucket, for the callback's
+    // reason: it is the second half of a flow whose Google consent has ALREADY
+    // been given, so refusing it costs a person something they have to walk
+    // the whole flow again to get back. It opens no session (it can only spend
+    // one the callback parked, under a cookie and a CSRF token a stranger does
+    // not have), so it is not the cheap-to-loop thing the login bucket
+    // rations. Mounted only with WorkOS configured, like `/agent/auth`.
+    let mut callback = Router::new().route("/oauth/callback", get(handlers::oauth_callback));
+    if state.config().workos.is_some() {
+        // The GET renders the parked page and the POST answers it. The GET is
+        // here for the POST's reason, plus one: it is what a refresh asks for,
+        // and a person refreshing a page they already consented their way to
+        // must not meet a 429. It opens nothing and spends nothing.
+        callback = callback.route(
+            "/agent/confirm",
+            get(handlers::agent_confirm_page)
+                .post(handlers::agent_confirm)
+                .layer(DefaultBodyLimit::max(handlers::MAX_BODY)),
+        );
+    }
+    let callback = callback
         .layer(middleware::from_fn_with_state(
             state.clone(),
             ratelimit::limit_callback,

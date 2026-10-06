@@ -111,7 +111,7 @@ const INVITE_HELD: &str =
 /// the browser attaches the cookie. This check is what narrows it the rest of
 /// the way. A request with neither header is not a browser making it, and the
 /// cookie is still required.
-fn same_origin(state: &ControlState, headers: &HeaderMap) -> bool {
+pub(crate) fn same_origin(state: &ControlState, headers: &HeaderMap) -> bool {
     origin_matches(&state.config().public_url, headers)
 }
 

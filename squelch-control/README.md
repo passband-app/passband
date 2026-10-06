@@ -69,6 +69,114 @@ The admin POSTs take a `SameSite=Strict` session cookie AND a same-origin
 buttons. An `Origin` of `null` names nothing, so it is decided by
 `Sec-Fetch-Site`, which no page can write.
 
+## The agent door: WorkOS AuthKit login (`/agent/auth`, `/agent/confirm`)
+
+Agents reach a hosted tenant's `/mcp` with an OAuth access token issued by
+**WorkOS AuthKit**, running in "Standalone Connect" mode: AuthKit is the
+authorization server and does the OAuth dance with the agent, but it delegates
+the LOGIN to this service. This route is that login:
+
+```
+agent    ── OAuth authorize ──► AuthKit
+browser  ── GET /agent/auth?external_auth_id=<opaque> ──► 302 to Google (identity only)
+         ── Google consent ──►
+         ── GET /oauth/callback ──► mailbox Google names → its ACTIVE tenant here
+                                    park the result, 303 to /agent/confirm (fresh cookie)
+         ── GET /agent/confirm ──► OUR confirmation page (a read; refresh is safe)
+         ── POST /agent/confirm ──► POST https://api.workos.com/authkit/oauth2/complete
+                                    303 to the redirect_uri WorkOS answers with
+         ── AuthKit consent ──► token for the agent
+```
+
+- **One input.** `external_auth_id` is the only parameter read, and it must be
+  1 to 128 ASCII letters, digits, `-` or `_`; anything else is a 400 refusal page
+  and opens no session. No return URL, no tenant, no address. It is opaque to
+  us: parked in the server-side session (never in the cookie), sent to WorkOS,
+  and never logged.
+- **Not an oracle.** Every well-formed id gets the same 302 to Google. Nothing
+  is looked up until Google has authenticated somebody, so whether a mailbox
+  exists is a question only its owner can ask.
+- **A page of ours asks first.** The `/agent/auth` link can be mailed to a
+  victim by whoever started the authorization, Google's chooser asks a
+  returning user nothing, and AuthKit's consent screen names the agent with
+  whatever name its builder registered. So the callback does NOT call WorkOS:
+  it parks the verified result (the id, the tenant, the stored address, the
+  verified address) server-side under a FRESH session id and cookie, for five
+  minutes, one-shot, inside the same bounded session table, and answers a 303
+  to `GET /agent/confirm`, a stable address with no query string (Google's
+  code does not stay in the address bar). That page names the mailbox: an AI
+  agent is asking to read this mail, continue only if you started this
+  yourself on this device, close it if somebody sent you the link, and the
+  next screen's agent name is chosen by whoever built it. Unframeable,
+  uncacheable, no script, no CORS grant.
+- **`GET /agent/confirm` is a read.** It renders from the parked session
+  without consuming it and sets no cookie, so a refresh, Back/Forward, or a
+  second tab shows the same page with the same one CSRF token. It answers only
+  to the flow cookie naming a live confirmation; anything else is the refusal
+  page. A refresh of the old callback URL (stale code, new cookie) is sent back
+  to this page without touching the parked session or Google: the callback
+  peeks at the session before taking it, and declines to take the two
+  agent-flow kinds it never finishes. Every other kind is still taken first.
+- **Confirmations are not charged to the login pool.** Only a Google-verified
+  owner of an active tenant can create one, so a stranger spraying
+  `/agent/auth` cannot crowd them out. They are bounded by the whole session
+  table, and per client by the `/agent/auth` bucket (each needs its own
+  pre-Google session and a Google round trip) and a five minute life.
+- **`POST /agent/confirm`** is the answer. It requires a same-origin
+  `Origin`/`Sec-Fetch-Site` (the admin POSTs' check), the flow cookie, an
+  atomic one-shot take of a confirmation session (any other kind is refused),
+  and the form's CSRF token (constant time). Continue completes at WorkOS;
+  Cancel discards the state and says nothing was connected. A double click is
+  covered: while the first press is waiting on WorkOS it leaves an in-flight
+  placeholder under its session id (15 seconds at most), and a second Continue
+  from the same browser (same signed cookie, same token) that lands then waits
+  for it, polling the table, and gets the first press's answer; for 10 seconds
+  after, a done or failed marker answers the same way. The same 303, or the
+  same class of failure page, and never a second WorkOS call. A wrong token or
+  a Cancel in that window is refused without disturbing the first press, and
+  after the markers expire a replay is refused. The WorkOS call itself runs as
+  a detached task that always settles the placeholder (done, or failed, even
+  on a panic), so a first press whose browser closed its connection still
+  leaves the answer the second press is waiting for; the waiter wakes on that
+  settle rather than polling. The success answer does not clear the flow cookie, so that second
+  press can still be matched. Both methods ride the callback's rate-limit
+  bucket, as the second half of a consent already given, and a refresh must
+  not meet a 429.
+  Its page's CSP widens `form-action` to `https:`, because Chrome applies
+  `form-action` to the redirect a form submission gets and the AuthKit host is
+  not configured here.
+- **WorkOS is called last.** Only once the Google-verified mailbox matches an
+  active tenant and its owner has pressed Continue. A Google account with no
+  mailbox here gets a plain "no Passband mailbox" page, nothing is parked, and
+  WorkOS hears nothing. The completion sends
+  `{"external_auth_id", "user": {"id": <verified address, lowercased>, "email":
+  <the address as the tenant record stores it>}}` with `Authorization: Bearer
+  <key>` and a 10 second budget. That `email` becomes the token's `email` claim,
+  which is what a tenant daemon holds against its own account before serving
+  anything.
+- **The redirect is checked.** The browser is sent (303, `no-store`,
+  `no-referrer`) to WorkOS's `redirect_uri` only if it is an absolute `https`
+  URL with a host and no userinfo (`http` too, on a plain-http local run).
+  401/403, 429, any 5xx, a timeout, unreadable JSON, or a URL that fails that
+  check is one "try again" page. Every other non-2xx status (in practice a 4xx
+  such as a spent or expired `external_auth_id`, but also a 3xx, which the
+  client never follows) gets "this connection request has expired, start
+  again from your agent", since a retry here can never work. Neither repeats
+  anything WorkOS said.
+- `/agent/auth` shares the login hops' rate-limit bucket and counts against
+  the session table's login ceiling.
+
+**Setup.** Set `SQUELCH_CONTROL_WORKOS_API_KEY` in the `control` service's
+Railway variables; unset, neither `/agent/auth` nor `/agent/confirm` is mounted
+(404). In the WorkOS
+dashboard, under *Connect* → *Configuration*, set the **External Sign-in URI**
+(the docs call it the Standalone Connect Login URI) to
+`https://<control origin>/agent/auth` (today `https://signup.passband.app/agent/auth`).
+The `control` service deploys itself from `main`: merge the change, set the
+variable, and let it redeploy. Do not `railway up`. The WorkOS API origin is a
+pinned constant (`https://api.workos.com`), not a variable, for the reason the
+Google and Resend ones are.
+
 ## Provisioning is two calls
 
 Wire v2 splits provisioning so that no single key opens two mailboxes:
@@ -159,6 +267,7 @@ Everything is validated at startup and a bad value is a refusal to boot.
 | `SQUELCH_CONTROL_RESEND_API_KEY` | trio | Resend sending key, used for the one call that mails an approved applicant their invite. Printable ASCII, no spaces. Mint it sending-only and domain-restricted. |
 | `SQUELCH_CONTROL_INVITE_FROM` | trio | The `From:` invites are sent as, e.g. `Passband <invites@passband.app>`. Must be an address on a domain **verified at Resend** or every send is refused. |
 | `SQUELCH_CONTROL_WAITLIST_ORIGIN` | no | The one browser origin allowed to post the public waitlist form, echoed as `Access-Control-Allow-Origin` on that route only, and the origin the signup page's "join the waitlist" link is built from (`<origin>/waitlist`). Default `https://passband.app`. Only meaningful with the trio above set; set alone it refuses to boot. |
+| `SQUELCH_CONTROL_WORKOS_API_KEY` | no | The WorkOS API key (`sk_live_...`), sent as a bearer on the one AuthKit completion call `/agent/auth` makes. Set: the agent door is mounted. Unset: `/agent/auth` is a 404. Printable ASCII, no spaces. A SECRET: it acts on the whole WorkOS environment. Set it in the `control` service's Railway variables. |
 | `SQUELCH_CONTROL_TRUSTED_PROXY_HOPS` | no | How many proxies write `X-Forwarded-For` in front of this listener. `0` (default) meters the TCP peer, which behind a platform edge means one shared rate-limit bucket. Set `1` on Railway. |
 | `SQUELCH_CONTROL_ALERT_WEBHOOK_URL` | no | A Slack incoming webhook (https only). When set, control posts there when a signup ends half-finished, hits an already-set-up mailbox, or provisions a tenant it then cannot record, and on every finished signup. Label and VK ids only, never the mailbox. Fire and forget: Slack being down never slows or fails a signup. A SECRET: the URL is the whole credential. Unset = log lines only. |
 | `SQUELCH_CONTROL_LOG` | no | `tracing` filter. Default `info`. |
@@ -172,7 +281,9 @@ than no variable at all.
 
 The Google endpoints are **pinned constants**, deliberately not environment
 variables: those requests carry the client secret, and "which host do we send
-the secret to" must not be a deploy-time typo.
+the secret to" must not be a deploy-time typo. Resend's and WorkOS's API origins
+are pinned for the same reason; tests point them at stubs by building the config
+struct directly.
 
 ## CLI
 
@@ -342,5 +453,7 @@ is `deploy/hosted/PRODUCTION.md`.
   the user has already granted.
 - Every invite failure is one message. Wrong, spent, revoked, and malformed are
   indistinguishable from the outside.
-- `/mcp` does not exist here, and a tenant's Ingress answers 404 for it too. The
-  hosted MVP ships the human door only.
+- `/mcp` does not exist here. On a tenant it is published only when the warden
+  is configured for agent OAuth, and then the daemon accepts nothing but an
+  AuthKit token whose `email` is its own mailbox; `/agent/auth` above is this
+  service's whole part in that.

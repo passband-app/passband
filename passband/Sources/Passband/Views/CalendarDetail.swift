@@ -47,11 +47,15 @@
 
         private var header: some View {
             HStack(spacing: Space.scaled(7)) {
-                AgendaMark(fill: item.fill, estimated: item.endEstimated, thin: item.cancelled)
+                AgendaMark(
+                    fill: item.fill, estimated: item.endEstimated, thin: item.cancelled,
+                    hue: ChipColors.inks(item).edge)
                     .frame(width: 10, height: 10)
+                // A real event's calendar is named in its own colour: the
+                // same ink its time wears on the month.
                 Text(source)
                     .font(Typo.micro)
-                    .foregroundStyle(Palette.inkFaint)
+                    .foregroundStyle(item.event != nil ? ChipColors.inks(item).ink : Palette.inkFaint)
                 Spacer(minLength: Space.s8)
                 if item.isGhost {
                     Text("not on your calendar")
@@ -153,6 +157,20 @@
                     if event.busy == false {
                         FactRow(label: "Shows as") { plain("free") }
                     }
+                    if let notes = event.description?.trimmingCharacters(in: .whitespacesAndNewlines),
+                        !notes.isEmpty
+                    {
+                        FactRow(label: "Notes") {
+                            // The calendar's own text, laundered by the
+                            // daemon: plain Text, never markup.
+                            Text(verbatim: notes)
+                                .font(Typo.rowSub)
+                                .foregroundStyle(Palette.ink)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .lineLimit(12)
+                                .textSelection(.enabled)
+                        }
+                    }
                 }
                 if item.unverified {
                     FactRow(label: "Sender") {
@@ -182,7 +200,9 @@
                 FactRow(label: "Likelihood") {
                     VStack(alignment: .leading, spacing: Space.s4) {
                         HStack(spacing: Space.s6) {
-                            AgendaMark(fill: item.fill, thin: likelihood.band == .unlikely)
+                            AgendaMark(
+                                fill: item.fill, thin: likelihood.band == .unlikely,
+                                hue: ChipColors.inks(item).edge)
                                 .frame(width: 10, height: 10)
                             Text(likelihood.band.rawValue.capitalized)
                                 .font(Typo.ui(12, weight: .semibold))
@@ -214,9 +234,11 @@
         // MARK: actions
 
         /// The verbs, each wearing its key the way the app teaches keys in
-        /// place. Mark going, dismiss, or (on a ghost already marked going)
-        /// take the mark off. An RSVP that answers through the calendar is a
-        /// later wave; nothing here writes mail.
+        /// place. A ghost: mark going, dismiss, or (on a ghost already marked
+        /// going) take the mark off. A real event: open it in Google
+        /// Calendar, and, only where the daemon says the event is the user's
+        /// to change, edit and delete. An RSVP that answers through the
+        /// calendar is a later wave; nothing here writes mail.
         @ViewBuilder
         private var actions: some View {
             if let ghost = item.ghost {
@@ -236,10 +258,20 @@
                     }
                     Spacer(minLength: 0)
                 }
-            } else if let link = item.event?.html_link, Opener.isHTTP(link) {
-                HStack {
-                    HintButton(key: "↵", label: "open in Google Calendar") { Opener.open(link) }
-                    Spacer(minLength: 0)
+            } else if let event = item.event {
+                let link = event.html_link.flatMap { Opener.isHTTP($0) ? $0 : nil }
+                let editable = CalendarWrite.canEdit(event) && !RehearsalMode.isEnabled
+                if link != nil || editable {
+                    HStack(spacing: Space.s14) {
+                        if editable {
+                            HintButton(key: "e", label: "edit") { store.openEventEditor(editing: event) }
+                            HintButton(key: "⌫", label: "delete") { store.askDeleteEvent(event) }
+                        }
+                        if let link {
+                            HintButton(key: "↵", label: "open in Google Calendar") { Opener.open(link) }
+                        }
+                        Spacer(minLength: 0)
+                    }
                 }
             }
         }

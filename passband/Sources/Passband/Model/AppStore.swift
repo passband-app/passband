@@ -621,7 +621,8 @@ final class AppStore {
     /// Agenda or month, and where the month is. Kept here, not in the page,
     /// for the session: the page is unmounted every time you leave it, and
     /// coming back should land where you were. `calendarPlace` nil is today.
-    var calendarMode: CalendarViewMode = .agenda
+    /// The month first (`CalendarViewMode.initial`).
+    var calendarMode: CalendarViewMode = .initial
     var calendarPlace: MonthPlace?
     /// The month's levels, deepest last: the selected day's column opened in
     /// place of the grid (narrow windows only), and the item whose detail is
@@ -638,6 +639,15 @@ final class AppStore {
     /// A self-host daemon has been asked for a consent link and has not
     /// answered yet: Connect does nothing meanwhile, so one press is one tab.
     var calendarConnectStarting = false
+    /// The event editor, while it is up (`CalendarEditorRequest`): a modal
+    /// card in the action layer, registered in `modalOverlayOpen`.
+    var calendarEditor: CalendarEditorRequest?
+    /// The one-question card before an event is deleted from Google, raised
+    /// from the detail pane (the editor asks in its own footer instead).
+    var calendarDeleteAsk: CalendarDeleteAsk?
+    /// A write to Google is out: the card's buttons wait, so one Enter is
+    /// one event.
+    var calendarWriting = false
     /// Bumped by every timeline request and every local write to the feed;
     /// an answer is applied only if nothing newer has started since it was
     /// asked for. Not observed: it is bookkeeping, never drawn.
@@ -1828,6 +1838,11 @@ final class AppStore {
         calendarConnectAsk = nil
         calendarConnectWait = nil
         calendarConnectStarting = false
+        // The editor and the delete question were about the last mailbox's
+        // calendars, and a write still out answers into nothing.
+        calendarEditor = nil
+        calendarDeleteAsk = nil
+        calendarWriting = false
         calendarLoadGeneration &+= 1
         // The parked refresh tasks go too, not just their results: a joiner
         // arriving after the switch would otherwise wait on — and adopt the
@@ -2313,6 +2328,7 @@ final class AppStore {
             || groupEditor != nil
             || !authQueue.isEmpty || retriage != nil || retriageAsk != nil
             || reconnectAsk != nil || calendarCardUp
+            || calendarEditor != nil || calendarDeleteAsk != nil
             || tour.wantsBlur || whatsNew.active
     }
 

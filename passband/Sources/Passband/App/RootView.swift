@@ -283,7 +283,13 @@ private struct ShellWatchers: View {
             // leaving it over a page it says nothing about. A wait already
             // started is kept, and the page's waiting line carries it.
             .onChange(of: store.activeView) { _, view in
-                if view != .calendar { store.closeCalendarConnectForNavigation() }
+                if view != .calendar {
+                    store.closeCalendarConnectForNavigation()
+                    // So do the event editor and the delete question: they
+                    // are about the page being left.
+                    store.closeEventEditor()
+                    store.cancelDeleteEvent()
+                }
             }
             .onChange(of: store.lastRefresh) { old, new in
                 if old == nil, new != nil {

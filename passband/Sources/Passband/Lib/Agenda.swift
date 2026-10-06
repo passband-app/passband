@@ -337,7 +337,7 @@ enum Agenda {
         }
         if allDay, end == nil || end! <= start.date { end = dayAfter(start.date, calendar) }
         return AgendaItem(
-            id: "e:\(event.calendar_id)|\(event.id)",
+            id: itemId(event),
             origin: .event(event),
             title: tidy(event.title) ?? "Untitled event",
             location: tidy(event.location),
@@ -350,6 +350,12 @@ enum Agenda {
             cancelled: false,
             unverified: false,
             folded: false)
+    }
+
+    /// A real event's row id: its calendar and its id, since Google's ids are
+    /// unique only within a calendar. The editor selects a saved event by it.
+    static func itemId(_ event: TimelineEvent) -> String {
+        "e:\(event.calendar_id)|\(event.id)"
     }
 
     /// The order inside a day: all-day first, then by start; at the same

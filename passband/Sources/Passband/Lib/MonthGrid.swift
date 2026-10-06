@@ -1,26 +1,22 @@
 // THE MONTH VIEW'S ARITHMETIC: the shape of the month. Which days the grid
-// shows, where each item sits on a day's strip of hours, which items are spans
-// across the top of the cells, which lane a span takes, how many unlikely
-// ghosts fold under a day, how the keys move the selection, the day column
-// beside the grid, and the range the page asks the daemon for.
+// shows, what each day's cell lists and in what order, which items are spans
+// across the top of the cells and which lane each takes, how much of a cell
+// fits and what folds into "+N more", how many unlikely ghosts a day counts,
+// how the keys move the selection, the day column beside the grid, and the
+// range the page asks the daemon for.
 //
 // PURE, and Foundation only, like Lib/Agenda.swift beside it, so test.sh can
 // hold it against fixtures (Tests/MonthGridTests.swift). Clock and zone are
 // arguments; nothing here reads `Date()` or `Calendar.current`.
 //
-// The design is docs/calendar-ux-preview.html, section 4:
-//   - Load is the amount of ink. No titles in the cells, no number, no heat
-//     colour: a day is a strip of its waking hours, 7am to midnight, after a
-//     folded night cap (midnight to 7am), in the agenda's fills.
-//   - Midnight is the cell border. Every strip shares one axis, so a week row
-//     reads as one timeline and Saturday's 10pm to 6am party leaves the end of
-//     Saturday and lands in the start of Sunday's night cap.
-//   - Spans carry the only words: a trip or a stay is a named bar across the
-//     top of the cells it covers.
-//
-// THE AXIS IS WALL TIME, NOT ELAPSED TIME. 9am sits at the same place on every
-// strip, including the Sunday the clocks change: a strip is a picture of a
-// calendar day, and a calendar day is read off a wall clock.
+// A CONVENTIONAL MONTH (wave 3, the founder: "lets do top down like gmail
+// does"). Each cell lists its day top-down: trips and stays first, as named
+// bars across the cells they cover, in lanes every cell of the row keeps
+// free; then the day's own all-day items; then its timed items by start, one
+// row each. Whatever does not fit folds into "+N more", which opens the day.
+// The hour strips of wave 2 are gone from the grid; their arithmetic lives on
+// for the day column (`segments`, `nowMark`), whose hours are still a picture
+// of a wall clock.
 
 import Foundation
 
@@ -32,6 +28,11 @@ import Foundation
 enum CalendarViewMode: String, Sendable, Hashable {
     case agenda
     case month
+
+    /// The page opens on the month (wave 3). The agenda is a key away.
+    static let initial: CalendarViewMode = .month
+    /// The header's switch, left to right: Month | Agenda.
+    static let pickerOrder: [CalendarViewMode] = [.month, .agenda]
 }
 
 // MARK: - where the month is
@@ -57,8 +58,8 @@ enum MonthMove: Hashable, Sendable {
 
 // MARK: - the model
 
-/// One timed item's piece of one day: either the folded night cap (midnight to
-/// 7am) or the waking strip (7am to midnight). `lo` / `hi` are fractions of
+/// One timed item's piece of one day in the DAY COLUMN: either the folded
+/// night row (midnight to 7am) or the hours (7am to midnight). `lo` / `hi` are fractions of
 /// that part. A `continues` edge is drawn flat: the item goes on past it.
 struct DaySegment: Hashable, Sendable {
     enum Part: String, Hashable, Sendable {
@@ -80,14 +81,23 @@ struct MonthDay: Hashable, Sendable, Identifiable {
     let day: Date
     /// False for the greyed days of the month before and after.
     let inMonth: Bool
-    /// What the strip draws, night cap first, then by where it starts.
-    let segments: [DaySegment]
-    /// All-day items of this one day: a faint bar under the strip each.
-    let allDay: [AgendaItem]
+    /// What the cell lists under its row's span lanes, top-down: this day's
+    /// own all-day items, then the timed items that START this day, by start.
+    /// A timed item that runs past midnight is listed once, where it begins
+    /// (the day column shows its tail the morning after).
+    let items: [AgendaItem]
     /// Unlikely ghosts that start this day: not drawn, counted.
     let unlikely: [AgendaItem]
 
     var id: Date { day }
+}
+
+/// What one cell shows in the room it has: the first `shown` of its items,
+/// then "+`more` more" when anything is left over (items that did not fit,
+/// and trips that found no lane over this day).
+struct CellFold: Hashable, Sendable {
+    let shown: Int
+    let more: Int
 }
 
 /// One span's bar inside one week row.
@@ -109,8 +119,11 @@ struct MonthWeek: Hashable, Sendable, Identifiable {
     let days: [MonthDay]
     let spans: [SpanSegment]
     /// Per column: spans covering that day that found no lane, so the cell
-    /// can say there is more than it shows.
+    /// can count them in its "+N more".
     let overflow: [Int]
+    /// The span lanes this row uses: every cell in it lists its own items
+    /// below them, so a trip's bar never lands on a dinner.
+    let lanes: Int
 
     var id: Date { days.first?.day ?? .distantPast }
 }
@@ -118,9 +131,6 @@ struct MonthWeek: Hashable, Sendable, Identifiable {
 struct MonthModel: Hashable, Sendable {
     let month: Date
     let weeks: [MonthWeek]
-    /// Lanes the busiest row uses, at most the cap: every row reserves this
-    /// many, so the strips sit on one line down the month.
-    let lanes: Int
 
     var days: [MonthDay] { weeks.flatMap(\.days) }
 }
@@ -155,7 +165,7 @@ struct DayColumn: Hashable, Sendable {
 // MARK: - building
 
 enum MonthGrid {
-    /// Where the waking strip starts: the agenda's own 7am.
+    /// Where the day column's hours start: the agenda's own 7am.
     static var dayFromHour: Int { Agenda.stripFromHour }
     static var nightHours: Double { Double(dayFromHour) }
     static var dayHours: Double { 24 - Double(dayFromHour) }
@@ -217,7 +227,7 @@ enum MonthGrid {
         return (0..<7).map { names[(calendar.firstWeekday - 1 + $0) % 7] }
     }
 
-    // MARK: the strip
+    // MARK: the day column's hours
 
     /// A wall clock's hours since `day`'s midnight, 0 before the day and 24
     /// after it.
@@ -260,7 +270,7 @@ enum MonthGrid {
         return out
     }
 
-    /// Now, on today's strip: which part and how far along it.
+    /// Now, on the day column: which part and how far along it.
     static func nowMark(_ now: Date, day: Date, calendar: Calendar) -> (part: DaySegment.Part, at: Double)? {
         guard now >= day, now < addDays(1, to: day, calendar) else { return nil }
         let h = wallHours(now, on: day, calendar)
@@ -358,14 +368,13 @@ enum MonthGrid {
         let first = monthStart(month, calendar: calendar)
         let days = gridDays(month: first, calendar: calendar)
         guard let gridStart = days.first, let gridLast = days.last else {
-            return MonthModel(month: first, weeks: [], lanes: 0)
+            return MonthModel(month: first, weeks: [])
         }
         let gridEnd = addDays(1, to: gridLast, calendar)
         var index: [Date: Int] = [:]
         for (i, d) in days.enumerated() { index[d] = i }
 
-        var segments = Array(repeating: [DaySegment](), count: days.count)
-        var allDay = Array(repeating: [AgendaItem](), count: days.count)
+        var listed = Array(repeating: [AgendaItem](), count: days.count)
         var unlikely = Array(repeating: [AgendaItem](), count: days.count)
         var spans: [AgendaItem] = []
 
@@ -383,48 +392,80 @@ enum MonthGrid {
                 }
                 continue
             }
-            if item.allDay {
-                if let i = index[startDay] { allDay[i].append(item) }
-                continue
-            }
-            guard item.start < gridEnd, item.effectiveEnd > gridStart else { continue }
-            // Under a day long, so at most two days: the start's, and the one
-            // it runs into past midnight.
-            var day = max(startDay, gridStart)
-            while day < gridEnd, day < item.effectiveEnd {
-                if let i = index[day] {
-                    segments[i].append(contentsOf: Self.segments(item, on: day, calendar: calendar))
-                }
-                day = addDays(1, to: day, calendar)
-            }
+            if let i = index[startDay] { listed[i].append(item) }
         }
 
         spans.sort(by: spanPrecedes)
         var weeks: [MonthWeek] = []
-        var lanes = 0
         for row in stride(from: 0, to: days.count, by: 7) {
             let rowDays = (row..<min(row + 7, days.count)).map { i in
                 MonthDay(
                     day: days[i],
                     inMonth: calendar.isDate(days[i], equalTo: first, toGranularity: .month),
-                    segments: segments[i].sorted(by: segmentPrecedes),
-                    allDay: allDay[i].sorted(by: Agenda.precedes),
+                    items: listed[i].sorted(by: Agenda.precedes),
                     unlikely: unlikely[i].sorted(by: Agenda.precedes))
             }
             let (bars, overflow) = spanRow(
                 spans, rowStart: days[row], calendar: calendar, maxLanes: maxLanes)
-            lanes = max(lanes, (bars.map(\.lane).max() ?? -1) + 1)
-            weeks.append(MonthWeek(days: rowDays, spans: bars, overflow: overflow))
+            let lanes = (bars.map(\.lane).max() ?? -1) + 1
+            weeks.append(MonthWeek(days: rowDays, spans: bars, overflow: overflow, lanes: lanes))
         }
-        return MonthModel(month: first, weeks: weeks, lanes: lanes)
+        return MonthModel(month: first, weeks: weeks)
     }
 
-    /// The night cap before the strip, then by where each piece starts: the
-    /// later block is drawn over the earlier, as the agenda strip does.
-    private static func segmentPrecedes(_ a: DaySegment, _ b: DaySegment) -> Bool {
-        if a.part != b.part { return a.part == .night }
-        if a.lo != b.lo { return a.lo < b.lo }
-        return Agenda.precedes(a.item, b.item)
+    // MARK: a cell's room
+
+    /// How many rows fit under a cell's span lanes: the cell's height less
+    /// its date band, its foot and the lanes, in whole rows. Every number is
+    /// in points, as drawn (the view's metrics, scaled with density).
+    static func slots(
+        cellHeight: Double, lanes: Int, numberBand: Double, rowHeight: Double, rowGap: Double,
+        foot: Double
+    ) -> Int {
+        let step = rowHeight + rowGap
+        guard step > 0 else { return 0 }
+        let room = cellHeight - numberBand - foot - Double(lanes) * step
+        return max(0, Int(((room + rowGap) / step).rounded(.down)))
+    }
+
+    /// What a cell shows. Everything, when everything fits; otherwise all but
+    /// one of its rows and "+N more" in the last, N counting the items left
+    /// and the trips that found no lane. A cell with no room shows nothing
+    /// and still counts.
+    static func fold(items: Int, hiddenSpans: Int, slots: Int) -> CellFold {
+        let total = items + hiddenSpans
+        guard total > 0 else { return CellFold(shown: 0, more: 0) }
+        if hiddenSpans == 0, items <= slots { return CellFold(shown: items, more: 0) }
+        let shown = max(0, min(items, slots - 1))
+        return CellFold(shown: shown, more: total - shown)
+    }
+
+    /// A cell's width: a seventh of the grid's, whatever that is now. The
+    /// grid's width is the CONTAINER's, measured each layout, so narrowing
+    /// the window narrows the cells (it once only ever grew).
+    static func cellWidth(gridWidth: Double) -> Double { max(0, gridWidth / 7) }
+
+    /// The narrowest cell that keeps a time beside a title ("7:45pm  Dreamers
+    /// Dinner"). Below it a timed row is its title alone, and the time is in
+    /// the row's help and the day column: a title cut to "Dre" beside a full
+    /// time is a row that says when but not what.
+    static let rowTimeMinWidth = 96.0
+
+    /// The time a cell row leads with, or nil: all-day rows have none, and a
+    /// narrow cell drops it.
+    static func cellTime(
+        _ item: AgendaItem, cellWidth: Double, minWidth: Double = rowTimeMinWidth, calendar: Calendar
+    ) -> String? {
+        guard !item.allDay, cellWidth >= minWidth else { return nil }
+        return Agenda.clock(item.start, calendar)
+    }
+
+    /// Where now falls in today's list: the index of the first timed row
+    /// that has not started yet (the count when all have). Nil with no timed
+    /// rows, since a line among all-day bars would mean nothing.
+    static func nowSlot(_ items: [AgendaItem], now: Date) -> Int? {
+        guard items.contains(where: { !$0.allDay }) else { return nil }
+        return items.firstIndex { !$0.allDay && $0.start > now } ?? items.count
     }
 
     // MARK: the day column

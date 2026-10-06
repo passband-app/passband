@@ -549,6 +549,31 @@ actor APIClient {
         return try decode(GhostPatchResult.self, from: data)
     }
 
+    // MARK: - calendar events (wave 3: writes to the user's own calendars)
+
+    /// `POST /client/calendar/events`: create at Google, answered 201 with the
+    /// event in the timeline's own shape.
+    func createCalendarEvent(_ body: EventWrite) async throws -> TimelineEvent {
+        try await post("/client/calendar/events", body: body)
+    }
+
+    /// `PATCH /client/calendar/events/{calendar_id}/{id}` with only the
+    /// changed fields. Built by hand, as `setGhostState` is, because a cleared
+    /// location or note is an explicit JSON null.
+    func patchCalendarEvent(calendarId: String, id: String, _ patch: EventPatch) async throws -> TimelineEvent {
+        let body = try JSONSerialization.data(withJSONObject: patch.json())
+        let req = try buildRequest(
+            path: CalendarWrite.path(calendarId: calendarId, eventId: id), method: .PATCH, query: [:],
+            body: body, timeout: Self.requestTimeout)
+        let (data, _) = try await perform(req)
+        return try decode(TimelineEvent.self, from: data)
+    }
+
+    /// `DELETE /client/calendar/events/{calendar_id}/{id}`: 204.
+    func deleteCalendarEvent(calendarId: String, id: String) async throws {
+        try await deleteNoContent(CalendarWrite.path(calendarId: calendarId, eventId: id))
+    }
+
     /// RFC3339 in the user's current offset, seconds precision: "2026-10-04T00:00:00-07:00".
     nonisolated static func rfc3339Local(_ date: Date) -> String {
         let f = ISO8601DateFormatter()

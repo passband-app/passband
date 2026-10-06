@@ -1,10 +1,13 @@
-// The month view's arithmetic, against fixtures (Lib/MonthGrid.swift).
+// The month view's arithmetic, against fixtures (Lib/MonthGrid.swift), and
+// the calendar's colours (Lib/CalendarColor.swift).
 //
 // Each of these is wrong only on somebody's screen in a particular month: the
-// grid a row short in a month that starts on a Sunday, the party that
-// vanishes at midnight instead of landing in Sunday's night cap, every block a
-// sliver to the left on the Sunday the clocks change, the trip that loses its
-// name on the second row it crosses. The fixture month is the mock's
+// grid a row short in a month that starts on a Sunday, the party listed on
+// both nights it touches, every block in the day column a sliver to the left
+// on the Sunday the clocks change, the trip that loses its name on the second
+// row it crosses, the cell that folds its last row into "+1 more" when the
+// row would have fitted, a Banana calendar whose time is unreadable on its own
+// chip. The fixture month is the mock's
 // (docs/calendar-ux-preview.html): October 2026 in San Francisco, today
 // Monday October 5 at 3:40pm.
 
@@ -46,6 +49,13 @@ struct MonthGridTests {
         arrowsAndMonths()
         theRequestedRange()
         nowOnTheStrip()
+        aCellListsTopDown()
+        theCellFold()
+        cellsFollowTheContainersWidth()
+        nowInTodaysList()
+        theMonthComesFirst()
+        colourResolution()
+        coloursSitInsideThePalette()
 
         if failures > 0 {
             print("FAILED: \(failures) of \(checks) checks")
@@ -210,10 +220,10 @@ struct MonthGridTests {
                "the strip's piece came from it")
     }
 
-    /// The mock's Night Shift: 10pm Saturday to 6am Sunday leaves Saturday
-    /// flat and lands in Sunday's night cap flat. And on the last Saturday of
-    /// October, the party crosses into the greyed November 1, which the grid
-    /// still draws.
+    /// The mock's Night Shift: 10pm Saturday to 6am Sunday is a row on
+    /// Saturday, the night it begins, and not on Sunday (the day column
+    /// shows its tail). Halloween on the last Saturday of October is on the
+    /// 31st, not the greyed November 1 it runs into.
     static func aPartyRunsOffSaturdayIntoSundaysNightCap() {
         let model = build([
             ghost(1, "Night Shift", start: "2026-10-10T22:00:00-07:00", end: "2026-10-11T06:00:00-07:00",
@@ -223,23 +233,21 @@ struct MonthGridTests {
             ghost(3, "Late dinner", start: "2026-10-12T21:00:00-07:00", end: "2026-10-13T00:00:00-07:00",
                   commitment: .committed),
         ])
-        let sat = cell(model, "2026-10-10")?.segments ?? []
-        expect(sat.count == 1, "Saturday draws the party once")
-        expect(sat.first.map { $0.part == .day && near($0.lo, 15 / 17) && near($0.hi, 1) && $0.continuesAfter } == true,
-               "from 10pm to the end of Saturday's strip, flat")
-        let sun = cell(model, "2026-10-11")?.segments ?? []
-        expect(sun.count == 1, "Sunday draws it too")
-        expect(sun.first.map { $0.part == .night && near($0.lo, 0) && near($0.hi, 6 / 7) && $0.continuesBefore } == true,
-               "in its night cap, from midnight to 6am, flat")
+        expect(cell(model, "2026-10-10")?.items.map(\.title) == ["Night Shift"],
+               "Saturday lists the party, the night it begins")
+        expect(cell(model, "2026-10-11")?.items.isEmpty == true, "Sunday does not list it again")
+        expect(cell(model, "2026-10-31")?.items.map(\.title) == ["Halloween"], "Halloween is on the 31st")
         let nov1 = cell(model, "2026-11-01")
-        expect(nov1?.inMonth == false && nov1?.segments.first?.part == .night,
-               "Halloween runs into the greyed November 1")
-        expect(nov1?.segments.first.map { near($0.hi, 2 / 7) } == true,
-               "to 2am, read on the wall clock")
-        expect(cell(model, "2026-10-13")?.segments.isEmpty == true,
+        expect(nov1?.inMonth == false && nov1?.items.isEmpty == true,
+               "and not on the greyed November 1 it runs into")
+        expect(cell(model, "2026-10-12")?.items.map(\.title) == ["Late dinner"], "a late dinner is its own day's")
+        expect(cell(model, "2026-10-13")?.items.isEmpty == true,
                "ending exactly at midnight touches nothing of the next day")
-        expect(cell(model, "2026-10-12")?.segments.first.map { !$0.continuesAfter && near($0.hi, 1) } == true,
-               "and keeps its rounded end")
+        // The column, not the grid, still draws the morning after.
+        let sun = MonthGrid.segments(model.days.flatMap(\.items).first { $0.title == "Night Shift" }!,
+                                     on: day("2026-10-11"), calendar: cal)
+        expect(sun.first.map { $0.part == .night && near($0.hi, 6 / 7) && $0.continuesBefore } == true,
+               "Sunday's column has the tail, midnight to 6am")
     }
 
     /// The Sundays the clocks change: 9am is where 9am always is, a party over
@@ -313,8 +321,8 @@ struct MonthGridTests {
                "a timed span says when it leaves where it starts")
         expect(lisbon.allSatisfy { MonthGrid.spanLabel($0.bar, calendar: cal).sub == nil },
                "an all-day one says nothing more")
-        expect(cell(model, "2026-10-15")?.segments.isEmpty == true,
-               "a span puts no ink on the strips it crosses")
+        expect(cell(model, "2026-10-15")?.items.isEmpty == true,
+               "a span is not also a row in the cells it crosses")
     }
 
     static func whatIsAndIsNotASpan() {
@@ -332,14 +340,14 @@ struct MonthGridTests {
         expect(span("Offsite"), "a real two-day all-day event is a span")
     }
 
-    /// Rent due: a faint bar under that day's strip, no block, no span.
+    /// Rent due: a row in its own cell, not a span.
     static func anAllDaySingleDayIsABarNotABlock() {
         let model = build([ghost(1, "Rent due", start: "2026-10-05", allDay: true, commitment: .committed)])
         let rent = cell(model, "2026-10-05")
-        expect(rent?.allDay.map(\.title) == ["Rent due"], "it is the day's all-day bar")
-        expect(rent?.segments.isEmpty == true, "and nothing on the strip")
+        expect(rent?.items.map(\.title) == ["Rent due"] && rent?.items.first?.allDay == true,
+               "it is the day's all-day row")
         expect(model.weeks.allSatisfy(\.spans.isEmpty), "and no span")
-        expect(cell(model, "2026-10-06")?.allDay.isEmpty == true, "only on its own day")
+        expect(cell(model, "2026-10-06")?.items.isEmpty == true, "only on its own day")
     }
 
     /// Two trips that overlap take two lanes; a third is counted in the
@@ -359,11 +367,12 @@ struct MonthGridTests {
         expect(lane("Guests") == nil, "a third at once has no lane")
         expect(row.overflow == [0, 0, 1, 1, 1, 0, 0], "and is counted on the 21st to the 23rd")
         expect(lane("Camping") == 0, "a later trip takes the first lane back")
-        expect(model.lanes == 2, "the month reserves two lanes")
+        expect(row.lanes == 2, "that row keeps two lanes")
+        expect(model.weeks[0].lanes == 0, "a row with no trips keeps none, and its cells start under the date")
         let quiet = build([ghost(1, "Lisbon", start: "2026-10-14", end: "2026-10-19", allDay: true,
                                  commitment: .committed)])
-        expect(quiet.lanes == 1, "a month with one trip reserves one")
-        expect(build([]).lanes == 0, "and one with none reserves none")
+        expect(quiet.weeks.map(\.lanes) == [0, 0, 1, 1, 0], "one trip keeps one lane in the two rows it crosses")
+        expect(build([]).weeks.allSatisfy { $0.lanes == 0 }, "and a month with none keeps none")
     }
 
     /// Unlikely ghosts are never drawn; each day says how many start there.
@@ -377,7 +386,7 @@ struct MonthGridTests {
         ])
         let thu = cell(model, "2026-10-08")
         expect(thu?.unlikely.count == 3, "three unlikely on Thursday")
-        expect(thu?.segments.map(\.item.title) == ["Drinks"], "only the likely one is ink")
+        expect(thu?.items.map(\.title) == ["Drinks"], "only the likely one is a row")
         expect(cell(model, "2026-10-15")?.unlikely.map(\.title) == ["Retreat"],
                "an unlikely trip is counted on the day it starts")
         expect(cell(model, "2026-10-16")?.unlikely.isEmpty == true, "and nowhere else")
@@ -507,6 +516,218 @@ struct MonthGridTests {
         let early = MonthGrid.nowMark(at("2026-10-05T06:00:00-07:00"), day: day("2026-10-05"), calendar: cal)
         expect(early.map { $0.part == .night && near($0.at, 6 / 7) } == true, "6am in the night cap")
         expect(MonthGrid.nowMark(now, day: day("2026-10-06"), calendar: cal) == nil, "only on today")
+    }
+
+    // MARK: the cells
+
+    static func colouredEvent(
+        _ id: String, _ title: String, start: String, end: String? = nil, allDay: Bool = false,
+        color: String? = "#039be5", calendar: String = "primary"
+    ) -> TimelineEvent {
+        TimelineEvent(
+            id: id, calendar_id: calendar, calendar_name: "Work", title: title, start: start,
+            end: end, all_day: allDay, start_timezone: nil, location: nil, status: .confirmed,
+            self_response: nil, busy: true, organizer: nil, html_link: nil, color: color,
+            editable: true, description: nil)
+    }
+
+    /// Thursday Oct 8: the bill first (all day), then the timed rows by
+    /// start, ghosts and real events together. "7:45pm  Dreamers Dinner".
+    static func aCellListsTopDown() {
+        let model = build(
+            [
+                ghost(1, "Standup", start: "2026-10-08T09:30:00-07:00", end: "2026-10-08T09:45:00-07:00",
+                      commitment: .committed),
+                ghost(2, "Electric bill", start: "2026-10-08", allDay: true, commitment: .committed),
+            ],
+            [colouredEvent("d", "Dreamers Dinner", start: "2026-10-08T19:45:00-07:00",
+                           end: "2026-10-08T21:30:00-07:00")])
+        let thu = cell(model, "2026-10-08")?.items ?? []
+        expect(thu.map(\.title) == ["Electric bill", "Standup", "Dreamers Dinner"],
+               "all-day first, then by start")
+        let dinner = thu[2]
+        expect(MonthGrid.cellTime(dinner, cellWidth: 130, calendar: cal) == "7:45pm", "a timed row leads with its time")
+        expect(MonthGrid.cellTime(thu[1], cellWidth: 130, calendar: cal) == "9:30am", "a ghost's too")
+        expect(MonthGrid.cellTime(thu[0], cellWidth: 130, calendar: cal) == nil, "an all-day row has none")
+        expect(MonthGrid.cellTime(dinner, cellWidth: 80, calendar: cal) == nil,
+               "a narrow cell keeps the title and drops the time")
+        expect(MonthGrid.cellTime(dinner, cellWidth: MonthGrid.rowTimeMinWidth, calendar: cal) != nil,
+               "at exactly the threshold the time stays")
+    }
+
+    /// What fits and what folds. The last row is "+N more" only when
+    /// something is left over; a cell that holds everything shows everything.
+    static func theCellFold() {
+        func fold(_ items: Int, _ spans: Int, _ slots: Int) -> CellFold {
+            MonthGrid.fold(items: items, hiddenSpans: spans, slots: slots)
+        }
+        expect(fold(3, 0, 5) == CellFold(shown: 3, more: 0), "three in five: all shown")
+        expect(fold(5, 0, 5) == CellFold(shown: 5, more: 0), "exactly full: all shown, no fold")
+        expect(fold(6, 0, 5) == CellFold(shown: 4, more: 2), "one over: four shown and +2 more")
+        expect(fold(2, 1, 5) == CellFold(shown: 2, more: 1), "a trip with no lane is counted in the fold")
+        expect(fold(0, 2, 3) == CellFold(shown: 0, more: 2), "only lane-less trips: +2 more")
+        expect(fold(4, 0, 1) == CellFold(shown: 0, more: 4), "one slot is the fold itself")
+        expect(fold(4, 0, 0) == CellFold(shown: 0, more: 4), "no room shows nothing and still counts")
+        expect(fold(0, 0, 0) == CellFold(shown: 0, more: 0), "an empty day is empty")
+
+        func slots(_ h: Double, lanes: Int = 0) -> Int {
+            MonthGrid.slots(cellHeight: h, lanes: lanes, numberBand: 26, rowHeight: 17, rowGap: 2, foot: 4)
+        }
+        // 140pt (five rows down an 800pt window): 110 left, five 17pt rows
+        // and their gaps take 93, a sixth would need 112.
+        expect(slots(140) == 5, "a 140pt cell holds five rows")
+        expect(slots(140, lanes: 2) == 3, "two trip lanes take two of them")
+        expect(slots(121) == 4 && slots(123) == 5, "a row fits the moment its height does, gap and all")
+        expect(slots(30) == 0, "a sliver of a cell holds none")
+        expect(slots(200) > slots(140), "a taller cell holds more")
+    }
+
+    /// The founder's bug: widen the window, the grid widens; narrow it, it
+    /// stayed wide. The cell width is a pure seventh of the container's
+    /// width, so it has no memory of the width before.
+    static func cellsFollowTheContainersWidth() {
+        let wide = MonthGrid.cellWidth(gridWidth: 980)
+        let narrow = MonthGrid.cellWidth(gridWidth: 560)
+        expect(near(wide, 140) && near(narrow, 80), "a seventh of the grid")
+        expect(narrow < wide, "a narrower window gives narrower cells")
+        _ = MonthGrid.cellWidth(gridWidth: 1400)
+        expect(near(MonthGrid.cellWidth(gridWidth: 560), 80), "and back again after a wider one, no ratchet")
+        expect(MonthGrid.cellWidth(gridWidth: -10) == 0, "never negative")
+        let dinner = items([], [colouredEvent("d", "Dinner", start: "2026-10-08T19:45:00-07:00")])[0]
+        expect(MonthGrid.cellTime(dinner, cellWidth: wide, calendar: cal) != nil
+               && MonthGrid.cellTime(dinner, cellWidth: narrow, calendar: cal) == nil,
+               "and the narrower cell drops the time the wider one shows")
+    }
+
+    static func nowInTodaysList() {
+        let i = items([
+            ghost(1, "Bill", start: "2026-10-05", allDay: true, commitment: .committed),
+            ghost(2, "Lunch", start: "2026-10-05T12:00:00-07:00", end: "2026-10-05T13:00:00-07:00",
+                  commitment: .committed),
+            ghost(3, "Gym", start: "2026-10-05T17:00:00-07:00", end: "2026-10-05T18:00:00-07:00",
+                  commitment: .committed),
+        ]).sorted(by: Agenda.precedes)
+        expect(MonthGrid.nowSlot(i, now: now) == 2, "at 3:40pm the line sits above the gym")
+        expect(MonthGrid.nowSlot(i, now: at("2026-10-05T08:00:00-07:00")) == 1,
+               "in the morning, under the bill and above lunch")
+        expect(MonthGrid.nowSlot(i, now: at("2026-10-05T21:00:00-07:00")) == 3, "at night, under everything")
+        expect(MonthGrid.nowSlot(Array(i.prefix(1)), now: now) == nil, "no line among all-day rows alone")
+    }
+
+    static func theMonthComesFirst() {
+        expect(CalendarViewMode.initial == .month, "the page opens on the month")
+        expect(CalendarViewMode.pickerOrder == [.month, .agenda], "Month | Agenda, in that order")
+    }
+
+    // MARK: colour
+
+    static func colourResolution() {
+        expect(CalendarColor.parse("#039BE5") == RGB(hex: 0x039BE5), "Google's #rrggbb")
+        expect(CalendarColor.parse(" 039be5 ") == RGB(hex: 0x039BE5), "bare and padded")
+        expect(CalendarColor.parse("#abc") == RGB(hex: 0xAABBCC), "the short form")
+        for bad in [nil, "", "blue", "#12345", "#1234567", "#gg0000"] as [String?] {
+            expect(CalendarColor.parse(bad) == nil, "\(bad ?? "nil") is no colour")
+        }
+        let feed = TimelineFeed(
+            ghosts: [
+                ghost(1, "Booked", start: "2026-10-08T19:00:00-07:00", commitment: .committed),
+                ghost(2, "Likely", start: "2026-10-08T19:00:00-07:00", band: .likely),
+                ghost(3, "Maybe", start: "2026-10-08T19:00:00-07:00", band: .maybe),
+                ghost(4, "Unlikely", start: "2026-10-08T19:00:00-07:00", band: .unlikely),
+            ],
+            events: [
+                colouredEvent("a", "Coloured", start: "2026-10-08T09:00:00-07:00", color: "#f6bf26"),
+                colouredEvent("b", "Old daemon", start: "2026-10-08T09:00:00-07:00", color: nil),
+                colouredEvent("c", "Garbage", start: "2026-10-08T09:00:00-07:00", color: "tomato"),
+            ])
+        var cancelled = ghost(5, "Off", start: "2026-10-08T19:00:00-07:00", commitment: .committed)
+        cancelled.mail_state = .cancelled
+        let all = Agenda.items(feed, calendar: cal)
+            + [Agenda.item(cancelled, calendar: cal)!, Agenda.item(feed.ghosts[3], calendar: cal)!]
+        func style(_ t: String) -> ChipStyle { CalendarColor.style(all.first { $0.title == t }!) }
+        expect(style("Coloured") == ChipStyle(hue: .calendar(RGB(hex: 0xF6BF26)), fill: .solid, thin: false, struck: false),
+               "a real event wears its calendar's colour, solid")
+        expect(style("Old daemon").hue == .plain, "no colour from an older daemon: the neutral")
+        expect(style("Garbage").hue == .plain, "an unreadable colour: the neutral")
+        expect(style("Booked") == ChipStyle(hue: .ghost, fill: .solid, thin: false, struck: false),
+               "a committed ghost: the ghost hue, solid")
+        expect(style("Likely").hue == .ghost && style("Likely").fill == .striped, "likely: striped")
+        expect(style("Maybe").hue == .ghost && style("Maybe").fill == .outline, "maybe: an outline")
+        expect(style("Off").struck && style("Off").thin && style("Off").hue == .ghost,
+               "cancelled: struck through and thinned, in the ghost hue")
+        expect(style("Unlikely").thin && !style("Unlikely").struck,
+               "an unlikely ghost out of its fold is thinned, not struck")
+        expect(CalendarColor.base(.ghost) == RGB(hex: 0x2B7FD4), "the ghost hue is the accent")
+    }
+
+    /// Google's calendar and event palettes, every one: each placed on the
+    /// palette's own lightness for the theme, its hue kept, its chroma capped,
+    /// its ink readable on its own fill, and the app's title ink readable on
+    /// every fill. A grey calendar stays grey.
+    static func coloursSitInsideThePalette() {
+        let google: [UInt32] = [
+            0xAC725E, 0xD06B64, 0xF83A22, 0xFA573C, 0xFF7537, 0xFFAD46, 0x42D692, 0x16A765,
+            0x7BD148, 0xB3DC6C, 0xFBE983, 0xFAD165, 0x92E1C0, 0x9FE1E7, 0x9FC6E7, 0x4986E7,
+            0x9A9CFF, 0xB99AFF, 0xC2C2C2, 0xCABDBF, 0xCCA6AC, 0xF691B2, 0xCD74E6, 0xA47AE2,
+            0x7986CB, 0x33B679, 0x8E24AA, 0xE67C73, 0xF6BF26, 0xF4511E, 0x039BE5, 0x616161,
+            0x3F51B5, 0x0B8043, 0xD50000, 0x2B7FD4, 0x8C7254,
+        ]
+        let titleLight = RGB(hex: 0x141C26)  // Palette.ink, light
+        let titleDark = RGB(hex: 0xE9EEF5)  // Palette.ink, dark
+        var fillLs: [Double] = []
+        var worstInk = 99.0
+        var worstTitle = 99.0
+        var hueOK = true
+        var capOK = true
+        for hex in google {
+            let base = RGB(hex: hex)
+            let src = CalendarColor.oklch(base)
+            for dark in [false, true] {
+                let t = CalendarColor.tones(base, dark: dark)
+                let fill = CalendarColor.oklch(t.fill)
+                let ink = CalendarColor.oklch(t.ink)
+                fillLs.append(fill.l - (dark ? CalendarColor.darkFill.l : CalendarColor.lightFill.l))
+                worstInk = min(worstInk, RGB.contrast(t.ink, t.fill))
+                worstTitle = min(worstTitle, RGB.contrast(dark ? titleDark : titleLight, t.fill))
+                let cap = dark ? CalendarColor.darkFill.maxChroma : CalendarColor.lightFill.maxChroma
+                if fill.c > cap + 0.006 { capOK = false }
+                if src.c > 0.05, fill.c > 0.02 {
+                    let d = abs(fill.h - src.h).truncatingRemainder(dividingBy: 360)
+                    if min(d, 360 - d) > 6 { hueOK = false }
+                }
+                if src.c > 0.05, ink.c > 0.02 {
+                    let d = abs(ink.h - src.h).truncatingRemainder(dividingBy: 360)
+                    if min(d, 360 - d) > 8 { hueOK = false }
+                }
+            }
+        }
+        expect(fillLs.allSatisfy { abs($0) < 0.012 }, "every calendar's fill sits on the theme's one lightness")
+        expect(hueOK, "and keeps its own hue")
+        expect(capOK, "with its chroma capped")
+        expect(worstInk >= 4.5, "the hue's ink reads on its own fill in both themes (worst \(worstInk))")
+        expect(worstTitle >= 7, "the title ink reads on every fill in both themes (worst \(worstTitle))")
+        let graphite = CalendarColor.tones(RGB(hex: 0x616161), dark: false)
+        expect(CalendarColor.oklch(graphite.fill).c < 0.01, "a grey calendar stays grey")
+        let banana = CalendarColor.oklch(CalendarColor.tones(RGB(hex: 0xF6BF26), dark: false).fill)
+        let tomato = CalendarColor.oklch(CalendarColor.tones(RGB(hex: 0xD50000), dark: false).fill)
+        expect(abs(banana.l - tomato.l) < 0.012 && abs(banana.h - tomato.h) > 30,
+               "Banana and Tomato: the same weight, different hues")
+        // The ghost is the accent's hue, and Peacock (#039be5) is a blue too:
+        // the ghost's body must be the quieter of the two, its edge not.
+        for dark in [false, true] {
+            let ghostTones = CalendarColor.tones(for: .ghost, dark: dark)
+            let peacockTones = CalendarColor.tones(for: .calendar(RGB(hex: 0x039BE5)), dark: dark)
+            let ghostFill = CalendarColor.oklch(ghostTones.fill)
+            let peacockFill = CalendarColor.oklch(peacockTones.fill)
+            expect(ghostFill.c < peacockFill.c * 0.7, "a ghost's body is a quieter blue than Peacock's (dark: \(dark))")
+            expect(CalendarColor.oklch(ghostTones.edge).c > ghostFill.c * 1.5,
+                   "while its edge, which carries the band, keeps its strength (dark: \(dark))")
+            expect(RGB.contrast(ghostTones.ink, ghostTones.fill) >= 4.5, "and its ink still reads (dark: \(dark))")
+        }
+        let light = CalendarColor.tones(RGB(hex: 0x039BE5), dark: false)
+        let dark = CalendarColor.tones(RGB(hex: 0x039BE5), dark: true)
+        expect(light.fill.luminance > light.ink.luminance && dark.fill.luminance < dark.ink.luminance,
+               "light mode: dark ink on a light fill; dark mode the other way round")
     }
 
     static func expect(_ cond: Bool, _ what: String) {

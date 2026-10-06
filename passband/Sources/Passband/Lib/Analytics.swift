@@ -113,10 +113,13 @@ enum Analytics {
         "ios_nudge_closed",
         "group_created", "group_updated", "group_deleted",
         // The calendar page (developer mode only, for now): opened, the
-        // connect card's two answers, and the user's word on a ghost. Bools
-        // and a closed state word; never a title, a place or an address.
+        // connect card's two answers, the user's word on a ghost, and the
+        // three writes to a real calendar. Bools and a closed state word;
+        // never a title, a place, a time, a calendar or an address. A write
+        // carries `all_day` alone.
         "calendar_opened", "calendar_connect_clicked", "calendar_connect_dismissed",
         "calendar_ghost_marked",
+        "calendar_event_created", "calendar_event_edited", "calendar_event_deleted",
         // Derived, never captured by a call site: see `milestones`.
         "milestone", "catchup_completed",
     ]

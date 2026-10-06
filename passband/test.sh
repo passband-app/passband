@@ -50,16 +50,30 @@ run_suite agenda \
   Sources/Passband/Lib/Agenda.swift \
   Tests/AgendaTests.swift
 
-# The month view's arithmetic: the grid's days in the user's calendar, where
-# each item sits on a day's strip (the night cap, 7am, past midnight, the DST
-# Sundays), spans and their lanes, the unlikely counts, the day column, the
-# keys' moves, and the range the page asks for.
+# The month view's arithmetic: the grid's days in the user's calendar, what
+# each cell lists and what folds into "+N more", spans and their lanes, the
+# unlikely counts, the day column's hours (the night cap, 7am, past midnight,
+# the DST Sundays), the keys' moves, the range the page asks for, the
+# month-first default, and the calendar colours brought into the palette.
 run_suite month-grid \
   Sources/Passband/Model/SubjectText.swift \
   Sources/Passband/Model/WireTypes.swift \
   Sources/Passband/Lib/Agenda.swift \
   Sources/Passband/Lib/MonthGrid.swift \
+  Sources/Passband/Lib/CalendarColor.swift \
   Tests/MonthGridTests.swift
+
+# The event editor: typed dates and times, what blocks a save, the exact
+# body sent (timed with offsets, all-day with the INCLUSIVE last day), an
+# edit's patch carrying only what moved, the route's path, the daemon's
+# answer laid into the feed, and the wave-3 wire decoding.
+run_suite event-draft \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/Agenda.swift \
+  Sources/Passband/Lib/CalendarWrite.swift \
+  Sources/Passband/Lib/EventDraft.swift \
+  Tests/EventDraftTests.swift
 
 # The real poller against a cancellation-oblivious transport: mailbox switches
 # must detach old requests before the next mailbox starts warming.
@@ -93,6 +107,7 @@ run_suite credential-probe \
   Sources/Passband/Model/SubjectText.swift \
   Sources/Passband/Model/WireTypes.swift \
   Sources/Passband/Model/APIError.swift \
+  Sources/Passband/Lib/CalendarWrite.swift \
   Sources/Passband/Model/APIClient.swift \
   Sources/Passband/Lib/ClientIdentity.swift \
   Sources/Passband/Lib/TriageTargets.swift \

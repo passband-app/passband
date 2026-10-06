@@ -1225,14 +1225,18 @@ struct TimelineFeed: Codable, Sendable, Hashable {
     var ghosts: [TimelineGhost]
     var events: [TimelineEvent]?
     var calendar: TimelineCalendarStatus?
+    /// Wave 3: the calendars being synced, primary first. ABSENT on an older
+    /// daemon, and then nothing on the page offers to create an event.
+    var calendars: [TimelineCalendar]?
 
     init(
         ghosts: [TimelineGhost] = [], events: [TimelineEvent]? = nil,
-        calendar: TimelineCalendarStatus? = nil
+        calendar: TimelineCalendarStatus? = nil, calendars: [TimelineCalendar]? = nil
     ) {
         self.ghosts = ghosts
         self.events = events
         self.calendar = calendar
+        self.calendars = calendars
     }
 
     init(from decoder: Decoder) throws {
@@ -1242,6 +1246,8 @@ struct TimelineFeed: Codable, Sendable, Hashable {
         events = try c.decodeIfPresent([OneRow<TimelineEvent>].self, forKey: .events)?
             .compactMap(\.value)
         calendar = try? c.decodeIfPresent(TimelineCalendarStatus.self, forKey: .calendar)
+        calendars = (try? c.decodeIfPresent([OneRow<TimelineCalendar>].self, forKey: .calendars))?
+            .map { $0.compactMap(\.value) }
     }
 
     /// A row that may fail to decode without failing its array.
@@ -1383,6 +1389,53 @@ struct TimelineEvent: Codable, Sendable, Hashable, Identifiable {
     var busy: Bool?
     var organizer: String?
     var html_link: String?
+    /// Wave 3. The calendar's colour as Google reports it, or the event's own
+    /// override, "#rrggbb". Nil from an older daemon: drawn in the neutral.
+    var color: String?
+    /// Wave 3. The user can write to this calendar AND the event is not
+    /// another organizer's. Nil (an older daemon) is NOT editable: no Edit,
+    /// no Delete, no `e`.
+    var editable: Bool?
+    /// Wave 3. The event's notes, laundered and capped like `location`.
+    var description: String?
+}
+
+extension TimelineEvent {
+    /// THE NEW KEYS COST ONLY THEMSELVES. A `color` that is not a string, or
+    /// an `editable` that is not a bool, from some daemon mid-change, leaves
+    /// that key nil rather than dropping the event (the synthesized decoder
+    /// would throw, and the feed's row guard would drop the whole row). In an
+    /// extension so the memberwise init stays.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        calendar_id = try c.decode(String.self, forKey: .calendar_id)
+        calendar_name = try c.decodeIfPresent(String.self, forKey: .calendar_name)
+        title = try c.decodeIfPresent(String.self, forKey: .title)
+        start = try c.decode(String.self, forKey: .start)
+        end = try c.decodeIfPresent(String.self, forKey: .end)
+        all_day = try c.decode(Bool.self, forKey: .all_day)
+        start_timezone = try c.decodeIfPresent(String.self, forKey: .start_timezone)
+        location = try c.decodeIfPresent(String.self, forKey: .location)
+        status = try c.decodeIfPresent(TimelineEventStatus.self, forKey: .status)
+        self_response = try c.decodeIfPresent(TimelineSelfResponse.self, forKey: .self_response)
+        busy = try c.decodeIfPresent(Bool.self, forKey: .busy)
+        organizer = try c.decodeIfPresent(String.self, forKey: .organizer)
+        html_link = try c.decodeIfPresent(String.self, forKey: .html_link)
+        color = try? c.decodeIfPresent(String.self, forKey: .color)
+        editable = try? c.decodeIfPresent(Bool.self, forKey: .editable)
+        description = try? c.decodeIfPresent(String.self, forKey: .description)
+    }
+}
+
+/// Wave 3: one calendar being synced, from the feed's `calendars`. Primary
+/// first. Only `writable` ones are offered in the event editor.
+struct TimelineCalendar: Codable, Sendable, Hashable, Identifiable {
+    var id: String
+    var name: String?
+    var color: String?
+    var primary: Bool?
+    var writable: Bool?
 }
 
 enum TimelineSyncError: String, LenientRawEnum {

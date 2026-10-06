@@ -1,5 +1,7 @@
-// THE CALENDAR PAGE: an agenda, and the month (Views/CalendarMonth.swift),
-// switched with `a` / `m` and the header's control.
+// THE CALENDAR PAGE: the month (Views/CalendarMonth.swift), which it opens
+// on, and an agenda, switched with `m` / `a` and the header's control. From
+// either, `n` makes an event on one of the user's own Google calendars and
+// `e` changes one (Views/CalendarEventEditor.swift).
 //
 // The agenda: today and the days after it, real events
 // and the ghosts Passband found in mail in one time order, with the next
@@ -15,7 +17,9 @@
 //   - A ghost is an EMPTY container, never a faded one. Its words are at full
 //     strength, so it never reads as a disabled control.
 //   - A guessed end is softer and says "ends ~11pm".
-//   - Account colour lives only in fills. Blue is state: now, next, selection.
+//   - A real event wears its calendar's colour and a ghost the accent's,
+//     both brought inside the palette by Lib/CalendarColor.swift. Blue as a
+//     STATE is now, next and today; selection is an even edge.
 //   - Nothing on this page offers to write mail.
 //
 // All of the arithmetic (days, order, fills, folds, every time string) is
@@ -135,7 +139,7 @@
                     now: now, calendar: cal)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            .keyBindings(.modal, monthBindings(order: order, item: item))
+            .keyBindings(.modal, monthBindings(order: order, item: item, day: place.day))
         }
 
         @ViewBuilder
@@ -341,7 +345,7 @@
                 scrollTarget = rows[i].id
                 return true
             }
-            return modeBindings() + [
+            return modeBindings() + writeBindings(selected: selected, day: nil) + [
                 KeyBinding(declining: "j", "next") { step(+1) },
                 KeyBinding(declining: "k", "previous") { step(-1) },
                 KeyBinding(declining: "ArrowDown", "next") { step(+1) },
@@ -359,6 +363,31 @@
                 KeyBinding(declining: "x", "dismiss") {
                     guard free(), let ghost = selected?.ghost else { return false }
                     Task { await store.markGhost(ghost, .dismissed, viaKey: true) }
+                    return true
+                },
+            ]
+        }
+
+        /// `n`, `e` and ⌫, on both: a new event (on the month's selected day,
+        /// or today from the agenda), and the selected event edited or
+        /// deleted. Each declines where it does not apply: a daemon that lists
+        /// no writable calendar, a ghost, an event that is not the user's.
+        private func writeBindings(selected: AgendaItem?, day: Date?) -> [KeyBinding] {
+            let free = { !store.modalOverlayOpen }
+            return [
+                KeyBinding(declining: "n", "new event") {
+                    guard free(), store.calendarCanCreate else { return false }
+                    store.openEventEditor(day: day)
+                    return true
+                },
+                KeyBinding(declining: "e", "edit event") {
+                    guard free(), let event = selected?.event, CalendarWrite.canEdit(event) else { return false }
+                    store.openEventEditor(editing: event)
+                    return true
+                },
+                KeyBinding(declining: "Backspace", "delete event") {
+                    guard free(), let event = selected?.event, CalendarWrite.canEdit(event) else { return false }
+                    store.askDeleteEvent(event)
                     return true
                 },
             ]
@@ -386,7 +415,7 @@
         /// in: the day (where it is not already beside the grid), then its
         /// first item, then that item's mail, as the detail's own hint says.
         /// Escape is the routed host's (`AppStore.calendarMonthBack`).
-        private func monthBindings(order: [AgendaItem], item: AgendaItem?) -> [KeyBinding] {
+        private func monthBindings(order: [AgendaItem], item: AgendaItem?, day: Date) -> [KeyBinding] {
             let free = { !store.modalOverlayOpen }
             func move(_ m: MonthMove) -> Bool {
                 guard free() else { return false }
@@ -400,7 +429,7 @@
                 store.calendarMonthItem = order[i].id
                 return true
             }
-            return modeBindings() + [
+            return modeBindings() + writeBindings(selected: item, day: day) + [
                 KeyBinding(declining: "ArrowLeft", "previous day") { move(.days(-1)) },
                 KeyBinding(declining: "ArrowRight", "next day") { move(.days(1)) },
                 KeyBinding(declining: "ArrowUp", "a week back") { move(.days(-7)) },
@@ -614,7 +643,7 @@
                         .frame(width: Typo.measure(62), alignment: .trailing)
                     AgendaMark(
                         fill: item.fill, estimated: item.endEstimated,
-                        thin: thin || item.cancelled)
+                        thin: thin || item.cancelled, hue: ChipColors.inks(item).edge)
                         .frame(width: 10, height: 10)
                         // On the first line's middle, not its baseline.
                         .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 1 }
@@ -759,7 +788,8 @@
                         .font(Typo.ui(11, weight: .semibold))
                         .foregroundStyle(Palette.accentInk)
                     HStack(spacing: Space.scaled(7)) {
-                        AgendaMark(fill: item.fill, estimated: item.endEstimated)
+                        AgendaMark(
+                            fill: item.fill, estimated: item.endEstimated, hue: ChipColors.inks(item).edge)
                             .frame(width: 10, height: 10)
                         Text(item.title)
                             .font(Typo.ui(15, weight: .semibold))
@@ -814,7 +844,7 @@
                         ForEach(blocks, id: \.0.id) { item, span in
                             AgendaMark(
                                 fill: item.fill, estimated: item.endEstimated,
-                                thin: item.cancelled, cornerRadius: 2.5)
+                                thin: item.cancelled, hue: ChipColors.inks(item).edge, cornerRadius: 2.5)
                                 .frame(width: max(3, w * (span.upperBound - span.lowerBound)))
                                 .offset(x: w * span.lowerBound)
                         }
@@ -875,7 +905,7 @@
         private(set) var items: [AgendaItem] = []
         private var month: Date?
         private var firstWeekday: Int?
-        private var built = MonthModel(month: .distantPast, weeks: [], lanes: 0)
+        private var built = MonthModel(month: .distantPast, weeks: [])
         private var day: Date?
         private var builtColumn: DayColumn?
 

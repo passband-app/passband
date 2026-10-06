@@ -1,5 +1,6 @@
 // The calendar page's half of the store: the gate, the timeline load, the
-// user's word on a ghost, and the connect card's lifecycle. The stored state
+// user's word on a ghost, the connect card's lifecycle, and the three writes
+// to a real calendar (create, edit, delete). The stored state
 // it works on is declared in AppStore itself (an @Observable class keeps its
 // stored properties in its own body); everything here is behaviour.
 //
@@ -35,6 +36,32 @@ struct CalendarConnectWait: Hashable {
     let since: Date
     let epoch: Int
     let renewing: Bool
+}
+
+/// The event editor, while it is up: new, or an event being changed.
+struct CalendarEditorRequest: Hashable, Identifiable {
+    enum Mode: Hashable {
+        case create
+        case edit(TimelineEvent)
+    }
+
+    let id = UUID()
+    let mode: Mode
+    /// What the card opened with. An edit sends only what moved from this.
+    let initial: EventDraft
+    /// The account it is for, as the connect card's is.
+    let epoch: Int
+
+    var event: TimelineEvent? {
+        if case .edit(let e) = mode { return e }
+        return nil
+    }
+}
+
+/// "Delete this event from Google Calendar?", asked from the detail pane.
+struct CalendarDeleteAsk: Hashable {
+    let event: TimelineEvent
+    let epoch: Int
 }
 
 extension AppStore {
@@ -209,6 +236,14 @@ extension AppStore {
         if open { calendarDayOpen = true }
     }
 
+    /// A row in a cell clicked: its day selected and its detail open, in the
+    /// pane beside the grid or (on a narrow window) in place of it.
+    func selectCalendarItem(_ id: String, on day: Date, now: Date = Date()) {
+        let cal = Calendar.current
+        calendarPlace = MonthGrid.select(day, in: calendarMonthPlace(now: now, calendar: cal), calendar: cal)
+        calendarMonthItem = id
+    }
+
     /// Escape on the month: closes the item's detail, then the opened day.
     /// False when there is nothing to close, so Escape goes on to its usual
     /// "back to the sitrep".
@@ -274,6 +309,161 @@ extension AppStore {
         else { return }
         feed.ghosts[i].state = state
         calendarFeed = feed
+    }
+
+    // MARK: - writing events
+
+    /// The calendars the editor offers (writable, primary first). Empty on a
+    /// daemon too old to list them.
+    var calendarWritable: [TimelineCalendar] { CalendarWrite.writable(calendarFeed) }
+
+    /// Whether "New event" and `n` exist at all. Practice mode's daemon is a
+    /// fixture, so it never offers one.
+    var calendarCanCreate: Bool {
+        !RehearsalMode.isEnabled && CalendarWrite.canCreate(calendarFeed)
+    }
+
+    /// `n` and "New event": the editor, on `day` (the month's selected day;
+    /// today from the agenda).
+    func openEventEditor(day: Date?, now: Date = Date()) {
+        guard calendarCanCreate, calendarEditor == nil, calendarDeleteAsk == nil else { return }
+        let cal = Calendar.current
+        let draft = EventForm.newDraft(
+            day: day ?? now, now: now, calendarId: calendarWritable.first?.id, calendar: cal)
+        calendarEditor = CalendarEditorRequest(mode: .create, initial: draft, epoch: epoch)
+    }
+
+    /// `e` and the detail's Edit: the same card, filled in. Only for an event
+    /// the daemon called editable.
+    func openEventEditor(editing event: TimelineEvent, now: Date = Date()) {
+        guard !RehearsalMode.isEnabled, CalendarWrite.canEdit(event), calendarEditor == nil,
+            calendarDeleteAsk == nil
+        else { return }
+        let draft = EventForm.draft(editing: event, today: now, calendar: .current)
+        calendarEditor = CalendarEditorRequest(mode: .edit(event), initial: draft, epoch: epoch)
+    }
+
+    func closeEventEditor() {
+        calendarEditor = nil
+    }
+
+    /// Save the card. True when the daemon took it: the answer is laid into
+    /// the page at once and the card closes. False keeps the card up with
+    /// everything typed in it, after one quiet toast saying why; a draft that
+    /// cannot be saved yet is said on the card itself and sends nothing.
+    @discardableResult
+    func saveEvent(_ draft: EventDraft, _ request: CalendarEditorRequest) async -> Bool {
+        guard request.epoch == epoch, !calendarWriting else { return false }
+        let e = epoch
+        let now = Date()
+        let cal = Calendar.current
+        switch request.mode {
+        case .create:
+            guard case .success(let body) = EventForm.wire(draft, today: now, calendar: cal) else { return false }
+            calendarWriting = true
+            do {
+                let event = try await APIClient.shared.createCalendarEvent(body)
+                guard isCurrent(e) else { return false }
+                calendarWriting = false
+                landEvent(event)
+                Analytics.capture("calendar_event_created", ["all_day": body.all_day])
+                return true
+            } catch {
+                guard isCurrent(e) else { return false }
+                calendarWriting = false
+                pushToast(CalendarWrite.failureText(status: writeStatus(error), .create), .error)
+                return false
+            }
+        case .edit(let original):
+            guard
+                case .success(let patch) = EventForm.patch(
+                    draft, from: request.initial, today: now, calendar: cal)
+            else { return false }
+            // Nothing moved: nothing to send, and nothing to say.
+            if patch.isEmpty {
+                calendarEditor = nil
+                return true
+            }
+            calendarWriting = true
+            do {
+                let event = try await APIClient.shared.patchCalendarEvent(
+                    calendarId: original.calendar_id, id: original.id, patch)
+                guard isCurrent(e) else { return false }
+                calendarWriting = false
+                landEvent(event)
+                Analytics.capture("calendar_event_edited", ["all_day": event.all_day])
+                return true
+            } catch {
+                guard isCurrent(e) else { return false }
+                calendarWriting = false
+                pushToast(CalendarWrite.failureText(status: writeStatus(error), .edit), .error)
+                return false
+            }
+        }
+    }
+
+    /// The daemon's answer, on screen now: laid into the feed, every load
+    /// already out retired (an answer asked for before this write would put
+    /// the old event back), the card closed, and the event selected where it
+    /// now is, so the month turns to it and its detail opens.
+    private func landEvent(_ event: TimelineEvent) {
+        retireCalendarLoads()
+        calendarFeed = CalendarWrite.applying(event, to: calendarFeed)
+        calendarEditor = nil
+        let cal = Calendar.current
+        if let item = Agenda.item(event, calendar: cal) {
+            calendarPlace = MonthGrid.select(
+                item.start, in: calendarMonthPlace(now: Date(), calendar: cal), calendar: cal)
+            calendarMonthItem = item.id
+        }
+    }
+
+    /// The detail's Delete and ⌫: ask once, on the app's own card.
+    func askDeleteEvent(_ event: TimelineEvent) {
+        guard !RehearsalMode.isEnabled, CalendarWrite.canEdit(event), calendarEditor == nil else { return }
+        calendarDeleteAsk = CalendarDeleteAsk(event: event, epoch: epoch)
+    }
+
+    func cancelDeleteEvent() {
+        calendarDeleteAsk = nil
+    }
+
+    /// Delete at Google, then off the page. There is no undo (a recreated
+    /// event would be a different event, its invitations and id gone), which
+    /// is why this is only ever reached through the question.
+    @discardableResult
+    func deleteEvent(_ event: TimelineEvent) async -> Bool {
+        guard CalendarWrite.canEdit(event), !calendarWriting else { return false }
+        let e = epoch
+        calendarWriting = true
+        do {
+            try await APIClient.shared.deleteCalendarEvent(calendarId: event.calendar_id, id: event.id)
+            guard isCurrent(e) else { return false }
+            calendarWriting = false
+            retireCalendarLoads()
+            calendarFeed = CalendarWrite.removing(
+                calendarId: event.calendar_id, id: event.id, from: calendarFeed)
+            if calendarMonthItem == Agenda.itemId(event) { calendarMonthItem = nil }
+            calendarDeleteAsk = nil
+            if calendarEditor?.event.map(Agenda.itemId) == Agenda.itemId(event) { calendarEditor = nil }
+            Analytics.capture("calendar_event_deleted", ["all_day": event.all_day])
+            pushToast("Deleted from Google Calendar", .success)
+            return true
+        } catch {
+            guard isCurrent(e) else { return false }
+            calendarWriting = false
+            pushToast(CalendarWrite.failureText(status: writeStatus(error), .delete), .error)
+            return false
+        }
+    }
+
+    /// The status a refusal is worded by: 0 for a request that never reached
+    /// the daemon, -1 for anything else that is not a status at all (an
+    /// answer of the wrong shape).
+    private func writeStatus(_ error: Error) -> Int {
+        guard let api = error as? APIError else { return -1 }
+        if api.kind == .network { return 0 }
+        return api.status == 0 ? -1 : api.status
     }
 
     // MARK: - the connect card

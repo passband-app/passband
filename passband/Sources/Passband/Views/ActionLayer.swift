@@ -104,6 +104,15 @@ struct ActionLayer: View {
             if let ask = store.calendarConnectAsk, store.calendarCardUp {
                 CalendarConnectCard(ask: ask)
             }
+            // The event editor and the delete question, the calendar page's
+            // own cards, for the account they were raised under. Keyed by the
+            // request: a new one is a fresh form, not the last one's fields.
+            if let request = store.calendarEditor, request.epoch == store.epoch {
+                CalendarEventEditor(request: request).id(request.id)
+            }
+            if let ask = store.calendarDeleteAsk, ask.epoch == store.epoch {
+                CalendarDeleteConfirm(ask: ask)
+            }
             // LAST, and it outranks even the card above: that one is a greeting
             // the user can dismiss, this one is the app being unavailable while
             // a re-triage rewrites what every other overlay here is about.
@@ -388,11 +397,14 @@ struct ShortcutsOverlay: View {
             Group(
                 title: "Calendar",
                 items: [
-                    (["a", "m"], "agenda / month"),
+                    (["m", "a"], "month / agenda"),
                     (["j", "k"], "move selection"),
                     (["Enter"], "open the mail behind it"),
                     (["y"], "going (again: not going)"),
                     (["x"], "dismiss"),
+                    (["n"], "new event"),
+                    (["e"], "edit event"),
+                    (["⌫"], "delete event"),
                     (["←", "→", "↑", "↓"], "month: move the day"),
                     (["[", "]"], "month: previous / next"),
                     (["t"], "month: today"),

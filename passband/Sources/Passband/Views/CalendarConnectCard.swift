@@ -73,8 +73,8 @@
                 .foregroundStyle(Palette.inkDim)
                 .fixedSize(horizontal: false, vertical: true)
             // Honest about the ask: Google's screen will say see AND edit,
-            // and this wave of Passband only reads.
-            Text("Google will ask to let Passband see and edit your calendar events. For now Passband only reads them.")
+            // and Passband edits only on the user's own say-so.
+            Text("Google will ask to let Passband see and edit your calendar events. Passband changes an event only when you create, edit or delete it here.")
                 .font(Typo.micro)
                 .foregroundStyle(Palette.inkFaint)
                 .fixedSize(horizontal: false, vertical: true)

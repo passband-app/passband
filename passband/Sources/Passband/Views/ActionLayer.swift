@@ -155,12 +155,6 @@ struct ActionLayer: View {
                         .regular.tint(tone(toast.tone).opacity(0.16)).interactive(),
                         in: .rect(cornerRadius: 11, style: .continuous)
                     )
-                    .overlay(alignment: .leading) {
-                        RoundedRectangle(cornerRadius: 1)
-                            .fill(tone(toast.tone))
-                            .frame(width: 2)
-                            .padding(.vertical, Space.s6)
-                    }
                     .transition(.move(edge: .leading).combined(with: .opacity))
                 }
                 ForEach(store.undos) { undo in
@@ -168,20 +162,21 @@ struct ActionLayer: View {
                         Task { await store.fireUndo(undo.id) }
                     } label: {
                         HStack(spacing: Space.s14) {
-                            Text(undo.label)
-                                .font(Typo.rowSub)
-                                .foregroundStyle(Palette.ink)
+                            HStack(spacing: Space.s8) {
+                                if let expiresAt = undo.expiresAt {
+                                    UndoCountdown(
+                                        startedAt: undo.createdAt, expiresAt: expiresAt
+                                    )
+                                }
+                                Text(undo.label)
+                                    .font(Typo.rowSub)
+                                    .foregroundStyle(Palette.ink)
+                            }
                             HStack(spacing: Space.s4) {
                                 Kbd("u")
                                 Text("undo")
                                     .font(Typo.micro)
                                     .foregroundStyle(Palette.inkFaintest)
-                                if let expiresAt = undo.expiresAt {
-                                    UndoCountdown(
-                                        startedAt: undo.createdAt, expiresAt: expiresAt
-                                    )
-                                    .padding(.leading, 3)
-                                }
                             }
                         }
                         .padding(.horizontal, Space.s12)
@@ -192,12 +187,6 @@ struct ActionLayer: View {
                         .regular.tint(Palette.warn.opacity(0.18)).interactive(),
                         in: .rect(cornerRadius: 11, style: .continuous)
                     )
-                    .overlay(alignment: .leading) {
-                        RoundedRectangle(cornerRadius: 1)
-                            .fill(Palette.warn)
-                            .frame(width: 2)
-                            .padding(.vertical, Space.s6)
-                    }
                     .transition(.move(edge: .leading).combined(with: .opacity))
                     .tourTarget(.undoToast)
                 }

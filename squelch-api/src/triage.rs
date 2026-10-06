@@ -590,6 +590,10 @@ pub async fn keep_reading_sender(
 /// spent), `skipped_failed` (a refusal, a timeout, an error, or an answer that
 /// called nearly every row expired and was thrown away whole).
 ///
+/// `rows` is the receipt's full list: one entry per message written done, in
+/// `message_ids`' order, with its subject, sender, date and reason, read in
+/// the transaction that wrote it. `by_reason` is the tally of it.
+///
 /// ONE AUDIT ROW for the batch, not one per message: the batch id is the
 /// target and everything it took can be read back from it.
 ///
@@ -704,6 +708,25 @@ pub async fn smart_done(State(state): State<ApiState>) -> Result<impl IntoRespon
         let n = outcome.cleared.iter().filter(|(_, r)| *r == reason).count();
         by_reason.insert(reason.as_str().into(), json!(n));
     }
+    // THE FULL LIST behind the receipt: each message taken, with its subject,
+    // its sender and why. Mail text, so it is here and nowhere else: this
+    // route is the human door, the response is `no-store`, and none of it is
+    // written to the batch or the audit row. Sealed mail is never cleared, so
+    // it is never listed.
+    let rows: Vec<serde_json::Value> = outcome
+        .rows
+        .iter()
+        .map(|row| {
+            json!({
+                "message_id": row.message_id,
+                "reason": row.reason.as_str(),
+                "sender": row.sender,
+                "sender_name": row.sender_name,
+                "subject": row.subject,
+                "received_at": row.received_at,
+            })
+        })
+        .collect();
     if let Some(batch) = outcome.batch_id {
         crate::handlers::audit_action(
             &state,
@@ -721,6 +744,7 @@ pub async fn smart_done(State(state): State<ApiState>) -> Result<impl IntoRespon
             "senders": outcome.senders,
             "by_reason": by_reason,
             "message_ids": outcome.cleared.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            "rows": rows,
             "model": model,
         })),
     ))

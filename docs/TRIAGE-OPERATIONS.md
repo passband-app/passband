@@ -345,6 +345,43 @@ writes a squelch rule that governs them, the newer decision wins when the list
 is read and the keep is ignored; keeping again after that makes the keep the
 newer decision.
 
+### Rule suggestions for a sender
+
+`GET /client/rules/suggest?sender=<address>&count=<1..=3>` (human door) asks the
+small notify model what rule the owner might write about one sender. It reads
+the sender's 15 most recent subjects inside the untrusted fence, plus the
+owner's own record with them, through the sender digest, which leaves out
+sealed mail. Always `200` with `Cache-Control: no-store`; an empty `sender` is
+`400`.
+
+- `count` absent or `1`: `{"suggestion": "<sentence>" | null}`. One sentence,
+  which may be a blanket verdict ("mute them"). This is the rule card's
+  placeholder and the only form older clients know.
+- `count` `2` or `3`: `{"suggestion": "<first>" | null, "suggestions": [...]}`.
+  Up to that many narrowing rules, each naming kinds of mail to keep from the
+  sender ("only order confirmations and delivery updates"), for the purge deck
+  to offer beside its unsubscribe button. Never a blanket verdict. The list is
+  often shorter than asked, and empty when the sender sends one kind of mail or
+  there is no clear pattern. `suggestion` is its first entry.
+- A `count` below 1 is read as 1 and above 3 as 3. One that is not a number is
+  `400`.
+
+Either form is one model call, billed once to the `rule_suggest` ledger
+category and counted once against its cap of 300 calls a day per account. Past
+the cap, with no model configured, with fewer than two messages from the
+sender, or when the model refuses or answers badly, the answer is the empty one
+(a refusal or a bad answer that reported usage is still billed).
+
+The model's list is not trusted. An entry is dropped if it is empty, repeats an
+earlier one (ignoring case and spacing), is longer than 110 characters, spans
+more than one line or holds a control character, or is a blanket verdict: a
+sentence made only of words like mute, block, unsubscribe, always, never, show,
+them, that names no kind of mail.
+
+These sentences are written by a model from subjects the sender wrote. They are
+only ever shown to the owner, who may choose one and save it. The daemon never
+saves one itself.
+
 ### Who resolved a row: `triage.resolved_by`
 
 `triage.resolved_by` is `NULL` when a person resolved the row, or when a path
@@ -379,10 +416,24 @@ open Reading mail that has expired or that the owner plainly does not want:
   "by_reason": { "event_passed": 3, "offer_ended": 5, "expired": 4,
                  "ignored_sender": 20, "stale_promo": 11 },
   "message_ids": [812, 790],
+  "rows": [ { "message_id": 812, "reason": "offer_ended",
+              "sender": "deals@shop.example", "sender_name": "Shop Deals",
+              "subject": "Last day: 20% off", "received_at": "2026-09-28T14:02:11+00:00" } ],
   "model": "ok" }
 ```
 
-`batch_id` is `null` and nothing is recorded when nothing was cleared.
+`batch_id` is `null` and nothing is recorded when nothing was cleared; `rows`
+and `message_ids` are then empty.
+
+`rows` is the receipt's full list: one entry per message this press wrote done,
+the same messages in the same order as `message_ids`, each with why it was
+taken (`reason` is one of the `by_reason` keys, and `by_reason` is the tally of
+`rows`). `sender` is the address as stored, `sender_name` the display name or
+an empty string. The subject, sender and date are read by primary key inside
+the transaction that wrote the row, for exactly the rows it wrote. They are in
+the response only: the batch's stored `detail` keeps ids, reasons and prior
+status, and no mail text. The route is human door only, and sealed mail is
+never cleared, so a sealed subject cannot appear here.
 
 The candidates are the Reading feed's open items: the 30-day window and the
 feed's default limit. Mail older than that window is never swept. That is

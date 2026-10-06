@@ -117,6 +117,31 @@ struct Scanned {
     question: Option<String>,
 }
 
+/// One cleared message as the receipt's full list shows it: what it was, who
+/// sent it, and why it went.
+///
+/// THIS IS MAIL TEXT, AND IT LIVES ONLY IN THE ANSWER TO THE PRESS. It is
+/// read for the human door's response and is never written to the batch's
+/// `detail`, which records ids, reasons and prior status and nothing a sender
+/// wrote. A sealed row cannot be one of these because [`MARK_DONE_SQL`]
+/// cannot write one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SmartDoneRow {
+    pub message_id: i64,
+    pub reason: ClearReason,
+    /// The bare address as stored.
+    pub sender: String,
+    /// The display name, or empty when the mail gave none.
+    pub sender_name: String,
+    pub subject: String,
+    /// RFC 3339, as stored.
+    pub received_at: String,
+}
+
+/// What the receipt shows of one message, by primary key.
+const RECEIPT_ROW_SQL: &str = "SELECT from_addr, COALESCE(from_name, ''), subject, received_at
+     FROM messages WHERE account_id = ?1 AND id = ?2";
+
 /// What one press cleared.
 #[derive(Debug, Clone, Default)]
 pub struct SmartDoneOutcome {
@@ -124,6 +149,9 @@ pub struct SmartDoneOutcome {
     pub batch_id: Option<i64>,
     /// Each message taken and why, newest first.
     pub cleared: Vec<(i64, ClearReason)>,
+    /// The same messages in the same order, with what the receipt's full
+    /// list shows of each.
+    pub rows: Vec<SmartDoneRow>,
     /// How many distinct senders that mail came from.
     pub senders: usize,
 }
@@ -397,13 +425,29 @@ impl SqliteStore {
 
         let mut cleared = Vec::with_capacity(picks.len());
         let mut rows = Vec::with_capacity(picks.len());
+        let mut receipt = Vec::with_capacity(picks.len());
         let mut senders = HashSet::new();
         {
             let mut done = tx.prepare(MARK_DONE_SQL)?;
+            let mut shown = tx.prepare(RECEIPT_ROW_SQL)?;
             for (row, reason) in picks {
                 if done.execute(params![stamp, tag, account_id, row.message_id])? == 0 {
                     continue;
                 }
+                // THE RECEIPT IS READ HERE, for the row just written and in
+                // the transaction that wrote it, so the list the owner is
+                // shown can never name a message this press did not take or
+                // miss one it did. A later pass over the ids could do both.
+                receipt.push(shown.query_row(params![account_id, row.message_id], |r| {
+                    Ok(SmartDoneRow {
+                        message_id: row.message_id,
+                        reason,
+                        sender: r.get(0)?,
+                        sender_name: r.get(1)?,
+                        subject: r.get(2)?,
+                        received_at: r.get(3)?,
+                    })
+                })?);
                 rows.push(serde_json::json!({
                     "id": row.message_id,
                     "reason": reason.as_str(),
@@ -429,6 +473,7 @@ impl SqliteStore {
         Ok(SmartDoneOutcome {
             batch_id: Some(batch_id),
             cleared,
+            rows: receipt,
             senders: senders.len(),
         })
     }

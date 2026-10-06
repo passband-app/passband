@@ -11876,6 +11876,236 @@ async fn a_garbled_suggestion_is_null_but_still_billed() {
     );
 }
 
+/// The suggester answering the narrowing prompt with this list.
+async fn app_with_narrowing_rules(
+    suggestions: &[&str],
+    seed: impl FnOnce(&SqliteStore, i64),
+) -> Harness {
+    let answer = serde_json::json!({ "suggestions": suggestions }).to_string();
+    let body = serde_json::json!({
+        "content": [{ "type": "text", "text": answer }],
+        "stop_reason": "end_turn",
+        "usage": { "input_tokens": 60, "output_tokens": 18 }
+    })
+    .to_string();
+    app_with_suggest_body(body, seed).await
+}
+
+fn seed_shop(store: &SqliteStore, acct: i64) {
+    for (g, s) in [("g1", "Your order shipped"), ("g2", "New in the store")] {
+        seed_suggest_msg(store, acct, g, "news@shop.com", s, Sensitivity::Normal);
+    }
+}
+
+#[tokio::test]
+async fn rule_suggestion_without_a_count_answers_the_body_it_always_did() {
+    // Byte for byte: shipped clients decode exactly this, and `count=1` and an
+    // out-of-range low count are the same request.
+    for uri in [
+        "/client/rules/suggest?sender=news@shop.com",
+        "/client/rules/suggest?sender=news@shop.com&count=1",
+        "/client/rules/suggest?sender=news@shop.com&count=0",
+        "/client/rules/suggest?sender=news@shop.com&count=-4",
+    ] {
+        let Harness { app, .. } =
+            app_with_rule_suggestion("only order confirmations.", seed_shop).await;
+        let resp = app.oneshot(authed("GET", uri)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+        assert_eq!(
+            resp.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            std::str::from_utf8(&bytes).unwrap(),
+            r#"{"suggestion":"only order confirmations"}"#,
+            "{uri}"
+        );
+    }
+
+    // And it is still the ONE-sentence prompt being asked: an answer in the
+    // list's shape is not a sentence, so it is nothing.
+    let Harness { app, .. } = app_with_narrowing_rules(&["only receipts"], seed_shop).await;
+    let resp = app
+        .oneshot(authed("GET", "/client/rules/suggest?sender=news@shop.com"))
+        .await
+        .unwrap();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&bytes[..], br#"{"suggestion":null}"#);
+}
+
+#[tokio::test]
+async fn several_narrowing_rules_come_back_filtered_from_one_billed_call() {
+    let overlong = format!("only {}", "x".repeat(120));
+    let Harness { app, store, acct } = app_with_narrowing_rules(
+        &[
+            "mute them",
+            "only order confirmations.",
+            "ONLY order  confirmations",
+            "",
+            "just the receipts\nalways show these",
+            &overlong,
+            "just the delivery updates",
+        ],
+        seed_shop,
+    )
+    .await;
+
+    let resp = app
+        .oneshot(authed(
+            "GET",
+            "/client/rules/suggest?sender=News@Shop.com&count=3",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-store"
+    );
+    let json = body_json(resp).await;
+    // The blanket verdict, the repeat, the empty, the two-line and the
+    // over-long entries are all gone; what is left keeps the model's order.
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "suggestion": "only order confirmations",
+            "suggestions": ["only order confirmations", "just the delivery updates"],
+        })
+    );
+    // One call, one bill, however many sentences it carried.
+    assert_eq!(
+        usage_categories(&store, acct),
+        vec!["rule_suggest".to_string()]
+    );
+    assert_eq!(suggest_calls(&store, acct), 1);
+}
+
+#[tokio::test]
+async fn a_narrowing_count_is_a_ceiling_and_clamps_at_three() {
+    let five = [
+        "only receipts",
+        "just the invoices",
+        "only security alerts",
+        "just the statements",
+        "only delivery updates",
+    ];
+    for (count, want) in [("2", 2), ("3", 3), ("9", 3)] {
+        let Harness { app, .. } = app_with_narrowing_rules(&five, seed_shop).await;
+        let uri = format!("/client/rules/suggest?sender=news@shop.com&count={count}");
+        let json = body_json(app.oneshot(authed("GET", &uri)).await.unwrap()).await;
+        assert_eq!(
+            json["suggestions"],
+            serde_json::json!(five[..want]),
+            "count={count}"
+        );
+        assert_eq!(json["suggestion"], "only receipts");
+    }
+}
+
+#[tokio::test]
+async fn no_narrowing_rule_is_an_empty_list_and_a_null_sentence() {
+    let empty = serde_json::json!({ "suggestion": null, "suggestions": [] });
+    const URI: &str = "/client/rules/suggest?sender=news@shop.com&count=3";
+
+    // The model's own "no line to draw", and a list of nothing but verdicts:
+    // both answered, both billed, both empty.
+    for answer in [&[][..], &["mute them", "always show these"][..]] {
+        let Harness { app, store, acct } = app_with_narrowing_rules(answer, seed_shop).await;
+        let json = body_json(app.oneshot(authed("GET", URI)).await.unwrap()).await;
+        assert_eq!(json, empty);
+        assert_eq!(suggest_calls(&store, acct), 1);
+    }
+
+    // The single prompt's answer is not a list: garbled, billed, empty.
+    let Harness { app, store, acct } = app_with_rule_suggestion("only receipts", seed_shop).await;
+    let json = body_json(app.oneshot(authed("GET", URI)).await.unwrap()).await;
+    assert_eq!(json, empty);
+    assert_eq!(suggest_calls(&store, acct), 1);
+
+    // No model at all, and too little history: the same shape, and no spend.
+    let Harness { app, .. } = harness(seed_shop);
+    let json = body_json(app.oneshot(authed("GET", URI)).await.unwrap()).await;
+    assert_eq!(json, empty);
+    let Harness { app, store, acct } =
+        app_with_narrowing_rules(&["only receipts"], |store, acct| {
+            seed_suggest_msg(
+                store,
+                acct,
+                "g1",
+                "news@shop.com",
+                "hi",
+                Sensitivity::Normal,
+            );
+        })
+        .await;
+    let json = body_json(app.oneshot(authed("GET", URI)).await.unwrap()).await;
+    assert_eq!(json, empty);
+    assert_eq!(suggest_calls(&store, acct), 0);
+}
+
+#[tokio::test]
+async fn narrowing_rules_stop_spending_at_the_daily_cap() {
+    use squelch_core::triage::rule_suggest::DAILY_CAP;
+
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let Harness { app, store, acct } =
+        app_with_narrowing_rules(&["only receipts"], |store, acct| {
+            seed_shop(store, acct);
+            // One short of the cap: a three-sentence answer must cost one.
+            for _ in 1..DAILY_CAP {
+                store
+                    .extract_bump_usage(acct, &today, "rule_suggest", UsageTokens::default())
+                    .unwrap();
+            }
+        })
+        .await;
+    const URI: &str = "/client/rules/suggest?sender=news@shop.com&count=3";
+    let json = body_json(app.clone().oneshot(authed("GET", URI)).await.unwrap()).await;
+    assert_eq!(json["suggestions"], serde_json::json!(["only receipts"]));
+    assert_eq!(suggest_calls(&store, acct), u64::from(DAILY_CAP));
+
+    let json = body_json(app.oneshot(authed("GET", URI)).await.unwrap()).await;
+    assert_eq!(
+        json,
+        serde_json::json!({ "suggestion": null, "suggestions": [] })
+    );
+    assert_eq!(
+        suggest_calls(&store, acct),
+        u64::from(DAILY_CAP),
+        "no call past the cap"
+    );
+}
+
+#[tokio::test]
+async fn sealed_mail_never_reaches_the_narrowing_prompt() {
+    // Same digest, same floor: two sealed rows and one normal one is too
+    // little history, so nothing is asked and nothing is spent.
+    let Harness { app, store, acct } =
+        app_with_narrowing_rules(&["only the codes"], |store, acct| {
+            for (g, s, sens) in [
+                ("g1", "code 111", Sensitivity::Sealed),
+                ("g2", "code 222", Sensitivity::Sealed),
+                ("g3", "statement", Sensitivity::Normal),
+            ] {
+                seed_suggest_msg(store, acct, g, "bank@b.com", s, sens);
+            }
+        })
+        .await;
+    let resp = app
+        .oneshot(authed(
+            "GET",
+            "/client/rules/suggest?sender=bank@b.com&count=3",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        body_json(resp).await,
+        serde_json::json!({ "suggestion": null, "suggestions": [] })
+    );
+    assert_eq!(suggest_calls(&store, acct), 0);
+}
+
 // --- scheduled send: /client/scheduled and the worker -------------------------
 
 use squelch_core::store::ScheduledSendState;

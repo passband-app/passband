@@ -86,6 +86,69 @@ pub(super) fn promo(store: &SqliteStore, acct: AccountId, key: &str, days_ago: i
 // ---- what is cleared ----------------------------------------------------
 
 #[test]
+fn the_receipt_rows_are_the_rows_written_and_their_text_is_not_stored() {
+    let (store, acct) = store();
+    old_ledgers(&store, acct);
+    let now = Utc::now();
+    let offer = mail(&store, acct, "offer", "b@offers.example", 8);
+    into_reading_with(&store, acct, offer, |d| {
+        d.ends = time(now - Duration::days(5))
+    });
+    let stale = promo(&store, acct, "stale", 20);
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE messages SET subject = 'RECEIPT-SUBJECT', from_name = 'RECEIPT-NAME'
+             WHERE id = ?1",
+            [stale],
+        )
+        .unwrap();
+    // Left alone, so not on the receipt either.
+    let young = promo(&store, acct, "young", 5);
+
+    let outcome = apply(&store, acct, &[]);
+    // The same messages, for the same reasons, in the same order.
+    assert_eq!(
+        outcome
+            .rows
+            .iter()
+            .map(|r| (r.message_id, r.reason))
+            .collect::<Vec<_>>(),
+        outcome.cleared
+    );
+    assert_eq!(outcome.cleared.len(), 2);
+    assert!(outcome.rows.iter().all(|r| r.message_id != young));
+    let listed = outcome
+        .rows
+        .iter()
+        .find(|r| r.message_id == stale)
+        .expect("the stale promotion");
+    assert_eq!(
+        (
+            listed.sender.as_str(),
+            listed.sender_name.as_str(),
+            listed.subject.as_str()
+        ),
+        ("stale@shop.example", "RECEIPT-NAME", "RECEIPT-SUBJECT")
+    );
+    assert!(DateTime::parse_from_rfc3339(&listed.received_at).is_ok());
+
+    // MAIL TEXT STAYS OUT OF THE BATCH RECORD: ids, reasons, prior status.
+    let detail: String = store
+        .lock()
+        .unwrap()
+        .query_row("SELECT detail FROM smart_done_batches", [], |r| r.get(0))
+        .unwrap();
+    for text in ["RECEIPT-SUBJECT", "RECEIPT-NAME", "shop.example"] {
+        assert!(!detail.contains(text), "{text} in {detail}");
+    }
+
+    // An empty press has an empty receipt.
+    assert!(apply(&store, acct, &[]).rows.is_empty());
+}
+
+#[test]
 fn each_stored_reason_clears_its_own_row_with_provenance() {
     let (store, acct) = store();
     old_ledgers(&store, acct);

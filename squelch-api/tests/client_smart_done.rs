@@ -38,6 +38,17 @@ fn reading(
         received_at: Utc::now() - Duration::days(days_ago),
         ..msg(acct, key, key, SUBJECT, BODY)
     };
+    reading_message(store, acct, &message, summary, adjust)
+}
+
+/// [`reading`] for a message the test wrote itself.
+fn reading_message(
+    store: &SqliteStore,
+    acct: i64,
+    message: &NewMessage,
+    summary: &str,
+    adjust: impl FnOnce(&mut MessageDecision),
+) -> i64 {
     // An open ledger older than any mail here, as an established mailbox
     // has. (On a brand-new account every old promotion predates the ledger,
     // and "never opened" means nothing for it.) A test about a young ledger
@@ -49,7 +60,7 @@ fn reading(
             &(Utc::now() - Duration::days(400)).to_rfc3339(),
         )
         .unwrap();
-    let id = store.upsert_message(&message).unwrap();
+    let id = store.upsert_message(message).unwrap();
     store
         .set_triage(
             id,
@@ -361,6 +372,138 @@ async fn smart_done_clears_a_batch_reports_it_and_undo_gives_it_back() {
     // A batch this account does not have is 404, whatever the reason.
     assert_eq!(undo(&h, "99999").await.0, StatusCode::NOT_FOUND);
     assert_eq!(undo(&h, "not-a-batch").await.0, StatusCode::NOT_FOUND);
+}
+
+/// One Reading message like [`reading`]'s, from its own sender and under its
+/// own subject, so a receipt row can be told from its neighbours. Answers the
+/// id and the date as the store holds it.
+fn reading_from(
+    store: &SqliteStore,
+    acct: i64,
+    key: &str,
+    days_ago: i64,
+    (sender, name, subject): (&str, Option<&str>, &str),
+    adjust: impl FnOnce(&mut MessageDecision),
+) -> (i64, String) {
+    let message = NewMessage {
+        from_addr: sender.to_string(),
+        from_name: name.map(str::to_string),
+        received_at: Utc::now() - Duration::days(days_ago),
+        ..msg(acct, key, key, subject, BODY)
+    };
+    let id = reading_message(store, acct, &message, "A sale", adjust);
+    (id, message.received_at.to_rfc3339())
+}
+
+#[tokio::test]
+async fn the_receipt_lists_each_cleared_message_with_its_sender_subject_and_reason() {
+    let h = harness(|_, _| {});
+    let (stale, stale_at) = reading_from(
+        &h.store,
+        h.acct,
+        "a",
+        20,
+        ("deals@shop.example", Some("Shop Deals"), "Autumn sale"),
+        |_| {},
+    );
+    let (ended, ended_at) = reading_from(
+        &h.store,
+        h.acct,
+        "b",
+        8,
+        ("offers@air.example", None, "Fares to the 1st"),
+        |d| {
+            d.ends = Some(SupportedTime {
+                value: (Utc::now() - Duration::days(4))
+                    .format("%Y-%m-%d")
+                    .to_string(),
+                ..Default::default()
+            });
+        },
+    );
+    // Left alone: an essay, and a login code that the retired `sensitivity`
+    // column calls normal and only its stored decision keeps close.
+    reading_from(
+        &h.store,
+        h.acct,
+        "c",
+        20,
+        ("essays@press.example", None, "ESSAY-SUBJECT"),
+        |d| {
+            d.kinds = vec![EmailKind::Editorial];
+            d.reading_kind = Some(ReadingKind::Content);
+        },
+    );
+    let (sealed, _) = reading_from(
+        &h.store,
+        h.acct,
+        "d",
+        20,
+        (
+            "codes@bank.example",
+            Some("SEALED-NAME"),
+            "SEALED-SUBJECT 481516",
+        ),
+        |d| d.auth.kinds = vec![AuthKind::Otp],
+    );
+
+    let response = h
+        .app
+        .clone()
+        .oneshot(authed("POST", "/client/v2/reading/smart_done"))
+        .await
+        .unwrap();
+    let raw = String::from_utf8(
+        http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    // Nothing of the sealed row, anywhere in the answer.
+    for kept_close in ["SEALED-SUBJECT", "481516", "SEALED-NAME", "codes@bank"] {
+        assert!(!raw.contains(kept_close), "{kept_close} in {raw}");
+    }
+    assert!(!raw.contains("ESSAY-SUBJECT"));
+    let body: Value = serde_json::from_str(&raw).unwrap();
+
+    // Newest first, the feed's order, and the order of `message_ids`.
+    assert_eq!(
+        body["rows"],
+        json!([
+            { "message_id": ended, "reason": "offer_ended",
+              "sender": "offers@air.example", "sender_name": "",
+              "subject": "Fares to the 1st", "received_at": ended_at },
+            { "message_id": stale, "reason": "stale_promo",
+              "sender": "deals@shop.example", "sender_name": "Shop Deals",
+              "subject": "Autumn sale", "received_at": stale_at },
+        ])
+    );
+    assert_eq!(body["message_ids"], json!([ended, stale]));
+    assert_eq!(body["cleared"], 2);
+    assert_eq!(body["senders"], 2);
+    // `by_reason` is the tally of `rows`, zeroes included.
+    let rows = body["rows"].as_array().unwrap();
+    for (reason, n) in body["by_reason"].as_object().unwrap() {
+        let listed = rows.iter().filter(|r| r["reason"] == *reason).count();
+        assert_eq!(n.as_u64(), Some(listed as u64), "{reason}");
+    }
+    // The sealed row is exactly as it was.
+    assert_ne!(
+        h.store
+            .triage_debug(h.acct, sealed)
+            .unwrap()
+            .unwrap()
+            .status,
+        "done"
+    );
+
+    // A press that takes nothing lists nothing.
+    let again = press(&h).await;
+    assert_eq!(again["rows"], json!([]));
+    assert_eq!(again["message_ids"], json!([]));
+    assert_eq!(again["batch_id"], Value::Null);
 }
 
 #[tokio::test]

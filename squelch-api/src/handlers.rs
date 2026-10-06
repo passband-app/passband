@@ -1985,14 +1985,31 @@ fn may_resolve_sender_mail(resolved: &ResolvedDisposition, sweep: bool) -> bool 
 #[derive(Debug, Deserialize)]
 pub struct SuggestRuleQuery {
     sender: String,
+    /// How many suggestions the caller has room for. Absent is one, which is
+    /// the route as every shipped client knows it.
+    count: Option<i64>,
 }
 
-/// GET /client/rules/suggest?sender=addr: the sentence the owner might write
-/// about this sender, for the rule card to offer as a placeholder. Always 200;
-/// `suggestion` is null when there is no model, too little history, or no
-/// clear pattern. It is only ever SHOWN: the owner accepts it with tab and
-/// saves it themselves, and its disposition is then inferred from the owner's
-/// sentence like any other. See [`squelch_core::triage::rule_suggest`].
+/// GET /client/rules/suggest?sender=addr[&count=1..=3]: the sentence the owner
+/// might write about this sender, for the rule card to offer as a placeholder.
+/// Always 200; `suggestion` is null when there is no model, too little history,
+/// or no clear pattern. It is only ever SHOWN: the owner accepts it with tab
+/// and saves it themselves, and its disposition is then inferred from the
+/// owner's sentence like any other. See [`squelch_core::triage::rule_suggest`].
+///
+/// `count` of 2 or 3 asks a different question for the purge deck: up to that
+/// many NARROWING rules, each keeping some kind of this sender's mail, and
+/// never a blanket verdict (the deck has an unsubscribe button for that). The
+/// answer gains `suggestions`, a list that is often shorter than asked and
+/// empty when there is no line to draw, and `suggestion` is its first entry.
+/// It is still ONE model call, one count against the day's cap and one bill.
+/// A `count` outside 1..=3 is clamped into it, and absent or 1 is the original
+/// route with the original body, so a client that never heard of the
+/// parameter sees no difference.
+///
+/// SECURITY: every sentence here is written by a model from subjects the
+/// sender wrote. They are only ever SHOWN to the owner, who may choose one; the
+/// daemon must never save one itself.
 pub async fn suggest_rule(
     State(state): State<ApiState>,
     Query(params): Query<SuggestRuleQuery>,
@@ -2003,9 +2020,23 @@ pub async fn suggest_rule(
     if sender.is_empty() {
         return Err(ApiError::bad_request("sender must not be empty"));
     }
-    let none = || (no_store(), Json(serde_json::json!({ "suggestion": null })));
+    let count = params
+        .count
+        .unwrap_or(1)
+        .clamp(1, rule_suggest::MAX_SUGGESTIONS as i64) as usize;
+    // The list rides only when a list was asked for: the single-sentence body
+    // is what shipped clients decode, and it stays exactly that.
+    let answer = move |suggestions: Vec<String>| {
+        let first = suggestions.first().cloned();
+        let body = if count > 1 {
+            serde_json::json!({ "suggestion": first, "suggestions": suggestions })
+        } else {
+            serde_json::json!({ "suggestion": first })
+        };
+        (no_store(), Json(body))
+    };
     let Some(client) = state.rule_suggest.clone() else {
-        return Ok(none());
+        return Ok(answer(Vec::new()));
     };
     let addr = sender.clone();
     let digest = store_call(&state, move |store, account_id| {
@@ -2020,18 +2051,20 @@ pub async fn suggest_rule(
     })
     .await?;
     let Some((history, rules)) = digest else {
-        return Ok(none());
+        return Ok(answer(Vec::new()));
     };
     let existing = rules_in_the_owners_words(rules, &sender);
-    let (suggestion, usage) = rule_suggest::suggest_rule(
-        &client,
-        &rule_suggest::SuggestInput {
-            from_addr: &sender,
-            existing_rules: &existing,
-            history: &history,
-        },
-    )
-    .await;
+    let input = rule_suggest::SuggestInput {
+        from_addr: &sender,
+        existing_rules: &existing,
+        history: &history,
+    };
+    let (suggestions, usage) = if count > 1 {
+        rule_suggest::narrowing_rules(&client, &input, count).await
+    } else {
+        let (suggestion, usage) = rule_suggest::suggest_rule(&client, &input).await;
+        (suggestion.into_iter().collect(), usage)
+    };
     if let Some(u) = usage {
         let _ = store_call(&state, move |store, account_id| {
             bill_rule_suggest(store, account_id, u);
@@ -2039,10 +2072,7 @@ pub async fn suggest_rule(
         })
         .await;
     }
-    Ok((
-        no_store(),
-        Json(serde_json::json!({ "suggestion": suggestion })),
-    ))
+    Ok(answer(suggestions))
 }
 
 /// The suggester's runaway guard: past the day's cap its routes answer without

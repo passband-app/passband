@@ -60,6 +60,41 @@ struct MobileSitrepView: View {
     private static let eyesVisible = 4
     @State private var expanded = false
 
+    /// The account page, pushed. State rather than a link's own, because two
+    /// things open it: the person glyph, and a swipe from left to right.
+    @State private var showAccount = false
+    /// When the drag now in flight started, to tell a page swipe from a row's.
+    @State private var dragBegan: Date?
+
+    /// LEFT TO RIGHT ANYWHERE ON THE BOARD OPENS THE ACCOUNT PAGE, where the
+    /// mailboxes are: the phone's answer to the Mac's rail of accounts, one
+    /// gesture from the screen the app opens on.
+    ///
+    /// EXCEPT ON A MAIL ROW, which has its own use for that direction (reply,
+    /// remind, archive). The row's rail is a UIKit pan and this is a SwiftUI
+    /// one, so both hear the drag; the row stamps `SwipeRowActivity` when it
+    /// takes it, and a drag a row took is not a page swipe.
+    ///
+    /// Simultaneous, so the scroll never waits on it, and judged only when the
+    /// finger lifts: mostly sideways, and far enough to have been meant.
+    private var accountSwipe: some Gesture {
+        DragGesture(minimumDistance: 24)
+            .onChanged { value in
+                if dragBegan == nil { dragBegan = value.time }
+            }
+            .onEnded { value in
+                let began = dragBegan ?? value.time
+                dragBegan = nil
+                let dx = value.translation.width, dy = value.translation.height
+                guard dx > 90, abs(dy) < dx * 0.5 else { return }
+                // A little slack before the start: the row's recognizer and
+                // this one do not begin on the same event.
+                guard SwipeRowActivity.lastBegan < began.addingTimeInterval(-0.3) else { return }
+                Haptics.tick()
+                showAccount = true
+            }
+    }
+
     var body: some View {
         // Preserve the server order on every device.
         let ranked = store.sitrep.standing
@@ -113,8 +148,8 @@ struct MobileSitrepView: View {
         // that a glyph is a door and the reason a bare icon still looks tappable.
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
-                NavigationLink {
-                    AccountPage()
+                Button {
+                    showAccount = true
                 } label: {
                     Image(systemName: "person.crop.circle")
                         .foregroundStyle(Palette.accent)
@@ -142,6 +177,8 @@ struct MobileSitrepView: View {
             }
             .sharedBackgroundVisibility(.hidden)
         }
+        .navigationDestination(isPresented: $showAccount) { AccountPage() }
+        .simultaneousGesture(accountSwipe)
         .refreshable {
             _ = await SitrepPoller.shared.pull()
             await store.refreshZones(force: true)

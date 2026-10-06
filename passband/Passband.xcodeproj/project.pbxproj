@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		007DD445499A552534B3CD28 /* ImageRepeats.swift in Sources */ = {isa = PBXBuildFile; fileRef = EFF2F03B0D68F54C0DC28777 /* ImageRepeats.swift */; };
 		00DDA0A5E2AA17A893BEA9EB /* SearchIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67C63ACC5CBA08B09ABA71B2 /* SearchIntent.swift */; };
+		00FD7E47CC0166CB40DA4915 /* PhoneVignettes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C2908ED50464990EEF0B9AA /* PhoneVignettes.swift */; };
 		022DB1DE5C307F7EFF36AFE5 /* ActionLayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B11AE47A064BB58DD81A6DB /* ActionLayer.swift */; };
 		0271C8CF8F2DDC03C1DEF095 /* Opener.swift in Sources */ = {isa = PBXBuildFile; fileRef = 070286D5016F78C93DC49070 /* Opener.swift */; };
 		02A2C5770523B244425499D5 /* MobileSitrepView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E61AF9A237CA524B89126810 /* MobileSitrepView.swift */; };
@@ -179,6 +180,7 @@
 		647DD68EDE188660654C0D27 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDDBA0B71BDDC46E844D2856 /* RootView.swift */; };
 		6483175C82FC7A1C7672AB69 /* DemoAppearancePicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2D68A34D5DC11532BE8E359 /* DemoAppearancePicker.swift */; };
 		64BC88FBDA98D7C9C4F3AAF3 /* GroupEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8FF235DC1DB2B57F7C06220 /* GroupEditor.swift */; };
+		64D506A4A0385471D36ABFE0 /* PhoneReleaseNotes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3778503DAD54463B024DBB06 /* PhoneReleaseNotes.swift */; };
 		64FBE0F708CD095EF5B99E9D /* RehearsalAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = C55A9C1397111BDFCF947158 /* RehearsalAPI.swift */; };
 		65404ACF0C3CD7B16721D3E8 /* RelayProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A07093A9D416AD79A642B3A3 /* RelayProxy.swift */; };
 		65479129B186D557C3F9BC50 /* Sessions.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA80DD18A355200FB6274585 /* Sessions.swift */; };
@@ -210,6 +212,7 @@
 		764A73259735A815192E7EE0 /* ThreadViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2BD37CBEFEA8CEB215E3247 /* ThreadViewer.swift */; };
 		765C0A73FABBBF4F7A041A83 /* HeroCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20CA62DECFED05021D0C9964 /* HeroCache.swift */; };
 		778A9FBEDBA350092B770844 /* Actions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10544C7DF8CDBA851AF0D9D8 /* Actions.swift */; };
+		77F44BF6BF388F358070F3CC /* WhatsNewWalk.swift in Sources */ = {isa = PBXBuildFile; fileRef = E28B87131A6A21C97915D758 /* WhatsNewWalk.swift */; };
 		783FF9798B113BDC4869B2A2 /* RulePatternSuggest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88C38163197CC12C0A08950C /* RulePatternSuggest.swift */; };
 		7874B70E2E660A8F9446777F /* SpamNotice.swift in Sources */ = {isa = PBXBuildFile; fileRef = 848BEC54D1FCD1F0FC5BE1A5 /* SpamNotice.swift */; };
 		787AD75706177F4A8C038FC0 /* MessageRecipients.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FFFC29B07960820C815F66C /* MessageRecipients.swift */; };
@@ -249,6 +252,7 @@
 		85A1CC563396C7890FB07C1F /* HTMLImg.swift in Sources */ = {isa = PBXBuildFile; fileRef = 579ABC2B7707848B4AED6F18 /* HTMLImg.swift */; };
 		85A261179BDC0C4F5BEB9F4A /* MailCSP.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10C0C8780CCB9C6BAB2709C /* MailCSP.swift */; };
 		865AD21BDE6B66D287E33641 /* MailListCursor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FB62F2478B613F47FF918B0 /* MailListCursor.swift */; };
+		88A0D564A36D22B8ACB360BE /* PhoneReleaseNotes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3778503DAD54463B024DBB06 /* PhoneReleaseNotes.swift */; };
 		88A8F0598E0AD01532B11B24 /* EventStream.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE462B9CE6C195F53B48B801 /* EventStream.swift */; };
 		88DA0B8D32AA1FE0E82DA026 /* AnthropicStream.swift in Sources */ = {isa = PBXBuildFile; fileRef = E949BF41848E8F43B63C7AB7 /* AnthropicStream.swift */; };
 		8A9F649DE9EC1BEEEA1242B8 /* AuthLabels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40EDDA2423A09A989C77CAED /* AuthLabels.swift */; };
@@ -550,6 +554,7 @@
 		35C12A5AFBCED3C55DA7A5D8 /* MobileAgentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAgentView.swift; sourceTree = "<group>"; };
 		361AB4D81F3740E2B072C5BA /* QuickLookPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickLookPanel.swift; sourceTree = "<group>"; };
 		37716282CFABFF5910677BBC /* APIError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIError.swift; sourceTree = "<group>"; };
+		3778503DAD54463B024DBB06 /* PhoneReleaseNotes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneReleaseNotes.swift; sourceTree = "<group>"; };
 		37AEAA24984488DA00EBD6C4 /* Platform.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Platform.swift; sourceTree = "<group>"; };
 		380A6F03DF41EB8ACAACDBFC /* UsageSeries.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageSeries.swift; sourceTree = "<group>"; };
 		389673F8FDDB51FC4830D9D2 /* PassbandApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PassbandApp.swift; sourceTree = "<group>"; };
@@ -620,6 +625,7 @@
 		7AB80C57BCADB7324DD70C5F /* ProductGuide.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProductGuide.swift; sourceTree = "<group>"; };
 		7AC123D7E906293F404D8353 /* newsreader-var.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "newsreader-var.ttf"; sourceTree = "<group>"; };
 		7C0E91220FC27E7EC297FB40 /* FrameMeasurer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameMeasurer.swift; sourceTree = "<group>"; };
+		7C2908ED50464990EEF0B9AA /* PhoneVignettes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneVignettes.swift; sourceTree = "<group>"; };
 		82CD5D3AEF359995F968DB53 /* Sparkle.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Sparkle.framework; path = vendor/Sparkle/Sparkle.framework; sourceTree = "<group>"; };
 		83BF084E665545489EDF2D5E /* newsreader-italic-var.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "newsreader-italic-var.ttf"; sourceTree = "<group>"; };
 		84043CEC5CA50FFDDB4CC2DC /* PassbandiOSNotify.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = PassbandiOSNotify.entitlements; sourceTree = "<group>"; };
@@ -708,6 +714,7 @@
 		DEACCDDABDFBD619EB070CEB /* ShareNudge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareNudge.swift; sourceTree = "<group>"; };
 		E076DAB13B2768EAD01C88F3 /* CompositionSummary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompositionSummary.swift; sourceTree = "<group>"; };
 		E1C033DDA02DD344F437F943 /* Concurrency.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Concurrency.swift; sourceTree = "<group>"; };
+		E28B87131A6A21C97915D758 /* WhatsNewWalk.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhatsNewWalk.swift; sourceTree = "<group>"; };
 		E4C2C545E14D926E28E48DE6 /* SenderIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SenderIdentity.swift; sourceTree = "<group>"; };
 		E5B001C6ABDDB051E2B57205 /* InlineReply.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InlineReply.swift; sourceTree = "<group>"; };
 		E5B07DD7DA6133E705610323 /* Passband.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Passband.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -896,6 +903,7 @@
 				4EF8CFFF47055FF070BD9E8F /* MinimapGeometry.swift */,
 				8F65DF255404CE32FC4AD8CF /* NeedToday.swift */,
 				070286D5016F78C93DC49070 /* Opener.swift */,
+				3778503DAD54463B024DBB06 /* PhoneReleaseNotes.swift */,
 				37AEAA24984488DA00EBD6C4 /* Platform.swift */,
 				163BEF63DE1359294AD2ADD8 /* Prefs.swift */,
 				7AB80C57BCADB7324DD70C5F /* ProductGuide.swift */,
@@ -1051,8 +1059,10 @@
 				F82499FD36351898E386644C /* MobileSearchView.swift */,
 				E61AF9A237CA524B89126810 /* MobileSitrepView.swift */,
 				D0318A22219D3A1E36429C76 /* MobileToastHost.swift */,
+				7C2908ED50464990EEF0B9AA /* PhoneVignettes.swift */,
 				C465B24E00D0436CD5704294 /* SwipeRow.swift */,
 				6895E072B54D7FEA646D6903 /* UpdateVerbs.swift */,
+				E28B87131A6A21C97915D758 /* WhatsNewWalk.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -1431,6 +1441,7 @@
 				DD971CBBDF48F7F74F7D1190 /* Pairing.swift in Sources */,
 				BBE3AD0E42A5038B4013E5BB /* Palette.swift in Sources */,
 				42B14F1B7A46FE2A0B7E9772 /* PassbandApp.swift in Sources */,
+				88A0D564A36D22B8ACB360BE /* PhoneReleaseNotes.swift in Sources */,
 				62146C86E8F526DE2B2D99B6 /* PhosphorRenderer.swift in Sources */,
 				1E8DA017E91A02EF7B7BD2E3 /* PhosphorView.swift in Sources */,
 				D912E3C77E849D839A27A115 /* Platform.swift in Sources */,
@@ -1653,6 +1664,8 @@
 				D8FAA331307EB4021EF60BE1 /* Pairing.swift in Sources */,
 				DA96B9B6DC4CF125D3626BEC /* Palette.swift in Sources */,
 				B3BD3AFC1DED8C5544D23602 /* PassbandiOSApp.swift in Sources */,
+				64D506A4A0385471D36ABFE0 /* PhoneReleaseNotes.swift in Sources */,
+				00FD7E47CC0166CB40DA4915 /* PhoneVignettes.swift in Sources */,
 				5126015E560E46C1804BA20F /* PhosphorRenderer.swift in Sources */,
 				91072B199B1161CD7D310819 /* PhosphorView.swift in Sources */,
 				B36D0542B36A1421D26CA968 /* Platform.swift in Sources */,
@@ -1745,6 +1758,7 @@
 				E3023FCB2DE7ED325ED34C31 /* VignetteStage.swift in Sources */,
 				0A10F1733FF17A416C100485 /* WhatsNew.swift in Sources */,
 				F7F2772B8DCFEA19D81F022E /* WhatsNewCard.swift in Sources */,
+				77F44BF6BF388F358070F3CC /* WhatsNewWalk.swift in Sources */,
 				B91230E83D52E90A46495F77 /* WireTypes.swift in Sources */,
 				4844BB010D4C2DFAD56727F5 /* ZoomSteps.swift in Sources */,
 			);

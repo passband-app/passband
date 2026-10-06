@@ -124,7 +124,12 @@ enum ProductGuide {
     /// One topic's text. `runningVersion` is the build's marketing version, a
     /// parameter for the reason ReleaseNotes takes it as one: this file never
     /// reads a bundle, so the suite can ask as any version it likes.
-    static func text(_ topic: Topic, runningVersion: String?) -> String {
+    ///
+    /// `onPhone` is the same kind of fact, handed in for the same reason: the
+    /// iPhone app is numbered on its own line and keeps its own release notes
+    /// (Lib/PhoneReleaseNotes.swift), so "what's new" there is a different
+    /// table read against a different version.
+    static func text(_ topic: Topic, runningVersion: String?, onPhone: Bool = false) -> String {
         switch topic {
         case .gettingAround: gettingAround
         case .sitrep: sitrep
@@ -138,7 +143,7 @@ enum ProductGuide {
         case .loginCodes: loginCodes
         case .assistant: assistant
         case .appAndAccounts: appAndAccounts
-        case .whatsNew: whatsNew(running: runningVersion)
+        case .whatsNew: onPhone ? whatsNewOnPhone(running: runningVersion) : whatsNew(running: runningVersion)
         }
     }
 
@@ -261,7 +266,7 @@ enum ProductGuide {
         - Forward: press f. It forwards the message selected with j / k, in the side composer, with the original shown under the note. Fill in To and send; the note is optional.
         - From the Sitrep or a row in the Emails list, r opens the email and starts the reply in one step. On a list row f is "search this sender", not forward.
         - The Mac reader has no reply buttons. The keys are the way in.
-        - On the iPhone there are no keys. Scroll to the end of an open email for the reply and reply all buttons, or swipe one message to the left for Reply, Reply all and Forward on that message. The reply is written in a card under the thread and scrolls with it.
+        - On the iPhone there are no keys. Scroll to the end of an open email for the reply and reply all buttons, or swipe one message to the left for Reply all, Reply and Forward on that message. The reply is written in a card under the thread and scrolls with it.
 
         New message:
         - c on the Sitrep, the Emails list or the reader, or ⌘N from anywhere.
@@ -495,6 +500,7 @@ enum ProductGuide {
         - While a new version is waiting, a down-arrow icon sits in the sidebar above the share icon. Clicking it brings the card back.
         - The Passband menu has "Check for Updates…". The installed version is printed at the bottom right of Settings.
         - Settings > General > Help has "What's new" for the release notes and "Practice inbox" to replay the tour.
+        - On the iPhone, "What's new" is under the person icon at the top left of the Sitrep, in General. It shows the iPhone's own release notes full screen: swipe left for the next page, right to go back, and the x at the top right closes it. The iPhone has no practice inbox.
 
         Usage and audit:
         - Usage, at the bottom of the rail: mail in and out, signal against noise, triage spend and assistant usage, over 7, 30 or 90 days.
@@ -507,6 +513,37 @@ enum ProductGuide {
         Privacy:
         - Settings > Privacy sets telemetry to Full, Minimal or None.
         """
+
+    /// The iPhone's answer, read off the table its own walk reads, so the chat
+    /// and the walk cannot describe different releases. A build older than the
+    /// first phone note says so instead of reciting a note for a version that
+    /// is not installed.
+    private static func whatsNewOnPhone(running: String?) -> String {
+        let reopen =
+            "The iPhone shows this once per version, full screen, a page per feature. To see it "
+            + "again, tap the person icon at the top left of the Sitrep, then General, then "
+            + "What's new."
+        guard let running else {
+            return "This build does not report its version, so there are no release notes to read. " + reopen
+        }
+        guard let note = PhoneReleaseNotes.newest(atOrBelow: running) else {
+            return "This iPhone is running Passband \(running). No release notes are on record for it."
+        }
+        var lines = [
+            "This iPhone is running Passband \(running).",
+            "Release \(note.version), \(note.date): \(note.headline)",
+            "",
+        ]
+        for feature in note.features {
+            lines.append("- \(feature.title). \(feature.detail)")
+        }
+        for aside in note.also {
+            lines.append("- " + aside.text)
+        }
+        lines.append("")
+        lines.append(reopen)
+        return lines.joined(separator: "\n")
+    }
 
     /// The newest release this build is at or past, read off the one table the
     /// What's New card reads (Lib/ReleaseNotes.swift), so the chat and the card

@@ -30,6 +30,10 @@
         static var tab: String? { value("--fixture-tab") }
         /// What to raise once the board has loaded; see `stage`.
         static var scene: String? { value("--fixture-scene") }
+        /// Where a What's New vignette's clock is stopped, in seconds into its
+        /// loop: `--fixture-vignette-t 1.2`. A screenshot catches one frame,
+        /// and a scene is judged at several. Absent, the vignette plays.
+        static var vignetteTime: Double? { value("--fixture-vignette-t").flatMap(Double.init) }
 
         /// A press of the reader's checkmark, played by the reader itself once
         /// its thread is up (`ThreadViewer.rehearseBar`): nothing can touch the
@@ -112,6 +116,12 @@
                 }
             case "compose":
                 store.openComposeNew()
+            // THE SENT PAGE, which the practice mailbox leaves empty: nothing
+            // in a rehearsal sends. `sent` is the list with an outbox pinned
+            // above it (one mail waiting, one that failed); `sent-plain` is
+            // the same list with nothing scheduled. Wants `--fixture-tab mail`.
+            case "sent", "sent-plain":
+                Task { await stageSent(outbox: scene == "sent", store) }
             case "tune":
                 if let first { Actions.tune(sender: first.sender) }
             case "disconnected":
@@ -143,12 +153,90 @@
                 SitrepPoller.shared.stop()
                 store.sitrep.standing = []
                 store.zones.reading = []
+            // THE WHAT'S NEW WALK, raised the way Settings' row raises it and
+            // opened on a page: `whatsnew` is the first, `whatsnew-3` the
+            // third, and a number past the end is the closing page. It shows
+            // the newest phone note there is, whatever this build is running.
+            case let walk where walk.hasPrefix("whatsnew"):
+                let page = Int(walk.dropFirst("whatsnew-".count)) ?? 1
+                store.whatsNew.stage(page: page - 1)
             // THE ACCOUNT PAGE AND WHAT HANGS OFF IT; see `FixtureRoute`.
             case let page where FixtureRoute.scenes.contains(page):
                 Task { await FixtureRoute.shared.stage(page, store) }
             default:
                 break
             }
+        }
+
+        /// Rows the fixture daemon is handed and then asked for the ordinary
+        /// way, so the page on screen came through `refreshSent` like any
+        /// other. Long recipients, a long subject, no subject, no snippet, a
+        /// read receipt: each is a way a two-line row can go wrong.
+        private static func stageSent(outbox: Bool, _ store: AppStore) async {
+            func at(_ hours: Double) -> String {
+                Date().addingTimeInterval(hours * 3600).ISO8601Format()
+            }
+            func sent(
+                _ id: Int, _ to: String, _ subject: String, _ snippet: String, hours: Double,
+                opens: Int = 0
+            ) -> SentItem {
+                SentItem(
+                    id: 7000 + id, thread_id: "practice-1", to: to, subject: subject,
+                    snippet: snippet, sent_at: at(-hours), opens: opens)
+            }
+            func scheduled(
+                _ id: Int, _ to: String, _ subject: String, _ body: String, hours: Double,
+                state: String = "scheduled", error: String? = nil, files: Int = 0
+            ) -> ScheduledSendView {
+                ScheduledSendView(
+                    id: id, send_at: at(hours), state: state, attempts: error == nil ? 0 : 3,
+                    last_error: error, to: to, subject: subject, body: body,
+                    attachments: (0..<files).map {
+                        OutboundAttachment(
+                            id: $0 + 1, filename: "deck-\($0).pdf", mime: "application/pdf",
+                            size: 48_000, content_id: "")
+                    },
+                    created_at: at(-2), updated_at: at(-2))
+            }
+            await RehearsalAPI.shared.stage(
+                sent: [
+                    sent(
+                        1, "Maya Chen <maya@studio.example>", "Re: Thursday, and the deck",
+                        "Thursday works. Can you send the deck over before then?", hours: 0.4,
+                        opens: 2),
+                    sent(
+                        2,
+                        "Dana Okafor <dana@northwind.example>, Li Wen <li@harborvc.example>, "
+                            + "Sam Ortiz <sam@fieldnotes.example>, priya@lanternfund.example",
+                        "September update: revenue, the pilot renewal, and what we are hiring for next",
+                        "Revenue is up 18% and the pilot renewed for another year.", hours: 5,
+                        opens: 4),
+                    sent(
+                        3, "billing@harbor.example", "Question about the August statement",
+                        "There is a charge on the 14th that I do not recognise. Could you tell me "
+                            + "what it was for?", hours: 27),
+                    sent(4, "Alex <alex@friends.example>", "", "Running ten minutes late, save me a seat", hours: 50),
+                    sent(5, "returns@rainforest.example", "Return label for order 60218", "", hours: 75),
+                    sent(
+                        6, "Jo Lindqvist <jo@papermill.example>", "Intro: Dana and Maya",
+                        "You two should talk about the studio. Dana, Maya runs the place I mentioned.",
+                        hours: 200, opens: 1),
+                ],
+                scheduled: outbox
+                    ? [
+                        scheduled(
+                            1, "Maya Chen <maya@studio.example>, alex@friends.example",
+                            "Notes from the planning session, with next steps for each of us",
+                            "Here is everything we agreed on, in the order we agreed on it.",
+                            hours: 3, files: 2),
+                        scheduled(
+                            2, "events@citylibrary.example", "Two more seats for the author talk",
+                            "Could you add two seats to my registration?", hours: -1,
+                            state: "failed", error: "failed:gmail"),
+                    ] : [])
+            store.stats?.scheduled_send = outbox
+            store.mailMode = .sent
+            await store.refreshSent(force: true)
         }
 
         /// The newest card's rail, pulled out for a screenshot (`chain-swipe`).
@@ -251,6 +339,9 @@
     ///   group-thread   a history row tapped: the reader, over the detail
     ///   group-back     that reader closed again: the detail it came from
     ///   group-crowd    the editor on a group too big for the screen
+    ///   general        the General pane, which ends in the What's new row
+    ///   agents         the Agents pane, on a door nobody has probed (the
+    ///                  fixture daemon has none), which shows the setup card
     ///
     /// The editors are raised with the store call the views' own verbs end in
     /// (`openRuleEditor`, `openGroupEditor`), not through those verbs, which
@@ -262,14 +353,14 @@
         static let shared = FixtureRoute()
 
         enum Page: String, Hashable, Identifiable {
-            case rules, groups
+            case rules, groups, general, agents
             var id: String { rawValue }
         }
 
         static let scenes: Set<String> = [
             "account", "rules", "rules-empty", "rule-new", "rule-edit",
             "groups", "groups-empty", "group", "group-new", "group-edit", "group-thread",
-            "group-back", "group-crowd",
+            "group-back", "group-crowd", "general", "agents",
         ]
 
         /// Sitrep to Account. Watched by the sitrep tab's stack (MobileRootView).
@@ -280,7 +371,7 @@
         var group: Int?
 
         func stage(_ scene: String, _ store: AppStore) async {
-            if !scene.hasSuffix("-empty") {
+            if !scene.hasSuffix("-empty"), scene != "general", scene != "agents" {
                 await RehearsalAPI.shared.stage(
                     rules: Self.rules, groups: Self.groups, history: Self.history)
                 // The match counts on the Rules page read the board, and the
@@ -292,7 +383,10 @@
             // One push at a time: a stack handed two in the same pass drops
             // the second.
             try? await Task.sleep(for: .milliseconds(700))
-            page = scene.hasPrefix("rule") ? .rules : .groups
+            page =
+                scene == "general"
+                ? .general
+                : scene == "agents" ? .agents : scene.hasPrefix("rule") ? .rules : .groups
             try? await Task.sleep(for: .milliseconds(700))
             switch scene {
             case "rule-new":

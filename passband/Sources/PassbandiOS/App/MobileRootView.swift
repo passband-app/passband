@@ -31,6 +31,10 @@
 // the triage palette are all state on AppStore, and this shell mounts the same
 // views off the same flags. Nothing below owns a flag of its own — every one of
 // them is written by the verbs in Model/Actions.swift.
+//
+// WHAT'S NEW IS MOUNTED HERE TOO, and is the one piece that is not the Mac's
+// view: the Mac's is a card over a window, the phone's takes the screen
+// (Views/WhatsNewWalk.swift). The state is still the store's `whatsNew`.
 
 import SwiftUI
 
@@ -118,6 +122,14 @@ struct MobileRootView: View {
                 // offer two ways to connect at once, the front one adding an
                 // account to an install that no longer has any.
                 store.addAccountSheetOpen = false
+                // The gate, on an install that knows no mailbox: whoever is
+                // here is new, and is owed the cold open rather than release
+                // notes. Not every `.disconnected` is that: a keychain that
+                // would not unlock lands here too, with its mailbox still on
+                // the list, and that person has been here before.
+                if status == .disconnected, AccountManager.shared.accounts.isEmpty {
+                    store.whatsNew.meetNewcomer()
+                }
             }
         }
     }
@@ -279,6 +291,14 @@ private struct MobileShell: View {
                 }
             if let view, store.activeView != view { store.activeView = view }
         }
+        // WHAT'S NEW, after an update: asked once, when the first sync of a
+        // session lands, and only over the Sitrep. The Mac asks from the same
+        // moment (RootView); the rule itself is the model's.
+        .onChange(of: store.lastRefresh) { old, new in
+            if old == nil, new != nil {
+                store.whatsNew.maybeShowOnPhone(sitrepShowing: tab == .sitrep)
+            }
+        }
         // A seeded search is a request to be shown the search.
         .onChange(of: store.search.query) { _, query in
             if tab != .search, !query.trimmed.isEmpty { tab = .search }
@@ -386,6 +406,20 @@ private struct MobileShell: View {
         }
         // THE TWO-WEEK ASK, over the shell on both platforms.
         .overlay { ShareNudgeModal() }
+        // WHAT'S NEW, off the same `store.whatsNew` the Mac's action layer
+        // mounts its card on, and above everything else here: it takes the
+        // whole screen, tab bar included, which is why it is an overlay on the
+        // shell and not a page on one tab's stack. Settings' row raises it
+        // from three pushes deep and it still covers the lot.
+        .overlay {
+            if store.whatsNew.active {
+                WhatsNewWalk(
+                    notes: store.whatsNew.phoneNotes, openingPage: store.whatsNew.phoneOpeningPage
+                )
+                .transition(.opacity)
+            }
+        }
+        .animation(.smooth(duration: 0.35), value: store.whatsNew.active)
         .onChange(of: store.shareAvailable) { _, canShare in
             ShareNudge.shared.askIfEarned(canShare: canShare)
         }

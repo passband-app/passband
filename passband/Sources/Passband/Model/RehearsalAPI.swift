@@ -65,6 +65,16 @@ actor RehearsalAPI {
             nextGroupID = (groups.map(\.id).max() ?? 0) + 1
             groupHistory = history
         }
+
+        /// Sent mail and an outbox, for the same reason and the same caller:
+        /// the lesson sends nothing and schedules nothing, so its Sent page is
+        /// the empty one. Only a screenshot ever fills these.
+        private var stagedSent: [SentItem] = []
+        private var stagedScheduled: [ScheduledSendView] = []
+        func stage(sent: [SentItem], scheduled: [ScheduledSendView]) {
+            stagedSent = sent
+            stagedScheduled = scheduled
+        }
     #endif
 
     /// Confirm the saved rule, not the editor's requested/default disposition,
@@ -219,6 +229,14 @@ actor RehearsalAPI {
                 $0.reply_to_message_id == reply && $0.forward_of_message_id == forward
             }
             data = try practiceDraft(body, id: existing?.id)
+        #if DEBUG
+            // Staged rows only (see `stage(sent:scheduled:)`); unstaged, the
+            // Sent page answers exactly what it does in a shipped build.
+            case ("GET", "/client/sent") where !stagedSent.isEmpty:
+                data = try encode(["items": stagedSent])
+            case ("GET", "/client/scheduled") where !stagedScheduled.isEmpty:
+                data = try encode(stagedScheduled)
+        #endif
         case ("GET", "/client/sent"):
             data = try json(["items": []])
         case ("GET", "/client/invites"):

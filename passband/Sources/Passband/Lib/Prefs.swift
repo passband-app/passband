@@ -128,6 +128,7 @@ final class Prefs {
         static let developerMode = "passband.pref.developerMode"
         static let tourCompleted = "passband.pref.tourCompleted"
         static let lastSeenReleaseNotes = "passband.pref.lastSeenReleaseNotes"
+        static let lastSeenPhoneNotes = "passband.pref.lastSeenPhoneNotes"
         static let theme = "passband.pref.theme"
         static let zoom = "passband.pref.zoom"
         static let density = "passband.pref.density"
@@ -171,6 +172,7 @@ final class Prefs {
         _developerMode = defaults.bool(forKey: Key.developerMode)
         _tourCompleted = defaults.bool(forKey: Key.tourCompleted)
         _lastSeenReleaseNotes = defaults.string(forKey: Key.lastSeenReleaseNotes)
+        _lastSeenPhoneNotes = defaults.string(forKey: Key.lastSeenPhoneNotes)
         _theme = ThemeChoice(rawValue: defaults.string(forKey: Key.theme) ?? "") ?? .dark
         _zoom = Zoom.clamp(defaults.double(forKey: Key.zoom))
         _density =
@@ -295,6 +297,23 @@ final class Prefs {
         set {
             _lastSeenReleaseNotes = newValue
             defaults.set(newValue, forKey: Key.lastSeenReleaseNotes)
+        }
+    }
+
+    /// The iPhone's stamp: the newest PHONE release whose notes this install
+    /// has been shown (or been stamped past, as a newcomer). Its own key and
+    /// not `lastSeenReleaseNotes`, because the two are versions on different
+    /// lines read against different tables. The phone's numbers trail the
+    /// Mac's, so one field holding either, depending on which app wrote it, is
+    /// a Mac stamp that silences several phone releases the day a backup, a
+    /// shared suite or a careless read brings it across. Unregistered, for the
+    /// reason the Mac's is: absence is a real state.
+    private var _lastSeenPhoneNotes: String?
+    var lastSeenPhoneNotes: String? {
+        get { _lastSeenPhoneNotes }
+        set {
+            _lastSeenPhoneNotes = newValue
+            defaults.set(newValue, forKey: Key.lastSeenPhoneNotes)
         }
     }
 

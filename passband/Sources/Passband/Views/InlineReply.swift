@@ -521,6 +521,7 @@ struct InlineReply: View {
                 text: bind(\.body), autofocus: true, refocus: refocusEditor,
                 disabled: compose.sending, grows: true
             )
+            .attaching(store.composeAttachmentsAvailable ? .inlineReply : nil)
             .frame(minHeight: Self.editorFloor, alignment: .top)
         }
 
@@ -559,7 +560,7 @@ struct InlineReply: View {
         /// setting, not a switch.
         @ViewBuilder
         private var carries: some View {
-            AttachButton(slot: .inlineReply)
+            // The paperclip is on the keyboard's bar, as in the composer.
             TrackerToggle(on: bindFlag(\.includeTracker))
         }
 

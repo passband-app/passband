@@ -104,9 +104,11 @@ run_suite pairing \
 # One file, no dependencies: ReleaseNotes.swift is kept free of SwiftUI and
 # Bundle precisely so this suite and make-changelog.sh can both compile it
 # alone, and so the running version arrives as an argument rather than as
-# whatever bundle the binary happens to sit in.
+# whatever bundle the binary happens to sit in. The iPhone's own table rides
+# along: it is keyed by the phone's version and asks the same rules.
 run_suite release-notes \
   Sources/Passband/Lib/ReleaseNotes.swift \
+  Sources/Passband/Lib/PhoneReleaseNotes.swift \
   Tests/ReleaseNotesTests.swift
 
 # One file, no dependencies at all — SubjectText is kept that way on purpose.
@@ -446,6 +448,7 @@ run_suite product-guide \
   Sources/Passband/Lib/ShortcutCatalog.swift \
   Sources/Passband/Lib/SettingsSearch.swift \
   Sources/Passband/Lib/ReleaseNotes.swift \
+  Sources/Passband/Lib/PhoneReleaseNotes.swift \
   Sources/Passband/Lib/ProductGuide.swift \
   Tests/ProductGuideTests.swift
 

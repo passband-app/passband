@@ -223,13 +223,15 @@ struct ComposePane: View {
                     .foregroundStyle(Palette.ink)
                 draftsToggle(compose)
             #else
-                Text(onList ? "drafts" : "compose")
-                    .font(Typo.serif(24, weight: .medium))
-                    .foregroundStyle(Palette.ink)
-                if !onList {
-                    Text(kindLabel(compose))
-                        .font(Typo.micro)
-                        .foregroundStyle(Palette.inkFaintest)
+                // NO TITLE OVER A MESSAGE BEING WRITTEN. A sheet with a To
+                // line, a subject and a send button does not need to be told
+                // it is the composer, and "compose / new message" spent the
+                // bar's widest stretch saying so. The drafts page still names
+                // itself, because a list of drafts is not self-evident.
+                if onList {
+                    Text("drafts")
+                        .font(Typo.serif(24, weight: .medium))
+                        .foregroundStyle(Palette.ink)
                 }
                 draftsToggle(compose)
             #endif
@@ -259,9 +261,8 @@ struct ComposePane: View {
                 // its own: sending through the guard stays a wide, deliberate
                 // target rather than a chip in the corner.
                 //
-                // ATTACH RIDES BESIDE IT, because the footer it has on the Mac
-                // is not here. The inline reply already offers it on a phone;
-                // a new message that could not take a file was the odd one out.
+                // ATTACH IS NOT UP HERE: it is a paperclip on the keyboard's
+                // bar, with the formatting verbs (`MarkdownTextView.attaching`).
                 //
                 // NEITHER ON THE DRAFTS PAGE: a list has nothing to send.
                 //
@@ -269,7 +270,6 @@ struct ComposePane: View {
                 // verb's modifier, and "send" flips to "schedule" once a time
                 // is set.
                 if !onList {
-                    AttachButton(slot: .compose)
                     ScheduleClock(slot: .compose)
                     Button(ScheduleCopy.sendVerb(scheduled: scheduled)) { send(override: false) }
                         .buttonStyle(.glassProminent)
@@ -552,6 +552,7 @@ struct ComposePane: View {
                         } : nil,
                     onDropHover: { dropTargeted = $0 }
                 )
+                .attaching(store.composeAttachmentsAvailable ? .compose : nil)
                 .frame(maxHeight: .infinity)
                 // The text view's own inset plus its line-fragment padding make
                 // up the rest, so the body's left edge is the labels' edge.

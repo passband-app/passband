@@ -84,6 +84,8 @@ struct AccountPage: View {
                 switch page {
                 case .rules: RulesView()
                 case .groups: GroupsView()
+                case .general: pane(.general)
+                case .agents: pane(.agents)
                 }
             }
         #endif
@@ -278,12 +280,13 @@ struct AccountPage: View {
                     YouSection()
                     AppearanceSection()
                     NotificationsSection()
-                    // NO HelpSection: both of its buttons render through the
-                    // desktop's ActionLayer, which has no iOS host yet. Either
-                    // would set state (`tour.active`, `whatsNew.notes`) that no
-                    // surface here is able to show or dismiss. The phone's
-                    // what's-new is the App Store's release notes until that
-                    // host exists.
+                    // HelpSection is here for its What's new row, which the
+                    // shell can now answer (WhatsNewWalk, mounted in
+                    // MobileShell). Its Practice inbox row stays on the Mac:
+                    // the tour is a lesson over the Mac's shell and the phone
+                    // has none. The section leaves both out by itself, and
+                    // draws nothing when there is no note to show.
+                    HelpSection()
                     DeveloperSection()
                 case .mail:
                     MailSection()

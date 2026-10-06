@@ -2349,14 +2349,17 @@ struct ThreadViewer: View {
         /// because they are one verb at two widths; forward is the quiet tint
         /// because it is the one that leaves the conversation.
         private func cardVerbs(_ m: ClientMessage, proxy: ScrollViewProxy) -> [SwipeVerb] {
+            // REPLY ALL LEADS, so it is what a full swipe commits: answering
+            // one person out of a thread of five is the choice worth a second
+            // tap, and dropping four of them by flicking is the mistake.
             [
                 SwipeVerb(
-                    title: "Reply", symbol: "arrowshape.turn.up.left", tint: Palette.accent
-                ) { reply(to: m, all: false, proxy: proxy) },
-                SwipeVerb(
-                    title: "Reply all", symbol: "arrowshape.turn.up.left.2",
-                    tint: Palette.accent.opacity(0.72)
+                    title: "Reply all", symbol: "arrowshape.turn.up.left.2", tint: Palette.accent
                 ) { reply(to: m, all: true, proxy: proxy) },
+                SwipeVerb(
+                    title: "Reply", symbol: "arrowshape.turn.up.left",
+                    tint: Palette.accent.opacity(0.72)
+                ) { reply(to: m, all: false, proxy: proxy) },
                 SwipeVerb(
                     title: "Forward", symbol: "arrowshape.turn.up.right", tint: Palette.inkFaint
                 ) { forward(m) },
@@ -3666,7 +3669,7 @@ struct PlainBody: View {
         let found = search(shown: shown, quoted: split.quoted)
         VStack(alignment: .leading, spacing: Space.s8) {
             painted(shown, found?.visible ?? [], active: found?.active)
-                .font(Typo.ui(13.5))
+                .font(Typo.ui(ReaderMetrics.plainBase))
                 .foregroundStyle(Palette.ink)
                 .textSelection(.enabled)
                 .frame(maxWidth: fills ? .infinity : nil, alignment: .leading)

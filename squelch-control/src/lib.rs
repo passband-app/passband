@@ -96,12 +96,14 @@ use axum::{
 ///   reaches this listener from one cluster's handful of egress addresses, so a
 ///   tight per-client bucket would meter the whole fleet as one client. Its
 ///   real limit is the per-tenant quota in the store, which counts the right
-///   thing. See [`tenant`].
+///   thing. See [`tenant`]. `GET /tenant/features` shares the bucket: the same
+///   callers, asking once every few minutes each.
 /// - `POST /admin/login` is tight and in its OWN bucket, for the reason
 ///   `/console/auth` has one: it is the second route where a stranger guesses at
 ///   a secret, and it must not be able to spend the budget the dashboard needs.
 /// - The admin dashboard and its two buttons are generous. One operator with a
 ///   cookie, clicking through a list that re-renders after every approval.
+///   `/admin/features` sits in the same bucket behind the same cookie.
 ///
 /// THE LAST THREE ARE MOUNTED ONLY WHEN THE WAITLIST IS CONFIGURED. With the
 /// feature off they do not exist, so an unconfigured deployment answers 404 at
@@ -161,6 +163,10 @@ pub fn router(state: ControlState) -> Router {
     // which it is.
     let tenant = Router::new()
         .route("/tenant/invite", post(tenant::invite))
+        // The same door and the same bucket: one credential, one kind of
+        // caller. A daemon asks this every few minutes, which the bucket's
+        // size already assumes (see `TENANT_REQUESTS_PER_MINUTE`).
+        .route("/tenant/features", get(tenant::features))
         .layer(DefaultBodyLimit::max(handlers::MAX_BODY))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -226,7 +232,25 @@ pub fn router(state: ControlState) -> Router {
             state.clone(),
             ratelimit::limit_admin,
         ))
-        .with_state(state);
+        .with_state(state.clone());
 
-    app.merge(waitlist).merge(admin_login).merge(admin)
+    // The same door and the same bucket as the dashboard, split out only for
+    // its body limit: this form carries a field per ticked box and outgrows
+    // the ceiling every other form here fits under.
+    let admin_features = Router::new()
+        .route(
+            "/admin/features",
+            get(admin::features_page).post(admin::features_save),
+        )
+        .layer(DefaultBodyLimit::max(admin::MAX_FEATURES_BODY))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            ratelimit::limit_admin,
+        ))
+        .with_state(state.clone());
+
+    app.merge(waitlist)
+        .merge(admin_login)
+        .merge(admin)
+        .merge(admin_features)
 }

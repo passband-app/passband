@@ -1,4 +1,8 @@
-//! The tenant door: `POST /tenant/invite`.
+//! The tenant door: `POST /tenant/invite`, and `GET /tenant/features` beside it.
+//!
+//! The mint is what this file was written for and what almost all of it is
+//! about; the features read ([`features`]) borrows its credential and says so
+//! where it is defined.
 //!
 //! One route, one caller, one answer. A provisioned daemon presents its share
 //! token (see [`crate::share`]) and gets back ONE invite code to put in a mail
@@ -160,6 +164,42 @@ pub async fn invite(state: State<ControlState>, headers: axum::http::HeaderMap) 
         }),
     )
         .into_response()
+}
+
+/// What `GET /tenant/features` answers.
+#[derive(Serialize)]
+struct FeaturesGranted {
+    /// The hidden features that are on for this tenant, sorted: its own grants
+    /// plus whatever is on for everyone. Keys only; see
+    /// [`squelch_core::features`].
+    features: Vec<String>,
+}
+
+/// `GET /tenant/features` - which hidden features the presenting tenant has.
+///
+/// THE SAME CREDENTIAL AS THE MINT, and a much smaller thing to hand it: the
+/// answer is a list of feature names an operator ticked on `/admin/features`.
+/// It is still behind the token rather than keyed on a label in the URL,
+/// because "which tenants are in the beta" is a fact about people and a
+/// stranger walking the label space is not owed it.
+///
+/// A READ, POLLED BY EVERY DAEMON, so unlike the mint it does not depend on the
+/// invite policy being configured and it writes nothing. A daemon that is
+/// refused keeps whatever it last heard (see `squelch_api::sharing`); one that
+/// has never heard anything has nothing on, which is the safe direction.
+pub async fn features(state: State<ControlState>, headers: axum::http::HeaderMap) -> Response {
+    let State(state) = state;
+    let Some(sharer) = authenticate(&state, &headers).await else {
+        tracing::warn!("share token refused");
+        return refuse(StatusCode::UNAUTHORIZED, UNAUTHORIZED);
+    };
+    match state.store().features_for_tenant(sharer.id).await {
+        Ok(features) => (StatusCode::OK, Json(FeaturesGranted { features })).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, label = %sharer.label, "reading a tenant's features failed");
+            refuse(StatusCode::SERVICE_UNAVAILABLE, UNAVAILABLE)
+        }
+    }
 }
 
 /// The tenant behind the `Authorization: Bearer` header, or `None`.

@@ -25,6 +25,7 @@ use crate::resend::{ResendClient, ResendError};
 use crate::sessions::SessionStore;
 use crate::store::ControlStore;
 use crate::warden::Warden;
+use squelch_core::features::Feature;
 
 /// Why state could not be built. Both variants are a client that would not
 /// construct, which is the only failure derivation has: everything else that
@@ -80,6 +81,9 @@ struct Inner {
     /// has one: it is the route where a stranger guesses at a secret, and it
     /// must not be able to spend the budget the operator's own page needs.
     admin_login_limiter: Mutex<RateLimiter>,
+    /// The hidden features the admin page offers. `squelch_core`'s own list
+    /// everywhere but a test; see [`ControlState::with_feature_registry`].
+    feature_registry: &'static [Feature],
 }
 
 impl ControlState {
@@ -152,8 +156,28 @@ impl ControlState {
                 admin_login_limiter: Mutex::new(RateLimiter::per_minute(
                     ADMIN_LOGIN_REQUESTS_PER_MINUTE,
                 )),
+                feature_registry: squelch_core::features::KNOWN,
             }),
         })
+    }
+
+    /// Offer `registry` on the features page instead of the build's own list.
+    ///
+    /// FOR TESTS, and it has to exist because the real list is allowed to be
+    /// empty: on the day every hidden feature has launched there is nothing
+    /// left in it, and the page that manages flags must still be testable.
+    /// Only callable before the state is shared, which is when a harness
+    /// builds it.
+    pub fn with_feature_registry(mut self, registry: &'static [Feature]) -> Self {
+        if let Some(inner) = Arc::get_mut(&mut self.inner) {
+            inner.feature_registry = registry;
+        }
+        self
+    }
+
+    /// The hidden features an operator may grant.
+    pub fn feature_registry(&self) -> &'static [Feature] {
+        self.inner.feature_registry
     }
 
     pub fn config(&self) -> &Config {

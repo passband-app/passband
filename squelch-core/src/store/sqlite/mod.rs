@@ -57,11 +57,13 @@ mod agent_deliveries;
 mod agent_triage;
 mod attention;
 mod audit;
+mod calendar;
 mod contacts;
 pub mod device_tokens;
 mod drafts;
 mod events;
 mod feedback;
+mod ghosts;
 pub mod groups;
 mod messages;
 mod migrate;
@@ -77,6 +79,7 @@ mod specialists;
 mod tests;
 mod tracking;
 mod triage_stages;
+mod zones;
 
 use self::migrate::migrate;
 
@@ -642,6 +645,26 @@ impl Store for SqliteStore {
         policy: crate::config::ShipmentListPolicy,
     ) -> Result<bool> {
         self.clear_shipment(account_id, shipment_id, at, policy)
+    }
+
+    fn list_ghost_events(
+        &self,
+        account_id: AccountId,
+        from: DateTime<chrono::FixedOffset>,
+        to: DateTime<chrono::FixedOffset>,
+    ) -> Result<Vec<crate::types::GhostEvent>> {
+        self.list_ghost_events(account_id, from, to)
+    }
+
+    fn patch_ghost_user(
+        &self,
+        account_id: AccountId,
+        ghost_id: i64,
+        end: Option<Option<crate::triage::ghost::EventTime>>,
+        state: Option<Option<crate::types::GhostUserState>>,
+        at: DateTime<Utc>,
+    ) -> Result<bool> {
+        self.patch_ghost_user(account_id, ghost_id, end, state, at)
     }
 
     fn shipments_redetect_cleanup(&self, account_id: AccountId) -> Result<u64> {

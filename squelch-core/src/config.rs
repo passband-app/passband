@@ -117,6 +117,24 @@ pub const GMAIL_SEND_SCOPE: &str = "https://www.googleapis.com/auth/gmail.send";
 /// Convenience: the full set of scopes for the write credential.
 pub const WRITE_SCOPES: &[&str] = &[GMAIL_MODIFY_SCOPE, GMAIL_SEND_SCOPE];
 
+/// The OPTIONAL calendar grant. Requested only by the hosted calendar consent
+/// (`/reconnect?calendar=1`, beside the three Gmail scopes) and by `squelchd
+/// auth --calendar`; never REQUIRED by any flow, so a person who unticks it at
+/// Google keeps a working mailbox and simply has no calendar.
+///
+/// "Calendar is granted" means a token's recorded scopes include
+/// [`CALENDAR_EVENTS_SCOPE`]. [`CALENDAR_LIST_SCOPE`] is wanted and not
+/// required: without it only the primary calendar is read.
+///
+/// `calendar.events` rather than `calendar.events.owned` or `calendar.readonly`:
+/// the timeline shows events on calendars the user subscribes to but does not
+/// own, and later waves create and answer events. Nothing in this wave writes.
+pub const CALENDAR_EVENTS_SCOPE: &str = "https://www.googleapis.com/auth/calendar.events";
+pub const CALENDAR_LIST_SCOPE: &str =
+    "https://www.googleapis.com/auth/calendar.calendarlist.readonly";
+
+/// Both calendar scopes, in the order a consent asks for them.
+pub const CALENDAR_SCOPES: &[&str] = &[CALENDAR_EVENTS_SCOPE, CALENDAR_LIST_SCOPE];
 /// Google's basic-profile scope: the account's name and profile photo, and
 /// nothing about mail. Non-sensitive in Google's own classification.
 ///

@@ -162,6 +162,18 @@ struct AuthArgs {
     #[arg(long)]
     write: bool,
 
+    /// Mint the CALENDAR credential (calendar.events +
+    /// calendar.calendarlist.readonly) into its own slot, and touch nothing
+    /// else: the Read and Write credentials stay exactly as they are.
+    ///
+    /// Optional, and only for the calendar page. Run plain `squelchd auth`
+    /// first: the consent is matched to this mailbox through the Gmail access
+    /// this OAuth client already has. Works with --headless, --broker and
+    /// --export. Conflicts with --write, which renews the Gmail pair, and with
+    /// --import, where the blob decides what is stored.
+    #[arg(long, conflicts_with_all = ["write", "import"])]
+    calendar: bool,
+
     /// Headless mode: do NOT auto-open a browser, and bind the loopback
     /// listener to a FIXED port so it can be SSH-forwarded.
     #[arg(long)]
@@ -402,6 +414,9 @@ fn typed_port_is_ignored(args: &AuthArgs, transport: &Transport, sources: AuthFl
 fn other_err(msg: String) -> squelch_core::CoreError {
     squelch_core::CoreError::Other(anyhow::anyhow!(msg))
 }
+
+/// How long shutdown waits for the calendar sync loop before aborting it.
+const CALENDAR_STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 fn build_runtime() -> Result<tokio::runtime::Runtime, squelch_core::CoreError> {
     tokio::runtime::Builder::new_multi_thread()
@@ -665,14 +680,21 @@ fn scope_word(scopes: AuthScopes) -> &'static str {
     match scopes {
         AuthScopes::Read => "READ",
         AuthScopes::Write => "WRITE",
+        AuthScopes::Calendar => "CALENDAR",
     }
 }
 
 /// Which credentials one `auth` invocation mints, in order. `--write` re-mints
 /// READ too so the pair cannot drift, but it stays two scope sets, two flows,
 /// two slots — the two-door split is never collapsed into one merged token.
+///
+/// `--calendar` mints the Calendar credential ALONE. Calendar is an optional
+/// grant on top of a working mailbox, so asking for it must never re-run (and
+/// so never risk) the Gmail consents.
 fn auth_plan(args: &AuthArgs) -> Vec<AuthScopes> {
-    if args.write {
+    if args.calendar {
+        vec![AuthScopes::Calendar]
+    } else if args.write {
         vec![AuthScopes::Write, AuthScopes::Read]
     } else {
         vec![AuthScopes::Read]
@@ -770,7 +792,7 @@ fn mint_credential(
 ) -> Result<(), squelch_core::CoreError> {
     let kind = scopes.kind();
     println!(
-        "Authorizing Gmail account: {email} [{}] via {:?} backend",
+        "Authorizing Google account: {email} [{}] via {:?} backend",
         scopes.label(),
         backend
     );
@@ -2018,6 +2040,12 @@ fn cmd_serve(
 
     let backend = config.credential_backend;
     let creds_path = config.resolve_credentials_path();
+    // A writer that died between its temp write and its rename left a temp
+    // file holding a token; every write sweeps them too, but a daemon that
+    // never refreshes would otherwise keep one forever.
+    if backend == squelch_core::config::CredentialBackend::File {
+        squelch_core::credentials::remove_stale_temp_files(&creds_path);
+    }
 
     // Manual-refresh signal: `POST /client/refresh` fires it, the poll loop
     // wakes early.
@@ -2157,6 +2185,36 @@ fn cmd_serve(
         None => api_state,
     };
 
+    // Google Calendar sync, read only. Built over the human door's own token
+    // resolver whenever an OAuth client is configured, GRANTED OR NOT: without
+    // a grant the loop idles and looks again each minute, because a grant can
+    // arrive under a running daemon (`squelchd auth --calendar`). Its own task
+    // with its own backoff, never inside the Gmail sync loop: a calendar
+    // failure of any kind must not fail or delay Gmail sync, triage or ingest.
+    let calendar_sync = api_state.calendar().cloned().and_then(|creds| {
+        // The same live feature set the human door gates on: the loop asks it
+        // at every pass, so a flag flipped on the admin page reaches it with
+        // no restart.
+        match squelch_core::gcal::sync::CalendarSync::new(
+            store.clone(),
+            account_id,
+            creds,
+            api_state.features().clone(),
+        ) {
+            Ok(sync) => Some(sync),
+            Err(e) => {
+                eprintln!(
+                    "squelchd: calendar sync NOT started: its HTTP client could not be built: {e}"
+                );
+                None
+            }
+        }
+    });
+    let api_state = match &calendar_sync {
+        Some(sync) => api_state.with_calendar_sync_kick(sync.kick_handle()),
+        None => api_state,
+    };
+
     let runtime = build_runtime()?;
     runtime.block_on(async move {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -2239,6 +2297,20 @@ fn cmd_serve(
                 eprintln!(
                     "squelchd: shipment poller disabled (no carrier credentials in [carriers])"
                 );
+                None
+            }
+        };
+
+        // Reads Google Calendar. Same shape as the pollers above: shares the
+        // shutdown watch, awaited on the way out.
+        let calendar_handle = match calendar_sync {
+            Some(sync) => {
+                eprintln!("squelchd: calendar sync enabled (idles until calendar is granted)");
+                let shutdown_rx = shutdown_rx.clone();
+                Some(tokio::spawn(async move { sync.run(shutdown_rx).await }))
+            }
+            None => {
+                eprintln!("squelchd: calendar sync disabled (no OAuth client configured)");
                 None
             }
         };
@@ -2608,6 +2680,24 @@ fn cmd_serve(
                 Err(e) => eprintln!("squelchd: shipment poller task join error: {e}"),
             }
         }
+        // Bounded: the loop stops a pass in flight on the shutdown signal,
+        // and this is the backstop if anything in it ever stops listening.
+        // Its writes are each their own transaction, so aborting it leaves
+        // the store consistent; it holds nothing the mail engine needs.
+        if let Some(mut handle) = calendar_handle {
+            match tokio::time::timeout(CALENDAR_STOP_GRACE, &mut handle).await {
+                Ok(Ok(Ok(()))) => {}
+                Ok(Ok(Err(e))) => eprintln!("squelchd: calendar sync ended with error: {e}"),
+                Ok(Err(e)) => eprintln!("squelchd: calendar sync task join error: {e}"),
+                Err(_) => {
+                    eprintln!(
+                        "squelchd: calendar sync did not stop within {}s; aborting it",
+                        CALENDAR_STOP_GRACE.as_secs()
+                    );
+                    handle.abort();
+                }
+            }
+        }
         if scheduled_handle.await.is_err() {
             eprintln!("squelchd: scheduled-send worker task join error");
         }
@@ -2658,6 +2748,7 @@ mod tests {
     fn bare_auth_args() -> AuthArgs {
         AuthArgs {
             write: false,
+            calendar: false,
             headless: false,
             port: DEFAULT_HEADLESS_PORT,
             broker: None,
@@ -2757,6 +2848,57 @@ mod tests {
             write_scopes.iter().all(|s| !read_scopes.contains(s)),
             "write and read scope sets must not be merged into one consent"
         );
+    }
+
+    /// `--calendar` mints the Calendar credential and NOTHING ELSE: no Read
+    /// or Write consent runs, so neither slot can be touched. Its own slot,
+    /// the two calendar scopes requested, only the events scope required.
+    #[test]
+    fn auth_plan_calendar_mints_only_the_calendar_credential() {
+        for transport in [None, Some(BROKER.to_string())] {
+            let plan = auth_plan(&AuthArgs {
+                calendar: true,
+                broker: transport,
+                ..bare_auth_args()
+            });
+            assert_eq!(plan, vec![AuthScopes::Calendar]);
+        }
+        let plan = auth_plan(&AuthArgs {
+            calendar: true,
+            headless: true,
+            ..bare_auth_args()
+        });
+        assert_eq!(plan, vec![AuthScopes::Calendar]);
+        assert_eq!(plan[0].kind(), CredentialKind::Calendar);
+        assert_eq!(
+            CredentialKind::Calendar.slot_key("you@x.com"),
+            "you@x.com#calendar"
+        );
+        assert_eq!(
+            plan[0].scopes(),
+            vec![
+                squelch_core::config::CALENDAR_EVENTS_SCOPE.to_string(),
+                squelch_core::config::CALENDAR_LIST_SCOPE.to_string(),
+            ]
+        );
+        assert!(
+            plan[0].scopes().iter().all(|s| !s.contains("gmail")),
+            "the calendar consent requests no Gmail scope"
+        );
+
+        // It parses with --headless, and refuses the flags that would renew
+        // the Gmail pair or let a blob decide.
+        let (args, _) = parse_auth(["squelchd", "auth", "--calendar", "--headless"].as_ref());
+        assert!(args.calendar && args.headless);
+        for clash in [
+            ["squelchd", "auth", "--calendar", "--write"],
+            ["squelchd", "auth", "--calendar", "--import"],
+        ] {
+            assert!(
+                Cli::command().try_get_matches_from(clash).is_err(),
+                "{clash:?} must be refused"
+            );
+        }
     }
 
     /// `--broker` REPLACES the loopback listener rather than decorating it, so
@@ -3060,6 +3202,7 @@ mod tests {
                     access_token: "access".to_string(),
                     refresh_token: Some("refresh".to_string()),
                     expires_at: None,
+                    scopes: None,
                 },
             }],
         ))
@@ -3218,6 +3361,7 @@ mod tests {
                 access_token: "access".to_string(),
                 refresh_token: refresh.map(|r| r.to_string()),
                 expires_at: None,
+                scopes: None,
             },
         };
 
@@ -3250,6 +3394,7 @@ mod tests {
                     access_token: "access".to_string(),
                     refresh_token: Some("refresh".to_string()),
                     expires_at: None,
+                    scopes: None,
                 },
             }],
         );

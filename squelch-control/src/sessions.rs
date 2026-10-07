@@ -33,6 +33,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+pub use crate::reconnect::Purpose;
 use tokio::sync::Notify;
 
 /// How long a session lives. The whole budget is one human reading one Google
@@ -140,7 +141,12 @@ pub enum SessionKind {
     /// which account consented, and that is the only answer this flow will
     /// accept. Asking would turn the page into an oracle and, worse, would let
     /// somebody aim a credential they legitimately own at a tenant they do not.
-    Reconnect,
+    ///
+    /// `purpose` is what the session was STARTED as, a plain reconnect or the
+    /// calendar grant, and it lives here, server side, so a session started as
+    /// one can only ever complete as that one: nothing the browser carries can
+    /// change it.
+    Reconnect { purpose: Purpose },
     /// An AGENT login: the app login's identity hop, run because WorkOS AuthKit
     /// sent the browser here to log somebody in for an agent's OAuth flow.
     ///
@@ -239,7 +245,10 @@ impl std::fmt::Debug for SessionKind {
                 .finish(),
             SessionKind::Console => f.write_str("Console"),
             SessionKind::App => f.write_str("App"),
-            SessionKind::Reconnect => f.write_str("Reconnect"),
+            SessionKind::Reconnect { purpose } => f
+                .debug_struct("Reconnect")
+                .field("purpose", purpose)
+                .finish(),
             SessionKind::Agent { .. } => f
                 .debug_struct("Agent")
                 .field("external_auth_id", &"<redacted>")
@@ -269,7 +278,7 @@ impl SessionKind {
             // second one. Nor does an agent login, which provisions nothing.
             SessionKind::Console
             | SessionKind::App
-            | SessionKind::Reconnect
+            | SessionKind::Reconnect { .. }
             | SessionKind::Agent { .. }
             | SessionKind::AgentConfirm { .. }
             | SessionKind::AgentDone { .. }
@@ -323,7 +332,7 @@ impl SessionKind {
             self,
             SessionKind::Console
                 | SessionKind::App
-                | SessionKind::Reconnect
+                | SessionKind::Reconnect { .. }
                 | SessionKind::Agent { .. }
         )
     }
@@ -344,6 +353,14 @@ pub struct PendingSession {
     /// The validated label: the one being provisioned (signup) or the one being
     /// signed in to (console).
     pub label: String,
+    /// The Google account a reconnect was started FOR, when the link named one
+    /// (`/reconnect?hint=`). Already shape-checked by the handler.
+    ///
+    /// A GUARD, NEVER AN AUTHORITY. The callback refuses a consent from any
+    /// other account when this is set, and that is all it does: the tenant is
+    /// still discovered from the account Google says consented, and the warden
+    /// still checks custody. Anyone can craft the link that sets it.
+    pub login_hint: Option<String>,
     created: Instant,
 }
 
@@ -385,6 +402,22 @@ impl SessionStore {
         label: String,
         now: Instant,
     ) -> Result<(), InsertError> {
+        self.insert_with_hint(sid, kind, state, pkce_verifier, label, None, now)
+    }
+
+    /// [`SessionStore::insert`] carrying the account a reconnect was started
+    /// for. See [`PendingSession::login_hint`] for what it is and is not.
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_with_hint(
+        &mut self,
+        sid: String,
+        kind: SessionKind,
+        state: String,
+        pkce_verifier: String,
+        label: String,
+        login_hint: Option<String>,
+        now: Instant,
+    ) -> Result<(), InsertError> {
         self.sweep(now);
         if self.sessions.len() >= MAX_SESSIONS {
             return Err(InsertError::Full);
@@ -403,6 +436,7 @@ impl SessionStore {
                 state,
                 pkce_verifier,
                 label,
+                login_hint,
                 created: now,
             },
         );
@@ -487,6 +521,7 @@ impl SessionStore {
                     state: taken.state.clone(),
                     pkce_verifier: String::new(),
                     label: taken.label.clone(),
+                    login_hint: None,
                     created: now,
                 },
             );
@@ -594,6 +629,54 @@ mod tests {
         let signup = s.take("signup", now).expect("live");
         assert_eq!(signup.kind, SessionKind::Signup { invite_id: 1 });
         assert_eq!(signup.kind.invite_id(), Some(1));
+    }
+
+    /// A reconnect session comes back as the PURPOSE it went in as, with the
+    /// hint it was started for, and nothing on the way out can change either.
+    #[test]
+    fn a_reconnect_session_keeps_its_purpose_and_hint() {
+        let mut s = SessionStore::new();
+        let now = Instant::now();
+        for (sid, purpose, hint) in [
+            (
+                "cal",
+                Purpose::Calendar,
+                Some("ada@example.com".to_string()),
+            ),
+            ("plain", Purpose::Reconnect, None),
+        ] {
+            s.insert_with_hint(
+                sid.into(),
+                SessionKind::Reconnect { purpose },
+                "state".into(),
+                "verifier".into(),
+                String::new(),
+                hint,
+                now,
+            )
+            .unwrap();
+        }
+        let cal = s.take("cal", now).expect("live");
+        assert_eq!(
+            cal.kind,
+            SessionKind::Reconnect {
+                purpose: Purpose::Calendar
+            }
+        );
+        assert_eq!(cal.login_hint.as_deref(), Some("ada@example.com"));
+        assert!(cal.kind.is_identity());
+        assert_eq!(cal.kind.invite_id(), None);
+        let plain = s.take("plain", now).expect("live");
+        assert_eq!(
+            plain.kind,
+            SessionKind::Reconnect {
+                purpose: Purpose::Reconnect
+            }
+        );
+        assert_eq!(plain.login_hint, None);
+        // Every other kind carries no hint.
+        insert(&mut s, "signup", now).unwrap();
+        assert_eq!(s.take("signup", now).unwrap().login_hint, None);
     }
 
     /// An agent login carries its `external_auth_id` in the TABLE, comes back

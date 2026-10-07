@@ -28,6 +28,8 @@ struct ProductGuideTests {
         thePromptIsAPointer()
         shortcutsAreTheOverlaysTable()
         theGuideAgreesWithTheKeymapTable()
+        theCalendarIsListedOnlyWhereItIsOffered()
+        withTheCalendarOffTheGuideIsMains()
         settingsAreFoundByDescription()
         settingsWithNoQueryOrNoMatchListEverything()
         whatsNewReadsTheReleaseTable()
@@ -43,11 +45,11 @@ struct ProductGuideTests {
 
     static func everyTopicAnswers() {
         for topic in ProductGuide.Topic.allCases {
-            let text = ProductGuide.text(topic, runningVersion: "0.0.12")
+            let text = ProductGuide.text(topic, runningVersion: "0.0.12", calendar: true)
             expect(text.count > 200, "\(topic.rawValue) has something to say")
             expect(!topic.title.isEmpty, "\(topic.rawValue) has a title for its chip")
             expect(
-                ProductGuide.topicIndex.contains(topic.rawValue + ":"),
+                ProductGuide.topicIndex(calendar: true).contains(topic.rawValue + ":"),
                 "\(topic.rawValue) is in the index the model picks from")
             // A wire name the model has to spell: lowercase and underscores.
             expect(
@@ -62,18 +64,21 @@ struct ProductGuideTests {
         expect(writing.contains("enter"), "and names the key that does it")
         expect(writing.contains("forward"), "and forwarding")
         expect(
-            ProductGuide.topicIndex.lowercased().contains("reply all"),
+            ProductGuide.topicIndex(calendar: false).lowercased().contains("reply all"),
             "the index says where reply all lives, so the model picks the topic in one call")
     }
 
     /// Every word a help tool can return, and the two lines the prompt carries.
     static func houseStyle() {
-        var texts = ProductGuide.Topic.allCases.map {
-            ($0.rawValue, ProductGuide.text($0, runningVersion: "0.0.12"))
+        var texts: [(String, String)] = []
+        for calendar in [false, true] {
+            texts += ProductGuide.topics(calendar: calendar).map {
+                ($0.rawValue, ProductGuide.text($0, runningVersion: "0.0.12", calendar: calendar))
+            }
+            texts.append(("shortcuts", ProductGuide.shortcuts(calendar: calendar)))
+            texts.append(("topic index", ProductGuide.topicIndex(calendar: calendar)))
         }
-        texts.append(("shortcuts", ProductGuide.shortcuts()))
         texts.append(("settings", ProductGuide.settings(matching: nil)))
-        texts.append(("topic index", ProductGuide.topicIndex))
         texts.append(("prompt intro", ProductGuide.promptIntro))
         texts.append(("prompt tools", ProductGuide.promptTools))
         for (name, text) in texts {
@@ -122,6 +127,78 @@ struct ProductGuideTests {
         expect(writing.contains("press r"), "the guide says r replies")
         expect(writing.contains("press Enter"), "the guide says Enter replies to all")
         expect(writing.contains("press f"), "the guide says f forwards")
+    }
+
+    /// The calendar's keys follow the page: absent from the overlay while it
+    /// is not offered, and with Calendar at 2 when it is. The assistant, with
+    /// no account in hand, recites them with their condition, and the guide's
+    /// prose agrees with the table about the event pane's keys.
+    static func theCalendarIsListedOnlyWhereItIsOffered() {
+        let off = ShortcutCatalog.groups(calendar: false)
+        expect(off.map(\.title) == ShortcutCatalog.groups.map(\.title), "no calendar, the table as it was")
+        expect(!off.contains { $0.title == "Calendar" }, "no Calendar group while it is not offered")
+
+        let on = ShortcutCatalog.groups(calendar: true)
+        expect(on.contains { $0.title == "Calendar" }, "the Calendar group while it is offered")
+        let navigate = on.first { $0.title == "Navigate" }
+        expect(navigate?.items.first?.keys.count == 6, "six digits with the calendar")
+        expect(navigate?.items.first?.desc.hasPrefix("sitrep · calendar") == true, "Calendar is 2")
+        expect(navigate?.items.contains { $0.keys == ["⇧C"] } == true, "⇧C opens it")
+
+        let text = ProductGuide.shortcuts(calendar: true)
+        for item in ShortcutCatalog.calendarGroup.items {
+            expect(text.contains(item.desc), "the calendar's \"\(item.desc)\" is recited")
+        }
+        expect(text.contains("- ⇧C: calendar"), "and ⇧C, under Navigate")
+        let quiet = ProductGuide.shortcuts(calendar: false)
+        expect(!quiet.contains("\nCalendar\n"), "no Calendar group recited while the page is off")
+        expect(!quiet.contains("⇧C"), "nor ⇧C")
+        func key(_ desc: String) -> [String] {
+            ShortcutCatalog.calendarGroup.items.first { $0.desc == desc }?.keys ?? []
+        }
+        let guide = ProductGuide.text(.calendar, runningVersion: nil)
+        expect(key("new event") == ["n"] && guide.contains("n, or \"New event\""), "n makes an event")
+        expect(key("edit event") == ["e"] && guide.contains("e edits"), "e edits one")
+        expect(key("save the event") == ["⌘↵"] && guide.contains("⌘↵ saves"), "⌘↵ saves")
+        expect(key("delete event") == ["⌫"] && guide.contains("⌫ deletes"), "⌫ deletes")
+        expect(guide.contains("plain Enter does nothing"), "plain Enter never tells guests")
+    }
+
+    /// THE CALENDAR PAGE OFF IS MAIN, BYTE FOR BYTE (fix round 1, C1). The
+    /// guide, the topic list and the product_help schema built from them go
+    /// to every tenant's assistant, and before the flag is on for a mailbox
+    /// none of it may mention a page that mailbox does not have. The list is
+    /// main's own, spelled out; the prose is held to having no calendar page
+    /// in it, and was diffed against main's output when this was written.
+    static func withTheCalendarOffTheGuideIsMains() {
+        let mains = [
+            "getting_around", "sitrep", "reading_mail", "writing_mail", "mail_list", "triage",
+            "sender_rules", "reminders", "search", "login_codes", "assistant", "app_and_accounts",
+            "whats_new",
+        ]
+        expect(ProductGuide.topics(calendar: false).map(\.rawValue) == mains, "off: main's topics, in main's order")
+        expect(
+            ProductGuide.topics(calendar: true).map(\.rawValue)
+                == ["getting_around", "sitrep", "calendar"] + mains.dropFirst(2),
+            "on: the calendar topic third")
+        let index = ProductGuide.topicIndex(calendar: false)
+        expect(!index.contains("calendar:"), "off: the schema offers no calendar topic")
+        expect(!index.contains("Calendar page"), "nor describes the page")
+        expect(ProductGuide.topicIndex(calendar: true).contains("calendar: the Calendar page"), "on: it does")
+        for topic in ProductGuide.topics(calendar: false) {
+            let text = ProductGuide.text(topic, runningVersion: "0.0.12", calendar: false)
+            expect(!text.contains("Calendar page"), "off: \(topic.rawValue) says nothing of the page")
+            expect(!text.contains("⇧C"), "off: \(topic.rawValue) teaches no ⇧C")
+        }
+        let off = ProductGuide.text(.gettingAround, runningVersion: nil, calendar: false)
+        expect(off.contains("- 1 Sitrep:"), "off: 1 is the sitrep")
+        expect(off.contains("- 2 Emails:") && off.contains("- 5 Groups:"), "off: Emails 2 to Groups 5")
+        expect(!off.contains("- 6 "), "off: no sixth page")
+        expect(off.contains("modifier):\n- 1 Sitrep"), "the list sits right under its heading")
+        expect(off.contains("named sets of recipients.\n- Usage and Settings"), "and runs straight on")
+        let on = ProductGuide.text(.gettingAround, runningVersion: nil, calendar: true)
+        expect(on.contains("- 2 Calendar:") && on.contains("- 3 Emails:"), "on: Calendar 2, Emails 3")
+        expect(on.contains("- 6 Groups:"), "on: Groups 6")
     }
 
     // MARK: - settings

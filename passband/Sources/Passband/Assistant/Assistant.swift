@@ -321,9 +321,12 @@ enum Lane: String, Sendable {
     /// The definitions the model is SHOWN. Filtered from the one inventory by
     /// name, so a tool renamed in AgentTools cannot leave a lane quietly
     /// offering a tool that no longer exists.
-    var definitions: [Wire.ToolDef] {
+    ///
+    /// `calendar` is `AppStore.calendarPageAvailable`: whether the guide's
+    /// topic list may name the Calendar page (`AgentTools.definitions`).
+    func definitions(calendar: Bool) -> [Wire.ToolDef] {
         let allowed = toolNames
-        return AgentTools.definitions.filter { allowed.contains($0.name) }
+        return AgentTools.definitions(calendar: calendar).filter { allowed.contains($0.name) }
     }
 
     /// The lane's own model preference. The search lane runs on every deeper
@@ -841,7 +844,8 @@ final class AssistantSession {
                 body = try encoder.encode(
                     Wire.Request(
                         model: model.rawValue, max_tokens: Self.maxTokens, system: system(pin),
-                        tools: lane.definitions, messages: history))
+                        tools: lane.definitions(calendar: AppStore.shared.calendarPageAvailable),
+                        messages: history))
             } catch {
                 fail(errorText(error))
                 return

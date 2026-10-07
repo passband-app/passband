@@ -1860,6 +1860,371 @@ pub async fn get_calendar(
     .await
 }
 
+// --- GET /client/timeline, PATCH /client/timeline/ghosts/{id} ---------------
+
+/// The default window around now, and the widest one a caller may ask for.
+/// A wider range clamps (its end moves in), like every other out-of-range
+/// knob on this door; it is not a 400.
+const TIMELINE_DEFAULT_BEHIND: chrono::Duration = chrono::Duration::days(1);
+const TIMELINE_DEFAULT_AHEAD: chrono::Duration = chrono::Duration::days(90);
+const TIMELINE_MAX_SPAN: chrono::Duration = chrono::Duration::days(400);
+
+#[derive(Debug, Deserialize)]
+pub struct TimelineQuery {
+    /// RFC3339, with any `+` in the offset percent-encoded (a bare `+` in a
+    /// query string decodes to a space). Taken as text so a bad value is this
+    /// door's own 400 rather than the extractor's.
+    from: Option<String>,
+    to: Option<String>,
+}
+
+fn timeline_bound(raw: Option<&str>) -> Result<Option<DateTime<chrono::FixedOffset>>, ApiError> {
+    raw.map(|raw| {
+        DateTime::parse_from_rfc3339(raw.trim())
+            .map_err(|_| ApiError::bad_request("from and to must be RFC3339 timestamps"))
+    })
+    .transpose()
+}
+
+/// One ghost as served. SERIALIZED SHAPE IS A WIRE CONTRACT for the timeline
+/// client.
+///
+/// AN ESTIMATE IS NEVER SERVED AS A FACT: `end` is the resolved end and
+/// `end_source` / `end_estimated` say which tier produced it, while `estimate`
+/// is the model's own guess as stored, served even when a stronger tier wins
+/// so the client can say what it was overruled by. A date-only ghost with no
+/// stated or corrected end has no end at all (`end`, `end_source` null).
+fn ghost_view(
+    ghost: &squelch_core::types::GhostEvent,
+    now: DateTime<chrono::FixedOffset>,
+) -> serde_json::Value {
+    let end = ghost.effective_end();
+    json!({
+        "id": ghost.id,
+        "kind": ghost.kind,
+        "title": ghost.title,
+        "start": ghost.start.to_string(),
+        "start_timezone": ghost.start_timezone,
+        "all_day": ghost.all_day(),
+        "end": end.as_ref().map(|e| e.end.to_string()),
+        "end_estimated": end.as_ref().is_some_and(|e| e.estimated),
+        "end_source": end.as_ref().map(|e| e.source),
+        // Laundering blanks a `basis` or `reason` it will not show; an empty
+        // string is served as null so a client has one "no text" to handle.
+        "estimate": ghost.estimate.as_ref().map(|e| json!({
+            "minutes": e.minutes,
+            "basis": (!e.basis.is_empty()).then_some(&e.basis),
+        })),
+        "location": ghost.location,
+        "commitment": ghost.commitment,
+        "state": ghost.state(now),
+        // What the mail says, apart from the user's word: `state` reads
+        // `going` or `dismissed` over a real cancellation.
+        "mail_state": ghost.mail_state,
+        // False for a ghost made from mail that did not pass authentication.
+        "verified": ghost.verified(),
+        "likelihood": ghost.served_likelihood().map(|l| json!({
+            "band": l.band,
+            "reason": (!l.reason.is_empty()).then_some(&l.reason),
+        })),
+        "sources": ghost.sources.iter().map(|s| json!({
+            "message_id": s.message_id,
+            "thread_id": s.thread_id,
+            "role": s.role,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// `GET /client/timeline?from=&to=`: the calendar ghosts and the real Google
+/// Calendar events whose start falls in `[from, to)`, each by start, and the
+/// calendar sync's status. HUMAN DOOR ONLY: the agent door has no timeline
+/// route (docs/CALENDAR.md §10 leaves that open, and until it is decided the
+/// answer is no).
+///
+/// `{ "ghosts": [...], "events": [...], "calendars": [...], "calendar":
+/// {granted, synced_at, error, truncated} }`. Events and calendars are served
+/// only while calendar is granted. `calendars` is every calendar being read,
+/// the primary first: `{id, name, color, primary, writable, can_invite}`,
+/// `writable` being whether the app may create events on it (the user is
+/// `owner` or `writer`) and `can_invite` whether an event on it may carry
+/// guests (the user's own: the primary calendar, or one they are `owner` of).
+/// `error` is the credential's or the PRIMARY calendar's (a shared calendar
+/// that cannot be read is not an account error). `truncated` is true when
+/// the listing hit its cap (it keeps the events nearest now) or a calendar
+/// holds fewer events than Google has (its own cap, likewise nearest now).
+/// Each ghost
+/// carries `matched_event` (`{calendar_id, id}` or null): a real event at the
+/// same start whose title matches ([`squelch_core::gcal::ghost_matches`]),
+/// computed here for display de-duplication and never stored.
+///
+/// Defaults: `from` is a day ago and `to` is `from` plus the default window
+/// (so with neither, now-1d to now+90d). `state` is judged at the server's
+/// clock read in `from`'s offset, so a date-only ghost expires at the end of
+/// the CALLER's day when the caller sends its own offset.
+pub async fn get_timeline(
+    State(state): State<ApiState>,
+    Query(q): Query<TimelineQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let now = Utc::now();
+    let from = timeline_bound(q.from.as_deref())?
+        .unwrap_or_else(|| (now - TIMELINE_DEFAULT_BEHIND).fixed_offset());
+    // Checked: `+` panics past chrono's year range, and `from` is the caller's.
+    let later = |span| {
+        from.checked_add_signed(span)
+            .ok_or_else(|| ApiError::bad_request("from is out of range"))
+    };
+    let to = match timeline_bound(q.to.as_deref())? {
+        Some(to) => to,
+        None => later(TIMELINE_DEFAULT_BEHIND + TIMELINE_DEFAULT_AHEAD)?,
+    };
+    let to = to.min(later(TIMELINE_MAX_SPAN)?);
+    // Real events are served only while calendar is granted: a grant taken
+    // back hides what was synced under it.
+    let granted = match state.calendar() {
+        Some(calendar) => calendar.granted().await,
+        None => false,
+    };
+    let (ghosts, events, calendars, status) = store_call(&state, move |store, account_id| {
+        let ghosts = store.list_ghost_events(account_id, from, to)?;
+        if !granted {
+            return Ok((ghosts, Vec::new(), Vec::new(), Default::default()));
+        }
+        let (events, cut) = store.list_calendar_events(account_id, from, to, now)?;
+        let mut status: squelch_core::gcal::CalendarStatus = store.calendar_status(account_id)?;
+        status.truncated |= cut;
+        let calendars: Vec<_> = store
+            .calendar_calendars(account_id)?
+            .into_iter()
+            .filter(|c| c.selected)
+            .collect();
+        Ok((ghosts, events, calendars, status))
+    })
+    .await?;
+    // The display match, computed here and never stored, so it can never go
+    // stale and never changes a ghost.
+    let matched = squelch_core::gcal::match_ghosts(
+        ghosts.iter().map(|g| (g.title.as_str(), &g.start)),
+        &events,
+    );
+    let now = now.with_timezone(from.offset());
+    let ghosts: Vec<_> = ghosts
+        .iter()
+        .zip(matched)
+        .map(|(g, matched)| {
+            let mut view = ghost_view(g, now);
+            view["matched_event"] = match matched.map(|i| &events[i]) {
+                Some(event) => {
+                    json!({ "calendar_id": event.calendar_id, "id": event.row.event_id })
+                }
+                None => serde_json::Value::Null,
+            };
+            view
+        })
+        .collect();
+    let account_email = state
+        .calendar()
+        .map(|c| c.account_email().to_string())
+        .unwrap_or_default();
+    let events: Vec<_> = events
+        .iter()
+        .map(|e| calendar_event_view(e, &account_email))
+        .collect();
+    let calendars: Vec<_> = calendars
+        .iter()
+        .map(|c| {
+            json!({
+                "id": c.calendar_id,
+                "name": c.summary,
+                "color": c.color,
+                "primary": c.is_primary,
+                "writable": c.writable(),
+                "can_invite": c.can_invite(),
+            })
+        })
+        .collect();
+    Ok((
+        no_store(),
+        Json(json!({
+            "ghosts": ghosts,
+            "events": events,
+            "calendars": calendars,
+            "calendar": {
+                "granted": granted,
+                "synced_at": status.synced_at.map(|at| at.to_rfc3339()),
+                "error": status.error.map(|kind| kind.as_str()),
+                "truncated": status.truncated,
+            },
+        })),
+    ))
+}
+
+/// One real calendar event as served. SERIALIZED SHAPE IS A WIRE CONTRACT for
+/// the timeline client. HUMAN DOOR ONLY: the title, place, organizer and link
+/// are the user's personal data and no agent route serves them.
+///
+/// `start` / `end` are the ghosts' text form and convention: an all-day
+/// `end` is the INCLUSIVE last day (Google's exclusive `end.date` minus one),
+/// and null for a one-day event, as a one-day ghost has none. `busy` is false
+/// when the event is marked free. Declined events are served; the client
+/// hides them. `color` is the event's own colour or its calendar's
+/// (`#rrggbb`, or null when Google gave neither), `editable` the edit guard
+/// ([`squelch_core::gcal::SyncedEvent::editable`]) for `account_email`, and
+/// `description` laundered text of at most 2000 characters. `guests` is the
+/// event's attendees as Google lists them (`{email, name, response,
+/// organizer, self}`, `response` one of `accepted` / `declined` /
+/// `tentative` / `pending`), at most 100 and `[]` when it has none;
+/// `guests_truncated` says Google holds more than are listed, and
+/// `guest_editable` is the guest guard
+/// ([`squelch_core::gcal::SyncedEvent::guest_editable`]).
+pub(crate) fn calendar_event_view(
+    event: &squelch_core::gcal::SyncedEvent,
+    account_email: &str,
+) -> serde_json::Value {
+    let row = &event.row;
+    json!({
+        "id": row.event_id,
+        "calendar_id": event.calendar_id,
+        "calendar_name": event.calendar_name,
+        "title": row.summary,
+        "start": row.start.to_string(),
+        "end": row.end.map(|e| e.to_string()),
+        "all_day": row.all_day(),
+        "start_timezone": row.start_timezone,
+        "location": row.location,
+        "status": if row.tentative { "tentative" } else { "confirmed" },
+        "self_response": row.self_response.map(|r| r.as_str()),
+        "busy": !row.transparent,
+        "organizer": row.organizer_email,
+        "html_link": row.html_link,
+        "color": event.color(),
+        "editable": event.editable(account_email),
+        "description": row.description,
+        "guests": row.guests.iter().map(|g| json!({
+            "email": g.email,
+            "name": g.name,
+            "response": g.response.as_str(),
+            "organizer": g.organizer,
+            "self": g.is_self,
+        })).collect::<Vec<_>>(),
+        "guests_truncated": row.guests_truncated,
+        "guest_editable": event.guest_editable(account_email),
+    })
+}
+
+/// The least time between two calendar syncs one account may start from the
+/// human door.
+const TIMELINE_REFRESH_FLOOR: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// `POST /client/timeline/refresh`: start a calendar sync now. The client
+/// calls it when the calendar page opens. Always 202: `kicked` says whether a
+/// sync was started. At most one per account per 30 seconds, held in memory
+/// across requests and clients; inside the floor, or with no sync loop
+/// running, nothing is done. A kick also never cuts short the loop's own
+/// backoff after Google rate-limited it.
+///
+/// A READ-path trigger, like the shipments poll: no Gmail write, nothing to
+/// audit. HUMAN DOOR ONLY.
+pub async fn refresh_timeline(State(state): State<ApiState>) -> impl IntoResponse {
+    let refresh = &state.calendar_refresh;
+    let kicked = match &refresh.kick {
+        Some(kick) => {
+            let now = std::time::Instant::now();
+            let mut last = refresh.last_kick.lock().unwrap_or_else(|e| e.into_inner());
+            let due = last
+                .get(&state.account_id)
+                .is_none_or(|at| now.duration_since(*at) >= TIMELINE_REFRESH_FLOOR);
+            if due {
+                last.insert(state.account_id, now);
+                kick.notify_one();
+            }
+            due
+        }
+        None => false,
+    };
+    (
+        StatusCode::ACCEPTED,
+        no_store(),
+        Json(json!({ "kicked": kicked })),
+    )
+}
+
+/// A field that tells ABSENT from an explicit `null`: absent stays `None`,
+/// while `null` arrives as `Some(Value::Null)` (plain `Option` would fold it
+/// into `None`). Raw values, so a wrong type is this door's own 400.
+fn present<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde_json::Value::deserialize(deserializer).map(Some)
+}
+
+/// `PATCH /client/timeline/ghosts/{id}` body. Each field: absent leaves it
+/// alone, `null` clears it.
+#[derive(Debug, Deserialize)]
+pub struct GhostPatchBody {
+    /// `"dismissed"`, `"going"` or `null`.
+    #[serde(default, deserialize_with = "present")]
+    state: Option<serde_json::Value>,
+    /// The user's corrected end: RFC3339 for a timed ghost, `YYYY-MM-DD` for a
+    /// date-only one, or `null` to fall back to the estimate.
+    #[serde(default, deserialize_with = "present")]
+    end: Option<serde_json::Value>,
+}
+
+/// `PATCH /client/timeline/ghosts/{id}`: the user's word on a ghost. HUMAN DOOR
+/// ONLY, like every write. Both fields are user-owned columns the projection
+/// never overwrites, so a later mail cannot undo a dismissal or a correction.
+///
+/// The body is validated before the store is called, and the store applies
+/// both fields in ONE transaction, so a refused end (the one check that needs
+/// the ghost's start) is a 400 that leaves the state untouched too. An unknown
+/// id and another account's are the same 404.
+pub async fn patch_ghost(
+    State(state): State<ApiState>,
+    Path(ghost_id): Path<i64>,
+    Json(body): Json<GhostPatchBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    use serde_json::Value;
+    use squelch_core::triage::ghost::EventTime;
+    use squelch_core::types::GhostUserState;
+
+    let user_state = match body.state {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(Value::String(raw)) => Some(Some(GhostUserState::parse(&raw).ok_or_else(|| {
+            ApiError::bad_request("state must be \"dismissed\", \"going\" or null")
+        })?)),
+        Some(_) => {
+            return Err(ApiError::bad_request(
+                "state must be \"dismissed\", \"going\" or null",
+            ));
+        }
+    };
+    let bad_end =
+        || ApiError::bad_request("end must be an RFC3339 timestamp, a YYYY-MM-DD date, or null");
+    let user_end = match body.end {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(Value::String(raw)) => Some(Some(EventTime::parse(&raw).ok_or_else(bad_end)?)),
+        Some(_) => return Err(bad_end()),
+    };
+    if user_state.is_none() && user_end.is_none() {
+        return Err(ApiError::bad_request(
+            "nothing to change: send state, end, or both",
+        ));
+    }
+
+    let at = Utc::now();
+    let found = store_call(&state, move |store, account_id| {
+        store.patch_ghost_user(account_id, ghost_id, user_end, user_state, at)
+    })
+    .await?;
+    if !found {
+        return Err(ApiError::not_found());
+    }
+    Ok((no_store(), Json(json!({ "updated": true, "id": ghost_id }))))
+}
+
 // --- GET/POST/DELETE /client/rules ------------------------------------------
 
 pub async fn list_rules(State(state): State<ApiState>) -> Result<impl IntoResponse, ApiError> {
@@ -2643,6 +3008,28 @@ pub struct PersonThreadView {
     last_at: String,
 }
 
+/// A person's timezone on the card: the zone, where it came from (`user`,
+/// `invite`, `offsets`), how sure the inference is (`high`, `medium`), and the
+/// zone's offset from UTC right now, so a client without a zone database can
+/// still write "5:00pm ET" without guessing whether daylight saving is on.
+#[derive(Debug, Serialize)]
+pub struct PersonTimezoneView {
+    zone: String,
+    source: &'static str,
+    confidence: &'static str,
+    utc_offset_minutes: i32,
+}
+
+fn timezone_view(tz: Option<squelch_core::timezone::InferredZone>) -> Option<PersonTimezoneView> {
+    let tz = tz?;
+    Some(PersonTimezoneView {
+        utc_offset_minutes: tz.utc_offset_minutes(Utc::now())?,
+        source: tz.source.as_str(),
+        confidence: tz.confidence.as_str(),
+        zone: tz.zone,
+    })
+}
+
 /// The wire shape of the reader's contact card. The optional parts are ABSENT,
 /// never null, when there is nothing to say: no mail from them, never written
 /// to, no rule covers them.
@@ -2661,6 +3048,8 @@ pub struct PersonView {
     rule: Option<PersonRuleView>,
     groups: Vec<PersonGroupView>,
     recent_threads: Vec<PersonThreadView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timezone: Option<PersonTimezoneView>,
 }
 
 /// GET /client/person?addr= — everything the store knows about one address,
@@ -2672,6 +3061,8 @@ pub struct PersonView {
 /// be walked into a directory dump without already knowing every address.
 /// Sealed mail is absent from every count and list on it (see
 /// `SqliteStore::person_record`). `no-store`, for the same reason as senders.
+/// `timezone` is part of the `calendar` hidden feature: with it off the key is
+/// absent, as on main, though the inference behind it keeps running.
 pub async fn get_person(
     State(state): State<ApiState>,
     Query(params): Query<PersonQuery>,
@@ -2723,8 +3114,65 @@ pub async fn get_person(
                 last_at: t.last_at.to_rfc3339(),
             })
             .collect(),
+        timezone: if state.features().enabled(squelch_core::features::CALENDAR) {
+            timezone_view(p.timezone)
+        } else {
+            None
+        },
     };
     Ok((no_store(), Json(view)))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PersonTimezoneBody {
+    addr: String,
+    /// An IANA zone name to set, or `null` to clear the override. REQUIRED,
+    /// null included: a body that forgot the key must not read as "clear".
+    #[serde(deserialize_with = "required_nullable")]
+    zone: Option<String>,
+}
+
+/// `Option<T>` that must be PRESENT in the body: `null` is `None`, a missing
+/// key is a 4xx. Plain `Option` would read an absent key as `None`.
+fn required_nullable<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d)
+}
+
+/// PUT /client/person/timezone `{"addr": "...", "zone": "America/Chicago"}`:
+/// the user's own word on where someone is, which outranks every inferred
+/// signal. `"zone": null` clears it and the card goes back to inference.
+/// Answers `{"timezone": {...}}` or `{"timezone": null}`: what the card now
+/// shows, so the client need not re-read the whole card.
+///
+/// HUMAN DOOR ONLY, like the card it edits. A local write: nothing reaches
+/// Gmail. 400 for an address that is not one, a zone name `chrono-tz` does not
+/// know ("Eastern Standard Time", "PDT"), or the account's own address, whose
+/// zone is the device's. Not audited, like the user's word on a ghost: it
+/// changes a suggestion on this machine and acts on nothing.
+pub async fn put_person_timezone(
+    State(state): State<ApiState>,
+    Json(body): Json<PersonTimezoneBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let addr = body.addr.trim().to_string();
+    if addr.is_empty() || !addr.contains('@') || addr.len() > 320 {
+        return Err(ApiError::bad_request("addr must be an email address"));
+    }
+    let zone = body.zone.map(|z| z.trim().to_string());
+    if zone.as_ref().is_some_and(|z| z.is_empty() || z.len() > 64) {
+        return Err(ApiError::bad_request("unknown timezone"));
+    }
+    let shown = store_call(&state, move |store, account_id| {
+        store.set_person_timezone(account_id, &addr, zone.as_deref())
+    })
+    .await?;
+    Ok((
+        no_store(),
+        Json(json!({ "timezone": timezone_view(shown) })),
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -3207,8 +3655,11 @@ pub async fn get_stats(State(state): State<ApiState>) -> Result<impl IntoRespons
             // Only on the broken path: a link to re-consent is noise while the
             // mailbox works, and worse, an invitation to re-consent for no
             // reason.
+            // `hint` names this mailbox so the control plane pre-selects it at
+            // Google and refuses a consent from any other account.
             if let Some(origin) = state.console_sso_url() {
-                gmail["reconnect_url"] = json!(format!("{origin}/reconnect"));
+                gmail["reconnect_url"] =
+                    json!(format!("{origin}/reconnect?hint={}", url_component(&email)));
             }
         }
         body["gmail"] = gmail;
@@ -3284,7 +3735,58 @@ pub async fn get_stats(State(state): State<ApiState>) -> Result<impl IntoRespons
     // click would read as a broken app. The client hides every schedule door
     // (the clock, the Sent group) without this flag.
     body["scheduled_send"] = json!(true);
+    // And for the calendar timeline: whether GET /client/timeline and PATCH
+    // /client/timeline/ghosts/{id} exist. A LOUD failure like scheduled send
+    // (an old daemon 404s them), so the client shows no timeline without it.
+    //
+    // BEHIND THE `calendar` HIDDEN FEATURE: off, those routes 404 (see
+    // `calendar_routes`), so this says `false`, the answer the client already
+    // reads as "no Calendar page", and the `calendar` object below is left
+    // out. Asked now, so a flag flipped under a running daemon shows on the
+    // next poll.
+    let calendar_on = state.features().enabled(squelch_core::features::CALENDAR);
+    body["timeline"] = json!(calendar_on);
+    if calendar_on {
+        // IS GOOGLE CALENDAR GRANTED, and if not, how to grant it. Present
+        // whenever the feature is on (an old daemon's silence, like a feature
+        // that is off, is the client's "no calendar"), and human door only: no
+        // agent route carries it.
+        //
+        // `granted` is the token resolver's answer, read off the scopes recorded
+        // on the stored token, with no call to Google. `connect_url` is the
+        // hosted/self-host split exactly as `gmail.reconnect_url` is: the console
+        // origin when this daemon has one, with the mailbox as `hint` so the
+        // control plane pre-selects it and refuses any other account. Without
+        // one, the command a self-host runs.
+        let granted = match state.calendar() {
+            Some(calendar) => calendar.granted().await,
+            None => false,
+        };
+        let connect_url = state.console_sso_url().map(|origin| {
+            format!(
+                "{origin}/reconnect?calendar=1&hint={}",
+                url_component(&email)
+            )
+        });
+        let connect_command = connect_url.is_none().then_some("squelchd auth --calendar");
+        // `self_connect`: whether `POST /client/calendar/connect` runs the consent
+        // here (a self-host with an OAuth client). The client's one Connect button
+        // calls it when true and opens `connect_url` otherwise; `connect_command`
+        // stays for older builds that still print it.
+        body["calendar"] = json!({
+            "granted": granted,
+            "connect_url": connect_url,
+            "connect_command": connect_command,
+            "self_connect": crate::calendar_connect::self_connect(&state),
+        });
+    }
     Ok(Json(body))
+}
+
+/// One query-string value, percent-encoded so an address's `+` and `@` reach
+/// the control plane as written.
+fn url_component(value: &str) -> String {
+    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
 fn rfc3339(unix: i64) -> Option<String> {

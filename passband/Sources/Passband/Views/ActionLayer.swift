@@ -85,7 +85,9 @@ struct ActionLayer: View {
             // the clock above is: the pane is too narrow to hold a scrim.
             if store.discardAsk != nil { DiscardConfirm() }
             if store.askBarOpen { AskBar { store.askBarOpen = false } }
-            if store.shortcutsOpen { ShortcutsOverlay { store.shortcutsOpen = false } }
+            if store.shortcutsOpen {
+                ShortcutsOverlay(calendar: store.calendarPageAvailable) { store.shortcutsOpen = false }
+            }
             // Above everything else in this layer, because it is shown at most
             // once per version at a moment nothing else has been raised yet, and
             // a modal that can end up UNDER something has to be dismissed twice
@@ -97,6 +99,19 @@ struct ActionLayer: View {
             // behind whatever else happened to be open.
             if let days = store.retriageAsk { RetriageConfirm(days: days) }
             if let ask = store.reconnectAsk { ReconnectAccountPrompt(ask: ask) }
+            // The calendar connect card: same slot and same reasoning as the
+            // reconnect prompt above, which it is built like. Only for the
+            // account it was raised for (`calendarCardUp`): a switch that
+            // happens under it takes it down, whatever else is cleared.
+            if let ask = store.calendarConnectAsk, store.calendarCardUp {
+                CalendarConnectCard(ask: ask)
+            }
+            // The delete question, the calendar page's own card, for the
+            // account it was raised under. (The event editor is not here any
+            // more: it is a pane in the shell's layout, like the composer.)
+            if let ask = store.calendarDeleteAsk, ask.epoch == store.epoch {
+                CalendarDeleteConfirm(ask: ask)
+            }
             // LAST, and it outranks even the card above: that one is a greeting
             // the user can dismiss, this one is the app being unavailable while
             // a re-triage rewrites what every other overlay here is about.
@@ -210,6 +225,9 @@ struct ActionLayer: View {
 /// assistant's list_shortcuts tool also reads, so the two cannot disagree.
 struct ShortcutsOverlay: View {
     @Environment(AppStore.self) private var store
+    /// Whether the Calendar page is offered, so its keys are listed only where
+    /// they do something.
+    var calendar = false
     let onClose: () -> Void
 
     /// The sheet's way out to the assistant. It CLOSES THE SHEET FIRST: the
@@ -232,7 +250,7 @@ struct ShortcutsOverlay: View {
                     columns: [GridItem(.flexible(), spacing: Space.scaled(22)), GridItem(.flexible())],
                     alignment: .leading, spacing: Space.scaled(18)
                 ) {
-                    ForEach(ShortcutCatalog.groups) { group in
+                    ForEach(ShortcutCatalog.groups(calendar: calendar)) { group in
                         VStack(alignment: .leading, spacing: Space.scaled(5)) {
                             Text(group.title)
                                 .font(Typo.sectionLabel)

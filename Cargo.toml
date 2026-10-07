@@ -19,6 +19,13 @@ tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
+# IANA zone names, for laundering the zone a triage `event` record claims
+# (triage/ghost.rs) and, next, for reading a ghost's start in its own zone.
+chrono-tz = "0.10"
+# The Public Suffix List, compiled in (private section included), for the
+# sender scope a calendar ghost belongs to (triage/ghost.rs): `hotel.com.mx`
+# and `evil.com.mx` must not share `com.mx`.
+psl = "2"
 thiserror = "2"
 anyhow = "1"
 rusqlite = { version = "0.32", features = ["bundled", "chrono"] }

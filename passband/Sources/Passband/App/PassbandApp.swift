@@ -236,8 +236,10 @@ struct PassbandCommands: Commands {
             // RootView.globalBindings do the routing — which they always did,
             // behind the dispatcher's input guard, so nothing was lost but the
             // menu's ability to advertise them.
-            ForEach(Array(MainView.mainViews.enumerated()), id: \.element) { _, view in
-                Button(view.label) { store.setView(view) }
+            // Calendar rides second when it is offered, and takes the 2:
+            // same list as the rail, from the same gate.
+            ForEach(MainView.railViews(calendar: store.calendarPageAvailable), id: \.view) { row in
+                Button(row.view.label) { store.setView(row.view) }
                     .disabled(blocked)
             }
             Divider()

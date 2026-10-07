@@ -60,11 +60,18 @@ const MAILBOX: &str = "ada@example.com";
 const READONLY: &str = "https://www.googleapis.com/auth/gmail.readonly";
 const MODIFY: &str = "https://www.googleapis.com/auth/gmail.modify";
 const SEND: &str = "https://www.googleapis.com/auth/gmail.send";
+const CAL_EVENTS: &str = "https://www.googleapis.com/auth/calendar.events";
+const CAL_LIST: &str = "https://www.googleapis.com/auth/calendar.calendarlist.readonly";
 
 /// What a consent that left every box checked reports back, the way Google
 /// spells a scope set: space delimited, in one string.
 fn full_grant() -> String {
     format!("{READONLY} {MODIFY} {SEND}")
+}
+
+/// A calendar consent with every box left checked.
+fn calendar_grant() -> String {
+    format!("{READONLY} {MODIFY} {SEND} {CAL_EVENTS} {CAL_LIST}")
 }
 
 /// One tenant as the mock warden holds it: the identity it minted (which never
@@ -135,6 +142,9 @@ struct Recorder {
     /// The `scope` the mock Google reports on the token. `None` is the whole set
     /// signup asks for; `Some` is a user who unchecked something.
     granted_scope: Option<String>,
+    /// The mailbox the mock Gmail profile names. `None` is [`MAILBOX`]; `Some`
+    /// is a consent finished while signed in as somebody else.
+    profile_email: Option<String>,
     /// What `GET /v1/tenants/{label}/devices` answers, by label: a present
     /// entry is a 200 with this `first_paired_at` (None = the null body,
     /// nobody paired yet), an absent one is a 404. Labels listed in
@@ -205,7 +215,15 @@ async fn spawn_google(rec: Shared) -> String {
         )
         .route(
             "/profile",
-            get(|| async { Json(json!({ "emailAddress": MAILBOX })) }),
+            get(|AxumState(rec): AxumState<Shared>| async move {
+                let email = rec
+                    .lock()
+                    .unwrap()
+                    .profile_email
+                    .clone()
+                    .unwrap_or_else(|| MAILBOX.to_string());
+                Json(json!({ "emailAddress": email }))
+            }),
         )
         .with_state(rec);
     spawn(app).await
@@ -792,6 +810,29 @@ impl Harness {
     }
 
     /// How the store recorded the invite: `(used_by_label, still available)`.
+    /// Turn hidden feature `key` on for `label`, as a ticked box on
+    /// `/admin/features` would.
+    async fn grant_feature(&self, label: &str, key: &str) {
+        let store = self.state.store();
+        let board = store.feature_board().await.unwrap();
+        let id = board
+            .tenants
+            .iter()
+            .find(|t| t.label == label)
+            .expect("an active tenant")
+            .id;
+        store
+            .save_features(
+                &[id],
+                &[key.to_string()],
+                &[(id, key.to_string())],
+                &[],
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+    }
+
     async fn invite_row(&self) -> (Option<String>, bool) {
         let rows = self.state.store().list_invites().await.unwrap();
         let row = rows.last().expect("the harness minted one").clone();
@@ -886,9 +927,34 @@ impl Harness {
         (location, cookie)
     }
 
+    /// Start a reconnect with a query string of the test's choosing, the way
+    /// the daemon's `connect_url` and `reconnect_url` arrive.
+    async fn start_reconnect_with(&self, query: &str) -> (String, String) {
+        let (status, headers, _) = self.get(&format!("/reconnect?{query}"), None).await;
+        assert_eq!(status, StatusCode::FOUND, "reconnect should redirect");
+        assert_eq!(
+            headers.get_all(header::LOCATION).iter().count(),
+            1,
+            "exactly one Location"
+        );
+        let location = headers[header::LOCATION].to_str().unwrap().to_string();
+        let cookie = headers[header::SET_COOKIE].to_str().unwrap().to_string();
+        let cookie = cookie.split(';').next().unwrap().to_string();
+        (location, cookie)
+    }
+
     /// Walk a whole reconnect: the hop out, then Google's redirect back.
     async fn run_reconnect(&self) -> (StatusCode, String) {
-        let (consent, cookie) = self.start_reconnect().await;
+        self.run_reconnect_with("").await
+    }
+
+    /// [`Harness::run_reconnect`] with a query string on `/reconnect`.
+    async fn run_reconnect_with(&self, query: &str) -> (StatusCode, String) {
+        let (consent, cookie) = if query.is_empty() {
+            self.start_reconnect().await
+        } else {
+            self.start_reconnect_with(query).await
+        };
         self.rec.lock().unwrap().expected_challenge = Some(query_param(&consent, "code_challenge"));
         let (status, headers, body) = self
             .get(
@@ -1034,6 +1100,10 @@ async fn signup_provisions_a_tenant_and_hands_back_a_pairing_code() {
     // neither.
     assert_eq!(query_param(&consent_url, "access_type"), "offline");
     assert_eq!(query_param(&consent_url, "prompt"), "consent");
+    // Incremental, so a later grant never loses an earlier one; and signup
+    // names no account and asks for no calendar.
+    assert_eq!(query_param(&consent_url, "include_granted_scopes"), "true");
+    assert_eq!(query_param(&consent_url, "login_hint"), "");
 
     // Hold the exchange to the PKCE challenge that rode on THIS consent URL,
     // so the verifier is proven rather than merely present.
@@ -2317,6 +2387,21 @@ async fn reconnect_page(h: &Harness, token: &str) -> (HeaderMap, String) {
     (headers, body)
 }
 
+/// The `purpose` of every job row, oldest first.
+async fn job_purposes(h: &Harness) -> Vec<String> {
+    common::raw_client(&h.db_url)
+        .await
+        .query(
+            "SELECT purpose FROM reconnect_jobs ORDER BY created_at",
+            &[],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get(0))
+        .collect()
+}
+
 /// `(status, ciphertext, attempts)` of the one job row.
 async fn job_row(h: &Harness) -> (String, Option<String>, i32) {
     let row = common::raw_client(&h.db_url)
@@ -2786,12 +2871,16 @@ async fn a_reconnect_asks_google_for_a_replacement_refresh_token() {
 
     assert_eq!(query_param(&consent, "access_type"), "offline");
     assert_eq!(query_param(&consent, "prompt"), "consent");
+    // A plain reconnect made after a calendar grant must hand back a token
+    // that still carries calendar, which is what this parameter asks for.
+    assert_eq!(query_param(&consent, "include_granted_scopes"), "true");
     // And the full Gmail set: a replacement that covered less than the original
     // would leave the mailbox half readable.
     let scope = query_param(&consent, "scope");
     for want in ["gmail.readonly", "gmail.modify", "gmail.send"] {
         assert!(scope.contains(want), "scope {scope} is missing {want}");
     }
+    assert!(!scope.contains("calendar"), "{scope}");
 }
 
 /// THE CUSTODY CHECK, from the cluster's side. If the store and the warden ever
@@ -2865,5 +2954,609 @@ async fn a_reconnect_cannot_finish_a_half_done_signup() {
         h.rec.lock().unwrap().credential_puts.len(),
         installs_before,
         "a pending tenant must not be provisioned through reconnect"
+    );
+}
+
+// --- the calendar grant ------------------------------------------------------
+//
+// The same token with more scopes, through the same reconnect pipeline. The
+// link the daemon serves is `/reconnect?calendar=1&hint=<account>`.
+
+/// The link the daemon builds for this mailbox, hint URL-encoded.
+fn calendar_link() -> String {
+    format!("calendar=1&hint={}", urlencode(MAILBOX))
+}
+
+/// The slot map inside the last ciphertext installed for `label`.
+fn last_installed_slots(h: &Harness, label: &str) -> Value {
+    let armor = {
+        let r = h.rec.lock().unwrap();
+        str_field(&r.credential_puts.last().unwrap().1, "cred_read_ciphertext")
+    };
+    serde_json::from_str(&h.open_with_tenant_identity(label, &armor)).unwrap()
+}
+
+/// THE CALENDAR CONSENT URL, every parameter: the three Gmail scopes, the
+/// optional profile scope and both calendar scopes in one ask, offline, forced consent, incremental, PKCE, the
+/// callback, and the hint as `login_hint`.
+#[tokio::test]
+async fn the_calendar_consent_url_carries_every_parameter() {
+    let h = Harness::new().await;
+    let (consent, _) = h.start_reconnect_with(&calendar_link()).await;
+    eprintln!("calendar consent url: {consent}");
+
+    let url = url::Url::parse(&consent).unwrap();
+    assert!(url.path().ends_with("/authorize"), "{consent}");
+    assert_eq!(
+        query_param(&consent, "scope")
+            .split(' ')
+            .collect::<Vec<_>>(),
+        vec![
+            READONLY,
+            MODIFY,
+            SEND,
+            squelch_core::config::GOOGLE_PROFILE_SCOPE,
+            CAL_EVENTS,
+            CAL_LIST
+        ]
+    );
+    assert_eq!(query_param(&consent, "access_type"), "offline");
+    assert_eq!(query_param(&consent, "prompt"), "consent");
+    assert_eq!(query_param(&consent, "include_granted_scopes"), "true");
+    assert_eq!(query_param(&consent, "login_hint"), MAILBOX);
+    assert_eq!(query_param(&consent, "response_type"), "code");
+    assert_eq!(query_param(&consent, "code_challenge_method"), "S256");
+    assert!(!query_param(&consent, "code_challenge").is_empty());
+    assert_eq!(query_param(&consent, "client_id"), "test-client-id");
+    assert_eq!(
+        query_param(&consent, "redirect_uri"),
+        "https://signup.passband.test/oauth/callback"
+    );
+    assert_eq!(state_param(&consent).len(), 43);
+    // Every key once: a repeated parameter is one Google reads and we did not.
+    let keys: Vec<String> = url.query_pairs().map(|(k, _)| k.into_owned()).collect();
+    let mut unique = keys.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(keys.len(), unique.len(), "{keys:?}");
+
+    // A plain reconnect with a hint: the hint rides along, calendar does not.
+    let (plain, _) = h
+        .start_reconnect_with(&format!("hint={}", urlencode(MAILBOX)))
+        .await;
+    assert_eq!(query_param(&plain, "login_hint"), MAILBOX);
+    assert!(!query_param(&plain, "scope").contains("calendar"));
+    assert_eq!(query_param(&plain, "include_granted_scopes"), "true");
+    // `calendar` means calendar only when it says exactly 1.
+    for not_calendar in ["calendar=0", "calendar=true", "calendar=", "Calendar=1"] {
+        let (c, _) = h.start_reconnect_with(not_calendar).await;
+        assert!(
+            !query_param(&c, "scope").contains("calendar"),
+            "{not_calendar}"
+        );
+    }
+}
+
+/// A GRANTED calendar consent goes through the reconnect pipeline: the tenant
+/// is discovered from the consenting account, ONE token carrying calendar is
+/// sealed into both slots, the durable job records its purpose, and the status
+/// page says calendar.
+#[tokio::test]
+async fn a_granted_calendar_consent_installs_through_the_reconnect_pipeline() {
+    let h = Harness::new().await;
+    h.complete_signup("ada").await;
+    h.grant_feature("ada", "calendar").await;
+    let installs = h.rec.lock().unwrap().credential_puts.len();
+    let invite_before = h.invite_row().await;
+    h.rec.lock().unwrap().granted_scope = Some(calendar_grant());
+
+    let (status, body) = h.run_reconnect_with(&calendar_link()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("Calendar is connected"), "{body}");
+    assert!(
+        body.contains("You can close this tab and go back to Passband."),
+        "{body}"
+    );
+    assert!(!body.contains(MAILBOX), "{body}");
+    assert!(!body.contains(REFRESH_TOKEN));
+
+    assert_eq!(h.rec.lock().unwrap().credential_puts.len(), installs + 1);
+    let (label, put) = h
+        .rec
+        .lock()
+        .unwrap()
+        .credential_puts
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(label, "ada");
+    assert_eq!(put["account_email"], MAILBOX);
+    assert_eq!(put["pair"], false);
+    // ONE token in both slots, its granted scopes recorded on it.
+    let slots = last_installed_slots(&h, "ada");
+    let read = &slots["slots"][MAILBOX];
+    let write = &slots["slots"][format!("{MAILBOX}#write")];
+    assert_eq!(read, write, "the one token is sealed into both slots");
+    assert_eq!(read["refresh_token"], REFRESH_TOKEN);
+    let recorded: Vec<&str> = read["scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(recorded, vec![READONLY, MODIFY, SEND, CAL_EVENTS, CAL_LIST]);
+    assert!(slots["slots"].get(format!("{MAILBOX}#calendar")).is_none());
+
+    assert_eq!(job_purposes(&h).await, vec!["calendar"]);
+    let (job_status, ciphertext, _) = job_row(&h).await;
+    assert_eq!(job_status, "complete");
+    assert!(ciphertext.is_none());
+    assert_eq!(h.invite_row().await, invite_before, "no invite spent");
+}
+
+/// THE CALENDAR HIDDEN FEATURE. A tenant without `calendar` (no row of its
+/// own, no Everyone default) can start the consent, because the start names no
+/// tenant and must not become an oracle; but once Google has said whose
+/// mailbox this is, nothing is installed or queued and the page says calendar
+/// is not available yet. The plain reconnect is untouched. With the Everyone
+/// default on, the same consent installs.
+#[tokio::test]
+async fn a_calendar_consent_for_a_tenant_without_the_feature_installs_nothing() {
+    let h = Harness::new().await;
+    h.complete_signup("ada").await;
+    let installs = h.rec.lock().unwrap().credential_puts.len();
+    h.rec.lock().unwrap().granted_scope = Some(calendar_grant());
+    // ANOTHER tenant holds the feature: that grant is theirs, not ada's. The
+    // gate reads the grant of the tenant the consent is for, never "anyone's".
+    let other: i64 = common::raw_client(&h.db_url)
+        .await
+        .query_one(
+            "INSERT INTO tenants(label, account_email, status, created_at)
+             VALUES('bob', 'bob@example.com', 'active', '2026-10-01T00:00:00Z')
+             RETURNING id",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    h.state
+        .store()
+        .save_features(
+            &[other],
+            &["calendar".to_string()],
+            &[(other, "calendar".to_string())],
+            &[],
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        h.state
+            .store()
+            .tenant_has_feature("bob", "calendar")
+            .await
+            .unwrap(),
+        "the other tenant does hold it"
+    );
+
+    let (status, body) = h.run_reconnect_with(&calendar_link()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body.contains("Calendar isn&#39;t available for this mailbox yet.")
+            || body.contains("Calendar isn't available for this mailbox yet."),
+        "{body}"
+    );
+    assert!(!body.contains(MAILBOX), "{body}");
+    assert!(!body.contains(REFRESH_TOKEN));
+    assert_eq!(h.rec.lock().unwrap().credential_puts.len(), installs);
+    assert!(job_purposes(&h).await.is_empty(), "nothing queued");
+
+    // Everyone: the default row turns it on for this tenant too.
+    let store = h.state.store();
+    store
+        .save_features(
+            &[],
+            &["calendar".to_string()],
+            &[],
+            &["calendar".to_string()],
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
+    let (status, body) = h.run_reconnect_with(&calendar_link()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("Calendar is connected"), "{body}");
+    assert_eq!(h.rec.lock().unwrap().credential_puts.len(), installs + 1);
+    assert_eq!(job_purposes(&h).await, vec!["calendar"]);
+}
+
+/// THE GATE FAILS CLOSED: when the feature cannot be read (Postgres down,
+/// the table gone), a calendar consent installs nothing and queues nothing,
+/// and the page says to try again; it never falls through to the install.
+#[tokio::test]
+async fn a_calendar_consent_whose_feature_read_fails_installs_nothing() {
+    let h = Harness::new().await;
+    h.complete_signup("ada").await;
+    let installs = h.rec.lock().unwrap().credential_puts.len();
+    h.rec.lock().unwrap().granted_scope = Some(calendar_grant());
+    // The Everyone default would answer yes if it were read: the failure, not
+    // a "no", is what refuses.
+    h.state
+        .store()
+        .save_features(
+            &[],
+            &["calendar".to_string()],
+            &[],
+            &["calendar".to_string()],
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
+    let raw = common::raw_client(&h.db_url).await;
+    raw.execute(
+        "ALTER TABLE tenant_features RENAME TO tenant_features_gone",
+        &[],
+    )
+    .await
+    .unwrap();
+    assert!(
+        h.state
+            .store()
+            .tenant_has_feature("ada", "calendar")
+            .await
+            .is_err()
+    );
+
+    let (status, body) = h.run_reconnect_with(&calendar_link()).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert!(
+        body.contains("Reconnecting is unavailable right now"),
+        "{body}"
+    );
+    assert!(!body.contains(MAILBOX), "{body}");
+    assert!(!body.contains(REFRESH_TOKEN));
+    assert_eq!(h.rec.lock().unwrap().credential_puts.len(), installs);
+    assert!(job_purposes(&h).await.is_empty(), "nothing queued");
+
+    // The control: with the table back, the same consent installs.
+    raw.execute(
+        "ALTER TABLE tenant_features_gone RENAME TO tenant_features",
+        &[],
+    )
+    .await
+    .unwrap();
+    let (status, body) = h.run_reconnect_with(&calendar_link()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("Calendar is connected"), "{body}");
+    assert_eq!(h.rec.lock().unwrap().credential_puts.len(), installs + 1);
+}
+
+/// The plain reconnect never asks about the calendar feature.
+#[tokio::test]
+async fn a_plain_reconnect_does_not_need_the_calendar_feature() {
+    let h = Harness::new().await;
+    h.complete_signup("ada").await;
+    let installs = h.rec.lock().unwrap().credential_puts.len();
+    let (status, body) = h.run_reconnect_with("").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(h.rec.lock().unwrap().credential_puts.len(), installs + 1);
+    assert_eq!(job_purposes(&h).await, vec!["reconnect"]);
+}
+
+/// CALENDAR UNTICKED: the Gmail floor passes, calendar is absent, and NOTHING
+/// is installed or queued. The tenant keeps the credential it had.
+#[tokio::test]
+async fn an_unticked_calendar_installs_nothing() {
+    let h = Harness::new().await;
+    h.complete_signup("ada").await;
+    let installs = h.rec.lock().unwrap().credential_puts.len();
+    let bearers = h.rec.lock().unwrap().warden_bearers.len();
+    // Every Gmail box left checked, both calendar boxes unticked; and again
+    // with only the list scope, which is not a calendar grant.
+    for granted in [full_grant(), format!("{} {CAL_LIST}", full_grant())] {
+        h.rec.lock().unwrap().granted_scope = Some(granted);
+        let (consent, cookie) = h.start_reconnect_with(&calendar_link()).await;
+        h.rec.lock().unwrap().expected_challenge = Some(query_param(&consent, "code_challenge"));
+        let (status, headers, body) = h
+            .get(
+                &format!(
+                    "/oauth/callback?code=test-code&state={}",
+                    state_param(&consent)
+                ),
+                Some(&cookie),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains("Calendar was not connected"), "{body}");
+        assert!(
+            body.contains("nothing about your Passband mailbox changed"),
+            "{body}"
+        );
+        assert!(!body.contains(MAILBOX), "{body}");
+        assert!(
+            headers
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .all(|v| !v.to_str().unwrap().starts_with("pb_reconnect=")),
+            "no job to watch"
+        );
+    }
+    let (puts, asked) = {
+        let r = h.rec.lock().unwrap();
+        (r.credential_puts.len(), r.warden_bearers.len())
+    };
+    assert_eq!(puts, installs, "nothing installed");
+    assert_eq!(
+        asked, bearers,
+        "the warden was not even asked for a recipient"
+    );
+    assert!(job_purposes(&h).await.is_empty(), "nothing queued");
+}
+
+/// The Gmail floor still holds on the calendar flow: a consent missing any
+/// one Gmail scope is refused as a reconnect's is, calendar granted or not.
+#[tokio::test]
+async fn a_calendar_consent_missing_a_gmail_scope_is_refused() {
+    let h = Harness::new().await;
+    h.complete_signup("ada").await;
+    let installs = h.rec.lock().unwrap().credential_puts.len();
+    for missing in [READONLY, MODIFY, SEND] {
+        let granted: Vec<&str> = [READONLY, MODIFY, SEND, CAL_EVENTS, CAL_LIST]
+            .into_iter()
+            .filter(|s| *s != missing)
+            .collect();
+        h.rec.lock().unwrap().granted_scope = Some(granted.join(" "));
+        let (status, body) = h.run_reconnect_with(&calendar_link()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            body.contains("Passband needs all three Gmail permissions"),
+            "missing {missing}: {body}"
+        );
+        assert!(body.contains("Nothing changed"), "{body}");
+    }
+    assert_eq!(h.rec.lock().unwrap().credential_puts.len(), installs);
+    assert!(job_purposes(&h).await.is_empty());
+}
+
+/// THE HINT GUARD. The link named one account and a DIFFERENT one consented:
+/// nothing is installed, even though the consenting account owns a tenant of
+/// its own here (which a hintless reconnect would have re-sealed), and the page
+/// names neither address.
+#[tokio::test]
+async fn a_mismatched_account_with_a_hint_installs_nothing_and_names_no_address() {
+    const BOB: &str = "bob@example.com";
+    let h = Harness::new().await;
+    h.complete_signup("ada").await;
+    h.grant_feature("ada", "calendar").await;
+    // Bob has a mailbox here too.
+    h.rec.lock().unwrap().profile_email = Some(BOB.to_string());
+    h.rec.lock().unwrap().expected_challenge = None;
+    let invite = h.issue_invite().await;
+    let (status, body) = h.run_signup("bob", &invite).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let installs = h.rec.lock().unwrap().credential_puts.len();
+
+    // Ada's link, Bob's Google session.
+    for query in [calendar_link(), format!("hint={}", urlencode(MAILBOX))] {
+        h.rec.lock().unwrap().granted_scope = Some(calendar_grant());
+        let (status, body) = h.run_reconnect_with(&query).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            body.contains(
+                "That was a different Google account than this Passband mailbox. Go back to the app and try again."
+            ),
+            "{body}"
+        );
+        assert!(!body.contains(MAILBOX), "{body}");
+        assert!(!body.contains(BOB), "{body}");
+        assert!(!body.contains("example.com"), "{body}");
+    }
+    assert_eq!(
+        h.rec.lock().unwrap().credential_puts.len(),
+        installs,
+        "neither tenant was touched"
+    );
+    assert!(job_purposes(&h).await.is_empty());
+
+    // The comparison is case-insensitive: the same account in other casing
+    // is the same account, and installs.
+    h.rec.lock().unwrap().profile_email = None;
+    h.rec.lock().unwrap().granted_scope = Some(calendar_grant());
+    let (status, body) = h
+        .run_reconnect_with(&format!("calendar=1&hint={}", urlencode("ADA@Example.COM")))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("Calendar is connected"), "{body}");
+    let (label, _) = h
+        .rec
+        .lock()
+        .unwrap()
+        .credential_puts
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(label, "ada");
+}
+
+/// A hint that is not one bare address is IGNORED, never passed to Google and
+/// never a guard: the flow is exactly a hintless one. Nothing from it reaches a
+/// header or the page.
+#[tokio::test]
+async fn a_garbage_or_oversized_hint_is_ignored() {
+    let h = Harness::new().await;
+    h.complete_signup("ada").await;
+    h.grant_feature("ada", "calendar").await;
+    let oversized = format!("{}@example.com", "a".repeat(400));
+    for raw in [
+        "not-an-address".to_string(),
+        "Ada <ada@example.com>".to_string(),
+        "ada@example.com\r\nSet-Cookie: pwned=1".to_string(),
+        "ada@example.com,bob@example.com".to_string(),
+        "\"><script>alert(1)</script>@x.com".to_string(),
+        oversized.clone(),
+    ] {
+        let query = format!("calendar=1&hint={}", urlencode(&raw));
+        let (status, headers, body) = h.get(&format!("/reconnect?{query}"), None).await;
+        assert_eq!(status, StatusCode::FOUND);
+        let location = headers[header::LOCATION].to_str().unwrap();
+        assert_eq!(query_param(location, "login_hint"), "", "{raw:?}");
+        assert!(!location.contains("script"), "{location}");
+        assert!(!location.contains("pwned"), "{location}");
+        for v in headers.get_all(header::SET_COOKIE) {
+            assert!(!v.to_str().unwrap().contains("pwned"));
+        }
+        assert!(body.is_empty() || !body.contains("script"));
+    }
+
+    // And the flow completes as a hintless one would: the account Google
+    // names is the tenant, with no guard in the way.
+    h.rec.lock().unwrap().granted_scope = Some(calendar_grant());
+    let (status, body) = h
+        .run_reconnect_with(&format!("calendar=1&hint={}", urlencode(&oversized)))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("Calendar is connected"), "{body}");
+}
+
+/// A session completes as the purpose it STARTED as. The purpose lives in the
+/// server-side session, so query parameters added to the callback change
+/// nothing, and a plain reconnect whose token happens to carry calendar is
+/// still a reconnect.
+#[tokio::test]
+async fn a_session_completes_as_the_purpose_it_started_as() {
+    let h = Harness::new().await;
+    h.complete_signup("ada").await;
+    h.rec.lock().unwrap().granted_scope = Some(calendar_grant());
+
+    let (consent, cookie) = h.start_reconnect().await;
+    h.rec.lock().unwrap().expected_challenge = Some(query_param(&consent, "code_challenge"));
+    let (status, headers, _) = h
+        .get(
+            &format!(
+                "/oauth/callback?code=test-code&state={}&calendar=1&hint=bob%40example.com",
+                state_param(&consent)
+            ),
+            Some(&cookie),
+        )
+        .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let (_, body) = h.wait_for_reconnect(&reconnect_cookie(&headers)).await;
+    assert!(body.contains("You’re reconnected"), "{body}");
+    assert!(!body.contains("Calendar is connected"), "{body}");
+    assert_eq!(job_purposes(&h).await, vec!["reconnect"]);
+
+    // The other way round: a calendar session whose callback says nothing
+    // about calendar is still a calendar session, and still holds its guard.
+    h.rec.lock().unwrap().profile_email = Some("bob@example.com".to_string());
+    let (consent, cookie) = h.start_reconnect_with(&calendar_link()).await;
+    h.rec.lock().unwrap().expected_challenge = Some(query_param(&consent, "code_challenge"));
+    let (_, _, body) = h
+        .get(
+            &format!(
+                "/oauth/callback?code=test-code&state={}&calendar=0&hint=",
+                state_param(&consent)
+            ),
+            Some(&cookie),
+        )
+        .await;
+    assert!(
+        body.contains("That was a different Google account"),
+        "{body}"
+    );
+}
+
+/// THE NEWER CONSENT'S PURPOSE WINS along with its ciphertext, since the row
+/// installs the newer consent's token.
+#[tokio::test]
+async fn a_newer_consent_overwrites_a_pending_jobs_purpose() {
+    use squelch_control::reconnect::{Purpose, enqueue_for};
+    let h = Harness::new().await;
+    h.complete_signup("ada").await;
+    let ciphertext = signup_ciphertext(&h);
+    enqueue_for(
+        &h.state,
+        &"p".repeat(43),
+        "ada",
+        MAILBOX,
+        &ciphertext,
+        Purpose::Calendar,
+    )
+    .await
+    .unwrap();
+    assert_eq!(job_purposes(&h).await, vec!["calendar"]);
+    enqueue_for(
+        &h.state,
+        &"q".repeat(43),
+        "ada",
+        MAILBOX,
+        &ciphertext,
+        Purpose::Reconnect,
+    )
+    .await
+    .unwrap();
+    assert_eq!(job_purposes(&h).await, vec!["reconnect"]);
+    enqueue_for(
+        &h.state,
+        &"r".repeat(43),
+        "ada",
+        MAILBOX,
+        &ciphertext,
+        Purpose::Calendar,
+    )
+    .await
+    .unwrap();
+    assert_eq!(job_purposes(&h).await, vec!["calendar"]);
+    run_workers(&h.state).await;
+    // Every browser that joined the job reads the newest purpose's words.
+    for token in ["p".repeat(43), "q".repeat(43), "r".repeat(43)] {
+        let (_, body) = reconnect_page(&h, &token).await;
+        assert!(body.contains("Calendar is connected"), "{body}");
+    }
+}
+
+/// THE SHIPPED SCHEMA MIGRATES. A `reconnect_jobs` table written before
+/// `purpose` existed gains the column on open, and its rows read as the plain
+/// reconnects they were.
+#[tokio::test]
+async fn an_old_reconnect_jobs_table_gains_purpose_as_reconnect() {
+    let url = common::fresh_schema().await;
+    let raw = common::raw_client(&url).await;
+    raw.batch_execute(
+        "CREATE TABLE reconnect_jobs (
+            id TEXT PRIMARY KEY,
+            label TEXT NOT NULL,
+            account_email TEXT NOT NULL,
+            ciphertext TEXT,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK (status IN ('pending', 'complete', 'refused', 'gave_up')),
+            attempts INTEGER NOT NULL DEFAULT 0,
+            retry_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            lease_until TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        INSERT INTO reconnect_jobs (id, label, account_email, ciphertext)
+            VALUES ('old-job', 'ada', 'ada@example.com', 'x');",
+    )
+    .await
+    .unwrap();
+
+    // Twice: the migration is idempotent across restarts.
+    for _ in 0..2 {
+        squelch_control::ControlStore::connect(&url).await.unwrap();
+    }
+    let purpose: String = raw
+        .query_one(
+            "SELECT purpose FROM reconnect_jobs WHERE id = 'old-job'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(purpose, "reconnect");
+    // The constraint arrived with the column.
+    assert!(
+        raw.execute("UPDATE reconnect_jobs SET purpose = 'bogus'", &[])
+            .await
+            .is_err()
     );
 }

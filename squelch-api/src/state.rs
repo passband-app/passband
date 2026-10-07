@@ -145,6 +145,35 @@ pub struct ApiState {
     /// a LINK TARGET and nothing more: no trust flows from here, because whatever
     /// comes back is a pairing code the store adjudicates on its own terms.
     pub(crate) console_sso_url: Option<Arc<str>>,
+    /// The calendar token resolver, which is also how `/client/stats` learns
+    /// whether calendar is granted. `None` when no OAuth client is configured
+    /// (no refresh is possible, so nothing could call the Calendar API) and in
+    /// every test harness that did not attach one; `None` reports
+    /// `calendar.granted: false`. HUMAN DOOR ONLY: nothing on `/mcp` or
+    /// `/client/agent/*` reads it.
+    pub(crate) calendar: Option<Arc<squelch_core::credentials::CalendarCredentials>>,
+    /// The calendar sync loop's kick, behind `POST /client/timeline/refresh`,
+    /// and when each account last kicked it. The stamps live here, shared by
+    /// every clone of the state, so the 30 second floor holds across requests
+    /// and clients: the calendar page opening must not become a way to hammer
+    /// Google. `kick` is `None` when no loop runs (no OAuth client), and the
+    /// endpoint then answers `kicked: false`. HUMAN DOOR ONLY.
+    pub(crate) calendar_refresh: CalendarRefresh,
+    /// Where the user's own calendar writes go: `None` is Google's Calendar
+    /// API ([`squelch_core::gcal::client::API_BASE`]); a test's local fake
+    /// otherwise. Never read from the environment or a config file.
+    pub(crate) calendar_api_base: Option<Arc<str>>,
+    /// The one Google Calendar consent this daemon may have in flight for the
+    /// app's Connect button (`POST /client/calendar/connect`, self-host only),
+    /// and the loopback listener that waits for its redirect. Shared by every
+    /// clone, so a second Connect replaces the first. HUMAN DOOR ONLY.
+    pub(crate) calendar_consent: Arc<crate::calendar_connect::CalendarConsent>,
+    /// The loopback port that consent's listener binds: the headless CLI's
+    /// fixed port, or `SQUELCH_AUTH_PORT`.
+    pub(crate) calendar_consent_port: u16,
+    /// Where that consent's exchange talks to Google. Google's pinned pair in
+    /// production; see [`squelch_core::auth::GoogleEndpoints`].
+    pub(crate) calendar_consent_endpoints: Arc<squelch_core::auth::GoogleEndpoints>,
     /// What the console tells the owner about the agent door (`/mcp`). Set by
     /// squelchd from the mode it resolved at startup; the default, Open, is
     /// the self-host posture and what every test that does not care gets.
@@ -255,6 +284,49 @@ pub struct ApiState {
     /// and the small model that reads an unsubscribe page. See
     /// [`crate::unsub_job`]. HUMAN DOOR ONLY.
     pub(crate) unsub: crate::unsub_job::UnsubJobs,
+}
+
+/// The loopback port for the self-host calendar consent: `SQUELCH_AUTH_PORT`
+/// when it is a port number, else the headless CLI's fixed port, so one SSH
+/// tunnel serves both.
+fn auth_port_from_env() -> u16 {
+    let default = squelch_core::auth::DEFAULT_HEADLESS_PORT;
+    match std::env::var("SQUELCH_AUTH_PORT") {
+        Ok(raw) if !raw.trim().is_empty() => raw.trim().parse().unwrap_or_else(|_| {
+            eprintln!(
+                "squelch-api: SQUELCH_AUTH_PORT is not a port number; the calendar consent \
+                 listener uses {default}."
+            );
+            default
+        }),
+        _ => default,
+    }
+}
+
+/// The calendar sync kick and its per-account throttle. See
+/// [`ApiState::calendar_refresh`].
+#[derive(Clone, Default)]
+pub(crate) struct CalendarRefresh {
+    pub(crate) kick: Option<Arc<tokio::sync::Notify>>,
+    pub(crate) last_kick:
+        Arc<std::sync::Mutex<std::collections::HashMap<AccountId, std::time::Instant>>>,
+}
+
+impl CalendarRefresh {
+    /// Start a calendar sync now, past the 30 second floor, and restart that
+    /// floor. For a grant that just landed, which is worth a sync whenever the
+    /// page last asked for one. `false` when no sync loop runs.
+    pub(crate) fn kick_now(&self, account: AccountId) -> bool {
+        let Some(kick) = &self.kick else {
+            return false;
+        };
+        self.last_kick
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(account, std::time::Instant::now());
+        kick.notify_one();
+        true
+    }
 }
 
 /// What the human door needs to force a carrier pass: the poller's
@@ -448,6 +520,12 @@ impl ApiState {
                 crate::auth::DEVICE_AUTH_CONCURRENCY,
             )),
             console_sso_url: None,
+            calendar: None,
+            calendar_refresh: CalendarRefresh::default(),
+            calendar_api_base: None,
+            calendar_consent: Default::default(),
+            calendar_consent_port: squelch_core::auth::DEFAULT_HEADLESS_PORT,
+            calendar_consent_endpoints: Default::default(),
             agent_door: AgentDoorStatus::Open,
             audit_actor: crate::handlers::ACTION_ACTOR,
             sync_metrics: None,
@@ -668,6 +746,58 @@ impl ApiState {
 
     pub(crate) fn console_sso_url(&self) -> Option<&str> {
         self.console_sso_url.as_deref()
+    }
+
+    /// Attach the calendar token resolver. See [`ApiState::calendar`].
+    pub fn with_calendar_credentials(
+        mut self,
+        calendar: squelch_core::credentials::CalendarCredentials,
+    ) -> Self {
+        self.calendar = Some(Arc::new(calendar));
+        self
+    }
+
+    /// Attach the calendar sync loop's kick handle
+    /// ([`CalendarSync::kick_handle`]), for `POST /client/timeline/refresh`.
+    ///
+    /// [`CalendarSync::kick_handle`]: squelch_core::gcal::sync::CalendarSync::kick_handle
+    pub fn with_calendar_sync_kick(mut self, kick: Arc<tokio::sync::Notify>) -> Self {
+        self.calendar_refresh.kick = Some(kick);
+        self
+    }
+
+    /// Send the user's calendar writes to `base` instead of Google. TESTS
+    /// ONLY, like [`Self::with_calendar_consent_endpoints`].
+    #[doc(hidden)]
+    pub fn with_calendar_api_base(mut self, base: impl Into<Arc<str>>) -> Self {
+        self.calendar_api_base = Some(base.into());
+        self
+    }
+
+    /// The loopback port the self-host calendar consent's listener binds.
+    /// `0` binds an ephemeral port (tests), and the consent URL then carries
+    /// the port that was bound.
+    pub fn with_calendar_consent_port(mut self, port: u16) -> Self {
+        self.calendar_consent_port = port;
+        self
+    }
+
+    /// Point the self-host calendar consent's exchange at `endpoints`. TESTS
+    /// ONLY: production keeps Google's pinned pair, and nothing reads this
+    /// from the environment or a config file.
+    #[doc(hidden)]
+    pub fn with_calendar_consent_endpoints(
+        mut self,
+        endpoints: squelch_core::auth::GoogleEndpoints,
+    ) -> Self {
+        self.calendar_consent_endpoints = Arc::new(endpoints);
+        self
+    }
+
+    /// The calendar token resolver, if one is attached. Slice B's sync and
+    /// `/client/stats` read the grant through this one object.
+    pub fn calendar(&self) -> Option<&Arc<squelch_core::credentials::CalendarCredentials>> {
+        self.calendar.as_ref()
     }
 
     /// Declare that this console is served over plain http, the LAN escape
@@ -959,6 +1089,7 @@ impl ApiState {
         );
         Ok(Self::new(store, account_id, token)
             .with_console_sso_url(std::env::var("SQUELCH_CONSOLE_SSO_URL").ok())
+            .with_calendar_consent_port(auth_port_from_env())
             .with_sharing(sharing)
             // Pinned from `SQUELCH_FEATURES`, which no hosted pod sets; what
             // the control plane grants arrives later, through the refresher.
@@ -1067,12 +1198,23 @@ impl ApiState {
         }
 
         Ok(match cfg.oauth_client() {
-            Ok(client) => state.with_write_credentials(
-                cfg.credential_backend,
-                account_email.to_string(),
-                cfg.resolve_credentials_path(),
-                client,
-            ),
+            Ok(client) => {
+                let account_id = state.account_id;
+                state
+                    .with_calendar_credentials(squelch_core::credentials::CalendarCredentials::new(
+                        account_id,
+                        account_email.to_string(),
+                        cfg.credential_backend,
+                        cfg.resolve_credentials_path(),
+                        client.clone(),
+                    ))
+                    .with_write_credentials(
+                        cfg.credential_backend,
+                        account_email.to_string(),
+                        cfg.resolve_credentials_path(),
+                        client,
+                    )
+            }
             Err(_) => {
                 eprintln!(
                     "squelch-api: no OAuth client configured; action endpoints will return 403 \

@@ -1099,6 +1099,81 @@ struct StoreStats: Codable, Sendable, Hashable {
     /// rather than offered as a 404 on the click. See
     /// `AppStore.scheduledSendAvailable`.
     var scheduled_send: Bool?
+    /// Whether `GET /client/timeline` and `PATCH /client/timeline/ghosts/{id}`
+    /// exist. ABSENT on an older daemon, which 404s both, and absence reads as
+    /// no: the calendar page is not offered at all (`AppStore.calendarPageAvailable`).
+    var timeline: Bool?
+    /// Whether this mailbox has granted Google Calendar, and how to grant it.
+    /// ABSENT on a daemon too old to have the grant path, and absence reads as
+    /// "do not know", never as "not granted": with no way to connect there is
+    /// nothing true to ask, so no connect card or banner is drawn.
+    ///
+    /// LENIENT: a `calendar` this client cannot read (no `granted`, not an
+    /// object) reads as absent. This struct is everyone's ten-second poll, and
+    /// one optional field must never be able to fail the whole decode.
+    @LenientDecoded var calendar: CalendarAccess? = nil
+}
+
+/// An optional field that decodes to nil instead of throwing when its value
+/// is malformed. For a field on a struct whose decode must not fail because
+/// of it; a missing key or `null` is nil as usual, and encoding writes the
+/// value or nothing.
+@propertyWrapper
+struct LenientDecoded<Value: Codable & Sendable & Hashable>: Codable, Sendable, Hashable {
+    var wrappedValue: Value?
+
+    init(wrappedValue: Value?) { self.wrappedValue = wrappedValue }
+
+    init(from decoder: Decoder) throws {
+        wrappedValue = try? decoder.singleValueContainer().decode(Value.self)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        try c.encode(wrappedValue)
+    }
+}
+
+extension KeyedDecodingContainer {
+    /// What synthesized `Decodable` calls for a `@LenientDecoded` property: a
+    /// missing key is nil rather than `keyNotFound`, and a bad value is nil.
+    func decode<V>(_: LenientDecoded<V>.Type, forKey key: Key) throws -> LenientDecoded<V> {
+        LenientDecoded(wrappedValue: try? decodeIfPresent(V.self, forKey: key))
+    }
+}
+
+extension KeyedEncodingContainer {
+    /// The key is left out when the value is nil, as a plain optional's is.
+    mutating func encode<V>(_ value: LenientDecoded<V>, forKey key: Key) throws {
+        try encodeIfPresent(value.wrappedValue, forKey: key)
+    }
+}
+
+/// The calendar grant off /client/stats. How a mailbox connects: hosted sends
+/// `connect_url` (the control plane's consent, with the account pinned); a
+/// self-host daemon that can run Google's consent itself says
+/// `self_connect: true`, and the app asks it for the link
+/// (`POST /client/calendar/connect`). Either may be sent while granted (a
+/// renewal is the same consent again); neither means there is nothing to
+/// offer, which is harmless.
+struct CalendarAccess: Codable, Sendable, Hashable {
+    var granted: Bool
+    var connect_url: String?
+    /// The shell command older self-host daemons send. Decoded so their stats
+    /// still read, and never used: the terminal is a docs hint now, not a
+    /// path in the app.
+    var connect_command: String?
+    /// Lenient: absent on an older daemon, and a malformed value must not
+    /// cost the rest of the grant.
+    @LenientDecoded var self_connect: Bool? = nil
+}
+
+/// `POST /client/calendar/connect` on a self-host daemon: Google's authorize
+/// link for this mailbox, good for `expires_in` seconds. Both optional, so a
+/// body without a link reads as "no link" rather than a decode failure.
+struct CalendarConnectStart: Codable, Sendable, Hashable {
+    var url: String?
+    var expires_in: Int?
 }
 
 /// The 30-day re-walk the daemon falls back to when Gmail's history cursor
@@ -1170,6 +1245,317 @@ struct GmailHealth: Codable, Sendable, Hashable {
     /// not a link anything can offer. Nil is therefore the self-host branch, not
     /// an error.
     var reconnect_url: String?
+}
+
+// MARK: - calendar timeline
+
+/// What `GET /client/timeline` answers: the ghosts Passband derived from mail
+/// and, once the read-only calendar sync has landed on the daemon, the user's
+/// real events beside them.
+///
+/// EVERY ROW DECODES ALONE. One ghost a newer daemon shapes differently must
+/// cost that ghost, not the page: the page is somebody's week, and a decode
+/// error would blank all of it. `events` and `calendar` are ABSENT on a daemon
+/// that has ghosts but no calendar sync, and that is the normal state today.
+struct TimelineFeed: Codable, Sendable, Hashable {
+    var ghosts: [TimelineGhost]
+    var events: [TimelineEvent]?
+    var calendar: TimelineCalendarStatus?
+    /// Wave 3: the calendars being synced, primary first. ABSENT on an older
+    /// daemon, and then nothing on the page offers to create an event.
+    var calendars: [TimelineCalendar]?
+
+    init(
+        ghosts: [TimelineGhost] = [], events: [TimelineEvent]? = nil,
+        calendar: TimelineCalendarStatus? = nil, calendars: [TimelineCalendar]? = nil
+    ) {
+        self.ghosts = ghosts
+        self.events = events
+        self.calendar = calendar
+        self.calendars = calendars
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        ghosts = (try c.decodeIfPresent([OneRow<TimelineGhost>].self, forKey: .ghosts) ?? [])
+            .compactMap(\.value)
+        events = try c.decodeIfPresent([OneRow<TimelineEvent>].self, forKey: .events)?
+            .compactMap(\.value)
+        calendar = try? c.decodeIfPresent(TimelineCalendarStatus.self, forKey: .calendar)
+        calendars = (try? c.decodeIfPresent([OneRow<TimelineCalendar>].self, forKey: .calendars))?
+            .map { $0.compactMap(\.value) }
+    }
+
+    /// A row that may fail to decode without failing its array.
+    private struct OneRow<T: Decodable>: Decodable {
+        let value: T?
+        init(from decoder: Decoder) throws { value = try? T(from: decoder) }
+    }
+}
+
+/// `kind` on a ghost: what sort of thing the mail described.
+enum GhostKind: String, LenientRawEnum {
+    case other, ticket, travel, reservation, invite, proposal
+    static var unknownFallback: GhostKind { .other }
+}
+
+/// How far the user is already in. `committed` means they bought, booked,
+/// registered or accepted; it is certain and carries no likelihood.
+enum GhostCommitment: String, LenientRawEnum {
+    case unknown, committed, invited, proposed
+    static var unknownFallback: GhostCommitment { .unknown }
+}
+
+/// The served state: the user's word (`going`, `dismissed`) over the mail's
+/// (`cancelled`) over the clock (`expired`).
+enum GhostState: String, LenientRawEnum {
+    case ghost, going, dismissed, cancelled, expired
+    static var unknownFallback: GhostState { .ghost }
+}
+
+/// What the mail says, apart from the user's word: a ghost can be `going`
+/// and also `cancelled` here, and the page must say both.
+enum GhostMailState: String, LenientRawEnum {
+    case live, cancelled
+    static var unknownFallback: GhostMailState { .live }
+}
+
+/// Which tier produced the resolved end. Only `stated` and `user` are facts.
+enum GhostEndSource: String, LenientRawEnum {
+    case stated, user, history, model
+    case defaulted = "default"
+    static var unknownFallback: GhostEndSource { .defaulted }
+}
+
+/// The likelihood band. Three of them, never a number.
+enum GhostBand: String, LenientRawEnum {
+    case likely, maybe, unlikely
+    /// A band this client does not know is drawn as the middle one: shown,
+    /// but not planned around.
+    static var unknownFallback: GhostBand { .maybe }
+}
+
+/// What one source message did to the ghost.
+enum GhostSourceRole: String, LenientRawEnum {
+    case created, updated, cancelled, agreed
+    static var unknownFallback: GhostSourceRole { .updated }
+}
+
+struct GhostEstimate: Codable, Sendable, Hashable {
+    var minutes: Int
+    /// The model's own words for why. Model text, so the page quotes it and
+    /// says whose it is rather than speaking it in Passband's voice.
+    var basis: String?
+}
+
+struct GhostLikelihood: Codable, Sendable, Hashable {
+    var band: GhostBand
+    /// Model text, like `GhostEstimate.basis`.
+    var reason: String?
+}
+
+struct GhostSource: Codable, Sendable, Hashable {
+    var message_id: Int
+    var thread_id: String
+    var role: GhostSourceRole
+}
+
+/// The real event a ghost duplicates, by the daemon's display match. Display
+/// de-duplication only: it says draw the event, not the ghost.
+struct GhostMatchedEvent: Codable, Sendable, Hashable {
+    var calendar_id: String
+    var id: String
+}
+
+/// One ghost as `ghost_view` serves it (squelch-api handlers.rs). `start` and
+/// `end` are `YYYY-MM-DD` for a date-only ghost and RFC3339 with an offset
+/// otherwise. Optional where a daemon of this wave could omit the key.
+struct TimelineGhost: Codable, Sendable, Hashable, Identifiable {
+    var id: Int
+    var kind: GhostKind
+    var title: String
+    var start: String
+    var start_timezone: String?
+    var all_day: Bool
+    var end: String?
+    var end_estimated: Bool?
+    var end_source: GhostEndSource?
+    var estimate: GhostEstimate?
+    var location: String?
+    var commitment: GhostCommitment
+    var state: GhostState
+    var mail_state: GhostMailState?
+    /// False for a ghost made from mail that did not pass authentication.
+    /// Nil (an older shape) draws no mark rather than guessing either way.
+    var verified: Bool?
+    var likelihood: GhostLikelihood?
+    var sources: [GhostSource]
+    /// Slice B. Absent until the daemon syncs real events.
+    var matched_event: GhostMatchedEvent?
+}
+
+enum TimelineEventStatus: String, LenientRawEnum {
+    case confirmed, tentative
+    static var unknownFallback: TimelineEventStatus { .confirmed }
+}
+
+enum TimelineSelfResponse: String, LenientRawEnum {
+    case accepted, declined, tentative
+    case needsAction = "needs_action"
+    static var unknownFallback: TimelineSelfResponse { .needsAction }
+}
+
+/// One real event off the user's Google Calendar (read-only sync). `id` is
+/// unique only within its calendar.
+struct TimelineEvent: Codable, Sendable, Hashable, Identifiable {
+    var id: String
+    var calendar_id: String
+    var calendar_name: String?
+    /// Google allows an event with no title.
+    var title: String?
+    var start: String
+    var end: String?
+    var all_day: Bool
+    var start_timezone: String?
+    var location: String?
+    var status: TimelineEventStatus?
+    /// Nil when the user is not an attendee (their own event).
+    var self_response: TimelineSelfResponse?
+    /// False when the event is marked free.
+    var busy: Bool?
+    var organizer: String?
+    var html_link: String?
+    /// Wave 3. The calendar's colour as Google reports it, or the event's own
+    /// override, "#rrggbb". Nil from an older daemon: drawn in the neutral.
+    var color: String?
+    /// Wave 3. The user can write to this calendar AND the event is not
+    /// another organizer's. Nil (an older daemon) is NOT editable: no Edit,
+    /// no Delete, no `e`.
+    var editable: Bool?
+    /// Wave 3. The event's notes, laundered and capped like `location`.
+    var description: String?
+    /// Wave 5. Who is on the event, the user included when Google lists
+    /// them. Nil from an older daemon and on an event with nobody on it.
+    var guests: [TimelineGuest]?
+    /// Wave 5. Google holds more guests than the daemon stored. The list is
+    /// then a part of the truth and is never sent back as the whole of it.
+    var guests_truncated: Bool?
+    /// Wave 5. The user may change who is on it: editable, not truncated,
+    /// and theirs to organize. Nil (an older daemon) is NO, and is also how
+    /// the client knows a daemon cannot invite at all (Lib/EventGuests.swift).
+    var guest_editable: Bool?
+}
+
+/// How a guest answered, in the daemon's four words.
+enum GuestResponse: String, LenientRawEnum {
+    case accepted, declined, tentative, pending
+    static var unknownFallback: GuestResponse { .pending }
+}
+
+/// Wave 5: one person on an event. Only the address is required; a row
+/// without one is dropped, and it costs the event nothing.
+struct TimelineGuest: Codable, Sendable, Hashable {
+    var email: String
+    var name: String?
+    var response: GuestResponse?
+    var organizer: Bool?
+    /// The user's own row. `self` on the wire.
+    var isSelf: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case email, name, response, organizer
+        case isSelf = "self"
+    }
+
+    init(
+        email: String, name: String? = nil, response: GuestResponse? = nil, organizer: Bool? = nil,
+        isSelf: Bool? = nil
+    ) {
+        self.email = email
+        self.name = name
+        self.response = response
+        self.organizer = organizer
+        self.isSelf = isSelf
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        email = try c.decode(String.self, forKey: .email)
+        name = try? c.decodeIfPresent(String.self, forKey: .name)
+        response = try? c.decodeIfPresent(GuestResponse.self, forKey: .response)
+        organizer = try? c.decodeIfPresent(Bool.self, forKey: .organizer)
+        isSelf = try? c.decodeIfPresent(Bool.self, forKey: .isSelf)
+    }
+}
+
+extension TimelineEvent {
+    /// THE NEW KEYS COST ONLY THEMSELVES. A `color` that is not a string, or
+    /// an `editable` that is not a bool, from some daemon mid-change, leaves
+    /// that key nil rather than dropping the event (the synthesized decoder
+    /// would throw, and the feed's row guard would drop the whole row). In an
+    /// extension so the memberwise init stays.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        calendar_id = try c.decode(String.self, forKey: .calendar_id)
+        calendar_name = try c.decodeIfPresent(String.self, forKey: .calendar_name)
+        title = try c.decodeIfPresent(String.self, forKey: .title)
+        start = try c.decode(String.self, forKey: .start)
+        end = try c.decodeIfPresent(String.self, forKey: .end)
+        all_day = try c.decode(Bool.self, forKey: .all_day)
+        start_timezone = try c.decodeIfPresent(String.self, forKey: .start_timezone)
+        location = try c.decodeIfPresent(String.self, forKey: .location)
+        status = try c.decodeIfPresent(TimelineEventStatus.self, forKey: .status)
+        self_response = try c.decodeIfPresent(TimelineSelfResponse.self, forKey: .self_response)
+        busy = try c.decodeIfPresent(Bool.self, forKey: .busy)
+        organizer = try c.decodeIfPresent(String.self, forKey: .organizer)
+        html_link = try c.decodeIfPresent(String.self, forKey: .html_link)
+        color = try? c.decodeIfPresent(String.self, forKey: .color)
+        editable = try? c.decodeIfPresent(Bool.self, forKey: .editable)
+        description = try? c.decodeIfPresent(String.self, forKey: .description)
+        // Each guest decodes alone, and a `guests` of the wrong shape is nil.
+        guests = (try? c.decodeIfPresent([OneGuest].self, forKey: .guests))?.compactMap(\.value)
+        guests_truncated = try? c.decodeIfPresent(Bool.self, forKey: .guests_truncated)
+        guest_editable = try? c.decodeIfPresent(Bool.self, forKey: .guest_editable)
+    }
+
+    private struct OneGuest: Decodable {
+        let value: TimelineGuest?
+        init(from decoder: Decoder) throws { value = try? TimelineGuest(from: decoder) }
+    }
+}
+
+/// Wave 3: one calendar being synced, from the feed's `calendars`. Primary
+/// first. Only `writable` ones are offered in the event editor.
+struct TimelineCalendar: Codable, Sendable, Hashable, Identifiable {
+    var id: String
+    var name: String?
+    var color: String?
+    var primary: Bool?
+    var writable: Bool?
+    /// Wave 5. Events on it may carry guests: the primary calendar, or one
+    /// the user owns. Nil from an older daemon (`EventGuests.mayInvite`).
+    var can_invite: Bool?
+}
+
+enum TimelineSyncError: String, LenientRawEnum {
+    case auth, quota, unavailable
+    static var unknownFallback: TimelineSyncError { .unavailable }
+}
+
+struct TimelineCalendarStatus: Codable, Sendable, Hashable {
+    var granted: Bool
+    var synced_at: String?
+    var error: TimelineSyncError?
+    /// The daemon served only the nearest events of a longer list. ABSENT on
+    /// a daemon too old to cut one, and absence reads as false.
+    var truncated: Bool?
+}
+
+/// `PATCH /client/timeline/ghosts/{id}` answers this.
+struct GhostPatchResult: Codable, Sendable, Hashable {
+    var updated: Bool
+    var id: Int
 }
 
 // MARK: - invites
@@ -1677,6 +2063,24 @@ struct PersonCard: Codable, Sendable, Equatable {
     var rule: Rule?
     var groups: [Group]
     var recent_threads: [RecentThread]
+    /// Where the daemon thinks they are, or where the user said. Absent when
+    /// it has no idea, and on a daemon older than the inference.
+    var timezone: Timezone?
+
+    /// Only the zone's name is read here: the event pane wants the hour of
+    /// an event that may be months off, and the name is what knows that
+    /// date's offset. Never throws, so a shape this client does not know
+    /// costs the card nothing.
+    struct Timezone: Codable, Sendable, Equatable {
+        var zone: String?
+
+        init(zone: String?) { self.zone = zone }
+
+        init(from decoder: Decoder) throws {
+            let c = try? decoder.container(keyedBy: CodingKeys.self)
+            zone = c.flatMap { try? $0.decodeIfPresent(String.self, forKey: .zone) }
+        }
+    }
 }
 
 struct StatusResult: Codable, Sendable {

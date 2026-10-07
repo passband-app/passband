@@ -42,6 +42,7 @@ enum ProductGuide {
     enum Topic: String, CaseIterable, Sendable {
         case gettingAround = "getting_around"
         case sitrep
+        case calendar
         case readingMail = "reading_mail"
         case writingMail = "writing_mail"
         case mailList = "mail_list"
@@ -70,6 +71,9 @@ enum ProductGuide {
             case .sitrep:
                 "the home board: For your eyes, Reading, the calendar, shipments, billing and "
                     + "receipts cards, flow mode"
+            case .calendar:
+                "the Calendar page: month and agenda, events guessed from mail, connecting "
+                    + "Google Calendar, new, edited and deleted events, guests"
             case .readingMail:
                 "an open email: moving between messages and emails, done, skip, unsubscribe, "
                     + "attachments, images, chat or email style, the contact card"
@@ -98,12 +102,24 @@ enum ProductGuide {
         }
     }
 
-    /// The `topic` parameter's description: every topic and what it covers,
-    /// built from the enum so a topic added above is offered without a second
-    /// edit. This IS sent with every request, which is why each line is short.
-    static let topicIndex: String =
+    /// THE TOPICS ON OFFER for this mailbox. The calendar topic only while
+    /// the Calendar page is (`AppStore.calendarPageAvailable`, handed in):
+    /// a guide that described a page the rail does not have would have the
+    /// assistant send somebody looking for it. With the page off, this is
+    /// the list from before the calendar existed, byte for byte, and so is
+    /// everything else the guide says.
+    static func topics(calendar: Bool) -> [Topic] {
+        calendar ? Topic.allCases : Topic.allCases.filter { $0 != .calendar }
+    }
+
+    /// The `topic` parameter's description: every topic on offer and what it
+    /// covers, built from the enum so a topic added above is offered without
+    /// a second edit. This IS sent with every request, which is why each line
+    /// is short.
+    static func topicIndex(calendar: Bool) -> String {
         "Which page of the guide to read. "
-        + Topic.allCases.map { "\($0.rawValue): \($0.covers)." }.joined(separator: " ")
+            + topics(calendar: calendar).map { "\($0.rawValue): \($0.covers)." }.joined(separator: " ")
+    }
 
     // MARK: - the system prompt's share
 
@@ -130,10 +146,15 @@ enum ProductGuide {
     /// iPhone app is numbered on its own line and keeps its own release notes
     /// (Lib/PhoneReleaseNotes.swift), so "what's new" there is a different
     /// table read against a different version.
-    static func text(_ topic: Topic, runningVersion: String?, onPhone: Bool = false) -> String {
+    ///
+    /// `calendar` is whether the Calendar page is on for this mailbox: it
+    /// puts the page into the getting-around list. The calendar topic itself
+    /// is asked for only while it is on (`topics(calendar:)`).
+    static func text(_ topic: Topic, runningVersion: String?, onPhone: Bool = false, calendar: Bool = false) -> String {
         switch topic {
-        case .gettingAround: gettingAround
+        case .gettingAround: gettingAround(calendar: calendar)
         case .sitrep: sitrep
+        case .calendar: Self.calendar
         case .readingMail: readingMail
         case .writingMail: writingMail
         case .mailList: mailList
@@ -148,17 +169,40 @@ enum ProductGuide {
         }
     }
 
-    private static let gettingAround = """
+    /// The pages on the number keys, in rail order, Calendar second while
+    /// it is on (`CalendarGate.numbered`'s rule, restated: this file stands
+    /// alone under test). Numbered when the text is built, so a page added
+    /// renumbers the ones after it here exactly as it does on the rail.
+    private static func numberedPages(calendar: Bool) -> String {
+        var pages = [
+            "Sitrep: the home board. What needs the user, what there is to read, and today's records.",
+            "Emails: every message in one list, plus sent and spam.",
+            "Auth: login codes, password resets and security alerts.",
+            "Rules: sender rules.",
+            "Groups: named sets of recipients.",
+        ]
+        if calendar {
+            pages.insert(
+                "Calendar: events guessed from mail and, once connected, Google Calendar. ⇧C also "
+                    + "opens it. See the calendar topic.", at: 1)
+        }
+        return pages.enumerated().map { "- \($0.offset + 1) \($0.element)" }.joined(separator: "\n")
+    }
+
+    private static func gettingAround(calendar: Bool) -> String {
+        gettingAroundHead + numberedPages(calendar: calendar) + "\n" + gettingAroundTail
+    }
+
+    private static let gettingAroundHead = """
         Passband is one window. A narrow rail down the left edge switches pages, and \
         most actions have a single-letter key. Letter keys only fire when no text \
         field has focus, and a capital letter means Shift.
 
         Pages (number keys, no modifier):
-        - 1 Sitrep: the home board. What needs the user, what there is to read, and today's records.
-        - 2 Emails: every message in one list, plus sent and spam.
-        - 3 Auth: login codes, password resets and security alerts.
-        - 4 Rules: sender rules.
-        - 5 Groups: named sets of recipients.
+
+        """
+
+    private static let gettingAroundTail = """
         - Usage and Settings sit at the bottom of the rail and have no number key. ⌘, opens Settings.
         - The ring just above them opens Discover: a list of the ways through mail (the basics, flow mode, reminders, search, teaching Passband, the at a glance cards, the reading stack, writing) with a short guide to each on the right. The ring fills clockwise as the user tries each one on their own mail, and a feature used on three separate days is marked a habit. Nothing ever empties it. Esc leaves the page.
 
@@ -217,6 +261,32 @@ enum ProductGuide {
         - "ingesting" in the top bar means new mail is still being sorted and will land on the next refresh.
         - Unsubscribes Passband is carrying out show in a tray at the bottom right.
         - If a sender keeps emailing after an unsubscribe, a notice appears at the bottom left with "Block sender" and "Keep". When that sender also sends mail worth having, the notice adds "Smart block": it shows a rule that keeps the important kinds and drops the promotion, and saves it as a filter rule on that address.
+        """
+
+    private static let calendar = """
+        The Calendar page is on for this mailbox. Passband turns it on per mailbox from \
+        its side, and there is no setting for it in the app. It is second on the rail: \
+        key 2, or ⇧C from anywhere. Emails is then key 3, Auth 4, Rules 5 and Groups 6. \
+        It is on the Mac only; the iPhone has no Calendar page yet.
+
+        What is on it:
+        - Events guessed from mail (invitations, bookings, plans in a thread), drawn solid, striped or outlined by how likely they are. They need no permission.
+        - Real events from Google Calendar, once it is connected, in each calendar's own colour.
+        - Connecting: the "Connect calendar" card or button opens Google's consent screen. Unticking calendar there leaves the mailbox working and simply connects no calendar.
+
+        Views:
+        - m shows the month, a the agenda. The month is the default. Trips and stays are bars across the days they cover, and "+N more" is what does not fit in a day.
+        - In the month the arrow keys move the day, [ and ] go to the previous and next month, and t goes to today. Enter opens the selected day: its hours in a column beside the month.
+        - j / k move the selection. Enter opens the mail behind an event guessed from mail. y marks it going (again: not going), x dismisses it.
+
+        Making and changing events (only on the user's own calendars):
+        - n, or "New event", opens the event pane. It takes half the window, like the composer, and the month stays usable beside it: clicking a day sets the event's date.
+        - Pressing and dragging down the day column's hours sweeps a time, in quarter hours; letting go opens the event pane with that day and those times.
+        - e edits the selected event. ⌫ deletes it, after asking once.
+        - The pane has the title, the calendar, all day, the day and times, a location that suggests places from Apple Maps as it is typed (arrows and Enter pick one), guests and notes.
+        - ⌘↵ saves from anywhere in the pane. Plain Enter saves from a one-line field, but only when the event has no guests. With guests, plain Enter does nothing: only ⌘↵ or a click on the save control does.
+        - Google, not Passband, emails the guests, and only when the control says so: "add and invite 3", "save and tell guests" or "delete and tell guests". "save without telling" and "delete without telling" change the event and tell nobody.
+        - Esc closes the place list first, then the delete question, then the pane. The event pane and the composer share that half of the window, so only one is open at a time.
         """
 
     private static let readingMail = """
@@ -596,13 +666,17 @@ enum ProductGuide {
 
     /// The `?` overlay's table, as text. Key caps separated by a space, the
     /// way the overlay sets them side by side.
-    static func shortcuts() -> String {
+    ///
+    /// `calendar`: the table as the overlay draws it for this mailbox
+    /// (`ShortcutCatalog.groups(calendar:)`), so the calendar's keys are
+    /// recited only where the page is on.
+    static func shortcuts(calendar: Bool = false) -> String {
         var lines = [
             "Passband keyboard shortcuts, grouped by where they work. A single letter only "
                 + "fires when no text field has focus, and a capital letter means Shift. "
                 + "Pressing ? shows this same list in the app."
         ]
-        for group in ShortcutCatalog.groups {
+        for group in ShortcutCatalog.groups(calendar: calendar) {
             lines.append("")
             lines.append(group.title)
             for item in group.items {

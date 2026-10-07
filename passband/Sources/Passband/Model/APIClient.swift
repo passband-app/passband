@@ -112,7 +112,7 @@ actor APIClient {
 
     // MARK: - request plumbing
 
-    private enum Method: String { case GET, POST, PUT, DELETE }
+    private enum Method: String { case GET, POST, PUT, PATCH, DELETE }
 
     private func buildRequest(
         path: String,
@@ -250,9 +250,11 @@ actor APIClient {
         _ = try await perform(req)
     }
 
-    private func deleteNoContent(_ path: String) async throws {
+    private func deleteNoContent(
+        _ path: String, query: [String: String?] = [:], timeout: TimeInterval = APIClient.requestTimeout
+    ) async throws {
         let req = try buildRequest(
-            path: path, method: .DELETE, query: [:], body: nil, timeout: Self.requestTimeout)
+            path: path, method: .DELETE, query: query, body: nil, timeout: timeout)
         _ = try await perform(req)
     }
 
@@ -525,6 +527,97 @@ actor APIClient {
     func getCalendar(hours: Int? = nil) async throws -> [CalendarUpdate] {
         if RehearsalMode.isEnabled { return try await get("/client/calendar") }
         return try await getFeed(destination: "records", limit: 1000).calendar
+    }
+
+    // MARK: - calendar timeline
+
+    /// `GET /client/timeline`. Only `from` is sent: it is local midnight
+    /// yesterday in the user's own offset, which is both the window's start
+    /// (so last night's party, still running, comes back) and the zone the
+    /// daemon judges `expired` in, so a date-only ghost lasts to the end of
+    /// the USER's day. `to` is the daemon's default span from there.
+    /// `to` nil takes the daemon's default window (90 days past a day
+    /// behind `from`); the month view sends both (`MonthGrid.requestRange`).
+    func getTimeline(from: Date, to: Date? = nil) async throws -> TimelineFeed {
+        try await get(
+            "/client/timeline",
+            query: ["from": Self.rfc3339Local(from), "to": to.map(Self.rfc3339Local)])
+    }
+
+    /// `POST /client/timeline/refresh`: ask the calendar sync to run now. A
+    /// daemon without the sync answers 404 and one inside its throttle 202;
+    /// both are fine, so the caller ignores the outcome.
+    func refreshTimeline() async throws {
+        try await postNoContent("/client/timeline/refresh")
+    }
+
+    /// `POST /client/calendar/connect`: a self-host daemon starts Google's
+    /// consent for its mailbox and answers with the authorize link. Hosted
+    /// answers 409 (its link is `connect_url` on the stats instead), which
+    /// throws like any other refusal.
+    func startCalendarConnect() async throws -> CalendarConnectStart {
+        try await post("/client/calendar/connect", body: EmptyBody())
+    }
+
+    /// `PATCH /client/timeline/ghosts/{id}`. nil CLEARS the user's mark, which
+    /// is an explicit JSON `null` on the wire: the shared encoder drops nil
+    /// optionals, and a dropped key here means "leave it alone".
+    func setGhostState(_ id: Int, _ state: GhostState?) async throws -> GhostPatchResult {
+        let value: Any = state.map(\.rawValue) ?? NSNull()
+        let body = try JSONSerialization.data(withJSONObject: ["state": value])
+        let req = try buildRequest(
+            path: "/client/timeline/ghosts/\(id)", method: .PATCH, query: [:], body: body,
+            timeout: Self.requestTimeout)
+        let (data, _) = try await perform(req)
+        return try decode(GhostPatchResult.self, from: data)
+    }
+
+    // MARK: - calendar events (wave 3: writes to the user's own calendars)
+
+    /// `POST /client/calendar/events`: create at Google, answered 201 with the
+    /// event in the timeline's own shape.
+    func createCalendarEvent(_ body: EventWrite) async throws -> TimelineEvent {
+        try await post("/client/calendar/events", body: body, timeout: Self.calendarWriteTimeout)
+    }
+
+    /// A calendar write waits past the daemon's own wait on Google (30
+    /// seconds): given up on sooner, a slow Google would read here as "could
+    /// not reach your server, nothing was saved" while the write may have
+    /// gone through, and the daemon's 504 saying exactly that never arrives.
+    private static let calendarWriteTimeout: TimeInterval = 45
+
+    /// `PATCH /client/calendar/events/{calendar_id}/{id}` with only the
+    /// changed fields. Built by hand, as `setGhostState` is, because a cleared
+    /// location or note is an explicit JSON null.
+    ///
+    /// `notify` (wave 5) has Google email the event's guests about the
+    /// change. False, the default, sends no such key.
+    func patchCalendarEvent(
+        calendarId: String, id: String, _ patch: EventPatch, notify: Bool = false
+    ) async throws -> TimelineEvent {
+        let body = try JSONSerialization.data(withJSONObject: patch.json(notify: notify))
+        let req = try buildRequest(
+            path: CalendarWrite.path(calendarId: calendarId, eventId: id), method: .PATCH, query: [:],
+            body: body, timeout: Self.calendarWriteTimeout)
+        let (data, _) = try await perform(req)
+        return try decode(TimelineEvent.self, from: data)
+    }
+
+    /// `DELETE /client/calendar/events/{calendar_id}/{id}`: 204. `notify`
+    /// (wave 5) has Google email the guests the cancellation; false, the
+    /// default, sends no query at all.
+    func deleteCalendarEvent(calendarId: String, id: String, notify: Bool = false) async throws {
+        try await deleteNoContent(
+            CalendarWrite.path(calendarId: calendarId, eventId: id),
+            query: CalendarWrite.deleteQuery(notify: notify), timeout: Self.calendarWriteTimeout)
+    }
+
+    /// RFC3339 in the user's current offset, seconds precision: "2026-10-04T00:00:00-07:00".
+    nonisolated static func rfc3339Local(_ date: Date) -> String {
+        let f = ISO8601DateFormatter()
+        f.timeZone = .current
+        f.formatOptions = [.withInternetDateTime]
+        return f.string(from: date)
     }
 
     func getBanking() async throws -> [BankingRecord] {

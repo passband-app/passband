@@ -99,6 +99,37 @@ impl JobStatus {
     }
 }
 
+/// WHY a job exists: a plain reconnect, or the calendar grant. Written into the
+/// row so the status page can say which one finished, and nothing else reads
+/// it: both install the same way, one token into both slots.
+///
+/// The Postgres `CHECK` and these two spellings are the same list, and the
+/// column's DEFAULT is `reconnect`, so every row written before the column
+/// existed reads as what it was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Purpose {
+    Reconnect,
+    Calendar,
+}
+
+impl Purpose {
+    pub fn as_db(self) -> &'static str {
+        match self {
+            Purpose::Reconnect => "reconnect",
+            Purpose::Calendar => "calendar",
+        }
+    }
+
+    /// Anything unrecognized reads as `Reconnect`: the neutral wording, and
+    /// the one every pre-column row already has.
+    pub fn from_db(s: &str) -> Self {
+        match s {
+            "calendar" => Purpose::Calendar,
+            _ => Purpose::Reconnect,
+        }
+    }
+}
+
 /// What the status page shows. A superset of [`JobStatus`]: two of these are
 /// the same pending row seen at different ages, and two are not about the row
 /// at all. [`pages::reconnect_result`] matches it exhaustively, so a state
@@ -141,6 +172,8 @@ impl ReconnectView {
 /// sealed blob and starts its attempt count over; a worker mid-flight on the
 /// old blob finds its row changed underneath it and leaves it pending for the
 /// new one (see [`run_job`]).
+///
+/// A plain reconnect. [`enqueue_for`] is the same with a [`Purpose`].
 pub async fn enqueue(
     state: &ControlState,
     token: &str,
@@ -148,19 +181,40 @@ pub async fn enqueue(
     email: &str,
     ciphertext: &str,
 ) -> anyhow::Result<()> {
+    enqueue_for(state, token, label, email, ciphertext, Purpose::Reconnect).await
+}
+
+/// [`enqueue`] for a stated [`Purpose`].
+///
+/// THE NEWER CONSENT'S PURPOSE WINS, with its ciphertext, because the two
+/// describe one blob: the row is going to install the newer consent's token,
+/// so it says what that consent was for. A calendar grant overtaken by a plain
+/// reconnect therefore completes as a reconnect, which is still true of what
+/// was installed: every grant asks with `include_granted_scopes`, so a calendar
+/// grant made earlier rides on the newer token if Google still holds it.
+pub async fn enqueue_for(
+    state: &ControlState,
+    token: &str,
+    label: &str,
+    email: &str,
+    ciphertext: &str,
+    purpose: Purpose,
+) -> anyhow::Result<()> {
     let id = sessions::fingerprint(token);
     let mut client = state.store().client().await?;
     let tx = client.transaction().await?;
     let job: String = tx
         .query_one(
-            "INSERT INTO reconnect_jobs (id, label, account_email, ciphertext) VALUES ($1,$2,$3,$4)
+            "INSERT INTO reconnect_jobs (id, label, account_email, ciphertext, purpose)
+             VALUES ($1,$2,$3,$4,$5)
              ON CONFLICT (label) WHERE status = 'pending' DO UPDATE
                  SET ciphertext = EXCLUDED.ciphertext,
                      account_email = EXCLUDED.account_email,
+                     purpose = EXCLUDED.purpose,
                      attempts = 0,
                      retry_at = now()
              RETURNING id",
-            &[&id, &label, &email, &ciphertext],
+            &[&id, &label, &email, &ciphertext, &purpose.as_db()],
         )
         .await?
         .get(0);
@@ -202,13 +256,13 @@ fn browser_token(headers: &HeaderMap) -> Option<&str> {
 
 pub async fn status(State(state): State<ControlState>, headers: HeaderMap) -> Response {
     let Some(token) = browser_token(&headers) else {
-        return pages::reconnect_result(ReconnectView::Expired);
+        return pages::reconnect_result(ReconnectView::Expired, Purpose::Reconnect);
     };
     let row = async {
         let client = state.store().client().await?;
         client
             .query_opt(
-                "SELECT j.status, j.attempts FROM reconnect_views v
+                "SELECT j.status, j.attempts, j.purpose FROM reconnect_views v
                  JOIN reconnect_jobs j ON j.id = v.job_id
                  WHERE v.token_hash = $1 AND v.expires_at > now()",
                 &[&sessions::fingerprint(token)],
@@ -217,10 +271,12 @@ pub async fn status(State(state): State<ControlState>, headers: HeaderMap) -> Re
             .map_err(anyhow::Error::from)
     }
     .await;
+    let mut purpose = Purpose::Reconnect;
     let view = match row {
         Ok(Some(row)) => {
             let status: &str = row.get(0);
             let attempts: i32 = row.get(1);
+            purpose = Purpose::from_db(row.get(2));
             match JobStatus::from_db(status) {
                 Some(JobStatus::Pending) if attempts > 0 => ReconnectView::Retrying,
                 Some(JobStatus::Pending) => ReconnectView::Pending,
@@ -246,7 +302,7 @@ pub async fn status(State(state): State<ControlState>, headers: HeaderMap) -> Re
             ReconnectView::Checking
         }
     };
-    pages::reconnect_result(view)
+    pages::reconnect_result(view, purpose)
 }
 
 /// One row, claimed. Everything [`run_job`] needs, so it opens no connection
@@ -484,6 +540,15 @@ mod tests {
             assert_eq!(JobStatus::from_db(status.as_db()), Some(status));
         }
         assert_eq!(JobStatus::from_db("complet"), None);
+    }
+
+    #[test]
+    fn every_purpose_round_trips_and_strangers_read_as_reconnect() {
+        for purpose in [Purpose::Reconnect, Purpose::Calendar] {
+            assert_eq!(Purpose::from_db(purpose.as_db()), purpose);
+        }
+        assert_eq!(Purpose::from_db(""), Purpose::Reconnect);
+        assert_eq!(Purpose::from_db("Calendar"), Purpose::Reconnect);
     }
 
     #[test]

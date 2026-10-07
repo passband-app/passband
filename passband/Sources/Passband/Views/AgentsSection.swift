@@ -591,6 +591,10 @@ extension AgentKind {
                     ink: Color(light: Color.white, dark: Color(hex: 0x14142A)), mark: nil))
         case .chatGPT, .codex:
             return AgentBrand(logo: nil, symbolTile: Color(hex: 0x000000), button: openAI)
+        case .muse:
+            // No mark or colour of Meta's for Muse has been fetched from the
+            // source, so the stand-in symbol and the house button.
+            return AgentBrand(logo: nil, symbolTile: nil, button: nil)
         case .cursor:
             // Cursor's own "Add to Cursor" badge (cursor.com/deeplink/
             // mcp-install-dark.svg): black at 90%, white type, the light cube.

@@ -76,16 +76,23 @@ enum AgentDoorAuth: Equatable, Sendable {
 ///   VS Code      code.visualstudio.com/docs/copilot/reference/mcp-configuration
 ///                (servers, type http) and .../guides/mcp-developer-guide
 ///                (the vscode:mcp/install link)
+///   Muse         meta.com/help/artificial-intelligence/1687253048996149 (ask
+///                Muse to create a Custom Connector; Meta does not review
+///                them). Meta's page gives no wording and never says MCP. That
+///                Muse takes a streamable HTTP address with OAuth this way is
+///                from server makers' own Muse guides (sealgate.ai/docs/
+///                connect-clients/muse, wave.co/integrations/muse), so the
+///                prompt below is theirs in shape, not Meta's.
 /// And the install links, in `action(endpoint:auth:)`:
 ///   Claude       claude.com/docs/connectors/building/directory-vs-custom
 ///   Cursor       cursor.com/docs/context/mcp/install-links
 enum AgentKind: String, CaseIterable, Identifiable, Sendable {
-    case claude, openClaw, hermes, chatGPT, claudeCode, codex, cursor, vsCode, claudeDesktop, other
+    case claude, openClaw, hermes, muse, chatGPT, claudeCode, codex, cursor, vsCode, claudeDesktop, other
 
     /// The agents worth offering at a given door, in chip order. The first is
     /// the one the pane opens on.
     ///
-    /// Claude and ChatGPT reach a server from their makers' machines, not
+    /// Claude, Muse and ChatGPT reach a server from their makers' machines, not
     /// this one, so they cannot see a loopback or tailnet address and are
     /// offered only at the sign-in door, which is a public one.
     ///
@@ -95,7 +102,7 @@ enum AgentKind: String, CaseIterable, Identifiable, Sendable {
     static func shown(for auth: AgentDoorAuth) -> [AgentKind] {
         switch auth {
         case .none: [.openClaw, .hermes, .claudeCode, .codex, .cursor, .vsCode, .claudeDesktop, .other]
-        case .signIn: [.claude, .openClaw, .hermes, .chatGPT, .claudeCode, .codex, .cursor, .vsCode, .other]
+        case .signIn: [.claude, .openClaw, .hermes, .muse, .chatGPT, .claudeCode, .codex, .cursor, .vsCode, .other]
         }
     }
 
@@ -108,6 +115,7 @@ enum AgentKind: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .openClaw: "OpenClaw"
         case .hermes: "Hermes Agent"
+        case .muse: "Muse"
         case .chatGPT: "ChatGPT"
         case .vsCode: "VS Code"
         case .claudeCode: "Claude Code"
@@ -123,6 +131,7 @@ enum AgentKind: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .openClaw: "pawprint"
         case .hermes: "paperplane"
+        case .muse: "sparkles"
         case .chatGPT: "message"
         case .vsCode: "curlybraces"
         case .claudeCode: "terminal"
@@ -157,6 +166,8 @@ enum AgentKind: String, CaseIterable, Identifiable, Sendable {
         case .claude: instruction(for: .signIn)
         case .hermes:
             "Add this to ~/.hermes/config.yaml, inside mcp_servers if you already have one, then run /reload-mcp in Hermes."
+        case .muse:
+            "Send this to Muse in a new chat. Muse builds the connector itself, then shows a link to sign in to Passband. Meta does not review custom connectors."
         case .chatGPT:
             "On chatgpt.com, open Plugins, select the plus button and choose Add custom MCP server. Paste this address as the Server URL, choose OAuth, and select Create as a plugin. Then install it from your personal plugins. In a workspace, an admin can turn custom servers off."
         case .vsCode: "Add this to .vscode/mcp.json in one project, or run MCP: Add Server from the Command Palette."
@@ -175,7 +186,7 @@ enum AgentKind: String, CaseIterable, Identifiable, Sendable {
         case .claudeCode: return "claude mcp login passband"
         case .codex: return "codex mcp login passband"
         case .hermes: return "hermes mcp login passband"
-        case .cursor, .vsCode, .claudeDesktop, .claude, .chatGPT, .other: return nil
+        case .cursor, .vsCode, .claudeDesktop, .claude, .muse, .chatGPT, .other: return nil
         }
     }
 
@@ -195,7 +206,7 @@ enum AgentKind: String, CaseIterable, Identifiable, Sendable {
     var isCommand: Bool {
         switch self {
         case .openClaw, .claudeCode, .codex: true
-        case .hermes, .cursor, .vsCode, .claudeDesktop, .claude, .chatGPT, .other: false
+        case .hermes, .cursor, .vsCode, .claudeDesktop, .claude, .muse, .chatGPT, .other: false
         }
     }
 
@@ -208,6 +219,10 @@ enum AgentKind: String, CaseIterable, Identifiable, Sendable {
         default: false
         }
     }
+
+    /// Whether `snippet` is a message to send the agent itself, for an agent
+    /// that is set up by being asked.
+    var snippetIsPrompt: Bool { self == .muse }
 
     /// Whether the agent's install link opens a desktop app. A phone has no
     /// Cursor or VS Code to open, and a custom scheme nothing claims does
@@ -251,7 +266,9 @@ enum AgentKind: String, CaseIterable, Identifiable, Sendable {
     /// link opens a desktop app.
     func copyAction(auth: AgentDoorAuth) -> AgentAction {
         let label =
-            isCommand ? "Copy command" : snippetIsAddress(auth: auth) ? "Copy address" : "Copy config"
+            isCommand
+            ? "Copy command"
+            : snippetIsAddress(auth: auth) ? "Copy address" : snippetIsPrompt ? "Copy prompt" : "Copy config"
         return AgentAction(label: label, note: nil, kind: .copy)
     }
 
@@ -326,7 +343,7 @@ enum AgentKind: String, CaseIterable, Identifiable, Sendable {
             // connector form is still the honest answer rather than a bridge
             // config that would have to carry the sign-in itself.
             return url
-        case .claudeCode, .codex, .cursor, .vsCode, .other:
+        case .claudeCode, .codex, .cursor, .vsCode, .muse, .other:
             // Already the address alone; each signs in on the 401.
             return snippet(endpoint: url)
         }
@@ -367,6 +384,19 @@ enum AgentKind: String, CaseIterable, Identifiable, Sendable {
                 """
         case .claude, .chatGPT:
             return url
+        case .muse:
+            // Muse has no field for an address: it is asked, and writes its
+            // own client. The lines are the questions it otherwise asks back.
+            // Not offered at the open door (see `shown(for:)`), where Meta's
+            // machines could not reach the address anyway.
+            return """
+                Create a Custom Connector for a remote MCP server, then connect to it.
+                Name: Passband
+                Transport: streamable HTTP
+                URL: \(url)
+                Sign-in: OAuth. Show me the sign-in link when you have it.
+                Then list its tools to confirm it works.
+                """
         case .hermes:
             return """
                 mcp_servers:

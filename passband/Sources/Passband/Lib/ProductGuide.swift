@@ -493,6 +493,9 @@ enum ProductGuide {
 
         Arrival:
         - Auth mail shows up within seconds, without waiting for triage. The Auth icon on the rail shows live codes counting down.
+        - On the Mac, a fresh login code floats in a small panel at the top of the screen, over whatever app is in front, with Copy and Dismiss buttons. It does not bring Passband forward or take the keyboard. Copy puts the code on the clipboard and closes the panel. Left alone for 60 seconds, it closes and the code arrives as an ordinary banner instead.
+        - Settings > General > Notifications > "Float login codes" turns the panel off, and codes arrive as banners.
+        - By default the panel appears even during a Focus or Do Not Disturb. "Respect Do Not Disturb", just below that setting, holds it back while any Focus is on: the code then arrives as a banner, which the Focus handles like any other. Turning it on asks macOS for permission to see the Focus status.
         """
 
     private static let assistant = """
@@ -514,7 +517,8 @@ enum ProductGuide {
 
         Connecting an outside agent (Settings > Agents):
         - Passband has an MCP endpoint (Agent MCP) that Claude, OpenClaw, Hermes Agent, ChatGPT, Claude Code, Codex, Cursor, VS Code or Claude Desktop can connect to. The pane shows the address, a button that adds it where the agent has an install link (Claude, Cursor, VS Code) or copies the setup otherwise, and the setup snippet for each.
-        - Such an agent can read ranked updates and whole threads, search mail, list bills, deadlines and packages, and set sender rules. It cannot send, archive, label or delete, cannot see login codes, and cannot change anything in Gmail.
+        - Such an agent can read ranked updates and whole threads, search mail, list bills, deadlines and packages, and set sender rules. It cannot archive, label or delete, and cannot see login codes. Unless the user changed the setting below, it can leave drafts and cannot send.
+        - "What your agent may write" sets whether it can write mail, per mailbox. "Read only": it cannot. "Drafts only" (the default): it can leave drafts, marked "from your agent" in the drafts list and in the composer when one is opened, for the user to read, edit and send. "Send, with your approval": it can send from the user's address, and is told to show each message and wait for the user's go-ahead in its own chat first. Passband cannot check that it asked. It blocks anything that looks like a password or key, and every agent send is in the audit log.
         - Hosted Passband does not offer this yet. A self-hosted daemon does.
         """
 

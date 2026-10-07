@@ -1,10 +1,10 @@
 # squelch-mcp
 
-The **agent door**: an MCP server exposing squelch's read-only intelligence to any MCP client (Claude Code, Claude Desktop, whatever you run). Agents get ranked summaries — they never hold the Gmail credential, never see raw mailbox access, and structurally cannot see auth mail.
+The **agent door**: an MCP server exposing squelch's intelligence to any MCP client (Claude Code, Claude Desktop, whatever you run). Agents get ranked summaries — they never hold the Gmail credential, never see raw mailbox access, and structurally cannot see auth mail. It never sends mail unless the mailbox owner turns that on, and by default it can leave drafts for the owner to send (see "Writing mail").
 
 ## Tools
 
-Seven tools, read-mostly by design:
+Seven tools that are always there, read-mostly by design:
 
 - `get_inbox_updates` — ranked updates since a timestamp
 - `get_thread` — a sanitized thread by thread id or message id
@@ -14,6 +14,20 @@ Seven tools, read-mostly by design:
 - `set_sender_rule` / `list_sender_rules` — the one write: LOCAL sender disposition (surface / squelch / filtered). It touches squelch's own database only, never Gmail, and writes an audit row.
 
 Sealed messages (2FA codes, password resets, login alerts) are absent from every response — not redacted, absent, indistinguishable from not existing.
+
+### Writing mail
+
+Two more tools depend on the owner's setting, in Passband under Settings > Agents ("What your agent may write"). It is per mailbox, starts at Drafts only, and lives in the daemon, not in this crate:
+
+| Owner's setting | Extra tools | What happens |
+|---|---|---|
+| Read only | none | The agent cannot write mail. |
+| Drafts only (default) | `create_draft` | Saves a draft in Passband, marked as the agent's. The owner reads, edits and sends it. Nothing leaves the mailbox. |
+| Send, with your approval | `create_draft`, `send_email` | Sends from the owner's address through the daemon's send pipeline. |
+
+`send_email` needs **direct human approval for every message**. The server's instructions and the tool's description both tell the agent to show its human the exact recipients, subject and body and wait for a yes; the required `human_approved` argument must be `true`, and a call without it is refused. That approval happens in the agent's conversation, which the daemon cannot see, so it is an instruction to the agent rather than a lock. An owner who wants a lock uses Drafts only.
+
+Either way an agent can reply only to mail it can read, sends a reply to the sender address it was shown (never a hidden Reply-To) and copies nobody it did not name, cannot attach files or forward, cannot override the outbound secret guard, never overwrites a draft the owner is writing, and shows up in the audit log as `agent`. A tool the setting does not allow is not listed, and refuses if called anyway. The standalone `squelch-mcp` binary has no send pipeline and offers neither tool; they are served by `squelchd serve`. Full model: `docs/SECURITY.md` §4c.
 
 ## Transports
 

@@ -180,6 +180,11 @@ pub struct ApiState {
     /// Display only: the door's actual auth lives in squelch-mcp, and nothing
     /// here can loosen it.
     pub(crate) agent_door: AgentDoorStatus,
+    /// Who the audit log says performed this state's write actions.
+    /// `client-api` for every request on the human door; `agent` on the copy
+    /// handed to the agent door's mailer ([`ApiState::agent_mailer`]), so the
+    /// shared send pipeline attributes an agent's send to the agent.
+    pub(crate) audit_actor: &'static str,
     /// The process's metrics registry, read by `/client/stats` to answer
     /// whether this mailbox's Gmail credential is currently working.
     ///
@@ -522,6 +527,7 @@ impl ApiState {
             calendar_consent_port: squelch_core::auth::DEFAULT_HEADLESS_PORT,
             calendar_consent_endpoints: Default::default(),
             agent_door: AgentDoorStatus::Open,
+            audit_actor: crate::handlers::ACTION_ACTOR,
             sync_metrics: None,
             gmail_budget: None,
             console_allow_insecure_cookie: false,
@@ -724,6 +730,12 @@ impl ApiState {
 
     pub(crate) fn agent_door(&self) -> &AgentDoorStatus {
         &self.agent_door
+    }
+
+    /// A copy of this state whose audit rows are written by `actor`.
+    pub(crate) fn with_audit_actor(mut self, actor: &'static str) -> Self {
+        self.audit_actor = actor;
+        self
     }
 
     /// The control plane's origin, if console SSO is configured. `None` => the

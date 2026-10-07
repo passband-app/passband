@@ -95,6 +95,12 @@ struct ComposeState: Sendable, Equatable {
     /// Rides along to `send` so a successful send deletes the draft in the same
     /// transaction — otherwise the next `c` would restore mail already gone.
     var draftId: Int?
+    /// The draft this composer was filled from was written by an agent over
+    /// Agent MCP, not by the owner. Set by the restore paths and nothing else,
+    /// and shown in the composer until it is sent or closed: these are words
+    /// and recipients somebody else chose, about to go out under the owner's
+    /// name.
+    var fromAgent = false
     /// Redacted guard kinds from a 422, set when a held send comes back
     /// blocked and the composer reopens on it. Empty means the guard passed (or
     /// hasn't been asked yet). Non-empty is the ONLY state that offers an

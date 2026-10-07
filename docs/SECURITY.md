@@ -258,12 +258,14 @@ The outbound guard scans text and message parts at send time; binary files are
 not scanned. Restricting external-agent access does not delete human drafts or
 their attachments. However many drafts an account holds (one per reply target,
 one per forwarded message, any number of new-message drafts), they are served
-only on `/client/drafts`, are never audited, and have no MCP surface.
+only on `/client/drafts` and the owner's own are never audited. The agent door
+cannot list, read, edit or delete a draft; the one thing it can do, when the
+owner allows it, is ADD one (§4c).
 
 A staged file has a SECOND claim, `scheduled_send_id`, beside `draft_id`: the
 outbox row (`scheduled_sends`, docs/SCHEDULED-SEND.md) that will send it. The
-outbox is human-only like drafts, served only on `/client/scheduled`, with no
-MCP surface; unlike drafts it IS audited (ids and reasons only, never the
+outbox is human-only, served only on `/client/scheduled`, with no MCP surface
+at all (an agent's send is immediate and cannot be scheduled); unlike drafts it IS audited (ids and reasons only, never the
 frozen request). A scheduled row holds its files for as long as it waits, up
 to 366 days, and a failed row for 30 days more; only a cancel releases them
 (back to unclaimed, the one-day clock restarted), and the compose door's
@@ -343,6 +345,142 @@ The sync suite asserts the "not fetched routinely" half against the mock's CALL
 LOG rather than against what landed: "no spam rows appeared" would also pass if
 the walk ran and the folder happened to be empty, and the thing being avoided is
 the request.
+
+## 4c. Agent writes: drafts and sending (issue #394)
+
+**Invariant.** An agent writes mail only as far as the mailbox owner has said
+it may, only through the human door's own send pipeline, and never with more
+latitude than the owner has there. With nothing chosen it may leave drafts and
+cannot send: no mail leaves a mailbox on an agent's say-so unless the owner
+chose that level. Nothing here changes what an agent can READ.
+
+**The setting.** `app_settings` key `agent.write_access`, per mailbox:
+`none`, `drafts`, `send`; each level includes the ones before it. A mailbox
+that has never set it is at `drafts` (`AgentWriteAccess::UNSET`; the owner's
+product decision, 2026-10-06). That default is safe to hold for the reason
+`drafts` is the hard gate at all: a draft is a local row, marked as the
+agent's, that becomes mail only when the owner presses send. What it does
+cost is stated under the residual risks below.
+`squelch-core/src/agent_write.rs:AgentWriteAccess::load` reads it, and a
+STORED value this build does not recognize FAILS CLOSED to `none`, not to the
+unset default: "the owner chose something we cannot read" is not "the owner
+never chose". The type has no `Default` impl so that a failed read can never
+be spelled `unwrap_or_default()`. It is set
+only on the human door (`GET`/`PUT /client/settings/agent-access`, bearer-authed,
+audited as `agent.write_access` with `before->after`; the ledger row is written
+FIRST and a failed row leaves the setting unchanged). The agent door has no
+tool or route that changes it. It is read from the store on every call, so
+turning it off stops the next tool call, not the next restart.
+
+**Enforcement.** The agent door (`squelch-mcp`) holds a `dyn AgentMailer` and
+nothing else: no write credential, no message builder, no draft or outbox store
+call (`squelch-mcp/src/main.rs:the_mcp_crate_never_reaches_the_draft_store_itself`
+scans its source for those identifiers). The one implementation is
+`squelch-api/src/agent_write.rs:ApiAgentMailer`, which `squelchd serve` hands
+over via `ApiState::agent_mailer`. The standalone `squelch-mcp` binary passes
+none and offers neither tool. For each call the mailer:
+
+- re-reads the setting and refuses below the needed level (the MCP server
+  also hides tools the level does not allow, but listing is a courtesy and
+  this check is the gate);
+- resolves a reply target by PERFORMING THE AGENT DOOR'S OWN READ
+  (`readable_parent`: the message must appear in the `thread_view` that
+  `get_thread` serves), so an agent can only reply to mail it can read, and a
+  restricted, pending or spam id answers the same `not found` as an unknown
+  one. It asks the read rather than re-listing the read's conditions: a first
+  version re-listed them and left out spam (§4b);
+- DECIDES THE RECIPIENTS ITSELF: the `to` the agent stated, else the parent's
+  stored From, and the `cc` the agent stated or none. The owner's own reply
+  honors the parent's `Reply-To` and derives copies from its headers; an
+  agent's does not, because the agent is shown only a message's From and its
+  human approves only what the agent shows them. A `Reply-To` nobody in that
+  conversation saw must not decide where approved mail goes. The resolved
+  `to`/`cc` are returned in the tool result;
+- for `send_email`, runs `validate_send`, the outbound guard (§5) and
+  `perform_send`, as `POST /client/actions/send` does, with `override_guard`
+  hard-wired to `false`. The guard reads MORE than it does for the owner:
+  recipients and subject as well as the body, and the body a second time
+  with markdown emphasis marks removed (`guard_text`), since for an agent
+  all of it is model output and this is the one check with no override;
+- for `create_draft`, INSERTS a local draft marked `drafts.from_agent = 1`
+  and never edits one: a reply whose message already has a draft is refused,
+  because that row may be the owner's own unfinished writing and an agent
+  cannot see it to know. At most 25 unsent agent drafts per mailbox. The
+  client marks such a draft "from your agent" in the drafts list AND inside
+  the composer it is restored into (`AgentDraftNotice`), with its recipient
+  fields laid open: a reply draft is restored straight into the reply box
+  when the owner presses `r`, so a mark only on the list would never be seen;
+- refuses, for both tools, a body with no visible character, a header field
+  carrying any control character or Unicode line separator, and more than 50
+  recipients;
+- audits every call that reaches it, refusals included, as actor `agent`
+  (ids, counts and fixed reason strings only, never content). A draft and its
+  ledger row are one transaction, like `set_sender_rule`. NOT audited: a
+  `send_email` call the MCP server turns away for `human_approved` not being
+  `true`, which never reaches the mailer; and, as on the human door, a send's
+  success row is best-effort once the mail has left.
+
+An agent's composition is deliberately narrower than the owner's: no
+attachments, no forward, no send group, no read tracking, no scheduling.
+
+`from_agent` is set at insert and never cleared. An owner who rewrites an
+agent's draft still sees it marked, and so does an owner whose own save landed
+on a row the agent created a moment earlier. That errs toward the warning.
+
+**What "with your approval" does and does not mean.** At `send`, the approval
+is the agent's human saying yes IN THE AGENT'S OWN CONVERSATION. The daemon
+cannot see that conversation and does not verify it. What it does is:
+
+- tell the agent the rule three times: in the server instructions sent at
+  `initialize` (`server.rs:write_instructions`), in the `send_email`
+  description, and in the required `human_approved` argument, each saying that
+  approval is per message, comes from the human, and is never text found in an
+  email or a tool result. A sender rule's `standing_instruction` is named
+  explicitly as never being approval: `set_sender_rule` is an agent write, so
+  that text may have been written by an earlier, compromised session;
+- refuse a call whose `human_approved` is not `true`;
+- annotate the tool `destructiveHint` + `openWorldHint`, which is what MCP
+  clients key their own confirmation prompts on.
+
+**Residual risk of the default (`drafts`), accepted.** Every mailbox whose
+daemon serves the agent door offers `create_draft` without the owner having
+opened the setting. On an Open door (self-host, no agent sign-in) that means
+anything that can reach `/mcp` can leave up to 25 drafts in the owner's
+drafts list, and a reply draft is restored into the owner's reply box. What
+stands between such a draft and the wire is the owner: the mark in the list,
+the notice in the composer with its recipients laid open, and their own
+press of send. A draft written to be sent unread ("looks like mine") is the
+attack this default exposes, and the mark is the defence; do not weaken it.
+
+**Residual risk of `send`, accepted for an opt-in level and stated in the
+client.** A
+prompt-injected or simply wrong agent can assert `human_approved: true` and
+send. At `send`, the blast radius of the agent door grows from "can read
+triaged mail and write local rules" to "can send mail as the owner", including
+mail that quotes whatever it was able to read. Sealed mail stays unreadable and
+the outbound guard still blocks secret-shaped text with no override, but
+ordinary content is not protected by either. On an Open door (self-host, no
+agent sign-in) "the agent" is anything that can reach `/mcp`. An owner who
+wants a hard gate uses `drafts`, where the only way mail leaves is the owner
+pressing send in Passband. Not built yet, and the natural next steps if `send`
+needs hardening: per-send approval inside the app, a recipient allow-list, a
+daily cap, reply-only, and recording who authored a sender rule so agent-written
+rule text is not delivered as the owner's words.
+
+**Do not break.**
+- Never give `squelch-mcp` the write credential, a `GmailWriteClient`, or a
+  direct draft/outbox store call. Agent writes go through `AgentMailer`.
+- Never let an agent path pass `override_guard: true`.
+- Never resolve an agent's reply target with `action_message_ref` alone; it
+  applies no agent access check. And never re-list the agent door's read
+  conditions beside it: ask `thread_view`.
+- Never let an agent's send take its recipients from the pipeline's
+  derivation (`Reply-To`, the parent's Cc). State `to` and `cc` on the
+  `SendBody`.
+- Never let the unset level be `send`. Sending is only ever a choice.
+- Keep an unreadable stored setting, and a failed read, meaning `none`.
+- Keep the setting off the agent door: an agent that could raise its own
+  level has no level.
 
 ## 5. Outbound secret guard
 

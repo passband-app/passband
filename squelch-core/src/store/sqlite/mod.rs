@@ -94,16 +94,17 @@ use crate::error::{CoreError, Result};
 use crate::metrics::{NotifyDecision, NotifyLane};
 use crate::store::SmartBlockMemo;
 use crate::store::{
-    AccountIdentity, AccountPhoto, AttachmentBytes, BankingApplied, BlankBodyScan, ClientPlatform,
-    ClientSeen, ClientTag, ContactEntry, Device, DeviceToken, Draft, DraftFields, DraftKey,
-    ExtractQueued, FtsQuery, HealScope, InboxUnread, IssuedDeviceToken, LeggedHit, MailActivityDay,
-    MarketingApplied, MarketingOffer, MessageMissingRecipients, MessageOpen, MessageUnsub,
-    MintedPairingCode, MissingVector, NewAuditEntry, NewEvent, NewNotifyDecision,
-    NotifyDecisionRow, RevisitQueued, SPAM_SYNCED_AT_KEY, SealedBody, SealedMessage,
-    SearchDiagnostics, SearchFilter, SearchSort, SeedVerdict, SenderDigestRow, SenderDomainEntry,
-    SenderEntry, SenderHistory, SentMessage, SitrepBand, SpamScope, Stage1Applied, Stage1Queued,
-    Stage2Applied, Stage2CapOverrides, Stage2Queued, Stage2Usage, Stage2UsageDay, Store, SyncState,
-    TermDf, ThreadSibling, TrackedMessage, TriageDebug, TriagedMessage, UsageTokens,
+    AccountIdentity, AccountPhoto, AgentDraftOutcome, AttachmentBytes, BankingApplied,
+    BlankBodyScan, ClientPlatform, ClientSeen, ClientTag, ContactEntry, Device, DeviceToken, Draft,
+    DraftFields, DraftKey, ExtractQueued, FtsQuery, HealScope, InboxUnread, IssuedDeviceToken,
+    LeggedHit, MailActivityDay, MarketingApplied, MarketingOffer, MessageMissingRecipients,
+    MessageOpen, MessageUnsub, MintedPairingCode, MissingVector, NewAuditEntry, NewEvent,
+    NewNotifyDecision, NotifyDecisionRow, RevisitQueued, SPAM_SYNCED_AT_KEY, SealedBody,
+    SealedMessage, SearchDiagnostics, SearchFilter, SearchSort, SeedVerdict, SenderDigestRow,
+    SenderDomainEntry, SenderEntry, SenderHistory, SentMessage, SitrepBand, SpamScope,
+    Stage1Applied, Stage1Queued, Stage2Applied, Stage2CapOverrides, Stage2Queued, Stage2Usage,
+    Stage2UsageDay, Store, SyncState, TermDf, ThreadSibling, TrackedMessage, TriageDebug,
+    TriagedMessage, UsageTokens,
 };
 use crate::triage::rule_suggest::SmartBlock;
 use crate::types::{

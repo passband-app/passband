@@ -6,6 +6,7 @@
 //! docs/SECURITY.md §4.
 
 mod agent;
+mod agent_write;
 mod assistant;
 mod auth;
 mod calendar_connect;
@@ -336,6 +337,13 @@ fn client_router(state: ApiState) -> Router {
         .route("/client/actions/not_spam", post(handlers::action_not_spam))
         .route("/client/actions/label", post(handlers::action_label))
         .route("/client/actions/send", post(handlers::action_send))
+        // What an agent on the agent door may write (issue #394). Set HERE,
+        // by the owner, and only read over there: the agent door has no route
+        // or tool that changes it.
+        .route(
+            "/client/settings/agent-access",
+            get(agent_write::get_agent_access).put(agent_write::put_agent_access),
+        )
         // Bearer auth wraps EVERY route above.
         .layer(middleware::from_fn_with_state(
             state.clone(),

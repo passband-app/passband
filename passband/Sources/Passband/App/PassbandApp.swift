@@ -67,6 +67,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // was not running is delivered the moment a delegate exists, and a
         // center without one drops it.
         Notifier.shared.install()
+        // Look at the floating code panel without waiting for a login code:
+        // same posture as PASSBAND_FORCE_TOUR, a launch environment only.
+        if let code = ProcessInfo.processInfo.environment["PASSBAND_PREVIEW_LOGIN_CODE"] {
+            LoginCodePanel.shared.show(
+                .init(service: "GitHub", code: code), sender: "GitHub <noreply@github.com>",
+                account: nil, onMissed: {})
+        }
         // Attachment bytes staged for Quick Look are torn down when the panel
         // closes; this is the sweep for the ones a crash or a hard quit stranded.
         StagedAttachment.purgeRoot()

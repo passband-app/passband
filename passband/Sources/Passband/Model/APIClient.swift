@@ -1097,6 +1097,19 @@ actor APIClient {
         try await post("/client/tracking-config", body: TrackingConfigBody(default_enabled: enabled))
     }
 
+    // MARK: - agent write access
+
+    /// What an agent may write to this mailbox. A daemon older than the
+    /// setting answers 404, which the pane reads as "not offered here".
+    func getAgentAccess() async throws -> AgentAccessConfig {
+        try await get("/client/settings/agent-access")
+    }
+
+    /// Set it. The response is the daemon's stored answer after the write.
+    func setAgentAccess(_ level: AgentWriteAccess) async throws -> AgentAccessConfig {
+        try await put("/client/settings/agent-access", body: AgentAccessBody(write_access: level.rawValue))
+    }
+
     // MARK: - markdown preview
 
     struct MarkdownPreviewBody: Codable, Sendable { var source: String }

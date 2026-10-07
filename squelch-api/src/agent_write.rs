@@ -38,7 +38,8 @@ use chrono::Utc;
 use serde::Deserialize;
 use serde_json::json;
 use squelch_core::agent_write::{
-    AgentCompose, AgentDraftCreated, AgentMailer, AgentSent, AgentWriteAccess, AgentWriteError,
+    AgentCompose, AgentDraftCreated, AgentDraftOpened, AgentMailer, AgentSent, AgentWriteAccess,
+    AgentWriteError, draft_link,
 };
 use squelch_core::error::CoreError;
 use squelch_core::store::{AgentDraftOutcome, DraftFields, NewAuditEntry, Store};
@@ -59,6 +60,12 @@ pub(crate) const AGENT_ACTOR: &str = "agent";
 /// audited (an unsent composition is their own thinking); an agent's is a
 /// write by somebody else, so it is. IDS ONLY, never the text.
 const AUDIT_DRAFT: &str = "draft.create";
+/// Audit action for an agent asking the Mac to show one of its drafts.
+const AUDIT_OPEN: &str = "draft.open";
+/// The least time between two "show this draft" requests. Each one may pull
+/// the Mac app to the front, so an agent on a loop must not be able to hold
+/// the owner's screen.
+const OPEN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 /// Audit action for the owner changing the setting.
 const AUDIT_ACCESS: &str = "agent.write_access";
 
@@ -79,12 +86,18 @@ pub struct ApiAgentMailer {
     /// The daemon's state with its audit actor switched to [`AGENT_ACTOR`], so
     /// every row the shared pipeline writes is attributed to the agent.
     state: ApiState,
+    /// When the last "show this draft" request was let through. See
+    /// [`OPEN_INTERVAL`]. One mailer serves the whole agent door, so this is
+    /// one clock for every agent on the mailbox, which is the point: it is
+    /// the owner's screen that is being rationed.
+    last_open: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 impl ApiAgentMailer {
     pub(crate) fn new(state: &ApiState) -> Self {
         Self {
             state: state.clone().with_audit_actor(AGENT_ACTOR),
+            last_open: std::sync::Mutex::new(None),
         }
     }
 
@@ -296,7 +309,19 @@ impl AgentMailer for ApiAgentMailer {
         .map_err(|_| internal())?;
 
         match outcome {
-            AgentDraftOutcome::Created(draft_id) => Ok(AgentDraftCreated { draft_id }),
+            AgentDraftOutcome::Created(draft_id) => {
+                // The mailbox is only decoration on the link; a read that
+                // fails costs the hint, never the draft that was just saved.
+                let mailbox = store_call(&self.state, |store, account_id| {
+                    store.account_email(account_id)
+                })
+                .await
+                .unwrap_or_default();
+                Ok(AgentDraftCreated {
+                    draft_id,
+                    link: draft_link(&mailbox, draft_id),
+                })
+            }
             AgentDraftOutcome::ReplyDraftExists => Err(self
                 .refuse(
                     AUDIT_DRAFT,
@@ -322,6 +347,81 @@ impl AgentMailer for ApiAgentMailer {
                 )
                 .await),
         }
+    }
+
+    async fn open_draft(&self, draft_id: i64) -> Result<AgentDraftOpened, AgentWriteError> {
+        let target = Some(draft_id.to_string());
+        if !self.access().await?.allows_drafts() {
+            return Err(self
+                .refuse(
+                    AUDIT_OPEN,
+                    &target,
+                    "rejected:agent_not_allowed",
+                    AgentWriteError::NotAllowed(AgentWriteAccess::Drafts),
+                )
+                .await);
+        }
+        // ONLY A DRAFT AN AGENT WROTE. The owner's own drafts are theirs to
+        // open; naming one here answers exactly as an id that does not exist,
+        // so this cannot be used to count or find them either.
+        let mailbox = store_call(&self.state, move |store, account_id| {
+            match store.draft_by_id(account_id, draft_id)? {
+                Some(draft) if draft.from_agent => store.account_email(account_id).map(Some),
+                _ => Ok(None),
+            }
+        })
+        .await
+        .map_err(|_| internal())?;
+        let Some(mailbox) = mailbox else {
+            return Err(self
+                .refuse(
+                    AUDIT_OPEN,
+                    &target,
+                    "failed:target",
+                    AgentWriteError::NotFound,
+                )
+                .await);
+        };
+
+        let too_soon = {
+            let mut last = self.last_open.lock().unwrap_or_else(|e| e.into_inner());
+            let now = std::time::Instant::now();
+            let too_soon = last.is_some_and(|at| now.duration_since(at) < OPEN_INTERVAL);
+            if !too_soon {
+                *last = Some(now);
+            }
+            too_soon
+        };
+        if too_soon {
+            return Err(self
+                .refuse(
+                    AUDIT_OPEN,
+                    &target,
+                    "rejected:too_soon",
+                    AgentWriteError::Blocked(
+                        "Passband was asked to show a draft a moment ago and will not take \
+                         the owner's screen again so soon. The draft is saved; give them its \
+                         link instead."
+                            .into(),
+                    ),
+                )
+                .await);
+        }
+
+        // Told to every Mac app listening for this mailbox. `send` errs only
+        // when nothing is, which is the answer rather than a failure.
+        let on_mac = self.state.draft_opens.send(draft_id).is_ok();
+        audit_action(
+            &self.state,
+            AUDIT_OPEN,
+            target,
+            if on_mac { "ok:mac" } else { "ok:no_mac" },
+        )
+        .await;
+        Ok(AgentDraftOpened {
+            on_mac,
+            link: draft_link(&mailbox, draft_id),
+        })
     }
 
     async fn send(&self, compose: AgentCompose) -> Result<AgentSent, AgentWriteError> {

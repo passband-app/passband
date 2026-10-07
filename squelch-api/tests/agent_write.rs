@@ -750,3 +750,142 @@ async fn send_level_without_a_write_credential_says_so() {
         "{refused:?}"
     );
 }
+
+// --- opening a draft on the Mac ------------------------------------------------
+
+/// Read SSE frames off a `/client/events?opens=1` response until one names a
+/// draft to open, or the wait runs out.
+async fn next_open_frame(resp: axum::response::Response) -> Option<String> {
+    use http_body_util::BodyExt;
+    let mut body = resp.into_body();
+    let mut seen = String::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let frame = tokio::time::timeout_at(deadline, body.frame())
+            .await
+            .ok()??;
+        let Ok(frame) = frame else { return None };
+        if let Some(data) = frame.data_ref() {
+            seen.push_str(&String::from_utf8_lossy(data));
+            if seen.contains("open_draft") && seen.ends_with("\n\n") {
+                return Some(seen);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn open_draft_reaches_a_listening_mac_and_says_so() {
+    let f = fixture(AgentWriteAccess::Drafts, false).await;
+    let created = f.mailer.create_draft(compose("hello")).await.unwrap();
+    assert_eq!(
+        created.link,
+        format!(
+            "passband://draft/{}?mailbox=me%40example.com",
+            created.draft_id
+        )
+    );
+
+    // Nothing listening: saved, not shown, and the answer says which.
+    let unheard = f.mailer.open_draft(created.draft_id).await.unwrap();
+    assert!(!unheard.on_mac);
+    assert_eq!(unheard.link, created.link);
+
+    // A Mac app connects and asks for open requests.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(authed("GET", "/client/events?opens=1"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let listening = tokio::spawn(next_open_frame(resp));
+    // The 5s spacing is for the owner's screen, not for this test.
+    tokio::time::sleep(std::time::Duration::from_millis(5100)).await;
+
+    let heard = f.mailer.open_draft(created.draft_id).await.unwrap();
+    assert!(heard.on_mac);
+    let frame = listening.await.unwrap().expect("an open_draft frame");
+    assert!(frame.contains("event: open_draft"), "{frame}");
+    assert!(
+        frame.contains(&format!("{{\"open_draft\":{}}}", created.draft_id)),
+        "{frame}"
+    );
+    // Not a row in the notification log: it carries no cursor.
+    assert!(
+        !frame.contains("\nid:") && !frame.starts_with("id:"),
+        "{frame}"
+    );
+
+    let rows = audit_details(&f);
+    assert!(rows.contains(&("agent".into(), "draft.open".into(), "ok:no_mac".into())));
+    assert!(rows.contains(&("agent".into(), "draft.open".into(), "ok:mac".into())));
+}
+
+/// A connection that did not ask (an older Mac app, the phone) is not "a Mac
+/// listening", and is never sent the frame.
+#[tokio::test]
+async fn a_stream_that_did_not_ask_is_not_a_listening_mac() {
+    let f = fixture(AgentWriteAccess::Drafts, false).await;
+    let created = f.mailer.create_draft(compose("hello")).await.unwrap();
+    let resp = f
+        .app
+        .clone()
+        .oneshot(authed("GET", "/client/events"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let opened = f.mailer.open_draft(created.draft_id).await.unwrap();
+    assert!(!opened.on_mac);
+    drop(resp);
+}
+
+#[tokio::test]
+async fn an_agent_can_only_open_a_draft_an_agent_wrote() {
+    let f = fixture(AgentWriteAccess::Drafts, false).await;
+    let own = f
+        .store
+        .upsert_draft(
+            f.acct,
+            DraftKey::NewCreate,
+            DraftFields {
+                body: "the owner's own",
+                ..Default::default()
+            },
+            Utc::now(),
+        )
+        .unwrap()
+        .unwrap();
+    for id in [own.id, 999_999] {
+        assert_eq!(
+            f.mailer.open_draft(id).await,
+            Err(AgentWriteError::NotFound)
+        );
+    }
+    // And not at all once the owner has made the door read only.
+    let created = f.mailer.create_draft(compose("hello")).await.unwrap();
+    AgentWriteAccess::None
+        .save(f.store.as_ref(), f.acct)
+        .unwrap();
+    assert_eq!(
+        f.mailer.open_draft(created.draft_id).await,
+        Err(AgentWriteError::NotAllowed(AgentWriteAccess::Drafts))
+    );
+}
+
+#[tokio::test]
+async fn open_requests_are_spaced_out() {
+    let f = fixture(AgentWriteAccess::Drafts, false).await;
+    let created = f.mailer.create_draft(compose("hello")).await.unwrap();
+    assert!(f.mailer.open_draft(created.draft_id).await.is_ok());
+    let again = f.mailer.open_draft(created.draft_id).await;
+    assert!(
+        matches!(again, Err(AgentWriteError::Blocked(_))),
+        "{again:?}"
+    );
+    assert!(audit_details(&f).contains(&(
+        "agent".into(),
+        "draft.open".into(),
+        "rejected:too_soon".into()
+    )));
+}

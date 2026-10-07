@@ -54,6 +54,12 @@ const KEEPALIVE: Duration = Duration::from_secs(15);
 pub struct EventsQuery {
     /// The client's own cursor: send everything with `id > after`, then follow.
     after: Option<i64>,
+    /// `1` from a Mac app that understands [`open_draft_frame`] and will act
+    /// on it. OPT-IN, because the frame is useless to anything else and the
+    /// daemon counts the connections that asked as "a Mac is listening": an
+    /// older app, or the phone, must not make that count true.
+    #[serde(default)]
+    opens: Option<u8>,
 }
 
 /// Where a connection starts reading. WITH `after`: exactly there (exclusive);
@@ -89,6 +95,19 @@ fn subscribe(state: &ApiState) -> (broadcast::Receiver<i64>, Option<broadcast::S
 fn frame(ev: &Event) -> Option<SseEvent> {
     // `id` panics on embedded newlines; an integer has none.
     SseEvent::default().id(ev.id.to_string()).json_data(ev).ok()
+}
+
+/// "Bring this draft up" (the agent door's `open_draft`), as an SSE frame.
+///
+/// NO `id:`. The id field is the notification cursor (see [`frame`]) and this
+/// is not a row in that log; a frame without one inherits the connection's
+/// last id on the client, which moves nothing. The payload is one key no
+/// [`Event`] has, so a reader that does not know it fails to decode an event
+/// and carries on.
+fn open_draft_frame(draft_id: i64) -> SseEvent {
+    SseEvent::default()
+        .event("open_draft")
+        .data(format!("{{\"open_draft\":{draft_id}}}"))
 }
 
 /// Send every event past `cursor`, oldest first, in bounded batches. `None`
@@ -142,6 +161,7 @@ async fn run(
     start: i64,
     mut wake: broadcast::Receiver<i64>,
     _anchor: Option<broadcast::Sender<i64>>,
+    mut opens: Option<broadcast::Receiver<i64>>,
     tx: mpsc::Sender<Result<SseEvent, Infallible>>,
 ) {
     // Replay first — a no-op for a live-only connection.
@@ -165,9 +185,36 @@ async fn run(
                 // The store (and with it the process) is going away.
                 Err(broadcast::error::RecvError::Closed) => return,
             },
+            // A draft to show, for a connection that asked to be told. A
+            // lagged receiver simply missed some: there is no table to
+            // re-read, and a stale "show this" is worse than a dropped one.
+            Some(open) = next_open(&mut opens) => {
+                if let Some(draft_id) = open
+                    && tx.send(Ok(open_draft_frame(draft_id))).await.is_err()
+                {
+                    return;
+                }
+            }
             // The client hung up. A send would notice too, but a send needs a
             // wake and a quiet mailbox may never deliver one.
             _ = tx.closed() => return,
+        }
+    }
+}
+
+/// The next open-draft request on a connection that subscribed: `Some(id)`,
+/// or `None` for a lag (nothing to send). Pends forever on a connection that
+/// did not subscribe, and stops listening if the channel closes.
+async fn next_open(opens: &mut Option<broadcast::Receiver<i64>>) -> Option<Option<i64>> {
+    let Some(rx) = opens else {
+        return std::future::pending().await;
+    };
+    match rx.recv().await {
+        Ok(id) => Some(Some(id)),
+        Err(broadcast::error::RecvError::Lagged(_)) => Some(None),
+        Err(broadcast::error::RecvError::Closed) => {
+            *opens = None;
+            Some(None)
         }
     }
 }
@@ -207,6 +254,10 @@ pub async fn events_stream(
     };
     let start = start_cursor(q.after, latest);
 
+    // Subscribed for the life of the connection, and dropped with it: the
+    // receiver count IS the number of Macs listening.
+    let opens = (q.opens == Some(1)).then(|| state.draft_opens.subscribe());
+
     let (tx, rx) = mpsc::channel::<Result<SseEvent, Infallible>>(CHANNEL_BUFFER);
     let shutdown = state.shutdown.clone();
     tokio::spawn(async move {
@@ -215,7 +266,7 @@ pub async fn events_stream(
         // A lost in-flight frame comes back on the client's next reconnect.
         tokio::select! {
             _ = shutting_down(shutdown) => {}
-            _ = run(store, account_id, start, wake, anchor, tx) => {}
+            _ = run(store, account_id, start, wake, anchor, opens, tx) => {}
         }
     });
 

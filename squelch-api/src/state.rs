@@ -109,6 +109,16 @@ pub struct ApiState {
     ///
     /// [`SqliteStore::attach_event_notifier`]: squelch_core::store::SqliteStore::attach_event_notifier
     pub(crate) event_notifier: Option<tokio::sync::broadcast::Sender<i64>>,
+    /// "Show this draft" requests from the agent door (`open_draft`), carried
+    /// to every connected Mac app that asked for them on its event stream
+    /// (`GET /client/events?opens=1`). The payload is a draft id.
+    ///
+    /// DELIBERATELY NOT THE EVENTS LOG. Nothing is persisted and nothing is
+    /// replayed: a request to put something on screen is about now, and a Mac
+    /// that connects an hour later must not have a window thrown at it. Its
+    /// `receiver_count` is also how the agent learns whether anything was
+    /// listening.
+    pub(crate) draft_opens: tokio::sync::broadcast::Sender<i64>,
     /// The daemon's shutdown signal. An SSE stream is infinite and axum's
     /// graceful shutdown waits for open connections, so without this one
     /// resident client would hold squelchd open forever.
@@ -437,6 +447,7 @@ impl ApiState {
             refresh: None,
             spam_refresh: None,
             event_notifier: None,
+            draft_opens: tokio::sync::broadcast::channel(16).0,
             shutdown: None,
             worker_clock_skew: chrono::Duration::zero(),
             tracking_base_url: None,

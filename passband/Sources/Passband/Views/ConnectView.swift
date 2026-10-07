@@ -214,7 +214,11 @@ struct ConnectView: View {
             // Commit the initial route before the form can edit/clear an
             // error. Later error changes must never send it back to welcome.
             if purpose == .gate {
-                if case .introduction = gateStep, isReturning, store.connError != nil {
+                if case .introduction = gateStep, store.leftSavedConnectionWait {
+                    // Walked away from a server that is not answering: the
+                    // retry is offered, its host is not typed in for them.
+                    savedConnectionFailed = true
+                } else if case .introduction = gateStep, isReturning, store.connError != nil {
                     // The saved account's own host goes in the form, so a
                     // hosted person is not handed a localhost self-host form
                     // with a pairing-link instruction for a link that never came.
@@ -246,7 +250,7 @@ struct ConnectView: View {
     /// A fresh install has no active account and loadSettings clears
     /// `connError` for it, so the intro stays theirs.
     private var isReturning: Bool {
-        store.tour.hasLeftPractice
+        store.tour.hasLeftPractice || store.leftSavedConnectionWait
             || (AccountManager.shared.active != nil && store.connError != nil)
     }
 
@@ -257,7 +261,7 @@ struct ConnectView: View {
             // A saved connection that failed to restore needs the form and
             // its existing error, not the first-time hosting introduction —
             // and the form for the KIND of daemon that account was.
-            guard store.connError != nil else { return .welcome }
+            guard store.connError != nil, !store.leftSavedConnectionWait else { return .welcome }
             guard let host = Self.savedHost else { return .credentials(nil) }
             return .credentials(Self.isHostedHost(host) ? .hosted : .selfHosted)
         }
@@ -272,7 +276,7 @@ struct ConnectView: View {
     }
 
     private static func isHostedHost(_ host: String) -> Bool {
-        host.hasSuffix("passband.email")
+        HostedServer.isHosted(host: host)
     }
 
     /// The welcome screen's retry, only when there is a saved connection to
@@ -1319,6 +1323,89 @@ private struct WelcomeActions: View {
             }
         }
         .frame(maxWidth: maxWidth, alignment: .leading)
+    }
+}
+
+/// The way out of the loading gate when it is up because a saved account's
+/// daemon is not answering. The store keeps asking on its own, and that wait
+/// has no end: without this the window is a spinner until the daemon comes
+/// back, with every other account and the Connect form behind it.
+///
+/// Draws nothing for the first moments, so a daemon that answers at once
+/// never flashes a panel it did not need.
+struct SavedConnectionWait: View {
+    @Environment(AppStore.self) private var store
+    @State private var accounts = AccountManager.shared
+    @State private var patienceSpent = false
+
+    private var waiting: Bool { store.restoringSavedConnection && !store.accountActionsBlocked }
+    private var others: [AccountRecord] { accounts.accounts.filter { $0.id != accounts.activeId } }
+
+    var body: some View {
+        VStack(spacing: Space.s12) {
+            if waiting, patienceSpent {
+                VStack(spacing: Space.s4) {
+                    Text("Still trying to reach \(accounts.active?.displayName ?? "your server").")
+                        .font(Typo.ui(13, weight: .medium))
+                        .foregroundStyle(Palette.ink)
+                    if let error = store.connError {
+                        Text(error)
+                            .font(Typo.ui(12))
+                            .foregroundStyle(Palette.inkDim)
+                    }
+                }
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+
+                VStack(spacing: Space.s8) {
+                    choice("Try again now", symbol: "arrow.clockwise") {
+                        store.retrySavedConnectionNow()
+                    }
+                    ForEach(others) { account in
+                        choice(
+                            store.switchingTo == account.id
+                                ? "Switching to \(account.displayName)…" : "Switch to \(account.displayName)",
+                            symbol: "arrow.left.arrow.right"
+                        ) {
+                            Task { await accounts.switchTo(account.id) }
+                        }
+                    }
+                    choice("Connect a different server", symbol: "server.rack") {
+                        store.stopWaitingForSavedConnection()
+                    }
+                }
+                .disabled(store.switching)
+                .padding(.top, Space.s8)
+            }
+        }
+        .frame(maxWidth: 300)
+        .padding(.horizontal, Space.s24)
+        .animation(.easeOut(duration: 0.25), value: waiting && patienceSpent)
+        .task(id: store.restoringSavedConnection) {
+            patienceSpent = false
+            guard store.restoringSavedConnection else { return }
+            try? await Task.sleep(for: .seconds(2))
+            patienceSpent = !Task.isCancelled
+        }
+    }
+
+    private func choice(_ title: String, symbol: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: Space.scaled(9)) {
+                Image(systemName: symbol).frame(width: Space.scaled(18))
+                Text(title).lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 0)
+            }
+            .font(Typo.ui(13, weight: .medium))
+            .foregroundStyle(Palette.inkDim)
+            .padding(.vertical, Space.s10)
+            .padding(.horizontal, Space.s16)
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Palette.canvas.opacity(0.3)))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Palette.hairlineStrong, lineWidth: 0.75))
     }
 }
 

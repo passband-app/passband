@@ -150,6 +150,8 @@ enum AccountIndex {
         "passband.auth-seen",
         "passband.auth-decisions",
         "passband.thread-style",
+        // The tag of the profile photo held for this account (AccountPhotos).
+        "passband.account-photo-tag",
     ]
 
     /// The per-account name for one of those keys. Derived in ONE place so a
@@ -628,6 +630,7 @@ final class AccountManager {
         let cleared = await offMain { Result { try SettingsStore.clear(accountId: id) } }
         if case .failure = cleared { AccountIndex.parkOrphan(id) }
         AccountIndex.remove(id)
+        AccountPhotos.shared.forget(id)
         // The LAST one leaves an empty index, which is the one shape a boot
         // can still read as a pre-multi-account install — see
         // `sealLegacyIfEmpty`. Off the main actor with the delete above it,

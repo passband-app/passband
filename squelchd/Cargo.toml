@@ -32,3 +32,6 @@ libc = { workspace = true }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+# The agent door's fixture keys, token signer and stub JWKS server, for the
+# combined-router tests (both doors, OAuth mode).
+squelch-mcp = { path = "../squelch-mcp", features = ["testing"] }

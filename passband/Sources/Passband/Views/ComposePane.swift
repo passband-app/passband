@@ -104,7 +104,10 @@ struct ComposePane: View {
             #endif
             .keyContext(.modal)
             .keyBindings(.modal, bindings)
-            .onAppear { focusedField = .recipient(.to) }
+            .onAppear {
+                focusedField = .recipient(.to)
+                settleFocus()
+            }
             // Back from the drafts page (or a draft opened from it): the
             // fields remounted with nothing focused, so put the caret where
             // the mail still needs something, the way opening does.
@@ -141,6 +144,36 @@ struct ComposePane: View {
     private func refocus() {
         guard let compose = store.compose else { return }
         focusedField = compose.to.trimmed.isEmpty ? .recipient(.to) : .subject
+    }
+
+    /// ASK AGAIN ONCE THE PANE IS REALLY THERE. The request made in `onAppear`
+    /// is made while the pane is still sliding in, and on a forward it is made
+    /// in the same pass that mounts the quoted original's web frame; `f` then
+    /// opened a composer with the caret nowhere, and the address typed next
+    /// went to the reader's keys instead of the `to` line. One hop later covers
+    /// the mount, and one more after the slide (RootView's 0.22s) covers the
+    /// frame landing.
+    ///
+    /// Never a second opinion on a caret somebody already placed: a click into
+    /// the body in that third of a second stays where it was put.
+    private func settleFocus() {
+        for delay in [0, 0.3] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                guard store.compose?.page == .compose, !hasCaret else { return }
+                refocus()
+            }
+        }
+    }
+
+    /// Some text input already holds the caret. On the Mac that is asked of the
+    /// window, because the body is a platform text view `FocusState` cannot see
+    /// (a field's editor is an NSTextView too, so this covers all of them).
+    private var hasCaret: Bool {
+        #if os(macOS)
+            (NSApp.keyWindow?.firstResponder as? NSTextView)?.isEditable == true
+        #else
+            focusedField != nil
+        #endif
     }
 
     /// Page one: the fields, the editor, and the footer that sends them.
@@ -195,13 +228,15 @@ struct ComposePane: View {
                     .foregroundStyle(Palette.ink)
                 draftsToggle(compose)
             #else
-                Text(onList ? "drafts" : "compose")
-                    .font(Typo.serif(24, weight: .medium))
-                    .foregroundStyle(Palette.ink)
-                if !onList {
-                    Text(kindLabel(compose))
-                        .font(Typo.micro)
-                        .foregroundStyle(Palette.inkFaintest)
+                // NO TITLE OVER A MESSAGE BEING WRITTEN. A sheet with a To
+                // line, a subject and a send button does not need to be told
+                // it is the composer, and "compose / new message" spent the
+                // bar's widest stretch saying so. The drafts page still names
+                // itself, because a list of drafts is not self-evident.
+                if onList {
+                    Text("drafts")
+                        .font(Typo.serif(24, weight: .medium))
+                        .foregroundStyle(Palette.ink)
                 }
                 draftsToggle(compose)
             #endif
@@ -235,9 +270,8 @@ struct ComposePane: View {
                 // its own: sending through the guard stays a wide, deliberate
                 // target rather than a chip in the corner.
                 //
-                // ATTACH RIDES BESIDE IT, because the footer it has on the Mac
-                // is not here. The inline reply already offers it on a phone;
-                // a new message that could not take a file was the odd one out.
+                // ATTACH IS NOT UP HERE: it is a paperclip on the keyboard's
+                // bar, with the formatting verbs (`MarkdownTextView.attaching`).
                 //
                 // NEITHER ON THE DRAFTS PAGE: a list has nothing to send.
                 //
@@ -245,7 +279,6 @@ struct ComposePane: View {
                 // verb's modifier, and "send" flips to "schedule" once a time
                 // is set.
                 if !onList {
-                    AttachButton(slot: .compose)
                     ScheduleClock(slot: .compose)
                     Button(ScheduleCopy.sendVerb(scheduled: scheduled)) { send(override: false) }
                         .buttonStyle(.glassProminent)
@@ -547,6 +580,7 @@ struct ComposePane: View {
                         } : nil,
                     onDropHover: { dropTargeted = $0 }
                 )
+                .attaching(store.composeAttachmentsAvailable ? .compose : nil)
                 .frame(maxHeight: .infinity)
                 // The text view's own inset plus its line-fragment padding make
                 // up the rest, so the body's left edge is the labels' edge.

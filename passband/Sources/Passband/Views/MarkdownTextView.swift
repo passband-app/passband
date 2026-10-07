@@ -42,6 +42,11 @@ struct MarkdownTextView: NSViewRepresentable {
     /// hears about it.
     var onDropHover: ((Bool) -> Void)? = nil
 
+    /// The phone's editor carries the paperclip on its keyboard bar and needs
+    /// to know which draft it feeds. The Mac's paperclip is a chip in the
+    /// composer's footer, so this is here only so the composers do not fork.
+    func attaching(_ slot: DraftSaver.Slot?) -> MarkdownTextView { self }
+
     func makeNSView(context: Context) -> NSScrollView {
         let view = HighlightingTextView()
         view.delegate = context.coordinator

@@ -30,6 +30,15 @@ use squelch_core::types::{
 
 /// The squelch MCP server. Single-account: the account is resolved once at
 /// construction, though every row already carries `account_id`.
+///
+/// EVERY RESPONSE IS BOUNDED BY THE TOKEN THAT OPENED IT. In OAuth mode auth
+/// runs once per HTTP request, before this handler sees it, and
+/// `auth::require_agent_token` ends the response body when that request's
+/// token expires (plus leeway). That covers the long-lived GET event stream
+/// too. Nothing here may hand a response to anything that outlives its
+/// request (a background task writing to a session's stream later, a cached
+/// sender kept past the request) without re-checking a live token, or an
+/// expired or revoked credential would keep receiving mail.
 #[derive(Clone)]
 pub struct SquelchServer {
     store: Arc<SqliteStore>,

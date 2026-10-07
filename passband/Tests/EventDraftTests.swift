@@ -40,6 +40,9 @@ struct EventDraftTests {
         writableCalendars()
         answersLandInTheFeed()
         refusalsAreFixedSentences()
+        anUncertainWriteIsSettledByTheFeed()
+        anAnswerAfterTheGateClosedIsNobodys()
+        aTypedPaneSurvivesAPageChange()
         theWave3WireDecodes()
 
         if failures > 0 {
@@ -482,6 +485,77 @@ struct EventDraftTests {
         expect(CalendarWrite.failureText(status: 502, .delete).contains("not deleted"), "a refused delete says so")
         expect(CalendarWrite.failureText(status: 0, .create).contains("nothing was saved"),
                "an unreachable server: nothing was saved")
+    }
+
+    /// A 504 (fix round 1, B5): Google was asked and the answer was lost, so
+    /// it is not a refusal, and the pane closes only when the reloaded page
+    /// shows the change.
+    static func anUncertainWriteIsSettledByTheFeed() {
+        expect(CalendarWrite.uncertainStatus == 504, "the daemon's uncertain answer is a 504")
+        for action in [CalendarWriteAction.create, .edit, .delete] {
+            expect(
+                CalendarWrite.failureText(status: 504, action) == "Google may have made this change. Refreshing…",
+                "a 504 is never worded as a refusal")
+        }
+        expect(CalendarWrite.failureText(status: 502, .edit) != CalendarWrite.failureText(status: 504, .edit),
+               "a definite refusal stays its own sentence")
+
+        let a = event("a", start: "2026-10-08T09:00:00-07:00", end: "2026-10-08T10:00:00-07:00")
+        let before = TimelineFeed(events: [a])
+        let body = EventWrite(
+            calendar_id: "primary", title: "Dreamers Dinner", start: "2026-10-08T19:45:00-07:00",
+            end: "2026-10-08T21:00:00-07:00", all_day: false, location: nil, description: nil)
+        let had = CalendarWrite.keys(before)
+        expect(CalendarWrite.made(body, before: had, in: before) == nil,
+               "create: an event already there with the same title is not the one made")
+        let made = event("new", start: "2026-10-08T19:45:00-07:00", end: "2026-10-08T21:00:00-07:00")
+        expect(CalendarWrite.made(body, before: had, in: TimelineFeed(events: [a, made]))?.id == "new",
+               "create: a new event with that title on that calendar is")
+        let elsewhere = event("new", start: "2026-10-08T19:45:00-07:00", end: nil, calendar: "work")
+        expect(CalendarWrite.made(body, before: had, in: TimelineFeed(events: [a, elsewhere])) == nil,
+               "create: not on another calendar")
+        expect(CalendarWrite.made(body, before: had, in: nil) == nil, "create: no feed proves nothing")
+
+        expect(CalendarWrite.edited(a, in: before) == nil, "edit: unchanged is not yet saved")
+        var renamed = a
+        renamed.title = "Renamed"
+        expect(CalendarWrite.edited(a, in: TimelineFeed(events: [renamed]))?.title == "Renamed",
+               "edit: the event as the page now has it")
+        expect(CalendarWrite.edited(a, in: TimelineFeed(events: [])) == nil, "edit: gone is not this edit")
+
+        expect(!CalendarWrite.gone(a, from: before), "delete: still there")
+        expect(CalendarWrite.gone(a, from: TimelineFeed(events: [])), "delete: gone")
+        let sameIdElsewhere = event("a", start: "2026-10-08T09:00:00-07:00", end: nil, calendar: "work")
+        expect(CalendarWrite.gone(a, from: TimelineFeed(events: [sameIdElsewhere])),
+               "delete: the same id on another calendar is another event")
+        expect(!CalendarWrite.gone(a, from: nil) && !CalendarWrite.gone(a, from: TimelineFeed()),
+               "delete: a feed that never loaded proves nothing")
+    }
+
+    /// A write's answer is the session's that sent it (fix round 1, C4): the
+    /// gate closing bumps the session, an account switch the epoch, and
+    /// either one leaves the answer nobody's.
+    static func anAnswerAfterTheGateClosedIsNobodys() {
+        let sent = CalendarWriteTicket(epoch: 3, session: 7)
+        expect(sent.lands(live: CalendarWriteTicket(epoch: 3, session: 7)), "nothing dropped since: it lands")
+        expect(!sent.lands(live: CalendarWriteTicket(epoch: 3, session: 8)), "the gate closed meanwhile: dropped")
+        expect(!sent.lands(live: CalendarWriteTicket(epoch: 4, session: 7)), "another account: dropped")
+        expect(!sent.lands(live: CalendarWriteTicket(epoch: 3, session: 9)),
+               "closed and reopened: still dropped, the reopened page is a new session")
+    }
+
+    /// Fix round 1, C2: going to another page never throws a typed event
+    /// away. It is parked and comes back; an untouched pane closes as before.
+    static func aTypedPaneSurvivesAPageChange() {
+        expect(EventPaneTravel.leaving(open: true, touched: true) == .park, "typed in: parked, not lost")
+        expect(EventPaneTravel.leaving(open: true, touched: false) == .close, "untouched: closes as it always did")
+        expect(EventPaneTravel.leaving(open: false, touched: true) == nil, "no pane on screen: nothing to do")
+        let refused = EventPaneTravel.composer(open: true, parked: false, touched: true)
+        expect(!refused.allow && !refused.closePane, "a typed pane on screen still refuses the composer")
+        let gives = EventPaneTravel.composer(open: true, parked: false, touched: false)
+        expect(gives.allow && gives.closePane, "an untouched one gives way to it")
+        let parked = EventPaneTravel.composer(open: false, parked: true, touched: true)
+        expect(parked.allow && !parked.closePane, "a parked one lets a composer open elsewhere and stays parked")
     }
 
     // MARK: wire

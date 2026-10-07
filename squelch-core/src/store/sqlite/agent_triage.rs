@@ -1745,7 +1745,7 @@ impl AgentTriageStore for SqliteStore {
             job.message_id,
             !current.message.is_sent
                 && !current.message.is_spam
-                && !decision.external_access.restricted,
+                && super::ghosts::may_feed(decision),
             decision,
         )?;
         finish(&tx, job, "applied", &original.run_metadata)?;

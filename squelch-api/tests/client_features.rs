@@ -203,6 +203,11 @@ fn calendar_routes() -> Vec<(&'static str, &'static str, Value)> {
             json!({ "title": 7 }),
         ),
         ("DELETE", "/client/calendar/events/primary/ev1", Value::Null),
+        (
+            "PUT",
+            "/client/person/timezone",
+            json!({ "addr": "x", "zone": null }),
+        ),
     ]
 }
 

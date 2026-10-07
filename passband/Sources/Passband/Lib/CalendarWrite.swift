@@ -81,6 +81,20 @@ struct EventPatch: Hashable, Sendable {
 
 // MARK: - around a write
 
+/// WHOSE ANSWER IT IS. Taken when a write (a save, a delete, a ghost's mark)
+/// is sent, and asked again when its answer lands: the account it was sent
+/// for (`epoch`) and the calendar session it was sent in (`session`, bumped
+/// by `AppStore.dropCalendarState`, which an account switch AND the gate
+/// closing both run). An answer whose ticket is not the live one is dropped
+/// whole: nothing laid into the feed, no toast, no analytics.
+struct CalendarWriteTicket: Hashable, Sendable {
+    let epoch: Int
+    let session: Int
+
+    /// The answer may be applied: nothing has been dropped since it was sent.
+    func lands(live: CalendarWriteTicket) -> Bool { self == live }
+}
+
 /// What a write is, for the sentence its refusal becomes.
 enum CalendarWriteAction: Sendable {
     case create
@@ -151,6 +165,53 @@ enum CalendarWrite {
         return f
     }
 
+    // MARK: an answer that never came (504)
+
+    /// The daemon's word for "Google was asked and the answer was lost": a
+    /// timeout or a dropped connection after the request went out. Google
+    /// may well have made the change (and emailed the guests), so it is NOT
+    /// a refusal and the same control must not simply be pressed again.
+    static let uncertainStatus = 504
+
+    /// Said at once, while the page reloads to find out.
+    static let uncertainText = "Google may have made this change. Refreshing…"
+
+    /// Said when the reloads still do not show the change. The pane stays
+    /// open with everything in it.
+    static let uncertainUnseenText = "Not on your calendar yet. Check it before trying again."
+
+    /// An event's identity in a feed.
+    static func key(_ e: TimelineEvent) -> String { e.calendar_id + "\n" + e.id }
+
+    /// Every event the feed holds, by identity: taken before a create, so
+    /// the event it made can be told from one already there.
+    static func keys(_ feed: TimelineFeed?) -> Set<String> { Set((feed?.events ?? []).map(key)) }
+
+    /// After an uncertain create: the event the reloaded feed shows that the
+    /// write would have made. On the calendar written to, with the title
+    /// sent, and not one of the events there before it was sent.
+    static func made(_ body: EventWrite, before: Set<String>, in feed: TimelineFeed?) -> TimelineEvent? {
+        (feed?.events ?? []).first {
+            $0.calendar_id == body.calendar_id && ($0.title ?? "") == body.title && !before.contains(key($0))
+        }
+    }
+
+    /// After an uncertain edit: the event as the reloaded feed has it, if it
+    /// is no longer the event the pane opened on. Nil while it still is (or
+    /// it is gone, which is not this edit's doing).
+    static func edited(_ original: TimelineEvent, in feed: TimelineFeed?) -> TimelineEvent? {
+        guard let now = (feed?.events ?? []).first(where: { key($0) == key(original) }), now != original
+        else { return nil }
+        return now
+    }
+
+    /// After an uncertain delete: the reloaded feed no longer has it. A feed
+    /// that never loaded proves nothing.
+    static func gone(_ event: TimelineEvent, from feed: TimelineFeed?) -> Bool {
+        guard let events = feed?.events else { return false }
+        return !events.contains { key($0) == key(event) }
+    }
+
     /// A refusal, as one quiet toast. Fixed sentences: the daemon's own error
     /// text is for logs, and none of this echoes what was typed. `status` 0
     /// is a request that never reached the daemon.
@@ -180,6 +241,8 @@ enum CalendarWrite {
             return deleting
                 ? "Google Calendar refused, so the event was not deleted."
                 : "Google Calendar refused the change, so nothing was saved."
+        case uncertainStatus:
+            return uncertainText
         default:
             return deleting ? "Could not delete the event." : "Could not save the event."
         }

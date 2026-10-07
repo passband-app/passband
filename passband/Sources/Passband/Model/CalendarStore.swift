@@ -72,20 +72,8 @@ extension HiddenFeature { static let calendar = HiddenFeature(key: "calendar") }
 extension AppStore {
     // MARK: - the gate
 
-    /// Whether the Calendar destination exists at all. Rail, Go menu, ⇧C, the
-    /// number keys, the shortcuts sheet and the route all read this one
-    /// property; the rule itself, the daemon's timeline AND the `calendar`
-    /// hidden feature, is `CalendarGate.pageAvailable`.
-    ///
-    /// Deliberately off the raw `stats`, not `calendarAccess`: this says only
-    /// whether a page exists, never whose calendar is in it. Reading it
-    /// through the account guard would hide the page for the second between
-    /// an account switch and the first poll, and the shell watcher would
-    /// throw the user off it. The page's data is fetched from the new daemon
-    /// under the new epoch either way.
-    var calendarPageAvailable: Bool {
-        CalendarGate.pageAvailable(timeline: stats?.timeline, feature: hasFeature(.calendar))
-    }
+    // `calendarPageAvailable`, the gate itself, is stored in AppStore and
+    // written from `stats` only when it flips.
 
     /// The gate closed under the user (the flag turned off, or an older
     /// daemon): leave the page for the Sitrep if it is up, close the event
@@ -101,10 +89,10 @@ extension AppStore {
 
     /// Everything the calendar page holds for the ACTIVE mailbox, gone: the
     /// feed, the open item, the connect card and its wait, the event pane and
-    /// its draft, the delete question, and any write still out (its answer
-    /// lands on a newer generation and is dropped). The view mode and the
-    /// month are the user's and stay. Shared by an account switch and the
-    /// gate closing.
+    /// its draft (a parked one too), the delete question, and any write still
+    /// out (its ticket is from the session this ends, so its answer is
+    /// dropped whole: `CalendarWriteTicket`). The view mode and the month are
+    /// the user's and stay. Shared by an account switch and the gate closing.
     func dropCalendarState() {
         calendarFeed = nil
         calendarLoaded = false
@@ -117,8 +105,17 @@ extension AppStore {
         calendarSweepCancel = nil
         calendarDeleteAsk = nil
         calendarWriting = false
+        calendarEditorParked = false
         calendarLoadGeneration &+= 1
+        calendarSession &+= 1
     }
+
+    /// What a write takes with it when it is sent, and must still be when
+    /// its answer lands.
+    var calendarTicket: CalendarWriteTicket { CalendarWriteTicket(epoch: epoch, session: calendarSession) }
+
+    /// The answer to a write sent under `ticket` may be applied.
+    func calendarLands(_ ticket: CalendarWriteTicket) -> Bool { ticket.lands(live: calendarTicket) }
 
     /// The calendar grant as the ACTIVE account's own stats report it; nil
     /// until they have arrived. Everything below reads this, never
@@ -316,7 +313,7 @@ extension AppStore {
     /// at once, sent, and put back with a toast if the daemon refuses. A
     /// dismissal takes the row off the page, so it leaves an undo behind.
     func markGhost(_ ghost: TimelineGhost, _ state: GhostState?, viaKey: Bool) async {
-        let e = epoch
+        let ticket = calendarTicket
         let before = ghost.state
         // What the user's mark was, so an undo of a dismissal restores it
         // rather than merely clearing it.
@@ -325,7 +322,7 @@ extension AppStore {
         setGhostLocally(ghost.id, shown)
         do {
             _ = try await APIClient.shared.setGhostState(ghost.id, state)
-            guard isCurrent(e) else { return }
+            guard calendarLands(ticket) else { return }
             // Spelled out rather than `rawValue`: the vocabulary is closed, and
             // only these three words are in it.
             let word = state == .going ? "going" : (state == .dismissed ? "dismissed" : "cleared")
@@ -343,7 +340,7 @@ extension AppStore {
             }
             await refreshCalendar()
         } catch {
-            guard isCurrent(e) else { return }
+            guard calendarLands(ticket) else { return }
             setGhostLocally(ghost.id, before)
             pushToast(errText(error, "Could not update that plan"), .error)
         }
@@ -375,10 +372,11 @@ extension AppStore {
         !RehearsalMode.isEnabled && CalendarWrite.canCreate(calendarFeed)
     }
 
-    /// The event pane is open, for the account on screen. What the shell
-    /// lays out beside, as `composeOpen` is for the composer: it changes on
-    /// open and close only, never while a field is typed in.
-    var eventPaneOpen: Bool { calendarEditor?.epoch == epoch }
+    /// The event pane is open, for the account on screen, and not parked
+    /// on another page. What the shell lays out beside, as `composeOpen` is
+    /// for the composer: it changes on open, close, park and return only,
+    /// never while a field is typed in.
+    var eventPaneOpen: Bool { calendarEditor?.epoch == epoch && !calendarEditorParked }
 
     /// The pane's fields differ from what it opened with.
     var eventDraftTouched: Bool {
@@ -432,19 +430,55 @@ extension AppStore {
     /// in it does NOT: an event has no drafts folder to be kept in, so the
     /// composer is refused with one quiet line rather than the event thrown
     /// away. True when the composer may open.
+    ///
+    /// A PARKED pane (left with something typed in it, see
+    /// `parkEventEditorForNavigation`) is not in the way: the composer opens
+    /// and the pane stays parked for the way back.
     func yieldEventPaneToCompose() -> Bool {
         guard calendarEditor != nil else { return true }
-        if eventDraftTouched, eventPaneOpen {
+        let rule = EventPaneTravel.composer(
+            open: eventPaneOpen, parked: calendarEditorParked, touched: eventDraftTouched)
+        guard rule.allow else {
             pushToast("Save or close the event first")
             return false
         }
-        closeEventEditor()
+        if rule.closePane { closeEventEditor() }
         return true
     }
 
     func closeEventEditor() {
         calendarEditor = nil
         calendarDraft = nil
+        calendarEditorParked = false
+    }
+
+    /// Leaving the Calendar page (a digit, the rail, ⌘[, a search): an
+    /// untouched pane closes as it always did; one with something typed in
+    /// it is PARKED, kept whole and not drawn, because an event has no drafts
+    /// folder to be kept in (`EventPaneTravel`).
+    func parkEventEditorForNavigation() {
+        switch EventPaneTravel.leaving(open: eventPaneOpen, touched: eventDraftTouched) {
+        case .park: calendarEditorParked = true
+        case .close: closeEventEditor()
+        case nil:
+            // Not on screen: parked already, or another account's.
+            if calendarEditor != nil, calendarEditor?.epoch != epoch { closeEventEditor() }
+        }
+    }
+
+    /// Back on the Calendar page: a parked pane comes back as it was left.
+    /// It takes its half of the window the way it did when it opened
+    /// (`openEventPane`): a composer opened meanwhile is closed into drafts
+    /// with the usual toast, and a side panel steps aside.
+    func returnParkedEventEditor() {
+        guard calendarEditorParked else { return }
+        guard calendarEditor?.epoch == epoch else {
+            closeEventEditor()
+            return
+        }
+        if compose != nil { closeCompose() }
+        if sideView.isOpen { closeSide() }
+        calendarEditorParked = false
     }
 
     /// The draft's chip on the month: where the pane's fields would put the
@@ -483,10 +517,19 @@ extension AppStore {
     /// `EventGuests.notify` answers true for a control that says so and is
     /// on offer for this draft, and a control that is not on offer saves
     /// nothing at all.
+    ///
+    /// AN ANSWER THAT NEVER CAME (504, `CalendarWrite.uncertainStatus`):
+    /// Google may have made the change. The page reloads to find out
+    /// (`settleUncertain`), the save stays locked meanwhile so the same
+    /// control cannot be pressed twice, and the pane closes only if the
+    /// reloaded page shows the change.
+    ///
+    /// AN ANSWER FOR NOBODY: one landing after the gate closed or the account
+    /// changed (`CalendarWriteTicket`) is dropped whole, analytics included.
     @discardableResult
     func saveEvent(_ draft: EventDraft, _ request: CalendarEditorRequest, via control: SaveControl) async -> Bool {
         guard request.epoch == epoch, !calendarWriting else { return false }
-        let e = epoch
+        let ticket = calendarTicket
         let now = Date()
         let cal = Calendar.current
         let plan = guestPlan(draft, request)
@@ -498,10 +541,11 @@ extension AppStore {
             else { return false }
             let body = made.stamped(notify: notify)
             let invited = body.guests?.count ?? 0
+            let before = CalendarWrite.keys(calendarFeed)
             calendarWriting = true
             do {
                 let event = try await APIClient.shared.createCalendarEvent(body)
-                guard isCurrent(e) else { return false }
+                guard calendarLands(ticket) else { return false }
                 calendarWriting = false
                 landEvent(event)
                 Analytics.capture(
@@ -514,7 +558,17 @@ extension AppStore {
                 }
                 return true
             } catch {
-                guard isCurrent(e) else { return false }
+                guard calendarLands(ticket) else { return false }
+                if writeStatus(error) == CalendarWrite.uncertainStatus {
+                    let found = await settleUncertain(ticket) {
+                        CalendarWrite.made(body, before: before, in: $0) != nil
+                    }
+                    guard found, let event = CalendarWrite.made(body, before: before, in: calendarFeed) else {
+                        return false
+                    }
+                    landEvent(event, closing: request)
+                    return true
+                }
                 calendarWriting = false
                 pushToast(
                     CalendarWrite.failureText(status: writeStatus(error), .create, guests: invited > 0), .error)
@@ -535,7 +589,7 @@ extension AppStore {
             do {
                 let event = try await APIClient.shared.patchCalendarEvent(
                     calendarId: original.calendar_id, id: original.id, patch, notify: notify)
-                guard isCurrent(e) else { return false }
+                guard calendarLands(ticket) else { return false }
                 calendarWriting = false
                 landEvent(event)
                 Analytics.capture(
@@ -543,7 +597,13 @@ extension AppStore {
                     ["all_day": event.all_day, "guests": plan.before > 0 || plan.after > 0, "notified": notify])
                 return true
             } catch {
-                guard isCurrent(e) else { return false }
+                guard calendarLands(ticket) else { return false }
+                if writeStatus(error) == CalendarWrite.uncertainStatus {
+                    let found = await settleUncertain(ticket) { CalendarWrite.edited(original, in: $0) != nil }
+                    guard found, let event = CalendarWrite.edited(original, in: calendarFeed) else { return false }
+                    landEvent(event, closing: request)
+                    return true
+                }
                 calendarWriting = false
                 pushToast(
                     CalendarWrite.failureText(status: writeStatus(error), .edit, guests: patch.guests != nil),
@@ -553,14 +613,42 @@ extension AppStore {
         }
     }
 
+    /// After a 504: say so, and reload the page a few times (the daemon
+    /// kicked a sync of its own when it answered) until `seen` finds the
+    /// change in it. The write stays locked (`calendarWriting`) throughout,
+    /// so nothing can be sent twice while it is unknown. True when the
+    /// change showed up; false says so in one more toast. Either way the
+    /// lock is released, unless the answer has stopped being anybody's.
+    private func settleUncertain(
+        _ ticket: CalendarWriteTicket, seen: (TimelineFeed?) -> Bool
+    ) async -> Bool {
+        pushToast(CalendarWrite.uncertainText)
+        for _ in 0..<3 {
+            try? await Task.sleep(for: .seconds(2))
+            guard calendarLands(ticket) else { return false }
+            await refreshCalendar()
+            guard calendarLands(ticket) else { return false }
+            if seen(calendarFeed) {
+                calendarWriting = false
+                return true
+            }
+        }
+        calendarWriting = false
+        pushToast(CalendarWrite.uncertainUnseenText)
+        return false
+    }
+
     /// The daemon's answer, on screen now: laid into the feed, every load
     /// already out retired (an answer asked for before this write would put
     /// the old event back), the card closed, and the event selected where it
     /// now is, so the month turns to it and its detail opens.
-    private func landEvent(_ event: TimelineEvent) {
+    ///
+    /// `closing`: the pane that asked, when it may have been closed (or
+    /// another opened) while the answer was in doubt; only that one closes.
+    private func landEvent(_ event: TimelineEvent, closing request: CalendarEditorRequest? = nil) {
         retireCalendarLoads()
         calendarFeed = CalendarWrite.applying(event, to: calendarFeed)
-        closeEventEditor()
+        if request == nil || calendarEditor?.id == request?.id { closeEventEditor() }
         let cal = Calendar.current
         if let item = Agenda.item(event, calendar: cal) {
             calendarPlace = MonthGrid.select(
@@ -585,35 +673,50 @@ extension AppStore {
     ///
     /// `tellGuests` is true only from the question's "delete and tell
     /// guests" control (or its ⌘↵), and counts only for an event that has
-    /// guests to tell: then Google emails them the cancellation.
+    /// guests to tell on a calendar that may tell them
+    /// (`EventGuests.mayTell`): then Google emails them the cancellation.
+    /// A 504 is settled as a save's is: gone from the reloaded page is
+    /// deleted, still there keeps the question up.
     @discardableResult
     func deleteEvent(_ event: TimelineEvent, tellGuests: Bool = false) async -> Bool {
         guard CalendarWrite.canEdit(event), !calendarWriting else { return false }
-        let e = epoch
+        let ticket = calendarTicket
         let hasGuests = EventGuests.count(event) > 0
-        let notify = tellGuests && hasGuests
+        let notify = tellGuests && hasGuests && EventGuests.mayTell(event, feed: calendarFeed)
         calendarWriting = true
         do {
             try await APIClient.shared.deleteCalendarEvent(
                 calendarId: event.calendar_id, id: event.id, notify: notify)
-            guard isCurrent(e) else { return false }
+            guard calendarLands(ticket) else { return false }
             calendarWriting = false
-            retireCalendarLoads()
-            calendarFeed = CalendarWrite.removing(
-                calendarId: event.calendar_id, id: event.id, from: calendarFeed)
-            if calendarMonthItem == Agenda.itemId(event) { calendarMonthItem = nil }
-            calendarDeleteAsk = nil
-            if calendarEditor?.event.map(Agenda.itemId) == Agenda.itemId(event) { closeEventEditor() }
+            eventDeleted(event)
             Analytics.capture(
                 "calendar_event_deleted", ["all_day": event.all_day, "guests": hasGuests, "notified": notify])
-            pushToast("Deleted from Google Calendar", .success)
             return true
         } catch {
-            guard isCurrent(e) else { return false }
+            guard calendarLands(ticket) else { return false }
+            if writeStatus(error) == CalendarWrite.uncertainStatus {
+                guard await settleUncertain(ticket, seen: { CalendarWrite.gone(event, from: $0) }) else {
+                    return false
+                }
+                eventDeleted(event)
+                return true
+            }
             calendarWriting = false
             pushToast(CalendarWrite.failureText(status: writeStatus(error), .delete), .error)
             return false
         }
+    }
+
+    /// The event is gone at Google: off the page, its detail, its question
+    /// and its pane closed.
+    private func eventDeleted(_ event: TimelineEvent) {
+        retireCalendarLoads()
+        calendarFeed = CalendarWrite.removing(calendarId: event.calendar_id, id: event.id, from: calendarFeed)
+        if calendarMonthItem == Agenda.itemId(event) { calendarMonthItem = nil }
+        calendarDeleteAsk = nil
+        if calendarEditor?.event.map(Agenda.itemId) == Agenda.itemId(event) { closeEventEditor() }
+        pushToast("Deleted from Google Calendar", .success)
     }
 
     /// The status a refusal is worded by: 0 for a request that never reached

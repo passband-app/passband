@@ -72,8 +72,8 @@ enum ProductGuide {
                 "the home board: For your eyes, Reading, the calendar, shipments, billing and "
                     + "receipts cards, flow mode"
             case .calendar:
-                "the Calendar page (not on for everyone yet): month and agenda, events guessed "
-                    + "from mail, connecting Google Calendar, new, edited and deleted events, guests"
+                "the Calendar page: month and agenda, events guessed from mail, connecting "
+                    + "Google Calendar, new, edited and deleted events, guests"
             case .readingMail:
                 "an open email: moving between messages and emails, done, skip, unsubscribe, "
                     + "attachments, images, chat or email style, the contact card"
@@ -102,12 +102,24 @@ enum ProductGuide {
         }
     }
 
-    /// The `topic` parameter's description: every topic and what it covers,
-    /// built from the enum so a topic added above is offered without a second
-    /// edit. This IS sent with every request, which is why each line is short.
-    static let topicIndex: String =
+    /// THE TOPICS ON OFFER for this mailbox. The calendar topic only while
+    /// the Calendar page is (`AppStore.calendarPageAvailable`, handed in):
+    /// a guide that described a page the rail does not have would have the
+    /// assistant send somebody looking for it. With the page off, this is
+    /// the list from before the calendar existed, byte for byte, and so is
+    /// everything else the guide says.
+    static func topics(calendar: Bool) -> [Topic] {
+        calendar ? Topic.allCases : Topic.allCases.filter { $0 != .calendar }
+    }
+
+    /// The `topic` parameter's description: every topic on offer and what it
+    /// covers, built from the enum so a topic added above is offered without
+    /// a second edit. This IS sent with every request, which is why each line
+    /// is short.
+    static func topicIndex(calendar: Bool) -> String {
         "Which page of the guide to read. "
-        + Topic.allCases.map { "\($0.rawValue): \($0.covers)." }.joined(separator: " ")
+            + topics(calendar: calendar).map { "\($0.rawValue): \($0.covers)." }.joined(separator: " ")
+    }
 
     // MARK: - the system prompt's share
 
@@ -134,11 +146,15 @@ enum ProductGuide {
     /// iPhone app is numbered on its own line and keeps its own release notes
     /// (Lib/PhoneReleaseNotes.swift), so "what's new" there is a different
     /// table read against a different version.
-    static func text(_ topic: Topic, runningVersion: String?, onPhone: Bool = false) -> String {
+    ///
+    /// `calendar` is whether the Calendar page is on for this mailbox: it
+    /// puts the page into the getting-around list. The calendar topic itself
+    /// is asked for only while it is on (`topics(calendar:)`).
+    static func text(_ topic: Topic, runningVersion: String?, onPhone: Bool = false, calendar: Bool = false) -> String {
         switch topic {
-        case .gettingAround: gettingAround
+        case .gettingAround: gettingAround(calendar: calendar)
         case .sitrep: sitrep
-        case .calendar: calendar
+        case .calendar: Self.calendar
         case .readingMail: readingMail
         case .writingMail: writingMail
         case .mailList: mailList
@@ -153,18 +169,40 @@ enum ProductGuide {
         }
     }
 
-    private static let gettingAround = """
+    /// The pages on the number keys, in rail order, Calendar second while
+    /// it is on (`CalendarGate.numbered`'s rule, restated: this file stands
+    /// alone under test). Numbered when the text is built, so a page added
+    /// renumbers the ones after it here exactly as it does on the rail.
+    private static func numberedPages(calendar: Bool) -> String {
+        var pages = [
+            "Sitrep: the home board. What needs the user, what there is to read, and today's records.",
+            "Emails: every message in one list, plus sent and spam.",
+            "Auth: login codes, password resets and security alerts.",
+            "Rules: sender rules.",
+            "Groups: named sets of recipients.",
+        ]
+        if calendar {
+            pages.insert(
+                "Calendar: events guessed from mail and, once connected, Google Calendar. ⇧C also "
+                    + "opens it. See the calendar topic.", at: 1)
+        }
+        return pages.enumerated().map { "- \($0.offset + 1) \($0.element)" }.joined(separator: "\n")
+    }
+
+    private static func gettingAround(calendar: Bool) -> String {
+        gettingAroundHead + numberedPages(calendar: calendar) + "\n" + gettingAroundTail
+    }
+
+    private static let gettingAroundHead = """
         Passband is one window. A narrow rail down the left edge switches pages, and \
         most actions have a single-letter key. Letter keys only fire when no text \
         field has focus, and a capital letter means Shift.
 
         Pages (number keys, no modifier):
-        - 1 Sitrep: the home board. What needs the user, what there is to read, and today's records.
-        - 2 Emails: every message in one list, plus sent and spam.
-        - 3 Auth: login codes, password resets and security alerts.
-        - 4 Rules: sender rules.
-        - 5 Groups: named sets of recipients.
-        - When the Calendar page is shown (it is not on for everyone yet), it sits second on the rail and is key 2, and the pages after it move up one: Emails 3, Auth 4, Rules 5, Groups 6. ⇧C also opens it. Without it the numbers are the ones above. See the calendar topic.
+
+        """
+
+    private static let gettingAroundTail = """
         - Usage and Settings sit at the bottom of the rail and have no number key. ⌘, opens Settings.
         - The ring just above them opens Discover: a list of the ways through mail (the basics, flow mode, reminders, search, teaching Passband, the at a glance cards, the reading stack, writing) with a short guide to each on the right. The ring fills clockwise as the user tries each one on their own mail, and a feature used on three separate days is marked a habit. Nothing ever empties it. Esc leaves the page.
 
@@ -226,10 +264,9 @@ enum ProductGuide {
         """
 
     private static let calendar = """
-        The Calendar page is not on for everyone yet. Passband turns it on for a mailbox \
-        from its side, and there is no setting for it in the app: when the rail has no \
-        Calendar icon, the page is not on for this mailbox yet. A self-hosted server turns \
-        it on itself. It is second on the rail: key 2, or ⇧C from anywhere. While it is shown, Emails is key 3, Auth 4, Rules 5 and Groups 6. \
+        The Calendar page is on for this mailbox. Passband turns it on per mailbox from \
+        its side, and there is no setting for it in the app. It is second on the rail: \
+        key 2, or ⇧C from anywhere. Emails is then key 3, Auth 4, Rules 5 and Groups 6. \
         It is on the Mac only; the iPhone has no Calendar page yet.
 
         What is on it:
@@ -629,29 +666,22 @@ enum ProductGuide {
 
     /// The `?` overlay's table, as text. Key caps separated by a space, the
     /// way the overlay sets them side by side.
-    static func shortcuts() -> String {
+    ///
+    /// `calendar`: the table as the overlay draws it for this mailbox
+    /// (`ShortcutCatalog.groups(calendar:)`), so the calendar's keys are
+    /// recited only where the page is on.
+    static func shortcuts(calendar: Bool = false) -> String {
         var lines = [
             "Passband keyboard shortcuts, grouped by where they work. A single letter only "
                 + "fires when no text field has focus, and a capital letter means Shift. "
                 + "Pressing ? shows this same list in the app."
         ]
-        for group in ShortcutCatalog.groups {
+        for group in ShortcutCatalog.groups(calendar: calendar) {
             lines.append("")
             lines.append(group.title)
             for item in group.items {
                 lines.append("- \(item.keys.joined(separator: " ")): \(item.desc)")
             }
-        }
-        // The calendar's keys, said with their condition: this table has no
-        // account in hand, so it cannot know whether the page is shown.
-        let calendar = ShortcutCatalog.calendarGroup
-        lines.append("")
-        lines.append(
-            "\(calendar.title) (only while the Calendar page is shown, which is not on for "
-                + "everyone yet. Calendar is then key 2, the pages after it move up one, and ⇧C "
-                + "opens it)")
-        for item in calendar.items {
-            lines.append("- \(item.keys.joined(separator: " ")): \(item.desc)")
         }
         return lines.joined(separator: "\n")
     }

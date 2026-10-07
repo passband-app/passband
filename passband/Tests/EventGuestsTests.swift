@@ -37,6 +37,8 @@ struct EventGuestsTests {
         aNewEventToTheWire()
         anEditToTheWire()
         deleting()
+        guestsAreToldOnlyFromAnInvitingCalendar()
+        enterSavesOnlyFromALine()
         editingStartsFromTheOthers()
         aGuestsLocalTime()
         theDetailList()
@@ -522,9 +524,59 @@ struct EventGuestsTests {
         expect(EventGuests.deleteWording(guests: 0, truncated: true).tell != nil, "even with none stored")
         expect(none.detail == three.detail && !three.detail.isEmpty, "the same second line")
 
-        expect(EventGuests.deleteWording(event(guests: [me, sam, ana])).title == "Delete and tell 2 guests?", "the user is not counted")
-        expect(EventGuests.deleteWording(event(guests: [me])).tell == nil, "an event with only the user on it has nobody to tell")
-        expect(EventGuests.deleteWording(event(guests: nil)).tell == nil, "nor one from an older daemon")
+        expect(EventGuests.deleteWording(event(guests: [me, sam, ana]), feed: feed()).title == "Delete and tell 2 guests?", "the user is not counted")
+        expect(EventGuests.deleteWording(event(guests: [me]), feed: feed()).tell == nil, "an event with only the user on it has nobody to tell")
+        expect(EventGuests.deleteWording(event(guests: nil), feed: feed()).tell == nil, "nor one from an older daemon")
+    }
+
+    /// Fix round 1, A2: an update or a cancellation goes out under the
+    /// event's calendar's name exactly as an invitation would, so the
+    /// controls that tell guests are on offer only where an invitation is.
+    /// The daemon refuses `notify` anywhere else with a 400.
+    static func guestsAreToldOnlyFromAnInvitingCalendar() {
+        let f = feed()
+        let mine = event(calendar: "me", guests: [me, sam, ana], guestEditable: true)
+        let shared = event(calendar: "work", guests: [me, sam, ana], guestEditable: true)
+        expect(EventGuests.mayTell(mine, feed: f), "the user's own calendar may tell")
+        expect(!EventGuests.mayTell(shared, feed: f), "a calendar the user only writes to may not")
+        var said = calendars
+        said[0].can_invite = false
+        expect(!EventGuests.mayTell(mine, feed: TimelineFeed(events: [], calendars: said)),
+               "the daemon's can_invite false is the last word, even on the primary")
+        expect(!EventGuests.mayTell(mine, feed: nil), "no calendars known: nobody is told")
+
+        let own = EventGuests.plan(EventForm.draft(editing: mine, today: now, calendar: cal), editing: mine, feed: f)
+        expect(own.controls == SaveControls(primary: .saveAndTell, quiet: .saveWithoutTelling) && !own.silent,
+               "own calendar: both controls, as before")
+        let plan = EventGuests.plan(EventForm.draft(editing: shared, today: now, calendar: cal), editing: shared, feed: f)
+        expect(plan.controls == SaveControls(primary: .saveWithoutTelling), "shared calendar: the silent control alone")
+        expect(plan.silent, "and the pane says why")
+        expect(EventGuests.notify(.saveAndTell, offered: plan.controls) == nil,
+               "a stale \"save and tell guests\" saves nothing at all")
+        expect(EventGuests.notify(.saveWithoutTelling, offered: plan.controls) == false, "the silent one tells nobody")
+        expect(!plan.controls.all.contains { $0.notifies }, "no control on offer tells anyone")
+        let lonely = event(calendar: "work", guests: [me], guestEditable: true)
+        expect(
+            !EventGuests.plan(EventForm.draft(editing: lonely, today: now, calendar: cal), editing: lonely, feed: f).silent,
+            "nobody to tell: nothing to explain")
+        expect(!EventGuests.silentLine.contains("\u{2014}") && !EventGuests.silentLine.contains("\n"), "one line, no em dash")
+
+        let ask = EventGuests.deleteWording(shared, feed: f)
+        expect(ask.tell == nil && ask.quiet == "delete without telling", "delete on a shared calendar: the silent answer alone")
+        expect(ask.detail.contains("not told"), "and it says the guests are not told")
+        expect(EventGuests.deleteWording(mine, feed: f).tell == "delete and tell guests", "own calendar: both answers")
+    }
+
+    /// Fix round 1, C5: plain ↵ saves only from a single-line field. With
+    /// nothing focused (a day clicked on the month beside the pane) it
+    /// declines, and the month's own ↵ has it.
+    static func enterSavesOnlyFromALine() {
+        let quiet = EventGuests.controls(editing: false, before: 0, after: 0)
+        let told = EventGuests.controls(editing: false, before: 0, after: 2)
+        expect(EventGuests.enter(onLine: true, quiet) == .save, "a line, a save that tells nobody: ↵ saves")
+        expect(EventGuests.enter(onLine: false, quiet) == .decline, "no field focused: ↵ passes on")
+        expect(EventGuests.enter(onLine: true, told) == .swallow, "a save that would tell: ↵ does nothing")
+        expect(EventGuests.enter(onLine: false, told) == .decline, "and with no field focused it still passes on")
     }
 
     static func editingStartsFromTheOthers() {

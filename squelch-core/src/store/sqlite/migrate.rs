@@ -680,6 +680,22 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
+    // The unreadable-organizer mark (calendar fix round 1). A stored row from
+    // before it reads as "no organizer named", which the edit guard treats
+    // as the user's own; so when the column is new every calendar forgets
+    // its token and last full read, and the next pass rereads each in full
+    // and sets the mark where Google sends such an organizer.
+    if add_column_if_missing(
+        conn,
+        "calendar_events",
+        "organizer_unreadable",
+        "INTEGER NOT NULL DEFAULT 0",
+    )? {
+        conn.execute(
+            "UPDATE calendar_calendars SET sync_token=NULL, full_synced_at=NULL",
+            [],
+        )?;
+    }
 
     // STRANDED FAN-OUTS. A group send settles its recipients from a background
     // task, and no task survives the process. So any recipient still 'pending'

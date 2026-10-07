@@ -97,6 +97,36 @@ struct TimeOfDay: Hashable, Sendable {
 
 // MARK: - reading, checking, writing
 
+/// THE EVENT PANE ACROSS A PAGE CHANGE (fix round 1, C2). An event has no
+/// drafts folder, so a pane with something typed in it is never thrown away
+/// by going to another page: it is PARKED (kept in the store, not drawn) and
+/// comes back as it was on the way back to the Calendar page. An untouched
+/// pane simply closes. A composer opened elsewhere while one is parked opens
+/// normally and leaves it parked. The gate closing and an account switch
+/// still discard it (`AppStore.dropCalendarState`).
+enum EventPaneTravel {
+    enum Leave: Hashable, Sendable {
+        case close
+        case park
+    }
+
+    /// Leaving the Calendar page with a pane on screen (`open`): what
+    /// becomes of it. Nil with no pane on screen.
+    static func leaving(open: Bool, touched: Bool) -> Leave? {
+        guard open else { return nil }
+        return touched ? .park : .close
+    }
+
+    /// A composer asked for while an event pane exists. `allow`: it may
+    /// open; `closePane`: the pane goes first. A touched pane on screen
+    /// refuses it; a parked one is not on screen and is not in its way.
+    static func composer(open: Bool, parked: Bool, touched: Bool) -> (allow: Bool, closePane: Bool) {
+        if parked { return (true, false) }
+        if open, touched { return (false, false) }
+        return (true, true)
+    }
+}
+
 enum EventForm {
     /// The daemon's title cap (contract: 1 to 200 characters).
     static let maxTitle = 200

@@ -3106,6 +3106,38 @@ async fn a_calendar_consent_for_a_tenant_without_the_feature_installs_nothing() 
     h.complete_signup("ada").await;
     let installs = h.rec.lock().unwrap().credential_puts.len();
     h.rec.lock().unwrap().granted_scope = Some(calendar_grant());
+    // ANOTHER tenant holds the feature: that grant is theirs, not ada's. The
+    // gate reads the grant of the tenant the consent is for, never "anyone's".
+    let other: i64 = common::raw_client(&h.db_url)
+        .await
+        .query_one(
+            "INSERT INTO tenants(label, account_email, status, created_at)
+             VALUES('bob', 'bob@example.com', 'active', '2026-10-01T00:00:00Z')
+             RETURNING id",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    h.state
+        .store()
+        .save_features(
+            &[other],
+            &["calendar".to_string()],
+            &[(other, "calendar".to_string())],
+            &[],
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        h.state
+            .store()
+            .tenant_has_feature("bob", "calendar")
+            .await
+            .unwrap(),
+        "the other tenant does hold it"
+    );
 
     let (status, body) = h.run_reconnect_with(&calendar_link()).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -3136,6 +3168,67 @@ async fn a_calendar_consent_for_a_tenant_without_the_feature_installs_nothing() 
     assert!(body.contains("Calendar is connected"), "{body}");
     assert_eq!(h.rec.lock().unwrap().credential_puts.len(), installs + 1);
     assert_eq!(job_purposes(&h).await, vec!["calendar"]);
+}
+
+/// THE GATE FAILS CLOSED: when the feature cannot be read (Postgres down,
+/// the table gone), a calendar consent installs nothing and queues nothing,
+/// and the page says to try again; it never falls through to the install.
+#[tokio::test]
+async fn a_calendar_consent_whose_feature_read_fails_installs_nothing() {
+    let h = Harness::new().await;
+    h.complete_signup("ada").await;
+    let installs = h.rec.lock().unwrap().credential_puts.len();
+    h.rec.lock().unwrap().granted_scope = Some(calendar_grant());
+    // The Everyone default would answer yes if it were read: the failure, not
+    // a "no", is what refuses.
+    h.state
+        .store()
+        .save_features(
+            &[],
+            &["calendar".to_string()],
+            &[],
+            &["calendar".to_string()],
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
+    let raw = common::raw_client(&h.db_url).await;
+    raw.execute(
+        "ALTER TABLE tenant_features RENAME TO tenant_features_gone",
+        &[],
+    )
+    .await
+    .unwrap();
+    assert!(
+        h.state
+            .store()
+            .tenant_has_feature("ada", "calendar")
+            .await
+            .is_err()
+    );
+
+    let (status, body) = h.run_reconnect_with(&calendar_link()).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert!(
+        body.contains("Reconnecting is unavailable right now"),
+        "{body}"
+    );
+    assert!(!body.contains(MAILBOX), "{body}");
+    assert!(!body.contains(REFRESH_TOKEN));
+    assert_eq!(h.rec.lock().unwrap().credential_puts.len(), installs);
+    assert!(job_purposes(&h).await.is_empty(), "nothing queued");
+
+    // The control: with the table back, the same consent installs.
+    raw.execute(
+        "ALTER TABLE tenant_features_gone RENAME TO tenant_features",
+        &[],
+    )
+    .await
+    .unwrap();
+    let (status, body) = h.run_reconnect_with(&calendar_link()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("Calendar is connected"), "{body}");
+    assert_eq!(h.rec.lock().unwrap().credential_puts.len(), installs + 1);
 }
 
 /// The plain reconnect never asks about the calendar feature.

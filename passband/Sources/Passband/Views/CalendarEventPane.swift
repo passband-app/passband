@@ -37,8 +37,8 @@
 // KEYS. ⌘↵ presses the footer's main control from anywhere in the pane. ↵
 // saves from a single-line field ONLY when the save tells nobody; it also
 // picks a highlighted place or contact, makes a typed address a guest, and is
-// a new line in the notes. Esc closes the place list, then the delete
-// question, then the pane.
+// a new line in the notes. With no field focused it is the month's. Esc
+// closes the place list, then the delete question, then the pane.
 
 #if os(macOS)
     import SwiftUI
@@ -392,10 +392,19 @@
                             Text(verbatim: names)
                                 .lineLimit(2)
                         }
-                        Text(bar.text)
+                        // A calendar the guests cannot be told from says
+                        // that instead: the one fact the footer's single
+                        // "save without telling" needs explained.
+                        Text(plan.silent && bar == .otherCalendar ? EventGuests.silentLine : bar.text)
                             .font(Typo.micro)
                             .foregroundStyle(Palette.inkFaint)
                             .fixedSize(horizontal: false, vertical: true)
+                        if plan.silent, bar != .otherCalendar {
+                            Text(EventGuests.silentLine)
+                                .font(Typo.micro)
+                                .foregroundStyle(Palette.inkFaint)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                 }
             }
@@ -648,7 +657,8 @@
 
         /// The question for the event being edited, by its guests.
         private var deleteWording: DeleteWording {
-            editing.map { EventGuests.deleteWording($0) } ?? EventGuests.deleteWording(guests: 0, truncated: false)
+            editing.map { EventGuests.deleteWording($0, feed: store.calendarFeed) }
+                ?? EventGuests.deleteWording(guests: 0, truncated: false)
         }
 
         /// A footer verb with its key beside it, dimmer, in the key chip's
@@ -702,9 +712,15 @@
                         commitTypedGuest()
                         return true
                     }
-                    guard EventGuests.enterMaySave(plan.controls) else { return true }
-                    save(plan.controls.primary, problem: problem)
-                    return true
+                    // ONLY FROM A LINE: with no field focused (a day clicked
+                    // on the month beside the pane) ↵ is the month's.
+                    switch EventGuests.enter(onLine: focus.map(Self.lines.contains) ?? false, plan.controls) {
+                    case .decline: return false
+                    case .swallow: return true
+                    case .save:
+                        save(plan.controls.primary, problem: problem)
+                        return true
+                    }
                 },
                 // The arrows are the place list's only while it is up and the
                 // caret is in its line; otherwise they pass on (the month
@@ -728,6 +744,9 @@
         }
 
         // MARK: verbs
+
+        /// The single-line fields: the ones plain ↵ saves from.
+        private static let lines: Set<Field> = [.title, .date, .endDate, .start, .end, .location]
 
         /// Said under the guests line.
         private static let guestProblems: Set<EventDraftProblem> = [.badGuest, .guestIsYou, .tooManyGuests]

@@ -36,7 +36,11 @@
 //! loop asks the live [`Features`] handle at the top of every pass: off, the
 //! pass reads no credential, calls Google for nothing and idles like a
 //! missing grant ([`PassOutcome::Disabled`]); the first pass after the flag
-//! turns on syncs, with no restart.
+//! turns on syncs, with no restart. It asks again before each calendar, so a
+//! flag turned off mid-pass stops the pass at the next calendar (a page
+//! already in flight finishes). Turning it off deletes nothing: the stored
+//! calendars, events and guest lists stay, hidden by the routes, and are
+//! brought up to date by the next pass once it is on again.
 //!
 //! A pass: resolve the token; decide which calendars to read (the primary
 //! one, plus every calendar the user shows when the list scope was granted,
@@ -116,7 +120,8 @@ async fn stopped(shutdown: &mut watch::Receiver<bool>) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PassOutcome {
     /// The `calendar` hidden feature is off for this mailbox: nothing was
-    /// read and nothing was called.
+    /// read and nothing was called, or (turned off mid-pass) nothing more
+    /// after the calendar in hand.
     Disabled,
     /// Calendar is not granted: nothing was called.
     NotGranted,
@@ -370,6 +375,12 @@ impl CalendarSync {
         // is the pass failing; see the module doc.
         let mut failed: Option<CalendarErrorKind> = None;
         for (index, meta) in calendars.iter().enumerate() {
+            // The flag again before each calendar: turning calendar off stops
+            // a pass in flight at the next calendar, not after the last one.
+            // What was stored stays (the routes hide it); nothing more is read.
+            if !self.features.enabled(CALENDAR) {
+                return PassOutcome::Disabled;
+            }
             let Some(row) = stored.iter().find(|c| c.calendar_id == meta.calendar_id) else {
                 continue;
             };

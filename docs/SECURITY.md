@@ -974,6 +974,16 @@ input, default or code path can ask for it.
   kind (`auth`, `quota`, `unavailable`).
 - **Calendar failures stay out of Gmail.** The loop is its own task; no failure of
   it touches Gmail health or sync.
+- **Sealed mail feeds no ghost** (`store/sqlite/ghosts.rs:ELIGIBLE`, `may_feed`).
+  A calendar ghost is built only from a message that is not sent, not spam and
+  not sealed, where sealed is what the Auth page's `sealed_messages` reads today:
+  a stored decision naming an auth kind (a sign-in alert, a login code), or an
+  access review that is not `allowed` (`restricted`, or still `pending` after the
+  message changed). The retired `triage.sensitivity` column is NOT the test: the
+  agent pipeline no longer writes it. The same predicate runs at reconcile, at
+  rebuild and in SQL at listing time, so a message that becomes sealed after its
+  ghost was built stops serving it at once; a decision that does not parse feeds
+  nothing.
 
 **The user's own writes** (`squelch-api/src/calendar_write.rs`). `POST
 /client/calendar/events`, `PATCH` and `DELETE /client/calendar/events/{calendar_id}/{id}`,
@@ -985,15 +995,32 @@ its query at Google, while the stored copy is Google's answer laundered by
 `read_event`),
 the calendar (one being read, on which the user is `owner` or `writer`), the
 stored event and the edit guard (`gcal/mod.rs:SyncedEvent::editable`: the user's
-own event, by `organizer.self`, no organizer, or the mailbox's own address), and
+own event, by `organizer.self`, no organizer named at all, or the mailbox's own
+address; it FAILS CLOSED, so an organizer Google names whose address does not
+read, stored as `organizer_unreadable`, and an event whose stored guest list
+marks someone other than this calendar as organizer, are somebody else's), and
 only then Google, through the same `CalendarCredentials` resolver the sync uses,
 with `sendUpdates=none` unless the request asked otherwise (below). Only Google's success
 changes a row, and what is stored is Google's answer read by the sync's own
-`read_event`. A write is never retried. Error bodies are fixed strings that never
+`read_event`. A write is never retried. A refusal Google answered is a 502; a
+write that went out and got no usable answer (a timeout or a lost connection after
+sending, a 2xx body that does not read: `CallError::Uncertain`) is a 504 saying
+Google may have made the change, kicks a sync and stores nothing, so the client
+refreshes before offering to send again (a "tell guests" is not repeated on a
+guess). A delete Google answers 404 or 410 found the event gone and removes the
+local row. Event and calendar ids of `.` or `..` (or empty) are refused at read
+and again when the URL is built, because a URL path would read them as "here"
+and "up one". Error bodies are fixed strings that never
 echo the request; logs carry the action and an error kind, never an id. Every
 attempt writes one audit row (`calendar_event_create` / `_edit` / `_delete`,
 actor `client-api`, target `calendar:<calendar_id>/<event_id>`, detail `ok` or the
-reason), never a title, place or description. The `calendar:` prefix keeps the
+reason), never a title, place, description or guest's address. The target DOES
+carry the calendar id, and a calendar id can be an address: the primary calendar
+is stored as `primary`, but a personal calendar someone shared with the user is
+named by its owner's address. Audit rows are human-door data like the rest. The
+row is written even when the client disconnects mid-request: each write's checks,
+Google call and audit run in a task of their own that the handler awaits, so
+dropping the request does not cancel them. The `calendar:` prefix keeps the
 audit listing's join to `messages` (a numeric target) from matching a calendar id
 that starts with digits. The in-app assistant has no tool for any of it.
 
@@ -1015,7 +1042,12 @@ reaches people outside the account and cannot be undone. What gates it:
   nothing the daemon does on its own (the sync, triage, ghosts) calls a write.
 - **Whose calendar.** Guests only on the user's own calendar (the primary one, or
   one they are `owner` of): `gcal/mod.rs:may_invite`. A shared calendar the user
-  can write to cannot be made to invite anyone.
+  can write to cannot be made to invite anyone, nor to mail an update or a
+  cancellation: `notify: true` on an edit or a delete there is a 400
+  (`calendar_write.rs:refuse_notify_unless_own`, "guests can only be told about
+  changes on your own calendar"), refused before Google hears anything. The
+  client offers only the silent controls on such a calendar, with one line
+  saying why.
 - **Whose event.** An existing event's guest list changes only when the event is
   the user's own, the user organizes it, and the stored list is whole
   (`SyncedEvent::guest_editable`). Google replaces the attendee array on a patch,
@@ -1030,12 +1062,13 @@ reaches people outside the account and cannot be undone. What gates it:
   its mail are the event's own, typed by the user.
 - **What is audited.** Every attempt's row carries ` guests=<n>
   notified=<true|false>` after its outcome, on failures too (a write that timed
-  out may have gone through), and never an address. Guests' addresses are in no
+  out may have gone through, and is audited `failed:uncertain`), even when the
+  app disconnects mid-request, and never a guest's address. Guests' addresses are in no
   log line and no error body.
 
 What this does NOT cover: a client that sends `notify: true` when the user did
-not mean it (the client's controls must say what they send; the daemon cannot
-tell), and Google's own behaviour with `sendUpdates=none`, which the reference
+not mean it (the client's controls must say what they send, and offer it only
+where the daemon would accept it; the daemon cannot tell intent), and Google's own behaviour with `sendUpdates=none`, which the reference
 hedges ("some emails might still be sent") and which has not been tested against
 a real account.
 
@@ -1106,7 +1139,14 @@ minute.
   leave `sendUpdates` off the URL.
 - Do not build an `attendees` array from stored rows, from a truncated list, or for
   an edit that did not name `guests`; do not widen `may_invite` past the user's own
-  calendars; do not let anything derived from mail set guests or `notify`.
+  calendars, or accept `notify: true` on a calendar it refuses; do not let
+  anything derived from mail set guests or `notify`.
+- Do not read an organizer that is present but unreadable as "no organizer"; the
+  edit guard fails closed.
+- Do not report a write whose answer was lost as refused (it may have happened),
+  or run a write's Google call and audit inside the request future alone.
+- Do not gate ghosts on `triage.sensitivity`; use the sealed test
+  `sealed_messages` uses.
 - Do not let a mail path load the Calendar slot, or the calendar loop load the
   Write slot: the token in either can do more than its job.
 - Do not loosen `google_link`, drop the `fields` mask or `maxAttendees`, or ask

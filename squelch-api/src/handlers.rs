@@ -3061,6 +3061,8 @@ pub struct PersonView {
 /// be walked into a directory dump without already knowing every address.
 /// Sealed mail is absent from every count and list on it (see
 /// `SqliteStore::person_record`). `no-store`, for the same reason as senders.
+/// `timezone` is part of the `calendar` hidden feature: with it off the key is
+/// absent, as on main, though the inference behind it keeps running.
 pub async fn get_person(
     State(state): State<ApiState>,
     Query(params): Query<PersonQuery>,
@@ -3112,7 +3114,11 @@ pub async fn get_person(
                 last_at: t.last_at.to_rfc3339(),
             })
             .collect(),
-        timezone: timezone_view(p.timezone),
+        timezone: if state.features().enabled(squelch_core::features::CALENDAR) {
+            timezone_view(p.timezone)
+        } else {
+            None
+        },
     };
     Ok((no_store(), Json(view)))
 }

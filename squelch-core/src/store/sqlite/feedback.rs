@@ -151,12 +151,11 @@ impl SqliteStore {
                 ("kinds", serde_json::json!([kind]))
             }
         };
-        // Retain compatibility diagnostics. These columns never control
-        // placement or external access in the new pipeline, but `sensitivity`
-        // does gate calendar ghosts (a sealed message feeds none), so it is
-        // written BEFORE the correction below, whose access change re-runs
-        // the ghost projection: written after, an unseal would be projected
-        // as still sealed.
+        super::agent_triage::correct_agent_triage_conn(
+            &tx, account_id, message_id, field, &value, now,
+        )?;
+        // Retain compatibility diagnostics only. These columns never control
+        // placement or external access in the new pipeline.
         let column = match axis {
             TriageAxis::Tier => "tier",
             TriageAxis::Category => "category",
@@ -165,9 +164,6 @@ impl SqliteStore {
         tx.execute(
             &format!("UPDATE triage SET {column}=?3 WHERE account_id=?1 AND message_id=?2"),
             params![account_id, message_id, to_value],
-        )?;
-        super::agent_triage::correct_agent_triage_conn(
-            &tx, account_id, message_id, field, &value, now,
         )?;
 
         let original_s = original.to_string();

@@ -295,10 +295,14 @@ private struct ShellWatchers: View {
             .onChange(of: store.activeView) { _, view in
                 if view != .calendar {
                     store.closeCalendarConnectForNavigation()
-                    // So do the event pane and the delete question: they
-                    // are about the page being left.
-                    store.closeEventEditor()
+                    // The delete question is about the page being left, and
+                    // goes. The event pane closes too, unless something is
+                    // typed in it: then it is parked, and back on the page
+                    // it is there as it was left.
+                    store.parkEventEditorForNavigation()
                     store.cancelDeleteEvent()
+                } else {
+                    store.returnParkedEventEditor()
                 }
             }
             .onChange(of: store.lastRefresh) { old, new in
@@ -702,28 +706,18 @@ struct MainShell: View {
         // would make the whole shell a reader of the stats poll. One more
         // digit is bound than there are pages without the calendar; it
         // passes on while the calendar is not offered.
-        var bindings: [KeyBinding] = (1...MainView.numberKeyCount).map { number in
-            KeyBinding(declining: "\(number)", "go to page \(number)") {
-                let pages = MainView.numberedViews(calendar: store.calendarPageAvailable)
-                guard pages.indices.contains(number - 1) else { return false }
-                store.setView(pages[number - 1])
-                return true
-            }
-        }
-        // ⇧C OPENS THE CALENDAR TOO, as it did before the page had a digit.
-        // EXACT CASE, so a bare `c` (compose) is untouched; the shifted
-        // letter used to reach compose only through the dispatcher's case
-        // fold, and now means this instead wherever the page is offered.
-        // DECLINING, the gate asked at key time for the same reason as the
-        // digits above. With the gate
-        // closed, and while a sign-in code is on screen (whose modal copies on
-        // `c`, and so on ⇧C through the fold), the key passes on as before.
+        var bindings: [KeyBinding] = PageKeys.digits(
+            count: MainView.numberKeyCount,
+            pages: { MainView.numberedViews(calendar: store.calendarPageAvailable) },
+            go: { store.setView($0) })
+        // ⇧C OPENS THE CALENDAR TOO, as it did before the page had a digit
+        // (`PageKeys.calendar`: exact case, declining). With the gate closed,
+        // and while a sign-in code is on screen (whose modal copies on `c`,
+        // and so on ⇧C through the fold), the key passes on as before.
         bindings.append(
-            KeyBinding(declining: "C", "go to calendar", exactCase: true) {
-                guard store.calendarPageAvailable, store.authQueue.isEmpty else { return false }
-                store.setView(.calendar)
-                return true
-            })
+            PageKeys.calendar(
+                offered: { store.calendarPageAvailable && store.authQueue.isEmpty },
+                go: { store.setView(.calendar) }))
         bindings.append(
             KeyBinding("[", "back", meta: true, allowInInput: true) { store.goBack() })
         bindings.append(

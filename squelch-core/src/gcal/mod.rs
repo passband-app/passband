@@ -368,6 +368,12 @@ pub struct EventRow {
     pub end: Option<EventTime>,
     pub start_timezone: Option<String>,
     pub organizer_email: Option<String>,
+    /// Google sent an organizer that is not this calendar (`organizer.self`
+    /// not true) and whose address could not be read (absent, or failing
+    /// [`address`]). Somebody organizes the event and it is not known to be
+    /// the user, so it is NOT the user's own: distinct from an event that
+    /// names no organizer at all.
+    pub organizer_unreadable: bool,
     /// Google's `organizer.self`: "Whether the organizer corresponds to the
     /// calendar on which this copy of the event appears."
     pub organizer_self: bool,
@@ -444,18 +450,26 @@ impl SyncedEvent {
     /// THE EDIT GUARD: whether the app offers to edit or delete this event.
     /// The calendar is one the user writes to (`owner` or `writer`), AND the
     /// event is the user's own: Google marks this calendar as its organizer
-    /// (`organizer.self`), or it names no organizer, or the organizer is the
-    /// mailbox's own address. An invitation from someone else, sitting on the
-    /// user's own calendar, is theirs to change, not the user's.
+    /// (`organizer.self`), or it names no organizer at all, or the organizer
+    /// is the mailbox's own address. An invitation from someone else, sitting
+    /// on the user's own calendar, is theirs to change, not the user's.
+    ///
+    /// It FAILS CLOSED on doubt: an organizer Google sent but whose address
+    /// could not be read ([`EventRow::organizer_unreadable`]) is someone
+    /// else, and so is an event whose stored guest list names an organizer
+    /// that is not this calendar (`organizer` and not `self`), whatever the
+    /// organizer field says.
     pub fn editable(&self, account_email: &str) -> bool {
         let writable = self.calendar_access.is_some_and(AccessRole::writable);
+        let organized_elsewhere = self.row.guests.iter().any(|g| g.organizer && !g.is_self);
         let own = self.row.organizer_self
-            || self
-                .row
-                .organizer_email
-                .as_deref()
-                .is_none_or(|org| org.eq_ignore_ascii_case(account_email.trim()));
-        writable && own
+            || (!self.row.organizer_unreadable
+                && self
+                    .row
+                    .organizer_email
+                    .as_deref()
+                    .is_none_or(|org| org.eq_ignore_ascii_case(account_email.trim())));
+        writable && own && !organized_elsewhere
     }
 
     /// THE GUEST GUARD: whether the app offers to change this event's guest
@@ -492,10 +506,12 @@ fn text(value: &Value, key: &str) -> Option<String> {
 }
 
 /// A bounded identifier: laundered, non-empty, at most `cap` characters (an
-/// over-long one is refused, not cut, since a cut id names something else).
+/// over-long one is refused, not cut, since a cut id names something else),
+/// and never `.` or `..`, which a URL path reads as "here" and "up one" and
+/// so cannot name an event ([`client::CalendarApi`] refuses them too).
 fn bounded_id(raw: Option<&str>, cap: usize) -> Option<String> {
     let id = crate::triage::order_link::plain(raw?);
-    (!id.is_empty() && id.chars().count() <= cap).then_some(id)
+    (!id.is_empty() && id != "." && id != ".." && id.chars().count() <= cap).then_some(id)
 }
 
 /// A start or end: `dateTime` (RFC3339) for a timed event, `date`
@@ -645,6 +661,19 @@ pub fn read_event(
     let updated_at = text(item, "updated")
         .filter(|u| u.len() <= STAMP_CAP && chrono::DateTime::parse_from_rfc3339(u).is_ok());
     let (guests, guests_truncated) = read_guests(item);
+    // The organizer: an address, or none named, or one Google sent that could
+    // not be read (which is somebody, and not known to be the user).
+    let organizer = item.get("organizer").filter(|o| !o.is_null());
+    let organizer_self = organizer
+        .and_then(|o| o.get("self"))
+        .and_then(Value::as_bool)
+        == Some(true);
+    let organizer_email = address(
+        organizer
+            .and_then(|o| o.get("email"))
+            .and_then(Value::as_str),
+    );
+    let organizer_unreadable = organizer.is_some() && !organizer_self && organizer_email.is_none();
     let end = end.and_then(|end| match end {
         EventTime::Date(day) => day
             .pred_opt()
@@ -667,16 +696,9 @@ pub fn read_event(
         start,
         end,
         start_timezone,
-        organizer_email: address(
-            item.get("organizer")
-                .and_then(|o| o.get("email"))
-                .and_then(Value::as_str),
-        ),
-        organizer_self: item
-            .get("organizer")
-            .and_then(|o| o.get("self"))
-            .and_then(Value::as_bool)
-            == Some(true),
+        organizer_email,
+        organizer_unreadable,
+        organizer_self,
         self_response,
         transparent: item.get("transparency").and_then(Value::as_str) == Some("transparent"),
         html_link: google_link(item.get("htmlLink").and_then(Value::as_str)),
@@ -858,6 +880,7 @@ mod tests {
             end: None,
             start_timezone: None,
             organizer_email: None,
+            organizer_unreadable: false,
             organizer_self: false,
             self_response: None,
             transparent: false,
@@ -1127,6 +1150,26 @@ mod tests {
         assert_eq!(remove(json!({"status": "cancelled"})), None);
         assert_eq!(remove(json!({"id": ""})), None);
         assert_eq!(remove(json!({"id": "x".repeat(2000)})), None);
+    }
+
+    /// A dot segment is no id: `..` in a URL path climbs out of the event.
+    #[test]
+    fn an_id_of_dots_or_nothing_is_no_id() {
+        for bad in ["", ".", "..", "\u{200B}"] {
+            assert_eq!(bounded_id(Some(bad), ID_CAP), None, "{bad:?}");
+            assert_eq!(
+                read_event(
+                    &json!({"id": bad, "start": {"dateTime": "2026-10-05T09:00:00Z"}}),
+                    None,
+                    window(now())
+                ),
+                None,
+                "{bad:?}"
+            );
+        }
+        for good in ["...", ".a", "a..b", "abc"] {
+            assert_eq!(bounded_id(Some(good), ID_CAP).as_deref(), Some(good));
+        }
     }
 
     #[test]
@@ -1476,6 +1519,50 @@ mod tests {
         ] {
             assert!(!event(access, None, true).editable(me), "{access:?}");
         }
+        // A row from Google: the reviewer's case. An invitation on the
+        // user's own primary calendar whose organizer address does not read,
+        // and whose guest list names that organizer.
+        let synced = |item: Value| SyncedEvent {
+            row: upsert(item),
+            ..event(owner, None, false)
+        };
+        let invitation = synced(json!({
+            "id": "e", "start": {"dateTime": "2026-10-05T09:00:00Z"},
+            "organizer": {"email": "boss at example.com"},
+            "attendees": [
+                {"email": "boss@example.com", "organizer": true},
+                {"email": "me@example.com", "self": true}
+            ]
+        }));
+        assert!(invitation.row.organizer_unreadable);
+        assert_eq!(invitation.row.organizer_email, None);
+        assert!(
+            !invitation.editable(me),
+            "an organizer that does not read is somebody else"
+        );
+        // The unreadable organizer alone is enough, with no guest list.
+        let bare = synced(json!({
+            "id": "e", "start": {"dateTime": "2026-10-05T09:00:00Z"},
+            "organizer": {"displayName": "Boss"}
+        }));
+        assert!(bare.row.organizer_unreadable && !bare.editable(me));
+        // And a guest list naming another organizer is enough on its own,
+        // whatever the organizer field says.
+        let mut named = event(owner, None, false);
+        named.row.guests = invitation.row.guests.clone();
+        assert!(!named.editable(me), "a guest marked organizer, not self");
+        // No organizer object at all is still the user's own, and so is an
+        // organizer this calendar is, address or not.
+        assert!(
+            synced(json!({"id": "e", "start": {"dateTime": "2026-10-05T09:00:00Z"}})).editable(me)
+        );
+        let own = synced(json!({
+            "id": "e", "start": {"dateTime": "2026-10-05T09:00:00Z"},
+            "organizer": {"self": true},
+            "attendees": [{"email": "me@example.com", "self": true, "organizer": true}]
+        }));
+        assert!(!own.row.organizer_unreadable && own.editable(me));
+
         // Colour: the event's own over the calendar's.
         let mut colored = event(owner, None, true);
         assert_eq!(colored.color().as_deref(), Some("#123456"));

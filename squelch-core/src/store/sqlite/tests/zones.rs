@@ -398,13 +398,14 @@ fn a_failing_recompute_does_not_fail_ingest() {
         "the whole ingest committed"
     );
     // The first two inferred nothing and so inserted nothing; the third's
-    // savepoint took its observation's other writes with it.
+    // savepoint took its observation's other writes with it. The offsets are
+    // all kept: the message upsert wrote them, outside the savepoint.
     assert_eq!(
         count(
             &store,
             "SELECT COUNT(*) FROM messages WHERE date_offset_minutes IS NOT NULL"
         ),
-        2
+        3
     );
     assert_eq!(count(&store, "SELECT COUNT(*) FROM sender_zones"), 0);
     // The control: without the trigger the same mail does infer.
@@ -415,6 +416,54 @@ fn a_failing_recompute_does_not_fail_ingest() {
         .unwrap();
     three_from(&store, acct, "dan@example.com", "g", 330);
     assert!(zone_row(&store, acct, "dan@example.com").is_some());
+}
+
+/// THE ROW IS WRITTEN ONCE. The Date offset goes in with the message's
+/// INSERT; nothing UPDATEs the column afterwards (which made SQLite rewrite
+/// the whole record, bodies and overflow pages, a second time). A re-ingest
+/// writes it in the same upsert, and one with no offset keeps the old value.
+#[test]
+fn the_date_offset_is_written_by_the_message_upsert_itself() {
+    let (store, acct) = store();
+    store
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE offset_updates(gmail_msg_id TEXT);
+             CREATE TRIGGER offset_updated AFTER UPDATE OF date_offset_minutes ON messages
+             BEGIN INSERT INTO offset_updates VALUES (NEW.gmail_msg_id); END;",
+        )
+        .unwrap();
+    let mail = |offset| {
+        triaged(acct, "g1", "t")
+            .from("dan@example.com")
+            .auth_pass(Some(true))
+            .received_at(ago(1))
+            .date_offset(offset)
+    };
+    mail(Some(330)).ingest(&store);
+    assert_eq!(
+        count(&store, "SELECT date_offset_minutes FROM messages"),
+        330
+    );
+    assert_eq!(
+        count(&store, "SELECT COUNT(*) FROM offset_updates"),
+        0,
+        "a first ingest writes the offset in its INSERT, with no second write"
+    );
+    mail(None).ingest(&store);
+    assert_eq!(
+        count(&store, "SELECT date_offset_minutes FROM messages"),
+        330,
+        "no offset keeps the stored one"
+    );
+    mail(Some(-240)).ingest(&store);
+    assert_eq!(
+        count(&store, "SELECT date_offset_minutes FROM messages"),
+        -240
+    );
+    // Each re-ingest is one upsert: one write of the row apiece.
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM offset_updates"), 2);
 }
 
 #[test]

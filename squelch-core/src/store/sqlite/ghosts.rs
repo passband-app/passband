@@ -54,18 +54,32 @@ use crate::types::{GhostEvent, GhostMailState, GhostSource, GhostUserState};
 use chrono::FixedOffset;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// A message may feed a ghost: not sent, not spam, not restricted, and not
-/// sealed. The same test as the call site's, in SQL, for messages `m` joined
-/// by [`ELIGIBLE_JOINS`]. Sealed is `triage.sensitivity`, the predicate every
-/// other human-door listing uses (`people.rs`): a detector can seal mail at
-/// ingest without the agent's access review ever restricting it.
-const ELIGIBLE: &str = "m.is_sent=0 AND m.is_spam=0 AND COALESCE(a.access,'pending')<>'restricted' \
-     AND COALESCE(t.sensitivity,'normal')<>'sealed'";
+/// A message may feed a ghost: not sent, not spam, and NOT SEALED, judged by
+/// the same test the Auth page's `sealed_messages` uses (docs/SECURITY.md):
+/// its access review has ALLOWED it (not `restricted`, and not still
+/// `pending`, which is what a changed message is until its next review), and
+/// its stored decision names no auth kind (a sign-in alert, a login code).
+/// `triage.sensitivity` is NOT the test: the agent pipeline no longer writes
+/// it, so a guard on it would protect nothing. A decision that does not parse
+/// is not known to be harmless, and feeds nothing. The SQL form, for messages
+/// `m` joined by [`ELIGIBLE_JOINS`]; [`may_feed`] is its Rust half.
+const ELIGIBLE: &str = "m.is_sent=0 AND m.is_spam=0 AND COALESCE(a.access,'pending')='allowed' \
+     AND (CASE WHEN ed.decision_json IS NULL THEN 1 \
+               WHEN json_valid(ed.decision_json) \
+               THEN COALESCE(json_array_length(ed.decision_json,'$.auth.kinds'),0)=0 \
+               ELSE 0 END)";
 
 /// The rows [`ELIGIBLE`] reads, LEFT JOINed to messages `m`: no access state
-/// is not a restriction, and no triage row is not a seal.
+/// is a review not yet done, and no decision row names no auth kind.
 const ELIGIBLE_JOINS: &str = "LEFT JOIN agent_message_state a ON a.account_id=m.account_id AND a.message_id=m.id \
-     LEFT JOIN triage t ON t.account_id=m.account_id AND t.message_id=m.id";
+     LEFT JOIN agent_message_decisions ed ON ed.account_id=m.account_id AND ed.message_id=m.id";
+
+/// What a decision itself says about whether its message may feed a ghost:
+/// not restricted and not auth. The rest of [`ELIGIBLE`] (sent, spam, the
+/// access review) is the message's, read from the store.
+pub(super) fn may_feed(decision: &MessageDecision) -> bool {
+    !decision.external_access.restricted && !decision.auth.is_auth()
+}
 
 /// Source rows one ghost may hold. A new record past this replaces the oldest,
 /// so one long-running thread cannot grow a ghost (and every rebuild of it)
@@ -187,8 +201,9 @@ fn guarded(
 /// when the transaction itself is gone (see [`guarded`]); the caller
 /// propagates it.
 ///
-/// `eligible` is false for sent, spam and restricted mail, which then feeds
-/// nothing: its assigned records keep their rows and stop contributing.
+/// `eligible` is false for sent, spam, restricted and auth mail (see
+/// [`ELIGIBLE`]), which then feeds nothing: its assigned records keep their
+/// rows and stop contributing.
 pub(super) fn reconcile_guarded(
     conn: &Connection,
     account: AccountId,
@@ -226,13 +241,7 @@ pub(super) fn refresh_message_guarded(
             )
             .optional()?;
         match stored.and_then(|json| serde_json::from_str::<MessageDecision>(&json).ok()) {
-            Some(decision) => reconcile(
-                conn,
-                account,
-                message,
-                !decision.external_access.restricted,
-                &decision,
-            ),
+            Some(decision) => reconcile(conn, account, message, may_feed(&decision), &decision),
             None => {
                 let now = Utc::now().to_rfc3339();
                 for id in ghosts_fed_by(conn, account, message)? {
@@ -432,6 +441,14 @@ fn match_by_ref(
 /// live candidate (a ref-less "moved to 9pm" follow-up). With several live
 /// candidates and none on its date, it matches nothing: a ref-less
 /// cancellation then cancels nothing rather than a guess.
+/// The ghosts any message of one thread feeds. See [`match_by_thread`].
+/// `CROSS JOIN` is SQLite's way to fix the join order: the thread's messages
+/// first, so an `IN (subquery)` (which the planner still read as a filter over
+/// the account's sources) is not left to its guess.
+pub(super) const THREAD_GHOSTS_SQL: &str = "SELECT DISTINCT s.ghost_id FROM messages m
+     CROSS JOIN ghost_event_sources s ON s.account_id=m.account_id AND s.message_id=m.id
+     WHERE m.account_id=?1 AND m.thread_id=?2";
+
 fn match_by_thread(
     conn: &Connection,
     account: AccountId,
@@ -440,11 +457,11 @@ fn match_by_thread(
     claimed: &BTreeSet<i64>,
 ) -> Result<Option<i64>> {
     let ids: Vec<i64> = {
-        let mut statement = conn.prepare_cached(
-            "SELECT DISTINCT s.ghost_id FROM ghost_event_sources s
-             JOIN messages m ON m.account_id=s.account_id AND m.id=s.message_id
-             WHERE s.account_id=?1 AND m.thread_id=?2",
-        )?;
+        // Driven from the THREAD: its messages off a thread index, then each
+        // one's source rows off the primary key. Written as a join
+        // on the sources, the planner (with no ANALYZE ever run) walked every
+        // source row of the account instead, inside the triage commit.
+        let mut statement = conn.prepare_cached(THREAD_GHOSTS_SQL)?;
         statement
             .query_map(params![account, m.thread], |r| r.get(0))?
             .collect::<std::result::Result<_, _>>()?
@@ -788,7 +805,7 @@ pub(super) fn rebuild(conn: &Connection, account: AccountId, id: i64, now: &str)
             match serde_json::from_str::<MessageDecision>(&encoded) {
                 Ok(decision) => Stored::Events {
                     events: ghost::launder_events(&decision.records),
-                    eligible: eligible && !decision.external_access.restricted,
+                    eligible: eligible && may_feed(&decision),
                     in_scope: ghost::sender_scope(&from_addr, auth_pass) == owner,
                 },
                 Err(_) => {
@@ -1283,6 +1300,39 @@ mod tests {
         store
     }
 
+    /// THE THREAD MATCH IS DRIVEN FROM THE THREAD, with no ANALYZE (the
+    /// daemon never runs one): the thread's messages off a thread index,
+    /// their source rows off the primary key, and
+    /// never a walk of the account's sources by `idx_ghost_event_sources_ghost`.
+    #[test]
+    fn the_thread_match_reads_the_thread_index_not_every_source() {
+        let store = fixture();
+        let conn = store.lock().unwrap();
+        let plan: Vec<String> = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {THREAD_GHOSTS_SQL}"))
+            .unwrap()
+            .query_map(params![1, "t"], |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        let plan = plan.join(" | ");
+        eprintln!("thread ghosts plan: {plan}");
+        // Messages first, by a (account_id, thread_id) index...
+        assert!(
+            plan.starts_with("SEARCH m USING COVERING INDEX idx_messages_thread"),
+            "{plan}"
+        );
+        // ...then each message's sources off the primary key.
+        assert!(
+            plan.contains(
+                "SEARCH s USING INDEX sqlite_autoindex_ghost_event_sources_1 (account_id=? AND message_id=?)"
+            ),
+            "{plan}"
+        );
+        assert!(!plan.contains("idx_ghost_event_sources_ghost"), "{plan}");
+        assert!(!plan.contains("SCAN"), "{plan}");
+    }
+
     /// The sender every fixture message has unless a test says otherwise:
     /// authenticated, so its scope is `venue.example`.
     const VENUE: &str = "tickets@venue.example";
@@ -1418,7 +1468,7 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
-        let eligible = !sent && !spam && !decision.external_access.restricted;
+        let eligible = !sent && !spam && may_feed(decision);
         reconcile(&tx, account, id, eligible, decision).unwrap();
         tx.commit().unwrap();
     }
@@ -1671,6 +1721,12 @@ mod tests {
                 "INSERT INTO agent_message_decisions(account_id,message_id,revision,decision_json,decided_at)
                  VALUES(1,1,1,?1,?2)",
                 params![old, Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO agent_message_state(account_id,message_id,content_snapshot,access)
+                 VALUES(1,1,'','allowed')",
+                [],
             )
             .unwrap();
             reconcile(&tx, 1, 1, true, &decision).unwrap();
@@ -2910,8 +2966,13 @@ mod tests {
         decide(&store, 1, 2, &MessageDecision::default());
         assert!(listed(&store, 1).is_empty(), "no eligible supplier");
         assert_eq!(count(&store, "ghost_events"), 1, "but not deleted");
-        // The not-spam action rebuilds what the message feeds (A6).
+        // The not-spam action rebuilds what the message feeds (A6). Its
+        // content snapshot changed (the spam flag is in it), so its access
+        // review is pending again and the ghost waits for the re-review the
+        // action queued, which lands here as a decision.
         assert!(store.clear_spam(1, 1).unwrap());
+        assert!(listed(&store, 1).is_empty(), "pending until reviewed");
+        decide(&store, 1, 1, &Ev::default().decision());
         let g = listed(&store, 1).remove(0);
         assert_eq!(g.id, id);
         assert_eq!(g.title, "Show", "facts from the un-spammed source");
@@ -4148,55 +4209,116 @@ mod tests {
         assert_eq!(prior, (240, b));
     }
 
-    /// F16. Sealed mail feeds no ghost, like every human-door listing: at
-    /// LIST time in SQL, at reconcile, and back again when unsealed.
+    /// F16. Sealed mail feeds no ghost and serves none, judged by what seals
+    /// mail TODAY (the Auth page's `sealed_messages` test), never the retired
+    /// `triage.sensitivity` column: an auth decision, an access review still
+    /// pending, or a restriction. At LIST time in SQL, at reconcile, and back
+    /// again when it clears.
     #[test]
     fn sealed_mail_feeds_no_ghost() {
+        use crate::triage::decision::{AuthAssessment, AuthKind};
         use crate::types::TriageAxis;
         let store = fixture();
         mail(&store, 1, 1, "t1", 60);
         mail(&store, 1, 2, "t2", 30);
+        mail(&store, 1, 3, "t3", 20);
         decide(&store, 1, 1, &Ev::default().decision());
         let id = listed(&store, 1)[0].id;
         store
             .set_ghost_user_state(1, id, Some(GhostUserState::Going), Utc::now())
             .unwrap();
-        // A detector seals it on re-ingest: no rebuild runs, the listing
-        // hides it anyway.
+        // The legacy column seals nothing (the pipeline never writes it).
         set_flag(
             &store,
             "UPDATE triage SET sensitivity='sealed' WHERE message_id=1",
         );
-        assert!(listed(&store, 1).is_empty());
-        // A sealed message that is decided makes nothing.
+        assert_eq!(
+            listed(&store, 1).len(),
+            1,
+            "the retired column is not the test"
+        );
+
+        // AN ACCESS REVIEW PENDING (the message changed since its review): no
+        // rebuild runs, the listing hides it at once, and it is back when the
+        // review allows it.
         set_flag(
             &store,
-            "UPDATE triage SET sensitivity='sealed' WHERE message_id=2",
+            "UPDATE agent_message_state SET access='pending' WHERE message_id=1",
         );
-        decide(
+        assert!(listed(&store, 1).is_empty(), "pending serves nothing");
+        set_flag(
             &store,
-            1,
-            2,
-            &Ev {
-                refs: &["QXJZKM"],
+            "UPDATE agent_message_state SET access='allowed' WHERE message_id=1",
+        );
+        assert_eq!(listed(&store, 1)[0].id, id);
+        // A pending message that is decided makes nothing.
+        {
+            let mut conn = store.lock().unwrap();
+            let tx = conn.transaction().unwrap();
+            let decision = Ev {
+                refs: &["PENDNG"],
+                start: Some("2026-11-03T20:00:00-05:00"),
                 ..Default::default()
             }
-            .decision(),
+            .decision();
+            tx.execute(
+                "INSERT INTO agent_message_state(account_id,message_id,content_snapshot,access)
+                 VALUES(1,3,'','pending')",
+                [],
+            )
+            .unwrap();
+            reconcile(&tx, 1, 3, true, &decision).unwrap();
+            tx.commit().unwrap();
+        }
+        assert_eq!(count(&store, "ghost_events"), 1, "pending fed nothing");
+
+        // AN AUTH DECISION (a sign-in alert that also names an event, left
+        // unrestricted by the model): it feeds no ghost...
+        let auth = |ev: Ev<'_>| MessageDecision {
+            auth: AuthAssessment {
+                kinds: vec![AuthKind::LoginAlert],
+                evidence: vec![],
+            },
+            ..ev.decision()
+        };
+        let sign_in = auth(Ev {
+            refs: &["QXJZKM"],
+            start: Some("2026-12-03T20:00:00-05:00"),
+            ..Default::default()
+        });
+        assert!(!sign_in.external_access.restricted);
+        decide(&store, 1, 2, &sign_in);
+        assert_eq!(count(&store, "ghost_events"), 1, "auth mail fed nothing");
+        // ...and a ghost whose supplier is re-decided as auth serves nothing,
+        // even before any rebuild: the listing reads the stored decision.
+        set_flag(
+            &store,
+            &format!(
+                "UPDATE agent_message_decisions SET decision_json='{}' WHERE message_id=1",
+                serde_json::to_string(&auth(Ev::default())).unwrap()
+            ),
         );
-        assert_eq!(count(&store, "ghost_events"), 1);
-        // The user unseals message 1: the ghost is back with its mark.
+        assert!(listed(&store, 1).is_empty(), "auth serves nothing");
+        decide(&store, 1, 1, &auth(Ev::default()));
+        assert!(listed(&store, 1).is_empty());
+        assert_eq!(count(&store, "ghost_events"), 1, "kept, with its mark");
+        // Decided again without the auth kind, it is back with the mark.
+        decide(&store, 1, 1, &Ev::default().decision());
+        let g = listed(&store, 1).remove(0);
+        assert_eq!((g.id, g.user_state), (id, Some(GhostUserState::Going)));
+
+        // RESTRICTED by hand hides it at once, and lifting it brings it back.
+        store
+            .correct_triage(1, 1, TriageAxis::Sensitivity, "sealed", None, Utc::now())
+            .unwrap()
+            .unwrap();
+        assert!(listed(&store, 1).is_empty());
         store
             .correct_triage(1, 1, TriageAxis::Sensitivity, "normal", None, Utc::now())
             .unwrap()
             .unwrap();
         let g = listed(&store, 1).remove(0);
         assert_eq!((g.id, g.user_state), (id, Some(GhostUserState::Going)));
-        // And sealing it by hand hides it at once.
-        store
-            .correct_triage(1, 1, TriageAxis::Sensitivity, "sealed", None, Utc::now())
-            .unwrap()
-            .unwrap();
-        assert!(listed(&store, 1).is_empty());
     }
 
     // ---- Round 3 ----

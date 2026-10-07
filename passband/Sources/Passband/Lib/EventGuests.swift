@@ -120,6 +120,10 @@ struct GuestPlan: Hashable, Sendable {
     /// Guests the save would leave on it.
     let after: Int
     let controls: SaveControls
+    /// The event has guests, and its calendar is not one Passband may tell
+    /// them from (`EventGuests.mayTell`): only the silent control is on
+    /// offer, and the pane says why in one line (`EventGuests.silentLine`).
+    var silent = false
 
     /// What a write built for this draft may carry.
     func terms(owner: String?) -> GuestTerms {
@@ -304,16 +308,36 @@ enum EventGuests {
         return mayInvite(calendar, feed: feed) ? .field : .closed(.otherCalendar)
     }
 
+    // MARK: who may be told
+
+    /// Whether a change to this event may have Google email its guests: only
+    /// from a calendar that may invite (`mayInvite`), the same rule as an
+    /// invitation, since an update or a cancellation goes out under that
+    /// calendar's name exactly as an invitation would. The daemon refuses
+    /// `notify` anywhere else (a 400), so the controls that would ask for it
+    /// are not drawn there at all.
+    static func mayTell(_ event: TimelineEvent, feed: TimelineFeed?) -> Bool {
+        mayInvite(feed?.calendars?.first { $0.id == event.calendar_id }, feed: feed)
+    }
+
+    /// The pane's one line when an event's guests cannot be told.
+    static let silentLine =
+        "Passband can tell guests only from your own calendar, so this change tells nobody."
+
     // MARK: the controls
 
     /// The footer for a draft. A new event with guests has ONE control, and
     /// it says it invites. An event with guests on either side of an edit has
     /// two, so telling them is always chosen and never assumed.
-    static func controls(editing: Bool, before: Int, after: Int) -> SaveControls {
+    ///
+    /// `mayTell` false (an event on a calendar that may not tell its guests,
+    /// `mayTell(_:feed:)`): the silent control alone, by its silent name.
+    static func controls(editing: Bool, before: Int, after: Int, mayTell: Bool = true) -> SaveControls {
         if !editing {
             return SaveControls(primary: after > 0 ? .addAndInvite(after) : .addEvent)
         }
         if before > 0 || after > 0 {
+            guard mayTell else { return SaveControls(primary: .saveWithoutTelling) }
             return SaveControls(primary: .saveAndTell, quiet: .saveWithoutTelling)
         }
         return SaveControls(primary: .save)
@@ -325,9 +349,11 @@ enum EventGuests {
         // Only an open line changes who is on it. A closed one leaves the
         // event's guests as they were; a new event on a closed line has none.
         let after = access == .field ? read(draft.guests).addresses.count : before
+        let tell = event.map { mayTell($0, feed: feed) } ?? true
         return GuestPlan(
             access: access, before: before, after: after,
-            controls: controls(editing: event != nil, before: before, after: after))
+            controls: controls(editing: event != nil, before: before, after: after, mayTell: tell),
+            silent: event != nil && !tell && (before > 0 || after > 0))
     }
 
     /// ENTER DOES NOT SEND. Plain Enter in a single-line field saves only
@@ -335,6 +361,25 @@ enum EventGuests {
     /// either side of the save, only ⌘↵ or a click does.
     static func enterMaySave(_ controls: SaveControls) -> Bool {
         controls.quiet == nil && !controls.primary.notifies
+    }
+
+    /// What plain ↵ does in the event pane, with nothing more specific to
+    /// do (no place to pick, no address to make a guest, not the notes).
+    enum Enter: Hashable, Sendable {
+        /// Save with the footer's control.
+        case save
+        /// Held, and nothing happens: the save would tell someone.
+        case swallow
+        /// Not the pane's: no single-line field has focus (a day was clicked
+        /// on the month beside it), so the month's own ↵ has it.
+        case decline
+    }
+
+    /// ↵ SAVES ONLY FROM A LINE. `onLine`: a single-line field of the pane
+    /// has focus.
+    static func enter(onLine: Bool, _ controls: SaveControls) -> Enter {
+        guard onLine else { return .decline }
+        return enterMaySave(controls) ? .save : .swallow
     }
 
     /// NOTIFY ONLY FROM THE LABELLED CONTROL. Whether a save asked for by
@@ -361,11 +406,20 @@ enum EventGuests {
 
     /// The delete question. With guests it asks about telling them, and the
     /// count is the number of people, never a guess at a list cut short.
-    static func deleteWording(guests: Int, truncated: Bool) -> DeleteWording {
+    ///
+    /// `mayTell` false: the guests cannot be told from this calendar, so the
+    /// question offers the silent delete alone and says why.
+    static func deleteWording(guests: Int, truncated: Bool, mayTell: Bool = true) -> DeleteWording {
         let detail = "It goes from your calendar everywhere, and Passband cannot put it back."
         guard guests > 0 || truncated else {
             return DeleteWording(
                 title: "Delete this event from Google Calendar?", detail: detail, tell: nil, quiet: "delete event")
+        }
+        guard mayTell else {
+            return DeleteWording(
+                title: "Delete this event from Google Calendar?",
+                detail: detail + " Passband can tell guests only from your own calendar, so they are not told.",
+                tell: nil, quiet: "delete without telling")
         }
         let who = truncated ? "the guests" : (guests == 1 ? "1 guest" : "\(guests) guests")
         return DeleteWording(
@@ -373,8 +427,10 @@ enum EventGuests {
             quiet: "delete without telling")
     }
 
-    static func deleteWording(_ event: TimelineEvent) -> DeleteWording {
-        deleteWording(guests: others(event).count, truncated: event.guests_truncated == true)
+    static func deleteWording(_ event: TimelineEvent, feed: TimelineFeed?) -> DeleteWording {
+        deleteWording(
+            guests: others(event).count, truncated: event.guests_truncated == true,
+            mayTell: mayTell(event, feed: feed))
     }
 
     static func responseWord(_ response: GuestResponse?) -> String {

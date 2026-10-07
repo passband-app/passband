@@ -634,7 +634,26 @@ final class AppStore {
     /// The daemon's stats, apart from the bands (see SitrepData): the sync
     /// clock, the queues, the capabilities. Assigned by the poller only on
     /// change, and it changes often — so only its readers pay for that.
-    var stats: StoreStats?
+    var stats: StoreStats? {
+        didSet {
+            // The calendar gate, out of every poll: written only when it
+            // flips, so its readers (the rail, the Go menu) are not readers
+            // of the stats.
+            let open = CalendarGate.pageAvailable(timeline: stats?.timeline, feature: hasFeature(.calendar))
+            if open != calendarPageAvailable { calendarPageAvailable = open }
+        }
+    }
+    /// Whether the Calendar destination exists at all. Rail, Go menu, ⇧C, the
+    /// number keys, the shortcuts sheet, the assistant's guide and the route
+    /// all read this one property; the rule itself, the daemon's timeline AND
+    /// the `calendar` hidden feature, is `CalendarGate.pageAvailable`.
+    ///
+    /// STORED, and written by `stats`' didSet only when it changes (the
+    /// `statsEpoch` pattern): computed off `stats` it made the rail and the
+    /// Go menu re-evaluate on every poll that changed any count. Off the raw
+    /// `stats`, not `calendarAccess`: it says only whether a page exists,
+    /// never whose calendar is in it.
+    private(set) var calendarPageAvailable = false
     /// The epoch of the poll that wrote `stats`. `stats` is not wiped on an
     /// account switch, so until the new mailbox's first poll lands it still
     /// describes the one just left; anything that must not mix two accounts
@@ -716,6 +735,14 @@ final class AppStore {
     /// an answer is applied only if nothing newer has started since it was
     /// asked for. Not observed: it is bookkeeping, never drawn.
     @ObservationIgnored var calendarLoadGeneration = 0
+    /// Bumped by `dropCalendarState` (an account switch, the gate closing):
+    /// a write still out when it was bumped answers into nothing
+    /// (`CalendarWriteTicket`). Bookkeeping, never drawn.
+    @ObservationIgnored var calendarSession = 0
+    /// The event pane was left with something typed in it: the request and
+    /// the draft are kept, the pane is not drawn, and coming back to the
+    /// Calendar page brings it back as it was (`parkEventEditor`).
+    var calendarEditorParked = false
     /// When the last full zone refresh COMPLETED. nil = never loaded. OUT of
     /// the observed struct: it is a TTL stamp, and stamping it invalidated
     /// every zone view once per pass whether or not a row had changed.

@@ -224,12 +224,6 @@ fn client_router(state: ApiState) -> Router {
         // The reader's contact card: one address, everything known about it.
         // Human door only, for the reason contacts is.
         .route("/client/person", get(handlers::get_person))
-        // The user's correction of that person's inferred timezone. A local
-        // write, human door only, for the reason the card is.
-        .route(
-            "/client/person/timezone",
-            put(handlers::put_person_timezone),
-        )
         .merge(groups::routes())
         .route("/client/sealed", get(handlers::list_sealed))
         .route(
@@ -406,6 +400,15 @@ fn calendar_routes(state: ApiState) -> Router<ApiState> {
         .route(
             "/client/calendar/events/{calendar_id}/{id}",
             patch(calendar_write::edit_event).delete(calendar_write::delete_event),
+        )
+        // The user's correction of a person's inferred timezone (docs/
+        // CALENDAR.md §7). A local write, human door only, for the reason the
+        // contact card is; part of the calendar feature, so it is here. The
+        // inference itself runs at ingest whatever the flag says, and
+        // `GET /client/person` serves the zone only while the flag is on.
+        .route(
+            "/client/person/timezone",
+            put(handlers::put_person_timezone),
         )
         .route_layer(middleware::from_fn_with_state(state, require_calendar))
 }

@@ -81,15 +81,26 @@ fn bump_unsub_violation_conn(
 /// `is_sent` and not the stored one is what keeps a real Bcc through the sticky
 /// `is_sent` flip: the inbound sighting offers nothing here, so the COALESCE
 /// keeps what the sent copy wrote.
-fn upsert_message_conn(conn: &Connection, msg: &NewMessage) -> Result<i64> {
+/// `date_offset_minutes` is the Date header's offset (the timezone
+/// inference's observation), written HERE with the rest of the row rather
+/// than by a follow-up UPDATE: it is the last column, after the bodies, and
+/// changing a record's size afterwards makes SQLite rewrite the whole record
+/// and its overflow pages a second time. `None` is "no opinion" and keeps
+/// what is stored, the recipients' rule.
+fn upsert_message_conn(
+    conn: &Connection,
+    msg: &NewMessage,
+    date_offset_minutes: Option<i32>,
+) -> Result<i64> {
     conn.execute(
         "INSERT INTO messages(account_id, gmail_msg_id, thread_id, from_addr, from_name,
              subject, received_at, snippet, body, body_html, is_sent, to_addrs,
              cc_addrs, bcc_addrs,
-             list_unsubscribe, list_unsub_one_click, auth_pass, is_spam)
+             list_unsubscribe, list_unsub_one_click, auth_pass, is_spam,
+             date_offset_minutes)
          VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,
              CASE WHEN ?11 = 1 THEN ?14 ELSE NULL END,
-             ?15,?16,?17,?18)
+             ?15,?16,?17,?18,?19)
          ON CONFLICT(account_id, gmail_msg_id) DO UPDATE SET
              thread_id=excluded.thread_id, from_addr=excluded.from_addr,
              from_name=excluded.from_name, subject=excluded.subject,
@@ -102,7 +113,9 @@ fn upsert_message_conn(conn: &Connection, msg: &NewMessage) -> Result<i64> {
              list_unsubscribe=excluded.list_unsubscribe,
              list_unsub_one_click=excluded.list_unsub_one_click,
              auth_pass=excluded.auth_pass,
-             is_spam=MIN(messages.is_spam, excluded.is_spam)",
+             is_spam=MIN(messages.is_spam, excluded.is_spam),
+             date_offset_minutes=COALESCE(excluded.date_offset_minutes,
+                                          messages.date_offset_minutes)",
         params![
             msg.account_id,
             msg.gmail_msg_id,
@@ -122,6 +135,7 @@ fn upsert_message_conn(conn: &Connection, msg: &NewMessage) -> Result<i64> {
             msg.list_unsub_one_click as i64,
             msg.auth_pass.map(|p| p as i64),
             msg.is_spam as i64,
+            date_offset_minutes,
         ],
     )?;
     let id: i64 = conn.query_row(
@@ -434,7 +448,7 @@ pub(super) fn external_contributor_allowed_conn(
 impl SqliteStore {
     pub(super) fn upsert_message(&self, msg: &NewMessage) -> Result<i64> {
         let conn = self.lock()?;
-        upsert_message_conn(&conn, msg)
+        upsert_message_conn(&conn, msg, None)
     }
 
     /// Clear provider spam after the caller restores the message in Gmail.
@@ -811,7 +825,7 @@ impl SqliteStore {
         }
 
         // 1. Upsert the message row (+ FTS).
-        let id = upsert_message_conn(&tx, &triaged.message)?;
+        let id = upsert_message_conn(&tx, &triaged.message, triaged.date_offset_minutes)?;
 
         // 1a. HEAL: the vector was computed from the text the row had, which
         //     was the subject alone; drop it so the vector backfill re-embeds
@@ -847,16 +861,16 @@ impl SqliteStore {
             )?;
         }
 
-        // 1b''. TIMEZONE OBSERVATIONS: the Date header's offset onto the row,
-        //       the invitation's organizer and zone beside it, and the zone of
-        //       whoever they concern recomputed, when there is anything to
-        //       learn. Under its own savepoint, so a failure costs the zone and
-        //       not the message (see `zones::guarded` for the one exception).
+        // 1b''. TIMEZONE OBSERVATIONS: the Date header's offset is already
+        //       on the row (step 1); the invitation's organizer and zone go
+        //       beside it, and the zone of whoever they concern is recomputed,
+        //       when there is anything to learn. Under its own savepoint, so a
+        //       failure costs the zone and not the message (see
+        //       `zones::guarded` for the one exception).
         super::zones::observe_guarded(
             &tx,
             triaged.message.account_id,
             id,
-            triaged.date_offset_minutes,
             triaged.invite_zone.as_ref(),
         )?;
 

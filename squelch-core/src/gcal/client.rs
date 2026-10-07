@@ -150,6 +150,11 @@ pub enum CallError {
     Gone,
     /// 404: no such calendar (or no access to it any more).
     NotFound,
+    /// The request went out and no usable answer came back: the connection
+    /// was lost or timed out after sending, or a 2xx body could not be read.
+    /// Google may have done what was asked. A write that ends here is NOT a
+    /// refusal, and is never retried.
+    Uncertain,
     Kind(CalendarErrorKind),
 }
 
@@ -159,7 +164,7 @@ impl CallError {
     pub fn kind(self) -> CalendarErrorKind {
         match self {
             Self::Kind(kind) => kind,
-            Self::Gone | Self::NotFound => CalendarErrorKind::Unavailable,
+            Self::Gone | Self::NotFound | Self::Uncertain => CalendarErrorKind::Unavailable,
         }
     }
 }
@@ -169,6 +174,7 @@ impl std::fmt::Display for CallError {
         match self {
             Self::Gone => f.write_str("gone"),
             Self::NotFound => f.write_str("not_found"),
+            Self::Uncertain => f.write_str("uncertain"),
             Self::Kind(kind) => f.write_str(kind.as_str()),
         }
     }
@@ -226,7 +232,14 @@ impl CalendarApi {
         })
     }
 
+    /// The base plus `segments`, each one percent-encoded path segment. An
+    /// empty, `.` or `..` segment is refused: the `url` crate drops the first
+    /// two and pops on the third instead of encoding them, so an event id
+    /// `..` would turn a write on one event into a call on the collection.
     fn url(&self, segments: &[&str]) -> Result<url::Url, CallError> {
+        if segments.iter().any(|s| matches!(*s, "" | "." | "..")) {
+            return Err(CallError::NotFound);
+        }
         let mut url = url::Url::parse(&self.base)
             .map_err(|_| CallError::Kind(CalendarErrorKind::Unavailable))?;
         url.path_segments_mut()
@@ -413,7 +426,11 @@ impl CalendarApi {
 
     /// One request. A 2xx answers its JSON object, or `Null` for an empty
     /// body (a delete). Never retried: a write that timed out may have
-    /// happened, and sending it again could make it twice.
+    /// happened, and sending it again could make it twice. A failure before
+    /// the request could have reached Google (no connection) is
+    /// `Unavailable`; one after (a timeout or a lost connection once
+    /// connected, a 2xx whose body does not read) is [`CallError::Uncertain`].
+    /// A read treats both alike ([`CallError::kind`]).
     async fn call(
         &self,
         method: reqwest::Method,
@@ -426,18 +443,25 @@ impl CalendarApi {
         if let Some(body) = body {
             request = request.json(body);
         }
-        let resp = request.send().await.map_err(|_| unavailable)?;
+        let resp = request.send().await.map_err(|e| {
+            if e.is_connect() {
+                unavailable
+            } else {
+                CallError::Uncertain
+            }
+        })?;
         let status = resp.status().as_u16();
         if (200..300).contains(&status) {
-            let bytes = read_capped(resp, BODY_CAP).await.ok_or(unavailable)?;
+            let uncertain = CallError::Uncertain;
+            let bytes = read_capped(resp, BODY_CAP).await.ok_or(uncertain)?;
             if bytes.iter().all(u8::is_ascii_whitespace) {
                 return Ok(Value::Null);
             }
-            let body: Value = serde_json::from_slice(&bytes).map_err(|_| unavailable)?;
+            let body: Value = serde_json::from_slice(&bytes).map_err(|_| uncertain)?;
             return if body.is_object() {
                 Ok(body)
             } else {
-                Err(unavailable)
+                Err(uncertain)
             };
         }
         Err(match status {
@@ -541,6 +565,25 @@ mod tests {
         );
         let api = CalendarApi::new("http://127.0.0.1:9").unwrap();
         assert_eq!(api.url(&["users", "me"]).unwrap().path(), "/users/me");
+        // A dot segment, or none, is refused rather than collapsed: `..` would
+        // otherwise make `calendars/primary/events/..` the events collection.
+        for bad in ["..", ".", ""] {
+            assert_eq!(
+                api.url(&["calendars", "primary", "events", bad]),
+                Err(CallError::NotFound),
+                "{bad:?}"
+            );
+            assert_eq!(
+                api.url(&["calendars", bad, "events"]),
+                Err(CallError::NotFound)
+            );
+        }
+        assert_eq!(
+            api.url(&["calendars", "primary", "events", "..."])
+                .unwrap()
+                .path(),
+            "/calendars/primary/events/..."
+        );
     }
 
     /// THE NOTIFY DEFAULT: a write that was told nothing tells nobody, and

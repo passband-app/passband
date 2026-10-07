@@ -10254,8 +10254,9 @@ async fn person_card_carries_the_inferred_timezone_and_put_overrides_it() {
     // utc_offset_minutes}`, ABSENT (like the card's other optional parts) when
     // nothing is known. PUT /client/person/timezone {addr, zone} sets the
     // user's override, `zone: null` clears it, and both answer
-    // {"timezone": ...|null}: what the card now shows.
-    let Harness { app, .. } = harness(|store, acct| {
+    // {"timezone": ...|null}: what the card now shows. Both are part of the
+    // `calendar` hidden feature (the flag-off half is the next test).
+    let Harness { app, .. } = common::calendar_harness(|store, acct| {
         for (i, gmail) in ["g1", "g2", "g3"].into_iter().enumerate() {
             ingest_dated(
                 store,
@@ -10403,6 +10404,67 @@ async fn person_card_carries_the_inferred_timezone_and_put_overrides_it() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// THE TIMEZONE IS BEHIND THE `calendar` FLAG. Off, the card carries no
+/// `timezone` key and the override route is 404 (as on main: no such route),
+/// while the inference behind them keeps running at ingest, so turning the
+/// flag on shows a zone at once.
+#[tokio::test]
+async fn the_person_timezone_is_served_and_set_only_with_the_calendar_feature() {
+    let seed = |store: &SqliteStore, acct| {
+        for (i, gmail) in ["g1", "g2", "g3"].into_iter().enumerate() {
+            ingest_dated(
+                store,
+                acct,
+                gmail,
+                "Priya <priya@example.in>",
+                i as i64 + 1,
+                "+0530",
+            );
+        }
+    };
+    let (state, store, acct) = common::state_with(seed);
+    let features = squelch_core::features::Features::none();
+    let app = squelch_api::router(state.with_features(features.clone()));
+    let card = |app: axum::Router| async move {
+        let resp = app
+            .oneshot(authed("GET", "/client/person?addr=priya%40example.in"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        body_json(resp).await
+    };
+    let off = card(app.clone()).await;
+    assert!(
+        !off.as_object().unwrap().contains_key("timezone"),
+        "flag off: no timezone key: {off}"
+    );
+    let put = || {
+        authed_json(
+            "PUT",
+            "/client/person/timezone",
+            serde_json::json!({"addr": "priya@example.in", "zone": "America/Chicago"}),
+        )
+    };
+    let resp = app.clone().oneshot(put()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND, "flag off: no route");
+    // Inference ran regardless, and nothing was overridden.
+    let zone = store
+        .person_record(acct, "priya@example.in")
+        .unwrap()
+        .timezone;
+    assert_eq!(
+        zone.as_ref().map(|z| (z.zone.as_str(), z.source)),
+        Some(("Asia/Kolkata", squelch_core::timezone::ZoneSource::Offsets)),
+        "{zone:?}"
+    );
+    // On, the same daemon serves and sets it.
+    features.replace_granted([squelch_core::features::CALENDAR]);
+    assert_eq!(card(app.clone()).await["timezone"]["zone"], "Asia/Kolkata");
+    let resp = app.clone().oneshot(put()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(card(app).await["timezone"]["source"], "user");
 }
 
 // --- search: diagnostics, legs and the as-you-type prefix -------------------

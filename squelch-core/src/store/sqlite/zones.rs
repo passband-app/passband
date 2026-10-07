@@ -249,23 +249,18 @@ fn refresh_for_message(
 }
 
 /// Record one ingested message's observations and recompute whom they
-/// concern, in the ingest transaction. The offset is written with the
-/// recipients' rule (`None` is "no opinion" and keeps what is stored); the
-/// invitation row is REPLACED, so a re-ingest leaves exactly what this
-/// sighting says (and a re-ingest that no longer authenticates removes it).
+/// concern, in the ingest transaction. The Date header's offset is already on
+/// the row: the message upsert writes it (with the recipients' rule, `None`
+/// keeping what is stored), so the row is written once. The invitation row
+/// is REPLACED, so a re-ingest leaves exactly what this sighting says (and a
+/// re-ingest that no longer authenticates removes it).
 fn observe(
     conn: &Connection,
     account_id: AccountId,
     message_id: i64,
-    date_offset_minutes: Option<i32>,
     invite: Option<&InviteZone>,
     now: DateTime<Utc>,
 ) -> Result<()> {
-    conn.execute(
-        "UPDATE messages SET date_offset_minutes = COALESCE(?3, date_offset_minutes)
-         WHERE account_id = ?1 AND id = ?2",
-        params![account_id, message_id, date_offset_minutes],
-    )?;
     conn.execute(
         "DELETE FROM sender_zone_invites WHERE account_id = ?1 AND message_id = ?2",
         params![account_id, message_id],
@@ -364,18 +359,10 @@ pub(super) fn observe_guarded(
     conn: &Connection,
     account_id: AccountId,
     message_id: i64,
-    date_offset_minutes: Option<i32>,
     invite: Option<&InviteZone>,
 ) -> Result<()> {
     guarded(conn, account_id, message_id, || {
-        observe(
-            conn,
-            account_id,
-            message_id,
-            date_offset_minutes,
-            invite,
-            Utc::now(),
-        )
+        observe(conn, account_id, message_id, invite, Utc::now())
     })
 }
 

@@ -26,7 +26,10 @@
 //! - an existing event's list only when it is `guest_editable`
 //!   ([`SyncedEvent::guest_editable`]: editable, organized by the user, and
 //!   NOT truncated);
-//! - at most 50 plain addresses, no duplicates, never the owner.
+//! - at most 50 plain addresses, no duplicates, never the owner;
+//! - `notify: true` on an edit or a delete (an update or a cancellation
+//!   mailed under the calendar's name) only on a calendar that may invite,
+//!   the same rule ([`refuse_notify_unless_own`]).
 //!
 //! A guest edit sends Google the FULL attendee list, because `events.patch`
 //! replaces the array. It is built from Google's own list read in the same
@@ -43,10 +46,30 @@
 //! ` guests=<count> notified=<true|false>`: how many guests the event has
 //! after the write (before it, for a delete or a refusal; `<count>+` when
 //! Google holds more than are stored) and whether Google was asked to mail
-//! them. Never a title, a place, a description or an
-//! ADDRESS. The `calendar:` namespace is the credential rows' trick
-//! (`token:<id>`): the audit listing joins a numeric target to a message, and
-//! a calendar id can start with digits.
+//! them. Never a title, a place, a description or a GUEST'S address. The
+//! target does carry the calendar id, and a calendar id can be an address:
+//! the primary calendar is stored as `primary`, but a personal calendar
+//! someone shared with the user is named by its owner's address
+//! (`calendar:colleague@example.com/<event>`). Audit rows stay on the human
+//! door, as SECURITY.md section 9 says. The `calendar:` namespace is the
+//! credential rows' trick (`token:<id>`): the audit listing joins a numeric
+//! target to a message, and a calendar id can start with digits.
+//!
+//! THE AUDIT ROW SURVIVES A DISCONNECT. Each handler's work (the checks, the
+//! Google call and the audit write) runs in a task of its own that the
+//! handler awaits ([`detached`]). If the app goes away mid-request the
+//! handler's future is dropped, but the task is not: Google's answer is
+//! still stored and the row still written, so a write that may have mailed
+//! guests is never left unaudited.
+//!
+//! WHEN GOOGLE'S ANSWER IS LOST. A refusal from Google (any HTTP error) is a
+//! 502, [`GOOGLE_REFUSED`]: nothing changed. A write that went out and got no
+//! usable answer (a timeout or a lost connection after sending, a 2xx body
+//! that does not read: [`CallError::Uncertain`]) is a 504,
+//! [`GOOGLE_UNCERTAIN`], and kicks a sync: Google may have made the change,
+//! so the client refreshes before offering to try again, and a "save and
+//! tell guests" is not sent twice on a guess. A delete Google answers 404 or
+//! 410 found the event already gone, and removes the local row (204).
 //!
 //! Error bodies are fixed strings that never echo the request, and logs carry
 //! the action and an error kind only (a calendar id is usually an address).
@@ -85,6 +108,9 @@ pub(crate) const UNKNOWN_CALENDAR: &str = "calendar_id must name a calendar Pass
 pub(crate) const READ_ONLY_CALENDAR: &str = "that calendar is read-only";
 pub(crate) const NOT_EDITABLE: &str = "this event cannot be changed from Passband";
 pub(crate) const GOOGLE_REFUSED: &str = "Google Calendar did not accept the change";
+pub(crate) const GOOGLE_UNCERTAIN: &str =
+    "Google Calendar may have made this change; refresh before trying again";
+pub(crate) const CANNOT_NOTIFY: &str = "guests can only be told about changes on your own calendar";
 pub(crate) const UNREADABLE_ANSWER: &str =
     "Google Calendar saved the change, but its answer could not be read";
 pub(crate) const CANNOT_INVITE: &str = "guests can only be added on your own calendar";
@@ -109,9 +135,27 @@ impl Refusal {
     fn not_granted() -> Self {
         Self::new("rejected:not_granted", StatusCode::FORBIDDEN, NOT_GRANTED)
     }
+    /// A READ before the write failed (the guest list's fresh read): nothing
+    /// was asked to change, so every failure is a plain refusal.
     fn google(action: &str, error: CallError) -> Self {
         eprintln!("squelch-api: {action}: Google refused the write ({error})");
         Self::new("failed:google", StatusCode::BAD_GATEWAY, GOOGLE_REFUSED)
+    }
+    /// The WRITE itself failed. An answer Google gave is a refusal (502); no
+    /// usable answer after sending ([`CallError::Uncertain`]) means the change
+    /// may have happened: 504 with its own message, and a sync is kicked so
+    /// the client's refresh shows what Google holds.
+    fn written(state: &ApiState, action: &str, error: CallError) -> Self {
+        if error != CallError::Uncertain {
+            return Self::google(action, error);
+        }
+        eprintln!("squelch-api: {action}: Google's answer to the write was lost ({error})");
+        state.calendar_refresh.kick_now(state.account_id);
+        Self::new(
+            "failed:uncertain",
+            StatusCode::GATEWAY_TIMEOUT,
+            GOOGLE_UNCERTAIN,
+        )
     }
     fn internal(detail: &'static str) -> Self {
         Self::new(detail, StatusCode::INTERNAL_SERVER_ERROR, "internal error")
@@ -206,7 +250,7 @@ async fn google(
 }
 
 fn json_body(body: &Bytes) -> Result<Value, Refusal> {
-    serde_json::from_slice(body).map_err(|_| Refusal::body(write::NOT_AN_OBJECT))
+    write::body(body).map_err(Refusal::body)
 }
 
 /// The calendar a write names, as stored.
@@ -263,6 +307,36 @@ fn may_carry_guests(
         ));
     }
     write::check_not_owner(guests, &[account_email, &calendar.calendar_id]).map_err(Refusal::body)
+}
+
+/// THE NOTIFY GUARD: `notify: true` on an edit or a delete makes Google mail
+/// every guest an update or a cancellation under the calendar's name, which
+/// is what an invitation is. So, like guests ([`may_carry_guests`]), it is
+/// refused on a calendar that may not invite: one the user only writes to.
+fn refuse_notify_unless_own(calendar: &StoredCalendar, notify: Notify) -> Result<(), Refusal> {
+    if notify.tells_guests() && !calendar.can_invite() {
+        return Err(Refusal::new(
+            "rejected:cannot_notify",
+            StatusCode::BAD_REQUEST,
+            CANNOT_NOTIFY,
+        ));
+    }
+    Ok(())
+}
+
+/// Run a handler's work in a task of its own and wait for it. Dropping the
+/// request (the client went away) drops this future but NOT the task, so a
+/// Google call already sent still has its answer stored and its audit row
+/// written. A task that panicked is a 500, as it would have been inline.
+async fn detached<T: Send + 'static>(
+    work: impl std::future::Future<Output = Result<T, ApiError>> + Send + 'static,
+) -> Result<T, ApiError> {
+    tokio::spawn(work).await.unwrap_or_else(|_| {
+        Err(ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal error",
+        ))
+    })
 }
 
 fn guests_read_only() -> Refusal {
@@ -329,6 +403,11 @@ pub async fn create_event(
     State(state): State<ApiState>,
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
+    let view = detached(create(state, body)).await?;
+    Ok((StatusCode::CREATED, no_store(), Json(view)))
+}
+
+async fn create(state: ApiState, body: Bytes) -> Result<Value, ApiError> {
     let mut audit_target = None;
     let mut note = None;
     let outcome = async {
@@ -364,14 +443,13 @@ pub async fn create_event(
         let answer = api
             .insert_event(&token, &cal.calendar_id, &google_body, draft.notify)
             .await
-            .map_err(|e| Refusal::google(CREATE, e))?;
+            .map_err(|e| Refusal::written(&state, CREATE, e))?;
         let (row, view) = keep_answer(&state, &cal, &answer, creds.account_email()).await?;
         audit_target = Some(target(&cal.calendar_id, Some(&row.event_id)));
         Ok(view)
     }
     .await;
-    let view = finish(&state, CREATE, audit_target, note, outcome).await?;
-    Ok((StatusCode::CREATED, no_store(), Json(view)))
+    finish(&state, CREATE, audit_target, note, outcome).await
 }
 
 // --- PATCH /client/calendar/events/{calendar_id}/{id} ------------------------
@@ -387,6 +465,16 @@ pub async fn edit_event(
     Path((calendar_id, event_id)): Path<(String, String)>,
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
+    let view = detached(edit(state, calendar_id, event_id, body)).await?;
+    Ok((no_store(), Json(view)))
+}
+
+async fn edit(
+    state: ApiState,
+    calendar_id: String,
+    event_id: String,
+    body: Bytes,
+) -> Result<Value, ApiError> {
     let mut audit_target = None;
     let mut note = None;
     let outcome = async {
@@ -410,6 +498,7 @@ pub async fn edit_event(
                 return Err(guests_read_only());
             }
         }
+        refuse_notify_unless_own(&cal, edit.notify)?;
         let times = edit.times(&stored.row).map_err(Refusal::body)?;
         let (token, api) = google(&state, &creds, EDIT).await?;
         let attendees = match &edit.guests {
@@ -433,14 +522,13 @@ pub async fn edit_event(
         let answer = api
             .patch_event(&token, &calendar_id, &event_id, &patch, edit.notify)
             .await
-            .map_err(|e| Refusal::google(EDIT, e))?;
+            .map_err(|e| Refusal::written(&state, EDIT, e))?;
         let (row, view) = keep_answer(&state, &cal, &answer, creds.account_email()).await?;
         note = Some(GuestNote::of(&row, edit.notify));
         Ok(view)
     }
     .await;
-    let view = finish(&state, EDIT, audit_target, note, outcome).await?;
-    Ok((no_store(), Json(view)))
+    finish(&state, EDIT, audit_target, note, outcome).await
 }
 
 // --- DELETE /client/calendar/events/{calendar_id}/{id} -----------------------
@@ -460,20 +548,30 @@ fn delete_notify(query: &[(String, String)]) -> Result<Notify, Refusal> {
 }
 
 /// `DELETE /client/calendar/events/{calendar_id}/{id}?notify=true|false`:
-/// 204. An event Google says is already deleted (410) is deleted here too.
-/// With `notify=true` Google mails the event's guests a cancellation;
-/// absent or `false`, nobody is told.
+/// 204. An event Google says is already deleted (410) or does not know (404)
+/// is deleted here too. With `notify=true` Google mails the event's guests a
+/// cancellation; absent or `false`, nobody is told.
 pub async fn delete_event(
     State(state): State<ApiState>,
     Path((calendar_id, event_id)): Path<(String, String)>,
     Query(query): Query<Vec<(String, String)>>,
 ) -> Result<impl IntoResponse, ApiError> {
+    detached(delete(state, calendar_id, event_id, query)).await?;
+    Ok((StatusCode::NO_CONTENT, no_store()))
+}
+
+async fn delete(
+    state: ApiState,
+    calendar_id: String,
+    event_id: String,
+    query: Vec<(String, String)>,
+) -> Result<(), ApiError> {
     let mut audit_target = None;
     let mut note = None;
     let outcome = async {
         let creds = granted(&state).await?;
         let notify = delete_notify(&query)?;
-        let (_, stored) = stored_event(&state, &calendar_id, &event_id).await?;
+        let (cal, stored) = stored_event(&state, &calendar_id, &event_id).await?;
         audit_target = Some(target(&calendar_id, Some(&event_id)));
         note = Some(GuestNote::of(&stored.row, notify));
         if !stored.editable(creds.account_email()) {
@@ -483,13 +581,15 @@ pub async fn delete_event(
                 NOT_EDITABLE,
             ));
         }
+        refuse_notify_unless_own(&cal, notify)?;
         let (token, api) = google(&state, &creds, DELETE).await?;
         match api
             .delete_event(&token, &calendar_id, &event_id, notify)
             .await
         {
-            Ok(()) | Err(CallError::Gone) => {}
-            Err(e) => return Err(Refusal::google(DELETE, e)),
+            // Gone (410) or unknown (404) at Google: already deleted there.
+            Ok(()) | Err(CallError::Gone | CallError::NotFound) => {}
+            Err(e) => return Err(Refusal::written(&state, DELETE, e)),
         }
         let (c, e) = (calendar_id.clone(), event_id.clone());
         let removed = store_call(&state, move |store, account| {
@@ -501,6 +601,5 @@ pub async fn delete_event(
         Ok(())
     }
     .await;
-    finish(&state, DELETE, audit_target, note, outcome).await?;
-    Ok((StatusCode::NO_CONTENT, no_store()))
+    finish(&state, DELETE, audit_target, note, outcome).await
 }

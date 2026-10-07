@@ -1824,7 +1824,9 @@ CREATE TABLE IF NOT EXISTS calendar_calendars (
 -- one row at a time, after Google accepts the user's own create or edit.
 -- `guests_truncated` says Google holds more attendees than
 -- `calendar_event_guests` does for this event (Google's `attendeesOmitted`,
--- set past 100): its guest list is then read-only.
+-- set past 100): its guest list is then read-only. `organizer_unreadable`
+-- says Google named an organizer that is not this calendar and whose address
+-- could not be read: somebody else's event, never the user's own to edit.
 CREATE TABLE IF NOT EXISTS calendar_events (
     account_id      INTEGER NOT NULL,
     calendar_id     TEXT NOT NULL,
@@ -1847,6 +1849,7 @@ CREATE TABLE IF NOT EXISTS calendar_events (
     organizer_self  INTEGER NOT NULL DEFAULT 0,
     description     TEXT,
     guests_truncated INTEGER NOT NULL DEFAULT 0,
+    organizer_unreadable INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(account_id, calendar_id, event_id)
 );
 CREATE INDEX IF NOT EXISTS idx_calendar_events_start ON calendar_events(account_id, start_sort);

@@ -245,6 +245,43 @@ pub fn notify(value: Option<&Value>) -> Result<Notify, Invalid> {
     }
 }
 
+/// A request body as JSON, refusing one that names `notify` more than once
+/// at its top level. `serde_json` keeps the last of duplicate keys, so
+/// `{"notify": false, "notify": true}` would quietly read as a yes; like a
+/// delete's query ([`notify_query`]'s caller), two of them is refused rather
+/// than resolved. Not JSON at all is [`NOT_AN_OBJECT`].
+pub fn body(raw: &[u8]) -> Result<Value, Invalid> {
+    let value: Value = serde_json::from_slice(raw).map_err(|_| NOT_AN_OBJECT)?;
+    if value.is_object() && notify_keys(raw).is_none_or(|count| count > 1) {
+        return Err(BAD_NOTIFY);
+    }
+    Ok(value)
+}
+
+/// How many top-level keys of a JSON object are `notify` (after unescaping,
+/// so `"notif\u0079"` counts). None when it cannot be read as an object.
+fn notify_keys(raw: &[u8]) -> Option<usize> {
+    use serde::de::{Deserializer, IgnoredAny, MapAccess, Visitor};
+    struct Count;
+    impl<'de> Visitor<'de> for Count {
+        type Value = usize;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a JSON object")
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<usize, A::Error> {
+            let mut count = 0;
+            while let Some(key) = map.next_key::<String>()? {
+                map.next_value::<IgnoredAny>()?;
+                count += usize::from(key == "notify");
+            }
+            Ok(count)
+        }
+    }
+    serde_json::Deserializer::from_slice(raw)
+        .deserialize_map(Count)
+        .ok()
+}
+
 /// [`notify`] for a delete, whose `notify` is a query parameter: exactly
 /// `true` tells the guests, absent or exactly `false` tells nobody.
 pub fn notify_query(value: Option<&str>) -> Result<Notify, Invalid> {
@@ -524,6 +561,7 @@ mod tests {
             end: end.map(at),
             start_timezone: None,
             organizer_email: None,
+            organizer_unreadable: false,
             organizer_self: true,
             self_response: None,
             transparent: false,
@@ -879,6 +917,28 @@ mod tests {
         assert_eq!(edit(json!({"title": "x", "notify": 1})), Err(BAD_NOTIFY));
         // Telling the guests is not itself a change.
         assert_eq!(edit(json!({"notify": true})), Err(NOTHING));
+    }
+
+    /// A body naming `notify` twice is refused, whichever order, escaped or
+    /// not, as the delete's query refuses two; once, or nested, is read.
+    #[test]
+    fn a_body_with_two_notify_keys_is_refused() {
+        for raw in [
+            r#"{"title": "x", "notify": false, "notify": true}"#,
+            r#"{"notify": true, "title": "x", "notify": false}"#,
+            r#"{"notify": true, "notif\u0079": true}"#,
+        ] {
+            assert_eq!(body(raw.as_bytes()), Err(BAD_NOTIFY), "{raw}");
+        }
+        for raw in [
+            r#"{"title": "x", "notify": true}"#,
+            r#"{"title": "x"}"#,
+            r#"{"title": "x", "extra": {"notify": 1, "x": {"notify": 2}}}"#,
+            r#"[1, 2]"#,
+        ] {
+            assert!(body(raw.as_bytes()).is_ok(), "{raw}");
+        }
+        assert_eq!(body(b"not json"), Err(NOT_AN_OBJECT));
     }
 
     #[test]

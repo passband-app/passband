@@ -26,7 +26,7 @@
         let ask: CalendarDeleteAsk
 
         var body: some View {
-            let wording = EventGuests.deleteWording(ask.event)
+            let wording = EventGuests.deleteWording(ask.event, feed: store.calendarFeed)
             OverlayScrim(onDismiss: { store.cancelDeleteEvent() }) {
                 ModalCard(width: wording.tell == nil ? 380 : 460) {
                     DeleteQuestion(wording: wording)

@@ -2214,6 +2214,7 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
                 "organizer_self",
                 "description",
                 "guests_truncated",
+                "organizer_unreadable",
             ]
         );
         assert_eq!(
@@ -2253,7 +2254,7 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
     {
         let upgraded = SqliteStore::open(&path).unwrap();
         let conn = upgraded.lock().unwrap();
-        assert_eq!(columns(&conn, "calendar_events").len(), 21);
+        assert_eq!(columns(&conn, "calendar_events").len(), 22);
         assert_eq!(columns(&conn, "calendar_event_guests").len(), 9);
         assert!(index_exists(&conn));
         let mail: i64 = conn
@@ -2290,6 +2291,7 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
              ALTER TABLE calendar_events DROP COLUMN organizer_self;
              ALTER TABLE calendar_events DROP COLUMN description;
              ALTER TABLE calendar_events DROP COLUMN guests_truncated;
+             ALTER TABLE calendar_events DROP COLUMN organizer_unreadable;
              UPDATE calendar_calendars SET sync_token='minted-with-one-attendee',
                     full_synced_at='2026-10-01T00:00:00+00:00', synced_at='2026-10-01T00:00:00+00:00';",
         )
@@ -2299,7 +2301,7 @@ fn init_creates_the_calendar_tables_on_fresh_and_existing_dbs() {
     {
         let conn = reopened.lock().unwrap();
         assert_eq!(columns(&conn, "calendar_calendars").len(), 15);
-        assert_eq!(columns(&conn, "calendar_events").len(), 21);
+        assert_eq!(columns(&conn, "calendar_events").len(), 22);
         // A store from before guests was synced one attendee at a time: its
         // tokens are forgotten, so the next pass reads every calendar in full
         // with the new parameters.
@@ -2367,6 +2369,7 @@ fn an_events_guests_are_stored_with_it_and_go_with_it() {
         end: None,
         start_timezone: None,
         organizer_email: None,
+        organizer_unreadable: false,
         organizer_self: true,
         self_response: None,
         transparent: false,

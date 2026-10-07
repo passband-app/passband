@@ -188,21 +188,24 @@ struct KeyDispatchTests {
 
     // MARK: - the calendar's key
 
-    /// ⇧C, as RootView binds it: EXACT CASE, DECLINING, in the GLOBAL set. The
-    /// exact pass reaches global before the fold reaches the surface, so while
-    /// the page is offered ⇧C opens it over a surface's `c` (compose, which
-    /// ⇧C used to reach through the fold). With the gate closed it is asked,
-    /// declines, and the fold hands ⇧C to `c` exactly as before.
+    /// ⇧C, as RootView binds it (`PageKeys.calendar`, the same function):
+    /// EXACT CASE, DECLINING, in the GLOBAL set. The exact pass reaches global
+    /// before the fold reaches the surface, so while the page is offered ⇧C
+    /// opens it over a surface's `c` (compose, which ⇧C used to reach through
+    /// the fold). With the gate closed it is asked, declines, and the fold
+    /// hands ⇧C to `c` exactly as before.
     static func theCalendarKeyTakesShiftCOnlyWhenOffered() {
         let registry = KeyRegistry.shared
         var offered = true
         let global = registry.register(
             .global,
             box: KeyRegistry.BindingsBox([
-                KeyBinding(declining: "C", "calendar", exactCase: true) {
-                    ran.append("calendar")
-                    return offered
-                }
+                PageKeys.calendar(
+                    offered: {
+                        ran.append("calendar")
+                        return offered
+                    },
+                    go: {})
             ]))
         stage([[verb("c", "compose")]]) {
             equal(press("C"), ["calendar"], "shift+c opens the calendar over a surface's c")
@@ -212,11 +215,19 @@ struct KeyDispatchTests {
                   "gate closed: asked, declines, and shift+c folds to c as it did before")
             equal(press("C", editing: true), [], "a capital C typed into a field is just typed")
         }
+        // EXACT CASE is what keeps a bare `c` from reaching it through the
+        // fold on a surface that binds no `c` of its own.
+        offered = true
+        stage([[]]) {
+            equal(press("c"), [], "a plain c never opens the calendar, even with nothing else bound to c")
+            equal(press("C"), ["calendar"], "while ⇧C does")
+        }
         registry.unregister(global)
     }
 
-    /// THE DIGITS, as RootView binds them: one DECLINING binding per digit in
-    /// the GLOBAL set, each asking for the page order when it is pressed. So
+    /// THE DIGITS, as RootView binds them (`PageKeys.digits`, the same
+    /// function): one DECLINING binding per digit in the GLOBAL set, each
+    /// asking for the page order when it is pressed. So
     /// the gate opening renumbers without anything re-registering, and the
     /// extra digit (6) passes on to whatever else binds it while the calendar
     /// is not offered.
@@ -237,13 +248,7 @@ struct KeyDispatchTests {
         let digits = registry.register(
             .global,
             box: KeyRegistry.BindingsBox(
-                (1...base.count + 1).map { n in
-                    KeyBinding(declining: "\(n)", "page \(n)") {
-                        guard pages().indices.contains(n - 1) else { return false }
-                        ran.append(pages()[n - 1])
-                        return true
-                    }
-                }))
+                PageKeys.digits(count: base.count + 1, pages: pages, go: { ran.append($0) })))
         stage([[]]) {
             equal(press("2"), ["emails"], "gate closed: 2 is emails, as it always was")
             equal(press("5"), ["groups"], "and 5 is groups")

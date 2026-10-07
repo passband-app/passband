@@ -259,7 +259,9 @@ row that fails to deserialize must not fail a pass:
 | `identity_refs` | `Vec<String>` | iCalendar UID, confirmation numbers, event URL |
 | `likelihood` | `Option<EventLikelihood { band, reason }>` | the triage prior; stored, not yet learned from |
 
-The prompt is `agent-triage-v6`. It tells the model that `duration_estimate`
+The prompt is `agent-triage-v7` (main's own `v6`, for its login-code rule,
+was bumped in parallel with this branch's event fields; the merged prompt
+carries both and is neither, so it is `v7`). It tells the model that `duration_estimate`
 and `likelihood` are the only fields that are not stated facts, and that
 `committed` takes the word of the merchant, venue, platform or organizer
 itself. Rollout is forward-only: the version is recorded on new decisions and
@@ -412,8 +414,8 @@ contributes nothing, no facts, no keys and no commitment, until it is
 decided again. The ghost is `committed` only when it has an owner and one of
 its eligible, in-scope records is committed or `agreed`; a ghost made from
 unauthenticated mail is `unknown` whatever its mail claims. A source that is
-sent, spam, restricted or sealed keeps its row and its keys and supplies no
-facts; one whose decision does not deserialize keeps its row and contributes
+sent, spam, restricted, awaiting its access review, or an auth decision keeps
+its row and its keys and supplies no facts; one whose decision does not deserialize keeps its row and contributes
 nothing. An eligible message's row whose decision no longer carries a record
 at that position goes. No rows left deletes the ghost; rows but no eligible
 record keeps its facts and keys, clears the supplier, and hides it.
@@ -430,10 +432,15 @@ ghosts by position: a decision that changed while the message was
 restricted would otherwise take over the old ghost, marks and all.
 
 **Listing.** A ghost is served only while its supplier is eligible now (not
-sent, not spam, not restricted, not sealed by `triage.sensitivity`, the
-predicate the other human-door listings use), judged in SQL, so a status no
-rebuild has
-seen yet cannot serve facts from it. At most 2000. A timed start compares as
+sent, not spam, and not sealed by the test the Auth page's `sealed_messages`
+uses: its access review `allowed`, so neither `restricted` nor still
+`pending`, and its stored decision naming no auth kind), judged in SQL, so a
+status no rebuild has seen yet cannot serve facts from it. The retired
+`triage.sensitivity` column is not read: the agent pipeline no longer writes
+it. A consequence: a message whose content snapshot changed (the not-spam
+action changes it, since the spam flag is part of it) hides its ghost until
+its queued re-review allows it again, and the ghost comes back with the
+user's mark. At most 2000. A timed start compares as
 an instant; a date-only start is listed from `from`'s date in `from`'s offset
 up to `to`'s date in `to`'s own offset, and sorts at midnight in the caller's
 offset.
@@ -562,6 +569,22 @@ Wave 4, from the founder using wave 3 on screen:
   chip in its calendar's colour that moves as the fields change. In Agenda
   mode the list takes the other half. A refused save keeps the pane and its
   contents and says why in one toast; delete asks once.
+- **Leaving the page keeps the draft.** Going to another page with something
+  typed in the pane PARKS the draft in the store and hides the pane; coming
+  back to the Calendar page restores it as it was. An untouched pane just
+  closes. Only the calendar gate closing or an account switch discards a
+  draft.
+- **When Google's answer is lost.** A save or delete answered 504 shows a
+  quiet toast ("Google may have made this change. Refreshing…"), keeps the
+  control locked, and reloads the feed up to 3 times, 2 seconds apart. The
+  pane closes only once the change is visible in the feed; otherwise it stays
+  open with its contents. Calendar writes wait 45 seconds on the client, longer
+  than the daemon's 30 seconds on Google, so the daemon's answer (504
+  included) always arrives first.
+- **Telling guests only where it is allowed.** On a calendar that may not
+  invite (`can_invite` false: one the user only writes to), the pane and the
+  delete question offer only the silent controls, with one line saying why;
+  the daemon refuses `notify: true` there anyway (§8, "Guests").
 - **One pane at a time.** The event pane and the composer use the same half.
   Opening the event pane closes an open composer the way Esc does (its mail is
   kept in drafts). Opening a composer closes an untouched event pane; an event
@@ -775,7 +798,10 @@ Rules:
   confidence. It is served on the person record behind the contact card
   (`GET /client/person`), where the user can see it and correct it
   (`PUT /client/person/timezone`; clearing the correction hands it back to
-  inference). It learns forward from the day it ships: the raw mail is not
+  inference), both only while the `calendar` flag is on (§11); inference
+  runs either way. The Date offset is written by the message upsert itself,
+  in the same INSERT as the row, so ingest writes each message once. It
+  learns forward from the day it ships: the raw mail is not
   kept, so filling in existing correspondents would take a Gmail request per
   message. Human door only.
 
@@ -978,7 +1004,8 @@ promoting a ghost to a real event is later work.
     `location` and `description` take `null` to clear. A `calendar_id` in the
     body must be the event's own: moving an event is not offered.
   - `DELETE /client/calendar/events/{calendar_id}/{id}` answers 204. An event
-    Google says is already deleted (410) is deleted locally too.
+    Google says is already deleted (410) or does not know (404) is deleted
+    locally too.
 - **Times.** RFC3339 with an offset for a timed event, `YYYY-MM-DD` for an
   all-day one, both of one precision, the end after the start. An all-day
   `end` is the INCLUSIVE last day, as the timeline serves it (equal to the
@@ -1000,10 +1027,16 @@ promoting a ghost to a real event is later work.
 - **The edit guard.** An event is `editable` when its calendar's role is
   `owner` or `writer` AND the event is the user's own: Google's
   `organizer.self` ("Whether the organizer corresponds to the calendar on
-  which this copy of the event appears"), no organizer, or an organizer
-  address equal to the mailbox's (case-insensitive). Another organizer's
-  invitation on the user's own calendar is served `editable: false` and
-  refused with 403. `writerWithoutPrivateAccess` is not offered: it cannot
+  which this copy of the event appears"), no organizer named at all, or an
+  organizer address equal to the mailbox's (case-insensitive). Another
+  organizer's invitation on the user's own calendar is served `editable:
+  false` and refused with 403. The guard fails closed: an organizer Google
+  names whose address does not read (absent, or not an address) is stored
+  as `organizer_unreadable` and is somebody else, and so is an event whose
+  stored guest list marks an organizer that is not this calendar
+  (`organizer` and not `self`), whatever the organizer field says. A store
+  from before the column forgets its sync tokens once, so the next pass
+  rereads every calendar in full and sets it. `writerWithoutPrivateAccess` is not offered: it cannot
   write the private events it sees with their details hidden.
 - **Sent as typed, stored laundered.** The one deliberate asymmetry: Google
   gets the user's own text whole (a meeting link keeps its passcode, so the
@@ -1012,14 +1045,25 @@ promoting a ghost to a real event is later work.
   every synced event (a link without its query, markup as text).
 - **Google first, then local.** Only Google's success changes a row, and what
   is stored is Google's answer (its id, link, organizer and normalized times),
-  not the request. A refusal, a timeout or a transport failure is a 502 with a
-  fixed message and leaves every row exactly as it was. A write is never
-  retried: one that timed out may have happened. After a write the sync is
-  kicked, so the next pass confirms it.
+  not the request. A refusal Google answered (any HTTP error, or a failure to
+  connect at all) is a 502, "Google Calendar did not accept the change", and
+  leaves every row exactly as it was. A write that went out and got NO usable
+  answer (a timeout or a lost connection after sending, a 2xx whose body does
+  not read) is different: Google may have made the change. It is a 504,
+  "Google Calendar may have made this change; refresh before trying again",
+  stores nothing, and kicks a sync, so the client reloads and shows what
+  Google holds before anything is offered again (above all a second "tell
+  guests"). A write is never retried. After every write the sync is kicked,
+  so the next pass confirms it.
+- **A disconnect does not lose the write.** Each write's checks, Google call,
+  local row and audit row run in a task of their own that the handler
+  awaits. If the app goes away mid-request the request is dropped but the
+  task is not: Google's answer is still stored and the attempt audited.
 - **Errors.** 400 for a bad body (end before start, mixed precision, a title
-  empty or over 200, a missing field, an unknown or read-only calendar), 403
-  when calendar is not granted or the event is not editable, 404 for an
-  unknown event, 502 when Google refuses. Error bodies are fixed strings and
+  empty or over 200, a missing field, an unknown or read-only calendar, two
+  `notify` keys), 403 when calendar is not granted or the event is not
+  editable, 404 for an unknown event, 502 when Google refuses, 504 when
+  Google's answer was lost (above). Error bodies are fixed strings and
   never echo the request.
 - **Audit.** One row per attempt in the audit log, in the mail actions' shape:
   action `calendar_event_create`, `calendar_event_edit` or
@@ -1027,7 +1071,10 @@ promoting a ghost to a real event is later work.
   `calendar:<calendar_id>/<event_id>`, detail `ok` or the reason
   (`rejected:body`, `rejected:calendar`, `rejected:read_only`,
   `rejected:not_granted`, `rejected:not_editable`, `failed:target`,
-  `failed:google`, `failed:answer`). Never a title, place or description.
+  `failed:google`, `failed:uncertain`, `failed:answer`). Never a title,
+  place, description or guest's address. The target does carry the
+  calendar id, which for a personal calendar someone shared with the user is
+  its owner's address.
 - **Colour and roles on the timeline.** Each event gains `color` (`#rrggbb`:
   the event's own `colorId` from Google's event palette, else its calendar's
   `backgroundColor`, else null), `editable` and `description`. The body gains
@@ -1074,8 +1121,8 @@ server only: no request of this wave has been sent to the real Google API.
 - **The one switch.** A write tells Google `sendUpdates=all` ONLY when the
   request carries the JSON value `notify: true` (`?notify=true` on a
   delete). Absent or `false` sends `none`. Anything else (`null`, `"true"`,
-  `1`, two `notify` parameters) is a 400, never read as yes and never
-  silently as no. `sendUpdates` is always named, and the client type
+  `1`, two `notify` query parameters, two `notify` keys in a body) is a
+  400, never read as yes and never silently as no. `sendUpdates` is always named, and the client type
   (`gcal/client.rs:Notify`) can only say `none` or `all`, defaulting to
   `none`; `externalOnly` is not offered. `notify` alone is not an edit
   ("nothing to change"): there is no "tell them again".
@@ -1098,7 +1145,11 @@ server only: no request of this wave has been sent to the real Google API.
   the primary calendar, or one whose `accessRole` is `owner`. A calendar the
   user merely writes to (`writer`) takes events and takes no guests: an
   invitation from it would go out under someone else's calendar on the
-  user's say-so. 400 on create and on edit.
+  user's say-so. 400 on create and on edit. For the same reason `notify:
+  true` on an EDIT or a DELETE there (an update or a cancellation mailed
+  under that calendar's name) is a 400, "guests can only be told about
+  changes on your own calendar" (`rejected:cannot_notify`), refused before
+  Google hears anything; silent edits and deletes there still work.
 - **Which event's guests may change** (`SyncedEvent::guest_editable`).
   `editable`, AND the list is not truncated, AND the user organizes it
   (`organizer.self`, or the organizer is the mailbox's address; an event
@@ -1140,8 +1191,9 @@ server only: no request of this wave has been sent to the real Google API.
   number of guests other than the user after the write (before it for a
   delete or a refusal; `<n>+` when the stored list is truncated) and whether
   Google was asked to mail them. On a failure too: a write that timed out
-  may have happened. Never an address. Two new reasons:
-  `rejected:cannot_invite`, `rejected:guests_read_only`.
+  may have happened, audited `failed:uncertain`. Never a guest's address.
+  New reasons: `rejected:cannot_invite`, `rejected:guests_read_only`,
+  `rejected:cannot_notify`.
 - **Not here.** No agent route, MCP tool or assistant tool. No RSVP to other
   people's invitations. No `externalOnly`. No optional guests, no guest
   permissions (`guestsCanModify` and the rest keep Google's defaults).
@@ -1273,21 +1325,31 @@ is `docs/FEATURES.md`. For this one:
   behind the page (`GET /client/timeline`, `PATCH /client/timeline/ghosts/{id}`,
   `POST /client/timeline/refresh`, `POST /client/calendar/connect`,
   `POST /client/calendar/events`, `PATCH` and `DELETE
-  /client/calendar/events/{calendar_id}/{id}`) answers the opaque 404
+  /client/calendar/events/{calendar_id}/{id}`, `PUT /client/person/timezone`)
+  answers the opaque 404
   (`{"error": "not found"}`) from a route layer (`calendar_routes` in
   `squelch-api/src/lib.rs`), after bearer auth and before the handler reads a
   body or calls Google. A refused write writes no audit row: a path that is
   not served is not an attempt at an action. `/client/stats` says `timeline:
   false` and carries no `calendar` object. The sync loop asks the flag at the
   top of every pass and, off, reads no credential and calls Google for
-  nothing; the first pass after it turns on syncs. Each answer is asked at
-  the moment of the decision, so a flip takes effect on the next request or
-  pass.
+  nothing; the first pass after it turns on syncs. It asks again before each
+  calendar of a pass, so a flag turned off mid-pass stops at the next
+  calendar (a page already in flight finishes). Each answer is asked at the
+  moment of the decision, so a flip takes effect on the next request, pass
+  or calendar.
+- **Off deletes nothing.** Calendars, events and guest lists already synced
+  stay in the store (other people's addresses among them), served by no
+  route while the flag is off, and brought up to date by the first pass once
+  it is on again. Purging them on off was considered and not done: a flag
+  flipped by mistake would cost a full resync of every calendar.
 - **What keeps running when it is off,** on purpose: ghost projection in the
-  triage commit, and correspondent timezone inference, with `/client/person`'s
-  timezone and `PUT /client/person/timezone` (person-card data) ungated. Both
-  are cheap and never leave the daemon, and keeping them means a mailbox
-  switched on sees its recent history at once instead of starting empty.
+  triage commit, and correspondent timezone inference at ingest. Both are
+  cheap and never leave the daemon, and keeping them means a mailbox switched
+  on sees its recent history at once instead of starting empty. What they
+  produce is NOT served while it is off: `GET /client/person` carries no
+  `timezone` key (as on main), and `PUT /client/person/timezone` is one of
+  the gated routes (404).
 - **The hosted calendar consent** (`/reconnect?calendar=1`) is refused for a
   tenant without the feature (its own row or the Everyone default), with
   "Calendar isn't available for this mailbox yet." It is refused at the
@@ -1299,9 +1361,17 @@ is `docs/FEATURES.md`. For this one:
   `passband/Sources/Passband/Lib/Agenda.swift`) is the daemon's `timeline` AND
   `store.hasFeature(.calendar)`. Developer mode no longer has anything to do
   with it. The rail tile, `⇧C`, number key 2 and the shift of the later pages,
-  the Go menu and the shortcuts sheet all follow it. If the flag turns off
-  while the page is open, the app goes to the Sitrep, closes the event pane
-  (an unsaved draft is discarded) and drops the calendar state.
+  the Go menu and the shortcuts sheet all follow it. The rail and the Go menu
+  read a stored "page available" value that the stats poller writes only
+  when it changes, so they do not rebuild on every poll. The product guide
+  behind ⌘K help (`Lib/ProductGuide.swift`), its topic index and the
+  assistant's `product_help` schema mention the calendar (its topic, its
+  getting-around line, its shortcut group) only while the page is available;
+  with it off their text equals main's. If the flag turns off while the page
+  is open, the app goes to the Sitrep, closes the event pane (an unsaved
+  draft is discarded, as on an account switch; leaving the page by
+  navigation instead parks it, §5) and drops the calendar state. A write
+  whose answer lands after the gate closed is dropped, with no analytics.
 
 ## 12. Build order
 

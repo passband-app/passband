@@ -460,8 +460,10 @@ run_suite sender-identity \
 # exact binding in another set. That failure abandons a draft, so it is asserted
 # rather than remembered. KeyDispatch.swift is the whole suite: the registry and
 # the algorithm are pure, and only the NSEvent bridge below them is AppKit.
+# PageKeys.swift rides along: the digits and ⇧C exactly as RootView binds them.
 run_suite key-dispatch \
   Sources/Passband/Keys/KeyDispatch.swift \
+  Sources/Passband/Keys/PageKeys.swift \
   Tests/KeyDispatchTests.swift
 
 # The ledger between the live event feed, the 10s poll and the person reading

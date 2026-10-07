@@ -1,6 +1,13 @@
-// REPLY WHERE YOU READ. A pinned composer under the message stack rather than a
+// REPLY WHERE YOU READ. A composer under the message stack rather than a
 // panel over it: the email you are answering stays on screen, unblurred and
 // scrollable, which is the whole point of answering from the reader.
+//
+// ON THE MAC IT IS THE NEXT ROW OF THE CONVERSATION. It sits in the reader's
+// own scroll, under the newest message, where the reply will be once it is
+// sent (see `ReplyFoot` in ThreadViewer), and its editor is as tall as what
+// has been written in it: no fixed box, no second scroll inside the first.
+// A long reply is read back the way the mail above it is, by scrolling the
+// page.
 //
 // The ceremony is the pane composer's, and LOCKED: ⌘Enter closes the reply and
 // holds it five seconds behind an undo toast (`AppStore.sendWithUndo`), then it
@@ -82,6 +89,12 @@ struct InlineReply: View {
     /// takes the caret back (`EditorRefocus`): its autofocus fires on mount
     /// alone, and the palette's field had the caret.
     @State private var refocusEditor = 0
+    #if os(macOS)
+        /// What the body needs at the width it has, as the editor last
+        /// measured it (`MarkdownTextView.onContentHeight`). Changes when a
+        /// line is added or lost, not per keystroke.
+        @State private var bodyHeight: CGFloat = 0
+    #endif
     /// The message being answered. nil = nothing to answer, which renders as no
     /// composer at all.
     private var parent: ClientMessage? {
@@ -147,8 +160,9 @@ struct InlineReply: View {
     }
 
     /// THE COMPOSER'S OWN SHAPE, which is the one thing the two platforms do
-    /// not share: a bar under the Mac's reader, a card at the end of the
-    /// phone's chain. Everything hung on it in `body` is common to both.
+    /// not share: a row at the end of the Mac's conversation, a card at the
+    /// end of the phone's chain. Everything hung on it in `body` is common to
+    /// both.
     @ViewBuilder
     private func surface(_ compose: ComposeState, parent: ClientMessage) -> some View {
         #if os(macOS)
@@ -166,22 +180,19 @@ struct InlineReply: View {
                     if let error = compose.error {
                         Text(error).font(Typo.micro).foregroundStyle(Palette.danger)
                     }
+                    keyLine
                 }
-                .padding(.horizontal, Self.gutter)
-                .padding(.top, Space.s12)
-                .padding(.bottom, Space.s10)
+                // A MESSAGE CARD'S OWN MEASURE: the same inset from the
+                // column's edge and the same air above and below, so the
+                // reply's first line starts where the mail's does.
+                .padding(.leading, Self.gutter)
+                .padding(.vertical, Space.s16)
                 // Anywhere on the composer, same as the pane: see
                 // `composeDropTarget`.
                 .composeDropTarget(.inlineReply, targeted: $dropTargeted)
-
-                // When it goes, just left of the send verb it changes
-                // (`ScheduleClock`), as in the pane.
-                KeyHintBar(hints: hints, leading: AnyView(ScheduleClock(slot: .inlineReply)))
             }
-            // The reader's own measure, so the composer sits under the column it
-            // answers rather than sprawling the full window width.
-            .frame(maxWidth: ThreadViewer.columnWidth, alignment: .leading)
-            .frame(maxWidth: .infinity)
+            // Inside the reader's column, and as wide as it.
+            .frame(maxWidth: .infinity, alignment: .leading)
             .overlay(alignment: .top) { Hairline() }
         #else
             card(compose, parent: parent)
@@ -356,9 +367,12 @@ struct InlineReply: View {
                             data: png, filename: "pasted-image.png", mime: "image/png",
                             to: .inlineReply, at: at)
                     } : nil,
-                onDropHover: { dropTargeted = $0 }
+                onDropHover: { dropTargeted = $0 },
+                // The editor grows with the reply and the page scrolls, not
+                // the box (see `editorHeight`).
+                onContentHeight: { bodyHeight = $0 }
             )
-            .frame(height: Self.editorHeight)
+            .frame(height: editorHeight)
             .padding(Space.s8)
             .background(
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
@@ -377,8 +391,12 @@ struct InlineReply: View {
     /// bar's text starts where the mail's does. The phone's is the inset of a
     /// card that already sits inside that column.
     #if os(macOS)
-        private static var gutter: CGFloat { Space.scaled(22) }
-        private static var editorHeight: CGFloat { Space.scaled(150) }
+        private static var gutter: CGFloat { ThreadViewer.replyInset }
+        /// AS TALL AS THE REPLY. The floor is a few lines, so an empty
+        /// composer reads as somewhere to write rather than a search field;
+        /// past that every line written is a line of height, and the page
+        /// scrolls instead of the box.
+        private var editorHeight: CGFloat { max(Space.scaled(96), bodyHeight) }
     #else
         private static var gutter: CGFloat { Space.s14 }
         /// THE FLOOR, not the height: four lines or so, which is enough to
@@ -397,6 +415,23 @@ struct InlineReply: View {
             }
             hints.append(KeyHint("esc", "dismiss"))
             return hints
+        }
+
+        /// The send keys, as the last line of the composer: the clock just
+        /// left of the send verb it changes (`ScheduleClock`), as in the pane.
+        /// `KeyHintBar` without the bar. That one is a strip across the foot
+        /// of a page with a rule over it, and this is a row in a column that
+        /// has its own.
+        private var keyLine: some View {
+            HStack(spacing: Space.s4) {
+                ScheduleClock(slot: .inlineReply).padding(.trailing, Space.s4)
+                ForEach(Array(hints.enumerated()), id: \.offset) { i, hint in
+                    if i > 0 { Text("·").foregroundStyle(Palette.inkFaintest) }
+                    hint
+                }
+                Spacer()
+            }
+            .padding(.top, Space.s2)
         }
     #endif
 

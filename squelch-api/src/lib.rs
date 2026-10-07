@@ -43,7 +43,7 @@ pub use http_metrics::{ROUTE_CLASSES, record_http_metrics};
 pub use scheduled_send::{ScheduledPassReport, run_scheduled_send_pass};
 /// The invite minter. Exported for the daemon binaries that build state by
 /// hand and for the integration suite, which points it at a mock control plane.
-pub use sharing::Sharing;
+pub use sharing::{FEATURE_REFRESH, FeatureRefresher, Sharing};
 pub use state::{AgentDoorStatus, ApiState, StateError, attach_event_channel};
 
 use axum::{

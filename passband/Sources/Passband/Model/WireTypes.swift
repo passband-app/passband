@@ -1048,6 +1048,11 @@ struct StoreStats: Codable, Sendable, Hashable {
     /// ABSENT on a daemon too old to say, and on every self-host, and nil reads
     /// exactly like false: no button, no nudge, nothing offered.
     var invite_sharing: Bool?
+    /// The hidden features an operator has turned on for this mailbox, as
+    /// keys. ABSENT on a daemon too old to say, and nil reads exactly like
+    /// empty: nothing extra is shown. Read it through `AppStore.hasFeature`,
+    /// never directly; see `HiddenFeatures`.
+    var features: [String]?
     /// Whether an iPhone app has EVER connected to this mailbox. ABSENT on a
     /// daemon too old to say, and nil reads as "do not know": the TestFlight
     /// ask never fires on a guess, because telling somebody about the app they

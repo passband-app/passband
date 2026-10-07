@@ -390,6 +390,7 @@
 		CF2D4E9603C4787015DA65C7 /* ComposeAttachments.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9ED32B3054A31D7933998E59 /* ComposeAttachments.swift */; };
 		CF34A69E15DFE9980A622162 /* WhatsNewCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0AFCAEC0D83E0E01D0074CE7 /* WhatsNewCard.swift */; };
 		D026185D5848A86409FAE120 /* Sessions.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA80DD18A355200FB6274585 /* Sessions.swift */; };
+		D0797905A0AFC74B229FC0B3 /* HiddenFeatures.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4BFB7F8DEBF73425B2ED67C /* HiddenFeatures.swift */; };
 		D1722EF952905C3BCED61CD5 /* AuthCodeModal.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A47FA6986F50A4E81628452 /* AuthCodeModal.swift */; };
 		D229AE3C967617AE228AC01A /* HostedServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B2016745A95BE31B7869ECF /* HostedServer.swift */; };
 		D4A4EA8324A57E2B01720266 /* ImageRepeats.swift in Sources */ = {isa = PBXBuildFile; fileRef = EFF2F03B0D68F54C0DC28777 /* ImageRepeats.swift */; };
@@ -470,6 +471,7 @@
 		F407EADA69EC6BA6001EBD5B /* AgentNudge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77F7A4B36E2DEA7F8B1AC50B /* AgentNudge.swift */; };
 		F4D434105490FF1F19B89986 /* AttachmentKinds.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DAF25E856CCAD8284AAA131 /* AttachmentKinds.swift */; };
 		F6478DB23F517992C1B1F5FF /* AccountDoor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6956B39387CC9395FCCBECD2 /* AccountDoor.swift */; };
+		F64AE33C01B3FA2CF15D8F5A /* HiddenFeatures.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4BFB7F8DEBF73425B2ED67C /* HiddenFeatures.swift */; };
 		F6CCF6C021CD68BA6BED3944 /* HeroCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20CA62DECFED05021D0C9964 /* HeroCache.swift */; };
 		F7AE2C449EEB366EF93429A1 /* AuthLabels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40EDDA2423A09A989C77CAED /* AuthLabels.swift */; };
 		F7F2772B8DCFEA19D81F022E /* WhatsNewCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0AFCAEC0D83E0E01D0074CE7 /* WhatsNewCard.swift */; };
@@ -753,6 +755,7 @@
 		E076DAB13B2768EAD01C88F3 /* CompositionSummary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompositionSummary.swift; sourceTree = "<group>"; };
 		E1C033DDA02DD344F437F943 /* Concurrency.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Concurrency.swift; sourceTree = "<group>"; };
 		E28B87131A6A21C97915D758 /* WhatsNewWalk.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhatsNewWalk.swift; sourceTree = "<group>"; };
+		E4BFB7F8DEBF73425B2ED67C /* HiddenFeatures.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HiddenFeatures.swift; sourceTree = "<group>"; };
 		E4C2C545E14D926E28E48DE6 /* SenderIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SenderIdentity.swift; sourceTree = "<group>"; };
 		E5B001C6ABDDB051E2B57205 /* InlineReply.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InlineReply.swift; sourceTree = "<group>"; };
 		E5B07DD7DA6133E705610323 /* Passband.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Passband.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -930,6 +933,7 @@
 				151C06F2A835787B0FDEDB24 /* FindInThread.swift */,
 				5883BA424612265657845246 /* Format.swift */,
 				B5C36FCC4B2230B257E66F84 /* FromOperator.swift */,
+				E4BFB7F8DEBF73425B2ED67C /* HiddenFeatures.swift */,
 				3B2016745A95BE31B7869ECF /* HostedServer.swift */,
 				579ABC2B7707848B4AED6F18 /* HTMLImg.swift */,
 				CE514B2862480E62EB8936A3 /* ImageFill.swift */,
@@ -1489,6 +1493,7 @@
 				8E1F8DB308ED83F7376BE9B5 /* GroupsView.swift in Sources */,
 				85A1CC563396C7890FB07C1F /* HTMLImg.swift in Sources */,
 				F6CCF6C021CD68BA6BED3944 /* HeroCache.swift in Sources */,
+				D0797905A0AFC74B229FC0B3 /* HiddenFeatures.swift in Sources */,
 				D229AE3C967617AE228AC01A /* HostedServer.swift in Sources */,
 				E3F69438A22E2036CD7742D2 /* ImageFill.swift in Sources */,
 				B09D9943663FA2E8ECBE1933 /* ImageProxy.swift in Sources */,
@@ -1713,6 +1718,7 @@
 				E796A08FD35B6AFC987CF6A6 /* HTMLImg.swift in Sources */,
 				9F54901230BBCD7044B85B48 /* Haptics.swift in Sources */,
 				765C0A73FABBBF4F7A041A83 /* HeroCache.swift in Sources */,
+				F64AE33C01B3FA2CF15D8F5A /* HiddenFeatures.swift in Sources */,
 				133F2C60DF0A717549F68CEF /* HostedServer.swift in Sources */,
 				3E13EF7C34DE299091467239 /* ImageFill.swift in Sources */,
 				C2102B9052FF6E97DAAA2AB4 /* ImageProxy.swift in Sources */,

@@ -530,6 +530,12 @@ run_suite capability-probe \
   Sources/Passband/Model/APIError.swift \
   Tests/CapabilityProbeTests.swift
 
+# Which hidden features this mailbox has been let into. Off for every doubt:
+# no stats, an old daemon, an empty list.
+run_suite hidden-features \
+  Sources/Passband/Lib/HiddenFeatures.swift \
+  Tests/HiddenFeaturesTests.swift
+
 # Reading groups canonical membership without reconstructing triage from copy.
 run_suite reading \
   Sources/Passband/Model/SubjectText.swift \

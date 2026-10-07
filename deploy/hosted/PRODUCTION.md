@@ -1454,6 +1454,19 @@ Signup's mint is gated on the invite policy being configured, the same condition
 `POST /tenant/invite` itself answers 503 without: a deployment with no invite
 feature installs no credential for a door that cannot open.
 
+### Letting a tenant see a hidden feature
+
+`https://signup.passband.app/admin/features`, behind the same admin token as the
+waitlist: a grid of active tenants against the features this build still hides,
+plus an "Everyone" row. Tick, Save, and the tenant's daemon picks it up within
+about five minutes, with no pod roll.
+
+It rides the control token above, so a tenant with no share token has no hidden
+features either, and `share revoke` takes both away. The whole mechanism, how to
+add a flag, and how to pin one on a development daemon are in
+[docs/FEATURES.md](../../docs/FEATURES.md).
+
+
 ## Backups
 
 Two mechanisms, split by which disk they cover:

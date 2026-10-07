@@ -32,7 +32,8 @@ use axum::{
 use chrono::{DateTime, Utc};
 
 use crate::reconnect::ReconnectView;
-use crate::store::UserRow;
+use crate::store::{FeatureBoard, UserRow};
+use squelch_core::features::Feature;
 
 /// The Content-Security-Policy every page carries. The single allowance is the
 /// inline `<style>`; `frame-ancestors 'none'` (with the older `X-Frame-Options`
@@ -1237,6 +1238,7 @@ pub fn admin_page(pending: &[UserRow], approved: &[UserRow], error: Option<&str>
         "Waitlist",
         &format!(
             r#"<section class="hero">
+{tabs}
 <h1 data-text="Waitlist">Waitlist</h1>
 <p class="sr">{waiting_count} waiting, {approved_count} approved recently,
 {accepted_count} of those signed up, {active_count} of those active</p>
@@ -1271,6 +1273,7 @@ once and expires in {ttl} days.</p></div>
 </form>
 <p class="hint">This session lasts {session_days} days.</p>
 </div>"#,
+            tabs = admin_tabs(AdminTab::Waitlist),
             scope = scope(&rungs),
             error_html = stop_note(error),
             waiting_count = pending.len(),
@@ -1287,6 +1290,208 @@ once and expires in {ttl} days.</p></div>
                 "Nobody has been approved yet.",
             ),
             ttl = crate::invites::DEFAULT_TTL_DAYS,
+        ),
+    )
+}
+
+/// The two pages behind the admin token, as the strip above each one's title.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AdminTab {
+    Waitlist,
+    Features,
+}
+
+/// The way between the operator's pages. Plain links: no JavaScript here, and
+/// each page is a whole document.
+fn admin_tabs(current: AdminTab) -> String {
+    let tab = |tab: AdminTab, href: &str, label: &str| {
+        let here = if tab == current {
+            r#" aria-current="page""#
+        } else {
+            ""
+        };
+        format!(r#"<a href="{href}"{here}>{label}</a>"#)
+    };
+    format!(
+        r#"<nav class="tabs" aria-label="Admin pages">{}{}</nav>"#,
+        tab(AdminTab::Waitlist, "/admin", "Waitlist"),
+        tab(AdminTab::Features, "/admin/features", "Features"),
+    )
+}
+
+/// The form field names on the features page. Here so the page that writes
+/// them and the handler that reads them cannot drift apart.
+///
+/// `FEATURE_TENANT_FIELD` rides once per row as a hidden field and says "this
+/// tenant was on the page", which is what lets an UNTICKED box mean "off": a
+/// checkbox that is not ticked sends nothing at all, so without it a tenant
+/// with every box cleared would be indistinguishable from one who was never
+/// listed.
+pub const FEATURE_TENANT_FIELD: &str = "t";
+/// One COLUMN the page drew, as a hidden field, for the same reason the tenant
+/// field exists turned ninety degrees: a save may only untick boxes in columns
+/// this page actually had. A tab rendered before a deploy added a feature has
+/// no boxes for it, and must not read their absence as "off for everyone".
+pub const FEATURE_KEY_FIELD: &str = "k";
+/// One ticked box: `<tenant id>.<feature key>`.
+pub const FEATURE_GRANT_FIELD: &str = "g";
+/// One ticked box on the "everyone" row: a feature key.
+pub const FEATURE_EVERYONE_FIELD: &str = "all";
+
+/// The features page: which hidden features each tenant has been let into.
+///
+/// `board` is `None` when the store did not answer, and then THERE IS NO FORM.
+/// A form drawn over an empty list would post "every box is unticked" and the
+/// save would believe it, so the one thing this page must never do is offer a
+/// Save button under a list it failed to read.
+///
+/// ALWAYS 200, for the reason [`admin_page`] is: a banner over a real state is
+/// a finished page.
+///
+/// EVERYTHING FROM THE STORE IS ESCAPED, and so are the registry's own strings,
+/// which are compiled in and would be safe raw. The rule on this page is that
+/// nothing is interpolated raw, and it has no exceptions for good behaviour.
+pub fn admin_features(
+    registry: &[Feature],
+    board: Option<&FeatureBoard>,
+    error: Option<&str>,
+    saved: bool,
+    refresh_minutes: u64,
+) -> Response {
+    let legend: String = registry
+        .iter()
+        .map(|f| {
+            format!(
+                "<dt><code>{}</code></dt><dd>{}</dd>\n",
+                escape_html(f.key),
+                escape_html(f.summary),
+            )
+        })
+        .collect();
+
+    let body = match (registry.is_empty(), board) {
+        (true, _) => r#"<section class="rack"><div class="rack-head"><span class="led"></span><h2>Tenants</h2></div>
+<p class="muted">This build hides nothing: every feature it has is on for everyone. A hidden feature
+shows up here once it is listed in <code>squelch-core/src/features.rs</code> and that build is deployed.</p>
+</section>"#
+            .to_string(),
+        (false, None) => String::new(),
+        (false, Some(board)) => {
+            let head: String = registry
+                .iter()
+                .map(|f| format!("<th>{}</th>", escape_html(f.key)))
+                .collect();
+            let boxes = |name: &str, prefix: &str, on: &dyn Fn(&str) -> bool| -> String {
+                registry
+                    .iter()
+                    .map(|f| {
+                        let key = escape_html(f.key);
+                        let checked = if on(f.key) { " checked" } else { "" };
+                        format!(
+                            r#"<td class="tick"><label><input type="checkbox" name="{name}" value="{prefix}{key}"{checked}><span>{key}</span></label></td>"#
+                        )
+                    })
+                    .collect()
+            };
+            let everyone_row = format!(
+                r#"<tr class="everyone"><td class="who">Everyone<br><span class="muted">every tenant, and anybody who signs up later</span></td>{}</tr>
+"#,
+                boxes(FEATURE_EVERYONE_FIELD, "", &|key| board
+                    .everyone
+                    .contains(key)),
+            );
+            let tenant_rows: String = board
+                .tenants
+                .iter()
+                .map(|t| {
+                    // A row whose daemon cannot ask is still tickable: the
+                    // grant is stored and goes live when a token is minted.
+                    // What it must not do is look like every other row.
+                    let tokenless = if t.has_token {
+                        ""
+                    } else {
+                        r#"<br><span class="flag">no control token</span><span class="muted">waits for <code>share mint</code></span>"#
+                    };
+                    format!(
+                        r#"<tr><td class="who"><input type="hidden" name="{FEATURE_TENANT_FIELD}" value="{id}"><code>{label}</code><br><span class="muted">{email}</span>{tokenless}</td>{boxes}</tr>
+"#,
+                        id = t.id,
+                        label = escape_html(&t.label),
+                        email = escape_html(&t.account_email),
+                        boxes = boxes(FEATURE_GRANT_FIELD, &format!("{}.", t.id), &|key| t
+                            .features
+                            .contains(key)),
+                    )
+                })
+                .collect();
+            let nobody = if board.tenants.is_empty() {
+                r#"<p class="muted">No active tenants yet.</p>"#
+            } else {
+                ""
+            };
+            let columns: String = registry
+                .iter()
+                .map(|f| {
+                    format!(
+                        r#"<input type="hidden" name="{FEATURE_KEY_FIELD}" value="{}">"#,
+                        escape_html(f.key)
+                    )
+                })
+                .collect();
+            format!(
+                r#"<form class="features" method="post" action="/admin/features">{columns}
+<section class="rack">
+<div class="rack-head"><span class="led"></span><h2>Tenants</h2><span class="count">{count}</span>
+<p class="hint">A ticked box is on. A mailbox's daemon hears about a change within {refresh_minutes} minutes, with no restart.</p></div>
+<table class="matrix"><tr><th>Who</th>{head}</tr>
+{everyone_row}{tenant_rows}</table>
+{nobody}
+</section>
+<div class="footer-row"><button type="submit">Save</button>
+<p class="hint">Saves the whole page at once.</p></div>
+</form>"#,
+                count = board.tenants.len(),
+            )
+        }
+    };
+
+    let saved_note = if saved && error.is_none() {
+        r#"<p class="hint saved" role="status">Saved.</p>"#
+    } else {
+        ""
+    };
+    let legend = if legend.is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#"<section class="rack"><div class="rack-head"><span class="led"></span><h2>Hidden features</h2><span class="count">{}</span></div>
+<dl class="legend">
+{legend}</dl>
+</section>"#,
+            registry.len(),
+        )
+    };
+
+    console(
+        StatusCode::OK,
+        "Features",
+        &format!(
+            r#"<section class="hero">
+{tabs}
+<h1 data-text="Features">Features</h1>
+</section>
+{error_html}{saved_note}
+<div class="racks">
+{legend}
+{body}
+</div>
+<div class="footer-row">
+<form class="signout" method="post" action="/admin/logout">
+<button type="submit" class="quiet">Sign out</button>
+</form>
+</div>"#,
+            tabs = admin_tabs(AdminTab::Features),
+            error_html = stop_note(error),
         ),
     )
 }

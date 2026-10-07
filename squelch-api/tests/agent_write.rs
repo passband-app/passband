@@ -778,11 +778,19 @@ async fn next_open_frame(resp: axum::response::Response) -> Option<String> {
 async fn open_draft_reaches_a_listening_mac_and_says_so() {
     let f = fixture(AgentWriteAccess::Drafts, false).await;
     let created = f.mailer.create_draft(compose("hello")).await.unwrap();
+    // The link names the draft, its mailbox, and the second it was created,
+    // which is what ties it to this draft and not the next one to get the id.
+    let stored = f
+        .store
+        .draft_by_id(f.acct, created.draft_id)
+        .unwrap()
+        .unwrap();
     assert_eq!(
         created.link,
         format!(
-            "passband://draft/{}?mailbox=me%40example.com",
-            created.draft_id
+            "passband://draft/{}?mailbox=me%40example.com&t={}",
+            created.draft_id,
+            stored.created_at.timestamp()
         )
     );
 
@@ -808,7 +816,7 @@ async fn open_draft_reaches_a_listening_mac_and_says_so() {
     let frame = listening.await.unwrap().expect("an open_draft frame");
     assert!(frame.contains("event: open_draft"), "{frame}");
     assert!(
-        frame.contains(&format!("{{\"open_draft\":{}}}", created.draft_id)),
+        frame.contains(&format!("{{\"open_draft\":{},\"at\":", created.draft_id)),
         "{frame}"
     );
     // Not a row in the notification log: it carries no cursor.
@@ -838,6 +846,15 @@ async fn a_stream_that_did_not_ask_is_not_a_listening_mac() {
     let opened = f.mailer.open_draft(created.draft_id).await.unwrap();
     assert!(!opened.on_mac);
     drop(resp);
+
+    // Nor is a spelling of the opt-in this build does not know a broken feed.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(authed("GET", "/client/events?opens=true"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -856,13 +873,20 @@ async fn an_agent_can_only_open_a_draft_an_agent_wrote() {
         )
         .unwrap()
         .unwrap();
-    for id in [own.id, 999_999] {
-        assert_eq!(
-            f.mailer.open_draft(id).await,
-            Err(AgentWriteError::NotFound)
-        );
-    }
-    // And not at all once the owner has made the door read only.
+    assert_eq!(
+        f.mailer.open_draft(own.id).await,
+        Err(AgentWriteError::NotFound)
+    );
+    assert!(audit_details(&f).contains(&(
+        "agent".into(),
+        "draft.open".into(),
+        "failed:target".into()
+    )));
+}
+
+#[tokio::test]
+async fn open_draft_follows_the_owners_setting() {
+    let f = fixture(AgentWriteAccess::Drafts, false).await;
     let created = f.mailer.create_draft(compose("hello")).await.unwrap();
     AgentWriteAccess::None
         .save(f.store.as_ref(), f.acct)
@@ -873,19 +897,34 @@ async fn an_agent_can_only_open_a_draft_an_agent_wrote() {
     );
 }
 
+/// Inside the interval every request is turned away alike, whatever it
+/// names: a live draft, the owner's, or nothing. Otherwise the refusal itself
+/// would tell an agent whether the owner had sent or discarded a draft. And a
+/// second mailer over the same state shares the clock.
 #[tokio::test]
-async fn open_requests_are_spaced_out() {
-    let f = fixture(AgentWriteAccess::Drafts, false).await;
-    let created = f.mailer.create_draft(compose("hello")).await.unwrap();
-    assert!(f.mailer.open_draft(created.draft_id).await.is_ok());
-    let again = f.mailer.open_draft(created.draft_id).await;
-    assert!(
-        matches!(again, Err(AgentWriteError::Blocked(_))),
-        "{again:?}"
+async fn open_requests_are_spaced_out_and_the_refusal_says_nothing() {
+    let (state, store, acct) = state_with(|_, _| {});
+    AgentWriteAccess::Drafts.save(store.as_ref(), acct).unwrap();
+    let mailer = state.agent_mailer();
+    let other = state.agent_mailer();
+    let created = mailer.create_draft(compose("hello")).await.unwrap();
+    assert!(mailer.open_draft(created.draft_id).await.is_ok());
+
+    let before = store.list_audit(acct, 50).unwrap().len();
+    for (who, id) in [
+        (&mailer, created.draft_id),
+        (&mailer, 999_999),
+        (&other, created.draft_id),
+    ] {
+        let again = who.open_draft(id).await;
+        assert!(
+            matches!(again, Err(AgentWriteError::Blocked(_))),
+            "{id}: {again:?}"
+        );
+    }
+    assert_eq!(
+        store.list_audit(acct, 50).unwrap().len(),
+        before,
+        "a request inside the interval writes no ledger row"
     );
-    assert!(audit_details(&f).contains(&(
-        "agent".into(),
-        "draft.open".into(),
-        "rejected:too_soon".into()
-    )));
 }

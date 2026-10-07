@@ -119,6 +119,10 @@ pub struct ApiState {
     /// `receiver_count` is also how the agent learns whether anything was
     /// listening.
     pub(crate) draft_opens: tokio::sync::broadcast::Sender<i64>,
+    /// When the last open request was let through. HERE, shared by every
+    /// clone of the state, rather than on the mailer: it rations the owner's
+    /// screen, of which there is one per mailbox however many mailers exist.
+    pub(crate) draft_open_clock: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
     /// The daemon's shutdown signal. An SSE stream is infinite and axum's
     /// graceful shutdown waits for open connections, so without this one
     /// resident client would hold squelchd open forever.
@@ -448,6 +452,7 @@ impl ApiState {
             spam_refresh: None,
             event_notifier: None,
             draft_opens: tokio::sync::broadcast::channel(16).0,
+            draft_open_clock: Arc::new(std::sync::Mutex::new(None)),
             shutdown: None,
             worker_clock_skew: chrono::Duration::zero(),
             tracking_base_url: None,

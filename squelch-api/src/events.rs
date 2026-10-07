@@ -58,8 +58,12 @@ pub struct EventsQuery {
     /// on it. OPT-IN, because the frame is useless to anything else and the
     /// daemon counts the connections that asked as "a Mac is listening": an
     /// older app, or the phone, must not make that count true.
+    ///
+    /// A STRING, compared to `"1"`: a typed number here would make any other
+    /// spelling (`opens=true`) a 400 for the whole notification feed, and an
+    /// opt-in nobody understood should cost only the opt-in.
     #[serde(default)]
-    opens: Option<u8>,
+    opens: Option<String>,
 }
 
 /// Where a connection starts reading. WITH `after`: exactly there (exclusive);
@@ -104,10 +108,17 @@ fn frame(ev: &Event) -> Option<SseEvent> {
 /// last id on the client, which moves nothing. The payload is one key no
 /// [`Event`] has, so a reader that does not know it fails to decode an event
 /// and carries on.
+///
+/// `at` IS WHEN THE REQUEST WAS MADE (Unix seconds). A connection to a Mac
+/// that went to sleep stays open on this side for minutes, and the frame is
+/// then delivered when it wakes: the app drops a request that is not fresh,
+/// so nobody opens their laptop to a window thrown at them by something an
+/// agent did an hour ago.
 fn open_draft_frame(draft_id: i64) -> SseEvent {
+    let at = chrono::Utc::now().timestamp();
     SseEvent::default()
         .event("open_draft")
-        .data(format!("{{\"open_draft\":{draft_id}}}"))
+        .data(format!("{{\"open_draft\":{draft_id},\"at\":{at}}}"))
 }
 
 /// Send every event past `cursor`, oldest first, in bounded batches. `None`
@@ -256,7 +267,7 @@ pub async fn events_stream(
 
     // Subscribed for the life of the connection, and dropped with it: the
     // receiver count IS the number of Macs listening.
-    let opens = (q.opens == Some(1)).then(|| state.draft_opens.subscribe());
+    let opens = (q.opens.as_deref() == Some("1")).then(|| state.draft_opens.subscribe());
 
     let (tx, rx) = mpsc::channel::<Result<SseEvent, Infallible>>(CHANNEL_BUFFER);
     let shutdown = state.shutdown.clone();

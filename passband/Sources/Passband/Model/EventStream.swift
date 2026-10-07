@@ -306,7 +306,7 @@ final class EventStream {
             // and must not move the cursor. Handed over with the account, as
             // an arrival is, so the store decides what a draft in a mailbox
             // that is not on screen means.
-            AppStore.shared.openAgentDraft(signal.open_draft, accountId: accountId)
+            AppStore.shared.openAgentDraft(signal, accountId: accountId)
         } else if let id = frame.id.flatMap({ Int($0) }) {
             // An undecodable frame still ADVANCES the cursor, mirroring the
             // server's pump: otherwise one malformed row replays on every

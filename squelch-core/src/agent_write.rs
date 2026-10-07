@@ -143,7 +143,14 @@ pub struct AgentDraftOpened {
 /// The `passband://` link that opens draft `draft_id` of `mailbox` in the Mac
 /// app. The mailbox rides along because a Mac may hold several accounts and a
 /// draft id is one daemon's row id, meaningless in another's.
-pub fn draft_link(mailbox: &str, draft_id: i64) -> String {
+///
+/// `created` (the draft's creation time, Unix seconds) BINDS THE LINK TO THAT
+/// ONE DRAFT. Draft ids are SQLite row ids: small, sequential, and reused once
+/// a draft is sent or discarded. Without this, a link left in a chat transcript
+/// would open whichever agent draft held the number next, and any page could
+/// walk `draft/1..N`. The app opens a link only when the draft it finds was
+/// created at exactly this second.
+pub fn draft_link(mailbox: &str, draft_id: i64, created: i64) -> String {
     let mut encoded = String::with_capacity(mailbox.len());
     for b in mailbox.bytes() {
         match b {
@@ -153,7 +160,7 @@ pub fn draft_link(mailbox: &str, draft_id: i64) -> String {
             _ => encoded.push_str(&format!("%{b:02X}")),
         }
     }
-    format!("passband://draft/{draft_id}?mailbox={encoded}")
+    format!("passband://draft/{draft_id}?mailbox={encoded}&t={created}")
 }
 
 /// Mail the agent sent.
@@ -251,8 +258,8 @@ mod tests {
     #[test]
     fn a_draft_link_names_the_draft_and_its_mailbox() {
         assert_eq!(
-            draft_link("me+work@example.com", 12),
-            "passband://draft/12?mailbox=me%2Bwork%40example.com"
+            draft_link("me+work@example.com", 12, 1_790_000_000),
+            "passband://draft/12?mailbox=me%2Bwork%40example.com&t=1790000000"
         );
     }
 

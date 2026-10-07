@@ -5519,6 +5519,15 @@ final class AppStore {
     /// fires.
     var shareAvailable: Bool { stats?.invite_sharing == true }
 
+    /// The hidden features that are on for this mailbox. Read off the same
+    /// stats as the capability flags above, and for a different reason than
+    /// they are: those say what the DAEMON can do, this says what an operator
+    /// has let this PERSON see. See `HiddenFeatures`.
+    var hiddenFeatures: HiddenFeatures { HiddenFeatures(daemon: stats?.features) }
+
+    /// Whether to show `feature` here. False until the daemon says otherwise.
+    func hasFeature(_ feature: HiddenFeature) -> Bool { hiddenFeatures.has(feature) }
+
     /// The daemon's answer to "has an iPhone app ever talked to this mailbox",
     /// or nil when it has not given one yet (or is too old to). Drives the
     /// TestFlight ask; see `TestFlightNudge`.

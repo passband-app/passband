@@ -98,7 +98,7 @@ pub const ADMIN_LOGIN_REQUESTS_PER_MINUTE: f64 = 10.0;
 ///
 /// `GET /tenant/features` draws on it too, and that one IS periodic: each
 /// daemon asks every five minutes, so a fleet of N behind one address spends
-/// N/5 of this a minute. That is a fifth of the budget at a hundred tenants
+/// N/5 of this a minute. That is a sixth of the budget at a hundred tenants
 /// and all of it at six hundred, which is the number to revisit this at.
 pub const TENANT_REQUESTS_PER_MINUTE: f64 = 120.0;
 

@@ -35,14 +35,15 @@ control plane, a key nobody recognises: all read as "not enabled".
 | The control plane says | The daemon does |
 |---|---|
 | a list | replaces what it held |
-| nothing (down, deploying, 5xx) | keeps what it last heard, asks again in a minute |
-| 401 (token revoked, tenant cancelled) or 404 | clears what was granted |
+| nothing (down, deploying, 404, 5xx) | keeps what it last heard, asks again in a minute |
+| 401 (token revoked, tenant cancelled) | clears what was granted |
 
 Two consequences worth knowing:
 
 - **A tenant with no control token has no hidden features.** The token is
   installed at signup; a tenant from before that needs `squelch-control share
-  mint <label>`. `share revoke` turns their hidden features off along with
+  mint <label>`. The admin page marks those rows "no control token"; a box
+  ticked there is stored and goes live when the token is minted. `share revoke` turns their hidden features off along with
   sharing, because it is the same credential.
 - **A pod that restarts while the control plane is down comes up with nothing
   on** until the control plane answers. The list is held in memory.
@@ -108,6 +109,10 @@ Tick "Everyone" to turn a feature on for the whole fleet, new signups included.
 When it has settled, delete the flag: the `KNOWN` entry, the constant, and every
 check on it, in the daemon and the apps. Leftover rows in the two tables are
 harmless and saving the admin page does not touch them.
+
+**Never reuse a key.** Those leftover rows are still served to daemons, so a
+retired key given to a new feature arrives already switched on for whoever had
+the old one, which after an "Everyone" launch is the whole fleet.
 
 ## What this is not
 

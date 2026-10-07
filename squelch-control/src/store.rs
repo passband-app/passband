@@ -505,6 +505,10 @@ pub struct FeatureTenant {
     pub id: i64,
     pub label: String,
     pub account_email: String,
+    /// Whether this tenant's daemon holds a control token. Without one it has
+    /// no way to ask what it was granted, so a ticked box on its row is a
+    /// grant that waits for `share mint` rather than one that is live.
+    pub has_token: bool,
     /// Granted to THIS tenant. A feature that is on for everyone is not
     /// repeated here; see [`FeatureBoard::everyone`].
     pub features: BTreeSet<String>,
@@ -1159,7 +1163,7 @@ impl ControlStore {
             .await?;
         let mut tenants: Vec<FeatureTenant> = tx
             .query(
-                "SELECT id, label, account_email FROM tenants
+                "SELECT id, label, account_email, share_token_hash IS NOT NULL FROM tenants
                   WHERE status = $1 ORDER BY id DESC",
                 &[&STATUS_ACTIVE],
             )
@@ -1170,6 +1174,7 @@ impl ControlStore {
                     id: r.try_get(0)?,
                     label: r.try_get(1)?,
                     account_email: r.try_get(2)?,
+                    has_token: r.try_get(3)?,
                     features: BTreeSet::new(),
                 })
             })
@@ -1196,7 +1201,10 @@ impl ControlStore {
     /// Make the grants match one submitted features page.
     ///
     /// SCOPED TO WHAT THE PAGE SHOWED, which is the two slices up front:
-    /// `tenants` are the rows it listed and `keys` the columns. Inside that
+    /// `tenants` are the rows it listed and `keys` the columns (the caller
+    /// passes the columns the FORM named, narrowed to the registry, so a page
+    /// rendered before a feature existed cannot untick it, and a body with no
+    /// columns at all touches nothing, the "everyone" row included). Inside that
     /// rectangle, `grants` and `everyone` are the boxes that came back ticked
     /// and everything else is unticked. Outside it nothing is touched, so a
     /// tenant who signed up after the page was rendered keeps what they have,

@@ -1255,6 +1255,11 @@ fn admin_tabs(current: AdminTab) -> String {
 /// with every box cleared would be indistinguishable from one who was never
 /// listed.
 pub const FEATURE_TENANT_FIELD: &str = "t";
+/// One COLUMN the page drew, as a hidden field, for the same reason the tenant
+/// field exists turned ninety degrees: a save may only untick boxes in columns
+/// this page actually had. A tab rendered before a deploy added a feature has
+/// no boxes for it, and must not read their absence as "off for everyone".
+pub const FEATURE_KEY_FIELD: &str = "k";
 /// One ticked box: `<tenant id>.<feature key>`.
 pub const FEATURE_GRANT_FIELD: &str = "g";
 /// One ticked box on the "everyone" row: a feature key.
@@ -1326,8 +1331,16 @@ shows up here once it is listed in <code>squelch-core/src/features.rs</code> and
                 .tenants
                 .iter()
                 .map(|t| {
+                    // A row whose daemon cannot ask is still tickable: the
+                    // grant is stored and goes live when a token is minted.
+                    // What it must not do is look like every other row.
+                    let tokenless = if t.has_token {
+                        ""
+                    } else {
+                        r#"<br><span class="flag">no control token</span><span class="muted">waits for <code>share mint</code></span>"#
+                    };
                     format!(
-                        r#"<tr><td class="who"><input type="hidden" name="{FEATURE_TENANT_FIELD}" value="{id}"><code>{label}</code><br><span class="muted">{email}</span></td>{boxes}</tr>
+                        r#"<tr><td class="who"><input type="hidden" name="{FEATURE_TENANT_FIELD}" value="{id}"><code>{label}</code><br><span class="muted">{email}</span>{tokenless}</td>{boxes}</tr>
 "#,
                         id = t.id,
                         label = escape_html(&t.label),
@@ -1343,11 +1356,20 @@ shows up here once it is listed in <code>squelch-core/src/features.rs</code> and
             } else {
                 ""
             };
+            let columns: String = registry
+                .iter()
+                .map(|f| {
+                    format!(
+                        r#"<input type="hidden" name="{FEATURE_KEY_FIELD}" value="{}">"#,
+                        escape_html(f.key)
+                    )
+                })
+                .collect();
             format!(
-                r#"<form class="features" method="post" action="/admin/features">
+                r#"<form class="features" method="post" action="/admin/features">{columns}
 <section class="rack">
 <div class="rack-head"><span class="led"></span><h2>Tenants</h2><span class="count">{count}</span>
-<p class="hint">A ticked box is on. Mailboxes pick a change up within {refresh_minutes} minutes, with no restart.</p></div>
+<p class="hint">A ticked box is on. A mailbox's daemon hears about a change within {refresh_minutes} minutes, with no restart.</p></div>
 <table class="matrix"><tr><th>Who</th>{head}</tr>
 {everyone_row}{tenant_rows}</table>
 {nobody}
@@ -1389,6 +1411,11 @@ shows up here once it is listed in <code>squelch-core/src/features.rs</code> and
 <div class="racks">
 {legend}
 {body}
+</div>
+<div class="footer-row">
+<form class="signout" method="post" action="/admin/logout">
+<button type="submit" class="quiet">Sign out</button>
+</form>
 </div>"#,
             tabs = admin_tabs(AdminTab::Features),
             error_html = stop_note(error),

@@ -619,8 +619,9 @@ pub const MAX_FEATURES_BODY: usize = 512 * 1024;
 
 /// How long a daemon may go before it hears about a change made here, in
 /// minutes, for the sentence on the page. The daemon's own poll interval is
-/// `squelch_api::FEATURE_REFRESH`; this is that number rounded up to
-/// leave room for its jitter, and it is copy rather than a contract.
+/// `squelch_api::FEATURE_REFRESH`; this is that number plus a minute for
+/// the round trip and the app's own next stats read, and it is copy rather
+/// than a contract.
 const FEATURE_REFRESH_MINUTES: u64 = 6;
 
 /// `GET /admin/features` — who has been let into what.
@@ -661,18 +662,13 @@ pub async fn features_save(
         return cross_origin(&state, &headers);
     }
 
-    // THE COLUMNS ARE THIS BUILD'S OWN LIST, never the form's: a posted key
-    // that is not in the registry is not a feature anybody can be granted.
-    let keys: Vec<String> = state
-        .feature_registry()
-        .iter()
-        .map(|f| f.key.to_string())
-        .collect();
+    let mut posted_keys: Vec<String> = Vec::new();
     let mut tenants: Vec<i64> = Vec::new();
     let mut grants: Vec<(i64, String)> = Vec::new();
     let mut everyone: Vec<String> = Vec::new();
     for (name, value) in url::form_urlencoded::parse(&body) {
         match name.as_ref() {
+            pages::FEATURE_KEY_FIELD => posted_keys.push(value.into_owned()),
             pages::FEATURE_TENANT_FIELD => {
                 if let Ok(id) = value.parse() {
                     tenants.push(id);
@@ -689,6 +685,18 @@ pub async fn features_save(
             _ => {}
         }
     }
+
+    // THE COLUMNS ARE THE ONES THE PAGE DREW, NARROWED TO THIS BUILD'S LIST.
+    // Narrowed, because a posted key that is not in the registry is not a
+    // feature anybody can be granted. The page's, because a tab rendered before
+    // a deploy added a feature has no boxes for it and must not untick it. A
+    // body that names no columns (cut short, or hand-built) changes nothing.
+    let keys: Vec<String> = state
+        .feature_registry()
+        .iter()
+        .map(|f| f.key.to_string())
+        .filter(|key| posted_keys.contains(key))
+        .collect();
 
     match state
         .store()

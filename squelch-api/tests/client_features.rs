@@ -130,7 +130,14 @@ async fn an_outage_keeps_the_last_answer() {
     let refresher = state.feature_refresher().unwrap();
     refresher.refresh_once().await;
 
-    for (status, body) in [(500, json!({})), (200, json!("not the shape"))] {
+    for (status, body) in [
+        (500, json!({})),
+        (503, json!({ "error": "unavailable" })),
+        // Not "too old to grant anything": an edge with nothing behind it says
+        // this too, and that must not switch a fleet's features off.
+        (404, json!({})),
+        (200, json!("not the shape")),
+    ] {
         control.answers(status, body);
         assert!(refresher.refresh_once().await < FEATURE_REFRESH);
         assert_eq!(stats_features(&state).await, json!(["calendar"]));
@@ -138,11 +145,11 @@ async fn an_outage_keeps_the_last_answer() {
 }
 
 /// A refusal IS a decision: the control plane no longer vouches for this
-/// daemon, and off is the answer to every doubt. A 404 is a control plane too
-/// old to have granted anything. What was pinned locally survives both.
+/// daemon, and off is the answer to every doubt. What was pinned locally
+/// survives it.
 #[tokio::test]
 async fn a_refusal_clears_what_was_granted_and_leaves_what_was_pinned() {
-    for status in [401, 404] {
+    for status in [401, 403] {
         let (url, control) = spawn_control().await;
         control.answers(200, json!({ "features": ["calendar"] }));
         let state = daemon(Some(&url), Features::pinned(["local_only"]));

@@ -217,6 +217,7 @@ body.console main:has(.racks) { max-width: 64rem; }
   cursor: pointer; text-transform: none; letter-spacing: 0.04em; }
 .console .matrix td.tick span { display: none; }
 .console .matrix input[type=checkbox] { width: 1.05rem; height: 1.05rem; margin: 0; accent-color: var(--accent); }
+.console .matrix td.who .flag { margin-top: 0.35rem; }
 .console .matrix tr.everyone td { border-bottom-color: rgba(130, 186, 245, 0.22); }
 .console .saved { color: var(--positive); margin: 0 0 1rem; }
 

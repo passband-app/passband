@@ -201,9 +201,18 @@ impl Harness {
             .await
     }
 
-    /// The same, as the signed-in operator's own browser, asserting it took.
+    /// The same, as the signed-in operator's own browser on a page that drew
+    /// every column in [`REGISTRY`], asserting it took.
     async fn save_ok(&self, cookie: &str, body: &str) {
-        let (status, headers, page) = self.save(body, Some(cookie), Some(ORIGIN)).await;
+        self.save_columns(cookie, &["calendar", "agent_send"], body)
+            .await;
+    }
+
+    /// The same from a page that drew only `columns`.
+    async fn save_columns(&self, cookie: &str, columns: &[&str], body: &str) {
+        let columns: String = columns.iter().map(|k| format!("k={k}&")).collect();
+        let body = format!("{columns}{body}");
+        let (status, headers, page) = self.save(&body, Some(cookie), Some(ORIGIN)).await;
         assert_eq!(status, StatusCode::SEE_OTHER, "{page}");
         assert_eq!(headers[header::LOCATION], "/admin/features?saved");
     }
@@ -469,4 +478,124 @@ async fn an_empty_registry_is_a_sentence_not_a_form() {
     h.save_ok(&cookie, &format!("t={ada}&g={ada}.calendar&all=calendar"))
         .await;
     assert!(h.granted(&token).await.is_empty());
+}
+
+/// A save speaks only for the COLUMNS its page drew, the same rule as for rows.
+/// A tab rendered before a deploy added a feature has no boxes for it, and
+/// saving that tab must not read their absence as "off", for one tenant or for
+/// everyone.
+#[tokio::test]
+async fn a_page_from_before_a_feature_existed_cannot_untick_it() {
+    let h = Harness::new().await;
+    let (ada, token) = h.tenant("ada").await;
+    let (_, late_token) = h.tenant("late").await;
+    let cookie = h.sign_in().await;
+    h.save_ok(
+        &cookie,
+        &format!("t={ada}&g={ada}.agent_send&all=agent_send"),
+    )
+    .await;
+
+    // The old tab: it knows `calendar` only, and ticks it for ada.
+    h.save_columns(&cookie, &["calendar"], &format!("t={ada}&g={ada}.calendar"))
+        .await;
+    assert_eq!(h.granted(&token).await, ["agent_send", "calendar"]);
+    assert_eq!(h.granted(&late_token).await, ["agent_send"]);
+    assert!(h.enabled_at(ada, "agent_send").await.is_some());
+
+    // And it cannot grant through a column it did not draw either.
+    h.save_columns(
+        &cookie,
+        &["calendar"],
+        &format!("t={ada}&g={ada}.agent_send"),
+    )
+    .await;
+    assert!(h.enabled_at(ada, "calendar").await.is_none());
+}
+
+/// A body that names no columns is not a page: cut short on the way, or built
+/// by hand. It changes nothing, and in particular it does not switch the
+/// "everyone" row off, which has no tenant field of its own to be missing.
+#[tokio::test]
+async fn a_body_with_no_columns_changes_nothing() {
+    let h = Harness::new().await;
+    let (ada, token) = h.tenant("ada").await;
+    let cookie = h.sign_in().await;
+    h.save_ok(&cookie, &format!("t={ada}&g={ada}.calendar&all=agent_send"))
+        .await;
+
+    for body in [String::new(), format!("t={ada}"), "k=nope".to_string()] {
+        let (status, _, page) = h.save(&body, Some(&cookie), Some(ORIGIN)).await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "{page}");
+        assert_eq!(
+            h.granted(&token).await,
+            ["agent_send", "calendar"],
+            "{body:?}"
+        );
+    }
+}
+
+/// The page posts back the columns it drew, so the rule above has something to
+/// read.
+#[tokio::test]
+async fn the_page_names_its_own_columns() {
+    let h = Harness::new().await;
+    h.tenant("ada").await;
+    let cookie = h.sign_in().await;
+    let (_, page) = h.page(Some(&cookie)).await;
+    for key in ["calendar", "agent_send"] {
+        assert!(
+            page.contains(&format!(r#"<input type="hidden" name="k" value="{key}">"#)),
+            "{page}"
+        );
+    }
+}
+
+/// A STORE THAT COULD NOT BE ASKED IS NOT A REFUSAL. The daemon drops every
+/// feature it holds on a 401 and keeps them on anything else, so answering 401
+/// for a database blip would switch the fleet's hidden features off for the
+/// length of a Postgres restart.
+#[tokio::test]
+async fn a_store_that_cannot_answer_is_a_503_and_never_a_401() {
+    let h = Harness::new().await;
+    let (_, token) = h.tenant("ada").await;
+    let db = common::raw_client(&h.db_url).await;
+
+    // The grant read failing, with the token lookup fine.
+    db.execute("ALTER TABLE tenant_features RENAME TO gone", &[])
+        .await
+        .unwrap();
+    let (status, body) = h.daemon_reads(Some(&token)).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+
+    // The token lookup itself failing.
+    db.execute("ALTER TABLE tenants RENAME TO gone_too", &[])
+        .await
+        .unwrap();
+    let (status, body) = h.daemon_reads(Some(&token)).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["error"], "unavailable");
+
+    // A request with no token at all is still refused without asking the store.
+    assert_eq!(h.daemon_reads(None).await.0, StatusCode::UNAUTHORIZED);
+}
+
+/// A tenant whose daemon holds no control token cannot ask what it was
+/// granted, and the page says so on that row instead of offering boxes that
+/// look live.
+#[tokio::test]
+async fn a_tenant_with_no_control_token_is_marked() {
+    let h = Harness::new().await;
+    h.tenant("ada").await;
+    let cookie = h.sign_in().await;
+    let (_, page) = h.page(Some(&cookie)).await;
+    assert!(!page.contains("no control token"), "{page}");
+
+    h.state
+        .store()
+        .insert_tenant("old", "old@example.com")
+        .await
+        .unwrap();
+    let (_, page) = h.page(Some(&cookie)).await;
+    assert_eq!(page.matches("no control token").count(), 1, "{page}");
 }

@@ -8,7 +8,7 @@
 //! THREE PARTIES, ONE LIST:
 //!
 //! - THE CONTROL PLANE decides. An operator ticks a box on `/admin/features`
-//!   and the row lands in its database (`squelch_control::features`).
+//!   and the row lands in its database (`tenant_features`, in `squelch_control::store`).
 //! - THE DAEMON asks, with the same control token it mints invites with, and
 //!   keeps the answer in a [`Features`] handle that every subsystem can read.
 //! - THE CLIENT is told, on `/client/stats`, and hides what is not listed.

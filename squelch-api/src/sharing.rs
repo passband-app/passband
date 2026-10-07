@@ -285,8 +285,11 @@ impl Sharing {
                 Ok(granted.features)
             }
             401 | 403 => Err(ShareError::Unauthorized),
-            // A control plane too old to have the route grants nothing.
-            404 => Err(ShareError::Unavailable),
+            // 404 INCLUDED IN "NO ANSWER", unlike the mint above. It is what a
+            // control plane too old to have the route says, and it is also what
+            // an edge says while the service behind it has no live deployment.
+            // The first has nothing granted to lose; the second must not be
+            // read as a fleet-wide off switch.
             _ => Err(ShareError::Unreachable),
         }
     }
@@ -310,10 +313,12 @@ impl FeatureRefresher {
     /// - NO ANSWER KEEPS IT. A control plane that is down or deploying is not
     ///   a decision to take anybody's features away, and flickering a tester's
     ///   UI off for the length of a deploy would be this loop inventing one.
-    /// - A REFUSAL CLEARS IT. A 401 is the control plane saying it no longer
-    ///   vouches for this daemon at all (the token was revoked, the tenant was
-    ///   cancelled), and "off" is the answer to every doubt. So is a 404: a
-    ///   control plane with no such route has granted nothing.
+    /// - A REFUSAL CLEARS IT, and only a refusal. A 401 is the control plane
+    ///   saying it no longer vouches for this daemon at all (the token was
+    ///   revoked, the tenant was cancelled). It is the one answer that is a
+    ///   decision about this daemon rather than weather, which is why the
+    ///   control plane takes care to answer 503 and not 401 when it could not
+    ///   look the token up.
     ///
     /// Never returns an error: there is nothing a caller could do with one,
     /// and a daemon must not stop serving mail over a hidden-feature list.
@@ -325,8 +330,10 @@ impl FeatureRefresher {
             let delay = self.refresh_once().await;
             tokio::select! {
                 _ = tokio::time::sleep(delay) => {}
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() { return; }
+                // A dropped sender ends the loop too: `changed()` would then
+                // return at once forever, and this would be a GET in a spin.
+                res = shutdown.changed() => {
+                    if res.is_err() || *shutdown.borrow() { return; }
                 }
             }
         }
@@ -347,7 +354,7 @@ impl FeatureRefresher {
                 }
                 FEATURE_REFRESH
             }
-            Err(ShareError::Unauthorized | ShareError::Unavailable) => {
+            Err(ShareError::Unauthorized) => {
                 if self.features.replace_granted(Vec::<String>::new()) {
                     eprintln!(
                         "squelch: hidden features cleared (the control plane refused this daemon)"

@@ -189,9 +189,19 @@ struct FeaturesGranted {
 /// has never heard anything has nothing on, which is the safe direction.
 pub async fn features(state: State<ControlState>, headers: axum::http::HeaderMap) -> Response {
     let State(state) = state;
-    let Some(sharer) = authenticate(&state, &headers).await else {
-        tracing::warn!("share token refused");
-        return refuse(StatusCode::UNAUTHORIZED, UNAUTHORIZED);
+    // THREE ANSWERS, NOT TWO, and this route is why [`lookup`] exists. The
+    // daemon on the other end treats a 401 as a DECISION ("you are revoked",
+    // so it drops every feature it held) and anything else as weather (so it
+    // keeps them). A store that could not be asked has decided nothing, and
+    // answering 401 for it would switch the whole fleet's hidden features off
+    // for the length of a Postgres restart.
+    let sharer = match lookup(&state, &headers).await {
+        Presented::Tenant(sharer) => sharer,
+        Presented::Refused => {
+            tracing::warn!("share token refused");
+            return refuse(StatusCode::UNAUTHORIZED, UNAUTHORIZED);
+        }
+        Presented::Trouble => return refuse(StatusCode::SERVICE_UNAVAILABLE, UNAVAILABLE),
     };
     match state.store().features_for_tenant(sharer.id).await {
         Ok(features) => (StatusCode::OK, Json(FeaturesGranted { features })).into_response(),
@@ -209,26 +219,51 @@ pub async fn features(state: State<ControlState>, headers: axum::http::HeaderMap
 /// is one byte wrong as for one that is pure noise. A missing or malformed
 /// header takes the same path as a wrong token, which is why nothing here
 /// distinguishes them.
+///
+/// A store that did not answer reads as a refusal HERE, which is right for the
+/// mint (the caller shows nothing either way) and wrong for anything that acts
+/// on the difference; that caller uses [`lookup`].
 async fn authenticate(state: &ControlState, headers: &axum::http::HeaderMap) -> Option<Sharer> {
-    let presented = headers
+    match lookup(state, headers).await {
+        Presented::Tenant(sharer) => Some(sharer),
+        Presented::Refused | Presented::Trouble => None,
+    }
+}
+
+/// What a presented bearer turned out to be.
+enum Presented {
+    /// A live token, and the tenant behind it.
+    Tenant(Sharer),
+    /// Missing, malformed, wrong, revoked, or a cancelled tenant's. One answer.
+    Refused,
+    /// The store could not be asked. NOT a verdict on the token.
+    Trouble,
+}
+
+async fn lookup(state: &ControlState, headers: &axum::http::HeaderMap) -> Presented {
+    let Some(presented) = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))?;
+        .and_then(|v| v.strip_prefix("Bearer "))
+    else {
+        return Presented::Refused;
+    };
     // Bounded before it is hashed: this is an unauthenticated public route
     // until the line below returns, and hashing a megabyte of header is work a
     // stranger should not be able to ask for. A real token is 47 bytes.
     if presented.is_empty() || presented.len() > MAX_TOKEN_LEN {
-        return None;
+        return Presented::Refused;
     }
     match state
         .store()
         .tenant_by_share_token(&share::hash(presented))
         .await
     {
-        Ok(found) => found,
+        Ok(Some(sharer)) => Presented::Tenant(sharer),
+        Ok(None) => Presented::Refused,
         Err(e) => {
             tracing::error!(error = %e, "looking up a share token failed");
-            None
+            Presented::Trouble
         }
     }
 }

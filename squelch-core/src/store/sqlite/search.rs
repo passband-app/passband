@@ -154,7 +154,7 @@ fn map_search_hit_with_window(r: &rusqlite::Row<'_>) -> rusqlite::Result<SearchH
 /// a user value is matched LITERALLY. Pairs with `ESCAPE '\'` in the SQL; every
 /// `from:` predicate must carry both halves or a `%` in the reader's text turns
 /// into a wildcard.
-fn escape_like(value: &str) -> String {
+pub(super) fn escape_like(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 8);
     for c in value.chars() {
         if matches!(c, '\\' | '%' | '_') {

@@ -34,3 +34,33 @@ schemars = "1"
 # axum hosts it and provides graceful shutdown. Versions track rmcp 2.1.0.
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 tokio-util = "0.7"
+# Agent-door OAuth (src/auth.rs). The daemon is a resource server: it verifies
+# AuthKit's RS256 access tokens locally against the issuer's JWKS.
+# `Authorization: Bearer` parsing, shared with both other doors.
+squelch-httpauth = { path = "../squelch-httpauth" }
+# The SAME feature set squelch-relay uses: one crypto backend in the workspace.
+# jsonwebtoken 11 panics at verify time unless exactly one of rust_crypto /
+# aws_lc_rs is enabled across the build, so never add aws_lc_rs anywhere.
+jsonwebtoken = { version = "11", default-features = false, features = ["use_pem", "rust_crypto"] }
+# JWKS fetch. rustls via the workspace features, like every other outbound call.
+reqwest = { workspace = true }
+url = { workspace = true }
+# Reading a JWKS modulus to enforce the minimum RSA key size.
+base64 = { workspace = true }
+# Wrapping an authorized response body so it ends when the token expires.
+http-body = "1"
+# Only for the `testing` feature's endless-body stub.
+futures = { workspace = true, optional = true }
+
+[features]
+# Exposes `squelch_mcp::testing` (fixture keys, a token signer, a stub JWKS
+# server) to OTHER crates' tests, chiefly squelchd's router tests. Only ever
+# enabled from a [dev-dependencies] entry, so no shipped binary carries it.
+testing = ["dep:futures"]
+
+[dev-dependencies]
+# This crate's own integration tests use `testing` too.
+squelch-mcp = { path = ".", features = ["testing"] }
+tower = { version = "0.5", features = ["util"] }
+# Hand-building an `alg: none` token in the auth tests.
+base64 = { workspace = true }

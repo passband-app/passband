@@ -65,7 +65,8 @@ enum ProductGuide {
         var covers: String {
             switch self {
             case .gettingAround:
-                "the pages, the sidebar rail, navigation keys, undo, zoom, theme"
+                "the pages, the sidebar rail, the Discover page and its progress ring, navigation "
+                    + "keys, undo, zoom, theme"
             case .sitrep:
                 "the home board: For your eyes, Reading, the calendar, shipments, billing and "
                     + "receipts cards, flow mode"
@@ -124,7 +125,12 @@ enum ProductGuide {
     /// One topic's text. `runningVersion` is the build's marketing version, a
     /// parameter for the reason ReleaseNotes takes it as one: this file never
     /// reads a bundle, so the suite can ask as any version it likes.
-    static func text(_ topic: Topic, runningVersion: String?) -> String {
+    ///
+    /// `onPhone` is the same kind of fact, handed in for the same reason: the
+    /// iPhone app is numbered on its own line and keeps its own release notes
+    /// (Lib/PhoneReleaseNotes.swift), so "what's new" there is a different
+    /// table read against a different version.
+    static func text(_ topic: Topic, runningVersion: String?, onPhone: Bool = false) -> String {
         switch topic {
         case .gettingAround: gettingAround
         case .sitrep: sitrep
@@ -138,7 +144,7 @@ enum ProductGuide {
         case .loginCodes: loginCodes
         case .assistant: assistant
         case .appAndAccounts: appAndAccounts
-        case .whatsNew: whatsNew(running: runningVersion)
+        case .whatsNew: onPhone ? whatsNewOnPhone(running: runningVersion) : whatsNew(running: runningVersion)
         }
     }
 
@@ -154,11 +160,12 @@ enum ProductGuide {
         - 4 Rules: sender rules.
         - 5 Groups: named sets of recipients.
         - Usage and Settings sit at the bottom of the rail and have no number key. ⌘, opens Settings.
+        - The ring just above them opens Discover: a list of the ways through mail (the basics, flow mode, reminders, search, teaching Passband, the at a glance cards, the reading stack, writing) with a short guide to each on the right. The ring fills clockwise as the user tries each one on their own mail, and a feature used on three separate days is marked a habit. Nothing ever empties it. Esc leaves the page.
 
         Moving:
         - ⌘[ goes back and ⌘] goes forward.
         - Esc closes whatever is on top: an overlay, a panel, an open email. From a page it returns to the Sitrep.
-        - / or ⌘F opens search.
+        - / opens search, and so does ⌘F from any page. With an email open, ⌘F finds text in that email instead.
         - ⌘K opens this assistant. ⌘⇧K starts a new chat.
         - c or ⌘N starts a new message.
         - ? or ⌘/ shows the keyboard shortcut sheet.
@@ -205,10 +212,11 @@ enum ProductGuide {
         - Hover a Reading card and press e to mark everything from that sender done. That one cannot be undone.
 
         Other things on the page:
-        - Clicking the headline asks for a different one. The name in the greeting is set in Settings > General > You.
+        - Clicking the headline asks for a different one. The name in the greeting starts as the first name on the mailbox's Google profile (or the first part of the address when that is not available) and is changed in Settings > General > You.
         - With nothing in For your eyes the page says there is no important mail, shows the day's tally and links to all mail.
         - "ingesting" in the top bar means new mail is still being sorted and will land on the next refresh.
         - Unsubscribes Passband is carrying out show in a tray at the bottom right.
+        - If a sender keeps emailing after an unsubscribe, a notice appears at the bottom left with "Block sender" and "Keep". When that sender also sends mail worth having, the notice adds "Smart block": it shows a rule that keeps the important kinds and drops the promotion, and saves it as a filter rule on that address.
         """
 
     private static let readingMail = """
@@ -219,6 +227,12 @@ enum ProductGuide {
         - j or the down arrow goes to the newer message, k or the up arrow to the older one.
         - The right arrow or l opens the next email in the list the user came from. The left arrow opens the previous one.
         - Esc or ⌘[ goes back. If a side panel is open, the first Esc closes that.
+
+        Finding text in the open email:
+        - ⌘F opens a find bar at the top right of the reader. Typing highlights every match in the thread and shows a count like "2 of 7".
+        - Enter or ⌘G goes to the next match, Shift+Enter or ⌘⇧G to the previous one. The arrows on the bar do the same. It wraps around, across every message in the thread.
+        - Esc closes the bar. A second Esc closes the email.
+        - It searches the text that is shown. Open "show quoted history" on a message to include its quoted replies.
 
         Finishing:
         - e or d: done, and close the reader. The header has an "e done" button too.
@@ -255,6 +269,7 @@ enum ProductGuide {
         - Forward: press f. It forwards the message selected with j / k, in the side composer, with the original shown under the note. Fill in To and send; the note is optional.
         - From the Sitrep or a row in the Emails list, r opens the email and starts the reply in one step. On a list row f is "search this sender", not forward.
         - The Mac reader has no reply buttons. The keys are the way in.
+        - On the iPhone there are no keys. Scroll to the end of an open email for the reply and reply all buttons, or swipe one message to the left for Reply all, Reply and Forward on that message. The reply is written in a card under the thread and scrolls with it.
 
         New message:
         - c on the Sitrep, the Emails list or the reader, or ⌘N from anywhere.
@@ -270,6 +285,7 @@ enum ProductGuide {
         Groups:
         - "groups" on the To line addresses a saved group. New messages only, not replies or forwards.
         - Groups are made on the Groups page (key 5): n new, e or Enter edit, x delete.
+        - On the iPhone, Groups is under the person icon at the top left of the Sitrep: + makes one, tap opens it, swipe a group to the left to edit or delete it.
         - Each group is set to go out one way: To (one email, everyone sees the list), Bcc (one email, nobody sees anyone else) or Individually (a separate email per person).
 
         Sending:
@@ -365,12 +381,13 @@ enum ProductGuide {
 
         Making one:
         - From an email: press t in the reader, or on a highlighted row on the Sitrep or in the Emails list. The editor opens for that sender and may suggest a sentence; Tab takes the suggestion.
-        - From the Rules page (key 4, or T on the Emails page): n.
+        - From the Rules page (key 4, or T on the Emails page): n. Typing in the match field lists senders who have written to the user, by name or address; typing *@ lists whole domains instead. Arrows pick, Enter or Tab takes one, Esc hides the list.
         - In the editor: Enter saves, Option+Enter adds a line, Esc cancels and keeps what was typed. "advanced" (⌘D) shows the match pattern and the disposition picker, and with it open Tab cycles the disposition.
         - This assistant can write one when asked. It only adds rules; it never changes one the user wrote.
 
         Managing them:
         - On the Rules page: j / k move, e or Enter or a click edits, x deletes (with undo).
+        - On the iPhone, Rules is under the person icon at the top left of the Sitrep: + makes one, tap a rule to edit it, swipe it to the left to delete it (with undo). Swiping a mail row to the left and choosing Tune writes a rule for that sender.
         - Rules are grouped by what they do (allow, filter, mute) and then by domain.
         - A rule shapes mail from now on. It does not move mail already on the board. The exception is "Block sender", offered when unsubscribing from an email that has no unsubscribe link: it mutes that address and clears their open mail.
         - Rules live in Passband only. They never change anything in Gmail.
@@ -381,6 +398,7 @@ enum ProductGuide {
 
         Setting one:
         - Press h on the email: on the Sitrep, in the Emails list, or in the reader, where it then moves on to the next email.
+        - On the iPhone: swipe a mail row to the right and choose Remind, or tap "remind me" under the subject of an open email.
         - Pick a preset (in an hour, this evening, tomorrow morning, tomorrow evening, this weekend, next week, in a week, next month) or type a time: "friday", "aug 30", "in 3 hours", "the 24th". Each choice shows the exact time it means. Enter sets it.
 
         What happens:
@@ -396,7 +414,8 @@ enum ProductGuide {
 
     private static let search = """
         Opening:
-        - / from any page, or ⌘F. Reopening search brings back the last query, selected so typing replaces it.
+        - / from any page, or ⌘F when no email is open. Reopening search brings back the last query, selected so typing replaces it.
+        - With an email open, ⌘F finds text inside that email instead (see reading_mail). / still opens search from there.
         - f on a row in the Emails list searches everything from that sender.
 
         What it searches:
@@ -460,7 +479,7 @@ enum ProductGuide {
         Deeper search is the same agent working inside search. See the search topic.
 
         Connecting an outside agent (Settings > Agents):
-        - Passband has an MCP endpoint that Claude Code, Claude Desktop, Codex, Cursor or OpenClaw can connect to. The pane shows the address and a copyable setup snippet for each.
+        - Passband has an MCP endpoint (Agent MCP) that Claude, OpenClaw, Hermes Agent, ChatGPT, Claude Code, Codex, Cursor, VS Code or Claude Desktop can connect to. The pane shows the address, a button that adds it where the agent has an install link (Claude, Cursor, VS Code) or copies the setup otherwise, and the setup snippet for each.
         - Such an agent can read ranked updates and whole threads, search mail, list bills, deadlines and packages, and set sender rules. It cannot send, archive, label or delete, cannot see login codes, and cannot change anything in Gmail.
         - Hosted Passband does not offer this yet. A self-hosted daemon does.
         """
@@ -470,7 +489,9 @@ enum ProductGuide {
         - Add one from the Accounts menu ("Add Account…") or Settings > Account: sign in with Gmail, or connect a self-hosted server with a pairing code or an API token.
         - Switch with ⌘1 to ⌘9, in the order listed in Settings > Account, or from the account badge at the bottom of the rail once there are two or more. Switching starts a fresh assistant chat.
         - Rename an account by editing its name in Settings > Account. "remove", then confirm, takes it off this Mac. On the last account the button reads "disconnect".
+        - The account badge and the switcher show the photo from the mailbox's Google profile when Passband has been allowed to read it, and the account's initial otherwise. An account connected before this existed shows its initial until it is reconnected.
         - Notifications arrive for every account, not only the one on screen.
+        - If the account's server is not answering at launch, Passband keeps retrying on its own. After a couple of seconds the loading screen offers "Try again now", "Switch to" each other account, and "Connect a different server". The Accounts menu and ⌘1 to ⌘9 switch from there too. Nothing is removed: the Connect screen's "Try saved connection again" goes back to the saved account.
         - If the Google sign-in expires, a banner on the Sitrep says Passband cannot read the mail. On a hosted account it has a Reconnect button.
 
         Notifications:
@@ -481,21 +502,53 @@ enum ProductGuide {
         Updates:
         - Passband checks for a new version every hour and downloads it in the background. It installs the next time Passband quits.
         - When one is ready, a card at the bottom of the window offers "Restart" to install it now. "Later" hides the card for an hour.
-        - While a new version is waiting, a down-arrow icon sits in the sidebar above the share icon. Clicking it brings the card back.
+        - While a new version is waiting, a down-arrow icon sits near the bottom of the sidebar. Clicking it brings the card back.
         - The Passband menu has "Check for Updates…". The installed version is printed at the bottom right of Settings.
         - Settings > General > Help has "What's new" for the release notes and "Practice inbox" to replay the tour.
+        - On the iPhone, "What's new" is under the person icon at the top left of the Sitrep, in General. It shows the iPhone's own release notes full screen: swipe left for the next page, right to go back, and the x at the top right closes it. The iPhone has no practice inbox.
 
         Usage and audit:
         - Usage, at the bottom of the rail: mail in and out, signal against noise, triage spend and assistant usage, over 7, 30 or 90 days.
         - Audit log (Settings > Audit, or A on the Emails page): every action taken on the mail by the user or by an agent, with undo for the reversible ones.
 
         Sharing:
-        - The gift icon on the rail, or Settings > Account > Invites, sends a friend an invite from the user's own address. Shown only where the server supports it.
+        - Settings > Account > Invites sends a friend an invite from the user's own address. Shown only where the server supports it.
         - Settings > Account also has the link to the iPhone app on TestFlight.
 
         Privacy:
         - Settings > Privacy sets telemetry to Full, Minimal or None.
         """
+
+    /// The iPhone's answer, read off the table its own walk reads, so the chat
+    /// and the walk cannot describe different releases. A build older than the
+    /// first phone note says so instead of reciting a note for a version that
+    /// is not installed.
+    private static func whatsNewOnPhone(running: String?) -> String {
+        let reopen =
+            "The iPhone shows this once per version, full screen, a page per feature. To see it "
+            + "again, tap the person icon at the top left of the Sitrep, then General, then "
+            + "What's new."
+        guard let running else {
+            return "This build does not report its version, so there are no release notes to read. " + reopen
+        }
+        guard let note = PhoneReleaseNotes.newest(atOrBelow: running) else {
+            return "This iPhone is running Passband \(running). No release notes are on record for it."
+        }
+        var lines = [
+            "This iPhone is running Passband \(running).",
+            "Release \(note.version), \(note.date): \(note.headline)",
+            "",
+        ]
+        for feature in note.features {
+            lines.append("- \(feature.title). \(feature.detail)")
+        }
+        for aside in note.also {
+            lines.append("- " + aside.text)
+        }
+        lines.append("")
+        lines.append(reopen)
+        return lines.joined(separator: "\n")
+    }
 
     /// The newest release this build is at or past, read off the one table the
     /// What's New card reads (Lib/ReleaseNotes.swift), so the chat and the card

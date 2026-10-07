@@ -54,7 +54,8 @@ Nothing else is authenticated either, and that is the design: every stranger's
 self-hosted daemon is a legitimate client, so there is no credential anyone
 could be asked for. The defenses are strict validation of the registered consent
 URL (including a **scope allowlist**: a registration may only ask for the scopes
-`squelchd` itself asks for, `gmail.readonly` / `gmail.modify` / `gmail.send`, so
+`squelchd` itself asks for, `gmail.readonly` / `gmail.modify` / `gmail.send` and
+the optional `userinfo.profile`, so
 nobody can park a link on our domain requesting full mailbox control),
 high-entropy identifiers minted by the daemon, a session table capped at 4096
 with a 10 minute TTL, a per-client ceiling of 16 live sessions, and per-client

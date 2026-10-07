@@ -12,6 +12,31 @@ updates itself, the phone comes through TestFlight, and the daemon is
 rolled onto hosted accounts or pulled as an image on a self-host box,
 so every note says which one it landed in.
 
+## 0.0.13 (2026-10-05)
+
+Cleanup Time
+
+### Mac
+
+- **Connect your agents.** Hosted accounts can sign Claude or ChatGPT in to their mailbox from Settings, under Agents
+- **Smart block.** When a sender ignores your unsubscribe, block just the mail you did not want
+- Ask ⌘K how Passband works
+- `⌘F` to find text in an email
+- E and S walk Reading from one sender to the next
+- Better rule writing
+- Auto update
+- Better UX
+- Bug fixes
+
+### iPhone
+
+- Bug fixes
+
+### Daemon
+
+- Suggests a smart block for senders who ignore an unsubscribe
+- Bug fixes
+
 ## 0.0.12 (2026-10-01)
 
 Philipp's Update

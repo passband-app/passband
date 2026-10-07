@@ -43,7 +43,9 @@ struct MailFilterBar: View {
                     }
                 }
             }
-            Spacer(minLength: 8)
+            #if os(macOS)
+                Spacer(minLength: 8)
+            #endif
             // The reminder lens is your own parked list, which the picker does
             // not narrow; a lit control there would claim it did.
             CategoryPicker()
@@ -53,7 +55,9 @@ struct MailFilterBar: View {
         #if os(macOS)
             .padding(.horizontal, Space.s24)
         #else
-            .padding(.horizontal, Space.s16)
+            // Trailing only: the lenses' own scroller reaches the screen's
+            // leading edge and insets its content instead (`pillScroller`).
+            .padding(.trailing, Space.s16)
         #endif
         .padding(.top, Space.s10)
         .padding(.bottom, Space.s2)
@@ -62,14 +66,39 @@ struct MailFilterBar: View {
 
 /// The pills scroll sideways on a phone, where five of them do not fit; on a
 /// Mac they sit in the bar as they are.
-@ViewBuilder private func pillScroller<C: View>(@ViewBuilder _ content: () -> C) -> some View {
+///
+/// THE SCROLLER ENDS WHERE THE PICKER BEGINS. It used to draw past its own
+/// frame (`scrollClipDisabled`, so a pill could run out to the screen's edge),
+/// and the frame's other neighbour is the category picker, whose capsule has
+/// no fill: the fourth and fifth lenses were drawn straight through it. Now
+/// the scroller keeps to its frame and gets its bleed the honest way, by
+/// owning the leading edge of the screen and insetting what it scrolls. On
+/// the picker's side the last few points fade out, which is what says there
+/// are more lenses under there, and the inset on that side is the fade's
+/// width, so the last lens scrolls clear of it and stops.
+@MainActor @ViewBuilder private func pillScroller<C: View>(@ViewBuilder _ content: () -> C) -> some View {
     #if os(macOS)
         content()
     #else
         ScrollView(.horizontal, showsIndicators: false) { content() }
-            .scrollClipDisabled()
+            .contentMargins(.leading, Space.s16, for: .scrollContent)
+            .contentMargins(.trailing, pillFade, for: .scrollContent)
+            .mask {
+                HStack(spacing: 0) {
+                    Rectangle()
+                    LinearGradient(
+                        colors: [.black, .clear], startPoint: .leading, endPoint: .trailing
+                    )
+                    .frame(width: pillFade)
+                }
+            }
     #endif
 }
+
+#if !os(macOS)
+    /// How much of the scroller's trailing end dissolves.
+    private let pillFade: CGFloat = 22
+#endif
 
 /// WHICH SITREP ZONES THE LIST SHOWS, a menu of every zone with a tick each.
 /// Unticking one (Shipments, say) hides its mail from all mail until it is

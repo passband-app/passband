@@ -238,11 +238,29 @@ returns is a pairing code the tenant's own store adjudicates.
 
 ### The agent door
 
-Each tenant's Ingress declares exactly three path prefixes: `/client`,
-`/console` and `/t`. `/mcp` matches no rule, so the ingress controller answers
-404 for it. An allowlist rather than a deny rule, because a deny rule has to
-name every spelling of the thing it refuses and fails open when it misses one.
-The list is `HUMAN_DOOR_PREFIXES` in `src/objects.rs`, with a test on it.
+Unpublished by default. Each tenant's Ingress declares exactly three path
+prefixes, `/client`, `/console` and `/t`, plus an Exact `/` for the console
+redirect. `/mcp` matches no rule, so the ingress controller answers 404 for it.
+An allowlist rather than a deny rule, because a deny rule has to name every
+spelling of the thing it refuses and fails open when it misses one. The list is
+`HUMAN_DOOR_PREFIXES` in `src/objects.rs`, with a test on it.
+
+Published when `SQUELCH_WARDEN_MCP_OAUTH_ISSUER` is set. That one setting does
+two things, and they only make sense together:
+
+- every tenant pod gets `SQUELCH_MCP_OAUTH_ISSUER=<issuer>` and
+  `SQUELCH_MCP_PUBLIC_URL=https://<label>.<base domain>/mcp`, which puts the
+  daemon's `/mcp` into OAuth mode (a token from that issuer, for that URL, for
+  that tenant's own mailbox address, or nothing);
+- every tenant Ingress adds Prefix `/mcp` and Prefix
+  `/.well-known/oauth-protected-resource` (`AGENT_DOOR_PREFIXES`), and nothing
+  else.
+
+The warden never renders `SQUELCH_MCP_ALLOWED_HOSTS`, in either state, and a
+test holds it to that. A daemon adds its public hostname to its own Host
+allow-list only in OAuth mode, so a tenant still on an image that predates OAuth
+answers 403 behind a published `/mcp` instead of serving mail. Turning it on is
+an ordered procedure: `deploy/hosted/SETUP.md`, "Publishing the agent door".
 
 ### The network
 
@@ -326,6 +344,7 @@ holds even for a tenant reconciled by hand.
 | `SQUELCH_WARDEN_TLS_SECRET` | `passband-wildcard-tls` | The wildcard certificate, in the tenant namespace. |
 | `SQUELCH_WARDEN_OAUTH_SECRET_NAME` | `google-oauth-client` | Secret holding the web client tenant daemons refresh with. |
 | `SQUELCH_WARDEN_CONSOLE_SSO_URL` | unset | Control plane origin, passed on as `SQUELCH_CONSOLE_SSO_URL`. Origin only. |
+| `SQUELCH_WARDEN_MCP_OAUTH_ISSUER` | unset | Publishes the agent door with OAuth. The AuthKit issuer, an `https://` origin with no port and no path (e.g. `https://example.authkit.app`). Passed on as `SQUELCH_MCP_OAUTH_ISSUER`, with `SQUELCH_MCP_PUBLIC_URL=https://<label>.<base domain>/mcp`, and adds `/mcp` and `/.well-known/oauth-protected-resource` to every tenant Ingress. Unset renders exactly what a warden without it did. Set it LAST; see SETUP.md, "Publishing the agent door". |
 | `SQUELCH_WARDEN_STORAGE_CLASS` | `local-path` | k3s's built-in provisioner. |
 | `SQUELCH_WARDEN_STORAGE_SIZE` | `10Gi` | Per-tenant volume. |
 | `SQUELCH_WARDEN_CPU_REQUEST` | `100m` | Tenant daemon container. |
@@ -646,6 +665,21 @@ answer is `squelch-control reconcile <label>` per tenant, which re-applies all
 five objects in provision order; a tenant being rolled for some Deployment-visible
 reason picks the rest up as a side effect of that, which is luck rather than
 coverage.
+
+`SQUELCH_WARDEN_MCP_OAUTH_ISSUER` is the one Ingress-shaped knob that is not
+luck, almost. It also adds two variables to every pod, so every tenant's
+Deployment drifts, the roll reconciles each one, and a reconcile re-applies the
+Ingress right after the Deployment. The "almost" is two routes that apply the
+Deployment and NOT the Ingress: `PUT .../llm-key` (`set_llm_key`) and
+`PUT .../share-token` (`set_share_token`). One of those landing on a tenant
+after the knob changes and before the roll reaches it makes that tenant's
+Deployment current with its Ingress still on the old paths, and the roll then
+calls it current forever. A reconcile whose Ingress apply fails after its
+Deployment apply succeeded leaves the same shape. Both directions fail closed:
+a missing route is a 404, and a route left behind after the knob is removed
+reaches a daemon with no public host on its allow-list, which answers 403.
+SETUP.md's "Publishing the agent door" has the check that finds such a tenant
+and the `reconcile` that fixes it.
 
 **`reconcile`'s anti-resurrection guard still has one narrow race, and it is
 much narrower than it was.** The guard asks `passband.email/cancelled-at`, which

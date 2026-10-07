@@ -789,6 +789,22 @@ struct RuleSuggestion: Codable, Sendable {
     var suggestion: String?
 }
 
+/// `GET /client/unsubscribes/smart_block`. Null when the sender sends nothing
+/// worth keeping apart, or the daemon could not say.
+struct SmartBlockAnswer: Codable, Sendable {
+    var smart_block: SmartBlockProposal?
+}
+
+/// A filtered rule proposed for a sender who ignored an unsubscribe: `rule` is
+/// the sentence that gets saved, `keeps` and `drops` are what it means at a
+/// glance. All three are model text about the sender's own subjects, so they
+/// are shown as plain Text and saved only on the owner's click.
+struct SmartBlockProposal: Codable, Sendable, Hashable {
+    var rule: String
+    var keeps: String
+    var drops: String
+}
+
 /// GET /client/v2/fye/headline. Null when the daemon has no model, the band is
 /// empty, or the model had nothing to say.
 struct FyeHeadline: Codable, Sendable {
@@ -834,7 +850,8 @@ enum UnsubStatus: String, LenientRawEnum {
 }
 
 enum UnsubResolution: String, LenientRawEnum {
-    case blocked, dismissed
+    /// `filtered` is a smart block: a filtered rule in place of a mute.
+    case blocked, filtered, dismissed
     static var unknownFallback: UnsubResolution { .dismissed }
 }
 
@@ -870,6 +887,11 @@ struct UnsubscribeRecord: Codable, Sendable, Hashable, Identifiable {
     /// choose_topics | needs_browser | link_error | unclear, for `needs_you`.
     var status_reason: String? = nil
     var status_at: String? = nil
+    /// The smart block the daemon has worked out for this sender, and whether
+    /// it has worked one out at all: asked with no proposal is a settled no.
+    /// Both absent from a daemon without smart blocks.
+    var smart_block: SmartBlockProposal? = nil
+    var smart_block_asked: Bool? = nil
 
     var id: String { sender }
 }
@@ -984,6 +1006,15 @@ struct StoreStats: Codable, Sendable, Hashable {
     /// is not the same as an anonymous mailbox: nothing is seeded and the
     /// greeting stays bare, exactly as it did before this field existed.
     var account_email: String?
+    /// The mailbox owner's given name, from their Google profile. ABSENT when
+    /// the daemon does not know it: an older daemon, or a Google grant from
+    /// before the name was asked for. Seeds the greeting in place of the
+    /// address's local part when it is there.
+    var account_given_name: String?
+    /// The tag of the profile photo the daemon holds for this account, served
+    /// at `/client/account/photo`. ABSENT means there is no photo, and the
+    /// account wears its initial. See `AccountPhotos`.
+    var account_photo: String?
     var total: Int
     var sealed: Int
     /// How many messages the mail PROVIDER filed as spam — its own count, not a
@@ -1534,6 +1565,22 @@ struct SenderHit: Codable, Sendable, Equatable, Identifiable {
     var last_received_at: String
 
     var id: String { addr }
+}
+
+/// One row of the sender directory rolled up by host (GET
+/// /client/sender-domains): everyone at one domain who has written to this
+/// account, for the rule editor's `*@` suggestions. The host is exactly what
+/// the addresses carry, subdomain and all, because that is what a rule's glob
+/// has to match.
+struct SenderDomainHit: Codable, Sendable, Equatable, Identifiable {
+    var domain: String
+    /// How many addresses at the host. nil when the row was rolled up on this
+    /// side from a page of senders, which cannot know.
+    var sender_count: Int?
+    var msg_count: Int
+    var last_received_at: String?
+
+    var id: String { domain }
 }
 
 /// GET /client/person?addr= — the reader's contact card: everything the daemon

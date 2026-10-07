@@ -183,7 +183,7 @@ The `/client/*` surface is implemented in `Model/APIClient.swift`, with
 `Model/WireTypes.swift` mirroring the daemon's serde output exactly. Routes: `updates`, `thread/{id}`, `search`, `stats`, `usage`,
 `triage-config` (GET/POST), `audit`, `shipments`, `receipts`, `calendar`,
 `banking`, `marketing`, `triage-debug/{id}`, `attachments/{id}`, `rules`
-(GET/POST/DELETE), `unsubscribe`, `unsubscribes`, `unsubscribes/opened`, `unsubscribes/resolution`,
+(GET/POST/DELETE), `unsubscribe`, `unsubscribes`, `unsubscribes/opened`, `unsubscribes/resolution`, `unsubscribes/smart_block`,
 `sealed`, `sealed/{id}/reveal`, `updates/{id}/status`, `actions/{archive,label,send}`,
 `refresh`, `retriage`, `shredder` (GET/POST), `shredder/run`, `triage-feedback`
 (GET/POST), `messages/{id}/opens`, `tracking-config` (GET/POST).

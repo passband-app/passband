@@ -28,6 +28,18 @@
 // The rails are painted UNDER the row and revealed by moving the row, not built
 // as a stack that grows: one clip, one offset, and the row's own glass never
 // changes identity.
+//
+// THE READER'S MESSAGE CARDS WEAR IT TOO, and three things about a card are not
+// true of a sitrep row, each answered by a parameter that is off by default.
+// A card can be three screens tall, so its rail's labels cannot sit at the
+// card's own middle: they sit where the thumb came down (`followsTouch`). A
+// card lives in a pushed screen, where a rightward drag is the way back, so an
+// edge with no verbs must not start a pan at all (`yieldsEmptyEdges`). And a
+// card sits on the reader's ground rather than on a zone card's (`ground`).
+// The fourth is about looks. A sitrep row is a line tall, and a rail of solid
+// colour behind it is a band; behind three screens of mail the same rail is a
+// wall. So a card's verbs are discs on the ground the card slid off
+// (`floating`), which is the same vocabulary at a size that fits.
 
 import SwiftUI
 import UIKit
@@ -36,10 +48,29 @@ struct SwipeRow<Content: View>: View {
     var leading: [SwipeVerb] = []
     var trailing: [SwipeVerb] = []
     var cornerRadius: CGFloat = 10
+    /// Width of one rail button. Wide enough for a 15pt glyph over a caption.
+    var buttonWidth: CGFloat = 74
+    /// What the row slides OVER its rail on; nil is the sitrep's zone-card
+    /// ground. See the opaque fill under `content`.
+    var ground: Color? = nil
+    /// Hang the rail's labels at the height the pan began at rather than at
+    /// the row's middle. For a row that can be taller than the screen.
+    var followsTouch = false
+    /// Draw the verbs as tinted glass discs with a caption under each, on the
+    /// bare ground, instead of as full-height slabs of the verb's colour.
+    var floating = false
+    /// Refuse a pan toward an edge that has no verbs (and no open rail to
+    /// close), instead of rubber-banding it. The refusal happens before the
+    /// touch is owned, so whatever else wants that direction (the navigation
+    /// stack's swipe back) gets it untouched.
+    var yieldsEmptyEdges = false
+    #if DEBUG
+        /// Mount with the trailing rail already out. There is no thumb in a
+        /// simulator; see FixtureStage.
+        var stagedOpen = false
+    #endif
     @ViewBuilder var content: Content
 
-    /// Width of one rail button. Wide enough for a 15pt glyph over a caption.
-    private static var buttonWidth: CGFloat { 74 }
     /// How far past the rail a drag must go before letting go COMMITS the
     /// edge's primary verb instead of just resting the rail open.
     private static var commitOverrun: CGFloat { 56 }
@@ -52,12 +83,16 @@ struct SwipeRow<Content: View>: View {
     @State private var drag: CGFloat = 0
     /// Edge-detects the commit threshold so the "you are past it" tap fires once.
     @State private var wasArmed = false
+    /// Where the pan that pulled this rail out began, in the row's own space,
+    /// and how tall the row is. Only read when `followsTouch`.
+    @State private var touchY: CGFloat?
+    @State private var height: CGFloat = 0
 
     private var offset: CGFloat { resting + drag }
     private var open: Bool { resting != 0 }
 
     private func railWidth(_ verbs: [SwipeVerb]) -> CGFloat {
-        CGFloat(verbs.count) * Self.buttonWidth
+        CGFloat(verbs.count) * buttonWidth
     }
     private var leadingWidth: CGFloat { railWidth(leading) }
     private var trailingWidth: CGFloat { railWidth(trailing) }
@@ -92,9 +127,13 @@ struct SwipeRow<Content: View>: View {
                 // itself reads as a lighter panel sliding over a darker one.
                 .background {
                     if open || drag != 0 {
-                        ZStack {
-                            Palette.canvas
-                            Palette.glassTint
+                        if let ground {
+                            ground
+                        } else {
+                            ZStack {
+                                Palette.canvas
+                                Palette.glassTint
+                            }
                         }
                     }
                 }
@@ -113,7 +152,11 @@ struct SwipeRow<Content: View>: View {
                 }
         }
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-        .gesture(RailPan(handle: pan))
+        .gesture(RailPan(handle: pan, mayBegin: mayBegin))
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
+        #if DEBUG
+            .onAppear { if stagedOpen, !trailing.isEmpty { resting = -trailingWidth } }
+        #endif
         .onChange(of: armed) { _, nowArmed in
             // Felt, not watched: the rail is past its commit point.
             if nowArmed, !wasArmed { Haptics.armed() }
@@ -131,41 +174,118 @@ struct SwipeRow<Content: View>: View {
                     Haptics.commit()
                     verb.run()
                 } label: {
-                    VStack(spacing: 3) {
-                        Image(systemName: verb.symbol)
-                            .font(.system(size: 15, weight: .semibold))
-                        Text(verb.title)
-                            .font(Typo.micro)
+                    if floating {
+                        // THE DISC AND ITS CAPTION ARE THE BUTTON, and nothing
+                        // else in the column is: under a card three screens
+                        // tall, a column-high target would fire a reply from a
+                        // tap on bare ground a screen away from the verb.
+                        label(verb, primary: verb.id == primary(verbs)?.id)
+                            .frame(width: buttonWidth, height: labelHeight)
+                            .contentShape(Rectangle())
+                            .frame(maxHeight: .infinity, alignment: followsTouch ? .top : .center)
+                            .offset(y: followsTouch ? labelTop : 0)
+                    } else {
+                        label(verb, primary: false)
+                            .frame(width: buttonWidth, height: labelHeight)
+                            .frame(maxHeight: .infinity, alignment: followsTouch ? .top : .center)
+                            .offset(y: followsTouch ? labelTop : 0)
+                            .background(verb.tint)
+                            .contentShape(Rectangle())
                     }
-                    .foregroundStyle(.white)
-                    .frame(width: Self.buttonWidth)
-                    .frame(maxHeight: .infinity)
-                    .background(verb.tint)
-                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
         }
         // Past the rail's own width the primary verb's colour stretches to fill
         // what the drag opened, which is what says "let go and this happens".
+        // A floating rail has no slab to stretch; its primary disc swells
+        // instead (see `label`).
         .frame(maxWidth: .infinity, alignment: alignment)
         .background(
             (primary(verbs)?.tint ?? Palette.hairline)
-                .opacity(revealed > railWidth(verbs) ? 1 : 0)
+                .opacity(!floating && revealed > railWidth(verbs) ? 1 : 0)
         )
         .frame(maxWidth: .infinity, alignment: alignment)
     }
 
+    /// One verb's face: a glyph over a caption in white on the slab, or a
+    /// tinted disc with its caption in the ground's own ink.
+    @ViewBuilder
+    private func label(_ verb: SwipeVerb, primary: Bool) -> some View {
+        if floating {
+            VStack(spacing: Space.s4) {
+                Image(systemName: verb.symbol)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: Self.discSize, height: Self.discSize)
+                    .glassEffect(.regular.tint(verb.tint).interactive(), in: .circle)
+                    // Armed: this is the one a let-go commits.
+                    .scaleEffect(primary && armed ? 1.14 : 1)
+                    .animation(Motion.disclose, value: armed)
+                Text(verb.title)
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.inkDim)
+                    .lineLimit(1)
+                    .fixedSize()
+            }
+        } else {
+            VStack(spacing: 3) {
+                Image(systemName: verb.symbol)
+                    .font(.system(size: 15, weight: .semibold))
+                Text(verb.title)
+                    .font(Typo.micro)
+            }
+            .foregroundStyle(.white)
+        }
+    }
+
+    private static var discSize: CGFloat { 44 }
+
+    /// The glyph-over-caption block's own height: what `labelTop` centres on
+    /// the thumb, and what keeps it inside a short row.
+    private var labelHeight: CGFloat { floating ? Self.discSize + 22 : 44 }
+
+    /// Where the labels hang when they follow the touch: centred on it, and
+    /// never off either end of the row. A row shorter than the block centres
+    /// it, which is what the fixed rail does anyway.
+    private var labelTop: CGFloat {
+        let room = height - labelHeight
+        guard room > 0 else { return room / 2 }
+        let inset = min(Space.s12, room / 2)
+        let wanted = (touchY ?? height / 2) - labelHeight / 2
+        return min(max(wanted, inset), room - inset)
+    }
+
     // MARK: - gesture
+
+    /// Asked by the recognizer's delegate, before the pan exists: may a drag
+    /// in this direction start at all? Always yes unless `yieldsEmptyEdges`,
+    /// and then only toward an edge that has verbs or away from a rail that is
+    /// out and needs a way to be pushed shut.
+    private func mayBegin(pullingLeft: Bool) -> Bool {
+        guard yieldsEmptyEdges else { return true }
+        return pullingLeft
+            ? !trailing.isEmpty || resting > 0
+            : !leading.isEmpty || resting < 0
+    }
 
     /// The recognizer's whole state machine, in one place. There is no direction
     /// test here and no latch holding one: by the time this sees `.began` the
     /// delegate has already ruled the pan horizontal, and a vertical one is
     /// never reported at all.
-    private func pan(_ recognizer: UIPanGestureRecognizer) {
+    private func pan(_ recognizer: UIPanGestureRecognizer, at point: CGPoint) {
         let raw = recognizer.translation(in: recognizer.view).x
+        // Every event of a pan this row took, not only its first: the page's
+        // own drag can start counting well after a slow pan began.
+        SwipeRowActivity.lastActive = Date()
         switch recognizer.state {
-        case .began, .changed:
+        case .began:
+            // Only a pan that OPENS a rail says where its labels go: one that
+            // starts on a rail already out is adjusting it, and labels that
+            // jumped to the new finger would be buttons that dodge.
+            if !open { touchY = point.y }
+            drag = banded(raw)
+        case .changed:
             drag = banded(raw)
         case .ended:
             release(raw)
@@ -231,8 +351,11 @@ struct SwipeRow<Content: View>: View {
 /// subclass cannot carry the `@objc` witnesses an ObjC delegate protocol needs.
 @MainActor
 private struct RailPan: UIGestureRecognizerRepresentable {
-    /// Called for `.began`, `.changed`, `.ended`, `.cancelled` and `.failed`.
-    var handle: (UIPanGestureRecognizer) -> Void
+    /// Called for `.began`, `.changed`, `.ended`, `.cancelled` and `.failed`,
+    /// with the touch in the row's own coordinate space.
+    var handle: (UIPanGestureRecognizer, CGPoint) -> Void
+    /// Whether a horizontal pan may begin: true = the finger is moving LEFT.
+    var mayBegin: (Bool) -> Bool
 
     func makeCoordinator(converter: CoordinateSpaceConverter) -> Coordinator {
         Coordinator()
@@ -245,6 +368,7 @@ private struct RailPan: UIGestureRecognizerRepresentable {
         pan.minimumNumberOfTouches = 1
         pan.maximumNumberOfTouches = 1
         pan.delegate = context.coordinator
+        context.coordinator.mayBegin = mayBegin
         return pan
     }
 
@@ -254,14 +378,19 @@ private struct RailPan: UIGestureRecognizerRepresentable {
         // the one thing this row cannot survive is losing the seat that holds
         // the direction verdict. A pointer write is cheap insurance.
         recognizer.delegate = context.coordinator
+        // And the row's current answer about its edges, which changes as its
+        // rail opens and shuts.
+        context.coordinator.mayBegin = mayBegin
     }
 
     func handleUIGestureRecognizerAction(_ recognizer: UIPanGestureRecognizer, context: Context) {
-        handle(recognizer)
+        handle(recognizer, context.converter.localLocation)
     }
 
     @MainActor
     final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var mayBegin: (Bool) -> Bool = { _ in true }
+
         /// THE VERDICT, and the only one. Velocity at the moment UIKit is ready
         /// to start the pan says which way the finger is really going; a
         /// vertical lead means the page is scrolling and this row never enters
@@ -280,10 +409,18 @@ private struct RailPan: UIGestureRecognizerRepresentable {
             // direction by the time UIKit asks.
             let velocity = pan.velocity(in: pan.view)
             if velocity != .zero, abs(velocity.x) != abs(velocity.y) {
-                return abs(velocity.x) > abs(velocity.y)
+                return abs(velocity.x) > abs(velocity.y) && mayBegin(velocity.x < 0)
             }
             let translation = pan.translation(in: pan.view)
-            return abs(translation.x) > abs(translation.y)
+            return abs(translation.x) > abs(translation.y) && mayBegin(translation.x < 0)
         }
     }
+}
+
+/// When a row's rail was last being panned. A page that has a sideways gesture of
+/// its own (the sitrep's swipe to the account page) reads this to know the
+/// drag it is also hearing belonged to a row, and leaves it alone.
+@MainActor
+enum SwipeRowActivity {
+    static var lastActive = Date.distantPast
 }

@@ -104,9 +104,11 @@ run_suite pairing \
 # One file, no dependencies: ReleaseNotes.swift is kept free of SwiftUI and
 # Bundle precisely so this suite and make-changelog.sh can both compile it
 # alone, and so the running version arrives as an argument rather than as
-# whatever bundle the binary happens to sit in.
+# whatever bundle the binary happens to sit in. The iPhone's own table rides
+# along: it is keyed by the phone's version and asks the same rules.
 run_suite release-notes \
   Sources/Passband/Lib/ReleaseNotes.swift \
+  Sources/Passband/Lib/PhoneReleaseNotes.swift \
   Tests/ReleaseNotesTests.swift
 
 # One file, no dependencies at all — SubjectText is kept that way on purpose.
@@ -239,6 +241,13 @@ run_suite share-nudge \
   Sources/Passband/Lib/ShareNudge.swift \
   Tests/ShareNudgeTests.swift
 
+# The discovery ledger: found on the first move, kept on the third distinct
+# day, never regressing, and a blob from another build costing nobody their
+# ring. Foundation only; the UserDefaults shell around it is Discovery.swift.
+run_suite discovery-ledger \
+  Sources/Passband/Lib/DiscoveryLedger.swift \
+  Tests/DiscoveryLedgerTests.swift
+
 # When the iPhone ask fires: two days in, never to somebody whose mailbox has
 # seen the phone app, never on a daemon that has not said, and once.
 run_suite testflight-nudge \
@@ -246,6 +255,17 @@ run_suite testflight-nudge \
   Sources/Passband/Lib/ShareNudge.swift \
   Sources/Passband/Lib/TestFlightNudge.swift \
   Tests/TestFlightNudgeTests.swift
+
+# When the agent-door ad fires: a week in, once, only at a door an agent can
+# actually use, never to somebody who has been to Settings > Agents or whose
+# mailbox an agent has already written to, and never on the iPhone ad's heels.
+run_suite agent-nudge \
+  Sources/Passband/Lib/Platform.swift \
+  Sources/Passband/Lib/ShareNudge.swift \
+  Sources/Passband/Lib/TestFlightNudge.swift \
+  Sources/Passband/Model/AgentConnect.swift \
+  Sources/Passband/Lib/AgentNudge.swift \
+  Tests/AgentNudgeTests.swift
 
 # What "remind me…" resolves to. Foundation only, and every date computed
 # through an injected now/calendar — which is the whole reason it is testable:
@@ -435,6 +455,7 @@ run_suite product-guide \
   Sources/Passband/Lib/ShortcutCatalog.swift \
   Sources/Passband/Lib/SettingsSearch.swift \
   Sources/Passband/Lib/ReleaseNotes.swift \
+  Sources/Passband/Lib/PhoneReleaseNotes.swift \
   Sources/Passband/Lib/ProductGuide.swift \
   Tests/ProductGuideTests.swift
 
@@ -451,9 +472,19 @@ run_suite from-operator \
   Sources/Passband/Lib/FromOperator.swift \
   Tests/FromOperatorTests.swift
 
+# The rule editor's sender menu: what each field text asks the sender
+# directory for (people, or hosts after `*@`), and the host roll-up that
+# stands in for /client/sender-domains on a daemon older than the route.
+run_suite rule-pattern-suggest \
+  Sources/Passband/Model/SubjectText.swift \
+  Sources/Passband/Model/WireTypes.swift \
+  Sources/Passband/Lib/RulePatternSuggest.swift \
+  Tests/RulePatternSuggestTests.swift
+
 # The actual onboarding controller with in-memory collaborators: the store
 # stub flips the real RehearsalMode flag the way the real one does.
 run_suite tour-controller \
+  Sources/Passband/Lib/DiscoveryLedger.swift \
   Sources/Passband/Model/PracticeTourStep.swift \
   Sources/Passband/Model/TourController.swift \
   Tests/TourControllerTests.swift
@@ -467,6 +498,13 @@ run_suite tour-controller \
 run_suite recent-search-ring \
   Sources/Passband/Lib/RecentSearchRing.swift \
   Tests/RecentSearchRingTests.swift
+
+# ⌘F in the reader: matches in a string, the cursor walking them across a
+# thread's messages (wrap, skip, the backwards step into an uncounted message),
+# and the session reconciling its text estimate with what a frame reports.
+run_suite find-in-thread \
+  Sources/Passband/Lib/FindInThread.swift \
+  Tests/FindInThreadTests.swift
 
 run_suite search-preview \
   Sources/Passband/Model/SubjectText.swift \
@@ -501,6 +539,16 @@ run_suite reading \
   Sources/Passband/Lib/SenderIdentity.swift \
   Sources/Passband/Lib/Reading.swift \
   Tests/ReadingTests.swift
+
+# The Agents pane: which probe answers mean a sign-in door (an arbitrary 401
+# must not), and the text it hands somebody to paste. A snippet with a token
+# slot gets pasted with the slot still in, so every one is asserted, and the
+# self-hosted door's snippets are pinned to what they were before. A hosted
+# mailbox is never told to edit a daemon it does not have.
+run_suite agent-connect \
+  Sources/Passband/Lib/HostedServer.swift \
+  Sources/Passband/Model/AgentConnect.swift \
+  Tests/AgentConnectTests.swift
 
 # The all-mail list: lenses and the category picker, day headings and the
 # ranking inside them, the poll's head merging into the scrolled pages, and

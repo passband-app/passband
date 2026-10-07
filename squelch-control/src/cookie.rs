@@ -152,6 +152,23 @@ pub struct SessionClaim {
     /// the payload bytes it had.
     #[serde(default, skip_serializing_if = "is_false")]
     pub reconnect: bool,
+    /// Whether this is an AGENT login (WorkOS AuthKit delegating its login to
+    /// us) rather than an app login. Same role and same narrow reach as
+    /// [`SessionClaim::app`] and [`SessionClaim::reconnect`]: it exists so a
+    /// refusal written after the session is gone is worded in the flow the
+    /// person was in, and the callback holds it against the session's own kind
+    /// wherever the session survives.
+    ///
+    /// A MARKER AND NOTHING ELSE. AuthKit's `external_auth_id` is NOT in this
+    /// claim: it lives in the server-side session only (see
+    /// [`crate::sessions::SessionKind::Agent`] for why), so what WorkOS is told
+    /// to complete is decided by the table and never by anything the browser
+    /// holds. A forged `true` buys a stranger a differently worded refusal.
+    ///
+    /// Skipped when false, so every flow that predates agent logins keeps
+    /// exactly the payload bytes it had.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub agent: bool,
     /// Issued-at, unix seconds. The TTL is enforced on the server, so this is
     /// signed rather than trusted.
     pub iat: i64,
@@ -398,6 +415,7 @@ mod tests {
             invite: Some(7),
             app: false,
             reconnect: false,
+            agent: false,
             iat: 1_000_000,
         }
     }
@@ -466,6 +484,7 @@ mod tests {
             invite: None,
             app: true,
             reconnect: false,
+            agent: false,
             ..claim()
         };
         let json = payload(&app);

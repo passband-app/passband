@@ -292,7 +292,10 @@ struct OnboardingIntroView: View {
     /// Where the continue button is on the Mac: a line of copy and a run of
     /// chevrons that keep drifting right, pointing at where the next page is.
     /// It is a hint, not a target; the gesture is the whole screen.
-    private struct SwipeHint: View {
+    ///
+    /// Internal, not private: the phone's What's New walk pages the same way
+    /// and says so with the same line (PassbandiOS/Views/WhatsNewWalk.swift).
+    struct SwipeHint: View {
         let text: String
         @Environment(\.accessibilityReduceMotion) private var reduceMotion
 

@@ -59,7 +59,8 @@ Two consequences worth knowing:
 
    pub const KNOWN: &[Feature] = &[Feature {
        key: CALENDAR,
-       summary: "The calendar page and its mail-derived events.",
+       summary: "The Calendar page: events from mail, a Google Calendar connection, and creating \
+                 and editing events.",
    }];
    ```
 

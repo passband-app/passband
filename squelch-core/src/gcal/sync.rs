@@ -32,6 +32,12 @@
 //! self-host (`squelchd auth --calendar`) and a kick from the calendar page
 //! looks at once.
 //!
+//! BEHIND THE `calendar` HIDDEN FEATURE ([`crate::features::CALENDAR`]). The
+//! loop asks the live [`Features`] handle at the top of every pass: off, the
+//! pass reads no credential, calls Google for nothing and idles like a
+//! missing grant ([`PassOutcome::Disabled`]); the first pass after the flag
+//! turns on syncs, with no restart.
+//!
 //! A pass: resolve the token; decide which calendars to read (the primary
 //! one, plus every calendar the user shows when the list scope was granted,
 //! at most [`MAX_CALENDARS`]); then read each one, incrementally with its
@@ -55,6 +61,7 @@ use super::{
 };
 use crate::credentials::CalendarCredentials;
 use crate::error::{CoreError, Result};
+use crate::features::{CALENDAR, Features};
 use crate::store::SqliteStore;
 use crate::types::AccountId;
 
@@ -108,6 +115,9 @@ async fn stopped(shutdown: &mut watch::Receiver<bool>) {
 /// What one pass came to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PassOutcome {
+    /// The `calendar` hidden feature is off for this mailbox: nothing was
+    /// read and nothing was called.
+    Disabled,
     /// Calendar is not granted: nothing was called.
     NotGranted,
     /// The credential and the primary calendar were read, and Google set no
@@ -135,6 +145,8 @@ pub struct CalendarSync {
     api: CalendarApi,
     kick: Arc<Notify>,
     timing: Timing,
+    /// The live hidden-feature set, asked at the top of every pass.
+    features: Features,
 }
 
 /// A credential failure as a kind: Google refusing the refresh token (or no
@@ -160,8 +172,9 @@ impl CalendarSync {
         store: Arc<SqliteStore>,
         account_id: AccountId,
         creds: Arc<CalendarCredentials>,
+        features: Features,
     ) -> reqwest::Result<Self> {
-        Self::with_api_base(store, account_id, creds, API_BASE)
+        Self::with_api_base(store, account_id, creds, features, API_BASE)
     }
 
     /// The loop against another API origin: a test's local fake.
@@ -169,6 +182,7 @@ impl CalendarSync {
         store: Arc<SqliteStore>,
         account_id: AccountId,
         creds: Arc<CalendarCredentials>,
+        features: Features,
         base: &str,
     ) -> reqwest::Result<Self> {
         Ok(Self {
@@ -183,6 +197,7 @@ impl CalendarSync {
                 idle_recheck: IDLE_RECHECK,
                 backoff_base: BACKOFF_BASE,
             },
+            features,
         })
     }
 
@@ -222,7 +237,7 @@ impl CalendarSync {
                 }
             };
             let (delay, quota) = match outcome {
-                PassOutcome::NotGranted => {
+                PassOutcome::Disabled | PassOutcome::NotGranted => {
                     backoff = None;
                     (self.timing.idle_recheck, false)
                 }
@@ -311,6 +326,9 @@ impl CalendarSync {
 
     /// One pass. Public for tests, which drive passes one at a time.
     pub async fn pass(&self, now: DateTime<Utc>) -> PassOutcome {
+        if !self.features.enabled(CALENDAR) {
+            return PassOutcome::Disabled;
+        }
         let access = match self.creds.calendar_access(self.account_id).await {
             Ok(None) => return PassOutcome::NotGranted,
             Ok(Some(access)) => access,

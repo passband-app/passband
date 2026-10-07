@@ -526,7 +526,7 @@ founder says otherwise:
 - Accounts are two muted fills. Blue is reserved for state: now, next, holds
   and suggested slots.
 
-**Built so far** (Mac client, behind Developer mode): a Calendar destination
+**Built so far** (Mac client, behind the `calendar` hidden feature, §11): a Calendar destination
 second in the rail. The page opens on a conventional month (Month | Agenda in
 the header, `m` and `a`): each cell lists its day top-down as chips in the
 calendar's colour, trips and stays as named bars across the cells they cover,
@@ -1261,12 +1261,47 @@ create an event only behind its existing confirm step.
 
 ## 11. Feature flag
 
-All of this ships dark behind a feature flag so it can be tested on real
-accounts before anyone else sees it. A proper flag system does not exist yet
-and is being designed separately; this feature is its first customer. Until
-it lands, the Calendar page is shown only when the daemon reports `timeline`
-AND the client's Developer mode setting is on (`CalendarGate` in
-`passband/Sources/Passband/Lib/Agenda.swift` is the one place that decides).
+The calendar is the hidden feature `calendar` (`squelch_core::features::CALENDAR`,
+in `KNOWN`, so it is a column on `/admin/features`). How hidden features travel
+is `docs/FEATURES.md`. For this one:
+
+- **Turning it on.** Hosted: tick the box for a tenant, or "Everyone", on
+  `/admin/features`; the daemon hears within five minutes and the app on its
+  next stats poll, with no restart and no release. Development and self-host:
+  start squelchd with `SQUELCH_FEATURES=calendar`.
+- **Off is as if the feature did not exist, on the daemon.** Every route
+  behind the page (`GET /client/timeline`, `PATCH /client/timeline/ghosts/{id}`,
+  `POST /client/timeline/refresh`, `POST /client/calendar/connect`,
+  `POST /client/calendar/events`, `PATCH` and `DELETE
+  /client/calendar/events/{calendar_id}/{id}`) answers the opaque 404
+  (`{"error": "not found"}`) from a route layer (`calendar_routes` in
+  `squelch-api/src/lib.rs`), after bearer auth and before the handler reads a
+  body or calls Google. A refused write writes no audit row: a path that is
+  not served is not an attempt at an action. `/client/stats` says `timeline:
+  false` and carries no `calendar` object. The sync loop asks the flag at the
+  top of every pass and, off, reads no credential and calls Google for
+  nothing; the first pass after it turns on syncs. Each answer is asked at
+  the moment of the decision, so a flip takes effect on the next request or
+  pass.
+- **What keeps running when it is off,** on purpose: ghost projection in the
+  triage commit, and correspondent timezone inference, with `/client/person`'s
+  timezone and `PUT /client/person/timezone` (person-card data) ungated. Both
+  are cheap and never leave the daemon, and keeping them means a mailbox
+  switched on sees its recent history at once instead of starting empty.
+- **The hosted calendar consent** (`/reconnect?calendar=1`) is refused for a
+  tenant without the feature (its own row or the Everyone default), with
+  "Calendar isn't available for this mailbox yet." It is refused at the
+  CALLBACK, after Google, not at the start: the start names no tenant by
+  design (the `hint` is a guard that is never used to look anything up), so
+  refusing there would make the link an oracle for which mailboxes have
+  calendar. Nothing is installed or queued. The plain reconnect is untouched.
+- **The apps.** `CalendarGate.pageAvailable` (in
+  `passband/Sources/Passband/Lib/Agenda.swift`) is the daemon's `timeline` AND
+  `store.hasFeature(.calendar)`. Developer mode no longer has anything to do
+  with it. The rail tile, `⇧C`, number key 2 and the shift of the later pages,
+  the Go menu and the shortcuts sheet all follow it. If the flag turns off
+  while the page is open, the app goes to the Sitrep, closes the event pane
+  (an unsaved draft is discarded) and drops the calendar state.
 
 ## 12. Build order
 

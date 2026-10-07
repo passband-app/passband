@@ -14,7 +14,9 @@ use squelch_core::types::{SealedKind, Sensitivity, Tier};
 use tower::ServiceExt;
 
 mod common;
-use common::{Harness, TOKEN, authed, authed_json, body_json, harness, msg, sent_msg, state_with};
+use common::{
+    Harness, TOKEN, authed, authed_json, body_json, calendar_on, harness, msg, sent_msg, state_with,
+};
 
 #[tokio::test]
 async fn missing_token_is_401() {
@@ -9344,7 +9346,8 @@ async fn stats_offer_a_hosted_mailbox_the_calendar_link() {
     let app = router(
         state
             .with_calendar_credentials(resolver)
-            .with_console_sso_url(Some("https://signup.example/".into())),
+            .with_console_sso_url(Some("https://signup.example/".into()))
+            .with_features(calendar_on()),
     );
     let json = body_json(app.oneshot(authed("GET", "/client/stats")).await.unwrap()).await;
     eprintln!("hosted, not granted: {}", json["calendar"]);
@@ -9369,7 +9372,8 @@ async fn stats_report_a_hosted_calendar_grant() {
     let app = router(
         state
             .with_calendar_credentials(resolver)
-            .with_console_sso_url(Some("https://signup.example".into())),
+            .with_console_sso_url(Some("https://signup.example".into()))
+            .with_features(calendar_on()),
     );
     let json = body_json(app.oneshot(authed("GET", "/client/stats")).await.unwrap()).await;
     eprintln!("hosted, granted: {}", json["calendar"]);
@@ -9391,7 +9395,11 @@ async fn stats_report_a_hosted_calendar_grant() {
 async fn stats_tell_a_self_host_the_calendar_command() {
     let (state, _store, acct) = state_with(|_, _| {});
     let (resolver, path) = calendar_resolver("selfhost", acct, None);
-    let app = router(state.with_calendar_credentials(resolver));
+    let app = router(
+        state
+            .with_calendar_credentials(resolver)
+            .with_features(calendar_on()),
+    );
     let json = body_json(app.oneshot(authed("GET", "/client/stats")).await.unwrap()).await;
     eprintln!("self-host: {}", json["calendar"]);
     assert_eq!(
@@ -9406,7 +9414,7 @@ async fn stats_tell_a_self_host_the_calendar_command() {
     std::fs::remove_file(&path).ok();
 
     // And a door with no resolver at all answers the same shape, not absence.
-    let Harness { app, .. } = harness(|_, _| {});
+    let Harness { app, .. } = common::calendar_harness(|_, _| {});
     let json = body_json(app.oneshot(authed("GET", "/client/stats")).await.unwrap()).await;
     assert_eq!(json["calendar"]["granted"], serde_json::json!(false));
     assert_eq!(
@@ -9424,7 +9432,8 @@ async fn the_calendar_link_encodes_the_address() {
     let store = Arc::new(SqliteStore::open_in_memory().unwrap());
     let acct = store.ensure_account("a+b&calendar=0@example.com").unwrap();
     let state = ApiState::new(store, acct, TOKEN)
-        .with_console_sso_url(Some("https://signup.example".into()));
+        .with_console_sso_url(Some("https://signup.example".into()))
+        .with_features(calendar_on());
     let json = body_json(
         router(state)
             .oneshot(authed("GET", "/client/stats"))

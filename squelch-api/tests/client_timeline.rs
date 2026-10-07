@@ -217,7 +217,7 @@ fn by_title<'a>(ghosts: &'a [Value], title: &str) -> &'a Value {
 async fn timeline_serves_every_field_with_the_right_end_tier() {
     let start = Utc::now() + Duration::days(10);
     let day = (Utc::now() + Duration::days(5)).date_naive();
-    let h = harness(|_, _| {});
+    let h = calendar_harness(|_, _| {});
     let stated = decide(
         &h.store,
         h.acct,
@@ -410,7 +410,7 @@ async fn timeline_serves_every_field_with_the_right_end_tier() {
 #[tokio::test]
 async fn timeline_range_defaults_explicit_bounds_and_rejects_bad_input() {
     let now = Utc::now();
-    let h = harness(|_, _| {});
+    let h = calendar_harness(|_, _| {});
     for (n, (title, days)) in [("Past", -30), ("Soon", 10), ("Later", 200), ("Far", 360)]
         .into_iter()
         .enumerate()
@@ -505,7 +505,7 @@ async fn timeline_range_defaults_explicit_bounds_and_rejects_bad_input() {
 #[tokio::test]
 async fn timeline_state_comes_from_the_user_then_the_mail_then_the_clock() {
     let now = Utc::now();
-    let h = harness(|_, _| {});
+    let h = calendar_harness(|_, _| {});
     decide(
         &h.store,
         h.acct,
@@ -606,7 +606,7 @@ async fn timeline_state_comes_from_the_user_then_the_mail_then_the_clock() {
 #[tokio::test]
 async fn timeline_serves_mail_state_and_verified() {
     let now = Utc::now();
-    let h = harness(|_, _| {});
+    let h = calendar_harness(|_, _| {});
     let dinner = |change| Ev {
         title: "Dinner",
         start: rfc(now + Duration::days(3)),
@@ -679,7 +679,7 @@ async fn timeline_serves_mail_state_and_verified() {
 
 #[tokio::test]
 async fn patch_state_sets_and_clears_and_absent_leaves_it() {
-    let h = harness(|_, _| {});
+    let h = calendar_harness(|_, _| {});
     decide(&h.store, h.acct, "g1", "t1", 5, &[Ev::default()]);
     let id = wide(&h.app).await[0]["id"].as_i64().unwrap();
     let state = |ghosts: Vec<Value>| ghosts[0]["state"].clone();
@@ -715,7 +715,7 @@ async fn patch_state_sets_and_clears_and_absent_leaves_it() {
 async fn patch_end_corrects_clears_and_refuses_impossible_ends() {
     let start = Utc::now() + Duration::days(10);
     let day = (Utc::now() + Duration::days(5)).date_naive();
-    let h = harness(|_, _| {});
+    let h = calendar_harness(|_, _| {});
     decide(
         &h.store,
         h.acct,
@@ -808,7 +808,7 @@ async fn patch_end_corrects_clears_and_refuses_impossible_ends() {
 #[tokio::test]
 async fn patch_with_an_impossible_end_leaves_the_state_as_it_was() {
     let start = Utc::now() + Duration::days(10);
-    let h = harness(|_, _| {});
+    let h = calendar_harness(|_, _| {});
     decide(
         &h.store,
         h.acct,
@@ -848,7 +848,7 @@ async fn patch_with_an_impossible_end_leaves_the_state_as_it_was() {
 
 #[tokio::test]
 async fn patch_rejects_bad_bodies_and_unknown_ids() {
-    let h = harness(|_, _| {});
+    let h = calendar_harness(|_, _| {});
     decide(&h.store, h.acct, "g1", "t1", 5, &[Ev::default()]);
     // Another account's ghost, in the same database.
     let other = h.store.ensure_account("other@example.com").unwrap();
@@ -927,7 +927,7 @@ async fn patch_rejects_bad_bodies_and_unknown_ids() {
 
 #[tokio::test]
 async fn timeline_routes_require_the_client_credential() {
-    let h = harness(|_, _| {});
+    let h = calendar_harness(|_, _| {});
     decide(&h.store, h.acct, "g1", "t1", 5, &[Ev::default()]);
     let id = wide(&h.app).await[0]["id"].as_i64().unwrap();
     for bearer in [None, Some("Bearer nope")] {
@@ -964,7 +964,7 @@ async fn timeline_routes_require_the_client_credential() {
 
 #[tokio::test]
 async fn stats_advertise_timeline() {
-    let h = harness(|_, _| {});
+    let h = calendar_harness(|_, _| {});
     let (status, body) = get(&h.app, "/client/stats").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["timeline"], true);
@@ -974,7 +974,7 @@ async fn stats_advertise_timeline() {
 /// serves them, and the agent's record listing gains no ghost shape.
 #[tokio::test]
 async fn the_agent_door_serves_no_ghosts() {
-    let h = harness(|_, _| {});
+    let h = calendar_harness(|_, _| {});
     decide(&h.store, h.acct, "g1", "t1", 5, &[Ev::default()]);
     let id = wide(&h.app).await[0]["id"].as_i64().unwrap();
     for (method, uri) in [

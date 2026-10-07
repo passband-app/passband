@@ -167,35 +167,9 @@ fn client_router(state: ApiState) -> Router {
         .route("/client/receipts", get(handlers::get_receipts))
         .route("/client/banking", get(handlers::get_banking))
         .route("/client/calendar", get(handlers::get_calendar))
-        // Calendar ghosts: the timeline read and the user's word on one ghost
-        // (dismissed, going, a corrected end). HUMAN DOOR ONLY in both
-        // directions: the agent door has no timeline route.
-        .route("/client/timeline", get(handlers::get_timeline))
-        .route("/client/timeline/ghosts/{id}", patch(handlers::patch_ghost))
-        // Start a Google Calendar sync now (the calendar page opening), at
-        // most once per account per 30 seconds. HUMAN DOOR ONLY: the agent
-        // door neither reads the calendar nor spends its quota.
-        .route("/client/timeline/refresh", post(handlers::refresh_timeline))
-        // Connect Google Calendar on a SELF-HOST: the daemon runs the consent
-        // `squelchd auth --calendar` runs, on a loopback listener, and answers
-        // the consent URL. 409 on hosted, where the control plane runs it.
-        // HUMAN DOOR ONLY: the agent door can neither grant nor read calendar.
-        .route(
-            "/client/calendar/connect",
-            post(calendar_connect::connect_calendar),
-        )
-        // The user's own create, edit and delete of one event on their Google
-        // Calendar: Google first, then the local row, each attempt audited.
-        // HUMAN DOOR ONLY: the agent door and the in-app assistant can neither
-        // read nor write a calendar.
-        .route(
-            "/client/calendar/events",
-            post(calendar_write::create_event),
-        )
-        .route(
-            "/client/calendar/events/{calendar_id}/{id}",
-            patch(calendar_write::edit_event).delete(calendar_write::delete_event),
-        )
+        // Everything behind the Calendar page, behind the `calendar` hidden
+        // feature: see `calendar_routes`.
+        .merge(calendar_routes(state.clone()))
         .route("/client/search", get(handlers::search))
         // The user's own sent mail. Human door only — this is the one listing
         // that reads `is_sent = 1`, and the agent door gets no such route: what
@@ -377,4 +351,66 @@ fn client_router(state: ApiState) -> Router {
                 .allow_headers(tower_http::cors::Any),
         )
         .with_state(state)
+}
+
+/// The Calendar page's routes, ALL BEHIND THE `calendar` HIDDEN FEATURE
+/// ([`squelch_core::features::CALENDAR`]). Off is as if the feature did not
+/// exist: every route here answers [`ApiError::not_found`], the opaque 404 a
+/// missing thread or a hidden sealed message gets, asked at the moment of each request (a flag flipped under a running daemon
+/// changes the next answer), and BEFORE ANY OTHER WORK. The gate is a route
+/// layer rather than a line in each handler because the handlers' extractors
+/// (the query, the JSON body, the path) run before a handler body could ask,
+/// and a refused request should not have its body read at all. For the same
+/// reason a write refused here writes NO audit row: a path the daemon does
+/// not serve writes none either, and the audit log records attempts at
+/// actions that exist (the calendar writes audit their own refusals, from
+/// inside a feature that is on).
+///
+/// Merged inside [`client_router`], so bearer auth still runs first: a caller
+/// with no credential gets the 401 and learns nothing about the flag.
+fn calendar_routes(state: ApiState) -> Router<ApiState> {
+    Router::new()
+        // Calendar ghosts: the timeline read and the user's word on one ghost
+        // (dismissed, going, a corrected end). HUMAN DOOR ONLY in both
+        // directions: the agent door has no timeline route.
+        .route("/client/timeline", get(handlers::get_timeline))
+        .route("/client/timeline/ghosts/{id}", patch(handlers::patch_ghost))
+        // Start a Google Calendar sync now (the calendar page opening), at
+        // most once per account per 30 seconds. HUMAN DOOR ONLY: the agent
+        // door neither reads the calendar nor spends its quota.
+        .route("/client/timeline/refresh", post(handlers::refresh_timeline))
+        // Connect Google Calendar on a SELF-HOST: the daemon runs the consent
+        // `squelchd auth --calendar` runs, on a loopback listener, and answers
+        // the consent URL. 409 on hosted, where the control plane runs it.
+        // HUMAN DOOR ONLY: the agent door can neither grant nor read calendar.
+        .route(
+            "/client/calendar/connect",
+            post(calendar_connect::connect_calendar),
+        )
+        // The user's own create, edit and delete of one event on their Google
+        // Calendar: Google first, then the local row, each attempt audited.
+        // HUMAN DOOR ONLY: the agent door and the in-app assistant can neither
+        // read nor write a calendar.
+        .route(
+            "/client/calendar/events",
+            post(calendar_write::create_event),
+        )
+        .route(
+            "/client/calendar/events/{calendar_id}/{id}",
+            patch(calendar_write::edit_event).delete(calendar_write::delete_event),
+        )
+        .route_layer(middleware::from_fn_with_state(state, require_calendar))
+}
+
+/// The `calendar` gate itself. See [`calendar_routes`].
+async fn require_calendar(
+    axum::extract::State(state): axum::extract::State<ApiState>,
+    req: axum::extract::Request,
+    next: middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if !state.features().enabled(squelch_core::features::CALENDAR) {
+        return ApiError::not_found().into_response();
+    }
+    next.run(req).await
 }

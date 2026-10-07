@@ -22,14 +22,23 @@ import Foundation
 /// Whether the Calendar destination exists, and how to connect a calendar.
 enum CalendarGate {
     /// THE ONE PLACE THE CALENDAR PAGE IS SWITCHED ON. The daemon must serve
-    /// the timeline (`timeline == true` on /client/stats), and developer mode
-    /// must be on. The second condition is a STOPGAP for a feature flag
-    /// system that does not exist yet (docs/CALENDAR.md §11): when it lands,
-    /// this line becomes the flag's question and nothing else moves. The rail,
-    /// the Go menu, the number keys, ⇧C and the route all read it through
+    /// the timeline (`timeline == true` on /client/stats), and the `calendar`
+    /// hidden feature must be on for this mailbox (`feature`, which is
+    /// `store.hasFeature(.calendar)`; docs/FEATURES.md, docs/CALENDAR.md
+    /// section 11). A daemon with the flag off already says `timeline: false`;
+    /// the app asks both anyway, so a daemon older than the flag cannot show
+    /// the page to somebody who was not let in. The rail, the Go menu, the
+    /// number keys, ⇧C, the shortcuts sheet and the route all read it through
     /// `AppStore.calendarPageAvailable`, so it hides everywhere at once.
-    static func pageAvailable(timeline: Bool?, developerMode: Bool) -> Bool {
-        timeline == true && developerMode
+    static func pageAvailable(timeline: Bool?, feature: Bool) -> Bool {
+        timeline == true && feature
+    }
+
+    /// Whether the gate closing (the flag turned off, an older daemon) must
+    /// take the user off the page they are on: only when that page is the
+    /// calendar. Generic for the reason `numbered` is.
+    static func leavesPage<Page: Equatable>(available: Bool, active: Page, calendar: Page) -> Bool {
+        !available && active == calendar
     }
 
     /// THE NUMBER KEYS, WITH THE CALENDAR IN THEM (wave 4, the founder: "make

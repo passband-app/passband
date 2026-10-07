@@ -2056,22 +2056,12 @@ final class AppStore {
         // never mounted.
         zonesLoadedAt = nil
         zoneRetryOwed = false
-        calendarFeed = nil
-        calendarLoaded = false
-        // Ids are the account's: the item open in the month means nothing in
-        // the next mailbox. The mode and the month are the user's, and stay.
-        calendarMonthItem = nil
-        calendarConnectAsk = nil
-        calendarConnectWait = nil
-        calendarConnectStarting = false
-        // The editor and the delete question were about the last mailbox's
-        // calendars, and a write still out answers into nothing.
-        calendarEditor = nil
-        calendarDraft = nil
-        calendarSweepCancel = nil
-        calendarDeleteAsk = nil
-        calendarWriting = false
-        calendarLoadGeneration &+= 1
+        // The calendar page's state is the account's: the feed, the item
+        // open in the month, the connect card, the editor and the delete
+        // question were about the last mailbox's calendars, and a write still
+        // out answers into nothing. The mode and the month are the user's,
+        // and stay.
+        dropCalendarState()
         // The parked refresh tasks go too, not just their results: a joiner
         // arriving after the switch would otherwise wait on — and adopt the
         // silence of — a pass that has already been disowned.

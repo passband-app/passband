@@ -301,7 +301,13 @@ docker run --rm -p 8847:8847 \
 Import it the same way. Approve both screens with the same Google account, since
 one blob names one mailbox.
 
-**Google Calendar.** The app's calendar page has a Connect button. On your own
+**Google Calendar.** The calendar is a hidden feature, off until you turn it on:
+start squelchd with `SQUELCH_FEATURES=calendar` (in the compose file's
+`environment`, or on the command line) and the app shows a Calendar page on its
+next stats poll. Without it the calendar routes answer 404 and the calendar sync
+calls Google for nothing.
+
+The app's calendar page has a Connect button. On your own
 daemon it asks squelchd to run the Google consent itself: the daemon hands the app
 a consent URL, your browser opens it, and Google sends you back to a listener the
 daemon runs on its own loopback, `127.0.0.1:8847` (set `SQUELCH_AUTH_PORT` to move
@@ -316,8 +322,8 @@ daemon running with host networking (or not in a container). Otherwise use the
 The consent must be finished as the mailbox's own Google account and with the
 calendar box ticked, or nothing is stored. The terminal route does the same thing:
 `squelchd auth --calendar`, with `--headless` on a box with no browser (it prints
-the URL and waits on the same port). Calendar is optional and read only, and
-connecting it never touches the Gmail credentials.
+the URL and waits on the same port). Calendar is optional, and connecting it
+never touches the Gmail credentials.
 
 **Model triage.** Add `ANTHROPIC_API_KEY` to the environment and restart. Daily
 spend caps are on by default and tunable from the app's Settings without a

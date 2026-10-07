@@ -2183,7 +2183,15 @@ fn cmd_serve(
     // with its own backoff, never inside the Gmail sync loop: a calendar
     // failure of any kind must not fail or delay Gmail sync, triage or ingest.
     let calendar_sync = api_state.calendar().cloned().and_then(|creds| {
-        match squelch_core::gcal::sync::CalendarSync::new(store.clone(), account_id, creds) {
+        // The same live feature set the human door gates on: the loop asks it
+        // at every pass, so a flag flipped on the admin page reaches it with
+        // no restart.
+        match squelch_core::gcal::sync::CalendarSync::new(
+            store.clone(),
+            account_id,
+            creds,
+            api_state.features().clone(),
+        ) {
             Ok(sync) => Some(sync),
             Err(e) => {
                 eprintln!(

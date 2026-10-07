@@ -810,6 +810,29 @@ impl Harness {
     }
 
     /// How the store recorded the invite: `(used_by_label, still available)`.
+    /// Turn hidden feature `key` on for `label`, as a ticked box on
+    /// `/admin/features` would.
+    async fn grant_feature(&self, label: &str, key: &str) {
+        let store = self.state.store();
+        let board = store.feature_board().await.unwrap();
+        let id = board
+            .tenants
+            .iter()
+            .find(|t| t.label == label)
+            .expect("an active tenant")
+            .id;
+        store
+            .save_features(
+                &[id],
+                &[key.to_string()],
+                &[(id, key.to_string())],
+                &[],
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+    }
+
     async fn invite_row(&self) -> (Option<String>, bool) {
         let rows = self.state.store().list_invites().await.unwrap();
         let row = rows.last().expect("the harness minted one").clone();
@@ -3022,6 +3045,7 @@ async fn the_calendar_consent_url_carries_every_parameter() {
 async fn a_granted_calendar_consent_installs_through_the_reconnect_pipeline() {
     let h = Harness::new().await;
     h.complete_signup("ada").await;
+    h.grant_feature("ada", "calendar").await;
     let installs = h.rec.lock().unwrap().credential_puts.len();
     let invite_before = h.invite_row().await;
     h.rec.lock().unwrap().granted_scope = Some(calendar_grant());
@@ -3068,6 +3092,62 @@ async fn a_granted_calendar_consent_installs_through_the_reconnect_pipeline() {
     assert_eq!(job_status, "complete");
     assert!(ciphertext.is_none());
     assert_eq!(h.invite_row().await, invite_before, "no invite spent");
+}
+
+/// THE CALENDAR HIDDEN FEATURE. A tenant without `calendar` (no row of its
+/// own, no Everyone default) can start the consent, because the start names no
+/// tenant and must not become an oracle; but once Google has said whose
+/// mailbox this is, nothing is installed or queued and the page says calendar
+/// is not available yet. The plain reconnect is untouched. With the Everyone
+/// default on, the same consent installs.
+#[tokio::test]
+async fn a_calendar_consent_for_a_tenant_without_the_feature_installs_nothing() {
+    let h = Harness::new().await;
+    h.complete_signup("ada").await;
+    let installs = h.rec.lock().unwrap().credential_puts.len();
+    h.rec.lock().unwrap().granted_scope = Some(calendar_grant());
+
+    let (status, body) = h.run_reconnect_with(&calendar_link()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body.contains("Calendar isn&#39;t available for this mailbox yet.")
+            || body.contains("Calendar isn't available for this mailbox yet."),
+        "{body}"
+    );
+    assert!(!body.contains(MAILBOX), "{body}");
+    assert!(!body.contains(REFRESH_TOKEN));
+    assert_eq!(h.rec.lock().unwrap().credential_puts.len(), installs);
+    assert!(job_purposes(&h).await.is_empty(), "nothing queued");
+
+    // Everyone: the default row turns it on for this tenant too.
+    let store = h.state.store();
+    store
+        .save_features(
+            &[],
+            &["calendar".to_string()],
+            &[],
+            &["calendar".to_string()],
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
+    let (status, body) = h.run_reconnect_with(&calendar_link()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("Calendar is connected"), "{body}");
+    assert_eq!(h.rec.lock().unwrap().credential_puts.len(), installs + 1);
+    assert_eq!(job_purposes(&h).await, vec!["calendar"]);
+}
+
+/// The plain reconnect never asks about the calendar feature.
+#[tokio::test]
+async fn a_plain_reconnect_does_not_need_the_calendar_feature() {
+    let h = Harness::new().await;
+    h.complete_signup("ada").await;
+    let installs = h.rec.lock().unwrap().credential_puts.len();
+    let (status, body) = h.run_reconnect_with("").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(h.rec.lock().unwrap().credential_puts.len(), installs + 1);
+    assert_eq!(job_purposes(&h).await, vec!["reconnect"]);
 }
 
 /// CALENDAR UNTICKED: the Gmail floor passes, calendar is absent, and NOTHING
@@ -3154,6 +3234,7 @@ async fn a_mismatched_account_with_a_hint_installs_nothing_and_names_no_address(
     const BOB: &str = "bob@example.com";
     let h = Harness::new().await;
     h.complete_signup("ada").await;
+    h.grant_feature("ada", "calendar").await;
     // Bob has a mailbox here too.
     h.rec.lock().unwrap().profile_email = Some(BOB.to_string());
     h.rec.lock().unwrap().expected_challenge = None;
@@ -3211,6 +3292,7 @@ async fn a_mismatched_account_with_a_hint_installs_nothing_and_names_no_address(
 async fn a_garbage_or_oversized_hint_is_ignored() {
     let h = Harness::new().await;
     h.complete_signup("ada").await;
+    h.grant_feature("ada", "calendar").await;
     let oversized = format!("{}@example.com", "a".repeat(400));
     for raw in [
         "not-an-address".to_string(),

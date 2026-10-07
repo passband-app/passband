@@ -284,6 +284,14 @@ const AGENT_NO_TENANT: &str = "This Google account has no Passband mailbox, so n
      If your mailbox is on another Google account, go back to your agent, connect again, \
      and pick that account.";
 
+/// What a calendar consent gets when the mailbox it came back for does not
+/// have the `calendar` hidden feature yet. Shown only after Google has
+/// authenticated the reader as that mailbox, so it is about their own.
+/// NOTHING was installed: their mail keeps working as it was.
+const CALENDAR_NOT_AVAILABLE_HEADING: &str = "Calendar isn't available yet";
+const CALENDAR_NOT_AVAILABLE: &str = "Calendar isn't available for this mailbox yet. Nothing about your Passband \
+     mailbox changed.";
+
 /// The longest `external_auth_id` this service will carry. AuthKit's are ULIDs
 /// (26 characters) today; this is slack for a format change, and a bound on
 /// what a stranger can park in the session table.
@@ -2028,6 +2036,44 @@ async fn reconnect_install(
             return reconnect_unavailable();
         }
     };
+
+    // THE CALENDAR HIDDEN FEATURE. Calendar is behind the `calendar` flag
+    // (`squelch_core::features::CALENDAR`): a tenant without it (its own row
+    // or the Everyone default) gets no calendar grant installed, because its
+    // daemon would hide everything the grant is for.
+    //
+    // CHECKED HERE, AFTER GOOGLE, NOT AT `/reconnect`. The start of this flow
+    // names no tenant on purpose (see `reconnect_start`): the only input that
+    // could pick one is the `hint`, which is attacker-controlled and is never
+    // used to look anything up, so refusing at the start would turn the link
+    // into an oracle for "which mailboxes have calendar". Here the tenant is
+    // the one Google just authenticated this browser as, so the answer is
+    // only ever about the reader's own mailbox. The token is dropped unsealed
+    // and nothing is installed or queued: their working credential stays as
+    // it was.
+    if purpose == Purpose::Calendar {
+        match state
+            .store()
+            .tenant_has_feature(&label, squelch_core::features::CALENDAR)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::info!(label = %label, "calendar consent for a tenant without the calendar feature; nothing installed");
+                drop(grant.token);
+                return pages::console_problem(
+                    StatusCode::OK,
+                    CALENDAR_NOT_AVAILABLE_HEADING,
+                    CALENDAR_NOT_AVAILABLE,
+                );
+            }
+            Err(e) => {
+                tracing::error!(error = %e, label = %label, "reading the calendar feature failed");
+                drop(grant.token);
+                return reconnect_unavailable();
+            }
+        }
+    }
 
     // Re-learn the recipient. Creates nothing and mutates nothing; what it does
     // is refuse if this mailbox is not the account the CLUSTER says owns the

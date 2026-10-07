@@ -3727,38 +3727,48 @@ pub async fn get_stats(State(state): State<ApiState>) -> Result<impl IntoRespons
     // And for the calendar timeline: whether GET /client/timeline and PATCH
     // /client/timeline/ghosts/{id} exist. A LOUD failure like scheduled send
     // (an old daemon 404s them), so the client shows no timeline without it.
-    body["timeline"] = json!(true);
-    // IS GOOGLE CALENDAR GRANTED, and if not, how to grant it. ALWAYS PRESENT
-    // (an old daemon's silence is the client's "no calendar"), and human door
-    // only: no agent route carries it.
     //
-    // `granted` is the token resolver's answer, read off the scopes recorded
-    // on the stored token, with no call to Google. `connect_url` is the
-    // hosted/self-host split exactly as `gmail.reconnect_url` is: the console
-    // origin when this daemon has one, with the mailbox as `hint` so the
-    // control plane pre-selects it and refuses any other account. Without
-    // one, the command a self-host runs.
-    let granted = match state.calendar() {
-        Some(calendar) => calendar.granted().await,
-        None => false,
-    };
-    let connect_url = state.console_sso_url().map(|origin| {
-        format!(
-            "{origin}/reconnect?calendar=1&hint={}",
-            url_component(&email)
-        )
-    });
-    let connect_command = connect_url.is_none().then_some("squelchd auth --calendar");
-    // `self_connect`: whether `POST /client/calendar/connect` runs the consent
-    // here (a self-host with an OAuth client). The client's one Connect button
-    // calls it when true and opens `connect_url` otherwise; `connect_command`
-    // stays for older builds that still print it.
-    body["calendar"] = json!({
-        "granted": granted,
-        "connect_url": connect_url,
-        "connect_command": connect_command,
-        "self_connect": crate::calendar_connect::self_connect(&state),
-    });
+    // BEHIND THE `calendar` HIDDEN FEATURE: off, those routes 404 (see
+    // `calendar_routes`), so this says `false`, the answer the client already
+    // reads as "no Calendar page", and the `calendar` object below is left
+    // out. Asked now, so a flag flipped under a running daemon shows on the
+    // next poll.
+    let calendar_on = state.features().enabled(squelch_core::features::CALENDAR);
+    body["timeline"] = json!(calendar_on);
+    if calendar_on {
+        // IS GOOGLE CALENDAR GRANTED, and if not, how to grant it. Present
+        // whenever the feature is on (an old daemon's silence, like a feature
+        // that is off, is the client's "no calendar"), and human door only: no
+        // agent route carries it.
+        //
+        // `granted` is the token resolver's answer, read off the scopes recorded
+        // on the stored token, with no call to Google. `connect_url` is the
+        // hosted/self-host split exactly as `gmail.reconnect_url` is: the console
+        // origin when this daemon has one, with the mailbox as `hint` so the
+        // control plane pre-selects it and refuses any other account. Without
+        // one, the command a self-host runs.
+        let granted = match state.calendar() {
+            Some(calendar) => calendar.granted().await,
+            None => false,
+        };
+        let connect_url = state.console_sso_url().map(|origin| {
+            format!(
+                "{origin}/reconnect?calendar=1&hint={}",
+                url_component(&email)
+            )
+        });
+        let connect_command = connect_url.is_none().then_some("squelchd auth --calendar");
+        // `self_connect`: whether `POST /client/calendar/connect` runs the consent
+        // here (a self-host with an OAuth client). The client's one Connect button
+        // calls it when true and opens `connect_url` otherwise; `connect_command`
+        // stays for older builds that still print it.
+        body["calendar"] = json!({
+            "granted": granted,
+            "connect_url": connect_url,
+            "connect_command": connect_command,
+            "self_connect": crate::calendar_connect::self_connect(&state),
+        });
+    }
     Ok(Json(body))
 }
 

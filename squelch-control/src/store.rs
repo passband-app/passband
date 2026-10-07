@@ -1162,6 +1162,28 @@ impl ControlStore {
         rows.iter().map(|r| Ok(r.try_get(0)?)).collect()
     }
 
+    /// Whether one feature is on for the ACTIVE tenant with this label: its
+    /// own row, or the Everyone default. The same union
+    /// [`Self::features_for_tenant`] serves the daemon, asked for one key, so
+    /// the control plane's own gates and the daemon cannot disagree.
+    pub async fn tenant_has_feature(&self, label: &str, feature: &str) -> Result<bool> {
+        let row = self
+            .client()
+            .await?
+            .query_one(
+                "SELECT EXISTS (
+                     SELECT 1 FROM tenant_features f
+                     JOIN tenants t ON t.id = f.tenant_id
+                     WHERE t.label = $1 AND t.status = $2 AND f.feature = $3
+                 ) OR EXISTS (
+                     SELECT 1 FROM feature_defaults WHERE feature = $3
+                 )",
+                &[&label, &STATUS_ACTIVE, &feature],
+            )
+            .await?;
+        Ok(row.try_get(0)?)
+    }
+
     /// The features page's whole picture.
     ///
     /// ONE TRANSACTION, so the tenant list and the grants describe the same

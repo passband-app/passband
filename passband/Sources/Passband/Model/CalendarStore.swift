@@ -65,12 +65,17 @@ struct CalendarDeleteAsk: Hashable {
     let epoch: Int
 }
 
+/// The Calendar page and everything behind it, gated per mailbox from the
+/// admin site (docs/FEATURES.md).
+extension HiddenFeature { static let calendar = HiddenFeature(key: "calendar") }
+
 extension AppStore {
     // MARK: - the gate
 
-    /// Whether the Calendar destination exists at all. Rail, Go menu, ⇧C and
-    /// the route all read this one property; the rule itself, and why it
-    /// includes developer mode, is `CalendarGate.pageAvailable`.
+    /// Whether the Calendar destination exists at all. Rail, Go menu, ⇧C, the
+    /// number keys, the shortcuts sheet and the route all read this one
+    /// property; the rule itself, the daemon's timeline AND the `calendar`
+    /// hidden feature, is `CalendarGate.pageAvailable`.
     ///
     /// Deliberately off the raw `stats`, not `calendarAccess`: this says only
     /// whether a page exists, never whose calendar is in it. Reading it
@@ -79,8 +84,40 @@ extension AppStore {
     /// throw the user off it. The page's data is fetched from the new daemon
     /// under the new epoch either way.
     var calendarPageAvailable: Bool {
-        CalendarGate.pageAvailable(
-            timeline: stats?.timeline, developerMode: Prefs.shared.developerMode)
+        CalendarGate.pageAvailable(timeline: stats?.timeline, feature: hasFeature(.calendar))
+    }
+
+    /// The gate closed under the user (the flag turned off, or an older
+    /// daemon): leave the page for the Sitrep if it is up, close the event
+    /// pane and the delete question, and drop everything the page held. An
+    /// unsaved draft in the pane is DISCARDED: the page it belongs to no
+    /// longer exists for this mailbox, and the daemon would refuse its save.
+    func calendarGateClosed() {
+        if CalendarGate.leavesPage(available: calendarPageAvailable, active: activeView, calendar: .calendar) {
+            setView(.sitrep)
+        }
+        dropCalendarState()
+    }
+
+    /// Everything the calendar page holds for the ACTIVE mailbox, gone: the
+    /// feed, the open item, the connect card and its wait, the event pane and
+    /// its draft, the delete question, and any write still out (its answer
+    /// lands on a newer generation and is dropped). The view mode and the
+    /// month are the user's and stay. Shared by an account switch and the
+    /// gate closing.
+    func dropCalendarState() {
+        calendarFeed = nil
+        calendarLoaded = false
+        calendarMonthItem = nil
+        calendarConnectAsk = nil
+        calendarConnectWait = nil
+        calendarConnectStarting = false
+        calendarEditor = nil
+        calendarDraft = nil
+        calendarSweepCancel = nil
+        calendarDeleteAsk = nil
+        calendarWriting = false
+        calendarLoadGeneration &+= 1
     }
 
     /// The calendar grant as the ACTIVE account's own stats report it; nil

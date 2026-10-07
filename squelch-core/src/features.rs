@@ -49,7 +49,21 @@ pub struct Feature {
 /// `features.enabled(features::THE_KEY)` wherever the daemon gates on it. The
 /// clients gate on the same key string; a flag only a client reads still gets
 /// an entry here, because this list is the only thing the admin page offers.
-pub const KNOWN: &[Feature] = &[];
+pub const KNOWN: &[Feature] = &[Feature {
+    key: CALENDAR,
+    summary: "The Calendar page: events from mail, a Google Calendar connection, and creating \
+              and editing events.",
+}];
+
+/// The Calendar page and everything behind it on the human door: the
+/// timeline, the user's word on a ghost, the Google Calendar connection and
+/// sync, and the user's own event writes. OFF IS AS IF IT DID NOT EXIST: those
+/// routes 404, `/client/stats` says `timeline: false` and carries no
+/// `calendar` object, and the sync loop calls Google for nothing. What keeps
+/// running regardless is the cheap, local half: ghost projection in the
+/// triage commit and correspondent timezone inference, so a mailbox switched
+/// on sees its recent history at once (docs/CALENDAR.md section 11).
+pub const CALENDAR: &str = "calendar";
 
 /// The environment variable naming keys that are on for this daemon no matter
 /// what. Comma separated; whitespace around a key is ignored.

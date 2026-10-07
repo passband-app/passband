@@ -72,7 +72,7 @@ enum ProductGuide {
                 "the home board: For your eyes, Reading, the calendar, shipments, billing and "
                     + "receipts cards, flow mode"
             case .calendar:
-                "the Calendar page (developer mode for now): month and agenda, events guessed "
+                "the Calendar page (not on for everyone yet): month and agenda, events guessed "
                     + "from mail, connecting Google Calendar, new, edited and deleted events, guests"
             case .readingMail:
                 "an open email: moving between messages and emails, done, skip, unsubscribe, "
@@ -164,7 +164,7 @@ enum ProductGuide {
         - 3 Auth: login codes, password resets and security alerts.
         - 4 Rules: sender rules.
         - 5 Groups: named sets of recipients.
-        - When the Calendar page is shown (only with developer mode on, for now), it sits second on the rail and is key 2, and the pages after it move up one: Emails 3, Auth 4, Rules 5, Groups 6. ⇧C also opens it. Without it the numbers are the ones above. See the calendar topic.
+        - When the Calendar page is shown (it is not on for everyone yet), it sits second on the rail and is key 2, and the pages after it move up one: Emails 3, Auth 4, Rules 5, Groups 6. ⇧C also opens it. Without it the numbers are the ones above. See the calendar topic.
         - Usage and Settings sit at the bottom of the rail and have no number key. ⌘, opens Settings.
         - The ring just above them opens Discover: a list of the ways through mail (the basics, flow mode, reminders, search, teaching Passband, the at a glance cards, the reading stack, writing) with a short guide to each on the right. The ring fills clockwise as the user tries each one on their own mail, and a feature used on three separate days is marked a habit. Nothing ever empties it. Esc leaves the page.
 
@@ -226,9 +226,10 @@ enum ProductGuide {
         """
 
     private static let calendar = """
-        The Calendar page is shown only with developer mode on (Settings > General > \
-        Developer) and a server that offers it. It is second on the rail: key 2, or ⇧C \
-        from anywhere. While it is shown, Emails is key 3, Auth 4, Rules 5 and Groups 6. \
+        The Calendar page is not on for everyone yet. Passband turns it on for a mailbox \
+        from its side, and there is no setting for it in the app: when the rail has no \
+        Calendar icon, the page is not on for this mailbox yet. A self-hosted server turns \
+        it on itself. It is second on the rail: key 2, or ⇧C from anywhere. While it is shown, Emails is key 3, Auth 4, Rules 5 and Groups 6. \
         It is on the Mac only; the iPhone has no Calendar page yet.
 
         What is on it:
@@ -642,8 +643,9 @@ enum ProductGuide {
         let calendar = ShortcutCatalog.calendarGroup
         lines.append("")
         lines.append(
-            "\(calendar.title) (only while the Calendar page is shown, which needs developer mode "
-                + "for now. Calendar is then key 2, the pages after it move up one, and ⇧C opens it)")
+            "\(calendar.title) (only while the Calendar page is shown, which is not on for "
+                + "everyone yet. Calendar is then key 2, the pages after it move up one, and ⇧C "
+                + "opens it)")
         for item in calendar.items {
             lines.append("- \(item.keys.joined(separator: " ")): \(item.desc)")
         }

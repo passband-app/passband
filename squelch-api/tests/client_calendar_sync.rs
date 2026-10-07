@@ -21,6 +21,7 @@ use squelch_core::config::{
     OAuthClientConfig,
 };
 use squelch_core::credentials::{CalendarCredentials, CredentialKind, StoredToken};
+use squelch_core::features::Features;
 use squelch_core::gcal::sync::{CalendarSync, PassOutcome};
 use squelch_core::gcal::{CalendarErrorKind, PRIMARY};
 use squelch_core::store::{
@@ -479,6 +480,8 @@ struct World {
     creds: Arc<CalendarCredentials>,
     path: PathBuf,
     metrics: Arc<squelch_core::metrics::SyncMetrics>,
+    /// The `calendar` hidden feature as the loop and the door both read it.
+    features: Features,
 }
 
 impl Drop for World {
@@ -514,16 +517,23 @@ async fn world(tag: &str, scopes: &[&str]) -> World {
     ));
     let google: Fake = Arc::default();
     let base = spawn_google(google.clone()).await;
-    let sync = CalendarSync::with_api_base(store.clone(), acct, creds.clone(), &base)
-        .unwrap()
-        .with_test_timing(StdDuration::from_millis(50));
+    // The calendar hidden feature, ON: every test here is about a mailbox
+    // that has it. One handle, shared by the loop and the door, so a test can
+    // flip it under both.
+    let features = Features::none();
+    features.replace_granted([squelch_core::features::CALENDAR]);
+    let sync =
+        CalendarSync::with_api_base(store.clone(), acct, creds.clone(), features.clone(), &base)
+            .unwrap()
+            .with_test_timing(StdDuration::from_millis(50));
     let metrics = squelch_core::metrics::SyncMetrics::new();
     let app = router(
         state
             .with_calendar_credentials((*creds).clone())
             .with_calendar_sync_kick(sync.kick_handle())
             .with_calendar_api_base(base.clone())
-            .with_sync_metrics(metrics.clone()),
+            .with_sync_metrics(metrics.clone())
+            .with_features(features.clone()),
     );
     World {
         store,
@@ -535,6 +545,7 @@ async fn world(tag: &str, scopes: &[&str]) -> World {
         creds,
         path,
         metrics,
+        features,
     }
 }
 
@@ -1269,6 +1280,7 @@ async fn a_network_error_leaves_the_old_rows_and_sets_the_error_kind() {
         w.store.clone(),
         w.acct,
         w.creds.clone(),
+        w.features.clone(),
         "http://127.0.0.1:1",
     )
     .unwrap();
@@ -1333,6 +1345,7 @@ async fn no_calendar_failure_touches_gmail_health() {
         w.store.clone(),
         w.acct,
         w.creds.clone(),
+        w.features.clone(),
         "http://127.0.0.1:1",
     )
     .unwrap();
@@ -1429,9 +1442,15 @@ async fn the_loop_idles_without_a_grant_and_starts_when_one_appears() {
         )]],
     );
     let (stop, shutdown) = tokio::sync::watch::channel(false);
-    let sync = CalendarSync::with_api_base(w.store.clone(), w.acct, w.creds.clone(), &w.base)
-        .unwrap()
-        .with_test_timing(StdDuration::from_millis(30));
+    let sync = CalendarSync::with_api_base(
+        w.store.clone(),
+        w.acct,
+        w.creds.clone(),
+        w.features.clone(),
+        &w.base,
+    )
+    .unwrap()
+    .with_test_timing(StdDuration::from_millis(30));
     let task = tokio::spawn(sync.run(shutdown));
     tokio::time::sleep(StdDuration::from_millis(300)).await;
     assert!(w.google().bearers.is_empty(), "idle: Google not called");
@@ -1454,6 +1473,74 @@ async fn the_loop_idles_without_a_grant_and_starts_when_one_appears() {
     task.await.unwrap().unwrap();
 }
 
+/// BEHIND THE `calendar` HIDDEN FEATURE. Off, a pass reads nothing and calls
+/// Google for nothing, granted or not; the running loop starts reading on its
+/// own once the flag turns on, with no restart, and stops again when it goes
+/// off.
+#[tokio::test]
+async fn the_loop_calls_google_for_nothing_while_the_flag_is_off() {
+    let w = world("flag", GRANTED).await;
+    w.google().full.insert(
+        PRIMARY.into(),
+        vec![vec![timed(
+            "e",
+            "After the flag",
+            minute(Utc::now() + Duration::days(1)),
+            30,
+        )]],
+    );
+    w.features.replace_granted(Vec::<String>::new());
+    assert_eq!(w.pass().await, PassOutcome::Disabled);
+    assert!(
+        w.google().requests.is_empty(),
+        "a pass that is off read nothing"
+    );
+    assert!(
+        w.google().bearers.is_empty(),
+        "a pass that is off called nothing"
+    );
+
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let sync = CalendarSync::with_api_base(
+        w.store.clone(),
+        w.acct,
+        w.creds.clone(),
+        w.features.clone(),
+        &w.base,
+    )
+    .unwrap()
+    .with_test_timing(StdDuration::from_millis(30));
+    let task = tokio::spawn(sync.run(shutdown));
+    tokio::time::sleep(StdDuration::from_millis(300)).await;
+    assert!(
+        w.google().requests.is_empty(),
+        "the loop, off: Google not called"
+    );
+    assert!(
+        w.google().bearers.is_empty(),
+        "the loop, off: Google not called"
+    );
+
+    w.features
+        .replace_granted([squelch_core::features::CALENDAR]);
+    let mut waited = 0;
+    while w.titles().await.is_empty() {
+        assert!(waited < 100, "the loop never noticed the flag");
+        tokio::time::sleep(StdDuration::from_millis(50)).await;
+        waited += 1;
+    }
+    assert_eq!(w.titles().await, ["After the flag"]);
+
+    // Off again: the passes after it read nothing more.
+    w.features.replace_granted(Vec::<String>::new());
+    tokio::time::sleep(StdDuration::from_millis(100)).await;
+    let before = w.google().requests.len();
+    tokio::time::sleep(StdDuration::from_millis(300)).await;
+    assert_eq!(w.google().requests.len(), before, "off again: nothing read");
+    stop.send(true).unwrap();
+    task.await.unwrap().unwrap();
+}
+
 // --- refresh -----------------------------------------------------------------
 
 #[tokio::test]
@@ -1469,15 +1556,22 @@ async fn refresh_kicks_the_loop_at_most_once_per_30_seconds() {
     );
     // A loop that, left alone, would not pass again for an hour.
     let (stop, shutdown) = tokio::sync::watch::channel(false);
-    let sync = CalendarSync::with_api_base(w.store.clone(), w.acct, w.creds.clone(), &w.base)
-        .unwrap()
-        .with_test_timing(StdDuration::from_secs(3600));
+    let sync = CalendarSync::with_api_base(
+        w.store.clone(),
+        w.acct,
+        w.creds.clone(),
+        w.features.clone(),
+        &w.base,
+    )
+    .unwrap()
+    .with_test_timing(StdDuration::from_secs(3600));
     let kick = sync.kick_handle();
     let app = router(
         state_with(|_, _| {})
             .0
             .with_calendar_credentials((*w.creds).clone())
-            .with_calendar_sync_kick(kick),
+            .with_calendar_sync_kick(kick)
+            .with_features(w.features.clone()),
     );
     let task = tokio::spawn(sync.run(shutdown));
     let requests = |w: &World| w.google().requests.len();
@@ -1509,7 +1603,7 @@ async fn refresh_kicks_the_loop_at_most_once_per_30_seconds() {
     task.await.unwrap().unwrap();
 
     // A door with no loop answers the same shape.
-    let Harness { app, .. } = harness(|_, _| {});
+    let Harness { app, .. } = calendar_harness(|_, _| {});
     assert_eq!(
         refresh(&app).await,
         (StatusCode::ACCEPTED, json!({"kicked": false}))
@@ -1626,6 +1720,7 @@ async fn events_are_scoped_to_their_account() {
     );
     let app = router(
         squelch_api::ApiState::new(w.store.clone(), other, TOKEN)
+            .with_features(w.features.clone())
             .with_calendar_credentials(other_creds),
     );
     let body = get(&app, "/client/timeline").await;
@@ -1916,9 +2011,15 @@ async fn shutdown_interrupts_a_pass_in_flight_and_leaves_the_store_as_it_was() {
         g.requests.clear();
     }
     let (stop, shutdown) = tokio::sync::watch::channel(false);
-    let sync = CalendarSync::with_api_base(w.store.clone(), w.acct, w.creds.clone(), &w.base)
-        .unwrap()
-        .with_test_timing(StdDuration::from_millis(30));
+    let sync = CalendarSync::with_api_base(
+        w.store.clone(),
+        w.acct,
+        w.creds.clone(),
+        w.features.clone(),
+        &w.base,
+    )
+    .unwrap()
+    .with_test_timing(StdDuration::from_millis(30));
     let task = tokio::spawn(sync.run(shutdown));
     let mut waited = 0;
     while !w
@@ -2039,8 +2140,14 @@ async fn a_secondary_calendar_failing_forever_holds_back_nothing() {
         );
     }
     // The production pacing: a calendar's own backoff starts at a minute.
-    let sync =
-        CalendarSync::with_api_base(w.store.clone(), w.acct, w.creds.clone(), &w.base).unwrap();
+    let sync = CalendarSync::with_api_base(
+        w.store.clone(),
+        w.acct,
+        w.creds.clone(),
+        w.features.clone(),
+        &w.base,
+    )
+    .unwrap();
     let t0 = Utc::now();
     let reads = |w: &World, cal: &str| w.google().requests.iter().filter(|(c, _)| c == cal).count();
     let mut team_reads = Vec::new();
@@ -2382,9 +2489,15 @@ async fn a_kick_during_a_quota_backoff_leaves_no_extra_pass_behind() {
     w.google().fail = Some((429, json!({})));
     let tick = StdDuration::from_millis(600);
     let (stop, shutdown) = tokio::sync::watch::channel(false);
-    let sync = CalendarSync::with_api_base(w.store.clone(), w.acct, w.creds.clone(), &w.base)
-        .unwrap()
-        .with_test_timing(tick);
+    let sync = CalendarSync::with_api_base(
+        w.store.clone(),
+        w.acct,
+        w.creds.clone(),
+        w.features.clone(),
+        &w.base,
+    )
+    .unwrap()
+    .with_test_timing(tick);
     let kick = sync.kick_handle();
     let task = tokio::spawn(sync.run(shutdown));
     let mut waited = 0;
@@ -3223,6 +3336,7 @@ async fn writes_are_scoped_to_their_account() {
     );
     let app = router(
         squelch_api::ApiState::new(w.store.clone(), other, TOKEN)
+            .with_features(w.features.clone())
             .with_calendar_credentials(other_creds)
             .with_calendar_api_base(w.base.clone()),
     );
@@ -4238,6 +4352,7 @@ async fn guests_are_scoped_to_their_account() {
     );
     let app = router(
         squelch_api::ApiState::new(w.store.clone(), other, TOKEN)
+            .with_features(w.features.clone())
             .with_calendar_credentials(other_creds)
             .with_calendar_api_base(w.base.clone()),
     );

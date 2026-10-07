@@ -33,7 +33,18 @@ impl CredentialStore for StubCreds {
     }
 }
 
-/// Answer every request `200 {}` until dropped, recording what arrived. A
+/// What the mock answers a parent-headers read with: a message whose
+/// Reply-To and Cc name people its From does not. An agent is shown only the
+/// From, so neither may end up on an agent's reply.
+const PARENT_HEADERS: &str = r#"{"payload":{"headers":[
+{"name":"From","value":"Alice <alice@example.com>"},
+{"name":"Reply-To","value":"attacker@evil.test"},
+{"name":"To","value":"me@example.com"},
+{"name":"Cc","value":"carol@example.com"},
+{"name":"Message-ID","value":"<parent@example.com>"}]}}"#;
+
+/// Answer every request until dropped, recording what arrived: a send with
+/// `{}`, anything else (the parent-headers read) with [`PARENT_HEADERS`]. A
 /// test that expects NO request reads an empty log rather than hanging on one
 /// that never comes.
 async fn mock_gmail() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
@@ -48,15 +59,19 @@ async fn mock_gmail() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
             };
             let mut buf = vec![0u8; 16384];
             let n = sock.read(&mut buf).await.unwrap_or(0);
-            seen.lock()
-                .unwrap()
-                .push(String::from_utf8_lossy(&buf[..n]).to_string());
-            let _ = sock
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
-                      Content-Length: 2\r\nConnection: close\r\n\r\n{}",
-                )
-                .await;
+            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+            let body = if request.contains("/messages/send") {
+                "{}"
+            } else {
+                PARENT_HEADERS
+            };
+            seen.lock().unwrap().push(request);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = sock.write_all(response.as_bytes()).await;
             let _ = sock.flush().await;
         }
     });
@@ -67,10 +82,12 @@ async fn mock_gmail() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
 /// `restricted`, may not) read it.
 fn assess(store: &SqliteStore, acct: i64, id: i64, restricted: bool) {
     store.enqueue_agent_triage(acct, id, "test", false).unwrap();
-    let job = store
-        .claim_agent_job(acct, "triage", Utc::now(), 60)
-        .unwrap()
-        .unwrap();
+    // Ordinary mail queues a `triage` job; provider spam, which is never
+    // triaged, queues an `access` one.
+    let job = ["triage", "access"]
+        .into_iter()
+        .find_map(|kind| store.claim_agent_job(acct, kind, Utc::now(), 60).unwrap())
+        .expect("a queued assessment job");
     assert_eq!(job.message_id, id);
     let context = store.load_agent_context(&job).unwrap();
     let evidence = vec![EvidenceRef {
@@ -167,6 +184,27 @@ fn reply(to_message: i64, body: &str) -> AgentCompose {
 
 fn requests(f: &Fixture) -> Vec<String> {
     f.gmail.lock().unwrap().clone()
+}
+
+/// The RFC822 message a recorded `messages.send` request carried.
+fn sent_mail(request: &str) -> String {
+    use base64::Engine as _;
+    let json = &request[request.find("\r\n\r\n").expect("a body") + 4..];
+    let value: serde_json::Value = serde_json::from_str(json).expect("json body");
+    let raw = value["raw"].as_str().expect("raw");
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(raw.trim_end_matches('='))
+        .expect("base64url");
+    String::from_utf8_lossy(&bytes).to_string()
+}
+
+fn audit_details(f: &Fixture) -> Vec<(String, String, String)> {
+    f.store
+        .list_audit(f.acct, 50)
+        .unwrap()
+        .into_iter()
+        .map(|r| (r.actor, r.action, r.detail.unwrap_or_default()))
+        .collect()
 }
 
 // --- the setting -------------------------------------------------------------
@@ -443,6 +481,185 @@ async fn a_reply_send_reads_the_parent_then_sends() {
     assert_eq!(reqs.len(), 2, "parent headers, then the send");
     assert!(reqs[0].contains("/messages/g-open"));
     assert!(reqs[1].contains("/messages/send"));
+}
+
+/// The agent's view of a message carries its From and nothing else, and the
+/// human approves what the agent shows them. So a reply with no stated `to`
+/// goes to the From: not to a Reply-To nobody saw, and with nobody copied
+/// from the parent's headers. The owner's own reply honors both; this one
+/// must not.
+#[tokio::test]
+async fn an_agent_reply_goes_to_the_from_it_was_shown_not_a_hidden_reply_to() {
+    let f = fixture(AgentWriteAccess::Send, true).await;
+    let sent = f
+        .mailer
+        .send(reply(f.readable, "Works for me."))
+        .await
+        .unwrap();
+    assert_eq!(
+        sent.to, "alice@example.com",
+        "the result says where it went"
+    );
+    assert_eq!(sent.cc, "");
+
+    let mail = sent_mail(&requests(&f)[1]);
+    assert!(mail.contains("To: alice@example.com"), "{mail}");
+    assert!(!mail.contains("evil.test"), "{mail}");
+    assert!(!mail.contains("carol@example.com"), "{mail}");
+    // Still threaded onto the parent.
+    assert!(mail.contains("In-Reply-To: <parent@example.com>"), "{mail}");
+}
+
+/// Provider spam is assessed like other mail but the agent door never serves
+/// it, so it is not something an agent can reply to. "Readable" here is the
+/// door's own thread read, not a list of its rules.
+#[tokio::test]
+async fn spam_is_not_a_reply_target() {
+    let f = fixture(AgentWriteAccess::Send, true).await;
+    let spam = f
+        .store
+        .upsert_message(&squelch_core::types::NewMessage {
+            is_spam: true,
+            ..msg(f.acct, "g-spam", "t-spam", "WIN A PRIZE", "click here")
+        })
+        .unwrap();
+    assess(&f.store, f.acct, spam, false);
+
+    assert_eq!(
+        f.mailer.create_draft(reply(spam, "hello")).await,
+        Err(AgentWriteError::NotFound)
+    );
+    assert_eq!(
+        f.mailer.send(reply(spam, "hello")).await,
+        Err(AgentWriteError::NotFound)
+    );
+    assert!(f.store.list_drafts(f.acct).unwrap().is_empty());
+    assert!(requests(&f).is_empty(), "nothing may reach Gmail");
+}
+
+#[tokio::test]
+async fn every_refusal_leaves_a_ledger_row() {
+    let f = fixture(AgentWriteAccess::Send, true).await;
+    let _ = f.mailer.send(reply(f.restricted, "hello")).await;
+    let _ = f.mailer.create_draft(reply(f.restricted, "hello")).await;
+    let _ = f.mailer.send(compose("   ")).await;
+    let _ = f.mailer.create_draft(compose("\u{200B}")).await;
+    let _ = f
+        .mailer
+        .send(AgentCompose {
+            body: "hello".into(),
+            ..Default::default()
+        })
+        .await;
+    let rows = audit_details(&f);
+    assert_eq!(rows.len(), 5, "{rows:?}");
+    assert!(
+        rows.iter().all(|(actor, _, _)| actor == "agent"),
+        "{rows:?}"
+    );
+    let details: Vec<&str> = rows.iter().map(|(_, _, d)| d.as_str()).collect();
+    assert_eq!(details.iter().filter(|d| **d == "failed:target").count(), 2);
+    assert_eq!(
+        details.iter().filter(|d| **d == "rejected:invalid").count(),
+        2
+    );
+    assert!(details.contains(&"rejected:no_recipient"));
+}
+
+#[tokio::test]
+async fn the_guard_reads_everything_the_agent_wrote_not_only_the_body() {
+    let f = fixture(AgentWriteAccess::Send, true).await;
+    let key = "sk-abcDEF0123456789ghijKLMNopq";
+    let in_subject = AgentCompose {
+        subject: Some(format!("the key is {key}")),
+        ..compose("as promised")
+    };
+    let in_display_name = AgentCompose {
+        to: Some(format!("\"{key}\" <bob@example.com>")),
+        ..compose("as promised")
+    };
+    let split_by_markdown = compose("here: sk-abc**DEF0123456789**ghijKLMNopq");
+    for attempt in [in_subject, in_display_name, split_by_markdown] {
+        let refused = f.mailer.send(attempt.clone()).await;
+        assert!(
+            matches!(refused, Err(AgentWriteError::Blocked(_))),
+            "{attempt:?} -> {refused:?}"
+        );
+    }
+    assert!(requests(&f).is_empty(), "nothing may reach Gmail");
+}
+
+#[tokio::test]
+async fn a_new_message_needs_a_subject_to_send() {
+    let f = fixture(AgentWriteAccess::Send, true).await;
+    let no_subject = AgentCompose {
+        subject: None,
+        ..compose("hello")
+    };
+    assert!(matches!(
+        f.mailer.send(no_subject).await,
+        Err(AgentWriteError::Invalid(_))
+    ));
+    assert!(requests(&f).is_empty(), "nothing may reach Gmail");
+}
+
+#[tokio::test]
+async fn header_fields_take_no_control_characters_and_a_bounded_audience() {
+    let f = fixture(AgentWriteAccess::Send, true).await;
+    for bad in [
+        "Hello\u{2028}Bcc: eve@example.com",
+        "Hello\u{0}",
+        "Hello\u{85}x",
+    ] {
+        let smuggled = AgentCompose {
+            subject: Some(bad.into()),
+            ..compose("hi")
+        };
+        assert!(
+            matches!(
+                f.mailer.send(smuggled).await,
+                Err(AgentWriteError::Invalid(_))
+            ),
+            "{bad:?}"
+        );
+    }
+    let crowd = (0..60)
+        .map(|i| format!("p{i}@example.com"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let blast = AgentCompose {
+        bcc: Some(crowd),
+        ..compose("hi")
+    };
+    assert!(matches!(
+        f.mailer.send(blast).await,
+        Err(AgentWriteError::Invalid(_))
+    ));
+    assert!(requests(&f).is_empty(), "nothing may reach Gmail");
+}
+
+#[tokio::test]
+async fn agent_drafts_are_capped_until_the_owner_clears_some() {
+    let f = fixture(AgentWriteAccess::Drafts, false).await;
+    let mut last = 0;
+    for i in 0..25 {
+        last = f
+            .mailer
+            .create_draft(compose(&format!("draft {i}")))
+            .await
+            .unwrap()
+            .draft_id;
+    }
+    let refused = f.mailer.create_draft(compose("one too many")).await;
+    assert!(
+        matches!(refused, Err(AgentWriteError::Blocked(_))),
+        "{refused:?}"
+    );
+    assert_eq!(f.store.list_drafts(f.acct).unwrap().len(), 25);
+    // The owner's own drafts do not count against the agent, and clearing
+    // one agent draft makes room for one.
+    f.store.delete_draft(f.acct, last).unwrap();
+    assert!(f.mailer.create_draft(compose("room again")).await.is_ok());
 }
 
 #[tokio::test]

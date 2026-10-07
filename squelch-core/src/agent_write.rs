@@ -74,7 +74,7 @@ impl AgentWriteAccess {
     pub fn load(store: &dyn Store, account_id: AccountId) -> Result<Self> {
         Ok(store
             .get_app_setting(account_id, AGENT_WRITE_ACCESS_KEY)?
-            .and_then(|v| Self::parse(v.trim()))
+            .and_then(|v| Self::parse(&v))
             .unwrap_or_default())
     }
 
@@ -90,8 +90,9 @@ impl AgentWriteAccess {
 pub struct AgentCompose {
     /// The stored message this replies to. Must be one the agent can read.
     pub reply_to_message_id: Option<i64>,
-    /// Recipients, comma-joined. Optional on a reply (derived from the
-    /// parent), required on a new message that is being sent.
+    /// Recipients, comma-joined. Optional on a reply, where it defaults to
+    /// the parent's From address (the one the agent was shown, never a
+    /// Reply-To it was not); required on a new message that is being sent.
     pub to: Option<String>,
     pub cc: Option<String>,
     pub bcc: Option<String>,
@@ -112,6 +113,12 @@ pub struct AgentDraftCreated {
 pub struct AgentSent {
     /// The conversation the mail is in: the parent's, or the one just created.
     pub thread_id: Option<String>,
+    /// Who the mail was addressed to, as it went out. Handed back so the agent
+    /// can tell its human exactly where the message went, including when it
+    /// left `to` for the daemon to fill in on a reply.
+    pub to: String,
+    /// The visible copy list as it went out, `""` when there was none.
+    pub cc: String,
 }
 
 /// Why an agent's write did not happen. Every message here is written to be
@@ -207,7 +214,7 @@ mod tests {
             AgentWriteAccess::load(&store, acct).unwrap(),
             AgentWriteAccess::None
         );
-        for junk in ["SEND", "everything", "", "send,drafts"] {
+        for junk in ["SEND", "everything", "", "send,drafts", "send ", " drafts"] {
             Store::set_app_setting(&store, acct, AGENT_WRITE_ACCESS_KEY, junk).unwrap();
             assert_eq!(
                 AgentWriteAccess::load(&store, acct).unwrap(),

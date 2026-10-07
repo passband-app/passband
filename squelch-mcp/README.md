@@ -27,7 +27,7 @@ Two more tools exist only when the owner has allowed them, in Passband under Set
 
 `send_email` needs **direct human approval for every message**. The server's instructions and the tool's description both tell the agent to show its human the exact recipients, subject and body and wait for a yes; the required `human_approved` argument must be `true`, and a call without it is refused. That approval happens in the agent's conversation, which the daemon cannot see, so it is an instruction to the agent rather than a lock. An owner who wants a lock uses Drafts only.
 
-Either way an agent can reply only to mail it can read, cannot attach files or forward, cannot override the outbound secret guard, never overwrites a draft the owner is writing, and shows up in the audit log as `agent`. A tool the setting does not allow is not listed, and refuses if called anyway. The standalone `squelch-mcp` binary has no send pipeline and offers neither tool; they are served by `squelchd serve`. Full model: `docs/SECURITY.md` §4c.
+Either way an agent can reply only to mail it can read, sends a reply to the sender address it was shown (never a hidden Reply-To) and copies nobody it did not name, cannot attach files or forward, cannot override the outbound secret guard, never overwrites a draft the owner is writing, and shows up in the audit log as `agent`. A tool the setting does not allow is not listed, and refuses if called anyway. The standalone `squelch-mcp` binary has no send pipeline and offers neither tool; they are served by `squelchd serve`. Full model: `docs/SECURITY.md` §4c.
 
 ## Transports
 

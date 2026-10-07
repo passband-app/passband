@@ -15,9 +15,17 @@
 //! - every ledger row is written by actor `agent`, not `client-api`, so the
 //!   audit page tells the owner which sends were not typed by them.
 //!
-//! An agent may only reply to mail it can read: the reply target goes through
-//! the agent door's own access check, and a restricted message answers exactly
-//! as an unknown one does.
+//! An agent may only reply to mail it can read, and "can read" is decided by
+//! the agent door's own thread read, not by a second spelling of its rules: a
+//! restricted, pending or spam message answers exactly as an unknown one does.
+//!
+//! WHAT THE HUMAN APPROVED IS WHAT GOES OUT. The owner's own reply honors the
+//! parent's `Reply-To` and derives copies from its headers, because the owner
+//! can see the result in the composer. An agent sees only a message's From,
+//! and its human sees only what the agent shows them, so an agent's send goes
+//! to exactly the addresses it stated, or to the parent's From, and the
+//! resolved recipients are handed back in the result. Nothing is derived from
+//! a header nobody in that conversation was shown.
 
 use std::sync::Arc;
 
@@ -33,13 +41,13 @@ use squelch_core::agent_write::{
     AgentCompose, AgentDraftCreated, AgentMailer, AgentSent, AgentWriteAccess, AgentWriteError,
 };
 use squelch_core::error::CoreError;
-use squelch_core::store::{DraftFields, NewAuditEntry, Store};
+use squelch_core::store::{AgentDraftOutcome, DraftFields, NewAuditEntry, Store};
 
 use crate::error::ApiError;
-use crate::gmail_write::reply_subject;
+use crate::gmail_write::{count_addrs, reply_subject};
 use crate::handlers::{
     SendBody, SendGuard, SendOutcome, audit_action, composition_kinds, guard_verdict, no_store,
-    perform_send, send_target, store_call, validate_send,
+    perform_send, store_call, validate_send,
 };
 use crate::state::ApiState;
 
@@ -59,6 +67,11 @@ const AUDIT_ACCESS: &str = "agent.write_access";
 const MAX_BODY_BYTES: usize = 200_000;
 /// The longest subject or recipient list, in bytes.
 const MAX_HEADER_BYTES: usize = 4_000;
+/// The most addresses one agent composition may name across to, cc and bcc.
+const MAX_RECIPIENTS: usize = 50;
+/// The most unsent agent drafts a mailbox holds at once. Past it the agent is
+/// told to have its human send or discard some.
+const MAX_AGENT_DRAFTS: usize = 25;
 
 /// The human door's send pipeline, offered to the agent door as an
 /// [`AgentMailer`]. Built by [`ApiState::agent_mailer`].
@@ -83,10 +96,27 @@ impl ApiAgentMailer {
         .map_err(|_| internal())
     }
 
-    /// The reply target, IF AN AGENT MAY READ IT. `thread_id_for_message`
-    /// applies the per-message access check and `external_thread_allowed` the
-    /// whole-thread one, which is the pair `get_thread` resolves a message id
-    /// with. Unknown, another account's, pending and restricted all answer
+    /// Write the ledger row for a refusal and hand the error back, so no
+    /// refusal can be returned without one. A probing agent (which message
+    /// ids exist? what gets past validation?) leaves a trail.
+    async fn refuse(
+        &self,
+        action: &'static str,
+        target: &Option<String>,
+        reason: &str,
+        error: AgentWriteError,
+    ) -> AgentWriteError {
+        audit_action(&self.state, action, target.clone(), reason).await;
+        error
+    }
+
+    /// The reply target, IF AN AGENT CAN READ IT, decided by performing the
+    /// agent door's own read: the message must appear in the `thread_view`
+    /// that `get_thread` would serve. Asking the read itself, rather than
+    /// re-listing its conditions here, is the point: an earlier version of
+    /// this function re-listed them and left out spam, so an agent could
+    /// reply to mail the door would never show it. Unknown, another
+    /// account's, pending, restricted and spam all answer
     /// [`AgentWriteError::NotFound`].
     async fn readable_parent(
         &self,
@@ -97,7 +127,8 @@ impl ApiAgentMailer {
             else {
                 return Err(CoreError::NotFound);
             };
-            if !store.external_thread_allowed(account_id, &thread_id)? {
+            let view = Store::thread_view(store, account_id, &thread_id)?;
+            if !view.messages.iter().any(|m| m.id == message_id) {
                 return Err(CoreError::NotFound);
             }
             store.action_message_ref(account_id, message_id)
@@ -121,9 +152,20 @@ fn blank(s: &Option<String>) -> bool {
     s.as_deref().is_none_or(|s| s.trim().is_empty())
 }
 
+/// Characters that take up no space on screen. A body made only of these and
+/// whitespace is an empty body that passes `trim().is_empty()`.
+fn invisible(c: char) -> bool {
+    c.is_whitespace()
+        || c.is_control()
+        || matches!(
+            c,
+            '\u{200B}'..='\u{200F}' | '\u{2060}'..='\u{2064}' | '\u{FEFF}' | '\u{00AD}'
+        )
+}
+
 /// The checks both writes share, before anything is read or spent.
 fn validate_shape(compose: &AgentCompose) -> Result<(), AgentWriteError> {
-    if compose.body.trim().is_empty() {
+    if compose.body.chars().all(invisible) {
         return Err(AgentWriteError::Invalid("body must not be empty".into()));
     }
     if compose.body.len() > MAX_BODY_BYTES {
@@ -131,6 +173,7 @@ fn validate_shape(compose: &AgentCompose) -> Result<(), AgentWriteError> {
             "body is too long (limit {MAX_BODY_BYTES} bytes)"
         )));
     }
+    let mut recipients = 0;
     for (name, value) in [
         ("to", &compose.to),
         ("cc", &compose.cc),
@@ -141,14 +184,45 @@ fn validate_shape(compose: &AgentCompose) -> Result<(), AgentWriteError> {
         if value.len() > MAX_HEADER_BYTES {
             return Err(AgentWriteError::Invalid(format!("{name} is too long")));
         }
-        // A line break in a header field is how one header becomes two.
-        if value.contains(['\r', '\n']) {
+        // A line break in a header field is how one header becomes two, and
+        // CR/LF are not the only characters a mail system will break a line
+        // on. No control character and no Unicode line separator belongs in
+        // an address list or a subject.
+        if value
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
+        {
             return Err(AgentWriteError::Invalid(format!(
-                "{name} must be a single line"
+                "{name} must be a single line of plain text"
             )));
         }
+        if name != "subject" {
+            recipients += count_addrs(value);
+        }
+    }
+    if recipients > MAX_RECIPIENTS {
+        return Err(AgentWriteError::Invalid(format!(
+            "too many recipients (limit {MAX_RECIPIENTS})"
+        )));
     }
     Ok(())
+}
+
+/// Everything of an agent's composition the outbound guard reads.
+///
+/// MORE THAN THE BODY, which is all the owner's own send scans. The owner
+/// typed their subject and chose their recipients; an agent's are as much
+/// model output as its body, and for an agent the guard is the one check with
+/// no override, so a key moved into the subject line or a display name must
+/// not walk past it. The body is scanned twice: as written, and with markdown
+/// emphasis marks removed, so `sk-abc**DEF**...` reads as the token it
+/// renders to.
+fn guard_text(to: &str, cc: &str, bcc: &str, subject: &str, body: &str) -> String {
+    let plain: String = body
+        .chars()
+        .filter(|c| !matches!(c, '*' | '_' | '`' | '~'))
+        .collect();
+    [to, cc, bcc, subject, body, &plain].join("\n")
 }
 
 #[async_trait]
@@ -159,22 +233,29 @@ impl AgentMailer for ApiAgentMailer {
     ) -> Result<AgentDraftCreated, AgentWriteError> {
         let target = compose.reply_to_message_id.map(|id| id.to_string());
         if !self.access().await?.allows_drafts() {
-            audit_action(
-                &self.state,
-                AUDIT_DRAFT,
-                target,
-                "rejected:agent_not_allowed",
-            )
-            .await;
-            return Err(AgentWriteError::NotAllowed(AgentWriteAccess::Drafts));
+            return Err(self
+                .refuse(
+                    AUDIT_DRAFT,
+                    &target,
+                    "rejected:agent_not_allowed",
+                    AgentWriteError::NotAllowed(AgentWriteAccess::Drafts),
+                )
+                .await);
         }
-        validate_shape(&compose)?;
+        if let Err(e) = validate_shape(&compose) {
+            return Err(self
+                .refuse(AUDIT_DRAFT, &target, "rejected:invalid", e)
+                .await);
+        }
 
         // A reply draft is addressed and titled the way the composer would
         // have opened it, so the owner finds a draft ready to send rather than
-        // one with nobody on it.
+        // one with nobody on it. From the stored From, like an agent's send.
         let parent = match compose.reply_to_message_id {
-            Some(id) => Some(self.readable_parent(id).await?),
+            Some(id) => match self.readable_parent(id).await {
+                Ok(p) => Some(p),
+                Err(e) => return Err(self.refuse(AUDIT_DRAFT, &target, "failed:target", e).await),
+            },
             None => None,
         };
         let to = match (&parent, blank(&compose.to)) {
@@ -187,12 +268,16 @@ impl AgentMailer for ApiAgentMailer {
         };
 
         let reply_to = compose.reply_to_message_id;
-        let audit_target = target.clone();
-        // FAIL-CLOSED, like `set_sender_rule`: a draft an agent wrote is never
-        // left standing without its ledger row. If the row will not write, the
-        // draft is taken back out and the tool reports a failure.
-        let created = store_call(&self.state, move |store, account_id| {
-            let Some(draft) = store.create_agent_draft(
+        let entry = NewAuditEntry {
+            actor: AGENT_ACTOR.to_string(),
+            action: AUDIT_DRAFT.to_string(),
+            target: target.clone(),
+            // Completed by the store with the new draft's id.
+            detail: None,
+        };
+        // The draft and its ledger row are one transaction in the store.
+        let outcome = store_call(&self.state, move |store, account_id| {
+            store.create_agent_draft(
                 account_id,
                 reply_to,
                 DraftFields {
@@ -203,68 +288,118 @@ impl AgentMailer for ApiAgentMailer {
                     body: &compose.body,
                 },
                 Utc::now(),
-            )?
-            else {
-                return Ok(None);
-            };
-            let entry = NewAuditEntry {
-                actor: AGENT_ACTOR.to_string(),
-                action: AUDIT_DRAFT.to_string(),
-                target: audit_target,
-                detail: Some(format!("ok:{}", draft.id)),
-            };
-            if let Err(e) = store.append_audit(account_id, &entry) {
-                let _ = store.delete_draft(account_id, draft.id);
-                return Err(e);
-            }
-            Ok(Some(draft.id))
+                MAX_AGENT_DRAFTS,
+                &entry,
+            )
         })
         .await
         .map_err(|_| internal())?;
 
-        match created {
-            Some(draft_id) => Ok(AgentDraftCreated { draft_id }),
-            None => {
-                audit_action(&self.state, AUDIT_DRAFT, target, "rejected:draft_exists").await;
-                Err(AgentWriteError::Blocked(
-                    "The owner already has a draft reply to that message in Passband, and an \
-                     agent may not overwrite it. Tell them, and let them decide what to do \
-                     with their draft."
-                        .into(),
-                ))
-            }
+        match outcome {
+            AgentDraftOutcome::Created(draft_id) => Ok(AgentDraftCreated { draft_id }),
+            AgentDraftOutcome::ReplyDraftExists => Err(self
+                .refuse(
+                    AUDIT_DRAFT,
+                    &target,
+                    "rejected:draft_exists",
+                    AgentWriteError::Blocked(
+                        "That message already has a draft reply in Passband, and an agent may \
+                         not overwrite one. Tell the owner, and let them decide what to do \
+                         with the draft that is there."
+                            .into(),
+                    ),
+                )
+                .await),
+            AgentDraftOutcome::TooMany => Err(self
+                .refuse(
+                    AUDIT_DRAFT,
+                    &target,
+                    "rejected:too_many_drafts",
+                    AgentWriteError::Blocked(format!(
+                        "Passband already holds {MAX_AGENT_DRAFTS} unsent drafts from agents. \
+                         Ask the owner to send or discard some before leaving more."
+                    )),
+                )
+                .await),
         }
     }
 
     async fn send(&self, compose: AgentCompose) -> Result<AgentSent, AgentWriteError> {
         let target = compose.reply_to_message_id.map(|id| id.to_string());
         if !self.access().await?.allows_send() {
-            audit_action(&self.state, "send", target, "rejected:agent_not_allowed").await;
-            return Err(AgentWriteError::NotAllowed(AgentWriteAccess::Send));
+            return Err(self
+                .refuse(
+                    "send",
+                    &target,
+                    "rejected:agent_not_allowed",
+                    AgentWriteError::NotAllowed(AgentWriteAccess::Send),
+                )
+                .await);
         }
-        validate_shape(&compose)?;
-        if let Some(id) = compose.reply_to_message_id {
-            // Checked for its refusal only; the pipeline re-reads the target.
-            self.readable_parent(id).await?;
-        } else if blank(&compose.to) {
-            return Err(AgentWriteError::Invalid(
-                "a new message needs `to`; a reply needs `reply_to_message_id`".into(),
-            ));
+        if let Err(e) = validate_shape(&compose) {
+            return Err(self.refuse("send", &target, "rejected:invalid", e).await);
         }
 
-        let keep = |s: Option<String>| s.filter(|s| !s.trim().is_empty());
+        // WHO IT GOES TO IS DECIDED HERE, never by the pipeline's derivation
+        // (see the module docs): the stated `to`, else the parent's stored
+        // From, and the stated `cc` or none.
+        let to = match compose.reply_to_message_id {
+            Some(id) => {
+                let parent = match self.readable_parent(id).await {
+                    Ok(p) => p,
+                    Err(e) => return Err(self.refuse("send", &target, "failed:target", e).await),
+                };
+                if blank(&compose.to) {
+                    parent.from_addr
+                } else {
+                    compose.to.clone().unwrap_or_default()
+                }
+            }
+            None => {
+                if blank(&compose.to) {
+                    return Err(self
+                        .refuse(
+                            "send",
+                            &target,
+                            "rejected:no_recipient",
+                            AgentWriteError::Invalid(
+                                "a new message needs `to`; a reply needs `reply_to_message_id`"
+                                    .into(),
+                            ),
+                        )
+                        .await);
+                }
+                if blank(&compose.subject) {
+                    return Err(self
+                        .refuse(
+                            "send",
+                            &target,
+                            "rejected:no_subject",
+                            AgentWriteError::Invalid("a new message needs `subject`".into()),
+                        )
+                        .await);
+                }
+                compose.to.clone().unwrap_or_default()
+            }
+        };
+        let to = to.trim().to_string();
+        let cc = compose.cc.as_deref().unwrap_or("").trim().to_string();
+        let bcc = compose.bcc.as_deref().unwrap_or("").trim().to_string();
+        let subject = compose.subject.as_deref().unwrap_or("").trim().to_string();
+
         let body = SendBody {
             reply_to_message_id: compose.reply_to_message_id,
             forward_of_message_id: None,
-            to: keep(compose.to),
-            // Absent keeps a reply's derived copies; an agent never states an
-            // empty list to strip them.
-            cc: keep(compose.cc),
+            to: Some(to.clone()),
+            // STATED, even when empty: a present `cc` replaces the pipeline's
+            // derivation from the parent's headers.
+            cc: Some(cc.clone()),
             reply_all: false,
-            bcc: keep(compose.bcc),
+            bcc: Some(bcc.clone()).filter(|s| !s.is_empty()),
             group_id: None,
             group_mode: None,
-            subject: keep(compose.subject),
+            // Absent on a reply reuses the parent's subject.
+            subject: Some(subject.clone()).filter(|s| !s.is_empty()),
             body: compose.body,
             body_format: Some("markdown".into()),
             // The owner's standing consent is the setting checked above.
@@ -275,13 +410,12 @@ impl AgentMailer for ApiAgentMailer {
             include_tracker: None,
             attachment_ids: Vec::new(),
         };
-        debug_assert_eq!(send_target(&body), target);
 
         if let Err(f) = validate_send(&body) {
             audit_action(&self.state, "send", target, f.reason).await;
             return Err(AgentWriteError::Invalid(f.error.message));
         }
-        let kinds = composition_kinds(&body.body, &[]);
+        let kinds = composition_kinds(&guard_text(&to, &cc, &bcc, &subject, &body.body), &[]);
         if guard_verdict(&self.state, "send", &kinds, false, target)
             .await
             .is_some()
@@ -295,7 +429,7 @@ impl AgentMailer for ApiAgentMailer {
         }
 
         match perform_send(&self.state, &body, Vec::new(), SendGuard::Settled, None).await {
-            Ok(SendOutcome::Sent { thread_id, .. }) => Ok(AgentSent { thread_id }),
+            Ok(SendOutcome::Sent { thread_id, .. }) => Ok(AgentSent { thread_id, to, cc }),
             // Unreachable: no group is ever set on an agent's send.
             Ok(SendOutcome::Sending { .. }) => Err(internal()),
             Err(f) if f.error.status == StatusCode::FORBIDDEN => Err(AgentWriteError::Unavailable(
@@ -308,6 +442,7 @@ impl AgentMailer for ApiAgentMailer {
                  retry on your own: tell the owner and let them check their Sent mail."
                     .into(),
             )),
+            Err(f) if f.error.status == StatusCode::NOT_FOUND => Err(AgentWriteError::NotFound),
             Err(f) if f.error.status.is_client_error() => {
                 Err(AgentWriteError::Invalid(f.error.message))
             }
@@ -360,20 +495,25 @@ pub async fn put_agent_access(
             "write_access must be one of: none, drafts, send",
         ));
     };
-    let before = store_call(&state, move |store, account_id| {
+    // LEDGER FIRST, and fail closed: the switch that lets something other
+    // than the owner send as them is never thrown without its row. If the
+    // row will not write, nothing changes.
+    store_call(&state, move |store, account_id| {
         let before = AgentWriteAccess::load(store, account_id)?;
-        wanted.save(store, account_id)?;
-        Ok(before)
+        if before == wanted {
+            return Ok(());
+        }
+        store.append_audit(
+            account_id,
+            &NewAuditEntry {
+                actor: crate::handlers::ACTION_ACTOR.to_string(),
+                action: AUDIT_ACCESS.to_string(),
+                target: None,
+                detail: Some(format!("{}->{}", before.as_str(), wanted.as_str())),
+            },
+        )?;
+        wanted.save(store, account_id)
     })
     .await?;
-    if before != wanted {
-        audit_action(
-            &state,
-            AUDIT_ACCESS,
-            None,
-            &format!("{}->{}", before.as_str(), wanted.as_str()),
-        )
-        .await;
-    }
     Ok(access_body(wanted))
 }

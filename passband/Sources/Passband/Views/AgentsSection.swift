@@ -26,6 +26,12 @@ struct AgentsSection: View {
     /// good on a daemon older than the setting, where the card is not drawn:
     /// such a daemon has no tool that writes mail, so there is nothing to set.
     @State private var access: AgentAccessConfig?
+    /// The setting could not be read, for a reason other than the daemon
+    /// predating it (which is a 404 and simply draws no card). Kept apart
+    /// from "not offered" because the two must not look alike: with this
+    /// set, the pane does not know whether the agent can send, and says so
+    /// instead of claiming it cannot.
+    @State private var accessUnknown = false
     @State private var accessBusy = false
     @State private var accessError: String?
 
@@ -51,16 +57,22 @@ struct AgentsSection: View {
             // command for a 404 is a trap. See `showsSetup` for hosted.
             if let endpoint, AgentConnect.showsSetup(status, hosted: hosted) {
                 setupCard(endpoint)
-                if let access { writeCard(access) }
+                if let access {
+                    writeCard(access)
+                } else if accessUnknown {
+                    writeUnknownCard
+                }
                 reachCard
             }
         }
         .task(id: endpoint) {
             // Another account's answer is never shown while this one loads.
             access = nil
+            accessUnknown = false
             accessError = nil
+            accessBusy = false
             await connect.check(serverURL: store.settings?.serverURL)
-            access = try? await APIClient.shared.getAgentAccess()
+            await loadAccess()
         }
         // Somebody who has been here knows the door exists, so the one-time
         // ad for it never goes up after this (`AgentNudge`).
@@ -239,6 +251,34 @@ struct AgentsSection: View {
 
     // MARK: - what it may write
 
+    /// Read the setting for the mailbox on screen. A 404 is a daemon older
+    /// than the setting; anything else is "could not find out".
+    private func loadAccess() async {
+        let asked = endpoint
+        do {
+            let loaded = try await APIClient.shared.getAgentAccess()
+            guard asked == endpoint, !Task.isCancelled else { return }
+            access = loaded
+            accessUnknown = false
+        } catch {
+            guard asked == endpoint, !Task.isCancelled else { return }
+            access = nil
+            accessUnknown = (error as? APIError)?.kind != .notFound
+        }
+    }
+
+    private var writeUnknownCard: some View {
+        SectionCard(label: "What your agent may write") {
+            SettingsHint("Could not read this setting from the server, so it is not shown here.")
+            Button("try again") {
+                Task { await loadAccess() }
+            }
+            .buttonStyle(.plain)
+            .font(Typo.micro)
+            .foregroundStyle(Palette.accent)
+        }
+    }
+
     /// The owner's one decision about writing, as three whole rows rather than
     /// a segmented control: each level is a different promise, and a promise
     /// needs its sentence beside it, not in a tooltip.
@@ -324,11 +364,17 @@ struct AgentsSection: View {
         guard !accessBusy, access?.level != level else { return }
         accessBusy = true
         accessError = nil
+        // The mailbox this click was about. An answer that comes back after
+        // a switch belongs to the other mailbox and is dropped: painting it
+        // here would show one mailbox's level on another's card.
+        let asked = endpoint
         Task {
             do {
                 let saved = try await APIClient.shared.setAgentAccess(level)
+                guard asked == endpoint else { return }
                 withAnimation(Motion.disclose) { access = saved }
             } catch {
+                guard asked == endpoint else { return }
                 accessError = errText(error, "could not save")
             }
             accessBusy = false
@@ -347,7 +393,17 @@ struct AgentsSection: View {
             "Set sender rules, inside Passband only",
         ]
         var cannot = ["See sign-in codes or password resets"]
-        switch access?.level ?? AgentWriteAccess.none {
+        // What the daemon says, or, when it has no such setting at all, the
+        // read-only door that daemon is. Nil is "do not know": the setting
+        // would not load, or holds a level this build cannot read. Then the
+        // columns say nothing about writing mail, rather than a "can't send"
+        // that may be false.
+        let level: AgentWriteAccess? = access.map(\.level) ?? (accessUnknown ? nil : AgentWriteAccess.none)
+        guard let level else {
+            cannot.append("Archive, label or delete")
+            return (can, cannot)
+        }
+        switch level {
         case .none:
             cannot.insert("Send, archive, label or delete", at: 0)
             cannot.append("Change anything in Gmail")

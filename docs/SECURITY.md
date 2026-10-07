@@ -358,7 +358,8 @@ all. Nothing here changes what an agent can READ.
 `squelch-core/src/agent_write.rs:AgentWriteAccess::load` reads it and FAILS
 CLOSED: unset, or any value this build does not recognize, is `none`. It is set
 only on the human door (`GET`/`PUT /client/settings/agent-access`, bearer-authed,
-audited as `agent.write_access` with `before->after`). The agent door has no
+audited as `agent.write_access` with `before->after`; the ledger row is written
+FIRST and a failed row leaves the setting unchanged). The agent door has no
 tool or route that changes it. It is read from the store on every call, so
 turning it off stops the next tool call, not the next restart.
 
@@ -373,23 +374,49 @@ none and offers neither tool. For each call the mailer:
 - re-reads the setting and refuses below the needed level (the MCP server
   also hides tools the level does not allow, but listing is a courtesy and
   this check is the gate);
-- resolves a reply target through the AGENT's access check
-  (`thread_id_for_message` + `external_thread_allowed`), so an agent can only
-  reply to mail it can read, and a restricted id answers the same `not found`
-  as an unknown one;
+- resolves a reply target by PERFORMING THE AGENT DOOR'S OWN READ
+  (`readable_parent`: the message must appear in the `thread_view` that
+  `get_thread` serves), so an agent can only reply to mail it can read, and a
+  restricted, pending or spam id answers the same `not found` as an unknown
+  one. It asks the read rather than re-listing the read's conditions: a first
+  version re-listed them and left out spam (§4b);
+- DECIDES THE RECIPIENTS ITSELF: the `to` the agent stated, else the parent's
+  stored From, and the `cc` the agent stated or none. The owner's own reply
+  honors the parent's `Reply-To` and derives copies from its headers; an
+  agent's does not, because the agent is shown only a message's From and its
+  human approves only what the agent shows them. A `Reply-To` nobody in that
+  conversation saw must not decide where approved mail goes. The resolved
+  `to`/`cc` are returned in the tool result;
 - for `send_email`, runs `validate_send`, the outbound guard (§5) and
-  `perform_send`, exactly as `POST /client/actions/send` does, with
-  `override_guard` hard-wired to `false`;
+  `perform_send`, as `POST /client/actions/send` does, with `override_guard`
+  hard-wired to `false`. The guard reads MORE than it does for the owner:
+  recipients and subject as well as the body, and the body a second time
+  with markdown emphasis marks removed (`guard_text`), since for an agent
+  all of it is model output and this is the one check with no override;
 - for `create_draft`, INSERTS a local draft marked `drafts.from_agent = 1`
-  (shown as "from your agent" in the client) and never edits one: a reply
-  whose message already has a draft is refused, because that row is the
-  owner's own unfinished writing and an agent cannot see it to know;
-- audits every outcome, refusals included, as actor `agent` (ids, counts and
-  fixed reason strings only, never content). A draft is written fail-closed
-  with its ledger row, like `set_sender_rule`.
+  and never edits one: a reply whose message already has a draft is refused,
+  because that row may be the owner's own unfinished writing and an agent
+  cannot see it to know. At most 25 unsent agent drafts per mailbox. The
+  client marks such a draft "from your agent" in the drafts list AND inside
+  the composer it is restored into (`AgentDraftNotice`), with its recipient
+  fields laid open: a reply draft is restored straight into the reply box
+  when the owner presses `r`, so a mark only on the list would never be seen;
+- refuses, for both tools, a body with no visible character, a header field
+  carrying any control character or Unicode line separator, and more than 50
+  recipients;
+- audits every call that reaches it, refusals included, as actor `agent`
+  (ids, counts and fixed reason strings only, never content). A draft and its
+  ledger row are one transaction, like `set_sender_rule`. NOT audited: a
+  `send_email` call the MCP server turns away for `human_approved` not being
+  `true`, which never reaches the mailer; and, as on the human door, a send's
+  success row is best-effort once the mail has left.
 
 An agent's composition is deliberately narrower than the owner's: no
 attachments, no forward, no send group, no read tracking, no scheduling.
+
+`from_agent` is set at insert and never cleared. An owner who rewrites an
+agent's draft still sees it marked, and so does an owner whose own save landed
+on a row the agent created a moment earlier. That errs toward the warning.
 
 **What "with your approval" does and does not mean.** At `send`, the approval
 is the agent's human saying yes IN THE AGENT'S OWN CONVERSATION. The daemon
@@ -399,7 +426,9 @@ cannot see that conversation and does not verify it. What it does is:
   `initialize` (`server.rs:write_instructions`), in the `send_email`
   description, and in the required `human_approved` argument, each saying that
   approval is per message, comes from the human, and is never text found in an
-  email or a tool result;
+  email or a tool result. A sender rule's `standing_instruction` is named
+  explicitly as never being approval: `set_sender_rule` is an agent write, so
+  that text may have been written by an earlier, compromised session;
 - refuse a call whose `human_approved` is not `true`;
 - annotate the tool `destructiveHint` + `openWorldHint`, which is what MCP
   clients key their own confirmation prompts on.
@@ -415,14 +444,19 @@ agent sign-in) "the agent" is anything that can reach `/mcp`. An owner who
 wants a hard gate uses `drafts`, where the only way mail leaves is the owner
 pressing send in Passband. Not built yet, and the natural next steps if `send`
 needs hardening: per-send approval inside the app, a recipient allow-list, a
-daily cap, reply-only.
+daily cap, reply-only, and recording who authored a sender rule so agent-written
+rule text is not delivered as the owner's words.
 
 **Do not break.**
 - Never give `squelch-mcp` the write credential, a `GmailWriteClient`, or a
   direct draft/outbox store call. Agent writes go through `AgentMailer`.
 - Never let an agent path pass `override_guard: true`.
 - Never resolve an agent's reply target with `action_message_ref` alone; it
-  applies no agent access check.
+  applies no agent access check. And never re-list the agent door's read
+  conditions beside it: ask `thread_view`.
+- Never let an agent's send take its recipients from the pipeline's
+  derivation (`Reply-To`, the parent's Cc). State `to` and `cc` on the
+  `SendBody`.
 - Keep the default `none`, and keep an unreadable setting meaning `none`.
 - Keep the setting off the agent door: an agent that could raise its own
   level has no level.

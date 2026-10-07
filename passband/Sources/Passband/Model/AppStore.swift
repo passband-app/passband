@@ -3799,6 +3799,7 @@ final class AppStore {
         // The files the draft claimed, already staged — no upload to wait on.
         next.attachments = (draft.attachments ?? []).map(ComposeAttachment.init)
         next.draftId = draft.id
+        next.fromAgent = draft.from_agent == true
     }
 
     // MARK: - drafts list
@@ -4243,6 +4244,17 @@ final class AppStore {
             next.bcc = bcc
             next.to = draft.to.isEmpty ? next.to : draft.to
             next.recipientsStated = true
+        }
+        // AN AGENT'S DRAFT STATES ITS AUDIENCE, always. The agent chose who
+        // this goes to, so the fields are laid open with exactly what it
+        // chose rather than left showing the reply's derived recipient over
+        // a `to` the owner never saw.
+        if draft.from_agent == true {
+            next.to = draft.to.isEmpty ? next.to : draft.to
+            next.cc = draft.cc ?? next.cc
+            next.bcc = draft.bcc ?? next.bcc
+            next.recipientsStated = true
+            next.fromAgent = true
         }
         next.attachments = (draft.attachments ?? []).map(ComposeAttachment.init)
         next.draftId = draft.id

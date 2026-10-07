@@ -702,6 +702,19 @@ pub struct Draft {
     pub from_agent: bool,
 }
 
+/// What [`SqliteStore::create_agent_draft`](sqlite::SqliteStore::create_agent_draft)
+/// did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentDraftOutcome {
+    /// Inserted, with its audit row, under this draft id.
+    Created(i64),
+    /// The message being replied to already has a draft. Nothing written.
+    ReplyDraftExists,
+    /// The account already holds the most unsent agent drafts it may.
+    /// Nothing written.
+    TooMany,
+}
+
 /// Which draft row a save addresses. Taken by
 /// [`SqliteStore::upsert_draft`](sqlite::SqliteStore::upsert_draft).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

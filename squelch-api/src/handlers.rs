@@ -3037,6 +3037,12 @@ pub async fn get_stats(State(state): State<ApiState>) -> Result<impl IntoRespons
     // tenant nobody has turned it on for). Always present, so a client reads an
     // answer rather than absence, and an OLD daemon's silence reads as "no".
     body["invite_sharing"] = json!(state.sharing().is_some());
+    // The hidden features this mailbox has been let into, as sorted keys. An
+    // app shows a hidden feature only when its key is listed, so an OLD
+    // daemon's silence and an empty list both read as "nothing extra", which
+    // is the safe direction. Keys the daemon itself has never heard of ride
+    // through: a feature only the app implements is still a feature.
+    body["features"] = json!(state.features().list());
     // Whether the iPhone app has EVER talked to this mailbox. The Mac uses it
     // to decide whether to point somebody at the TestFlight; see
     // [`ios_app_connected`]. Always present, so an old daemon's silence is the

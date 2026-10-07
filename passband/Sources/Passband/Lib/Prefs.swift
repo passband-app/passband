@@ -136,6 +136,7 @@ final class Prefs {
         static let searchSort = "passband.pref.searchSort"
         static let notificationSound = "passband.pref.notificationSound"
         static let floatLoginCodes = "passband.pref.floatLoginCodes"
+        static let loginCodesRespectFocus = "passband.pref.loginCodesRespectFocus"
         static let userName = "passband.name"
         static let nameChosen = "passband.name.chosen"
         static let signature = "passband.pref.signature"
@@ -163,6 +164,7 @@ final class Prefs {
             Key.searchSort: SearchSortChoice.recent.rawValue,
             Key.notificationSound: NotificationSound.system.rawValue,
             Key.floatLoginCodes: true,
+            Key.loginCodesRespectFocus: false,
             Key.telemetry: TelemetryLevel.full.rawValue,
             Key.deeperSearch: DeeperSearchChoice.automatic.rawValue,
         ])
@@ -187,6 +189,7 @@ final class Prefs {
             NotificationSound(rawValue: defaults.string(forKey: Key.notificationSound) ?? "")
             ?? .system
         _floatLoginCodes = defaults.bool(forKey: Key.floatLoginCodes)
+        _loginCodesRespectFocus = defaults.bool(forKey: Key.loginCodesRespectFocus)
         _telemetry =
             TelemetryLevel(rawValue: defaults.string(forKey: Key.telemetry) ?? "") ?? .full
         let storedName = defaults.string(forKey: Key.userName) ?? ""
@@ -388,6 +391,19 @@ final class Prefs {
         set {
             _floatLoginCodes = newValue
             defaults.set(newValue, forKey: Key.floatLoginCodes)
+        }
+    }
+
+    /// Whether a Focus (Do Not Disturb included) holds the floating panel
+    /// back, leaving the code to the banner the system then filters itself.
+    /// Off by default: reading the Focus takes a permission, and nobody is
+    /// asked for one until they turn this on.
+    private var _loginCodesRespectFocus: Bool
+    var loginCodesRespectFocus: Bool {
+        get { _loginCodesRespectFocus }
+        set {
+            _loginCodesRespectFocus = newValue
+            defaults.set(newValue, forKey: Key.loginCodesRespectFocus)
         }
     }
 

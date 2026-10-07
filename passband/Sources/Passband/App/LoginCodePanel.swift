@@ -17,7 +17,31 @@
 // Notification Center when they come back.
 
 import AppKit
+import Intents
 import SwiftUI
+
+/// Whether a Focus is on. The system answers only for an app the human has
+/// allowed to ask (System Settings, Privacy & Security, Focus), and the ask
+/// itself is made from the Settings toggle, never on arrival of a code.
+@MainActor
+enum FocusGate {
+    /// nil when Passband may not know.
+    static var focused: Bool? {
+        let center = INFocusStatusCenter.default
+        guard center.authorizationStatus == .authorized else { return nil }
+        return center.focusStatus.isFocused
+    }
+
+    /// Ask for the permission. Shows the system prompt the first time and
+    /// answers from the stored decision after that.
+    static func request() async -> Bool {
+        await withCheckedContinuation { done in
+            INFocusStatusCenter.default.requestAuthorization { status in
+                done.resume(returning: status == .authorized)
+            }
+        }
+    }
+}
 
 @MainActor
 final class LoginCodePanel {

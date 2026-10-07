@@ -185,6 +185,15 @@ enum SettingsSearch {
             ]),
         SettingsEntry(
             card: .notifications,
+            title: "Respect Do Not Disturb",
+            blurb: "Keeps login codes from floating over your screen while a Focus is on.",
+            keywords: [
+                "do not disturb", "dnd", "focus", "focus mode", "quiet", "screen share",
+                "screen sharing", "presenting", "login code", "login codes", "code", "otp",
+                "float", "panel", "popup",
+            ]),
+        SettingsEntry(
+            card: .notifications,
             title: "Test banner",
             blurb: "Posts a notification right now to prove banners reach you.",
             keywords: [

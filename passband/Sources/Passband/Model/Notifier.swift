@@ -115,7 +115,14 @@ final class Notifier {
         // banner is what it falls back to when nobody answers the panel, so a
         // code is never in both places at once and never in neither.
         #if os(macOS)
-            if Prefs.shared.floatLoginCodes, let login = EventBanner.loginCode(for: event) {
+            if let login = EventBanner.loginCode(for: event),
+                EventBanner.floatsLoginCode(
+                    enabled: Prefs.shared.floatLoginCodes,
+                    respectFocus: Prefs.shared.loginCodesRespectFocus,
+                    // Asked only when the setting wants it: the answer is the
+                    // system's to give and nothing else here needs it.
+                    focused: Prefs.shared.loginCodesRespectFocus ? FocusGate.focused : nil)
+            {
                 let accounts = AccountManager.shared.accounts
                 LoginCodePanel.shared.show(
                     login, sender: event.sender,

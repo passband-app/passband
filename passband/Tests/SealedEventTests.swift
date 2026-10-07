@@ -36,6 +36,7 @@ struct SealedEventTests {
         """.utf8))
         expect(auth.isAuth && EventBanner.copy(for: auth).sound, "Login alerts carry explicit auth and sound even at low importance")
         aLoginCodeIsReadOutOfTheDaemonsSentenceAndNothingElse()
+        aFocusHoldsThePanelBackOnlyWhenAskedTo()
         anOrdinaryEventDecodesWithNoSealedKey()
         aSealedEventCarriesItsKind()
         anUnheardOfKindKeepsItsRawString()
@@ -373,6 +374,14 @@ struct SealedEventTests {
             EventBanner.loginCode(
                 for: event("Your UPS login code is 914515", at: "2026-10-07T06:00:00Z"), now: now)
                 == nil, "a replayed event from last night does not float this morning")
+    }
+
+    static func aFocusHoldsThePanelBackOnlyWhenAskedTo() {
+        expect(EventBanner.floatsLoginCode(enabled: true, respectFocus: false, focused: true), "by default a Focus does not stop the panel")
+        expect(!EventBanner.floatsLoginCode(enabled: true, respectFocus: true, focused: true), "respecting a Focus that is on leaves the code to the banner")
+        expect(EventBanner.floatsLoginCode(enabled: true, respectFocus: true, focused: false), "no Focus, so it floats")
+        expect(EventBanner.floatsLoginCode(enabled: true, respectFocus: true, focused: nil), "a Focus the system will not report is not a Focus")
+        expect(!EventBanner.floatsLoginCode(enabled: false, respectFocus: false, focused: false), "off is off")
     }
 
     static func genericPushStillIdentifiesItsAccountAndEvent() {

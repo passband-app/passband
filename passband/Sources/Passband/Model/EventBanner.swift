@@ -142,6 +142,14 @@ enum EventBanner {
         return LoginCode(service: service, code: code)
     }
 
+    /// Whether a parsed code floats or stays a banner. `focused` is nil when
+    /// the system will not say (permission never granted, or taken away), and
+    /// that reads as NOT focused: somebody who asked for a code and got
+    /// nothing is worse off than somebody who got a panel during a Focus.
+    static func floatsLoginCode(enabled: Bool, respectFocus: Bool, focused: Bool?) -> Bool {
+        enabled && !(respectFocus && focused == true)
+    }
+
     // MARK: - content mapping
 
     /// The display copy for one event. Pure: same event in, same banner out.

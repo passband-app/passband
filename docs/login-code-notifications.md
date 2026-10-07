@@ -30,7 +30,11 @@ does not bring Passband forward and does not take the keyboard from the field
 the code is about to be typed into. Copy strips the display gap from an
 all-digit code ("123 456" pastes as "123456"). Unanswered for 60 seconds, it
 closes and the ordinary banner is posted in its place. Settings > General >
-Notifications > "Float login codes" turns it off. `PASSBAND_PREVIEW_LOGIN_CODE=<code>`
+Notifications > "Float login codes" turns it off. The panel is our own window,
+so unlike a banner it ignores a Focus unless "Respect Do Not Disturb" (same
+card, off by default) is on. That setting asks for the Focus status permission
+(`INFocusStatusCenter`, no entitlement needed) and, while any Focus is on,
+leaves the code to the banner. `PASSBAND_PREVIEW_LOGIN_CODE=<code>`
 in the launch environment shows the panel without waiting for mail.
 
 ## Validation

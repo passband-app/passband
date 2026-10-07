@@ -748,6 +748,8 @@ struct NotificationsSection: View {
     /// What the last test banner did, shown until the next one. nil before the
     /// first press — no verdict to report yet.
     @State private var delivered: Bool?
+    /// The system said no when "Respect Do Not Disturb" asked to read the Focus.
+    @State private var focusRefused = false
 
     var body: some View {
         @Bindable var prefs = prefs
@@ -774,6 +776,20 @@ struct NotificationsSection: View {
                         .toggleStyle(.switch)
                         .controlSize(.small)
                 }
+                if prefs.floatLoginCodes {
+                    RowDivider()
+                    SettingsRow(
+                        title: "Respect Do Not Disturb",
+                        detail: focusRefused
+                            ? "Passband is not allowed to see your Focus. Allow it in System Settings, Privacy & Security, Focus, then turn this on again."
+                            : "While a Focus is on, codes do not float. They arrive as banners, which your Focus handles like any other."
+                    ) {
+                        Toggle("", isOn: $prefs.loginCodesRespectFocus)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                    }
+                }
             #endif
             RowDivider()
             // Three states, because two of them look identical from the outside:
@@ -789,6 +805,18 @@ struct NotificationsSection: View {
             }
         }
         .onChange(of: prefs.notificationSound) { _, choice in preview(choice) }
+        #if os(macOS)
+            // Turning it on is the moment to ask: a switch that reads on while
+            // the system refuses to say whether a Focus is up would be a lie.
+            .onChange(of: prefs.loginCodesRespectFocus) { _, on in
+                guard on else { return }
+                Task {
+                    let allowed = await FocusGate.request()
+                    focusRefused = !allowed
+                    if !allowed { prefs.loginCodesRespectFocus = false }
+                }
+            }
+        #endif
     }
 
     private var hint: String {

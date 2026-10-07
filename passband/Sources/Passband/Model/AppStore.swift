@@ -518,6 +518,7 @@ final class AppStore {
         didSet {
             if connStatus == .connected { Notifier.shared.connectionBecameReady() }
             if connStatus != .loading { restoringSavedConnection = false }
+            if connStatus == .loading || connStatus == .connected { leftSavedConnectionWait = false }
         }
     }
     /// The loading gate is up because a saved account's daemon is being
@@ -525,6 +526,10 @@ final class AppStore {
     /// a practice swap. That wait has no end of its own, so this is what lets
     /// the gate and the Accounts menu offer a way out of it.
     private(set) var restoringSavedConnection = false
+    /// The Connect gate is up because the person walked away from that wait
+    /// to connect something else. It opens on its choices then, not on a form
+    /// filled in with the one server known not to be answering.
+    private(set) var leftSavedConnectionWait = false
     /// Switching is offered from a working mailbox, and from the wait for one
     /// that is not answering. Not from the Connect gate (see PassbandCommands).
     var canSwitchAccounts: Bool { connStatus == .connected || restoringSavedConnection }
@@ -1393,15 +1398,14 @@ final class AppStore {
     /// Stop waiting on the saved daemon and hand the window to the Connect
     /// gate. Nothing is forgotten: the account stays in the index with its
     /// credentials, and the gate's "Try saved connection again" comes straight
-    /// back here. Leaves the same state a daemon that answers with a refusal
-    /// does, so the gate opens on its form rather than on the first-run intro.
+    /// back here.
     func stopWaitingForSavedConnection() {
         guard restoringSavedConnection, !accountActionsBlocked, !switching else { return }
         capabilityRecoveryTask?.cancel()
         capabilityRecoveryTask = nil
-        let name = AccountManager.shared.active?.displayName ?? "Your saved server"
-        connError = "\(name) is not answering. Connect another server, or try the saved connection again."
-        connStatus = .error
+        connError = nil
+        leftSavedConnectionWait = true
+        connStatus = .disconnected
     }
 
     /// Verify candidate credentials and triage capabilities, then persist and connect.

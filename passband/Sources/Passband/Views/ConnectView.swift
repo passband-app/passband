@@ -214,7 +214,11 @@ struct ConnectView: View {
             // Commit the initial route before the form can edit/clear an
             // error. Later error changes must never send it back to welcome.
             if purpose == .gate {
-                if case .introduction = gateStep, isReturning, store.connError != nil {
+                if case .introduction = gateStep, store.leftSavedConnectionWait {
+                    // Walked away from a server that is not answering: the
+                    // retry is offered, its host is not typed in for them.
+                    savedConnectionFailed = true
+                } else if case .introduction = gateStep, isReturning, store.connError != nil {
                     // The saved account's own host goes in the form, so a
                     // hosted person is not handed a localhost self-host form
                     // with a pairing-link instruction for a link that never came.
@@ -246,7 +250,7 @@ struct ConnectView: View {
     /// A fresh install has no active account and loadSettings clears
     /// `connError` for it, so the intro stays theirs.
     private var isReturning: Bool {
-        store.tour.hasLeftPractice
+        store.tour.hasLeftPractice || store.leftSavedConnectionWait
             || (AccountManager.shared.active != nil && store.connError != nil)
     }
 
@@ -257,7 +261,7 @@ struct ConnectView: View {
             // A saved connection that failed to restore needs the form and
             // its existing error, not the first-time hosting introduction —
             // and the form for the KIND of daemon that account was.
-            guard store.connError != nil else { return .welcome }
+            guard store.connError != nil, !store.leftSavedConnectionWait else { return .welcome }
             guard let host = Self.savedHost else { return .credentials(nil) }
             return .credentials(Self.isHostedHost(host) ? .hosted : .selfHosted)
         }

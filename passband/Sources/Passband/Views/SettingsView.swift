@@ -760,6 +760,21 @@ struct NotificationsSection: View {
                     options: NotificationSound.allCases.map { ($0, $0.label) },
                     selection: $prefs.notificationSound)
             }
+            // The panel is an AppKit window over other apps. The phone has
+            // no such place, and its code banners are the system's to draw.
+            #if os(macOS)
+                RowDivider()
+                SettingsRow(
+                    title: "Float login codes",
+                    detail:
+                        "A fresh code appears over whatever app you are in, with a Copy button. It does not take the keyboard. Off, it arrives as a banner."
+                ) {
+                    Toggle("", isOn: $prefs.floatLoginCodes)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                }
+            #endif
             RowDivider()
             // Three states, because two of them look identical from the outside:
             // a banner that never came because the grant is off, and one that

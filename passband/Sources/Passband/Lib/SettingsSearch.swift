@@ -176,6 +176,15 @@ enum SettingsSearch {
             ]),
         SettingsEntry(
             card: .notifications,
+            title: "Float login codes",
+            blurb: "Shows an arriving login code over whatever app you are in, with a Copy button.",
+            keywords: [
+                "login code", "login codes", "code", "otp", "2fa", "two factor", "verification",
+                "verification code", "pin", "passcode", "float", "floating", "popup", "pop up",
+                "panel", "copy code", "on top", "front",
+            ]),
+        SettingsEntry(
+            card: .notifications,
             title: "Test banner",
             blurb: "Posts a notification right now to prove banners reach you.",
             keywords: [

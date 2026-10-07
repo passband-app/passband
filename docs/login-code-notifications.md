@@ -20,6 +20,19 @@ and notification eligibility/deduplication continue to apply.
 The formatted event body reaches the existing macOS renderer and iOS
 notification service extension. The relay still transports encrypted events.
 
+## The floating panel (Mac)
+
+On the Mac a fresh code is not a banner first. `EventBanner.loginCode` parses
+the formatted sentence back out of an `is_auth` event under ten minutes old,
+and `LoginCodePanel` floats it at the top of the screen over whatever app is
+in front, with Copy and Dismiss. The panel is non-activating and never key: it
+does not bring Passband forward and does not take the keyboard from the field
+the code is about to be typed into. Copy strips the display gap from an
+all-digit code ("123 456" pastes as "123456"). Unanswered for 60 seconds, it
+closes and the ordinary banner is posted in its place. Settings > General >
+Notifications > "Float login codes" turns it off. `PASSBAND_PREVIEW_LOGIN_CODE=<code>`
+in the launch environment shows the panel without waiting for mail.
+
 ## Validation
 
 Automated tests cover exact copy through both notification lanes, leading zeros,

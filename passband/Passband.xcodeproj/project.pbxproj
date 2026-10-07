@@ -44,6 +44,7 @@
 		16B0C0F30C085FB37AB94D2A /* APIError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 37716282CFABFF5910677BBC /* APIError.swift */; };
 		16E483911006F01000C2CEC8 /* ConnectView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D6D7D083F3A7242DB7EB186 /* ConnectView.swift */; };
 		173671ED69C053A71E8BA23F /* SquelchRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57180C4CAEA47A9008DE2513 /* SquelchRenderer.swift */; };
+		184BB7DACF3D0EB860D35674 /* LoginCodePanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0FA5BEB63026EC8404C0F2AC /* LoginCodePanel.swift */; };
 		187732D5B3ABF7A3442444AF /* OnboardingIntroView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C787F920246CFD228F21747 /* OnboardingIntroView.swift */; };
 		18FD22776F56E1E1D787465D /* Density.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84AD5723EFAFDE98586BA93D /* Density.swift */; };
 		19AC9992744F5AE1DE0DF040 /* AuditView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6D39F14D1F28EEB5D9E86FE /* AuditView.swift */; };
@@ -486,6 +487,7 @@
 		0B8C4EAAA4A34C51BF2C88E6 /* RecentSearchStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecentSearchStore.swift; sourceTree = "<group>"; };
 		0B934097D54904EB956A1B16 /* AgentsSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentsSection.swift; sourceTree = "<group>"; };
 		0C13060FB00E773CC4E33680 /* RuleGrouping.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuleGrouping.swift; sourceTree = "<group>"; };
+		0FA5BEB63026EC8404C0F2AC /* LoginCodePanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginCodePanel.swift; sourceTree = "<group>"; };
 		10544C7DF8CDBA851AF0D9D8 /* Actions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Actions.swift; sourceTree = "<group>"; };
 		12468DFB107CC662204BCE84 /* MobileRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileRootView.swift; sourceTree = "<group>"; };
 		15B8541C2F7C988507905103 /* RefinementSlot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RefinementSlot.swift; sourceTree = "<group>"; };
@@ -1016,6 +1018,7 @@
 		A10FEC54530ACCB7EC40643B /* App */ = {
 			isa = PBXGroup;
 			children = (
+				0FA5BEB63026EC8404C0F2AC /* LoginCodePanel.swift */,
 				00D13052ED3A4D60224B1B18 /* MainWindow.swift */,
 				389673F8FDDB51FC4830D9D2 /* PassbandApp.swift */,
 				F5D8D394D011C195B13791BE /* RehearsalControlPanel.swift */,
@@ -1360,6 +1363,7 @@
 				1B728ED3AEA7FA2987C81319 /* ListRow.swift in Sources */,
 				36B44007385A5C9CC2BCCA24 /* LiveInboxSummary.swift in Sources */,
 				4A484A26530C0131828B0A16 /* Loadable.swift in Sources */,
+				184BB7DACF3D0EB860D35674 /* LoginCodePanel.swift in Sources */,
 				C44797D33062B1E2B2A342FE /* MailCSP.swift in Sources */,
 				12FA01A347B0C6F768928A55 /* MailFilterBar.swift in Sources */,
 				46D44A7303D12ED7AD0C0852 /* MailList.swift in Sources */,

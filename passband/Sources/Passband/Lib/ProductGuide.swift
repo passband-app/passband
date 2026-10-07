@@ -439,6 +439,8 @@ enum ProductGuide {
 
         Arrival:
         - Auth mail shows up within seconds, without waiting for triage. The Auth icon on the rail shows live codes counting down.
+        - On the Mac, a fresh login code floats in a small panel at the top of the screen, over whatever app is in front, with Copy and Dismiss buttons. It does not bring Passband forward or take the keyboard. Copy puts the code on the clipboard and closes the panel. Left alone for 60 seconds, it closes and the code arrives as an ordinary banner instead.
+        - Settings > General > Notifications > "Float login codes" turns the panel off, and codes arrive as banners.
         """
 
     private static let assistant = """

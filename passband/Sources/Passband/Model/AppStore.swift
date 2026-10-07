@@ -4162,6 +4162,16 @@ final class AppStore {
             discardCompose()
             return
         }
+        // The card has no field of its own, so the caret would stay in the
+        // mail under the scrim and every key the card does not bind (letters,
+        // Backspace, ⌘V) would edit it blind. The pane puts it back if the
+        // answer is no. Whichever window holds a text responder, not only
+        // the key one: the trash can is clickable in a window that is not.
+        #if os(macOS)
+            for window in NSApp.windows where window.firstResponder is NSText {
+                window.makeFirstResponder(nil)
+            }
+        #endif
         discardAsk = open.id
     }
 

@@ -125,6 +125,11 @@ struct ComposePane: View {
                     refocus()
                 }
             }
+            // The delete confirm took the caret away so nothing typed at it
+            // could land in the mail; "keep writing" hands it back.
+            .onChange(of: store.discardAsk) { old, new in
+                if old != nil, new == nil, store.compose?.page == .compose { refocus() }
+            }
             // ANYWHERE ON THE PANE: a file let go over the subject line or
             // the tray still lands.
             .composeDropTarget(.compose, targeted: $dropTargeted)

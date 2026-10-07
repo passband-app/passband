@@ -72,6 +72,14 @@ final class DraftSaver {
     /// save edits a deleted row, 404s, and the text is gone.
     private var resolved: [UUID: Int?] = [:]
 
+    /// Composers thrown away by `discard`, by identity. A save of one must
+    /// never reach the wire again: a debounce that had already fired can be
+    /// parked in `write` behind a slow save, wake AFTER the discard's delete,
+    /// find the id forgotten, and mint the row afresh. The mail the person
+    /// confirmed deleting would be back in drafts for good. Emptied whenever
+    /// the saver is idle (`pruneResolved`), when no such save can exist.
+    private var discarded: Set<UUID> = []
+
     private init() {}
 
     // MARK: - lifecycle
@@ -190,6 +198,7 @@ final class DraftSaver {
         pending[slot]?.cancel()
         pending[slot] = nil
         touched.remove(slot)
+        discarded.insert(state.id)
         let ticket = nextFlush
         nextFlush &+= 1
         flushes[ticket] = Task { [weak self] in
@@ -242,7 +251,9 @@ final class DraftSaver {
     /// (which carry theirs through `AppStore.detachedDrafts`), so the live slot
     /// identities are all that must survive.
     private func pruneResolved() {
-        guard flushes.isEmpty, inflight.isEmpty, !resolved.isEmpty else { return }
+        guard flushes.isEmpty, inflight.isEmpty else { return }
+        discarded = []
+        guard !resolved.isEmpty else { return }
         let live = Set([store.compose?.id, store.inlineReply?.id].compactMap { $0 })
         resolved = resolved.filter { live.contains($0.key) }
     }
@@ -338,6 +349,9 @@ final class DraftSaver {
             guard await awaitVerdict() else { return }
         }
         if state.forwardOfMessageId != nil, store.stats?.drafts_v2 != true { return }
+        // Thrown away while this save waited its turn (or for the verdict
+        // above): see `discarded`.
+        if discarded.contains(state.id) { return }
         // A body that is only the seeded signature counts as blank: saving it
         // would mint a draft of nothing, and every later `c` would restore it.
         //

@@ -1,6 +1,6 @@
 # squelch-mcp
 
-The **agent door**: an MCP server exposing squelch's intelligence to any MCP client (Claude Code, Claude Desktop, whatever you run). Agents get ranked summaries — they never hold the Gmail credential, never see raw mailbox access, and structurally cannot see auth mail. It is read-only unless the mailbox owner says otherwise (see "Writing mail").
+The **agent door**: an MCP server exposing squelch's intelligence to any MCP client (Claude Code, Claude Desktop, whatever you run). Agents get ranked summaries — they never hold the Gmail credential, never see raw mailbox access, and structurally cannot see auth mail. It never sends mail unless the mailbox owner turns that on, and by default it can leave drafts for the owner to send (see "Writing mail").
 
 ## Tools
 
@@ -17,12 +17,12 @@ Sealed messages (2FA codes, password resets, login alerts) are absent from every
 
 ### Writing mail
 
-Two more tools exist only when the owner has allowed them, in Passband under Settings > Agents ("What your agent may write"). The setting is per mailbox, defaults to read only, and lives in the daemon, not in this crate:
+Two more tools depend on the owner's setting, in Passband under Settings > Agents ("What your agent may write"). It is per mailbox, starts at Drafts only, and lives in the daemon, not in this crate:
 
 | Owner's setting | Extra tools | What happens |
 |---|---|---|
-| Read only (default) | none | The agent cannot write mail. |
-| Drafts only | `create_draft` | Saves a draft in Passband, marked as the agent's. The owner reads, edits and sends it. Nothing leaves the mailbox. |
+| Read only | none | The agent cannot write mail. |
+| Drafts only (default) | `create_draft` | Saves a draft in Passband, marked as the agent's. The owner reads, edits and sends it. Nothing leaves the mailbox. |
 | Send, with your approval | `create_draft`, `send_email` | Sends from the owner's address through the daemon's send pipeline. |
 
 `send_email` needs **direct human approval for every message**. The server's instructions and the tool's description both tell the agent to show its human the exact recipients, subject and body and wait for a yes; the required `human_approved` argument must be `true`, and a call without it is refused. That approval happens in the agent's conversation, which the daemon cannot see, so it is an instruction to the agent rather than a lock. An owner who wants a lock uses Drafts only.

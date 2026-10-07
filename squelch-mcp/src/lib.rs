@@ -116,7 +116,8 @@ fn build_service(
 /// daemon's send pipeline (`ApiState::agent_mailer`). `None` means the door
 /// offers no mail-writing tool at all, which is what the standalone binary
 /// passes. Passing one grants nothing by itself: every write is gated on the
-/// owner's `AgentWriteAccess`, which defaults to none.
+/// owner's `AgentWriteAccess`: drafts until they choose otherwise, never
+/// sending unless they chose it.
 ///
 /// The returned router has no fallback, so it merges into one that does.
 pub fn agent_door_router(

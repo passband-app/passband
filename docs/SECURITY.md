@@ -350,13 +350,22 @@ the request.
 
 **Invariant.** An agent writes mail only as far as the mailbox owner has said
 it may, only through the human door's own send pipeline, and never with more
-latitude than the owner has there. The default is that it cannot write mail at
-all. Nothing here changes what an agent can READ.
+latitude than the owner has there. With nothing chosen it may leave drafts and
+cannot send: no mail leaves a mailbox on an agent's say-so unless the owner
+chose that level. Nothing here changes what an agent can READ.
 
 **The setting.** `app_settings` key `agent.write_access`, per mailbox:
-`none` (default), `drafts`, `send`; each level includes the ones before it.
-`squelch-core/src/agent_write.rs:AgentWriteAccess::load` reads it and FAILS
-CLOSED: unset, or any value this build does not recognize, is `none`. It is set
+`none`, `drafts`, `send`; each level includes the ones before it. A mailbox
+that has never set it is at `drafts` (`AgentWriteAccess::UNSET`; the owner's
+product decision, 2026-10-06). That default is safe to hold for the reason
+`drafts` is the hard gate at all: a draft is a local row, marked as the
+agent's, that becomes mail only when the owner presses send. What it does
+cost is stated under the residual risks below.
+`squelch-core/src/agent_write.rs:AgentWriteAccess::load` reads it, and a
+STORED value this build does not recognize FAILS CLOSED to `none`, not to the
+unset default: "the owner chose something we cannot read" is not "the owner
+never chose". The type has no `Default` impl so that a failed read can never
+be spelled `unwrap_or_default()`. It is set
 only on the human door (`GET`/`PUT /client/settings/agent-access`, bearer-authed,
 audited as `agent.write_access` with `before->after`; the ledger row is written
 FIRST and a failed row leaves the setting unchanged). The agent door has no
@@ -433,7 +442,18 @@ cannot see that conversation and does not verify it. What it does is:
 - annotate the tool `destructiveHint` + `openWorldHint`, which is what MCP
   clients key their own confirmation prompts on.
 
-**Residual risk, accepted for an opt-in level and stated in the client.** A
+**Residual risk of the default (`drafts`), accepted.** Every mailbox whose
+daemon serves the agent door offers `create_draft` without the owner having
+opened the setting. On an Open door (self-host, no agent sign-in) that means
+anything that can reach `/mcp` can leave up to 25 drafts in the owner's
+drafts list, and a reply draft is restored into the owner's reply box. What
+stands between such a draft and the wire is the owner: the mark in the list,
+the notice in the composer with its recipients laid open, and their own
+press of send. A draft written to be sent unread ("looks like mine") is the
+attack this default exposes, and the mark is the defence; do not weaken it.
+
+**Residual risk of `send`, accepted for an opt-in level and stated in the
+client.** A
 prompt-injected or simply wrong agent can assert `human_approved: true` and
 send. At `send`, the blast radius of the agent door grows from "can read
 triaged mail and write local rules" to "can send mail as the owner", including
@@ -457,7 +477,8 @@ rule text is not delivered as the owner's words.
 - Never let an agent's send take its recipients from the pipeline's
   derivation (`Reply-To`, the parent's Cc). State `to` and `cc` on the
   `SendBody`.
-- Keep the default `none`, and keep an unreadable setting meaning `none`.
+- Never let the unset level be `send`. Sending is only ever a choice.
+- Keep an unreadable stored setting, and a failed read, meaning `none`.
 - Keep the setting off the agent door: an agent that could raise its own
   level has no level.
 

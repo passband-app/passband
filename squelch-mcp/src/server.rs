@@ -485,7 +485,8 @@ impl SquelchServer {
         if self.mailer.is_none() {
             return AgentWriteAccess::None;
         }
-        AgentWriteAccess::load(self.store.as_ref(), self.account_id).unwrap_or_default()
+        AgentWriteAccess::load(self.store.as_ref(), self.account_id)
+            .unwrap_or(AgentWriteAccess::None)
     }
 
     /// Whether `tool` is offered under `access`. The read tools and the local
@@ -1427,6 +1428,22 @@ mod tests {
         AgentWriteAccess::Send.save(store.as_ref(), acct).unwrap();
         let bare = SquelchServer::new(store, "me@localhost").unwrap();
         assert!(!has(&bare, "create_draft") && !has(&bare, "send_email"));
+    }
+
+    /// A mailbox whose owner never opened the setting: drafts are offered,
+    /// sending is not, and the instructions say so.
+    #[test]
+    fn an_unset_mailbox_offers_drafts_and_never_sending() {
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        store.ensure_account("me@localhost").unwrap();
+        let server = SquelchServer::new(store, "me@localhost")
+            .unwrap()
+            .with_mailer(Some(Arc::new(RecordingMailer::default())));
+        let offered = server.offered_tool_names();
+        assert!(offered.iter().any(|n| n == "create_draft"), "{offered:?}");
+        assert!(!offered.iter().any(|n| n == "send_email"), "{offered:?}");
+        let told = server.get_info().instructions.unwrap_or_default();
+        assert!(told.contains("You cannot send mail"), "{told}");
     }
 
     #[test]

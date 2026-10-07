@@ -3,10 +3,11 @@
 //!
 //! Two things live here because both doors need them and neither may own them:
 //!
-//! - [`AgentWriteAccess`], the owner's per-mailbox setting. Off unless the
-//!   owner turned it on in Settings > Agents, and read from the store on every
-//!   call, so flipping it back off takes effect on the next tool call rather
-//!   than the next daemon restart.
+//! - [`AgentWriteAccess`], the owner's per-mailbox setting, changed in
+//!   Settings > Agents. A mailbox that never touched it is at
+//!   [`AgentWriteAccess::UNSET`]: drafts, nothing sent. It is read from the
+//!   store on every call, so changing it takes effect on the next tool call
+//!   rather than the next daemon restart.
 //! - [`AgentMailer`], the trait the agent door calls to create a draft or send
 //!   mail. The agent door holds a `dyn AgentMailer` and nothing else: the
 //!   implementation lives beside the human door's send pipeline (squelch-api),
@@ -25,14 +26,19 @@ pub const AGENT_WRITE_ACCESS_KEY: &str = "agent.write_access";
 
 /// How much an agent may write to the mailbox. ORDERED: each level includes
 /// the ones before it, so an agent allowed to send may also leave a draft.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+///
+/// NO `Default` IMPL, on purpose. There are two different "no stored answer"
+/// cases and they must not share a spelling: a mailbox that never chose is
+/// [`Self::UNSET`], and a value that cannot be read is [`Self::None`]. A
+/// `default()` would invite `unwrap_or_default()` at exactly the call sites
+/// where an error has to mean "nothing allowed".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AgentWriteAccess {
-    /// The agent reads and nothing else. The default, and what every mailbox
-    /// that never opened the setting has.
-    #[default]
+    /// The agent reads and nothing else.
     None,
     /// The agent may leave drafts in Passband for the owner to read, edit and
-    /// send themselves. Nothing leaves the mailbox.
+    /// send themselves. Nothing leaves the mailbox. What a mailbox that never
+    /// opened the setting has ([`Self::UNSET`]).
     Drafts,
     /// The agent may send mail, having been told to get its human's approval
     /// for each message first.
@@ -40,6 +46,12 @@ pub enum AgentWriteAccess {
 }
 
 impl AgentWriteAccess {
+    /// What a mailbox that has never set the level gets: drafts (the owner's
+    /// decision, 2026-10-06). Nothing an agent does at this level leaves the
+    /// mailbox; the only way a draft becomes mail is the owner pressing send.
+    /// Sending is never a default, only ever a choice.
+    pub const UNSET: Self = AgentWriteAccess::Drafts;
+
     pub fn as_str(self) -> &'static str {
         match self {
             AgentWriteAccess::None => "none",
@@ -68,14 +80,18 @@ impl AgentWriteAccess {
         self >= AgentWriteAccess::Send
     }
 
-    /// The mailbox's current setting. FAILS CLOSED: unset, and any value this
-    /// build does not recognize, both read as [`AgentWriteAccess::None`], so a
-    /// row written by a newer daemon can never widen what an older one allows.
+    /// The mailbox's current setting. Unset is [`Self::UNSET`]. A STORED
+    /// VALUE THIS BUILD CANNOT READ FAILS CLOSED, to [`Self::None`] rather
+    /// than to the unset default: a row written by a newer daemon, or a
+    /// corrupted one, must never widen what this one allows, and "the owner
+    /// chose something we do not understand" is not "the owner never chose".
     pub fn load(store: &dyn Store, account_id: AccountId) -> Result<Self> {
-        Ok(store
-            .get_app_setting(account_id, AGENT_WRITE_ACCESS_KEY)?
-            .and_then(|v| Self::parse(&v))
-            .unwrap_or_default())
+        Ok(
+            match store.get_app_setting(account_id, AGENT_WRITE_ACCESS_KEY)? {
+                None => Self::UNSET,
+                Some(v) => Self::parse(&v).unwrap_or(AgentWriteAccess::None),
+            },
+        )
     }
 
     pub fn save(self, store: &dyn Store, account_id: AccountId) -> Result<()> {
@@ -207,13 +223,15 @@ mod tests {
     }
 
     #[test]
-    fn unset_and_unrecognized_both_read_as_none() {
+    fn unset_is_drafts_and_an_unreadable_value_is_none() {
         let store = SqliteStore::open_in_memory().unwrap();
         let acct = store.ensure_account("me@localhost").unwrap();
+        // Never chosen: drafts, and never more than drafts.
         assert_eq!(
             AgentWriteAccess::load(&store, acct).unwrap(),
-            AgentWriteAccess::None
+            AgentWriteAccess::Drafts
         );
+        assert!(!AgentWriteAccess::UNSET.allows_send());
         for junk in ["SEND", "everything", "", "send,drafts", "send ", " drafts"] {
             Store::set_app_setting(&store, acct, AGENT_WRITE_ACCESS_KEY, junk).unwrap();
             assert_eq!(
@@ -235,6 +253,12 @@ mod tests {
         let a = store.ensure_account("a@localhost").unwrap();
         let b = store.ensure_account("b@localhost").unwrap();
         AgentWriteAccess::Send.save(&store, a).unwrap();
+        assert_eq!(
+            AgentWriteAccess::load(&store, b).unwrap(),
+            AgentWriteAccess::UNSET
+        );
+        // And an owner who chose read only keeps it.
+        AgentWriteAccess::None.save(&store, b).unwrap();
         assert_eq!(
             AgentWriteAccess::load(&store, b).unwrap(),
             AgentWriteAccess::None

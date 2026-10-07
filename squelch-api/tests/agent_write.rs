@@ -209,14 +209,43 @@ fn audit_details(f: &Fixture) -> Vec<(String, String, String)> {
 
 // --- the setting -------------------------------------------------------------
 
+/// A mailbox that never opened the setting: an agent may leave drafts, and
+/// may not send. Sending is only ever something the owner chose.
 #[tokio::test]
-async fn a_mailbox_that_never_opened_the_setting_allows_an_agent_nothing() {
+async fn a_mailbox_that_never_opened_the_setting_allows_drafts_and_no_sending() {
     let (state, store, acct) = state_with(|_, _| {});
     assert!(
         Store::get_app_setting(store.as_ref(), acct, AGENT_WRITE_ACCESS_KEY)
             .unwrap()
             .is_none()
     );
+    let mailer = state.agent_mailer();
+
+    let created = mailer.create_draft(compose("hi")).await.unwrap();
+    assert!(
+        store
+            .draft_by_id(acct, created.draft_id)
+            .unwrap()
+            .unwrap()
+            .from_agent
+    );
+    assert_eq!(
+        mailer.send(compose("hi")).await,
+        Err(AgentWriteError::NotAllowed(AgentWriteAccess::Send))
+    );
+    let audit = store.list_audit(acct, 10).unwrap();
+    assert_eq!(audit[0].actor, "agent");
+    assert_eq!(audit[0].action, "send");
+    assert_eq!(
+        audit[0].detail.as_deref(),
+        Some("rejected:agent_not_allowed")
+    );
+}
+
+#[tokio::test]
+async fn read_only_allows_an_agent_nothing() {
+    let (state, store, acct) = state_with(|_, _| {});
+    AgentWriteAccess::None.save(store.as_ref(), acct).unwrap();
     let mailer = state.agent_mailer();
 
     assert_eq!(

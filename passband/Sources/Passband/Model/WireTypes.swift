@@ -1549,6 +1549,55 @@ struct TrackingConfigBody: Codable, Sendable {
     var default_enabled: Bool?
 }
 
+/// What an agent connected over Agent MCP may WRITE to this mailbox. The
+/// owner's setting, held by the daemon per mailbox and checked there on every
+/// agent call; this app only shows and sets it. Each level includes the ones
+/// before it.
+enum AgentWriteAccess: String, Codable, Sendable, CaseIterable, Identifiable {
+    case none, drafts, send
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .none: "Read only"
+        case .drafts: "Drafts only"
+        case .send: "Send, with your approval"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .none: "Your agent reads and reports. It cannot write mail."
+        case .drafts: "Your agent can leave drafts here. You read, edit and send them yourself."
+        case .send:
+            "Your agent can send from your address. It is told to show you each message and wait for your go-ahead first."
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .none: "eye"
+        case .drafts: "square.and.pencil"
+        case .send: "paperplane"
+        }
+    }
+}
+
+/// GET / PUT /client/settings/agent-access. `write_access` is a plain string
+/// on the wire so a level this build does not know (a newer daemon's) decodes
+/// rather than failing the whole card; `level` reads it, and an unknown one is
+/// nil, which the pane shows as nothing selected.
+struct AgentAccessConfig: Codable, Sendable, Hashable {
+    var write_access: String
+
+    var level: AgentWriteAccess? { AgentWriteAccess(rawValue: write_access) }
+}
+
+struct AgentAccessBody: Codable, Sendable {
+    var write_access: String
+}
+
 /// GET /client/contacts — one recipient-autocomplete hit, ranked server-side
 /// (prefix > substring, then frequency and recency).
 struct ContactHit: Codable, Sendable, Equatable, Identifiable {
@@ -1695,6 +1744,9 @@ struct DraftView: Codable, Sendable, Identifiable, Hashable {
     /// The files the draft holds. OPTIONAL for the reason `cc` is: an older
     /// daemon sends no key, and a restore must not fail over it.
     var attachments: [OutboundAttachment]?
+    /// An agent wrote this draft over Agent MCP, rather than the owner. Kept
+    /// through the owner's own edits. nil from a daemon older than the flag.
+    var from_agent: Bool? = nil
 }
 
 /// PUT /client/drafts — upsert keyed on `reply_to_message_id`. Every text field

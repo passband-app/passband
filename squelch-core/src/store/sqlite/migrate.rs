@@ -188,6 +188,9 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // schema.sql runs before this seam, so on an old DB it would reference a
     // column that does not exist yet and fail every open.
     add_column_if_missing(conn, "drafts", "forward_of_message_id", "INTEGER")?;
+    // Which drafts an agent wrote (issue #394). Every existing row is the
+    // owner's own, which is what the default says.
+    add_column_if_missing(conn, "drafts", "from_agent", "INTEGER NOT NULL DEFAULT 0")?;
     if has_columns(conn, "drafts", &["account_id", "forward_of_message_id"])? {
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_drafts_forward

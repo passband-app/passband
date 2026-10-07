@@ -1,4 +1,7 @@
 //! squelch-mcp: MCP server exposing squelch's read-mostly tools (agent door).
+//! The two tools that write mail (`create_draft`, `send_email`) exist only
+//! when the mailbox owner has allowed them and only through the host daemon's
+//! send pipeline; see `squelch_core::agent_write`.
 //!
 //! [`agent_door_router`] is the one construction path for the whole HTTP door
 //! (the MCP service, its auth, and the OAuth metadata routes), shared by the
@@ -18,6 +21,7 @@ use std::sync::Arc;
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
+use squelch_core::agent_write::AgentMailer;
 use squelch_core::store::SqliteStore;
 use tokio_util::sync::CancellationToken;
 
@@ -49,6 +53,7 @@ fn streamable_http_service(
     shipment_policy: squelch_core::config::ShipmentListPolicy,
     ranking: squelch_core::triage::agent_config::RankingConfig,
     cancellation: CancellationToken,
+    mailer: Option<Arc<dyn AgentMailer>>,
 ) -> anyhow::Result<SquelchHttpService> {
     // DNS-rebinding guard: rmcp defaults to loopback-only Host headers, which
     // 403s requests proxied by `tailscale serve` (Host: *.ts.net). Additive —
@@ -60,6 +65,7 @@ fn streamable_http_service(
         ranking,
         cancellation,
         squelch_core::config::mcp_allowed_hosts(),
+        mailer,
     )
 }
 
@@ -70,10 +76,12 @@ fn build_service(
     ranking: squelch_core::triage::agent_config::RankingConfig,
     cancellation: CancellationToken,
     allowed_hosts: Vec<String>,
+    mailer: Option<Arc<dyn AgentMailer>>,
 ) -> anyhow::Result<SquelchHttpService> {
     let template = SquelchServer::new(store, account_email)?
         .with_shipment_policy(shipment_policy)
-        .with_ranking_config(ranking);
+        .with_ranking_config(ranking)
+        .with_mailer(mailer);
     Ok(StreamableHttpService::new(
         move || Ok(template.clone()),
         Arc::new(LocalSessionManager::default()),
@@ -104,6 +112,13 @@ fn build_service(
 ///   answers 503 and the MCP service is never built. No metadata routes. An
 ///   error is logged here, once, at startup.
 ///
+/// `mailer` is the door's only way to write mail (issue #394): the host
+/// daemon's send pipeline (`ApiState::agent_mailer`). `None` means the door
+/// offers no mail-writing tool at all, which is what the standalone binary
+/// passes. Passing one grants nothing by itself: every write is gated on the
+/// owner's `AgentWriteAccess`: drafts until they choose otherwise, never
+/// sending unless they chose it.
+///
 /// The returned router has no fallback, so it merges into one that does.
 pub fn agent_door_router(
     store: Arc<SqliteStore>,
@@ -112,6 +127,7 @@ pub fn agent_door_router(
     ranking: squelch_core::triage::agent_config::RankingConfig,
     cancellation: CancellationToken,
     auth: &AgentDoorAuth,
+    mailer: Option<Arc<dyn AgentMailer>>,
 ) -> anyhow::Result<axum::Router> {
     use axum::routing::{any, get};
 
@@ -126,6 +142,7 @@ pub fn agent_door_router(
                 shipment_policy,
                 ranking,
                 cancellation,
+                mailer,
             )?;
             Ok(axum::Router::new().nest_service(MCP_PATH, service))
         }
@@ -146,6 +163,7 @@ pub fn agent_door_router(
                 ranking,
                 cancellation,
                 allowed_hosts,
+                mailer,
             )?;
             let state = auth::AuthLayerState::new(config, account_email);
             // `route_layer`, not `layer`: the guard wraps the MCP routes only,

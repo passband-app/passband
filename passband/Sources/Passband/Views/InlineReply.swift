@@ -176,6 +176,7 @@ struct InlineReply: View {
                     // The files, under the editor. Nothing when empty.
                     AttachmentTray(slot: .inlineReply)
                     // A held send came back blocked.
+                    if compose.fromAgent { AgentDraftNotice() }
                     if guarded { GuardVerdictBox(kinds: compose.guardKinds) }
                     if let error = compose.error {
                         Text(error).font(Typo.micro).foregroundStyle(Palette.danger)
@@ -468,7 +469,8 @@ struct InlineReply: View {
                         // The files, under the editor. Nothing when empty.
                         AttachmentTray(slot: .inlineReply)
                         // A held send came back blocked.
-                        if guarded { GuardVerdictBox(kinds: compose.guardKinds) }
+                        if compose.fromAgent { AgentDraftNotice() }
+                    if guarded { GuardVerdictBox(kinds: compose.guardKinds) }
                         if let error = compose.error {
                             Text(error).font(Typo.micro).foregroundStyle(Palette.danger)
                         }

@@ -719,6 +719,23 @@ pub struct Draft {
     pub parent_subject: Option<String>,
     pub parent_from_addr: Option<String>,
     pub parent_from_name: Option<String>,
+    /// An agent on the agent door wrote this draft (issue #394). Set at insert
+    /// by [`SqliteStore::create_agent_draft`](sqlite::SqliteStore::create_agent_draft)
+    /// and kept through every later edit.
+    pub from_agent: bool,
+}
+
+/// What [`SqliteStore::create_agent_draft`](sqlite::SqliteStore::create_agent_draft)
+/// did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentDraftOutcome {
+    /// Inserted, with its audit row, under this draft id.
+    Created(i64),
+    /// The message being replied to already has a draft. Nothing written.
+    ReplyDraftExists,
+    /// The account already holds the most unsent agent drafts it may.
+    /// Nothing written.
+    TooMany,
 }
 
 /// Which draft row a save addresses. Taken by

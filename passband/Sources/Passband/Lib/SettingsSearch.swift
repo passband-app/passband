@@ -317,6 +317,15 @@ enum SettingsSearch {
                 "mcp url", "agent url", "streamable http", "allowed hosts",
                 "squelch_mcp_allowed_hosts", "403", "tailscale", "tailnet", "remote agent",
             ]),
+        SettingsEntry(
+            card: .agents,
+            title: "What your agent may write",
+            blurb: "Read only, drafts only, or sending with your approval.",
+            keywords: [
+                "agent send", "agent drafts", "send email", "let agent send", "agent write",
+                "read only", "drafts only", "approval", "agent permissions", "write access",
+                "can my agent send", "agent reply",
+            ]),
     ]
 
     private static let baseAssistantEntries: [SettingsEntry] = [

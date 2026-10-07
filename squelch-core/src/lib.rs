@@ -3,6 +3,7 @@
 //! Sealed (auth-related) messages are ABSENT from every agent-door query, never
 //! redacted — see docs/SECURITY.md §4, [`store`], and [`triage::seal`].
 
+pub mod agent_write;
 pub mod auth;
 pub mod carriers;
 pub mod config;

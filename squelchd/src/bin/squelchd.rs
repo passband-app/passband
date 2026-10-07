@@ -1948,9 +1948,13 @@ fn agent_door_status(auth: &squelch_mcp::AgentDoorAuth) -> squelch_api::AgentDoo
     }
 }
 
-/// The router hosting both doors: `/mcp` (agent door, read-only, sealed-absent)
-/// and `/client/*` (human door, bearer-authed, the only write capability). They
-/// share the store; the agent door never sees the write credential.
+/// The router hosting both doors: `/mcp` (agent door, sealed-absent; it can
+/// leave drafts unless the owner turned that off, and send only if the owner
+/// turned that on, in Settings > Agents) and
+/// `/client/*` (human door, bearer-authed, where every write to Gmail is
+/// performed). They share the store; the agent door never sees the write
+/// credential, and an allowed agent write is the human door's pipeline run on
+/// its behalf (`ApiState::agent_mailer`).
 ///
 /// The agent door's auth is `agent_door`, resolved once by the caller: Open
 /// (Host guard only, the self-host door), OAuth (bearer JWTs bound to this
@@ -1978,6 +1982,11 @@ fn build_serve_router(
         api_state.triage_ranking(),
         mcp_cancel,
         agent_door,
+        // The agent door's only way to write mail is the human door's own
+        // send pipeline, and only as far as the owner's setting allows
+        // (drafts unless they chose otherwise; sending only if they chose it).
+        // It never holds the write credential.
+        Some(api_state.agent_mailer()),
     )?;
     // The latency histogram wraps BOTH doors, outermost, so the number it
     // records is everything the daemon did for the request including auth. It

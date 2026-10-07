@@ -1123,6 +1123,11 @@ CREATE TABLE IF NOT EXISTS drafts (
     bcc_addr            TEXT NOT NULL DEFAULT '',
     subject             TEXT NOT NULL DEFAULT '',
     body                TEXT NOT NULL DEFAULT '',
+    -- 1 = an agent on the agent door wrote this row (issue #394), 0 = the
+    -- owner did. Set once at insert and never cleared by an edit: the owner
+    -- finishing an agent's draft does not make its first words theirs, and
+    -- the composer says so until it is sent or discarded.
+    from_agent          INTEGER NOT NULL DEFAULT 0,
     created_at          TEXT NOT NULL,
     updated_at          TEXT NOT NULL
 );

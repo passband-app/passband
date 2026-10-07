@@ -15,6 +15,7 @@ private let railSpace = "sidebar-rail"
 
 struct SidebarRail: View {
     @Environment(AppStore.self) private var store
+    @Environment(\.colorScheme) private var colorScheme
     let namespace: Namespace.ID
 
     /// Where each icon sits in the rail's own space, written by the buttons as
@@ -221,15 +222,7 @@ struct SidebarRail: View {
                 // menu in the menu bar owns the ⌘numbers, and a second
                 // registration of the same chord is a conflict, not a shortcut.
                 ForEach(manager.accounts) { account in
-                    Button {
-                        Task { await manager.switchTo(account.id) }
-                    } label: {
-                        if account.id == manager.activeId {
-                            Label(account.displayName, systemImage: "checkmark")
-                        } else {
-                            Text(account.displayName)
-                        }
-                    }
+                    accountMenuRow(account, isActive: account.id == manager.activeId)
                 }
                 Divider()
                 Button("Add Account…") { store.addAccountSheetOpen = true }
@@ -248,14 +241,82 @@ struct SidebarRail: View {
         }
     }
 
+    /// The live account's profile photo, or its initial when none was imported.
+    ///
+    /// THE PHOTO GOES IN AS A BITMAP. This view is a `Menu`'s label, and AppKit
+    /// draws an image in a menu button at its natural size with no regard for
+    /// a SwiftUI frame or clip shape: a resizable photo here came out as a
+    /// 256pt square over the bottom of the rail. A bitmap that is already a
+    /// 26pt circle has nothing left to get wrong. The initial stays a real
+    /// view, as it always was: text in a menu label is laid out by SwiftUI.
+    @ViewBuilder
     private var accountMark: some View {
-        Text(AccountManager.shared.active?.initial ?? "?")
-            .font(Typo.ui(13, weight: .semibold))
-            .foregroundStyle(Palette.accent)
-            .frame(width: 26, height: 26)
-            .background(Circle().fill(Palette.accentSoft))
-            .overlay(Circle().strokeBorder(Palette.accent.opacity(0.35), lineWidth: 0.75))
+        let active = AccountManager.shared.active
+        if let active, AccountPhotos.shared.image(for: active.id) != nil,
+            let bitmap = markBitmap(active, size: 26, font: Typo.ui(13, weight: .semibold))
+        {
+            Image(nsImage: bitmap).renderingMode(.original)
+        } else {
+            AccountMark(account: active, font: Typo.ui(13, weight: .semibold))
+        }
     }
+
+    /// One row of the switcher menu: the account's mark beside its name, with
+    /// the menu's own checkmark on the live one.
+    ///
+    /// A `Toggle`, because that is how a SwiftUI menu spells a checked item:
+    /// the tick lands in the state column AppKit reserves for it, which leaves
+    /// the image slot free for the face. Every row gets a mark, photo or
+    /// initial, so the names line up whether or not each account has a picture.
+    private func accountMenuRow(_ account: AccountRecord, isActive: Bool) -> some View {
+        Toggle(
+            isOn: Binding(
+                get: { isActive },
+                // Either direction is "go to this account": `switchTo` already
+                // declines the one that is live.
+                set: { _ in Task { await AccountManager.shared.switchTo(account.id) } })
+        ) {
+            Label {
+                Text(account.displayName)
+            } icon: {
+                if let mark = markBitmap(account, size: 18, font: Typo.ui(10, weight: .semibold)) {
+                    Image(nsImage: mark).renderingMode(.original)
+                }
+            }
+        }
+    }
+
+    /// An account's mark as a bitmap, for the two places AppKit draws it
+    /// instead of SwiftUI (see `accountMark`). Rendering the same `AccountMark`
+    /// the rest of the app wears is what keeps them from drifting apart; the
+    /// color scheme is handed over because a renderer has no window to inherit
+    /// one from and would draw the light palette into a dark rail.
+    private func markBitmap(_ account: AccountRecord, size: CGFloat, font: Font) -> NSImage? {
+        // Read HERE, in the rail's own body, and not only inside the renderer:
+        // a renderer's view graph is not this view's, so a photo that arrived
+        // for a row in the menu would otherwise never redraw it.
+        let photo = AccountPhotos.shared.image(for: account.id)
+        // `body` runs on every hover and slot change, and a rasterisation per
+        // account per pass is not free. The key is everything the bitmap is
+        // drawn from; the photo by identity, since a new one is a new object.
+        let key =
+            "\(account.id)|\(photo.map { "\(ObjectIdentifier($0).hashValue)" } ?? account.initial)|\(size)|\(colorScheme)"
+            as NSString
+        if let hit = Self.markCache.object(forKey: key) { return hit }
+        let renderer = ImageRenderer(
+            content: AccountMark(account: account, size: size, font: font)
+                .environment(\.colorScheme, colorScheme))
+        renderer.scale = NSScreen.main?.backingScaleFactor ?? 2
+        guard let image = renderer.nsImage else { return nil }
+        Self.markCache.setObject(image, forKey: key)
+        return image
+    }
+
+    private static let markCache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 64
+        return cache
+    }()
 
     /// The one rounded corner the rail owns: the top-trailing shoulder, where
     /// the material tucks under the top bar. The other three corners meet

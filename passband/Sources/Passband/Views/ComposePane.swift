@@ -128,6 +128,11 @@ struct ComposePane: View {
                     refocus()
                 }
             }
+            // The delete confirm took the caret away so nothing typed at it
+            // could land in the mail; "keep writing" hands it back.
+            .onChange(of: store.discardAsk) { old, new in
+                if old != nil, new == nil, store.compose?.page == .compose { refocus() }
+            }
             // ANYWHERE ON THE PANE: a file let go over the subject line or
             // the tray still lands.
             .composeDropTarget(.compose, targeted: $dropTargeted)
@@ -241,6 +246,10 @@ struct ComposePane: View {
             // Esc closes this pane like every other panel in the app; saying
             // so in a chip or a button was the pane promising one key twice.
             #if os(macOS)
+                // THE OTHER DOOR OUT, up here with the pane's own controls and
+                // a pane's width from send: Esc keeps the mail, this does not.
+                // Not on the drafts page, where each row has its own delete.
+                if !onList { discardButton }
                 expandButton
             #else
                 // THE PHONE'S PRIMARY ACTION, IN THE CORNER IT LIVES IN. On a
@@ -284,6 +293,25 @@ struct ComposePane: View {
     }
 
     #if os(macOS)
+        /// Delete this message outright, after a confirm (`DiscardConfirm`).
+        /// Inked like the expand button beside it rather than in danger red:
+        /// the card it opens is where the warning lives.
+        private var discardButton: some View {
+            Button {
+                store.askDiscardCompose()
+            } label: {
+                Image(systemName: "trash")
+                    .font(Typo.ui(11, weight: .semibold))
+                    .frame(width: Space.scaled(22), height: Space.scaled(22))
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Palette.inkFaint)
+            .pointingHand()
+            .help("delete this message")
+            .accessibilityLabel("Delete message")
+        }
+
         /// Open the pane out to a centred column over the page, or back.
         private var expandButton: some View {
             Button {
@@ -717,6 +745,13 @@ struct ComposePane: View {
 
     // MARK: - keymap
 
+    /// A modal is up over this pane, in the same key context: the ask bar, or
+    /// the delete confirm. Each binds only its own keys, so a chord typed at
+    /// it falls through to the bindings below, and none of them may act on
+    /// the mail underneath. Least of all send it while it is asking to be
+    /// deleted.
+    private var modalAbove: Bool { store.askBarOpen || store.discardAsk != nil }
+
     /// ⌘Enter sends from anywhere in the pane, the body included. Plain Enter
     /// is left alone everywhere: it used to open review from the to/subject
     /// lines, and with review gone an Enter that SENDS from the subject line
@@ -737,7 +772,7 @@ struct ComposePane: View {
             KeyBinding(declining: "Enter", "send", meta: true, allowInInput: true) {
                 // Not from the drafts page: the mail being sent is not on
                 // screen, and a send should never be of something unseen.
-                guard !store.askBarOpen, store.compose?.page != .drafts else { return false }
+                guard !modalAbove, store.compose?.page != .drafts else { return false }
                 send(override: false)
                 return true
             },
@@ -747,7 +782,7 @@ struct ComposePane: View {
                 // THE ASK BAR IS A MODAL ON TOP OF THIS PANE, and KeyMonitor
                 // walks the sets newest-first; a chord typed into its field
                 // must not send THROUGH the outbound guard from under it.
-                guard !store.askBarOpen, guarded, store.compose?.page != .drafts else {
+                guard !modalAbove, guarded, store.compose?.page != .drafts else {
                     return false
                 }
                 send(override: true)
@@ -761,7 +796,7 @@ struct ComposePane: View {
                 declining: ScheduleClock.chordKey, "send later", meta: true, allowInInput: true,
                 exactCase: true
             ) {
-                guard !store.askBarOpen, store.scheduledSendAvailable,
+                guard !modalAbove, store.scheduledSendAvailable,
                     store.compose?.page != .drafts
                 else { return false }
                 store.schedulePicker = .compose
@@ -871,6 +906,48 @@ enum ComposeLabels {
         // the reply is kept and restored next time, not thrown away.
         static let dismiss = "dismiss"
     #endif
+}
+
+// MARK: - the delete confirm
+
+/// THE QUESTION BEHIND THE TRASH CAN. Everything else that removes something
+/// in this app is undone from a chip; this is the one that asks instead,
+/// because the composer's whole promise is that closing it loses nothing
+/// ("kept in drafts"), and the button that breaks the promise sits a few
+/// points from the one that only resizes the pane.
+///
+/// Drawn by `ActionLayer` off `AppStore.discardAsk`. Enter deletes, Esc and
+/// the scrim keep writing.
+struct DiscardConfirm: View {
+    @Environment(AppStore.self) private var store
+
+    var body: some View {
+        OverlayScrim(onDismiss: { store.cancelDiscardAsk() }) {
+            ModalCard(width: 380) {
+                Text("Delete this message?")
+                    .font(Typo.ui(14, weight: .semibold))
+                    .foregroundStyle(Palette.ink)
+                Text("It will not be kept in drafts, and this cannot be undone.")
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.inkFaint)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                HStack(spacing: Space.s8) {
+                    Spacer(minLength: 0)
+                    Button("Cancel") { store.cancelDiscardAsk() }
+                        .buttonStyle(.glass)
+                    Button("Delete") { store.confirmDiscard() }
+                        .buttonStyle(.glassProminent)
+                        .tint(Palette.danger)
+                }
+            }
+        }
+        .keyContext(.modal)
+        .keyBindings(.modal, [
+            KeyBinding("Escape", "keep writing", allowInInput: true) { store.cancelDiscardAsk() },
+            KeyBinding("Enter", "delete message", allowInInput: true) { store.confirmDiscard() },
+        ])
+    }
 }
 
 // MARK: - shared chrome

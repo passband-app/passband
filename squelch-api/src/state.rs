@@ -6,6 +6,7 @@ use squelch_core::config::{Config, CredentialBackend, OAuthClientConfig, Stage2C
 use squelch_core::credentials::{
     CredentialKind, CredentialStore, FileCredentialStore, KeyringCredentialStore,
 };
+use squelch_core::features::Features;
 use squelch_core::store::SqliteStore;
 use squelch_core::triage::fye_headline::HeadlineClient;
 use squelch_core::triage::rule_infer::RuleInferClient;
@@ -232,6 +233,11 @@ pub struct ApiState {
     /// offers a button that could only fail. HUMAN DOOR ONLY: it spends a quota
     /// and sends mail as the user.
     pub(crate) sharing: Option<Arc<crate::sharing::Sharing>>,
+    /// The hidden features this mailbox has been let into; see
+    /// [`squelch_core::features`]. Nothing is on by default. `/client/stats`
+    /// lists it for the apps, and a handler that gates on one asks
+    /// `state.features().enabled(..)` at the moment it decides.
+    pub(crate) features: Features,
     /// The carrier poller's kick handle plus the carriers it was built over,
     /// behind `POST /client/shipments/poll`. `None` when no poller runs — which
     /// is the resting state of every daemon with no carrier credentials — and
@@ -457,6 +463,7 @@ impl ApiState {
             fye_headline_attempts: Arc::new(std::sync::Mutex::new((String::new(), 0))),
             assistant: None,
             sharing: None,
+            features: Features::none(),
             shipment_poll: None,
             shipment_policy: squelch_core::config::ShipmentListPolicy::default(),
             unsub: crate::unsub_job::UnsubJobs::default(),
@@ -754,6 +761,29 @@ impl ApiState {
         self
     }
 
+    /// Use `features` as this daemon's hidden-feature set. The handle is
+    /// shared, not copied: whatever refreshes it is seen here.
+    pub fn with_features(mut self, features: Features) -> Self {
+        self.features = features;
+        self
+    }
+
+    /// The hidden features that are on. Clone it to hand a subsystem outside
+    /// this crate the same live set.
+    pub fn features(&self) -> &Features {
+        &self.features
+    }
+
+    /// The loop that keeps [`Self::features`] in step with the control plane,
+    /// or `None` when there is no control plane to ask (every self-host, where
+    /// the only features on are the ones `SQUELCH_FEATURES` pins).
+    pub fn feature_refresher(&self) -> Option<crate::sharing::FeatureRefresher> {
+        Some(crate::sharing::FeatureRefresher {
+            sharing: self.sharing.clone()?,
+            features: self.features.clone(),
+        })
+    }
+
     /// The invite minter, if this daemon has one.
     pub(crate) fn sharing(&self) -> Option<&Arc<crate::sharing::Sharing>> {
         self.sharing.as_ref()
@@ -929,7 +959,10 @@ impl ApiState {
         );
         Ok(Self::new(store, account_id, token)
             .with_console_sso_url(std::env::var("SQUELCH_CONSOLE_SSO_URL").ok())
-            .with_sharing(sharing))
+            .with_sharing(sharing)
+            // Pinned from `SQUELCH_FEATURES`, which no hosted pod sets; what
+            // the control plane grants arrives later, through the refresher.
+            .with_features(Features::from_env()))
     }
 
     /// THE one way a binary turns a loaded [`Config`] into serving state:

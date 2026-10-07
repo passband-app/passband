@@ -2188,6 +2188,24 @@ fn cmd_serve(
             }
         };
 
+        // Keeps the hidden-feature set in step with the control plane. Hosted
+        // only: a daemon with no control token has nobody to ask, and what is
+        // on there is whatever SQUELCH_FEATURES pins. Not awaited on the way
+        // out: it holds no state worth flushing and exits on the same watch.
+        // Read BEFORE the refresher starts, so this line names only what the
+        // variable pinned and never what the control plane went on to grant.
+        let pinned = api_state.features().list();
+        if !pinned.is_empty() {
+            eprintln!(
+                "squelchd: hidden features pinned on by SQUELCH_FEATURES: {}",
+                pinned.join(", ")
+            );
+        }
+        if let Some(refresher) = api_state.feature_refresher() {
+            eprintln!("squelchd: hidden features follow the control plane");
+            tokio::spawn(refresher.run(shutdown_rx.clone()));
+        }
+
         // Drains observed opens off the same relay. Shares the shutdown watch
         // and is awaited on the way out, like the pusher.
         let opens_handle = match opens_poller {

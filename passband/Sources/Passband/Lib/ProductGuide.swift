@@ -212,7 +212,7 @@ enum ProductGuide {
         - Hover a Reading card and press e to mark everything from that sender done. That one cannot be undone.
 
         Other things on the page:
-        - Clicking the headline asks for a different one. The name in the greeting is set in Settings > General > You.
+        - Clicking the headline asks for a different one. The name in the greeting starts as the first name on the mailbox's Google profile (or the first part of the address when that is not available) and is changed in Settings > General > You.
         - With nothing in For your eyes the page says there is no important mail, shows the day's tally and links to all mail.
         - "ingesting" in the top bar means new mail is still being sorted and will land on the next refresh.
         - Unsubscribes Passband is carrying out show in a tray at the bottom right.
@@ -264,6 +264,7 @@ enum ProductGuide {
     private static let writingMail = """
         Reply, reply all and forward all start from an open email:
         - Reply: press r. A composer opens inline under the thread, answering the newest message, addressed to its sender.
+        - On the Mac the inline composer is part of the conversation: it sits under the newest message, scrolls with the thread, and grows taller as the reply gets longer instead of scrolling inside a fixed box.
         - Reply all: press Enter. The same inline composer, addressed to everyone on the newest message. It only works when no reply is already open and no text field has focus. An open reply is never converted, so to turn one into a reply all, close it with Esc and press Enter.
         - Forward: press f. It forwards the message selected with j / k, in the side composer, with the original shown under the note. Fill in To and send; the note is optional.
         - From the Sitrep or a row in the Emails list, r opens the email and starts the reply in one step. On a list row f is "search this sender", not forward.
@@ -299,6 +300,7 @@ enum ProductGuide {
 
         Drafts:
         - Everything autosaves about a second after typing stops. Esc closes a composer and keeps the draft.
+        - The trash can in the side composer's top corner deletes the message instead of keeping it. It asks first (Enter deletes, Esc goes back), and it cannot be undone.
         - A reply draft comes back when r is pressed on the same message.
         - Other drafts are behind the "drafts" control beside the composer's title: up and down move, Enter opens, Backspace deletes.
 
@@ -489,7 +491,9 @@ enum ProductGuide {
         - Add one from the Accounts menu ("Add Account…") or Settings > Account: sign in with Gmail, or connect a self-hosted server with a pairing code or an API token.
         - Switch with ⌘1 to ⌘9, in the order listed in Settings > Account, or from the account badge at the bottom of the rail once there are two or more. Switching starts a fresh assistant chat.
         - Rename an account by editing its name in Settings > Account. "remove", then confirm, takes it off this Mac. On the last account the button reads "disconnect".
+        - The account badge and the switcher show the photo from the mailbox's Google profile when Passband has been allowed to read it, and the account's initial otherwise. An account connected before this existed shows its initial until it is reconnected.
         - Notifications arrive for every account, not only the one on screen.
+        - If the account's server is not answering at launch, Passband keeps retrying on its own. After a couple of seconds the loading screen offers "Try again now", "Switch to" each other account, and "Connect a different server". The Accounts menu and ⌘1 to ⌘9 switch from there too. Nothing is removed: the Connect screen's "Try saved connection again" goes back to the saved account.
         - If the Google sign-in expires, a banner on the Sitrep says Passband cannot read the mail. On a hosted account it has a Reconnect button.
 
         Notifications:

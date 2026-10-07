@@ -10,6 +10,7 @@ pub mod config;
 pub mod credentials;
 pub mod embed;
 pub mod error;
+pub mod features;
 pub mod gmail_budget;
 pub mod mem;
 pub mod metrics;

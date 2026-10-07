@@ -44,7 +44,7 @@ pub use http_metrics::{ROUTE_CLASSES, record_http_metrics};
 pub use scheduled_send::{ScheduledPassReport, run_scheduled_send_pass};
 /// The invite minter. Exported for the daemon binaries that build state by
 /// hand and for the integration suite, which points it at a mock control plane.
-pub use sharing::Sharing;
+pub use sharing::{FEATURE_REFRESH, FeatureRefresher, Sharing};
 pub use state::{AgentDoorStatus, ApiState, StateError, attach_event_channel};
 
 use axum::{
@@ -254,6 +254,7 @@ fn client_router(state: ApiState) -> Router {
         .route("/client/marketing", get(handlers::get_marketing))
         .route("/client/audit", get(handlers::get_audit))
         .route("/client/stats", get(handlers::get_stats))
+        .route("/client/account/photo", get(handlers::get_account_photo))
         // SHARING. The GET is a read (may this daemon share, and what could the
         // mail say); the POST spends a quota and sends mail as the user, so it
         // sits with the write routes below rather than here... except it does

@@ -32,6 +32,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use squelch_core::features::Features;
 use squelch_core::store::Store as _;
 use squelch_core::types::OpenRate;
 
@@ -229,6 +230,139 @@ impl Sharing {
             // that cannot mint for us, which is the same fact.
             404 | 503 => Err(ShareError::Unavailable),
             _ => Err(ShareError::Unreachable),
+        }
+    }
+}
+
+// --- hidden features --------------------------------------------------------
+
+/// How often a daemon asks the control plane which hidden features it has.
+///
+/// Five minutes is "an operator ticks a box and the tester sees it before they
+/// have finished reading the message saying it is on", and it is one small GET
+/// per tenant against a bucket sized for the whole fleet sharing an address
+/// (`squelch_control::ratelimit::TENANT_REQUESTS_PER_MINUTE`).
+pub const FEATURE_REFRESH: Duration = Duration::from_secs(5 * 60);
+
+/// How soon to ask again after an answer that did not arrive. Shorter than
+/// [`FEATURE_REFRESH`] so a daemon that booted during a control-plane deploy
+/// is not featureless for five minutes, and long enough that a fleet retrying
+/// together is not a load on the thing that is trying to come back.
+const FEATURE_RETRY: Duration = Duration::from_secs(60);
+
+/// Budget for one features read. Nobody is watching a spinner on this one, so
+/// it is tighter than the mint's.
+const FEATURES_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// What the control plane answers a features read with.
+#[derive(Deserialize)]
+struct FeaturesGranted {
+    features: Vec<String>,
+}
+
+impl Sharing {
+    /// Ask the control plane which hidden features this tenant has.
+    ///
+    /// The keys come back UNFILTERED by this method. What makes them safe to
+    /// hold is [`squelch_core::features::Features::replace_granted`], which
+    /// keeps only strings shaped like keys and only so many of them: the
+    /// control plane's answer is untrusted here for the same reason it is in
+    /// [`Sharing::mint`].
+    pub async fn features(&self) -> Result<Vec<String>, ShareError> {
+        let resp = self
+            .http
+            .get(format!("{}/tenant/features", self.url))
+            .header(reqwest::header::AUTHORIZATION, &self.auth_header)
+            .timeout(FEATURES_TIMEOUT)
+            .send()
+            .await
+            .map_err(|_| ShareError::Unreachable)?;
+        match resp.status().as_u16() {
+            200 => {
+                let body = read_capped(resp).await?;
+                let granted: FeaturesGranted =
+                    serde_json::from_slice(&body).map_err(|_| ShareError::Unreachable)?;
+                Ok(granted.features)
+            }
+            401 | 403 => Err(ShareError::Unauthorized),
+            // 404 INCLUDED IN "NO ANSWER", unlike the mint above. It is what a
+            // control plane too old to have the route says, and it is also what
+            // an edge says while the service behind it has no live deployment.
+            // The first has nothing granted to lose; the second must not be
+            // read as a fleet-wide off switch.
+            _ => Err(ShareError::Unreachable),
+        }
+    }
+}
+
+/// The loop that keeps a daemon's [`Features`] current. Built by
+/// [`crate::ApiState::feature_refresher`], which is `None` on every daemon
+/// with no control plane to ask.
+pub struct FeatureRefresher {
+    pub(crate) sharing: std::sync::Arc<Sharing>,
+    pub(crate) features: Features,
+}
+
+impl FeatureRefresher {
+    /// Ask now, then every [`FEATURE_REFRESH`], until shutdown.
+    ///
+    /// WHAT EACH ANSWER DOES TO WHAT IS ALREADY HELD:
+    ///
+    /// - A list replaces it. An unticked box is a feature gone on the next
+    ///   poll, with no restart.
+    /// - NO ANSWER KEEPS IT. A control plane that is down or deploying is not
+    ///   a decision to take anybody's features away, and flickering a tester's
+    ///   UI off for the length of a deploy would be this loop inventing one.
+    /// - A REFUSAL CLEARS IT, and only a refusal. A 401 is the control plane
+    ///   saying it no longer vouches for this daemon at all (the token was
+    ///   revoked, the tenant was cancelled). It is the one answer that is a
+    ///   decision about this daemon rather than weather, which is why the
+    ///   control plane takes care to answer 503 and not 401 when it could not
+    ///   look the token up.
+    ///
+    /// Never returns an error: there is nothing a caller could do with one,
+    /// and a daemon must not stop serving mail over a hidden-feature list.
+    pub async fn run(self, mut shutdown: tokio::sync::watch::Receiver<bool>) {
+        loop {
+            if *shutdown.borrow() {
+                return;
+            }
+            let delay = self.refresh_once().await;
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => {}
+                // A dropped sender ends the loop too: `changed()` would then
+                // return at once forever, and this would be a GET in a spin.
+                res = shutdown.changed() => {
+                    if res.is_err() || *shutdown.borrow() { return; }
+                }
+            }
+        }
+    }
+
+    /// One ask, applied by the rules [`Self::run`] states. Returns how long to
+    /// wait before the next one.
+    pub async fn refresh_once(&self) -> Duration {
+        match self.sharing.features().await {
+            Ok(keys) => {
+                if self.features.replace_granted(&keys) {
+                    // Names of features, never of people: the keys are in the
+                    // source and say nothing about the mailbox.
+                    eprintln!(
+                        "squelch: hidden features now on: {}",
+                        self.features.list().join(", ")
+                    );
+                }
+                FEATURE_REFRESH
+            }
+            Err(ShareError::Unauthorized) => {
+                if self.features.replace_granted(Vec::<String>::new()) {
+                    eprintln!(
+                        "squelch: hidden features cleared (the control plane refused this daemon)"
+                    );
+                }
+                FEATURE_REFRESH
+            }
+            Err(_) => FEATURE_RETRY,
         }
     }
 }

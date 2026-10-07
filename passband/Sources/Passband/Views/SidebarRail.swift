@@ -1,9 +1,11 @@
 // SIDEBAR — the slim icon rail: Sitrep / Emails / Auth / Rules / Groups on the
 // digit keys, with Calendar second when it is offered (2, and every later page
-// one higher; see `MainView.railViews`); Share + Usage + Settings sit below a divider, out of that sequence
-// so adding one never renumbers it. Share is the odd one there: it opens a sheet
-// rather than routing, so it carries no selector (see `shareButton`). ONE long-lived pane behind the icons is the selector,
-// moved by GEOMETRY not identity: per-icon glass drags the glyph along and
+// one higher; see `MainView.railViews`); Update + Usage + Settings sit below a
+// divider, out of that sequence so adding one never renumbers it. The discovery
+// ring sits just ABOVE that divider, alone after the spacer: a real destination
+// with no number key, its RailButton drawing the ring where the others draw a
+// symbol. ONE long-lived pane behind the icons is the selector, moved by
+// GEOMETRY not identity: per-icon glass drags the glyph along and
 // swallows clicks, and a GlassEffectContainer would hoist the pane over it.
 
 import SwiftUI
@@ -15,6 +17,7 @@ private let railSpace = "sidebar-rail"
 
 struct SidebarRail: View {
     @Environment(AppStore.self) private var store
+    @Environment(\.colorScheme) private var colorScheme
     let namespace: Namespace.ID
 
     /// Where each icon sits in the rail's own space, written by the buttons as
@@ -22,9 +25,10 @@ struct SidebarRail: View {
     @State private var slots: [MainView: CGRect] = [:]
     /// True for the span of a slide, so the pane can firm up while it moves.
     @State private var traveling = false
-    /// The share tile's own hover, which `RailButton` keeps for itself.
-    @State private var shareHovering = false
-    @State private var shareDeniedAttempts = 0
+    @State private var updateHovering = false
+    /// Bumped once when the update tile appears, for its single bounce.
+    @State private var updateArrived = 0
+    @ObservedObject private var updater = Updater.shared
     @State private var accountDeniedAttempts = 0
 
     /// THE TILE AND THE RAIL HOLD STILL ACROSS DENSITY. The glyphs grow with
@@ -116,12 +120,25 @@ struct SidebarRail: View {
 
                 Spacer(minLength: Space.s8)
 
+                // WAYS THROUGH YOUR MAIL: the discovery ring, alone between the
+                // spacer and the divider. It is about how you use the five
+                // destinations above, not about your account like the group
+                // below, so it sits on the line between them. A RailButton
+                // like any other, so the selector parks on it when its page
+                // is up; the divider's own vertical padding is the gap under
+                // it, the same gap the bottom group gets above.
+                RailButton(
+                    view: .discovery, keyHint: nil, active: store.activeView == .discovery,
+                    showRings: false, onSlot: { slots[.discovery] = $0 }
+                ) { _ in DiscoveryRailGlyph() }
+                .accessibilityValue(DiscoveryRailGlyph.spokenValue)
+
                 Rectangle()
                     .fill(Palette.hairline)
                     .frame(width: 22, height: 0.5)
                     .padding(.vertical, Space.s4)
 
-                shareButton
+                updateButton
 
                 ForEach(MainView.bottomViews, id: \.self) { view in
                     RailButton(
@@ -146,49 +163,40 @@ struct SidebarRail: View {
             .ignoresSafeArea(edges: .top)
     }
 
-    /// HAND A FRIEND AN INVITE. Above Usage in the bottom group, because it
-    /// belongs with the things that are about your account rather than with the
-    /// five destinations on the number keys.
+    /// A NEWER PASSBAND IS WAITING. First in the bottom group, so it is the
+    /// first thing there the eye lands on, and present for as long as a version
+    /// is pending: Later hides the card, never this. It goes when the app
+    /// relaunches into the update.
     ///
-    /// Deliberately NOT a `RailButton`, for the same reason `accountBadge` is
-    /// not: it opens a sheet rather than routing, so it has no `MainView` to be
-    /// active for, takes no selector pane, and reports no slot. What it does
-    /// borrow is the tile — the same 44x36 target and the same hover wash — so
-    /// it reads as one of the rail's own rather than as a thing pinned to it.
+    /// Accent rather than a red dot: red in this rail means Auth wants an
+    /// answer now, and an update never does. One bounce on arrival, then still;
+    /// a rail tile that keeps moving is a tile you learn to hate.
     ///
-    /// ABSENT unless the daemon says it can share, like the button in Settings.
-    /// A rail is 60 points wide and its whole argument is that everything in it
-    /// earns the space; an icon that can only refuse does not.
+    /// The click brings the card back rather than restarting: a relaunch from a
+    /// 44pt tile is one stray click away from quitting someone mid-email, and
+    /// the card says what Restart does before it is pressed.
     @ViewBuilder
-    private var shareButton: some View {
-        if store.shareAvailable {
-            Button {
-                guard !RehearsalMode.isEnabled else {
-                    shareDeniedAttempts += 1
-                    return
-                }
-                store.openShareSheet(from: .rail)
-            } label: {
-                Image(systemName: "gift")
-                    .font(Typo.ui(16))
-                    .foregroundStyle(Palette.inkDim)
+    private var updateButton: some View {
+        if let version = updater.pending, !RehearsalMode.isEnabled {
+            Button { updater.showAgain() } label: {
+                Image(systemName: "arrow.down.circle")
+                    .font(Typo.ui(17, weight: .medium))
+                    .foregroundStyle(Palette.accent)
+                    .symbolEffect(.bounce, value: updateArrived)
                     .frame(width: Self.iconWidth, height: Self.iconHeight)
-                    // THE WHOLE TILE IS THE TARGET, for the reason RailButton
-                    // spells out: every rail symbol is an outline, and a click
-                    // through the middle of one otherwise lands in a hole.
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .background {
                 RoundedRectangle(cornerRadius: Self.selectorRadius, style: .continuous)
-                    .fill(Palette.hairline.opacity(shareHovering ? 0.7 : 0))
+                    .fill(Palette.hairline.opacity(updateHovering ? 0.7 : 0))
                     .frame(width: Self.iconWidth, height: Self.iconHeight)
             }
-            .onHover { shareHovering = $0 }
-            .help("share Passband with a friend")
-            .accessibilityLabel("share Passband")
-            .accessibilityHint(RehearsalMode.isEnabled ? "Available after onboarding." : "")
-            .modifier(PracticeRailFeedback(attempts: shareDeniedAttempts))
+            .onHover { updateHovering = $0 }
+            .onAppear { updateArrived += 1 }
+            .help("Passband \(version) is available")
+            .accessibilityLabel("Passband \(version) is available")
+            .transition(.scale(scale: 0.6).combined(with: .opacity))
         }
     }
 
@@ -217,15 +225,7 @@ struct SidebarRail: View {
                 // menu in the menu bar owns the ⌘numbers, and a second
                 // registration of the same chord is a conflict, not a shortcut.
                 ForEach(manager.accounts) { account in
-                    Button {
-                        Task { await manager.switchTo(account.id) }
-                    } label: {
-                        if account.id == manager.activeId {
-                            Label(account.displayName, systemImage: "checkmark")
-                        } else {
-                            Text(account.displayName)
-                        }
-                    }
+                    accountMenuRow(account, isActive: account.id == manager.activeId)
                 }
                 Divider()
                 Button("Add Account…") { store.addAccountSheetOpen = true }
@@ -244,14 +244,82 @@ struct SidebarRail: View {
         }
     }
 
+    /// The live account's profile photo, or its initial when none was imported.
+    ///
+    /// THE PHOTO GOES IN AS A BITMAP. This view is a `Menu`'s label, and AppKit
+    /// draws an image in a menu button at its natural size with no regard for
+    /// a SwiftUI frame or clip shape: a resizable photo here came out as a
+    /// 256pt square over the bottom of the rail. A bitmap that is already a
+    /// 26pt circle has nothing left to get wrong. The initial stays a real
+    /// view, as it always was: text in a menu label is laid out by SwiftUI.
+    @ViewBuilder
     private var accountMark: some View {
-        Text(AccountManager.shared.active?.initial ?? "?")
-            .font(Typo.ui(13, weight: .semibold))
-            .foregroundStyle(Palette.accent)
-            .frame(width: 26, height: 26)
-            .background(Circle().fill(Palette.accentSoft))
-            .overlay(Circle().strokeBorder(Palette.accent.opacity(0.35), lineWidth: 0.75))
+        let active = AccountManager.shared.active
+        if let active, AccountPhotos.shared.image(for: active.id) != nil,
+            let bitmap = markBitmap(active, size: 26, font: Typo.ui(13, weight: .semibold))
+        {
+            Image(nsImage: bitmap).renderingMode(.original)
+        } else {
+            AccountMark(account: active, font: Typo.ui(13, weight: .semibold))
+        }
     }
+
+    /// One row of the switcher menu: the account's mark beside its name, with
+    /// the menu's own checkmark on the live one.
+    ///
+    /// A `Toggle`, because that is how a SwiftUI menu spells a checked item:
+    /// the tick lands in the state column AppKit reserves for it, which leaves
+    /// the image slot free for the face. Every row gets a mark, photo or
+    /// initial, so the names line up whether or not each account has a picture.
+    private func accountMenuRow(_ account: AccountRecord, isActive: Bool) -> some View {
+        Toggle(
+            isOn: Binding(
+                get: { isActive },
+                // Either direction is "go to this account": `switchTo` already
+                // declines the one that is live.
+                set: { _ in Task { await AccountManager.shared.switchTo(account.id) } })
+        ) {
+            Label {
+                Text(account.displayName)
+            } icon: {
+                if let mark = markBitmap(account, size: 18, font: Typo.ui(10, weight: .semibold)) {
+                    Image(nsImage: mark).renderingMode(.original)
+                }
+            }
+        }
+    }
+
+    /// An account's mark as a bitmap, for the two places AppKit draws it
+    /// instead of SwiftUI (see `accountMark`). Rendering the same `AccountMark`
+    /// the rest of the app wears is what keeps them from drifting apart; the
+    /// color scheme is handed over because a renderer has no window to inherit
+    /// one from and would draw the light palette into a dark rail.
+    private func markBitmap(_ account: AccountRecord, size: CGFloat, font: Font) -> NSImage? {
+        // Read HERE, in the rail's own body, and not only inside the renderer:
+        // a renderer's view graph is not this view's, so a photo that arrived
+        // for a row in the menu would otherwise never redraw it.
+        let photo = AccountPhotos.shared.image(for: account.id)
+        // `body` runs on every hover and slot change, and a rasterisation per
+        // account per pass is not free. The key is everything the bitmap is
+        // drawn from; the photo by identity, since a new one is a new object.
+        let key =
+            "\(account.id)|\(photo.map { "\(ObjectIdentifier($0).hashValue)" } ?? account.initial)|\(size)|\(colorScheme)"
+            as NSString
+        if let hit = Self.markCache.object(forKey: key) { return hit }
+        let renderer = ImageRenderer(
+            content: AccountMark(account: account, size: size, font: font)
+                .environment(\.colorScheme, colorScheme))
+        renderer.scale = NSScreen.main?.backingScaleFactor ?? 2
+        guard let image = renderer.nsImage else { return nil }
+        Self.markCache.setObject(image, forKey: key)
+        return image
+    }
+
+    private static let markCache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 64
+        return cache
+    }()
 
     /// The one rounded corner the rail owns: the top-trailing shoulder, where
     /// the material tucks under the top bar. The other three corners meet
@@ -313,7 +381,10 @@ private struct RailEdge: Shape {
     }
 }
 
-private struct RailButton: View {
+/// One rail tile. The glyph is a parameter, an SF Symbol for every
+/// destination but discovery, which draws its ring: everything else about a
+/// tile (the target, the wash, the slot, the refusal) is the same thing.
+private struct RailButton<Icon: View>: View {
     @Environment(AppStore.self) private var store
     let view: MainView
     /// The key the tooltip teaches: a digit, or nothing.
@@ -323,6 +394,8 @@ private struct RailButton: View {
     /// Where this icon landed, in the rail's space, so the rail can park the
     /// selector on it.
     let onSlot: (CGRect) -> Void
+    /// The glyph, given whether the tile is the active one.
+    @ViewBuilder let icon: (Bool) -> Icon
 
     @State private var hovering = false
     @State private var deniedAttempts = 0
@@ -336,9 +409,7 @@ private struct RailButton: View {
             store.setView(view, viaPointer: true)
         } label: {
             ZStack {
-                Image(systemName: view.symbol)
-                    .font(Typo.ui(17, weight: active ? .semibold : .regular))
-                    .foregroundStyle(active ? Palette.accent : Palette.inkDim)
+                icon(active)
                     .frame(width: SidebarRail.iconWidth, height: SidebarRail.iconHeight)
                     // The rail's selector is placed from this. Nothing about the
                     // glyph changes with selection except weight and colour, so
@@ -375,9 +446,30 @@ private struct RailButton: View {
     }
 }
 
+extension RailButton where Icon == RailSymbol {
+    init(view: MainView, keyHint: String?, active: Bool, showRings: Bool, onSlot: @escaping (CGRect) -> Void) {
+        self.init(
+            view: view, keyHint: keyHint, active: active, showRings: showRings, onSlot: onSlot
+        ) { RailSymbol(symbol: view.symbol, active: $0) }
+    }
+}
+
+/// The ordinary tile glyph. Nothing about it changes with selection except
+/// weight and colour.
+private struct RailSymbol: View {
+    let symbol: String
+    let active: Bool
+
+    var body: some View {
+        Image(systemName: symbol)
+            .font(Typo.ui(17, weight: active ? .semibold : .regular))
+            .foregroundStyle(active ? Palette.accent : Palette.inkDim)
+    }
+}
+
 /// Keep practice navigation recognizable and responsive without leaving the
 /// lesson. With Reduce Motion the same refusal is a short, stationary outline.
-private struct PracticeRailFeedback: ViewModifier {
+struct PracticeRailFeedback: ViewModifier {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let attempts: Int
     @State private var highlighted = false

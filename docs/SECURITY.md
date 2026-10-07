@@ -2,7 +2,8 @@
 
 One section per surface: the **invariant**, the **enforcement point** (`file:symbol`
 — the line that actually holds it), and **what a maintainer must not break**.
-Verified against the tree on 2026-07-30; §6 was written against it on 2026-08-18.
+Verified against the tree on 2026-07-30; §6 was written against it on 2026-08-18,
+§8 on 2026-10-01.
 Stale source comments are flagged, not trusted.
 
 ## 1. HTML sanitization at ingest
@@ -613,7 +614,187 @@ it. That move is what the guard below exists for.
 - `needs_you` sends the user to the ORIGINAL link, not a post-redirect hop that may
   depend on this job's cookies.
 
-## 8. Google Calendar
+## 8. Agent door authentication
+
+**Invariant.** On a hosted tenant, only the owner of that tenant's mailbox can use
+its agent door, and only through a credential that cannot open the human door. A
+daemon whose agent-door settings are incomplete serves nothing on `/mcp`. A
+self-hosted daemon with no settings behaves exactly as it always has.
+
+**Three modes**, chosen once at startup by `squelch-mcp/src/auth.rs:AgentDoorAuth::from_env`
+and applied by `squelch-mcp/src/lib.rs:agent_door_router`, the only public way to
+build the HTTP agent door (the bare rmcp service is private to the crate):
+
+- **Open.** Neither `SQUELCH_MCP_OAUTH_ISSUER` nor `SQUELCH_MCP_PUBLIC_URL` is set.
+  No auth layer at all; the only guard is rmcp's Host allow-list (loopback plus
+  `SQUELCH_MCP_ALLOWED_HOSTS`). This is self-host, and it is fit only for a listener
+  the owner controls the reach of. No metadata routes exist.
+- **OAuth.** Both are set, each a valid `https` URL (`http` only on loopback), and
+  the public URL's path is exactly `/mcp` with no query or fragment (the resource
+  IS the door, so any other path could never match a token's `aud`). Every
+  `/mcp` request needs a bearer token, verified below. Two unauthenticated GET routes
+  publish RFC 9728 protected-resource metadata naming the issuer.
+- **Misconfigured.** Exactly one is set, one does not parse, the public URL's path
+  is anything but exactly `/mcp`, or OAuth is configured
+  but the daemon has no real account email to bind tokens to (unset, or the
+  `me@localhost` placeholder; `AgentDoorAuth::for_account`, applied inside
+  `agent_door_router` so no host can skip it). `/mcp` answers 503
+  to everything, no metadata is published, and startup logs which setting is at
+  fault. It never falls back to Open: the likeliest way to get here is a hosted pod
+  that lost one variable, and that pod's `/mcp` is published. The human door is
+  unaffected.
+
+**Roles.** The daemon is a **resource server only**. WorkOS AuthKit is the
+authorization server: it runs registration, consent and token issuance, and our
+control plane supplies the identity (a Google sign-in, mapped to a mailbox) through
+AuthKit's Standalone Connect hop. The daemon never issues a token, never sees the
+user's Google credential, and never calls AuthKit about a specific token. It
+verifies AuthKit's RS256 access tokens locally against the issuer's JWKS.
+
+**Verification, in order** (`auth.rs:Verifier::verify`). Each step is a refusal on
+failure, and the cheap, local steps come before anything that touches keys:
+
+1. An `Authorization: Bearer` header (`squelch-httpauth:parse_bearer`). Absent or
+   not Bearer: 401 with `WWW-Authenticate: Bearer resource_metadata="..."`.
+2. The token is at most 8 KiB. Checked before any decoding.
+3. The JWT header parses, `alg` is exactly `RS256`, and there is no `crit`
+   header (RFC 7515 §4.1.11: we understand no extensions, so we accept none).
+   `none` does not parse, and every HS* algorithm is refused here, before any key
+   is looked up, so the RSA public key can never be fed to HMAC.
+4. The header has a `kid`, and the JWKS cache has an RSA signing key of at least
+   2048 bits for it. See "The key set" below for when the cache refreshes. If no
+   refresh has ever succeeded, or none has for 24 hours, the answer is 503, never
+   a pass.
+5. The signature verifies under that key.
+6. `iss` equals our issuer and `aud` (a string, or an array) contains our public
+   URL. Both are exact string compares after trimming one trailing `/`.
+7. `exp` is present and not past, with 60 seconds of leeway; `nbf`, if present, is
+   not in the future, with the same leeway.
+8. **`email` equals this daemon's account email**, trimmed and ASCII-case-insensitive.
+   A token with no `email` claim is refused.
+
+Every refusal after step 1 is a 401 with `error="invalid_token"` added to the
+challenge, and an empty body, with one exception: when no key set can be trusted
+(step 4: never fetched, or no successful fetch for 24 hours) the answer is a 503
+with no challenge, because the token was never judged. A token that passes bounds
+its response (`auth.rs:response_lifetime`): the body is ended when the token's `exp`
+plus the leeway passes, so a long-lived GET event stream closes and the client
+must come back with a fresh token. Two clamps keep that bound from misfiring. A
+FLOOR of 30 seconds lets a response opened by a token accepted late in its leeway
+finish, rather than return an empty body after the tool has already run. A CAP of
+24 hours applies whatever `exp` says, and the arithmetic is total, so an absurd
+`exp` (`1e300`) gets a normal response instead of a panicked connection. Nothing an
+agent receives outlives the credential that asked for it by more than the floor.
+The library verifies the signature and nothing else:
+every claim check is ours, because its defaults check `aud` and `iss` only when
+present and leave `nbf` off.
+
+**The key set** (`auth.rs:JwksClient`). Fetched lazily from `<issuer>/oauth2/jwks`
+(or the override), with no redirects followed (a redirect is a failed fetch, since
+the https check covered only the configured URL) and the body read in chunks that
+stop at 256 KiB. A fetch happens when a `kid` is unknown or when the cached set is
+older than one hour, and never more than once per 60 seconds whatever arrives: a
+spray of random `kid`s cannot drive outbound fetches, and since a throttled request
+does not extend the window, a newly published key is usable at most 60 seconds
+after the last fetch. A successful fetch REPLACES the set, so a key the issuer
+withdraws stops verifying within about an hour, and a JWKS with no usable keys
+empties the set. A failed fetch keeps the old set, so an issuer blip does not log
+every agent out, but only until 24 hours have passed without one success; then
+nothing is trusted (503). A fresh cached key is never delayed by a refresh in
+flight.
+
+**Step 8 is the tenant boundary.** One wildcard resource indicator,
+`https://*.passband.email/mcp`, covers the whole fleet, so any Passband user can
+obtain a correctly signed, unexpired token whose `aud` names someone else's tenant.
+`aud` says "this token is for a Passband daemon"; only `email` says whose. Without
+step 8, tenant A's owner could read tenant B's mail with a token AuthKit issued
+quite properly.
+
+**The `email` claim exists only because the operator puts it there.** A WorkOS
+Connect access token carries `iss`, `aud`, `sub`, `client_id`, `org_id`, `sid`,
+`scope`, `jti`, `exp` and `iat`, and no `email`. The claim appears only when the
+environment's JWT template is set to `{"email": {{ user.email }}}`. Without the
+template every token is refused as `missing_email`, which is the fail-closed
+direction: a forgotten template locks agents out, it does not let them in. `sub`
+is WorkOS's own user id, not anything the control plane chose, so it cannot stand
+in for the mailbox.
+
+**The doors do not share credentials.** `/mcp` never accepts an `sqd_` device
+token or the `SQUELCH_API_TOKEN` master token: neither is a JWT, so step 3 refuses
+it, and nothing on the agent path consults the device-token table. `/client/*`
+never accepts an agent JWT: the bearer check there knows only the master token and
+issued device tokens. The two routers are merged side by side in
+`squelchd:build_serve_router`, so neither inherits the other's auth, CORS or body
+limits. Both directions are pinned against the real combined router in squelchd's
+tests. The agent door still has no path to the write credential, and sealed
+material stays structurally absent from it under §4: nothing here touches tool
+logic.
+
+**Rollout fails closed.** The warden never renders `SQUELCH_MCP_ALLOWED_HOSTS`. The
+public hostname reaches the rmcp Host allow-list only from `agent_door_router`, and
+only in OAuth mode. So an older daemon image behind a newly published `/mcp`
+Ingress path answers 403 from the Host guard rather than serving mail without a
+token.
+
+**Logging.** A refusal is counted under one closed category (`auth.rs:Refusal`,
+e.g. `wrong_mailbox`, `expired`), and only the counts are ever written. No token, no claim value and no email
+address reaches a log line or a response; a misconfiguration names the setting,
+not its value. Both binaries' startup lines (`squelchd serve` and the standalone
+`squelch-mcp --http`) print the same mode text (`AgentDoorAuth::describe`): the
+mode and, in OAuth mode, the public URL, which the metadata publishes anyway.
+
+**Accepted costs.**
+- **WorkOS can mint a token that reads a mailbox.** AuthKit holds the signing key,
+  so a compromise of WorkOS (or of our WorkOS API key, which completes the identity
+  hop) can produce a token that passes every step above. That is the price of not
+  running our own authorization server.
+- **Revocation is a WorkOS-side operator action, not instant, and not ours.** The
+  daemon checks no revocation list. Access tokens are short-lived, but AuthKit
+  also issues refresh tokens (`offline_access` is among the standard scopes a
+  dynamically registered client gets), so an approved agent keeps access for as
+  long as its grant lives on the WorkOS side. Ending that access means revoking
+  the grant in WorkOS, which today is something an operator does. The
+  access-token lifetime only bounds how long a revoked grant's last token keeps
+  working, and the stream bound above makes that true for open streams too.
+
+**The phishing shape that remains.** An attacker can register their own MCP client
+with AuthKit, start a flow, and send the victim the resulting login link. If the
+victim signs in and approves, the attacker's client gets a token for the victim's
+mailbox. Client names under dynamic registration are chosen by whoever registers
+the client and are not verified by anyone, so "Claude" on a consent screen proves
+nothing. The defence is two screens the victim must get past: our control plane's
+own confirmation page, which names the mailbox and is shown after Google sign-in
+and before anything is sent to WorkOS (`/agent/auth`, then Google, then confirm,
+then the POST that completes the hop), and then AuthKit's consent screen naming
+the client. Both depend on the victim reading them.
+
+**Not proxied on purpose.** The daemon does not serve
+`/.well-known/oauth-authorization-server`. Clients that predate the 2025-06-18
+authorization spec and expect the resource server to also be the authorization
+server will not work, and that is accepted rather than worked around.
+
+**Browser-based MCP clients are not supported.** `/mcp` sends no CORS headers, by
+choice for now, so a page in a browser cannot call it. The protected-resource
+metadata is CORS-open because it is public. Server-side and native clients, which
+is every agent we document, are unaffected.
+
+**Refusal logging is rate-bounded.** Refusals are unauthenticated, so they are
+counted per category and written as at most one summary line per minute
+(`auth.rs:RefusalLog`), never one line per request.
+
+**What a maintainer must not break.**
+- Do not drop or weaken step 8, and never swap the binding to `sub`: `sub` is
+  WorkOS's user id, and `email` (from the JWT template) is the claim this daemon
+  checks against its own mailbox.
+- Do not remove the stream bound or the key-set maximum age and ceiling.
+- Do not let a misconfiguration fall back to Open, and do not mount the agent door
+  any way other than `agent_door_router`.
+- Do not render `SQUELCH_MCP_ALLOWED_HOSTS` from the warden.
+- Do not let the agent door accept a human door credential, or the human door an
+  agent JWT.
+- Do not log anything from a token, including on the 401 path.
+
+## 9. Google Calendar
 
 **Invariant.** Calendar data (event titles, places, descriptions, organizers,
 guests' addresses, names and answers, links, calendar names) is human-door data: served on `GET /client/timeline` (and

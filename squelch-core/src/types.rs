@@ -1083,8 +1083,8 @@ pub struct AttachmentInfo {
 ///
 /// WIRE CONTRACT: `{ sender, requested_at, method, violation_count,
 /// last_violation_at, resolution }`, newest `requested_at` first. `method` is
-/// "one_click" | "mailto" | "browser"; `resolution` is "blocked" | "dismissed"
-/// | null.
+/// "one_click" | "mailto" | "browser"; `resolution` is "blocked" | "filtered" |
+/// "dismissed" | null.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnsubscribeRecord {
     /// Lowercased sender address the unsubscribe was requested against.
@@ -1096,7 +1096,8 @@ pub struct UnsubscribeRecord {
     pub violation_count: i64,
     /// Timestamp of the most recent counted violation, or `None`.
     pub last_violation_at: Option<DateTime<Utc>>,
-    /// User's resolution of a repeat offender: "blocked" | "dismissed", or
+    /// User's resolution of a repeat offender: "blocked" | "filtered" (a smart
+    /// block: a filtered rule in place of a mute) | "dismissed", or
     /// `None` while the request is still outstanding.
     pub resolution: Option<String>,
     /// Where an AUTOMATIC unsubscribe stands: running | done | needs_you |
@@ -1111,6 +1112,15 @@ pub struct UnsubscribeRecord {
     pub status_reason: Option<String>,
     /// When `status` last changed.
     pub status_at: Option<DateTime<Utc>>,
+    /// The smart block proposed for this sender: a filtered rule that keeps
+    /// their consequential mail and drops the promotion. `None` when nothing
+    /// was proposed, which `smart_block_asked` tells apart from never asked.
+    #[serde(default)]
+    pub smart_block: Option<crate::triage::rule_suggest::SmartBlock>,
+    /// The question has been answered for this sender, whichever way, so a
+    /// client has no reason to ask `GET /client/unsubscribes/smart_block`.
+    #[serde(default)]
+    pub smart_block_asked: bool,
 }
 
 str_enum! {

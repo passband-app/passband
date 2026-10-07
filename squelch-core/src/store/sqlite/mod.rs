@@ -92,18 +92,20 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::error::{CoreError, Result};
 // The ledger's stored lane/decision strings ARE the metric labels; see `notify`.
 use crate::metrics::{NotifyDecision, NotifyLane};
+use crate::store::SmartBlockMemo;
 use crate::store::{
-    AttachmentBytes, BankingApplied, BlankBodyScan, ClientPlatform, ClientSeen, ClientTag,
-    ContactEntry, Device, DeviceToken, Draft, DraftFields, DraftKey, ExtractQueued, FtsQuery,
-    HealScope, InboxUnread, IssuedDeviceToken, LeggedHit, MailActivityDay, MarketingApplied,
-    MarketingOffer, MessageMissingRecipients, MessageOpen, MessageUnsub, MintedPairingCode,
-    MissingVector, NewAuditEntry, NewEvent, NewNotifyDecision, NotifyDecisionRow, RevisitQueued,
-    SPAM_SYNCED_AT_KEY, SealedBody, SealedMessage, SearchDiagnostics, SearchFilter, SearchSort,
-    SeedVerdict, SenderDigestRow, SenderEntry, SenderHistory, SentMessage, SitrepBand, SpamScope,
-    Stage1Applied, Stage1Queued, Stage2Applied, Stage2CapOverrides, Stage2Queued, Stage2Usage,
-    Stage2UsageDay, Store, SyncState, TermDf, ThreadSibling, TrackedMessage, TriageDebug,
-    TriagedMessage, UsageTokens,
+    AccountIdentity, AccountPhoto, AttachmentBytes, BankingApplied, BlankBodyScan, ClientPlatform,
+    ClientSeen, ClientTag, ContactEntry, Device, DeviceToken, Draft, DraftFields, DraftKey,
+    ExtractQueued, FtsQuery, HealScope, InboxUnread, IssuedDeviceToken, LeggedHit, MailActivityDay,
+    MarketingApplied, MarketingOffer, MessageMissingRecipients, MessageOpen, MessageUnsub,
+    MintedPairingCode, MissingVector, NewAuditEntry, NewEvent, NewNotifyDecision,
+    NotifyDecisionRow, RevisitQueued, SPAM_SYNCED_AT_KEY, SealedBody, SealedMessage,
+    SearchDiagnostics, SearchFilter, SearchSort, SeedVerdict, SenderDigestRow, SenderDomainEntry,
+    SenderEntry, SenderHistory, SentMessage, SitrepBand, SpamScope, Stage1Applied, Stage1Queued,
+    Stage2Applied, Stage2CapOverrides, Stage2Queued, Stage2Usage, Stage2UsageDay, Store, SyncState,
+    TermDf, ThreadSibling, TrackedMessage, TriageDebug, TriagedMessage, UsageTokens,
 };
+use crate::triage::rule_suggest::SmartBlock;
 use crate::types::{
     AccountId, AttachmentInfo, AttentionStatus, AttentionUpdate, AuditEntry, BandCounts, Banking,
     CalendarUpdate, ClientAttachment, ClientMessage, ClientThreadView, Deadline, Disposition,
@@ -909,6 +911,15 @@ impl Store for SqliteStore {
         self.search_senders(account_id, q, limit)
     }
 
+    fn search_sender_domains(
+        &self,
+        account_id: AccountId,
+        q: &str,
+        limit: u32,
+    ) -> Result<Vec<SenderDomainEntry>> {
+        self.search_sender_domains(account_id, q, limit)
+    }
+
     fn sync_state(&self, account_id: AccountId, mailbox: &str) -> Result<Option<SyncState>> {
         self.sync_state(account_id, mailbox)
     }
@@ -928,6 +939,24 @@ impl Store for SqliteStore {
 
     fn set_inbox_unread(&self, account_id: AccountId, messages: i64, threads: i64) -> Result<()> {
         self.set_inbox_unread(account_id, messages, threads)
+    }
+
+    fn account_identity(&self, account_id: AccountId) -> Result<Option<AccountIdentity>> {
+        self.account_identity(account_id)
+    }
+
+    fn account_photo(&self, account_id: AccountId) -> Result<Option<AccountPhoto>> {
+        self.account_photo(account_id)
+    }
+
+    fn set_account_profile(
+        &self,
+        account_id: AccountId,
+        name: Option<&str>,
+        given_name: Option<&str>,
+        photo: Option<&AccountPhoto>,
+    ) -> Result<()> {
+        self.set_account_profile(account_id, name, given_name, photo)
     }
 
     fn sealed_messages(&self, account_id: AccountId) -> Result<Vec<SealedMessage>> {
@@ -1150,8 +1179,9 @@ impl Store for SqliteStore {
         token: &str,
         platform: &str,
         tag: Option<&str>,
+        environment: Option<&str>,
     ) -> Result<Device> {
-        self.upsert_device(account_id, token, platform, tag)
+        self.upsert_device(account_id, token, platform, tag, environment)
     }
 
     fn list_devices(&self, account_id: AccountId) -> Result<Vec<Device>> {
@@ -1238,6 +1268,23 @@ impl Store for SqliteStore {
         resolution: &str,
     ) -> Result<bool> {
         self.set_unsubscribe_resolution(account_id, sender, resolution)
+    }
+
+    fn unsubscribe_smart_block(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+    ) -> Result<Option<SmartBlockMemo>> {
+        self.unsubscribe_smart_block(account_id, sender)
+    }
+
+    fn set_unsubscribe_smart_block(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+        proposal: Option<&SmartBlock>,
+    ) -> Result<bool> {
+        self.set_unsubscribe_smart_block(account_id, sender, proposal)
     }
 
     fn correct_triage(

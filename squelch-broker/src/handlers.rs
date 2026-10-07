@@ -474,6 +474,10 @@ const SCOPE_DESCRIPTIONS: &[(&str, &str)] = &[
         validate::CALENDAR_LIST_SCOPE,
         "See the list of calendars you subscribe to. Read only.",
     ),
+    (
+        validate::GOOGLE_PROFILE_SCOPE,
+        "See your Google account's name and profile photo, to show them in the app. Optional: untick it on Google's screen and everything else still works.",
+    ),
 ];
 
 /// The requested permissions as a list, in the order the link asks for them.

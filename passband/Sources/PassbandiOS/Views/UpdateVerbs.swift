@@ -1,5 +1,5 @@
 // THE ROW VERBS, ONCE. Every touch gesture in this app — a swipe rail, a
-// long-press menu, a deck card flung sideways — ends up in exactly one of these
+// long-press menu — ends up in exactly one of these
 // methods, and each method is the body of the desktop key binding that shares
 // its name. Nothing here decides anything: it looks up what `e` does and does
 // that.
@@ -47,7 +47,7 @@ struct UpdateVerbs {
         Task { await Actions.done(update, via: via, on: surface) }
     }
 
-    /// `e` in process mode — a DIFFERENT verb from done (status stays open, the
+    /// The long-press menu's Archive — a DIFFERENT verb from done (status stays open, the
     /// INBOX label comes off), with its own inverse in the undo queue.
     func archive(via: Actions.Via = .swipe) {
         Task { await Actions.archive(update, via: via, on: surface) }
@@ -63,6 +63,15 @@ struct UpdateVerbs {
     /// spam folder; see `Actions.notSpam` for why it has no undo.
     func notSpam(via: Actions.Via = .swipe) {
         Task { await Actions.notSpam(update, via: via, on: surface) }
+    }
+
+    /// `h`. The same target the list's binding builds, so a row that already
+    /// carries a reminder opens the palette as a move rather than a first set.
+    func remind() {
+        store.openRemind(
+            RemindTarget(
+                messageId: update.id, sender: update.sender, subject: update.one_line,
+                remindAt: update.remind_at))
     }
 
     /// `t` (registered in ActionLayer for the list context).
@@ -128,8 +137,14 @@ extension UpdateVerbs {
         ]
     }
 
-    /// Leading edge (drag RIGHT): the two verbs that keep the mail — answering it
-    /// or filing it. On the spam page, the one verb that keeps it for real.
+    /// Leading edge (drag RIGHT): the three verbs that keep the mail — answering
+    /// it, putting it off, or filing it. On the spam page, the one verb that
+    /// keeps it for real.
+    ///
+    /// REMIND IS AMBER AND ARCHIVE IS GREY. Two accent buttons side by side
+    /// read as one wide one, and amber is the colour a clock already has on
+    /// every other phone; filing is the quiet verb of the three, so it takes
+    /// the quiet tint.
     var leadingVerbs: [SwipeVerb] {
         if isSpamPage {
             return [
@@ -141,8 +156,9 @@ extension UpdateVerbs {
         return [
             SwipeVerb(
                 title: "Reply", symbol: "arrowshape.turn.up.left", tint: Palette.accent, run: reply),
+            SwipeVerb(title: "Remind", symbol: "bell", tint: Palette.warn, run: remind),
             SwipeVerb(
-                title: "Archive", symbol: "archivebox", tint: Palette.warn,
+                title: "Archive", symbol: "archivebox", tint: Palette.inkFaint,
                 run: { archive(via: .swipe) }),
         ]
     }
@@ -167,6 +183,11 @@ struct UpdateContextMenu: ViewModifier {
             } else {
                 Button { verbs.reply() } label: {
                     Label("Reply", systemImage: "arrowshape.turn.up.left")
+                }
+                Button { verbs.remind() } label: {
+                    Label(
+                        verbs.update.hasPendingReminder ? "Move the reminder" : "Remind me",
+                        systemImage: "bell")
                 }
                 Divider()
                 Button { verbs.tune() } label: {

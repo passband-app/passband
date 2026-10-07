@@ -33,9 +33,9 @@ use crate::config::{
     Config, DEFAULT_BIND, DEFAULT_CPU_LIMIT, DEFAULT_CPU_REQUEST, DEFAULT_EPHEMERAL_LIMIT,
     DEFAULT_EPHEMERAL_REQUEST, DEFAULT_INGRESS_CLASS, DEFAULT_INGRESS_NAMESPACE,
     DEFAULT_MEMORY_LIMIT, DEFAULT_MEMORY_REQUEST, DEFAULT_MIN_READY_SECS,
-    DEFAULT_OAUTH_SECRET_NAME, DEFAULT_PENDING_TTL_SECS, DEFAULT_RUN_AS, DEFAULT_STORAGE_CLASS,
-    DEFAULT_STORAGE_SIZE, DEFAULT_TENANT_NAMESPACE, DEFAULT_TLS_SECRET, DEFAULT_TMP_SIZE,
-    Resources,
+    DEFAULT_OAUTH_SECRET_NAME, DEFAULT_PENDING_TTL_SECS, DEFAULT_RELAY_SECRET_NAME, DEFAULT_RUN_AS,
+    DEFAULT_STORAGE_CLASS, DEFAULT_STORAGE_SIZE, DEFAULT_TENANT_NAMESPACE, DEFAULT_TLS_SECRET,
+    DEFAULT_TMP_SIZE, Resources,
 };
 use crate::provision::Warden;
 
@@ -88,6 +88,14 @@ pub fn test_config() -> Config {
         llm_stage1_daily_cap: None,
         llm_stage2_daily_cap: None,
         embed_idle_unload_secs: None,
+        // Unset, so the agent door is unpublished: the tests that publish it
+        // set it themselves.
+        mcp_oauth_issuer: None,
+        // Off, like a warden that never heard of the relay: the tests that
+        // render push env turn it on themselves.
+        relay_url: None,
+        relay_secret_name: DEFAULT_RELAY_SECRET_NAME.to_string(),
+        relay_topic: None,
     }
 }
 

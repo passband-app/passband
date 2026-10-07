@@ -639,6 +639,7 @@ CREATE TABLE IF NOT EXISTS unsubscribes (
     status            TEXT,
     status_url        TEXT,
     status_reason     TEXT,
+    smart_block       TEXT,
     status_at         TEXT,
     UNIQUE(account_id, sender_addr)
 );
@@ -785,6 +786,26 @@ CREATE TABLE IF NOT EXISTS inbox_unread (
     account_id INTEGER NOT NULL PRIMARY KEY,
     messages   INTEGER NOT NULL,
     threads    INTEGER NOT NULL,
+    fetched_at TEXT NOT NULL
+);
+
+-- THE ACCOUNT'S GOOGLE PROFILE: display name and profile photo, fetched by the
+-- sync loop from the People API when the grant carries the optional
+-- userinfo.profile scope. One row per account, overwritten whole on each
+-- successful fetch, so a photo the person removed goes away here too.
+--
+-- NO ROW MEANS NEVER FETCHED (an older grant without the scope, or a People
+-- API that has never answered), and readers serve that as absence. A row with
+-- a NULL photo is a real answer: the account has a name and no picture of its
+-- own. `photo_tag` is a short hash of the bytes, which is all a client needs to
+-- know whether the copy it holds is current.
+CREATE TABLE IF NOT EXISTS account_profile (
+    account_id INTEGER NOT NULL PRIMARY KEY,
+    name       TEXT,
+    given_name TEXT,
+    photo      BLOB,
+    photo_mime TEXT,
+    photo_tag  TEXT,
     fetched_at TEXT NOT NULL
 );
 
@@ -1074,6 +1095,13 @@ CREATE TABLE IF NOT EXISTS devices (
     -- for anything registered before the field existed, and for the macOS
     -- client, which never asks a daemon to push at all.
     tag                TEXT,
+    -- The APNs environment this token was minted in, as the client declared it:
+    -- `production` (TestFlight / App Store) or `sandbox` (Xcode dev builds,
+    -- simulators). It is a property of the TOKEN, not of the daemon: a token
+    -- sent to the wrong environment is rejected by APNs, so ONE global switch
+    -- cannot serve a mixed fleet. NULL = the client did not say, and the pusher
+    -- falls back to its configured environment (then the relay's default).
+    environment        TEXT,
     created_at         TEXT NOT NULL,
     last_registered_at TEXT NOT NULL
 );

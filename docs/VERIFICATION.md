@@ -87,9 +87,16 @@ finding.
 | `https://www.googleapis.com/auth/gmail.modify` | Restricted |
 | `https://www.googleapis.com/auth/gmail.send` | Sensitive |
 | `https://www.googleapis.com/auth/userinfo.email` | Sensitive |
+| `https://www.googleapis.com/auth/userinfo.profile` | Non-sensitive |
 | `openid` | — |
 | `https://www.googleapis.com/auth/calendar.events` | Sensitive (confirm at filing). **Optional**: requested only by the calendar grant |
 | `https://www.googleapis.com/auth/calendar.calendarlist.readonly` | Sensitive (confirm at filing). **Optional**: requested only by the calendar grant |
+
+`userinfo.profile` is requested and never required: it feeds the account's name
+and photo in the client (`squelch-core/src/sync/profile.rs`), read through the
+**People API**, which therefore has to be ENABLED on the Cloud project. Without
+it the call answers 403 and the client shows an initial, the same as a grant
+that never carried the scope.
 
 The constants are pinned in `squelch-core/src/config.rs` and re-pinned in
 `squelch-broker/src/validate.rs`; the signup floor is tested in

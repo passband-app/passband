@@ -6,6 +6,7 @@ use squelch_core::config::{Config, CredentialBackend, OAuthClientConfig, Stage2C
 use squelch_core::credentials::{
     CredentialKind, CredentialStore, FileCredentialStore, KeyringCredentialStore,
 };
+use squelch_core::features::Features;
 use squelch_core::store::SqliteStore;
 use squelch_core::triage::fye_headline::HeadlineClient;
 use squelch_core::triage::rule_infer::RuleInferClient;
@@ -13,6 +14,19 @@ use squelch_core::triage::rule_suggest::RuleSuggestClient;
 use squelch_core::triage::unsub_page::UnsubPageClient;
 use squelch_core::types::AccountId;
 
+/// The agent door's mode as the console describes it. Mirrors squelch-mcp's
+/// `AgentDoorAuth` without depending on it (the human door does not link the
+/// agent door's crate), carrying only what the page shows.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum AgentDoorStatus {
+    /// No agent sign-in configured: the self-host door, Host guard only.
+    #[default]
+    Open,
+    /// OAuth sign-in configured; agents connect at this public URL.
+    OAuth { public_url: String },
+    /// Half-set or invalid settings: the door refuses everything (503).
+    Unavailable,
+}
 /// A board hash and the headline written for it (`None`: nothing to say).
 pub(crate) type HeadlineCacheEntry = (u64, Option<String>);
 
@@ -160,6 +174,12 @@ pub struct ApiState {
     /// Where that consent's exchange talks to Google. Google's pinned pair in
     /// production; see [`squelch_core::auth::GoogleEndpoints`].
     pub(crate) calendar_consent_endpoints: Arc<squelch_core::auth::GoogleEndpoints>,
+    /// What the console tells the owner about the agent door (`/mcp`). Set by
+    /// squelchd from the mode it resolved at startup; the default, Open, is
+    /// the self-host posture and what every test that does not care gets.
+    /// Display only: the door's actual auth lives in squelch-mcp, and nothing
+    /// here can loosen it.
+    pub(crate) agent_door: AgentDoorStatus,
     /// The process's metrics registry, read by `/client/stats` to answer
     /// whether this mailbox's Gmail credential is currently working.
     ///
@@ -200,6 +220,10 @@ pub struct ApiState {
     /// this. `None` (no API key configured, and every test harness) means
     /// inference resolves to `filtered`, which is the safe default. HUMAN DOOR
     /// ONLY, like every other rule write.
+    ///
+    /// A route that AWAITS any of the model handles below before it answers
+    /// owes `ROUTE_CLASSES` in `http_metrics.rs` a row, or its seconds are
+    /// charted as the daemon's own.
     pub(crate) rule_infer: Option<Arc<RuleInferClient>>,
     /// The small model that suggests a rule sentence for the rule card. It
     /// reads the sender's recent subjects, so its output is only ever SHOWN,
@@ -233,6 +257,11 @@ pub struct ApiState {
     /// offers a button that could only fail. HUMAN DOOR ONLY: it spends a quota
     /// and sends mail as the user.
     pub(crate) sharing: Option<Arc<crate::sharing::Sharing>>,
+    /// The hidden features this mailbox has been let into; see
+    /// [`squelch_core::features`]. Nothing is on by default. `/client/stats`
+    /// lists it for the apps, and a handler that gates on one asks
+    /// `state.features().enabled(..)` at the moment it decides.
+    pub(crate) features: Features,
     /// The carrier poller's kick handle plus the carriers it was built over,
     /// behind `POST /client/shipments/poll`. `None` when no poller runs — which
     /// is the resting state of every daemon with no carrier credentials — and
@@ -492,6 +521,7 @@ impl ApiState {
             calendar_consent: Default::default(),
             calendar_consent_port: squelch_core::auth::DEFAULT_HEADLESS_PORT,
             calendar_consent_endpoints: Default::default(),
+            agent_door: AgentDoorStatus::Open,
             sync_metrics: None,
             gmail_budget: None,
             console_allow_insecure_cookie: false,
@@ -505,6 +535,7 @@ impl ApiState {
             fye_headline_attempts: Arc::new(std::sync::Mutex::new((String::new(), 0))),
             assistant: None,
             sharing: None,
+            features: Features::none(),
             shipment_poll: None,
             shipment_policy: squelch_core::config::ShipmentListPolicy::default(),
             unsub: crate::unsub_job::UnsubJobs::default(),
@@ -630,10 +661,9 @@ impl ApiState {
         self.tracking_base_url = base_url
             .map(|u| u.trim().trim_end_matches('/').to_string())
             .filter(|u| !u.is_empty())
-            .filter(|u| {
-                let lower = u.to_ascii_lowercase();
-                lower.starts_with("http://") || lower.starts_with("https://")
-            })
+            // The shared predicate: the opens-poller gate and the startup
+            // posture report apply the same rule, so all three agree.
+            .filter(|u| squelch_core::tracking::is_mintable_base_url(u))
             .map(|u| Arc::from(u.as_str()));
         self
     }
@@ -683,6 +713,17 @@ impl ApiState {
             })
             .map(|u| Arc::from(u.as_str()));
         self
+    }
+
+    /// Tell the console which mode the agent door is in. See
+    /// [`AgentDoorStatus`].
+    pub fn with_agent_door(mut self, status: AgentDoorStatus) -> Self {
+        self.agent_door = status;
+        self
+    }
+
+    pub(crate) fn agent_door(&self) -> &AgentDoorStatus {
+        &self.agent_door
     }
 
     /// The control plane's origin, if console SSO is configured. `None` => the
@@ -836,6 +877,29 @@ impl ApiState {
     pub fn with_sharing(mut self, sharing: Option<crate::sharing::Sharing>) -> Self {
         self.sharing = sharing.map(Arc::new);
         self
+    }
+
+    /// Use `features` as this daemon's hidden-feature set. The handle is
+    /// shared, not copied: whatever refreshes it is seen here.
+    pub fn with_features(mut self, features: Features) -> Self {
+        self.features = features;
+        self
+    }
+
+    /// The hidden features that are on. Clone it to hand a subsystem outside
+    /// this crate the same live set.
+    pub fn features(&self) -> &Features {
+        &self.features
+    }
+
+    /// The loop that keeps [`Self::features`] in step with the control plane,
+    /// or `None` when there is no control plane to ask (every self-host, where
+    /// the only features on are the ones `SQUELCH_FEATURES` pins).
+    pub fn feature_refresher(&self) -> Option<crate::sharing::FeatureRefresher> {
+        Some(crate::sharing::FeatureRefresher {
+            sharing: self.sharing.clone()?,
+            features: self.features.clone(),
+        })
     }
 
     /// The invite minter, if this daemon has one.
@@ -1014,7 +1078,10 @@ impl ApiState {
         Ok(Self::new(store, account_id, token)
             .with_console_sso_url(std::env::var("SQUELCH_CONSOLE_SSO_URL").ok())
             .with_calendar_consent_port(auth_port_from_env())
-            .with_sharing(sharing))
+            .with_sharing(sharing)
+            // Pinned from `SQUELCH_FEATURES`, which no hosted pod sets; what
+            // the control plane grants arrives later, through the refresher.
+            .with_features(Features::from_env()))
     }
 
     /// THE one way a binary turns a loaded [`Config`] into serving state:

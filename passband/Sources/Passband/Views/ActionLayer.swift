@@ -1,20 +1,15 @@
 // The global action surface, above every other layer: undo/notice toasts, the
-// unsubscribe-violation prompt, rule editor, process mode, the 2FA modal,
+// unsubscribe-violation notice (Views/UnsubscribeViolationNotice.swift), rule editor, the 2FA modal,
 // triage-fix palette, ⌘K ask bar, shortcuts overlay, the re-triage confirm and
 // the re-triage run itself. The composer is NOT here anymore — it is a layout
 // pane (see ComposePane in MainShell), not an overlay.
 // Read views own the list keymap; this layer extends that same "list" context
-// with t and p. Modal-context keys live inside each overlay.
+// with c. Modal-context keys live inside each overlay.
 
 import SwiftUI
 
 struct ActionLayer: View {
     @Environment(AppStore.self) private var store
-
-    @State private var blockPrompt: UnsubscribeRecord?
-    @State private var blockBusy = false
-    /// Senders acted on this session, so a lagging read model can't re-nag.
-    @State private var acted: Set<String> = []
 
     var body: some View {
         ZStack(alignment: .bottomLeading) {
@@ -54,6 +49,11 @@ struct ActionLayer: View {
                 .transition(.opacity)
             }
 
+            // THE DISCOVERY RING'S FOUND MOMENT. Above the toasts and the
+            // tray, under every palette and modal below: the moment only ever
+            // arrives when none of them is up, and one raised over it covers it.
+            DiscoveryLayer()
+
             if let request = store.ruleEditor {
                 // Keyed by the request: a click on an in-effect rule swaps the
                 // request under an open card, and without a fresh identity the
@@ -67,7 +67,6 @@ struct ActionLayer: View {
             if let request = store.groupEditor {
                 GroupEditor(request: request) { store.closeGroupEditor() }
             }
-            if store.processModeOpen { ProcessMode { store.processModeOpen = false } }
             if !store.authQueue.isEmpty { AuthCodeModal() }
             if let target = store.triageFix {
                 TriageFixPalette(target: target) { store.closeTriageFix() }
@@ -82,6 +81,9 @@ struct ActionLayer: View {
             if let slot = store.schedulePicker {
                 SchedulePalette(slot: slot) { store.schedulePicker = nil }
             }
+            // The composer's trash can asking first. Here for the reason
+            // the clock above is: the pane is too narrow to hold a scrim.
+            if store.discardAsk != nil { DiscardConfirm() }
             if store.askBarOpen { AskBar { store.askBarOpen = false } }
             if store.shortcutsOpen {
                 ShortcutsOverlay(calendar: store.calendarPageAvailable) { store.shortcutsOpen = false }
@@ -120,10 +122,6 @@ struct ActionLayer: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
         .keyBindings(.list, [
-            KeyBinding("t", "tune sender") {
-                if let u = store.selectedUpdate { Actions.tune(sender: u.sender) }
-            },
-            KeyBinding("p", "process mode") { store.processModeOpen = true },
             // `c` = compose, registered per-SURFACE (here for the lists, and again
             // in the sitrep and the reader) rather than globally: a global one would
             // fire from inside a modal, where the letter belongs to whatever is
@@ -133,7 +131,7 @@ struct ActionLayer: View {
         // The scan rides the poll tick from a leaf of its own: this layer is
         // every toast, undo chip and modal in the app, and reading the tick
         // here re-evaluated all of it every ten seconds.
-        .background { ViolationScanKeeper(scan: scanViolations) }
+        .background { ViolationScanKeeper() }
     }
 
     private var showsUnsubscribeTray: Bool {
@@ -148,8 +146,9 @@ struct ActionLayer: View {
             VStack(alignment: .leading, spacing: Space.scaled(7)) {
                 // Sender strings are email-derived: rendered as Text only,
                 // never as markup.
-                if let prompt = blockPrompt {
-                    violationPrompt(prompt)
+                if let prompt = UnsubscribeViolations.shared.prompt {
+                    UnsubscribeViolationNotice(record: prompt)
+                        .transition(.move(edge: .leading).combined(with: .opacity))
                 }
                 ForEach(store.toasts) { toast in
                     Button {
@@ -170,12 +169,6 @@ struct ActionLayer: View {
                         .regular.tint(tone(toast.tone).opacity(0.16)).interactive(),
                         in: .rect(cornerRadius: 11, style: .continuous)
                     )
-                    .overlay(alignment: .leading) {
-                        RoundedRectangle(cornerRadius: 1)
-                            .fill(tone(toast.tone))
-                            .frame(width: 2)
-                            .padding(.vertical, Space.s6)
-                    }
                     .transition(.move(edge: .leading).combined(with: .opacity))
                 }
                 ForEach(store.undos) { undo in
@@ -183,9 +176,16 @@ struct ActionLayer: View {
                         Task { await store.fireUndo(undo.id) }
                     } label: {
                         HStack(spacing: Space.s14) {
-                            Text(undo.label)
-                                .font(Typo.rowSub)
-                                .foregroundStyle(Palette.ink)
+                            HStack(spacing: Space.s8) {
+                                if let expiresAt = undo.expiresAt {
+                                    UndoCountdown(
+                                        startedAt: undo.createdAt, expiresAt: expiresAt
+                                    )
+                                }
+                                Text(undo.label)
+                                    .font(Typo.rowSub)
+                                    .foregroundStyle(Palette.ink)
+                            }
                             HStack(spacing: Space.s4) {
                                 Kbd("u")
                                 Text("undo")
@@ -201,12 +201,6 @@ struct ActionLayer: View {
                         .regular.tint(Palette.warn.opacity(0.18)).interactive(),
                         in: .rect(cornerRadius: 11, style: .continuous)
                     )
-                    .overlay(alignment: .leading) {
-                        RoundedRectangle(cornerRadius: 1)
-                            .fill(Palette.warn)
-                            .frame(width: 2)
-                            .padding(.vertical, Space.s6)
-                    }
                     .transition(.move(edge: .leading).combined(with: .opacity))
                     .tourTarget(.undoToast)
                 }
@@ -223,197 +217,26 @@ struct ActionLayer: View {
         case .info: Palette.inkDim
         }
     }
-
-    // MARK: - unsubscribe violations
-
-    private func violationPrompt(_ record: UnsubscribeRecord) -> some View {
-        VStack(alignment: .leading, spacing: Space.scaled(9)) {
-            Text(
-                "\(SenderCache.resolved(record.sender).displayName) is ignoring your unsubscribe — "
-                    + "\(record.violation_count) email\(record.violation_count == 1 ? "" : "s") "
-                    + "since you asked \(Fmt.relAge(record.requested_at)) ago."
-            )
-            .font(Typo.rowSub)
-            .foregroundStyle(Palette.ink)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: Typo.measure(360), alignment: .leading)
-
-            HStack(spacing: Space.s8) {
-                Button("Block sender") { Task { await block(record) } }
-                    .buttonStyle(.glassProminent)
-                    .tint(Palette.danger)
-                    .disabled(blockBusy)
-                Button("Keep") { Task { await keep(record) } }
-                    .buttonStyle(.glass)
-                    .disabled(blockBusy)
-            }
-            .controlSize(.small)
-        }
-        .padding(Space.scaled(13))
-        .passbandGlass(.pane, cornerRadius: 14, tint: Palette.dangerSoft)
-        .transition(.move(edge: .leading).combined(with: .opacity))
-    }
-
-    private func scanViolations() async {
-        let gen = UnsubscribeJobs.shared.generation
-        guard let rows = try? await APIClient.shared.getUnsubscribes() else { return }
-        // The same rows carry automatic-unsubscribe jobs: a `needs_you` left
-        // from before a relaunch reaches the tray through this fetch.
-        UnsubscribeJobs.shared.absorb(rows, generation: gen)
-        // Surface one at a time: a stack of these is a nag, not a prompt.
-        let next = rows.first {
-            $0.violation_count > 0 && $0.resolution == nil && !acted.contains($0.sender)
-        }
-        // Assignment is invalidation, and the answer is nil nearly always.
-        if next != blockPrompt { blockPrompt = next }
-    }
-
-    private func block(_ record: UnsubscribeRecord) async {
-        guard !blockBusy else { return }
-        blockBusy = true
-        // Mark acted immediately so a refresh mid-flight can't re-surface it.
-        acted.insert(record.sender)
-        do {
-            // Exact sender address, not the domain.
-            try await Actions.createBlockRule(sender: record.sender)
-            // No message on screen to name, but the rule is still a verdict on
-            // the sender, so the same rows clear here as anywhere else.
-            store.noteSenderResolved(record.sender)
-            try await APIClient.shared.setUnsubResolution(
-                sender: record.sender, resolution: .blocked)
-            store.pushToast("blocked \(record.sender)", .success)
-        } catch {
-            store.pushToast(errText(error, "block failed"), .error)
-        }
-        blockBusy = false
-        blockPrompt = nil
-    }
-
-    private func keep(_ record: UnsubscribeRecord) async {
-        guard !blockBusy else { return }
-        blockBusy = true
-        acted.insert(record.sender)
-        // Best-effort: the session-level `acted` set already suppresses re-nag.
-        _ = try? await APIClient.shared.setUnsubResolution(
-            sender: record.sender, resolution: .dismissed)
-        blockBusy = false
-        blockPrompt = nil
-    }
 }
 
 // MARK: - shortcuts overlay
 
-/// Keyboard-shortcuts help ('?'). Curated and grouped by hand rather than
-/// dumped from the keymap registry, which carries per-context duplicates.
+/// Keyboard-shortcuts help ('?'). Draws `ShortcutCatalog`, the one table the
+/// assistant's list_shortcuts tool also reads, so the two cannot disagree.
 struct ShortcutsOverlay: View {
-    /// Whether the Calendar page is offered, so its key is listed only where
-    /// it does something.
+    @Environment(AppStore.self) private var store
+    /// Whether the Calendar page is offered, so its keys are listed only where
+    /// they do something.
     var calendar = false
     let onClose: () -> Void
 
-    private struct Group: Identifiable {
-        var title: String
-        var items: [(keys: [String], desc: String)]
-        var id: String { title }
-    }
-
-    private static let groups: [Group] = [
-        Group(
-            title: "Sitrep & inbox",
-            items: [
-                (["j", "k"], "move selection"),
-                (["Enter"], "open thread"),
-                (["r"], "reply"),
-                (["c"], "new message"),
-                (["e", "d"], "mark done"),
-                (["v"], "fix a wrong triage verdict"),
-                (["h"], "remind me about this later"),
-                (["t"], "tune sender rule"),
-                (["f"], "search this sender"),
-                (["p"], "process mode"),
-                (["u"], "undo last action"),
-            ]),
-        Group(
-            title: "Thread viewer",
-            items: [
-                (["j", "k"], "older / newer message"),
-                (["←", "→"], "previous / next queued email"),
-                (["r"], "reply"),
-                (["Enter"], "reply all"),
-                (["c"], "new message"),
-                (["e", "d"], "done, and close the reader"),
-                (["E", "D"], "done, and open the next email"),
-                (["S"], "skip to the next email, leave this one"),
-                (["h"], "remind + next"),
-                (["u"], "unsubscribe from this sender"),
-                (["t"], "new rule for this sender"),
-                // `f` is FORWARD in the reader and search-this-sender
-                // everywhere else; the group above still shows `f` as search,
-                // and this row is the one place a reader can see that the key
-                // changes hands. The reader has no search-this-sender key of
-                // its own: `/` then `from:` is the spelled-out way.
-                (["f"], "forward this message"),
-                (["Esc"], "back"),
-            ]),
-        Group(
-            title: "Navigate",
-            items: [
-                (["1", "2", "3", "4", "5"], "sitrep · emails · auth · rules · groups"),
-                (["⌘["], "back"),
-                (["⌘]"], "forward"),
-                (["a"], "browse all mail"),
-                (["n"], "noise page (and back)"),
-                (["/"], "search"),
-                (["⌘K"], "ask your inbox"),
-                (["⌘⇧K"], "new ask chat"),
-                (["⌘,"], "settings"),
-                (["g"], "auth messages"),
-                (["T"], "rules"),
-                (["A"], "audit log (in settings)"),
-            ]),
-        Group(
-            title: "App",
-            items: [
-                (["\\"], "toggle light / dark theme"),
-                (["?"], "this help"),
-                (["Esc"], "close panel / overlay"),
-            ]),
-    ]
-
-    /// The fixed list, with the calendar in the digits (and ⇧C) under
-    /// Navigate and the page's own keys when the calendar is offered, so
-    /// nothing is advertised where it does nothing.
-    private var groups: [Group] {
-        guard calendar else { return Self.groups }
-        var out = Self.groups.map { group in
-            guard group.title == "Navigate" else { return group }
-            var g = group
-            // The digits follow the rail: Calendar is 2 and the rest move up.
-            g.items[0] = (
-                ["1", "2", "3", "4", "5", "6"], "sitrep · calendar · emails · auth · rules · groups"
-            )
-            g.items.insert((["⇧C"], "calendar"), at: 1)
-            return g
-        }
-        out.insert(
-            Group(
-                title: "Calendar",
-                items: [
-                    (["m", "a"], "month / agenda"),
-                    (["j", "k"], "move selection"),
-                    (["Enter"], "open the mail behind it"),
-                    (["y"], "going (again: not going)"),
-                    (["x"], "dismiss"),
-                    (["n"], "new event"),
-                    (["e"], "edit event"),
-                    (["⌘↵"], "save the event"),
-                    (["⌫"], "delete event"),
-                    (["←", "→", "↑", "↓"], "month: move the day"),
-                    (["[", "]"], "month: previous / next"),
-                    (["t"], "month: today"),
-                    (["Enter"], "month: open the day"),
-                ]), at: 2)
-        return out
+    /// The sheet's way out to the assistant. It CLOSES THE SHEET FIRST: the
+    /// ask bar is mounted beneath this overlay, so the global ⌘K alone would
+    /// open it underneath, behind a scrim, where the hint that sent somebody
+    /// there had just hidden it.
+    private func askAgent() {
+        onClose()
+        store.askBarOpen = true
     }
 
     var body: some View {
@@ -427,7 +250,7 @@ struct ShortcutsOverlay: View {
                     columns: [GridItem(.flexible(), spacing: Space.scaled(22)), GridItem(.flexible())],
                     alignment: .leading, spacing: Space.scaled(18)
                 ) {
-                    ForEach(groups) { group in
+                    ForEach(ShortcutCatalog.groups(calendar: calendar)) { group in
                         VStack(alignment: .leading, spacing: Space.scaled(5)) {
                             Text(group.title)
                                 .font(Typo.sectionLabel)
@@ -448,6 +271,18 @@ struct ShortcutsOverlay: View {
                 }
 
                 HStack(spacing: Space.s4) {
+                    // A list of keys answers "which key", never "how do I". The
+                    // assistant reads this same table and the rest of the guide.
+                    Button(action: askAgent) {
+                        HStack(spacing: Space.s4) {
+                            Text("you can always ask the agent!")
+                                .font(Typo.micro)
+                                .foregroundStyle(Palette.inkDim)
+                            Kbd("⌘K")
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
                     Spacer()
                     Kbd("?")
                     Text("or").font(Typo.micro).foregroundStyle(Palette.inkFaintest)
@@ -460,28 +295,38 @@ struct ShortcutsOverlay: View {
         .keyBindings(.modal, [
             KeyBinding("Escape", "close help") { onClose() },
             KeyBinding("?", "close help") { onClose() },
+            // Ahead of the global ⌘K, which this context would otherwise let
+            // through to open the bar under the sheet (see `askAgent`).
+            KeyBinding("k", "ask your inbox", meta: true, allowInInput: true) { askAgent() },
         ])
     }
 }
 
 
-/// Asks for the unsubscribe ledger on the poll tick, from a zero-size leaf
-/// (see the call site), and NOT ON EVERY TICK: a violation is something a
-/// sender did days ago, and a request every ten seconds for it was the
-/// busiest thing this client asked the daemon for. Once a minute.
-private struct ViolationScanKeeper: View {
-    @Environment(AppStore.self) private var store
-    let scan: () async -> Void
-    @State private var lastScan: Date?
-    private static let interval: TimeInterval = 60
+/// How long an undo chip has left: a small ring that drains to nothing as the
+/// window closes. Drawn from the clock rather than animated to a value, like
+/// the reader's hold ring, so it empties on the same second the chip leaves
+/// even when it mounts late or the layer re-renders mid-sweep.
+private struct UndoCountdown: View {
+    let startedAt: Date
+    let expiresAt: Date
+
+    private static let size: CGFloat = 11
 
     var body: some View {
-        Color.clear
-            .frame(width: 0, height: 0)
-            .task(id: store.lastRefresh) {
-                if let lastScan, Date().timeIntervalSince(lastScan) < Self.interval { return }
-                lastScan = Date()
-                await scan()
+        TimelineView(.animation(minimumInterval: 1 / 30)) { ctx in
+            let total = max(0.001, expiresAt.timeIntervalSince(startedAt))
+            let left = min(1, max(0, expiresAt.timeIntervalSince(ctx.date) / total))
+            ZStack {
+                Circle()
+                    .stroke(Palette.hairlineStrong, lineWidth: 1.75)
+                Circle()
+                    .trim(from: 0, to: left)
+                    .stroke(Palette.warn, style: StrokeStyle(lineWidth: 1.75, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
             }
+            .frame(width: Self.size, height: Self.size)
+        }
+        .accessibilityHidden(true)
     }
 }

@@ -31,10 +31,14 @@ common way to end up with a feature that silently records nothing.
 | Setting | Gates | Effect when unset |
 |---|---|---|
 | `[tracking] base_url` (`SQUELCH_TRACK_URL`) | **minting** — where the pixel points | No send is ever tracked, whatever the client asks for |
-| `[pusher] relay_url` (`SQUELCH_RELAY_URL`) | **collection via relay** — whether the daemon drains a relay | No opens poller; opens must arrive at the daemon directly |
+| `[pusher] relay_url` (`SQUELCH_RELAY_URL`) | **collection via relay**, together with `base_url`: the opens poller runs only when BOTH are set, `base_url` counting as set only when minting would accept it (an `http://` or `https://` scheme) | No opens poller; opens must arrive at the daemon directly |
 
 `base_url` decides which door the recipient's mail client knocks on. That is the
-only thing it decides. It does not have to be a relay, and for self-hosted
+only thing it decides on its own. The opens poller needs it as well as the relay
+URL: a daemon that mints no pixels has no opens to collect, and because the
+relay's buffer is one global queue whose cursor ack deletes rows, a poller there
+could only consume opens that belong to another daemon. A relay configured for
+iOS push alone therefore never starts collecting. It does not have to be a relay, and for self-hosted
 deployments it usually should not be.
 
 The daemon states its posture at startup, so you never have to infer it:
@@ -128,6 +132,12 @@ for your own daemon and do not share its bearer: the open buffer has no tenant
 column and `/v1/opens` has a single global cursor, so two daemons draining the
 same relay will ack-delete each other's rows, and each silently never sees the
 opens the other collected.
+
+The daemon enforces the one case it can see: a daemon with a relay but no
+usable `[tracking] base_url` (unset, blank, or missing its http(s) scheme, the
+same rule minting applies) does not start the opens poller at all, so sharing a relay
+for push alone is safe. Two daemons that both mint pixels and share one relay
+are still the collision described above.
 
 An anonymous relay (`SQUELCH_RELAY_ALLOW_ANONYMOUS=1`) does not serve `/v1/opens`
 at all. Serving the push route open is a supported nuisance; serving the drain

@@ -9,6 +9,15 @@ actor RehearsalAPI {
     private var referenceDate: Date
     private var rules: [SenderRule] = []
     private var nextRuleID = 1
+    /// Send groups, held WITH their membership; the list read strips it, the
+    /// way the daemon's does. Empty in the lesson, which never makes one: they
+    /// are here so the Groups page and its editor answer in rehearsal instead
+    /// of failing a save that was never going anywhere.
+    private var groups: [SendGroup] = []
+    private var nextGroupID = 1
+    /// What a staged group has "sent". Nothing in rehearsal sends, so this is
+    /// only ever what `stage` put there.
+    private var groupHistory: [Int: [GroupHistoryEntry]] = [:]
     /// The drafts the practice composer saved, kept for the session only so
     /// the picker is not empty right after a save. `reset` drops them, so a
     /// practice draft never outlives the rehearsal.
@@ -39,9 +48,34 @@ actor RehearsalAPI {
         self.accountEmail = accountEmail
         referenceDate = Date()
         rules = []; nextRuleID = 1; drafts = [:]; nextDraftID = 1; clearedShipments = []
+        groups = []; nextGroupID = 1; groupHistory = [:]
         statusOverrides = [:]; tierOverrides = [:]; importanceOverrides = [:]; reminders = [:]
     }
     func snapshot() -> OnboardingRehearsal { mailbox }
+
+    #if DEBUG
+        /// Rules and groups laid in for a screenshot (PassbandiOS/Lib/
+        /// FixtureStage.swift). The lesson never calls this: a practice inbox
+        /// that arrived with rules already written would be teaching someone
+        /// to tune senders that were tuned for them.
+        func stage(rules: [SenderRule], groups: [SendGroup], history: [Int: [GroupHistoryEntry]]) {
+            self.rules = rules
+            nextRuleID = (rules.map(\.id).max() ?? 0) + 1
+            self.groups = groups
+            nextGroupID = (groups.map(\.id).max() ?? 0) + 1
+            groupHistory = history
+        }
+
+        /// Sent mail and an outbox, for the same reason and the same caller:
+        /// the lesson sends nothing and schedules nothing, so its Sent page is
+        /// the empty one. Only a screenshot ever fills these.
+        private var stagedSent: [SentItem] = []
+        private var stagedScheduled: [ScheduledSendView] = []
+        func stage(sent: [SentItem], scheduled: [ScheduledSendView]) {
+            stagedSent = sent
+            stagedScheduled = scheduled
+        }
+    #endif
 
     /// Confirm the saved rule, not the editor's requested/default disposition,
     /// actually governs and suppresses this sample after specificity is resolved.
@@ -156,7 +190,19 @@ actor RehearsalAPI {
                 (term.isEmpty || "\(message.sender) \(message.subject) \(message.body)".lowercased().contains(term))
             }.map { SearchHit(id: $0.id, thread_id: threadID($0.id), from_addr: address($0), from_name: $0.sender, subject: $0.subject, received_at: stamp(), snippet: $0.explanation, legs: ["keyword"]) }
             data = try encode(SearchPage(items: hits, match_kind: "keyword", sort: query["sort"]))
-        case ("GET", "/client/sealed"), ("GET", "/client/marketing"), ("GET", "/client/groups"), ("GET", "/client/unsubscribes"), ("GET", "/client/audit"), ("GET", "/client/triage-feedback"), ("GET", "/client/contacts"), ("GET", "/client/senders"):
+        case ("GET", "/client/groups"):
+            // Counts only, like the daemon's listing; `q` is the composer's
+            // autocomplete and matches on the name.
+            let term = query["q"]?.lowercased()
+            let listed = groups.filter { term.map($0.name.lowercased().contains) ?? true }
+                .sorted { $0.name.lowercased() < $1.name.lowercased() }
+                .map { group in var row = group; row.members = []; return row }
+            data = try encode(listed)
+        case ("POST", "/client/groups"):
+            data = try saveGroup(body, id: nil)
+        case ("GET", "/client/groups/limits"):
+            data = try encode(GroupLimits(max_members: 50))
+        case ("GET", "/client/sealed"), ("GET", "/client/marketing"), ("GET", "/client/unsubscribes"), ("GET", "/client/audit"), ("GET", "/client/triage-feedback"), ("GET", "/client/contacts"), ("GET", "/client/senders"), ("GET", "/client/sender-domains"):
             data = Data("[]".utf8)
         case ("GET", "/client/person"):
             // The practice inbox has no history behind its senders: the card
@@ -183,6 +229,14 @@ actor RehearsalAPI {
                 $0.reply_to_message_id == reply && $0.forward_of_message_id == forward
             }
             data = try practiceDraft(body, id: existing?.id)
+        #if DEBUG
+            // Staged rows only (see `stage(sent:scheduled:)`); unstaged, the
+            // Sent page answers exactly what it does in a shipped build.
+            case ("GET", "/client/sent") where !stagedSent.isEmpty:
+                data = try encode(["items": stagedSent])
+            case ("GET", "/client/scheduled") where !stagedScheduled.isEmpty:
+                data = try encode(stagedScheduled)
+        #endif
         case ("GET", "/client/sent"):
             data = try json(["items": []])
         // The practice stats never claim a timeline, so the calendar page is
@@ -258,6 +312,17 @@ actor RehearsalAPI {
                 if method == "PUT" { data = try saveRule(body, id: id) }
                 else if method == "DELETE" { rules.removeAll { $0.id == id }; data = try json(["deleted": true]) }
                 else { throw unsupported() }
+            } else if components.count == 3, components[1] == "groups", let id = Int(components[2]) {
+                guard let group = groups.first(where: { $0.id == id }) else { throw missing() }
+                if method == "GET" { data = try encode(group) }
+                else if method == "PUT" { data = try saveGroup(body, id: id) }
+                else if method == "DELETE" {
+                    groups.removeAll { $0.id == id }; groupHistory[id] = nil
+                    data = try json(["deleted": true])
+                } else { throw unsupported() }
+            } else if components.count == 4, components[1] == "groups", components[3] == "history", method == "GET", let id = Int(components[2]) {
+                guard groups.contains(where: { $0.id == id }) else { throw missing() }
+                data = try encode(GroupHistoryPage(items: groupHistory[id] ?? [], next_offset: nil))
             } else if components.count == 4, components[1] == "shipments", components[3] == "clear", method == "POST", let id = Int(components[2]), has(id) {
                 clearedShipments.insert(id); data = try json(["cleared": true])
             } else { throw unsupported() }
@@ -347,6 +412,28 @@ actor RehearsalAPI {
             }
         }
         return try encode(CreatedRule(rule_id: ruleID, disposition: disposition))
+    }
+    /// `members` REPLACES the membership, as the daemon's PUT does. An edit
+    /// keeps the row's id and what it has sent; a create is a new row with no
+    /// history, which is exactly what an undone delete comes back as.
+    private func saveGroup(_ body: [String: Any], id: Int?) throws -> Data {
+        guard let name = (body["name"] as? String)?.trimmingCharacters(in: .whitespaces), !name.isEmpty else {
+            throw APIError(.badRequest, 400, "A practice group needs a name")
+        }
+        let members = (body["members"] as? [[String: Any]] ?? []).compactMap { member in
+            (member["addr"] as? String).map { GroupMember(addr: $0, display_name: member["display_name"] as? String) }
+        }
+        let existing = id.flatMap { id in groups.first { $0.id == id } }
+        let groupID = id ?? nextGroupID
+        if id == nil { nextGroupID += 1 }
+        let group = SendGroup(
+            id: groupID, name: name, slug: name.lowercased().replacingOccurrences(of: " ", with: "-"),
+            mode: (body["mode"] as? String).flatMap(GroupMode.init(rawValue:)) ?? .to,
+            note: body["note"] as? String ?? "", member_count: members.count, members: members,
+            last_sent_at: existing?.last_sent_at, created_at: existing?.created_at ?? stamp(), updated_at: stamp())
+        groups.removeAll { $0.id == groupID }
+        groups.append(group)
+        return try encode(group)
     }
     private func ruleFor(_ message: OnboardingRehearsal.Message) -> SenderRule? {
         rules.filter { matches($0.match_pattern, address(message)) }.sorted {

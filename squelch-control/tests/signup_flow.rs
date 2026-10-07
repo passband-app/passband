@@ -669,6 +669,8 @@ impl Harness {
             // login is the one that reads userinfo (`tests/console_auth.rs`).
             userinfo_url: format!("{google}/userinfo"),
             alert_webhook_url: Some(format!("{warden_url}/hook")),
+            // No agent door: `/agent/auth` is not mounted.
+            workos: None,
             // The struct is constructed directly, so an http mock URL is fine
             // here; `from_env` is where https is enforced.
             bifrost: bifrost_url.map(|url| BifrostConfig {
@@ -1053,12 +1055,19 @@ async fn signup_provisions_a_tenant_and_hands_back_a_pairing_code() {
     let (consent_url, cookie) = h.start_signup("ada").await;
     // The consent URL is the mock's authorize endpoint, asking for all three
     // grants in ONE consent: hosted Passband ships the actions, and the daemon's
-    // write path has no other way to be filled.
+    // write path has no other way to be filled. The optional name-and-photo
+    // scope rides along; the mock below grants only the three, which is the
+    // unticked-box case, and the signup still completes.
     assert!(consent_url.contains("/authorize"), "{consent_url}");
     let asked = query_param(&consent_url, "scope");
     assert_eq!(
         asked.split(' ').collect::<Vec<_>>(),
-        vec![READONLY, MODIFY, SEND],
+        vec![
+            READONLY,
+            MODIFY,
+            SEND,
+            squelch_core::config::GOOGLE_PROFILE_SCOPE
+        ],
         "{consent_url}"
     );
     assert!(consent_url.contains("code_challenge_method=S256"));
@@ -2944,8 +2953,8 @@ fn last_installed_slots(h: &Harness, label: &str) -> Value {
     serde_json::from_str(&h.open_with_tenant_identity(label, &armor)).unwrap()
 }
 
-/// THE CALENDAR CONSENT URL, every parameter: the three Gmail scopes and both
-/// calendar scopes in one ask, offline, forced consent, incremental, PKCE, the
+/// THE CALENDAR CONSENT URL, every parameter: the three Gmail scopes, the
+/// optional profile scope and both calendar scopes in one ask, offline, forced consent, incremental, PKCE, the
 /// callback, and the hint as `login_hint`.
 #[tokio::test]
 async fn the_calendar_consent_url_carries_every_parameter() {
@@ -2959,7 +2968,14 @@ async fn the_calendar_consent_url_carries_every_parameter() {
         query_param(&consent, "scope")
             .split(' ')
             .collect::<Vec<_>>(),
-        vec![READONLY, MODIFY, SEND, CAL_EVENTS, CAL_LIST]
+        vec![
+            READONLY,
+            MODIFY,
+            SEND,
+            squelch_core::config::GOOGLE_PROFILE_SCOPE,
+            CAL_EVENTS,
+            CAL_LIST
+        ]
     );
     assert_eq!(query_param(&consent, "access_type"), "offline");
     assert_eq!(query_param(&consent, "prompt"), "consent");

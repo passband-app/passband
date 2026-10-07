@@ -21,7 +21,18 @@ struct UpdateAlert: View {
             case .checking:
                 narration(text: "checking for updates", fraction: nil, spinner: true)
             case .available(let version):
-                offer(version: version)
+                offer(
+                    title: "Passband \(version) is available",
+                    // What the button DOES, said before it is pressed: the app
+                    // quits and comes back, and anyone typing an email deserves
+                    // to know that before they find out.
+                    detail: "Updating installs it and restarts Passband.",
+                    action: "Update", perform: updater.installAndRelaunch)
+            case .ready(let version):
+                offer(
+                    title: "Passband \(version) is ready",
+                    detail: "It installs when you quit, or restart now.",
+                    action: "Restart", perform: updater.restartNow)
             case .downloading(let fraction):
                 narration(text: "downloading Passband", fraction: fraction, spinner: fraction == nil)
             case .extracting(let fraction):
@@ -35,20 +46,19 @@ struct UpdateAlert: View {
 
     // MARK: - the offer
 
-    private func offer(version: String) -> some View {
+    private func offer(
+        title: String, detail: String, action: String, perform: @escaping () -> Void
+    ) -> some View {
         HStack(spacing: Space.scaled(13)) {
             Image(systemName: "arrow.down.circle.fill")
                 .font(Typo.ui(19, weight: .medium))
                 .foregroundStyle(Palette.accent)
 
             VStack(alignment: .leading, spacing: Space.s2) {
-                Text("Passband \(version) is available")
+                Text(title)
                     .font(Typo.ui(13, weight: .semibold))
                     .foregroundStyle(Palette.ink)
-                // What the button DOES, said before it is pressed: the app
-                // quits and comes back, and anyone typing an email deserves to
-                // know that before they find out.
-                Text("Updating installs it and restarts Passband.")
+                Text(detail)
                     .font(Typo.rowSub)
                     .foregroundStyle(Palette.inkFaint)
             }
@@ -59,10 +69,11 @@ struct UpdateAlert: View {
                 .buttonStyle(.glass)
                 .font(Typo.ui(12, weight: .medium))
 
-            Button("Update") { updater.installAndRelaunch() }
+            // No .defaultAction: the card arrives unbidden, and on any page
+            // without its own Return binding that made Return a relaunch.
+            Button(action, action: perform)
                 .buttonStyle(.glassProminent)
                 .font(Typo.ui(12, weight: .semibold))
-                .keyboardShortcut(.defaultAction)
         }
         .padding(.horizontal, Space.scaled(15))
         .padding(.vertical, Space.s12)
@@ -70,7 +81,7 @@ struct UpdateAlert: View {
         .passbandGlass(.pane, cornerRadius: 14, tint: Palette.glassTintStrong)
         .transition(.move(edge: .bottom).combined(with: .opacity))
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Passband \(version) is available")
+        .accessibilityLabel(title)
     }
 
     // MARK: - the work

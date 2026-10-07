@@ -355,6 +355,14 @@ actor APIClient {
         try await get("/client/senders", query: ["q": q, "limit": String(limit)])
     }
 
+    /// The rule editor's `*@` suggestions: the hosts mail comes from, ranked
+    /// for a fragment of one. An empty `q` is a real question, like `senders`.
+    /// A daemon older than the route answers 404; the menu then rolls hosts up
+    /// from `senders` instead (`RulePatternSuggest.domains(from:)`).
+    func senderDomains(_ q: String, limit: Int = 8) async throws -> [SenderDomainHit] {
+        try await get("/client/sender-domains", query: ["q": q, "limit": String(limit)])
+    }
+
     /// The reader's contact card for one address. A daemon older than the
     /// route answers 404, which the card treats as "no history to show".
     func person(_ addr: String) async throws -> PersonCard {
@@ -370,6 +378,16 @@ actor APIClient {
     }
 
     func getStats() async throws -> StoreStats { try await get("/client/stats") }
+
+    /// The account's own profile photo, as the daemon imported it from Google.
+    /// Throws (a 404) when there is none; callers ask only after stats named a
+    /// tag for it. See `AccountPhotos`.
+    func accountPhoto() async throws -> Data {
+        let req = try buildRequest(
+            path: "/client/account/photo", method: .GET, query: [:], body: nil,
+            timeout: Self.requestTimeout)
+        return try await perform(req).0
+    }
 
     /// Tell the daemon a thread was OPENED. Fire and forget: it is a ledger
     /// write with nothing to show for it, and a failed one costs a rounding
@@ -424,7 +442,10 @@ actor APIClient {
     /// `config`, and the answer is decoded rather than merely 200-checked: a
     /// host that answers but is not a daemon must fail the same way it fails at
     /// the Connect gate.
-    func probe(baseURL: String, token: String) async throws {
+    ///
+    /// `retrying: false` asks exactly once, for a caller with a person waiting
+    /// on the answer who can simply ask again.
+    func probe(baseURL: String, token: String, retrying: Bool = true) async throws {
         guard !RehearsalMode.isEnabled else {
             throw APIError(.badRequest, 400, "Finish the practice inbox before changing accounts.")
         }
@@ -435,7 +456,7 @@ actor APIClient {
                 try await probeOnce(baseURL: baseURL, token: token)
                 return
             } catch {
-                guard let delay = retry.delay(after: error) else { throw error }
+                guard retrying, let delay = retry.delay(after: error) else { throw error }
                 try await Task.sleep(for: .seconds(delay))
             }
         }
@@ -754,6 +775,17 @@ actor APIClient {
 
     func getUnsubscribes() async throws -> [UnsubscribeRecord] {
         try await get("/client/unsubscribes")
+    }
+
+    /// A filtered rule that would keep `sender`'s consequential mail and drop
+    /// the promotion, or nil when there is no such line to draw. The daemon
+    /// asks a model once and remembers; after that the answer rides
+    /// `getUnsubscribes`. A daemon too old for the route 404s, which the
+    /// caller reads as none.
+    func unsubSmartBlock(sender: String) async throws -> SmartBlockProposal? {
+        let answer: SmartBlockAnswer = try await get(
+            "/client/unsubscribes/smart_block", query: ["sender": sender])
+        return answer.smart_block
     }
 
     @discardableResult

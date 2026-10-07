@@ -122,6 +122,19 @@ authentication is allowed but never *defaulted* into — a missing
 `SQUELCH_RELAY_AUTH_TOKEN` is a refusal to boot unless
 `SQUELCH_RELAY_ALLOW_ANONYMOUS=1` says the operator meant it.
 
+**Two bearers, two doors.** `SQUELCH_RELAY_AUTH_TOKEN` is the full bearer: it
+opens `POST /v1/push` AND `GET /v1/opens`, the drain of one global queue that
+every daemon's read-tracking opens share. `SQUELCH_RELAY_PUSH_TOKEN` is
+optional and opens `POST /v1/push` ONLY. It exists for a fleet of daemons you
+do not want draining each other's opens (the hosted tenants): give them the
+push token, and keep the full one for the daemons whose opens this relay
+buffers. A request is checked against both in constant time, with both compares
+always run, and any failure is a bare `401`. The push token must be a different
+value from the full one and is refused alongside
+`SQUELCH_RELAY_ALLOW_ANONYMOUS=1`, since an open push route has nothing for it
+to gate. Unset, the relay behaves exactly as it did before the variable
+existed. The startup line reports `push_token=true|false`, never the value.
+
 **Set `SQUELCH_RELAY_TRUSTED_PROXY_HOPS` when you deploy behind a TLS proxy**
 (`1` on Railway). Without it the rate limiters key on the TCP peer, which behind
 a proxy is the proxy: every client in the world then shares one bucket, and one
@@ -153,7 +166,8 @@ a header value.
 | `SQUELCH_RELAY_APNS_TEAM_ID` | yes | — | The team id (JWT `iss`). |
 | `SQUELCH_RELAY_APNS_TOPICS` | yes | — | Comma-separated `apns-topic` allowlist (bundle ids). The FIRST is the default. |
 | `SQUELCH_RELAY_APNS_ENV` | no | `production` | `production` or `sandbox`; a request may override per push. |
-| `SQUELCH_RELAY_AUTH_TOKEN` | yes* | — | Bearer required by `POST /v1/push` (constant-time compare). Minimum 32 characters. |
+| `SQUELCH_RELAY_AUTH_TOKEN` | yes* | — | The full bearer: required by `POST /v1/push` and `GET /v1/opens` (constant-time compare). Minimum 32 characters, no whitespace. |
+| `SQUELCH_RELAY_PUSH_TOKEN` | no | — | A push-only bearer: accepted by `POST /v1/push`, refused (`401`) by `GET /v1/opens`. Same length and character rules. Requires `SQUELCH_RELAY_AUTH_TOKEN`, must differ from it, and is an error with `SQUELCH_RELAY_ALLOW_ANONYMOUS=1`. Unset changes nothing. |
 | `SQUELCH_RELAY_ALLOW_ANONYMOUS` | no | `0` | `1` serves `POST /v1/push` open-but-rate-limited, and is the *only* way to omit the bearer. Setting both is an error. |
 | `SQUELCH_RELAY_DB_PATH` | no | — | SQLite file for the open buffer. Unset keeps it in memory: the binary warns at startup, and opens the daemon has not drained are lost on restart. |
 | `SQUELCH_RELAY_TRUSTED_PROXY_HOPS` | no | `0` | How many proxies you run in front of this listener. `0` trusts nothing and rate-limits on the TCP peer. `N` keys on the Nth-from-the-right `X-Forwarded-For` entry; `1` is the single-TLS-proxy case (Railway). Max 8. Setting it above `0` is a promise that **this listener is not reachable except through the declared proxies** — anything that can connect directly from a trusted address chooses its own rate-limit identity. |
@@ -222,7 +236,8 @@ first, not the oldest rows globally: the relay cannot tell a minted token from a
 invented one, so newest-wins would let a flood of junk delete opens an offline
 daemon had not drained yet. Any eviction is logged with a count (never a token).
 
-`GET /v1/opens?cursor=N` — behind the same bearer as `/v1/push`:
+`GET /v1/opens?cursor=N` — behind the FULL bearer only. `SQUELCH_RELAY_PUSH_TOKEN`
+is a `401` here, and a refused request acks nothing:
 
 ```json
 {"opens": [

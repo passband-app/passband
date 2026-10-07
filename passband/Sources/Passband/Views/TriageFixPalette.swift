@@ -206,6 +206,7 @@ struct TriageFixPalette: View {
             return
         }
         Analytics.capture("triage_corrected", ["axis": hit.axis.rawValue, "to": hit.value])
+        Discovery.note(.triageCorrected)
         // A restriction changes external access only. The owner keeps the
         // message and its placements. Refresh authoritative projections instead
         // of inferring a move from its kind or access assessment.

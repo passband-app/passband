@@ -25,6 +25,21 @@ use crate::error::{CoreError, Result};
 use crate::store::{NewEvent, OPEN_PROXIED, OPEN_UNKNOWN, Store, SyncState};
 use crate::types::{AccountId, EventKind, Tier};
 
+/// Whether a `[tracking] base_url` is one a pixel may be minted against:
+/// trimmed, it starts with `http://` or `https://`, case-insensitively. A value
+/// without a scheme would ride into outbound HTML as a RELATIVE url and resolve
+/// against the recipient's mail client, so it counts as UNSET.
+///
+/// THE ONE PREDICATE three sites must agree on: minting
+/// (`ApiState::with_tracking_base_url` in squelch-api), the startup posture
+/// report (`report_tracking_posture` in squelchd), and the opens-poller gate
+/// ([`OpensPoller::from_config`]). If they drift, a daemon that mints nothing
+/// can still drain another daemon's opens off the shared relay buffer.
+pub fn is_mintable_base_url(base_url: &str) -> bool {
+    let lower = base_url.trim().to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
+}
+
 /// The opens poller's cursor row in `sync_state`: `uidvalidity` unused,
 /// `last_uid` holds the highest relay row id durably written here. Its own key,
 /// distinct from the pusher's and the sync engine's.
@@ -119,7 +134,7 @@ fn relay_failure() -> CoreError {
 }
 
 /// The opens poller task. Construct with [`OpensPoller::from_config`], which
-/// returns `Ok(None)` when no relay is configured.
+/// returns `Ok(None)` unless both a relay and a tracking base URL are configured.
 pub struct OpensPoller {
     store: Arc<dyn Store>,
     account_id: AccountId,
@@ -131,14 +146,17 @@ pub struct OpensPoller {
 }
 
 impl OpensPoller {
-    /// Build the poller, or `Ok(None)` when `pusher.relay_url` is unset — the
-    /// relay is the only place remote opens can come from, so no relay means no
-    /// task and no socket. `Err` means a relay WAS named and the client could
-    /// not be built.
+    /// Build the poller, or `Ok(None)` unless BOTH `pusher.relay_url` and
+    /// `tracking.base_url` are set (non-blank after trimming). `Err` means both
+    /// WERE named and the client could not be built.
     ///
-    /// NOTE the asymmetry with `[tracking] base_url`: that gates MINTING (can a
-    /// pixel exist at all), this gates COLLECTION through the relay. The
-    /// daemon's own `/t/:token` route needs neither.
+    /// The relay is the only place remote opens can come from, so no relay
+    /// means no task and no socket. The tracking half is the safety clause: the
+    /// relay's opens buffer is ONE GLOBAL QUEUE, and presenting a cursor DELETES
+    /// every row at or below it. A daemon that mints no pixels has no opens to
+    /// collect, so all a poller there could do is drain and ack away ANOTHER
+    /// daemon's opens. Having a relay (for push) is not a reason to collect.
+    /// The daemon's own `/t/:token` route needs neither.
     pub fn from_config(
         store: Arc<dyn Store>,
         account_id: AccountId,
@@ -153,6 +171,16 @@ impl OpensPoller {
         else {
             return Ok(None);
         };
+        // The SAME rule minting applies: a scheme-less base_url mints nothing,
+        // so it must not collect either.
+        let mints_pixels = config
+            .tracking
+            .base_url
+            .as_deref()
+            .is_some_and(is_mintable_base_url);
+        if !mints_pixels {
+            return Ok(None);
+        }
         // The error carries no url and no bearer; neither reached the builder.
         let http = http_client()
             .map_err(|e| CoreError::Other(anyhow::anyhow!("opens poller HTTP client: {e}")))?;
@@ -385,6 +413,7 @@ mod tests {
     }
 
     /// No relay configured => no poller, and `Ok(None)` rather than `Err`.
+    /// Likewise no tracking base URL: a relay alone must not start collecting.
     #[test]
     fn from_config_is_none_without_a_relay_url() {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().unwrap());
@@ -412,10 +441,44 @@ mod tests {
                 .is_none()
         );
 
+        // A relay WITHOUT a tracking base_url does not start it either: the
+        // relay's opens buffer is global and the cursor ack deletes, so a
+        // daemon that mints no pixels would only consume another daemon's
+        // opens. This is the hosted tenant given a relay for push alone.
+        config.tracking.base_url = None;
         config.pusher.relay_url = Some("https://relay.example.com/".to_string());
+        assert!(
+            OpensPoller::from_config(store.clone(), 1, &config)
+                .expect("a relay without tracking is not an error")
+                .is_none()
+        );
+        config.tracking.base_url = Some("   ".to_string());
+        assert!(
+            OpensPoller::from_config(store.clone(), 1, &config)
+                .expect("a blank tracking url is not an error")
+                .is_none()
+        );
+        // Scheme-less: minting refuses it, so this daemon mints nothing and
+        // must not collect.
+        config.tracking.base_url = Some("track.example.com".to_string());
+        assert!(
+            OpensPoller::from_config(store.clone(), 1, &config)
+                .expect("a scheme-less tracking url is not an error")
+                .is_none()
+        );
+        // Case and surrounding whitespace do not matter, as in minting.
+        config.tracking.base_url = Some("  HTTPS://track.example.com ".to_string());
+        assert!(
+            OpensPoller::from_config(store.clone(), 1, &config)
+                .expect("building the client")
+                .is_some()
+        );
+
+        // Both named: the poller exists.
+        config.tracking.base_url = Some("https://track.example.com".to_string());
         let p = OpensPoller::from_config(store, 1, &config)
             .expect("building the client")
-            .expect("a named relay builds a poller");
+            .expect("a relay plus a tracking url builds a poller");
         // The trailing slash does not become a double slash on the path.
         assert_eq!(p.opens_url, "https://relay.example.com/v1/opens");
     }

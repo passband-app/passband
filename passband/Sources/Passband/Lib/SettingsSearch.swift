@@ -305,8 +305,9 @@ enum SettingsSearch {
             blurb: "Lets an AI agent you already run read your triaged inbox over MCP.",
             keywords: [
                 "agent", "agents", "mcp", "model context protocol", "openclaw", "claude code",
-                "codex", "cursor", "claude desktop", "connect an agent", "integration",
-                "integrations", "ai agent", "tools", "mcp server", "agent door",
+                "codex", "cursor", "claude desktop", "claude", "chatgpt", "hermes", "hermes agent",
+                "vs code", "vscode", "connect an agent", "integration",
+                "integrations", "ai agent", "tools", "mcp server", "agent mcp",
             ]),
         SettingsEntry(
             card: .agents,
@@ -462,6 +463,44 @@ enum SettingsSearch {
                     ? ordering[$0.card, default: 0] < ordering[$1.card, default: 0]
                     : $0.score > $1.score
             }
+    }
+
+    /// Ranked ENTRIES rather than cards, best first, for a reader that wants the
+    /// setting itself named: the assistant's find_setting tool answers
+    /// "Settings, Mail, Read tracking", where the pane draws a whole card.
+    /// Same scoring and the same platform fence as `hits`; ties keep the
+    /// index's own order.
+    ///
+    /// ONE DIFFERENCE: when the AND rule answers nothing, this falls back to
+    /// ANY term. The pane's rule exists for a person narrowing as they type,
+    /// who can see the list empty and take a word back. This caller is a model
+    /// that asks once, in a sentence ("change my signature", "turn off read
+    /// receipts"), and a verb the index has never heard of should not cost it
+    /// the noun that would have landed.
+    static func entryMatches(_ query: String) -> [SettingsEntry] {
+        let terms = terms(of: query)
+        guard !terms.isEmpty else { return [] }
+        let phrase = normalize(query)
+        func ranked(_ score: (SettingsEntry) -> Double) -> [SettingsEntry] {
+            var scored: [(index: Int, entry: SettingsEntry, score: Double)] = []
+            for (index, entry) in entries.enumerated() where entry.card.isAvailable {
+                let value = score(entry)
+                if value > 0 { scored.append((index, entry, value)) }
+            }
+            scored.sort { $0.score == $1.score ? $0.index < $1.index : $0.score > $1.score }
+            return scored.map(\.entry)
+        }
+        let strict = ranked { score($0, terms: terms, phrase: phrase) }
+        if !strict.isEmpty { return strict }
+        // Loose matches are kept only when they are in the best one's league:
+        // "read" alone turns up in half the index's sentences, and a tail of
+        // those under the real answer reads as five answers.
+        let any: (SettingsEntry) -> Double = { entry in
+            terms.reduce(0) { $0 + termScore(entry, $1) }
+        }
+        let loose = ranked(any)
+        guard let best = loose.first.map(any) else { return [] }
+        return loose.filter { any($0) >= best * 0.6 }
     }
 
     /// AND across the query's terms: every term must find something, so

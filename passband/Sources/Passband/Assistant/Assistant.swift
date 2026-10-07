@@ -311,7 +311,9 @@ enum Lane: String, Sendable {
     /// any name it likes, including one from the other lane.
     var toolNames: Set<String> {
         switch self {
-        case .chat: Set(AgentTools.Tool.allCases.map(\.rawValue))
+        // Every tool this platform has: the help tools are the Mac's alone
+        // (see `AgentTools.Tool.isAvailable`).
+        case .chat: Set(AgentTools.Tool.allCases.filter(\.isAvailable).map(\.rawValue))
         case .search: Set(Self.searchTools.map(\.rawValue))
         }
     }
@@ -320,13 +322,8 @@ enum Lane: String, Sendable {
     /// name, so a tool renamed in AgentTools cannot leave a lane quietly
     /// offering a tool that no longer exists.
     var definitions: [Wire.ToolDef] {
-        switch self {
-        case .chat:
-            return AgentTools.definitions
-        case .search:
-            let allowed = toolNames
-            return AgentTools.definitions.filter { allowed.contains($0.name) }
-        }
+        let allowed = toolNames
+        return AgentTools.definitions.filter { allowed.contains($0.name) }
     }
 
     /// The lane's own model preference. The search lane runs on every deeper
@@ -785,6 +782,7 @@ final class AssistantSession {
             Analytics.capture(
                 "assistant_asked",
                 ["model": model.shortLabel.lowercased(), "transport": transport.rawValue])
+            Discovery.note(.assistantAsked)
         }
 
         rollbackMark = history.count
@@ -1376,7 +1374,7 @@ final class AssistantSession {
         return """
             You are the user's personal inbox assistant, embedded in a macOS app called \
             Passband. Today is \(today). You answer questions about their email, and you \
-            can act on it with their confirmation.
+            can act on it with their confirmation.\(Self.helpIntro)
 
             Rules:
             - Be concise and direct. Lead with the answer, then the supporting detail.
@@ -1410,7 +1408,7 @@ final class AssistantSession {
               the chat alongside it. Never ask "would you like me to show that
               email?": showing is free and clickable, so just show it.
             - ACT: set_status, create_sender_rule, save_draft, archive_message,
-              label_message, send_email, unsubscribe_sender.
+              label_message, send_email, unsubscribe_sender.\(Self.helpTools)
 
             Acting:
             - archive_message, label_message, send_email, and unsubscribe_sender pause and
@@ -1421,6 +1419,20 @@ final class AssistantSession {
             - When the user asks you to write but not send, use save_draft.
             \(openEmailBlock(pin))
             """
+    }
+
+    /// THE POINTER, NOT THE GUIDE. How Passband works is a few thousand tokens
+    /// that most questions never need, so the prompt carries only the fact that
+    /// the help tools exist and when to reach for them; the content arrives as
+    /// a tool result on the turn that asked (Lib/ProductGuide.swift). Empty
+    /// where the tools are not offered, so the prompt never names a tool the
+    /// request does not carry.
+    private static var helpIntro: String {
+        AgentTools.Tool.productHelp.isAvailable ? ProductGuide.promptIntro : ""
+    }
+
+    private static var helpTools: String {
+        AgentTools.Tool.productHelp.isAvailable ? "\n" + ProductGuide.promptTools : ""
     }
 
     /// What the user has open in the reader, stated for the model. Empty when

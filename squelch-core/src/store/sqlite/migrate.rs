@@ -86,6 +86,9 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     for col in ["status", "status_url", "status_reason", "status_at"] {
         add_column_if_missing(conn, "unsubscribes", col, "TEXT")?;
     }
+    // The smart block proposed for a sender who ignored the request, as JSON.
+    // NULL means not proposed yet, which is every pre-existing row.
+    add_column_if_missing(conn, "unsubscribes", "smart_block", "TEXT")?;
     // Display recipients, one column per header. NULL on every pre-existing row,
     // which is exactly the recipients-backfill queue predicate (`cc_addrs IS
     // NULL`); the backfill runs from the sync engine, over the network, so it
@@ -238,6 +241,11 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // nothing here can know which account a device filed itself under, and the
     // client re-registers (tag included) on its next foreground.
     add_column_if_missing(conn, "devices", "tag", "TEXT")?;
+    // The token's APNs environment (`production` | `sandbox`). NULL on every
+    // pre-existing row and NOT backfilled: only the client knows which build
+    // minted its token, and the pusher treats NULL as "use the configured
+    // fallback", which is exactly what those rows got before the column existed.
+    add_column_if_missing(conn, "devices", "environment", "TEXT")?;
     // Which app last presented each device token. NULL on every pre-existing
     // row and NOT backfilled: a client that predates `X-Passband-Client` never
     // said what it was, and the columns fill in on its first request after it

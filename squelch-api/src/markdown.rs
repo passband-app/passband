@@ -6,7 +6,7 @@
 //! place the HTML part comes from — so the guard's verdict covers everything
 //! that leaves. Nothing here may take HTML from the caller.
 
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd, html};
+use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd, html};
 
 /// Schemes a link may keep in outbound mail. Anything else (`javascript:`,
 /// `data:`, scheme-relative) renders as its text content, unlinked.
@@ -26,6 +26,19 @@ fn cid_token(dest: &str) -> Option<&str> {
     crate::handlers::content_id_ok(token).then_some(token)
 }
 
+/// Whether the heading spanning `src` exists only because a bare `--` sits
+/// directly under a line of text. That is the signature delimiter, and
+/// CommonMark reads it as a setext underline. Exactly two dashes: `---` under
+/// text stays the heading stock markdown says it is. Inside a blockquote the
+/// underline's line still carries its `>` markers, so those come off first.
+fn underlined_by_signature_dashes(src: &str) -> bool {
+    src.trim_end().rsplit('\n').next().is_some_and(|last| {
+        last.trim_start_matches(|c: char| c == '>' || c.is_whitespace())
+            .trim_end()
+            == "--"
+    })
+}
+
 /// Render markdown to the HTML body of an email.
 ///
 /// Deviations from stock CommonMark, all deliberate:
@@ -33,13 +46,18 @@ fn cid_token(dest: &str) -> Option<&str> {
 ///   characters. The composer's contract is markdown in, not HTML in.
 /// * Soft breaks become hard breaks: people write emails with meaningful line
 ///   endings, and CommonMark folding "hi\nbob" into one line would mangle them.
+/// * A bare `--` directly under text is the signature delimiter, not a heading
+///   underline: the text above stays a paragraph and the dashes stay dashes.
+///   Every composer is seeded with a signature that opens with one, and one
+///   line typed against it would otherwise reach the recipient as an `<h2>`
+///   with the dashes gone, which the editor gives no hint of.
 /// * Images render as their alt text — EXCEPT a `cid:` image, which is how the
 ///   composer places an attached picture in the body (`![name](cid:token)`)
 ///   and renders as an `<img>` pointing at the sibling part. Remote images
 ///   stay refused; outbound mail has no business embedding resources the
 ///   recipient auto-fetches.
 pub fn render_email_html(source: &str) -> String {
-    let parser = Parser::new_ext(source, Options::ENABLE_STRIKETHROUGH);
+    let parser = Parser::new_ext(source, Options::ENABLE_STRIKETHROUGH).into_offset_iter();
 
     // Depth of suppressed link/image tags, so the matching End is swallowed
     // with its Start while the text between them still flows through.
@@ -47,9 +65,25 @@ pub fn render_email_html(source: &str) -> String {
     // The cid image being collected: its token, and the alt text between its
     // Start and End, which becomes the `alt=` rather than flowing through.
     let mut inline: Option<(String, String)> = None;
+    // Inside a heading that is being rendered as a paragraph plus its dashes.
+    let mut signature_dashes = false;
     let mut events: Vec<Event> = Vec::new();
-    for ev in parser {
+    for (ev, range) in parser {
         match ev {
+            Event::Start(Tag::Heading {
+                level: HeadingLevel::H2,
+                ..
+            }) if underlined_by_signature_dashes(&source[range]) => {
+                signature_dashes = true;
+                events.push(Event::Start(Tag::Paragraph));
+            }
+            Event::End(TagEnd::Heading(_)) if signature_dashes => {
+                signature_dashes = false;
+                events.push(Event::End(TagEnd::Paragraph));
+                events.push(Event::Start(Tag::Paragraph));
+                events.push(Event::Text("--".into()));
+                events.push(Event::End(TagEnd::Paragraph));
+            }
             Event::Start(Tag::Image { ref dest_url, .. })
                 if inline.is_none() && cid_token(dest_url).is_some() =>
             {
@@ -184,6 +218,68 @@ mod tests {
         let html = render_email_html("![a chart](https://example.com/x.png)");
         assert!(!html.contains("<img"));
         assert!(html.contains("a chart"));
+    }
+
+    /// The client's default signature (`Prefs.defaultSignature`), seeded two
+    /// newlines under whatever was typed. The dashes must stay two literal
+    /// dashes in a paragraph of their own: not a heading underline for the
+    /// line above, and not a typographic dash.
+    #[test]
+    fn the_default_signature_renders_as_dashes_then_a_link() {
+        let html = render_email_html(
+            "Thanks,\nBraelyn\n\n--\n\nSent from [Passband](https://passband.app)",
+        );
+        assert!(!html.contains("<h2>"), "{html}");
+        assert!(html.contains("<p>--</p>"), "{html}");
+        assert!(
+            html.contains("<p>Sent from <a href=\"https://passband.app\">Passband</a></p>"),
+            "{html}"
+        );
+    }
+
+    /// What typing on the line right above the seeded signature produces. The
+    /// editor shows nothing wrong, so the render is the only place to hold it.
+    #[test]
+    fn signature_dashes_under_text_are_not_a_heading_underline() {
+        for dashes in ["--", "-- "] {
+            let html = render_email_html(&format!(
+                "Thanks,\nBraelyn\n{dashes}\n\nSent from [Passband](https://passband.app)"
+            ));
+            assert!(!html.contains("<h2>"), "{dashes:?} => {html}");
+            assert!(
+                html.contains("<p>Thanks,<br />\nBraelyn</p>\n<p>--</p>"),
+                "{dashes:?} => {html}"
+            );
+            assert!(
+                html.contains("<p>Sent from <a href="),
+                "{dashes:?} => {html}"
+            );
+        }
+        // Quoted, the underline keeps its `>`; the rescue still sees dashes.
+        let html = render_email_html("> Thanks\n> --");
+        assert!(
+            html.contains("<blockquote>\n<p>Thanks</p>\n<p>--</p>\n</blockquote>"),
+            "{html}"
+        );
+        // Formatting in the rescued paragraph survives the rewrite.
+        let html = render_email_html("**Thanks** [x](https://example.com)\n--");
+        assert!(
+            html.contains(
+                "<p><strong>Thanks</strong> <a href=\"https://example.com\">x</a></p>\n<p>--</p>"
+            ),
+            "{html}"
+        );
+    }
+
+    /// The rescue is for the two-dash delimiter alone. Deliberate setext
+    /// headings, and two dashes that are not an underline, are untouched.
+    #[test]
+    fn real_setext_headings_still_render() {
+        assert!(render_email_html("Title\n---").contains("<h2>Title</h2>"));
+        assert!(render_email_html("Title\n==").contains("<h1>Title</h1>"));
+        assert!(render_email_html("## Title").contains("<h2>Title</h2>"));
+        let html = render_email_html("```\na\n--\n```");
+        assert!(html.contains("a\n--\n</code>"), "{html}");
     }
 
     #[test]

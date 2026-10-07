@@ -31,7 +31,8 @@ pub use transfer::{
 };
 
 use crate::config::{
-    CALENDAR_EVENTS_SCOPE, CALENDAR_SCOPES, GMAIL_READONLY_SCOPE, OAuthClientConfig, WRITE_SCOPES,
+    CALENDAR_EVENTS_SCOPE, CALENDAR_SCOPES, GMAIL_READONLY_SCOPE, GOOGLE_PROFILE_SCOPE,
+    OAuthClientConfig, WRITE_SCOPES,
 };
 use crate::credentials::{CredentialKind, RefreshedToken, StoredToken};
 use crate::error::{CoreError, Result};
@@ -124,7 +125,11 @@ pub enum AuthScopes {
 }
 
 impl AuthScopes {
-    /// The OAuth scope strings for this set.
+    /// The OAuth scope strings this set is FOR. For the two Gmail sets this is
+    /// also what a grant is held against and what a stored credential must
+    /// cover to be usable; Calendar's floor is narrower, see
+    /// [`AuthScopes::required`]. The consent URL asks for
+    /// [`AuthScopes::requested`].
     pub fn scopes(self) -> Vec<String> {
         match self {
             AuthScopes::Read => vec![GMAIL_READONLY_SCOPE.to_string()],
@@ -161,6 +166,19 @@ impl AuthScopes {
         matches!(self, AuthScopes::Calendar)
     }
 
+    /// What the consent URL ASKS for: [`Self::scopes`], plus
+    /// [`GOOGLE_PROFILE_SCOPE`] on the Read consent. Kept apart from the
+    /// required set on purpose, so the optional scope can never become a reason
+    /// to refuse a grant. Read only, because the sync loop is the one thing
+    /// that reads the profile and it holds the Read credential.
+    pub fn requested(self) -> Vec<String> {
+        let mut scopes = self.scopes();
+        if self == AuthScopes::Read {
+            scopes.push(GOOGLE_PROFILE_SCOPE.to_string());
+        }
+        scopes
+    }
+
     /// The credential kind this scope set maps to.
     pub fn kind(self) -> CredentialKind {
         match self {
@@ -173,7 +191,7 @@ impl AuthScopes {
     /// Human-readable label for prompts.
     pub fn label(self) -> &'static str {
         match self {
-            AuthScopes::Read => "read-only Gmail (gmail.readonly)",
+            AuthScopes::Read => "read-only Gmail (gmail.readonly), plus your name and photo",
             AuthScopes::Write => "Gmail modify + send (gmail.modify, gmail.send)",
             AuthScopes::Calendar => {
                 "Google Calendar (calendar.events, calendar.calendarlist.readonly)"
@@ -295,7 +313,7 @@ fn authorize_url(
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
 
     let mut req = oauth.authorize_url(move || state);
-    for scope in scopes.scopes() {
+    for scope in scopes.requested() {
         req = req.add_scope(Scope::new(scope));
     }
     if scopes.include_granted_scopes() {
@@ -417,9 +435,10 @@ fn exchange_code_at(
 /// The scopes to RECORD on a freshly exchanged token: what Google reported, or,
 /// when the response left `scope` out, what was requested (RFC 6749 §5.1 says
 /// absent means "identical to the request", and [`check_scope_grant`] already
-/// took it that way).
+/// took it that way). The request is [`AuthScopes::requested`], so a Read
+/// grant records the optional profile scope it asked for.
 fn recorded_scopes(requested: AuthScopes, granted: Option<Vec<String>>) -> Vec<String> {
-    granted.unwrap_or_else(|| requested.scopes())
+    granted.unwrap_or_else(|| requested.requested())
 }
 
 /// A calendar consent whose token cannot read Gmail's profile has nothing to
@@ -2002,6 +2021,24 @@ mod tests {
 
         // RFC 6749 §5.1: an absent `scope` means the grant matches the request.
         assert!(check_scope_grant(AuthScopes::Write, None).is_ok());
+    }
+
+    /// The profile scope is asked for and never insisted on: a person who
+    /// unticks it on Google's screen, and every grant from before it existed,
+    /// still gets a stored credential.
+    #[test]
+    fn the_profile_scope_is_requested_on_read_and_required_nowhere() {
+        let asked = AuthScopes::Read.requested();
+        assert!(asked.contains(&GMAIL_READONLY_SCOPE.to_string()));
+        assert!(asked.contains(&GOOGLE_PROFILE_SCOPE.to_string()));
+        // The write consent is about actions; it does not re-ask who you are.
+        assert_eq!(AuthScopes::Write.requested(), AuthScopes::Write.scopes());
+
+        for set in [AuthScopes::Read, AuthScopes::Write] {
+            assert!(!set.scopes().contains(&GOOGLE_PROFILE_SCOPE.to_string()));
+        }
+        let declined = vec![GMAIL_READONLY_SCOPE.to_string()];
+        assert!(check_scope_grant(AuthScopes::Read, Some(&declined)).is_ok());
     }
 
     /// The cap has to hold for a body that DECLARES its size and for one that

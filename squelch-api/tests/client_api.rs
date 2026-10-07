@@ -9,7 +9,7 @@ use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use serde_json::Value;
 use squelch_api::{ApiState, router};
-use squelch_core::store::{SpamScope, SqliteStore, Store, UsageTokens};
+use squelch_core::store::{SmartBlockMemo, SpamScope, SqliteStore, Store, UsageTokens};
 use squelch_core::types::{SealedKind, Sensitivity, Tier};
 use tower::ServiceExt;
 
@@ -5614,6 +5614,74 @@ async fn stats_name_the_mailbox_this_daemon_serves() {
 }
 
 #[tokio::test]
+async fn stats_name_the_person_and_the_photo_door_serves_their_picture() {
+    // Never fetched (a grant without the profile scope): every key is ABSENT
+    // and the photo door is a 404, so the client keeps its initial.
+    let Harness { app, .. } = harness(|_, _| {});
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", "/client/stats"))
+        .await
+        .unwrap();
+    let json = body_json(resp).await;
+    for key in ["account_name", "account_given_name", "account_photo"] {
+        assert!(json.get(key).is_none(), "{key} invented");
+    }
+    let resp = app
+        .oneshot(authed("GET", "/client/account/photo"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // Fetched: the name rides on stats, and the tag there is the photo's.
+    let jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3];
+    let Harness { app, .. } = harness(|store, acct| {
+        let photo = squelch_core::store::AccountPhoto {
+            bytes: vec![0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3],
+            mime: "image/jpeg".into(),
+            tag: "abc123".into(),
+        };
+        store
+            .set_account_profile(acct, Some("Ada Lovelace"), Some("Ada"), Some(&photo))
+            .unwrap();
+    });
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", "/client/stats"))
+        .await
+        .unwrap();
+    let json = body_json(resp).await;
+    assert_eq!(json["account_name"], Value::String("Ada Lovelace".into()));
+    assert_eq!(json["account_given_name"], Value::String("Ada".into()));
+    assert_eq!(json["account_photo"], Value::String("abc123".into()));
+
+    // The photo door is the human door: no token, no picture.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/client/account/photo")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    let resp = app
+        .oneshot(authed("GET", "/client/account/photo"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()["content-type"], "image/jpeg");
+    assert_eq!(resp.headers()["x-content-type-options"], "nosniff");
+    // Unversioned URL, so it must never be served stale past a tag change.
+    assert_eq!(resp.headers()["cache-control"], "private, no-cache");
+    assert_eq!(resp.headers()["etag"], "\"abc123\"");
+    assert_eq!(body_bytes(resp).await, jpeg);
+}
+
+#[tokio::test]
 async fn stats_carry_gmail_inbox_unread_only_once_the_sync_loop_has_fetched_it() {
     // Never fetched (old DB, or every fetch so far failed): the key is ABSENT.
     // A zeroed object would read as "your inbox is clear", which is a claim this
@@ -6523,6 +6591,24 @@ async fn unsubscribe_resolution_sets_blocked_and_404s_unknown_and_400s_bad_value
     assert!(audit.iter().any(
         |a| a.action == "unsub_resolution" && a.detail.as_deref() == Some("news@x.com:blocked")
     ));
+
+    // filtered (a smart block) is a resolution too.
+    let resp = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            "/client/unsubscribes/resolution",
+            serde_json::json!({ "sender": "news@x.com", "resolution": "filtered" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        store.list_unsubscribes(acct).unwrap()[0]
+            .resolution
+            .as_deref(),
+        Some("filtered")
+    );
 
     // Unknown sender => 404.
     let resp = app
@@ -9934,6 +10020,80 @@ async fn senders_autocomplete_ranks_prefix_then_volume_and_hides_spam_and_sent()
 }
 
 #[tokio::test]
+async fn sender_domains_roll_up_by_host_for_the_rule_editor() {
+    // WIRE CONTRACT: GET /client/sender-domains?q= returns a flat array of
+    // {domain, sender_count, msg_count, last_received_at}, a host that starts
+    // with the fragment first, then by volume; an empty or absent fragment
+    // lists the busiest hosts, the limit is capped, the response is no-store.
+    let Harness { app, .. } = harness(|store, acct| {
+        let seed = |gmail: &str, from: &str| {
+            let mut m = msg(acct, gmail, gmail, "hello", "body");
+            m.from_addr = from.to_string();
+            m
+        };
+        for (gmail, from) in [
+            ("g1", "receipts@stripe.com"),
+            ("g2", "support@stripe.com"),
+            ("g3", "news@e.stripe.com"),
+            ("g4", "dan@example.com"),
+        ] {
+            store.upsert_message(&seed(gmail, from)).unwrap();
+        }
+        let mut spam = seed("g5", "winner@stripe-lottery.example");
+        spam.is_spam = true;
+        store.upsert_message(&spam).unwrap();
+    });
+
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", "/client/sender-domains?q=stripe"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-store"
+    );
+    let items = body_json(resp).await;
+    let domains: Vec<&str> = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["domain"].as_str().unwrap())
+        .collect();
+    assert_eq!(domains, vec!["stripe.com", "e.stripe.com"]);
+    assert_eq!(items[0]["sender_count"], 2);
+    assert_eq!(items[0]["msg_count"], 2);
+    assert!(items[0]["last_received_at"].is_string());
+
+    for uri in ["/client/sender-domains?q=", "/client/sender-domains"] {
+        let resp = app.clone().oneshot(authed("GET", uri)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+        let items = body_json(resp).await;
+        assert_eq!(items.as_array().unwrap().len(), 3, "{uri}");
+        assert_eq!(items[0]["domain"], "stripe.com", "{uri}");
+    }
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", "/client/sender-domains?limit=1"))
+        .await
+        .unwrap();
+    assert_eq!(body_json(resp).await.as_array().unwrap().len(), 1);
+
+    // No token, no directory.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/client/sender-domains?q=stripe")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn person_card_reports_one_address_without_its_sealed_mail() {
     // WIRE CONTRACT: GET /client/person?addr= returns {addr, display_name?,
     // is_self, known_contact, received?, sent?, rule?, groups, recent_threads}.
@@ -11784,6 +11944,218 @@ async fn rule_suggestion_is_cleaned_and_billed_to_its_own_category() {
         usage_categories(&store, acct),
         vec!["rule_suggest".to_string()]
     );
+}
+
+/// The suggester answering a smart-block call with these three fields.
+async fn app_with_smart_block(
+    rule: &str,
+    keeps: &str,
+    drops: &str,
+    seed: impl FnOnce(&SqliteStore, i64),
+) -> Harness {
+    let answer = serde_json::json!({ "rule": rule, "keeps": keeps, "drops": drops }).to_string();
+    let body = serde_json::json!({
+        "content": [{ "type": "text", "text": answer }],
+        "stop_reason": "end_turn",
+        "usage": { "input_tokens": 90, "output_tokens": 20 }
+    })
+    .to_string();
+    app_with_suggest_body(body, seed).await
+}
+
+fn seed_mixed_sender(store: &SqliteStore, acct: i64) {
+    for (g, s) in [
+        ("g1", "New state filing requirement"),
+        ("g2", "50% off your next LLC"),
+        ("g3", "Webinar: grow your business"),
+        ("g4", "Annual report deadline changed"),
+    ] {
+        seed_suggest_msg(store, acct, g, "info@corp.com", s, Sensitivity::Normal);
+    }
+}
+
+const SMART_BLOCK: &str = "/client/unsubscribes/smart_block?sender=Info@Corp.com";
+
+/// A sender with both kinds of mail, and an unsubscribe on file for them.
+fn seed_ignored_unsubscribe(store: &SqliteStore, acct: i64) {
+    seed_mixed_sender(store, acct);
+    store
+        .upsert_unsubscribe(acct, "info@corp.com", "one_click", None, chrono::Utc::now())
+        .unwrap();
+}
+
+fn suggest_calls(store: &SqliteStore, acct: i64) -> u64 {
+    store
+        .list_usage_by_category(acct, 1)
+        .unwrap()
+        .into_iter()
+        .flat_map(|(_, days)| days)
+        .map(|d| d.calls)
+        .sum()
+}
+
+#[tokio::test]
+async fn a_smart_block_is_cleaned_billed_and_rides_the_unsubscribe_list() {
+    let Harness { app, store, acct } = app_with_smart_block(
+        "only state regulation alerts, no marketing.",
+        "regulation alerts",
+        "marketing and webinars",
+        seed_ignored_unsubscribe,
+    )
+    .await;
+    let proposal = serde_json::json!({
+        "rule": "only state regulation alerts, no marketing",
+        "keeps": "regulation alerts",
+        "drops": "marketing and webinars",
+    });
+    let resp = app
+        .clone()
+        .oneshot(authed("GET", SMART_BLOCK))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["smart_block"], proposal);
+    assert_eq!(
+        usage_categories(&store, acct),
+        vec!["rule_suggest".to_string()]
+    );
+
+    let list = body_json(
+        app.oneshot(authed("GET", "/client/unsubscribes"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(list[0]["smart_block"], proposal);
+    assert_eq!(list[0]["smart_block_asked"], true);
+}
+
+#[tokio::test]
+async fn a_smart_block_is_asked_of_the_model_once() {
+    let Harness { app, store, acct } = app_with_smart_block(
+        "only regulation alerts",
+        "regulation alerts",
+        "marketing",
+        seed_ignored_unsubscribe,
+    )
+    .await;
+    let first = body_json(
+        app.clone()
+            .oneshot(authed("GET", SMART_BLOCK))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(first["smart_block"]["drops"], "marketing");
+
+    // Swap what is remembered for something the model would not say: the
+    // second answer can then only have come from the row.
+    let mut kept = match store
+        .unsubscribe_smart_block(acct, "info@corp.com")
+        .unwrap()
+    {
+        Some(SmartBlockMemo::Asked(Some(block))) => block,
+        other => panic!("the proposal was not kept on the row: {other:?}"),
+    };
+    kept.drops = "webinars".into();
+    store
+        .set_unsubscribe_smart_block(acct, "info@corp.com", Some(&kept))
+        .unwrap();
+    let second = body_json(
+        app.clone()
+            .oneshot(authed("GET", SMART_BLOCK))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(second["smart_block"]["drops"], "webinars");
+    assert_eq!(suggest_calls(&store, acct), 1, "paid for a second call");
+
+    // A proposal survives the owner asking again, which resets the rest.
+    store
+        .upsert_unsubscribe(acct, "info@corp.com", "one_click", None, chrono::Utc::now())
+        .unwrap();
+    assert_eq!(
+        store
+            .unsubscribe_smart_block(acct, "info@corp.com")
+            .unwrap(),
+        Some(SmartBlockMemo::Asked(Some(kept)))
+    );
+}
+
+#[tokio::test]
+async fn a_no_is_remembered_until_the_owner_unsubscribes_again() {
+    // The model's "all promotion" answer.
+    let Harness { app, store, acct } =
+        app_with_smart_block("", "", "", seed_ignored_unsubscribe).await;
+    for _ in 0..2 {
+        let json = body_json(
+            app.clone()
+                .oneshot(authed("GET", SMART_BLOCK))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(json["smart_block"], Value::Null);
+    }
+    assert_eq!(
+        suggest_calls(&store, acct),
+        1,
+        "asked again about a known no"
+    );
+    let list = body_json(
+        app.oneshot(authed("GET", "/client/unsubscribes"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(list[0]["smart_block"], Value::Null);
+    assert_eq!(list[0]["smart_block_asked"], true);
+
+    store
+        .upsert_unsubscribe(acct, "info@corp.com", "one_click", None, chrono::Utc::now())
+        .unwrap();
+    assert_eq!(
+        store
+            .unsubscribe_smart_block(acct, "info@corp.com")
+            .unwrap(),
+        Some(SmartBlockMemo::NotAsked)
+    );
+}
+
+#[tokio::test]
+async fn too_little_mail_is_neither_asked_nor_remembered_and_no_unsubscribe_is_404() {
+    let Harness { app, store, acct } =
+        app_with_smart_block("only alerts", "alerts", "marketing", |store, acct| {
+            for g in ["g1", "g2", "g3"] {
+                seed_suggest_msg(store, acct, g, "a@b.com", "hi", Sensitivity::Normal);
+            }
+            store
+                .upsert_unsubscribe(acct, "a@b.com", "one_click", None, chrono::Utc::now())
+                .unwrap();
+            seed_mixed_sender(store, acct);
+        })
+        .await;
+    // Three messages clear the sentence's floor but not this one.
+    let resp = app
+        .clone()
+        .oneshot(authed(
+            "GET",
+            "/client/unsubscribes/smart_block?sender=a@b.com",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(body_json(resp).await["smart_block"], Value::Null);
+    assert_eq!(suggest_calls(&store, acct), 0);
+    assert_eq!(
+        store.unsubscribe_smart_block(acct, "a@b.com").unwrap(),
+        Some(SmartBlockMemo::NotAsked)
+    );
+
+    // Plenty of mail, but nobody ever unsubscribed from them.
+    let resp = app.oneshot(authed("GET", SMART_BLOCK)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(suggest_calls(&store, acct), 0);
 }
 
 #[tokio::test]

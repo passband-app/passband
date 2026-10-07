@@ -19,6 +19,7 @@ use crate::error::Result;
 // the type comments in `metrics.rs` and docs/NOTIFY.md §11.4.
 use crate::metrics::{NotifyDecision, NotifyLane};
 use crate::triage::extract::shipments::ShipmentsApplied;
+use crate::triage::rule_suggest::SmartBlock;
 use crate::triage::{CalendarInfo, CarrierTrack, DeadlineHit, ReceiptInfo, ShipmentInfo};
 use crate::types::{
     AccountId, AttachmentInfo, AttentionStatus, AttentionUpdate, AuditEntry, Banking,
@@ -137,6 +138,29 @@ pub struct InboxUnread {
     pub fetched_at: DateTime<Utc>,
 }
 
+/// Who the mailbox belongs to, as Google's People API last described them: the
+/// part of [`account_profile`](Store::account_identity) small enough to ride on
+/// every stats answer. The photo's bytes are fetched separately, by tag.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AccountIdentity {
+    /// The full display name ("Ada Lovelace").
+    pub name: Option<String>,
+    /// The given name alone, which is what a greeting wants.
+    pub given_name: Option<String>,
+    /// Present exactly when a photo is stored. A short hash of its bytes, so it
+    /// changes when the picture does and not otherwise.
+    pub photo_tag: Option<String>,
+}
+
+/// The account's profile photo, as stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountPhoto {
+    pub bytes: Vec<u8>,
+    /// Sniffed from the bytes at fetch time, never taken from a header.
+    pub mime: String,
+    pub tag: String,
+}
+
 /// One Sent-derived contact, as both the autocomplete hit shape and the
 /// Sent-history harvest's merge input (same fields either way).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,6 +182,22 @@ pub struct SenderEntry {
     /// Inbound, non-spam messages from this address. Sealed ones are counted
     /// (sealing is decided after the count is taken); a sender with ONLY sealed
     /// mail is never returned at all.
+    pub msg_count: i64,
+    pub last_received_at: DateTime<Utc>,
+}
+
+/// The sender directory rolled up by host (`/client/sender-domains`): everyone
+/// at one domain who has written to the account, as the rule editor's `*@`
+/// suggestion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SenderDomainEntry {
+    /// The host exactly as the addresses carry it (`e.stripe.com` is not
+    /// `stripe.com`), because a rule's glob matches the whole address and
+    /// `*@stripe.com` would not cover the subdomain.
+    pub domain: String,
+    /// Directory rows at this host.
+    pub sender_count: i64,
+    /// The sum of those rows' `msg_count`, with the same sealed caveat.
     pub msg_count: i64,
     pub last_received_at: DateTime<Utc>,
 }
@@ -453,6 +493,10 @@ pub struct Device {
     /// under, stamped onto every push sent here so the receiver can tell which
     /// mailbox an event id belongs to. `None` for a client that never sent one.
     pub tag: Option<String>,
+    /// The APNs environment the client declared this token was minted in,
+    /// `production` or `sandbox`. `None` for a client that did not say; the
+    /// pusher then uses its configured environment, else the relay's default.
+    pub environment: Option<String>,
     pub created_at: DateTime<Utc>,
     /// Refreshed on every re-registration — iOS re-hands its token each launch,
     /// so this, not `created_at`, is the liveness signal.
@@ -970,6 +1014,25 @@ pub struct SenderDigestRow {
     pub status: String,
     /// The owner opened it in Passband.
     pub opened: bool,
+    /// What triage called it (`marketing`, `bill`, ...), when it said.
+    pub category: Option<String>,
+}
+
+/// Whether a smart block has been worked out for a sender, and what it was.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SmartBlockMemo {
+    NotAsked,
+    /// Asked and answered; `None` is "this sender has no line to draw".
+    Asked(Option<SmartBlock>),
+}
+
+impl SmartBlockMemo {
+    /// Read the `unsubscribes.smart_block` column: NULL is never asked, JSON
+    /// `null` is an answered no. Anything unreadable is asked again.
+    pub(crate) fn from_column(raw: Option<String>) -> Self {
+        raw.and_then(|raw| serde_json::from_str::<Option<SmartBlock>>(&raw).ok())
+            .map_or(Self::NotAsked, Self::Asked)
+    }
 }
 
 /// One other message in the escalated row's thread. Verdict and envelope only,
@@ -1977,6 +2040,17 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
         limit: u32,
     ) -> Result<Vec<SenderEntry>>;
 
+    /// HUMAN-DOOR ONLY (`/client/sender-domains`): the sender directory rolled
+    /// up by host and ranked for a typed fragment of one, for the rule
+    /// editor's `*@` suggestions. MUST NOT be reachable from MCP, like
+    /// `search_senders`.
+    fn search_sender_domains(
+        &self,
+        account_id: AccountId,
+        q: &str,
+        limit: u32,
+    ) -> Result<Vec<SenderDomainEntry>>;
+
     /// Read the sync cursor for a mailbox key, if one has been persisted.
     fn sync_state(&self, account_id: AccountId, mailbox: &str) -> Result<Option<SyncState>>;
 
@@ -1994,6 +2068,26 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     /// now. Only ever called with numbers that came back from Gmail, so a failed
     /// fetch leaves the previous row in place.
     fn set_inbox_unread(&self, account_id: AccountId, messages: i64, threads: i64) -> Result<()>;
+
+    /// The account's Google name and photo tag, or `None` when the profile was
+    /// never fetched. `None` is "we do not know", not "this person has no
+    /// name": clients fall back to what they showed before.
+    fn account_identity(&self, account_id: AccountId) -> Result<Option<AccountIdentity>>;
+
+    /// The stored profile photo, or `None` when there is none to serve.
+    fn account_photo(&self, account_id: AccountId) -> Result<Option<AccountPhoto>>;
+
+    /// Overwrite the account's profile whole. Only ever called with an answer
+    /// that came back from Google, so a failed fetch leaves the previous row
+    /// standing; a `None` photo CLEARS the stored one, which is how a removed
+    /// picture stops being served.
+    fn set_account_profile(
+        &self,
+        account_id: AccountId,
+        name: Option<&str>,
+        given_name: Option<&str>,
+        photo: Option<&AccountPhoto>,
+    ) -> Result<()>;
 
     /// LOCAL-ONLY (TUI): list sealed messages. This is the ONLY method that
     /// exposes sealed content and must never be reachable from MCP.
@@ -2362,12 +2456,25 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
     /// `tag` is overwritten on every re-registration, including back to `None`:
     /// it describes where this device currently files the account, and a stale
     /// one would route a push at a mailbox the phone has since forgotten.
+    ///
+    /// `environment` is the OPPOSITE: `None` keeps whatever is stored. A token's
+    /// APNs environment never changes, so an older build re-registering the same
+    /// token without the field must not erase what a newer build declared. A
+    /// `Some` replaces it.
+    ///
+    /// CAPPED at `MAX_DEVICES_PER_ACCOUNT` (16) rows per account, because each
+    /// distinct (tag, environment) costs a relay request per event against a
+    /// rate limit the hosted fleet shares. Going over EVICTS the account's
+    /// least recently registered rows (never the one just upserted) in the
+    /// same transaction; it does not refuse, since stale and rejected rows
+    /// would otherwise lock a real phone out. Other accounts are untouched.
     fn upsert_device(
         &self,
         account_id: AccountId,
         token: &str,
         platform: &str,
         tag: Option<&str>,
+        environment: Option<&str>,
     ) -> Result<Device>;
 
     /// Every registered device for the account, oldest first — a stable order, so
@@ -2469,6 +2576,29 @@ pub trait Store: agent_triage::AgentTriageStore + Send + Sync {
         account_id: AccountId,
         sender: &str,
         resolution: &str,
+    ) -> Result<bool>;
+
+    /// What is remembered about a smart block for this sender's ignored
+    /// unsubscribe, so the question is put to a model once. `None` when the
+    /// sender has no unsubscribe row at all.
+    fn unsubscribe_smart_block(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+    ) -> Result<Option<SmartBlockMemo>>;
+
+    /// Remember the answer on the sender's unsubscribe row: a proposal, or
+    /// `None` for "nothing worth keeping apart". `false` when there is no row.
+    /// A proposal is model text about sender-written subjects: it is stored to
+    /// be SHOWN again and becomes a rule only through the owner's click. It
+    /// outlives a resolution and a fresh request, being a reading of the
+    /// sender; a remembered `None` is dropped by a fresh request, so asking
+    /// again gets a second look at a sender whose mail may have changed.
+    fn set_unsubscribe_smart_block(
+        &self,
+        account_id: AccountId,
+        sender: &str,
+        proposal: Option<&SmartBlock>,
     ) -> Result<bool>;
 
     /// Upsert one extracted promotion + stamp `triage.extractor_model_used`.

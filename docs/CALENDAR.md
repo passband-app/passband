@@ -845,7 +845,7 @@ from the plan below:
   `SQUELCH_AUTH_PORT`) for at most ten minutes, and stores a separate Calendar
   slot that touches neither Gmail slot. On hosted the endpoint answers 409 and
   the client opens `connect_url`. `squelchd auth --calendar` still does the
-  same from a terminal. Checks and storage: docs/SECURITY.md §8.
+  same from a terminal. Checks and storage: docs/SECURITY.md §9.
 
 - **Ghost mode needs no migration.** Every existing user gets the timeline and
   ghosts with zero consent. The grant is asked for at the first moment it is

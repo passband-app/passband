@@ -803,29 +803,50 @@ struct NotificationsSection: View {
 /// and the release notes. The what's-new card is shown once per version and
 /// then never again, which is the right behaviour and also means the one place
 /// somebody can go looking for it afterwards has to exist.
+///
+/// ON THE IPHONE IT IS ONE ROW. The practice inbox is a lesson over the Mac's
+/// shell and the phone has no tour, so only the release notes are here, and
+/// they are the phone's own (Lib/PhoneReleaseNotes.swift), shown full screen.
+/// With no note to show the section is not drawn at all: a build older than
+/// the first phone note has nothing behind the button.
 struct HelpSection: View {
     @Environment(AppStore.self) private var store
 
     var body: some View {
-        SectionCard(label: "Help") {
-            SettingsRow(
-                title: "Practice inbox",
-                detail: "Try the categories and a sender rule on example mail, then come back."
-            ) {
-                Button("Open") { store.tour.replay(store: store) }
-                    .buttonStyle(.glass)
-                    .controlSize(.small)
+        #if os(macOS)
+            SectionCard(label: "Help") {
+                SettingsRow(
+                    title: "Practice inbox",
+                    detail: "Try the categories and a sender rule on example mail, then come back."
+                ) {
+                    Button("Open") { store.tour.replay(store: store) }
+                        .buttonStyle(.glass)
+                        .controlSize(.small)
+                }
+                RowDivider()
+                SettingsRow(
+                    title: "What's new",
+                    detail: "What this version brought, in the app and in the daemon behind it."
+                ) {
+                    Button("Show") { store.whatsNew.replay() }
+                        .buttonStyle(.glass)
+                        .controlSize(.small)
+                }
             }
-            RowDivider()
-            SettingsRow(
-                title: "What's new",
-                detail: "What this version brought, in the app and in the daemon behind it."
-            ) {
-                Button("Show") { store.whatsNew.replay() }
-                    .buttonStyle(.glass)
-                    .controlSize(.small)
+        #else
+            if let note = WhatsNew.replayable {
+                SectionCard(label: "Help") {
+                    SettingsRow(
+                        title: "What's new",
+                        detail: "What version \(note.version) brought to the iPhone, a page at a time."
+                    ) {
+                        Button("Show") { store.whatsNew.replay() }
+                            .buttonStyle(.glass)
+                            .controlSize(.small)
+                    }
+                }
             }
-        }
+        #endif
     }
 }
 

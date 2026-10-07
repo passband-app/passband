@@ -87,6 +87,8 @@ struct Stats: Equatable, Sendable {
     /// Optional, as on the wire: a daemon too old to name its mailbox sends
     /// nothing, and the seed below must compile against that shape.
     var account_email: String? = "practice@example.test"
+    var account_given_name: String?
+    var account_photo: String?
     var sealed = 0
     var bands = Bands()
     var tier_counts: [String: Int] = [:]
@@ -151,6 +153,11 @@ struct RefreshError { var message: String; var kind: ErrorKind }
 @MainActor final class Prefs {
     static let shared = Prefs()
     func seedUserName(fromEmail: String?) {}
+    func seedUserName(fromGivenName: String?, email: String?) {}
+}
+@MainActor final class AccountPhotos {
+    static let shared = AccountPhotos()
+    func noteActive(tag: String?) {}
 }
 enum Analytics {
     static func capture(_ event: String) {}

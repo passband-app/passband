@@ -782,6 +782,14 @@ struct EmailsView: View {
                     TriageFixTarget(
                         messageId: u.id, sender: u.sender, subject: u.one_line))
             },
+            // `t` = tune the HIGHLIGHTED row's sender. It lives here, beside the
+            // other row verbs, because this list's cursor is its own: the shared
+            // layer's old `t` read the sitrep's selection and opened a rule for
+            // whoever was first on that board instead.
+            KeyBinding("t", "tune sender") {
+                guard verdicted, let u = selected else { return }
+                Actions.tune(sender: u.sender)
+            },
             // Reply opens the email and composes in it, so it hands over the same
             // queue Enter does — done + next keeps working from inside the reader.
             KeyBinding("r", "reply") {

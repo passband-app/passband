@@ -286,11 +286,19 @@ struct SettingsView: View {
             searchFocused = false
             prefs.settingsSection = section
         } label: {
-            Text(section.label)
-                .font(Typo.ui(12, weight: .medium))
+            HStack(spacing: Space.s8) {
+                // A FIXED SLOT, centred: SF Symbols are as wide as they are
+                // drawn, so without one the labels start on nine different
+                // lines and the column stops reading as a column.
+                Image(systemName: section.symbol)
+                    .font(Typo.ui(12, weight: .medium))
+                    .frame(width: Space.scaled(18))
+                Text(section.label)
+                    .font(Typo.ui(12, weight: .medium))
+            }
                 .foregroundStyle(active ? Palette.accent : Palette.inkFaint)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, Space.scaled(11))
+                .padding(.horizontal, Space.scaled(9))
                 .padding(.vertical, Space.s6)
                 .contentShape(Rectangle())
         }

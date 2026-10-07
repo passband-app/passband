@@ -465,9 +465,9 @@ enum ProductGuide {
 
     private static let appAndAccounts = """
         Accounts:
-        - Add one from the Accounts menu ("Add Account…") or Settings > Account: sign in with Gmail, or connect a self-hosted server with a pairing code or an API token.
-        - Switch with ⌘1 to ⌘9, in the order listed in Settings > Account, or from the account badge at the bottom of the rail once there are two or more. Switching starts a fresh assistant chat.
-        - Rename an account by editing its name in Settings > Account. "remove", then confirm, takes it off this Mac. On the last account the button reads "disconnect".
+        - Add one from the Accounts menu ("Add Account…") or Settings > Accounts: sign in with Gmail, or connect a self-hosted server with a pairing code or an API token.
+        - Switch with ⌘1 to ⌘9, in the order listed in Settings > Accounts, or from the account badge at the bottom of the rail once there are two or more. Switching starts a fresh assistant chat.
+        - Rename an account by editing its name in Settings > Accounts. "remove", then confirm, takes it off this Mac. On the last account the button reads "disconnect".
         - Notifications arrive for every account, not only the one on screen.
         - If the Google sign-in expires, a banner on the Sitrep says Passband cannot read the mail. On a hosted account it has a Reconnect button.
 
@@ -488,8 +488,8 @@ enum ProductGuide {
         - Audit log (Settings > Audit, or A on the Emails page): every action taken on the mail by the user or by an agent, with undo for the reversible ones.
 
         Sharing:
-        - The gift icon on the rail, or Settings > Account > Invites, sends a friend an invite from the user's own address. Shown only where the server supports it.
-        - Settings > Account also has the link to the iPhone app on TestFlight.
+        - The gift icon on the rail, or Settings > Accounts > Invites, sends a friend an invite from the user's own address. Shown only where the server supports it.
+        - Settings > Accounts also has the link to the iPhone app on TestFlight.
 
         Privacy:
         - Settings > Privacy sets telemetry to Full, Minimal or None.

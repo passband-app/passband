@@ -35,7 +35,25 @@ enum SettingsSection: String, CaseIterable, Sendable {
         case .agents: "Agents"
         case .privacy: "Privacy"
         case .audit: "Audit"
-        case .account: "Account"
+        case .account: "Accounts"
+        }
+    }
+
+    /// The glyph beside the label: in the Mac's sub-nav and on the phone's
+    /// settings list. One table for both, so a pane wears the same mark
+    /// wherever it is listed. Rules and Groups keep the symbols they had on
+    /// the rail, which is how somebody who knew them there finds them here.
+    var symbol: String {
+        switch self {
+        case .general: "gearshape"
+        case .mail: "envelope"
+        case .rules: "slider.horizontal.3"
+        case .groups: "person.2"
+        case .assistant: "sparkles"
+        case .agents: "point.3.connected.trianglepath.dotted"
+        case .privacy: "hand.raised"
+        case .audit: "scroll"
+        case .account: "person.crop.circle"
         }
     }
 }

@@ -181,7 +181,7 @@ struct AccountPage: View {
 
     private func row(_ section: SettingsSection) -> some View {
         HStack(spacing: 12) {
-            Image(systemName: symbol(section))
+            Image(systemName: section.symbol)
                 .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(Palette.accent)
                 .frame(width: 22)
@@ -252,23 +252,11 @@ struct AccountPage: View {
         .navigationBarTitleDisplayMode(.inline)
     }
 
-    /// Icons and one-line blurbs live HERE rather than on `SettingsSection`,
-    /// which is shared with the Mac and needs neither: the rail names the pane
-    /// and the pane itself is already on screen beside it. A list row has to say
-    /// what is behind it before you commit a tap to finding out.
-    private func symbol(_ section: SettingsSection) -> String {
-        switch section {
-        case .general: "gearshape"
-        case .mail: "envelope"
-        case .rules: "slider.horizontal.3"
-        case .groups: "person.2"
-        case .assistant: "sparkles"
-        case .agents: "point.3.connected.trianglepath.dotted"
-        case .privacy: "hand.raised"
-        case .audit: "scroll"
-        case .account: "person.crop.circle"
-        }
-    }
+    /// The one-line blurbs live HERE rather than on `SettingsSection`, which is
+    /// shared with the Mac and does not need them: its pane is already on
+    /// screen beside the row. A list row has to say what is behind it before
+    /// you commit a tap to finding out. (The icons used to live here too; the
+    /// Mac's sub-nav shows them now, so they are `SettingsSection.symbol`.)
 
     private func blurb(_ section: SettingsSection) -> String {
         switch section {

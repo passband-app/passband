@@ -85,7 +85,7 @@ data:
   # silently upgrade every tenant's daemon on any pod restart. The warden
   # refuses to start without one. Changing this value and applying is what a
   # daemon rollout IS; the roller does the rest.
-  SQUELCH_WARDEN_IMAGE: "ghcr.io/passband-app/squelchd:daemon-0.0.11"
+  SQUELCH_WARDEN_IMAGE: "ghcr.io/passband-app/squelchd:daemon-0.0.12"
   # Everything below is a default, restated so this file is the one place an
   # operator has to look. See squelch-warden/README.md.
   SQUELCH_WARDEN_TENANT_NAMESPACE: "tenants"
@@ -209,9 +209,9 @@ data:
   # tenants, one pod restart each, once rule 2 has been followed. The warden
   # image itself has to be new enough to know these names: an older warden
   # ignores them and renders no relay env at all.
-  # SQUELCH_WARDEN_RELAY_URL: "https://relay.squelch.sh"
-  # SQUELCH_WARDEN_RELAY_SECRET_NAME: "apns-relay"
-  # SQUELCH_WARDEN_RELAY_TOPIC: "app.passband.client.ios"
+  SQUELCH_WARDEN_RELAY_URL: "https://relay.squelch.sh"
+  SQUELCH_WARDEN_RELAY_SECRET_NAME: "apns-relay"
+  SQUELCH_WARDEN_RELAY_TOPIC: "app.passband.client.ios"
   # 3. EDIT ME. The control plane's origin, handed to every tenant daemon as
   # SQUELCH_CONSOLE_SSO_URL. It is what puts "Continue with Google" on a tenant's
   # own /console login page: Google forbids wildcard redirect URIs, so a
@@ -220,6 +220,23 @@ data:
   # itself. Leave it out and every console is the pasted-code form only (which is
   # what a self-host gets, and what `squelchd pair` is for).
   SQUELCH_WARDEN_CONSOLE_SSO_URL: "https://signup.passband.app"
+  # The agent door. UNSET IS THE DOOR SHUT: no tenant Ingress routes /mcp and no
+  # pod is told anything about it. Set, it is the WorkOS AuthKit issuer (an
+  # https origin, no path, exactly as AuthKit's own metadata spells `issuer`),
+  # every tenant pod gets SQUELCH_MCP_OAUTH_ISSUER and its own
+  # SQUELCH_MCP_PUBLIC_URL, and every tenant Ingress adds /mcp and
+  # /.well-known/oauth-protected-resource. The daemon then enforces OAuth on
+  # the door itself.
+  #
+  # SET IT LAST. The order is in SETUP.md, "Publishing the agent door": the
+  # daemon image that understands it rolled to the whole fleet first, the
+  # control plane's WorkOS key and AuthKit setup second (including the JWT
+  # template that puts `email` in the token, without which every agent is
+  # refused), the pre-publish checklist third (some of its checks, if they
+  # fail, mean this must never be set), and this line fourth. It moves every tenant's Deployment, so the roller carries it
+  # one tenant per tick and each reconcile re-applies the Ingress with it; the
+  # one tenant shape it can miss is in that section too.
+  SQUELCH_WARDEN_MCP_OAUTH_ISSUER: "https://secure-soul-15.authkit.app"
   # Per-tenant-container bounds. The number of tenants a box carries is these
   # divided into it; size them with 70-tenant-limits.yaml, not separately.
   #

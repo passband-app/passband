@@ -25,6 +25,10 @@ final class PhosphorScene {
     /// The What's New card's, for the same reason: it lands over the board on
     /// the first sync, which is exactly when the iPhone ad can be up too.
     static let whatsNew = PhosphorScene()
+    /// A What's New PAGE that stands on the phosphor (the agent door's). Its
+    /// own, because a page turn has that page and the card's hero strip on
+    /// screen together for the length of the transition.
+    static let whatsNewPage = PhosphorScene()
     /// The end of a Space walk's card: it lands over the sitrep, which can be
     /// showing the quiet board's own scene at the same moment.
     static let walkDone = PhosphorScene()

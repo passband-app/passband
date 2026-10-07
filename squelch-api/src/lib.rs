@@ -37,14 +37,14 @@ pub use error::ApiError;
 /// The auth-mail retention pass. Exported for the daemon's timer: it uses the
 /// WRITE credential, which the readonly-bound sync loop must never touch.
 pub use handlers::run_shred_pass;
-pub use http_metrics::record_http_metrics;
+pub use http_metrics::{ROUTE_CLASSES, record_http_metrics};
 /// The scheduled-send worker's pass. Exported for the daemon's timer for the
 /// same reason as the shredder: it sends on the WRITE credential.
 pub use scheduled_send::{ScheduledPassReport, run_scheduled_send_pass};
 /// The invite minter. Exported for the daemon binaries that build state by
 /// hand and for the integration suite, which points it at a mock control plane.
-pub use sharing::Sharing;
-pub use state::{ApiState, StateError, attach_event_channel};
+pub use sharing::{FEATURE_REFRESH, FeatureRefresher, Sharing};
+pub use state::{AgentDoorStatus, ApiState, StateError, attach_event_channel};
 
 use axum::{
     Router, middleware,
@@ -278,6 +278,7 @@ fn client_router(state: ApiState) -> Router {
         .route("/client/marketing", get(handlers::get_marketing))
         .route("/client/audit", get(handlers::get_audit))
         .route("/client/stats", get(handlers::get_stats))
+        .route("/client/account/photo", get(handlers::get_account_photo))
         // SHARING. The GET is a read (may this daemon share, and what could the
         // mail say); the POST spends a quota and sends mail as the user, so it
         // sits with the write routes below rather than here... except it does

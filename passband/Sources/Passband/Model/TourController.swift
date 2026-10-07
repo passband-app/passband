@@ -168,6 +168,7 @@ final class TourController {
     func completePractice() {
         guard active, phase == .practice, leaving == nil else { return }
         Analytics.capture("tour_completed", ["step": practiceStep.rawValue + 1])
+        Discovery.note(.tourCompleted)
         exploreInbox()
     }
 

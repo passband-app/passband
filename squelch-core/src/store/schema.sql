@@ -853,6 +853,26 @@ CREATE TABLE IF NOT EXISTS inbox_unread (
     fetched_at TEXT NOT NULL
 );
 
+-- THE ACCOUNT'S GOOGLE PROFILE: display name and profile photo, fetched by the
+-- sync loop from the People API when the grant carries the optional
+-- userinfo.profile scope. One row per account, overwritten whole on each
+-- successful fetch, so a photo the person removed goes away here too.
+--
+-- NO ROW MEANS NEVER FETCHED (an older grant without the scope, or a People
+-- API that has never answered), and readers serve that as absence. A row with
+-- a NULL photo is a real answer: the account has a name and no picture of its
+-- own. `photo_tag` is a short hash of the bytes, which is all a client needs to
+-- know whether the copy it holds is current.
+CREATE TABLE IF NOT EXISTS account_profile (
+    account_id INTEGER NOT NULL PRIMARY KEY,
+    name       TEXT,
+    given_name TEXT,
+    photo      BLOB,
+    photo_mime TEXT,
+    photo_tag  TEXT,
+    fetched_at TEXT NOT NULL
+);
+
 -- STAGE-2 BUDGET (circuit breaker). model_calls counts API attempts, incremented
 -- BEFORE the call so retry storms cannot exceed the cap. Two scopes share the
 -- table, keyed by thread_id:

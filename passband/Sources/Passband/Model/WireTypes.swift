@@ -1291,6 +1291,15 @@ struct StoreStats: Codable, Sendable, Hashable {
     /// is not the same as an anonymous mailbox: nothing is seeded and the
     /// greeting stays bare, exactly as it did before this field existed.
     var account_email: String?
+    /// The mailbox owner's given name, from their Google profile. ABSENT when
+    /// the daemon does not know it: an older daemon, or a Google grant from
+    /// before the name was asked for. Seeds the greeting in place of the
+    /// address's local part when it is there.
+    var account_given_name: String?
+    /// The tag of the profile photo the daemon holds for this account, served
+    /// at `/client/account/photo`. ABSENT means there is no photo, and the
+    /// account wears its initial. See `AccountPhotos`.
+    var account_photo: String?
     var total: Int
     var sealed: Int
     /// How many messages the mail PROVIDER filed as spam — its own count, not a
@@ -1324,6 +1333,11 @@ struct StoreStats: Codable, Sendable, Hashable {
     /// ABSENT on a daemon too old to say, and on every self-host, and nil reads
     /// exactly like false: no button, no nudge, nothing offered.
     var invite_sharing: Bool?
+    /// The hidden features an operator has turned on for this mailbox, as
+    /// keys. ABSENT on a daemon too old to say, and nil reads exactly like
+    /// empty: nothing extra is shown. Read it through `AppStore.hasFeature`,
+    /// never directly; see `HiddenFeatures`.
+    var features: [String]?
     /// Whether an iPhone app has EVER connected to this mailbox. ABSENT on a
     /// daemon too old to say, and nil reads as "do not know": the TestFlight
     /// ask never fires on a guess, because telling somebody about the app they

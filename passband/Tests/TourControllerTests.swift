@@ -51,6 +51,12 @@ enum Analytics {
         events.append((event, properties))
     }
 }
+/// The real Move vocabulary (DiscoveryLedger.swift rides along), a recording
+/// shell: the question here is only which tour exits grant `clear`.
+enum Discovery {
+    nonisolated(unsafe) static var moves: [Move] = []
+    static func note(_ move: Move) { moves.append(move) }
+}
 
 @main
 struct TourControllerTests {
@@ -172,6 +178,7 @@ struct TourControllerTests {
         let skips = Analytics.events.count
         tour.skip()
         precondition(Analytics.events.count == skips, "A second skip under the veil counts nothing twice")
+        precondition(Discovery.moves.isEmpty, "Skipping the tour discovers nothing")
         try await settle()
         precondition(store.exits == 1, "A second skip joins the departure under way")
         precondition(!RehearsalMode.isEnabled && tour.phase == .summary && tour.active && tour.veil == nil,
@@ -239,6 +246,7 @@ struct TourControllerTests {
         tour.advancePractice()
         precondition(Analytics.events.last?.0 == "tour_completed")
         precondition(Analytics.events.last?.1["step"] as? Int == PracticeTourStep.allCases.count)
+        precondition(Discovery.moves == [.tourCompleted], "Seeing the tour through finds clear, once")
         try await settle()
         precondition(store.exits == exitsBefore + 1 && tour.phase == .summary && tour.active)
         tour.finish()

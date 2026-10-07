@@ -25,4 +25,19 @@ enum Haptics {
     static func armed() {
         UIImpactFeedbackGenerator(style: .rigid).impactOccurred(intensity: 0.6)
     }
+
+    /// A press stopped being a tap and became a HOLD: the reader's checkmark,
+    /// at the moment its ring appears. The lightest thing the engine has,
+    /// because nothing has happened yet; it says "I am counting", and the
+    /// thumb covering the button is the reason it has to be said in the hand.
+    static func tick() {
+        UISelectionFeedbackGenerator().selectionChanged()
+    }
+
+    /// The hold ran out its ring and a whole stack went. Not `commit()`: the
+    /// same button's tap already answers with that, and the two have to feel
+    /// like the different amounts of mail they are.
+    static func cleared() {
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+    }
 }

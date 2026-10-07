@@ -1,6 +1,13 @@
-// REPLY WHERE YOU READ. A pinned composer under the message stack rather than a
+// REPLY WHERE YOU READ. A composer under the message stack rather than a
 // panel over it: the email you are answering stays on screen, unblurred and
 // scrollable, which is the whole point of answering from the reader.
+//
+// ON THE MAC IT IS THE NEXT ROW OF THE CONVERSATION. It sits in the reader's
+// own scroll, under the newest message, where the reply will be once it is
+// sent (see `ReplyFoot` in ThreadViewer), and its editor is as tall as what
+// has been written in it: no fixed box, no second scroll inside the first.
+// A long reply is read back the way the mail above it is, by scrolling the
+// page.
 //
 // The ceremony is the pane composer's, and LOCKED: ⌘Enter closes the reply and
 // holds it five seconds behind an undo toast (`AppStore.sendWithUndo`), then it
@@ -29,15 +36,22 @@
 // tell "a reply nobody addressed" from "a reply somebody moved to bcc": the
 // first must not mint a draft, the second must.
 //
-// ON A PHONE IT IS THE SAME BAR, pinned by `.safeAreaInset(edge: .bottom)`
-// instead of by a VStack — so the keyboard lifts it and insets the mail behind
-// it rather than squashing the reader (see ThreadViewer). Two things are fenced.
-// The KEY HINT BAR becomes real buttons, and that is not decoration: the
-// ceremony is driven ENTIRELY by keys on the Mac, so without them a phone could
-// open a reply and have no way on earth to send it. And the editor is
-// SHORTER, because 150pt of text view above a raised keyboard leaves nothing of
-// the email you are answering — which is the whole reason this composer is here
-// and not a panel over it.
+// ON A PHONE IT IS NOT A BAR AT ALL. It is the LAST CARD OF THE CHAIN: the reply
+// sits under the mail it answers, in the chain's own scroll, where the two
+// buttons that opened it were a moment ago (see ChainFoot). It was a bar pinned
+// over the keyboard once, and on a screen that size a pinned bar and a raised
+// keyboard left one line of the email showing: the reader could not read what
+// they were answering, which is the one thing this composer exists to allow.
+// Scrolling with the mail, the mail is a thumb's flick away and so is the reply.
+//
+// Same state, same ceremony, same parts; what is fenced is the ARRANGEMENT.
+// One line says who it reaches and opens the fields. The editor has no box of
+// its own and no fixed height: it is as tall as what has been typed, because
+// the chain is already the scroller and a second one nested in it is two
+// surfaces answering one thumb. And the KEY HINT BAR becomes a row of real
+// controls, which is not decoration: the ceremony is driven ENTIRELY by keys on
+// the Mac, so without them a phone could open a reply and have no way on earth
+// to send it.
 
 import SwiftUI
 
@@ -75,6 +89,12 @@ struct InlineReply: View {
     /// takes the caret back (`EditorRefocus`): its autofocus fires on mount
     /// alone, and the palette's field had the caret.
     @State private var refocusEditor = 0
+    #if os(macOS)
+        /// What the body needs at the width it has, as the editor last
+        /// measured it (`MarkdownTextView.onContentHeight`). Changes when a
+        /// line is added or lost, not per keystroke.
+        @State private var bodyHeight: CGFloat = 0
+    #endif
     /// The message being answered. nil = nothing to answer, which renders as no
     /// composer at all.
     private var parent: ClientMessage? {
@@ -110,49 +130,7 @@ struct InlineReply: View {
 
     var body: some View {
         if let compose, let parent {
-            VStack(alignment: .leading, spacing: 0) {
-                VStack(alignment: .leading, spacing: Space.scaled(9)) {
-                    headerLine(compose, parent: parent)
-                    if editingRecipients {
-                        recipientEditor(compose)
-                    }
-                    editor(compose)
-                    // The files, under the editor. Nothing when empty.
-                    AttachmentTray(slot: .inlineReply)
-                    // A held send came back blocked.
-                    if guarded { GuardVerdictBox(kinds: compose.guardKinds) }
-                    if let error = compose.error {
-                        Text(error).font(Typo.micro).foregroundStyle(Palette.danger)
-                    }
-                }
-                .padding(.horizontal, Self.gutter)
-                .padding(.top, Space.s12)
-                .padding(.bottom, Space.s10)
-                // Anywhere on the composer, same as the pane: see
-                // `composeDropTarget`.
-                .composeDropTarget(.inlineReply, targeted: $dropTargeted)
-
-                #if os(macOS)
-                    // When it goes, just left of the send verb it changes
-                    // (`ScheduleClock`), as in the pane.
-                    KeyHintBar(hints: hints, leading: AnyView(ScheduleClock(slot: .inlineReply)))
-                #else
-                    actionBar(compose)
-                #endif
-            }
-            // The reader's own measure, so the composer sits under the column it
-            // answers rather than sprawling the full window width. A phone is
-            // narrower than the column will ever be, so there it is inert.
-            .frame(maxWidth: ThreadViewer.columnWidth, alignment: .leading)
-            .frame(maxWidth: .infinity)
-            // A GROUND OF ITS OWN on the phone, and only there. On the Mac this
-            // bar sits INSIDE the reader's own material, at the bottom of its
-            // stack; as a safe-area inset it floats over scrolling mail, and mail
-            // reading through the send button is not a composer.
-            #if !os(macOS)
-                .passbandGlass(.pane, cornerRadius: 0, tint: Palette.glassTintStrong)
-            #endif
-            .overlay(alignment: .top) { Hairline() }
+            surface(compose, parent: parent)
             // REGISTRATION ORDER IS LOAD-BEARING. Within a context the LATEST
             // registered set wins, and this set mounts with the composer — after
             // the viewer's — which is the only reason Escape here means "leave the
@@ -179,6 +157,46 @@ struct InlineReply: View {
                 }
             }
         }
+    }
+
+    /// THE COMPOSER'S OWN SHAPE, which is the one thing the two platforms do
+    /// not share: a row at the end of the Mac's conversation, a card at the
+    /// end of the phone's chain. Everything hung on it in `body` is common to
+    /// both.
+    @ViewBuilder
+    private func surface(_ compose: ComposeState, parent: ClientMessage) -> some View {
+        #if os(macOS)
+            VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: Space.scaled(9)) {
+                    headerLine(compose, parent: parent)
+                    if editingRecipients {
+                        recipientEditor(compose)
+                    }
+                    editor(compose)
+                    // The files, under the editor. Nothing when empty.
+                    AttachmentTray(slot: .inlineReply)
+                    // A held send came back blocked.
+                    if guarded { GuardVerdictBox(kinds: compose.guardKinds) }
+                    if let error = compose.error {
+                        Text(error).font(Typo.micro).foregroundStyle(Palette.danger)
+                    }
+                    keyLine
+                }
+                // A MESSAGE CARD'S OWN MEASURE: the same inset from the
+                // column's edge and the same air above and below, so the
+                // reply's first line starts where the mail's does.
+                .padding(.leading, Self.gutter)
+                .padding(.vertical, Space.s16)
+                // Anywhere on the composer, same as the pane: see
+                // `composeDropTarget`.
+                .composeDropTarget(.inlineReply, targeted: $dropTargeted)
+            }
+            // Inside the reader's column, and as wide as it.
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .overlay(alignment: .top) { Hairline() }
+        #else
+            card(compose, parent: parent)
+        #endif
     }
 
     /// Ask the daemon who this reply would reach. Best-effort by contract: the
@@ -227,58 +245,53 @@ struct InlineReply: View {
 
     // MARK: - panes
 
-    private func headerLine(_ compose: ComposeState, parent: ClientMessage) -> some View {
-        HStack(spacing: Space.scaled(5)) {
-            // THE WHOLE "replying to <who>" PHRASE IS THE DISCLOSURE, chevron
-            // and all: the thing you want to change is the thing you click.
-            Button {
-                editingRecipients.toggle()
-                if editingRecipients { focusedField = .to }
-            } label: {
-                HStack(spacing: Space.scaled(5)) {
-                    Image(
-                        systemName: editingRecipients
-                            ? "chevron.down" : "chevron.right"
-                    )
-                    .font(Typo.ui(8, weight: .semibold))
-                    .foregroundStyle(Palette.inkFaintest)
-                    Text(compose.replyAll ? "replying to all" : "replying to")
-                        .font(Typo.micro)
+    #if os(macOS)
+        private func headerLine(_ compose: ComposeState, parent: ClientMessage) -> some View {
+            HStack(spacing: Space.scaled(5)) {
+                // THE WHOLE "replying to <who>" PHRASE IS THE DISCLOSURE, chevron
+                // and all: the thing you want to change is the thing you click.
+                Button {
+                    editingRecipients.toggle()
+                    if editingRecipients { focusedField = .to }
+                } label: {
+                    HStack(spacing: Space.scaled(5)) {
+                        Image(
+                            systemName: editingRecipients
+                                ? "chevron.down" : "chevron.right"
+                        )
+                        .font(Typo.ui(8, weight: .semibold))
                         .foregroundStyle(Palette.inkFaintest)
-                    // Addresses and sender strings alike are email-derived:
-                    // rendered as Text only, never as markup, and never
-                    // interpolated into a localized literal.
-                    Text(headerTarget(compose, parent: parent))
-                        .font(Typo.ui(11, weight: .medium))
-                        .foregroundStyle(Palette.inkDim)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
+                        Text(compose.replyAll ? "replying to all" : "replying to")
+                            .font(Typo.micro)
+                            .foregroundStyle(Palette.inkFaintest)
+                        // Addresses and sender strings alike are email-derived:
+                        // rendered as Text only, never as markup, and never
+                        // interpolated into a localized literal.
+                        Text(headerTarget(compose, parent: parent))
+                            .font(Typo.ui(11, weight: .medium))
+                            .foregroundStyle(Palette.inkDim)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    .contentShape(Rectangle())
                 }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            // A sentence in the micro voice reads as a caption until the
-            // pointer says it is a control.
-            .pointingHand()
-            .accessibilityLabel(editingRecipients ? "hide recipients" : "edit recipients")
-            Text("·").foregroundStyle(Palette.inkFaintest)
-            Text(replySubject)
-                .font(Typo.micro)
-                .foregroundStyle(Palette.inkFaintest)
-                .lineLimit(1)
-                .truncationMode(.tail)
-            Spacer(minLength: Space.s8)
-            // The tracker switch is DESKTOP ONLY, same as the pane. This
-            // header is one line in a reader column on a phone, already
-            // carrying the recipients door and the subject; a switch nobody
-            // came here to touch is what gets cut when that line has to hold
-            // three things at phone width. The account default still decides.
-            AttachButton(slot: .inlineReply)
-            #if os(macOS)
+                .buttonStyle(.plain)
+                // A sentence in the micro voice reads as a caption until the
+                // pointer says it is a control.
+                .pointingHand()
+                .accessibilityLabel(editingRecipients ? "hide recipients" : "edit recipients")
+                Text("·").foregroundStyle(Palette.inkFaintest)
+                Text(replySubject)
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.inkFaintest)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: Space.s8)
+                AttachButton(slot: .inlineReply)
                 TrackerToggle(on: bindFlag(\.includeTracker))
-            #endif
+            }
         }
-    }
+    #endif
 
     /// Who the header names. A plain reply names the parent's sender; a
     /// reply-all names the fetched set — and until that lands (or when it never
@@ -334,52 +347,64 @@ struct InlineReply: View {
         }
     }
 
-    private func editor(_ compose: ComposeState) -> some View {
-        // autofocus is the affordance: `r` must land the cursor in the body, or
-        // the composer is a box you have to go click. It lives on the EDITOR,
-        // not the bar: the editor also mounts on the way BACK from review (the
-        // bar never left), so Esc out of review would otherwise drop the cursor
-        // and hand every letter you typed next to the reader's verbs.
-        MarkdownTextView(
-            text: bind(\.body), autofocus: true, refocus: refocusEditor,
-            disabled: compose.sending,
-            // Same two doors the pane's editor has, gated the same way.
-            onDropFiles: store.composeAttachmentsAvailable
-                ? { urls, at in ComposeAttach.add(urls: urls, to: .inlineReply, at: at) }
-                : nil,
-            onPasteImage: store.composeAttachmentsAvailable
-                ? { png, at in
-                    ComposeAttach.add(
-                        data: png, filename: "pasted-image.png", mime: "image/png",
-                        to: .inlineReply, at: at)
-                } : nil,
-            onDropHover: { dropTargeted = $0 }
-        )
-        .frame(height: Self.editorHeight)
-        .padding(Space.s8)
-        .background(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .fill(Palette.canvas.opacity(0.65))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .strokeBorder(
-                    dropTargeted ? Palette.accent : Palette.hairlineStrong,
-                    lineWidth: dropTargeted ? 1.5 : 0.75))
-        .animation(.easeOut(duration: 0.12), value: dropTargeted)
-    }
-
-    /// The composer's own inset. The Mac's is the reader column's 22; a phone is
-    /// narrower and the mail beside it is inset 18, so the reply lines up with
-    /// the message it answers rather than sitting proud of it.
     #if os(macOS)
-        private static var gutter: CGFloat { Space.scaled(22) }
-        private static var editorHeight: CGFloat { Space.scaled(150) }
+        private func editor(_ compose: ComposeState) -> some View {
+            // autofocus is the affordance: `r` must land the cursor in the body, or
+            // the composer is a box you have to go click. It lives on the EDITOR,
+            // not the bar: the editor also mounts on the way BACK from review (the
+            // bar never left), so Esc out of review would otherwise drop the cursor
+            // and hand every letter you typed next to the reader's verbs.
+            MarkdownTextView(
+                text: bind(\.body), autofocus: true, refocus: refocusEditor,
+                disabled: compose.sending,
+                // Same two doors the pane's editor has, gated the same way.
+                onDropFiles: store.composeAttachmentsAvailable
+                    ? { urls, at in ComposeAttach.add(urls: urls, to: .inlineReply, at: at) }
+                    : nil,
+                onPasteImage: store.composeAttachmentsAvailable
+                    ? { png, at in
+                        ComposeAttach.add(
+                            data: png, filename: "pasted-image.png", mime: "image/png",
+                            to: .inlineReply, at: at)
+                    } : nil,
+                onDropHover: { dropTargeted = $0 },
+                // The editor grows with the reply and the page scrolls, not
+                // the box (see `editorHeight`).
+                onContentHeight: { bodyHeight = $0 }
+            )
+            .frame(height: editorHeight)
+            .padding(Space.s8)
+            .background(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(Palette.canvas.opacity(0.65))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .strokeBorder(
+                        dropTargeted ? Palette.accent : Palette.hairlineStrong,
+                        lineWidth: dropTargeted ? 1.5 : 0.75))
+            .animation(.easeOut(duration: 0.12), value: dropTargeted)
+        }
+    #endif
+
+    /// The composer's own inset. The Mac's is the reader column's 22, so the
+    /// bar's text starts where the mail's does. The phone's is the inset of a
+    /// card that already sits inside that column.
+    #if os(macOS)
+        private static var gutter: CGFloat { ThreadViewer.replyInset }
+        /// AS TALL AS THE REPLY. The floor is a few lines, so an empty
+        /// composer reads as somewhere to write rather than a search field;
+        /// past that every line written is a line of height, and the page
+        /// scrolls instead of the box.
+        private var editorHeight: CGFloat { max(Space.scaled(96), bodyHeight) }
     #else
-        private static var gutter: CGFloat { Space.scaled(18) }
-        /// Short enough that a couple of lines of the email survive above a
-        /// raised keyboard. The editor scrolls itself past that.
-        private static var editorHeight: CGFloat { Space.scaled(104) }
+        private static var gutter: CGFloat { Space.s14 }
+        /// THE FLOOR, not the height: four lines or so, which is enough to
+        /// read as a place to write and short enough that the whole card,
+        /// address line to send button, fits between the reader's header and
+        /// a raised keyboard. Past it the editor grows with the text.
+        private static var editorFloor: CGFloat { Space.scaled(92) }
+        private static var cardRadius: CGFloat { 18 }
     #endif
 
     #if os(macOS)
@@ -391,34 +416,213 @@ struct InlineReply: View {
             hints.append(KeyHint("esc", "dismiss"))
             return hints
         }
+
+        /// The send keys, as the last line of the composer: the clock just
+        /// left of the send verb it changes (`ScheduleClock`), as in the pane.
+        /// `KeyHintBar` without the bar. That one is a strip across the foot
+        /// of a page with a rule over it, and this is a row in a column that
+        /// has its own.
+        private var keyLine: some View {
+            HStack(spacing: Space.s4) {
+                ScheduleClock(slot: .inlineReply).padding(.trailing, Space.s4)
+                ForEach(Array(hints.enumerated()), id: \.offset) { i, hint in
+                    if i > 0 { Text("·").foregroundStyle(Palette.inkFaintest) }
+                    hint
+                }
+                Spacer()
+            }
+            .padding(.top, Space.s2)
+        }
     #endif
 
     #if !os(macOS)
+        // MARK: - the phone's card
+
+        /// Address line, editor, files and verdicts, controls: one glass card,
+        /// top to bottom in the order a reply is written.
+        private func card(_ compose: ComposeState, parent: ClientMessage) -> some View {
+            VStack(alignment: .leading, spacing: 0) {
+                addressLine(compose, parent: parent)
+                if editingRecipients {
+                    VStack(alignment: .leading, spacing: Space.s8) {
+                        recipientEditor(compose)
+                        // What the daemon will title it. Stated, not editable:
+                        // a reply's subject is derived from its parent, and
+                        // this is where somebody checking the audience looks
+                        // for the rest of the envelope.
+                        Text(replySubject)
+                            .font(Typo.micro)
+                            .foregroundStyle(Palette.inkFaintest)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    .padding(.horizontal, Self.gutter)
+                    .padding(.bottom, Space.s10)
+                }
+                Hairline()
+                growingEditor(compose)
+                    .padding(.horizontal, Self.gutter)
+                    .padding(.top, Space.s6)
+                if !compose.attachments.isEmpty || guarded || compose.error != nil {
+                    VStack(alignment: .leading, spacing: Space.scaled(9)) {
+                        // The files, under the editor. Nothing when empty.
+                        AttachmentTray(slot: .inlineReply)
+                        // A held send came back blocked.
+                        if guarded { GuardVerdictBox(kinds: compose.guardKinds) }
+                        if let error = compose.error {
+                            Text(error).font(Typo.micro).foregroundStyle(Palette.danger)
+                        }
+                    }
+                    .padding(.horizontal, Self.gutter)
+                    .padding(.top, Space.s8)
+                }
+                controls(compose)
+                    .padding(.horizontal, Self.gutter)
+                    .padding(.top, Space.s10)
+                    .padding(.bottom, Space.s12)
+            }
+            .passbandGlass(.pane, cornerRadius: Self.cardRadius)
+            #if DEBUG
+                .onAppear { if FixtureStage.recipientsOpen { editingRecipients = true } }
+            #endif
+        }
+
+        /// WHO IT REACHES, and the way out. The whole phrase is the door to
+        /// the recipient fields, as on the Mac: the thing you want to change
+        /// is the thing you press. It is the card's one line of chrome, so it
+        /// is set at reading size rather than in the micro voice the Mac's bar
+        /// uses, where a pointer is there to say a caption is a control.
+        private func addressLine(_ compose: ComposeState, parent: ClientMessage) -> some View {
+            HStack(spacing: Space.s4) {
+                Button {
+                    editingRecipients.toggle()
+                    if editingRecipients { focusedField = .to }
+                } label: {
+                    HStack(spacing: Space.s6) {
+                        Image(
+                            systemName: compose.replyAll
+                                ? "arrowshape.turn.up.left.2.fill" : "arrowshape.turn.up.left.fill"
+                        )
+                        .font(Typo.ui(11, weight: .semibold))
+                        .foregroundStyle(Palette.accent)
+                        Text(compose.replyAll ? "replying to all" : "replying to")
+                            .font(Typo.rowSub)
+                            .foregroundStyle(Palette.inkFaint)
+                            .fixedSize()
+                        // Addresses and sender strings alike are email-derived:
+                        // rendered as Text only, never as markup, and never
+                        // interpolated into a localized literal.
+                        Text(headerTarget(compose, parent: parent))
+                            .font(Typo.ui(13, weight: .medium))
+                            .foregroundStyle(Palette.ink)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Image(systemName: "chevron.down")
+                            .font(Typo.ui(9, weight: .semibold))
+                            .foregroundStyle(Palette.inkFaintest)
+                            .rotationEffect(.degrees(editingRecipients ? 180 : 0))
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(minHeight: Self.lineHeight)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(editingRecipients ? "hide recipients" : "edit recipients")
+                // "dismiss", never "discard": closing a composer FLUSHES its
+                // draft, so the reply is kept and restored next time. The Mac
+                // says it with Esc; a card says it in its corner.
+                Button { store.closeInlineReply() } label: {
+                    Image(systemName: "xmark")
+                        .font(Typo.ui(11, weight: .semibold))
+                        .foregroundStyle(Palette.inkFaint)
+                        .frame(width: Self.lineHeight, height: Self.lineHeight)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("dismiss reply, the draft is kept")
+            }
+            .padding(.leading, Self.gutter)
+            .animation(Motion.disclose, value: editingRecipients)
+        }
+
+        /// A thumb's worth of row for the address line and its close button.
+        private static var lineHeight: CGFloat { 44 }
+
+        /// The same editor, wired the same way, minus the two things a card in
+        /// a scroll view must not have: a well of its own (the card is the
+        /// well) and a height (see `MarkdownTextView.grows`).
+        private func growingEditor(_ compose: ComposeState) -> some View {
+            MarkdownTextView(
+                text: bind(\.body), autofocus: true, refocus: refocusEditor,
+                disabled: compose.sending, grows: true
+            )
+            .attaching(store.composeAttachmentsAvailable ? .inlineReply : nil)
+            .frame(minHeight: Self.editorFloor, alignment: .top)
+        }
+
         /// THE PHONE'S HALF OF THE CEREMONY. The same `send(override:)`, the
         /// same rule that a blocked verdict is the ONLY thing that unlocks an
         /// override: what changes is that a thumb presses them instead of
-        /// ⌘Enter and ⌘⇧Enter. The layout mirrors the pane composer's footer so
-        /// a reply reads the same wherever it started.
-        @ViewBuilder
-        private func actionBar(_ compose: ComposeState) -> some View {
-            HStack(spacing: Space.s8) {
-                Spacer()
-                Button(ComposeLabels.dismiss) { store.closeInlineReply() }
-                    .buttonStyle(.glass)
-                // When it goes, just left of the verbs, as in the pane: "send
-                // this tomorrow morning" is what a reply typed at midnight wants.
-                ScheduleClock(slot: .inlineReply)
-                if guarded {
-                    Button(ScheduleCopy.overrideVerb(scheduled: scheduled)) { send(override: true) }
-                        .buttonStyle(.glassProminent)
-                        .tint(Palette.danger)
+        /// ⌘Enter and ⌘⇧Enter.
+        ///
+        /// What the mail CARRIES on the left (files, the tracker), when and
+        /// whether it GOES on the right, the clock just left of the verb it
+        /// changes, as in the pane. One row when it fits. A set send time
+        /// turns the clock into a chip and a blocked verdict adds a second
+        /// verb, and either can ask for more than a phone is wide, so the
+        /// verbs drop to a row of their own rather than squeezing every
+        /// control on the line into an ellipsis.
+        private func controls(_ compose: ComposeState) -> some View {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: Space.s8) {
+                    carries
+                    Spacer(minLength: Space.s8)
+                    verbs
                 }
-                Button(ScheduleCopy.sendVerb(scheduled: scheduled)) { send(override: false) }
-                    .buttonStyle(.glassProminent)
-                    .tint(Palette.accent)
+                VStack(alignment: .trailing, spacing: Space.s10) {
+                    HStack(spacing: Space.s8) {
+                        carries
+                        Spacer(minLength: 0)
+                    }
+                    HStack(spacing: Space.s8) { verbs }
+                }
             }
-            .padding(.horizontal, Self.gutter)
-            .padding(.bottom, Space.s10)
+        }
+
+        /// The tracker switch is here on a phone now. It was cut while this
+        /// was one crowded line pinned over a keyboard; a card has the room,
+        /// and a reply whose pixel can only be decided on the Mac is a
+        /// setting, not a switch.
+        @ViewBuilder
+        private var carries: some View {
+            // The paperclip is on the keyboard's bar, as in the composer.
+            TrackerToggle(on: bindFlag(\.includeTracker))
+        }
+
+        @ViewBuilder
+        private var verbs: some View {
+            // When it goes, just left of the verbs: "send this tomorrow
+            // morning" is what a reply typed at midnight wants.
+            ScheduleClock(slot: .inlineReply)
+            if guarded {
+                Button { send(override: true) } label: {
+                    verbLabel(ScheduleCopy.overrideVerb(scheduled: scheduled))
+                }
+                .buttonStyle(.glassProminent)
+                .tint(Palette.danger)
+            }
+            Button { send(override: false) } label: {
+                verbLabel(ScheduleCopy.sendVerb(scheduled: scheduled))
+            }
+            .buttonStyle(.glassProminent)
+            .tint(Palette.accent)
+        }
+
+        private func verbLabel(_ verb: String) -> some View {
+            Text(verb)
+                .font(Typo.ui(13, weight: .semibold))
+                .padding(.horizontal, Space.s6)
+                .fixedSize()
         }
     #endif
 

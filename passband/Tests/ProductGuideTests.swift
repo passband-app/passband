@@ -173,6 +173,25 @@ struct ProductGuideTests {
         // at or below it, and one that reports no version says so.
         let none = ProductGuide.text(.whatsNew, runningVersion: nil)
         expect(none.count > 40, "no version still answers")
+
+        // THE IPHONE READS ITS OWN TABLE. Its versions are a different line:
+        // asked as the phone, the Mac's notes for the same number must not
+        // come back.
+        guard let phone = PhoneReleaseNotes.all.first, let feature = phone.features.first else {
+            expect(false, "the phone's table has a release with a feature")
+            return
+        }
+        let onPhone = ProductGuide.text(.whatsNew, runningVersion: phone.version, onPhone: true)
+        expect(onPhone.contains("This iPhone is running"), "the phone's answer says it is the phone's")
+        expect(onPhone.contains(feature.title) && onPhone.contains(feature.detail), "and recites the phone's features")
+        expect(onPhone.contains("person icon"), "and says where the phone keeps it")
+        expect(!onPhone.contains("In the Mac app"), "and none of the Mac's notes")
+        expect(!onPhone.contains("\u{2014}"), "with no em dashes")
+        let before = ProductGuide.text(.whatsNew, runningVersion: "0.0.0", onPhone: true)
+        expect(!before.contains(feature.title), "a phone build older than every note recites none")
+        expect(
+            ProductGuide.text(.appAndAccounts, runningVersion: nil).contains("On the iPhone, \"What's new\""),
+            "the accounts page says where What's new is on the iPhone")
     }
 
     // MARK: - helpers

@@ -287,7 +287,10 @@ struct PassbandCommands: Commands {
                 // is counting the mailbox it started on — the run's own epoch
                 // fence catches the switch, but the switch should not be
                 // offered in the first place.
-                .disabled(blocked || store.connStatus != .connected)
+                // The wait for a saved daemon that is not answering is the
+                // exception to the first: the account being left is exactly
+                // the one that cannot put anything on screen.
+                .disabled(blocked || !store.canSwitchAccounts)
             }
             Divider()
             // DELIBERATELY CHORDLESS. ⌘` is the system's window cycler, and
@@ -295,8 +298,7 @@ struct PassbandCommands: Commands {
             // own — this is the tenth-account escape hatch and a place for the
             // menu to say the list wraps, not a primary way to move.
             Button("Next Account") { Task { await accounts.switchToNext() } }
-                .disabled(
-                    blocked || store.connStatus != .connected || accounts.accounts.count < 2)
+                .disabled(blocked || !store.canSwitchAccounts || accounts.accounts.count < 2)
             Divider()
             Button("Add Account…") { store.addAccountSheetOpen = true }
                 // The gate is already a connect form. Offering a second one on

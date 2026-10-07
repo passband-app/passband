@@ -119,6 +119,29 @@ enum MeterSlot {
     }
 }
 
+/// THE PHONE'S TWO-LINE MAIL ROW, measured once. The inbox's rows
+/// (`UpdateRow`), the sent rows and the outbox rows above them are three
+/// structs drawing one list shape: a 26pt mark, a name line with its stamp on
+/// the right, and the words under it at the full width of the row. They read
+/// these so flipping the segmented control between all mail and sent does not
+/// change the rhythm of the page, and so the three cannot drift apart.
+#if !os(macOS)
+    @MainActor
+    enum PhoneRow {
+        static var hPadding: CGFloat { Space.s12 }
+        static var vPadding: CGFloat { Space.scaled(9) }
+        static let radius: CGFloat = 10
+        /// The avatar, or whatever stands where one would.
+        static let mark: CGFloat = 26
+        /// Mark to text.
+        static var gap: CGFloat { Space.s10 }
+        /// Name line to the words under it.
+        static var lineGap: CGFloat { Space.scaled(3) }
+        static var name: Font { Typo.ui(14, weight: .medium) }
+        static var stamp: Font { Typo.num(11) }
+    }
+#endif
+
 // MARK: - rules
 
 /// The 0.5pt rule dividing a header from what it heads. Ink-side (see

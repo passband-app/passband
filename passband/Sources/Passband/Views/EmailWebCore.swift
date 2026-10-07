@@ -1119,11 +1119,27 @@ struct ReaderMetrics: Hashable, Sendable {
     static let compact = ReaderMetrics(
         bodyFont: 14, cardPadding: 14, bubblePaddingV: 9, bubblePaddingH: 12)
 
+    /// The compact size of a body that names no type of its own. A POINT
+    /// SMALLER ON THE PHONE: the Mac reads its mail in a wide column beside
+    /// 13pt rows, and 14 is the step up a reading column wants. A phone's
+    /// rows are 12 and 13 and the column is the screen, where 14 read as the
+    /// mail shouting over the app around it.
+    ///
+    /// `plainBase` is the same thing for a plain-text body, which is drawn as
+    /// native text rather than in a web frame.
+    #if os(macOS)
+        static let bodyBase: CGFloat = 14
+        static let plainBase: CGFloat = 13.5
+    #else
+        static let bodyBase: CGFloat = 13
+        static let plainBase: CGFloat = 13
+    #endif
+
     /// At the density in force now.
     @MainActor
     static var current: ReaderMetrics {
         ReaderMetrics(
-            bodyFont: Typo.size(14), cardPadding: Space.s14,
+            bodyFont: Typo.size(bodyBase), cardPadding: Space.s14,
             bubblePaddingV: Space.scaled(9), bubblePaddingH: Space.s12)
     }
 

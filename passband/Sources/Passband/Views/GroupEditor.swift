@@ -34,6 +34,11 @@ struct GroupEditor: View {
     /// told is not a limit to enforce by guessing.
     @State private var maxMembers: Int?
     @FocusState private var focusedField: FocusTarget?
+    #if !os(macOS)
+        /// The card's own height, measured, so the phone's scroller can be
+        /// exactly as tall as the card until the card stops fitting.
+        @State private var cardHeight: CGFloat?
+    #endif
 
     private enum FocusTarget { case name, members, note }
 
@@ -71,19 +76,27 @@ struct GroupEditor: View {
 
     var body: some View {
         OverlayScrim(onDismiss: onClose) {
-            ModalCard(width: 500) {
-                header
-                nameField
-                membersField
-                modePicker
-                noteField
-
-                if let error {
-                    Text(error).font(Typo.micro).foregroundStyle(Palette.danger)
+            #if os(macOS)
+                card
+            #else
+                // A PHONE HAS HALF A SCREEN ONCE THE KEYBOARD IS UP, and this
+                // card grows a line for every few people in it. Five fit; a
+                // twelve-person investor list would push the name field up
+                // under the status bar and the save button down behind the
+                // keys. So the card scrolls when, and only when, it is taller
+                // than the room: the frame is capped at the card's measured
+                // height, which leaves a short card exactly where it always
+                // sat, centered and with nothing to scroll.
+                ScrollView {
+                    card.onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
+                        cardHeight = $0
+                    }
                 }
-
-                footer
-            }
+                .frame(maxHeight: cardHeight)
+                .scrollBounceBehavior(.basedOnSize)
+                // The card's shadow is wider than the card.
+                .scrollClipDisabled()
+            #endif
         }
         .keyContext(.modal)
         .keyBindings(.modal, [
@@ -97,6 +110,22 @@ struct GroupEditor: View {
         ])
         .onAppear { focusedField = editing ? .members : .name }
         .task { maxMembers = try? await APIClient.shared.groupLimits().max_members }
+    }
+
+    private var card: some View {
+        ModalCard(width: 500) {
+            header
+            nameField
+            membersField
+            modePicker
+            noteField
+
+            if let error {
+                Text(error).font(Typo.micro).foregroundStyle(Palette.danger)
+            }
+
+            footer
+        }
     }
 
     private var header: some View {

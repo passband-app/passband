@@ -50,11 +50,14 @@ enum ShortcutCatalog {
             title: "Purge",
             items: [
                 Item(["u"], "unsubscribe, or block when there is no link"),
-                Item(["1", "2", "3"], "add one of the suggested rules"),
+                Item(["r"], "create rule: show the suggestions"),
+                Item(["1", "2", "3"], "pick a suggested rule"),
+                Item(["o"], "other: type your own rule"),
                 Item(["s"], "keep this sender"),
                 Item(["z"], "back one sender"),
-                Item(["Esc"], "review what you chose"),
+                Item(["Esc"], "back out a step, then review"),
                 Item(["Enter"], "confirm, on the review page"),
+                Item(["p"], "resume a paused purge, from the sitrep"),
             ]),
         Group(
             title: "Thread viewer",

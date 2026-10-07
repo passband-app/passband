@@ -74,7 +74,7 @@ struct ActionLayer: View {
             // THE PURGE: the deck, its confirm page and its end page, each
             // the whole window. Here and not on the sitrep because this layer
             // is above everything else and owns the modal key context.
-            if let session = store.purge {
+            if let session = store.purgeShown {
                 PurgeOverlay(session: session)
             }
             if let finish = store.purgeFinished {
@@ -165,7 +165,7 @@ struct ActionLayer: View {
     }
 
     private var purgeUp: Bool {
-        store.purge != nil || store.purgeFinished != nil || store.smartDoneListOpen
+        store.purgeShown != nil || store.purgeFinished != nil || store.smartDoneListOpen
     }
 
     // MARK: - toasts
@@ -178,6 +178,15 @@ struct ActionLayer: View {
                 if let prompt = blockPrompt {
                     violationPrompt(prompt)
                 }
+                // A PARKED PURGE travels with the person, on every page, in
+                // the corner the undo chips use: choices made and not yet
+                // sent must not be forgotten on the mail page.
+                #if os(macOS)
+                    if let parked = store.purgeParked {
+                        PurgeParkedChip(chosen: parked.chosen)
+                            .transition(.move(edge: .leading).combined(with: .opacity))
+                    }
+                #endif
                 ForEach(store.toasts) { toast in
                     Button {
                         store.dismissToast(toast.id)
@@ -246,6 +255,12 @@ struct ActionLayer: View {
             }
         }
         .animation(.smooth(duration: 0.24), value: store.toasts.count)
+        .animation(.smooth(duration: 0.24), value: store.purgeParked != nil)
+        // "Your purge timed out", once, when the sitrep is the thing on
+        // screen: not fired into whatever they were doing when it lapsed.
+        .onChange(of: store.purgeExpiredNotice && store.showsSitrepCorner, initial: true) { _, due in
+            if due { store.takePurgeExpiredNotice() }
+        }
         .animation(.smooth(duration: 0.24), value: store.undos.count)
     }
 

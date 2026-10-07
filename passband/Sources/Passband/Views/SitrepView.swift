@@ -602,6 +602,12 @@ struct SitrepView: View {
             // sent from the deck it opens until a confirming press. Declines
             // where the pill is not drawn.
             KeyBinding(declining: "p", "purge reading") {
+                // A parked purge is resumed from anywhere on the board,
+                // whatever Reading holds now.
+                if store.purgeParked != nil {
+                    store.resumePurge()
+                    return true
+                }
                 guard !readingSenders.isEmpty, store.purgeOffered else { return false }
                 Task { await store.beginPurge() }
                 return true
@@ -1500,12 +1506,15 @@ struct ZonePill: View {
     /// changes, a glint drifts round the border, and a press does nothing.
     var working = false
     var workingLabel: String?
+    /// Held at its hover weight: something is waiting behind this door.
+    var emphasized = false
     let action: () -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
 
     private var lit: Bool { hovering && !working }
+    private var strong: Bool { lit || working || emphasized }
 
     var body: some View {
         Button(action: action) {
@@ -1537,7 +1546,7 @@ struct ZonePill: View {
                     .foregroundStyle(Palette.accent)
                 Text(working ? (workingLabel ?? label) : label)
                     .font(Typo.micro)
-                    .foregroundStyle(lit ? Palette.ink : Palette.inkDim)
+                    .foregroundStyle(lit || emphasized ? Palette.ink : Palette.inkDim)
                     .contentTransition(.opacity)
             }
             .padding(.leading, lit && key != nil ? 3 : 8)
@@ -1545,7 +1554,7 @@ struct ZonePill: View {
             .padding(.vertical, Space.scaled(3))
             .background(
                 Capsule(style: .continuous)
-                    .fill(Palette.accentSoft.opacity(lit || working ? 0.9 : 0.35))
+                    .fill(Palette.accentSoft.opacity(strong ? 0.9 : 0.35))
             )
             #if os(macOS)
                 // Alive without a spinner: the flow hint's glint, all the way

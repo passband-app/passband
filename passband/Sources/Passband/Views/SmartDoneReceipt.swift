@@ -230,7 +230,7 @@
         private var groups: [SmartDoneList.Group] { SmartDoneList.groups(receipt.items ?? []) }
 
         var body: some View {
-            FullPage(symbol: "checkmark.rectangle.stack", title: "Smart done") {
+            FullPage(title: "Smart done", subtitle: "what it cleared") {
                 Text(SmartDoneCopy.headline(cleared: receipt.cleared))
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaint)
@@ -274,7 +274,8 @@
                 KeyBinding("u", "undo all of it") { undo() },
                 KeyBinding("Enter", "confirm") { store.closeSmartDoneList() },
                 KeyBinding("Escape", "confirm") { store.closeSmartDoneList() },
-            ] + ["1", "2", "3", "4", "5"].map { KeyBinding($0, "nothing") {} })
+                KeyBinding("/", "nothing") {},
+            ])
             // Left by a route nobody named: the clock still starts again.
             .onDisappear { store.closeSmartDoneList() }
             .transition(.opacity)

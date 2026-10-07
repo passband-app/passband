@@ -748,10 +748,24 @@ struct ReadingZone: View {
                 ) {
                     Task { await store.runSmartDone() }
                 }
+                // A PARKED PURGE turns the pill into the way back: choices
+                // made (a count that is good news), and `p` resumes.
+                if let parked = store.purgeParked {
+                    ZonePill(
+                        symbol: "scissors",
+                        label: "\(PurgeCopy.resumePill) · \(PurgeCopy.chosen(parked.chosen))", key: "p",
+                        help: "Go back to your purge. Nothing has been sent yet (P)",
+                        accessibilityName: "Resume purge, \(PurgeCopy.chosen(parked.chosen)) made",
+                        emphasized: true
+                    ) {
+                        store.resumePurge()
+                    }
+                    .transition(.opacity)
+                }
                 // ONLY WITH A FEW CANDIDATES. The deck holds just the senders
                 // the evidence is confident about; with fewer than a handful
                 // there is no flow worth opening, so there is no door to it.
-                if store.purgeOffered {
+                else if store.purgeOffered {
                     ZonePill(
                         symbol: "scissors", label: "purge", key: "p",
                         help: "Go through the senders you have stopped reading, one at a time (P)",
@@ -763,6 +777,7 @@ struct ReadingZone: View {
                     .transition(.opacity)
                 }
             }
+            .animation(.easeOut(duration: 0.25), value: store.purgeParked != nil)
             .animation(.easeOut(duration: 0.25), value: store.purgeOffered)
             // The count behind the pill. Asked when the board first shows
             // and then on the poll's tick, where the store lets it through

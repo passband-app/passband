@@ -28,6 +28,11 @@ enum PurgeDecision: Hashable, Sendable {
     /// with this sentence, one of the suggestions shown on the card. It
     /// carries its sentence so it survives stepping back and the confirm page.
     case rule(String)
+    /// A rule in the person's OWN words, typed on the page. The same kind of
+    /// decision as `rule`, and sent differently: nobody chose its outcome,
+    /// so the daemon infers it from the sentence, as it does for a rule
+    /// typed into the rule editor.
+    case ownRule(String)
     /// We got this one wrong. Nothing is sent but a note to leave this
     /// sender out of the next purge.
     case keep
@@ -40,8 +45,119 @@ enum PurgeDecision: Hashable, Sendable {
         switch self {
         case .unsubscribe: .unsubscribe
         case .block: .block
-        case .rule: .rule
+        case .rule, .ownRule: .rule
         case .keep: .keep
+        }
+    }
+
+    /// The sentence of a rule decision, suggested or typed.
+    var want: String? {
+        switch self {
+        case .rule(let want), .ownRule(let want): want
+        case .unsubscribe, .block, .keep: nil
+        }
+    }
+}
+
+/// A rule sentence somebody typed, made fit to stage.
+enum PurgeRuleText {
+    /// The rule editor sets no limit of its own; this is a guard against a
+    /// paste of a whole email, not a style rule.
+    static let limit = 300
+
+    /// Trimmed at the ends, line breaks flattened to spaces (it is a
+    /// one-line field), cut at `limit`. nil when nothing is left: an empty
+    /// rule is refused, not staged.
+    static func accept(_ raw: String) -> String? {
+        let flat = raw.split(whereSeparator: \.isNewline).joined(separator: " ")
+        let trimmed = flat.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return String(trimmed.prefix(limit)).trimmingCharacters(in: .whitespaces)
+    }
+}
+
+/// WHAT LEAVING DOES MID-PURGE. The purge fills the content area and the
+/// rail beside it is the real rail, so a click there (or a page key, or
+/// opening an email) is a request to go somewhere else. Going must never
+/// silently throw away decisions somebody spent a minute making, and must
+/// not stand in the way either.
+enum PurgeLeave: Equatable, Sendable {
+    /// Nothing staged: the session ends. There is nothing to come back to.
+    case end
+    /// Something staged: the session is PARKED exactly as it stands, and
+    /// the app goes where it was asked. The way back is the purge pill and
+    /// the marker that travels with the person.
+    case park
+    /// The requests are out. Nothing to park and nothing to lose: the app
+    /// stays until they have answered, which is a second or two.
+    case stay
+
+    enum Stage: Sendable { case deciding, confirming, applying }
+
+    static func rule(stage: Stage, anythingStaged: Bool) -> PurgeLeave {
+        if stage == .applying { return .stay }
+        return anythingStaged ? .park : .end
+    }
+
+    static let applyingToast = "Your choices are being sent. One moment."
+}
+
+/// HOW LONG A PARKED PURGE WAITS. Half an hour of wall clock from the last
+/// thing the person did WITH the purge (a decision, a step back, a resume),
+/// and then it is dropped: the scores and the mail it was built on are
+/// getting old, and choices made half an hour ago must not fire unseen.
+///
+/// ONLY A PARKED SESSION EXPIRES. One that is on screen is being worked,
+/// however long somebody looks at a page, and never times out under them.
+struct PurgeClock: Hashable, Sendable {
+    static let parkedLifetime: TimeInterval = 30 * 60
+
+    private(set) var touchedAt: Date
+
+    init(at now: Date) { touchedAt = now }
+
+    /// The person did something with the purge.
+    mutating func touch(at now: Date) { touchedAt = now }
+
+    /// Wall clock on purpose: a Mac asleep for an hour has been away for an
+    /// hour. A clock that ran backwards (a time change) expires nothing.
+    func isExpired(at now: Date, parked: Bool) -> Bool {
+        parked && now.timeIntervalSince(touchedAt) >= Self.parkedLifetime
+    }
+}
+
+/// COMMIT, AFTER THE WORLD MAY HAVE MOVED. A session can sit parked for half
+/// an hour, and in that time a staged sender may have been dealt with some
+/// other way: the reader's `u`, the violation prompt, the rules page.
+enum PurgeReconcile: Equatable, Sendable {
+    /// Send it as staged.
+    case apply
+    /// Somebody already ended this sender. Not asked twice, and not an
+    /// error: reported as already taken care of.
+    case alreadyDone
+
+    /// `asked`: an unsubscribe request is on the daemon's books for this
+    /// sender. `blocked`: a mute rule governs their exact address now.
+    ///
+    /// Either one settles an unsubscribe or a block: the sender has been
+    /// ended, and which door it was does not matter. It settles a RULE too:
+    /// the daemon keeps one rule per address, so writing "only receipts"
+    /// now would quietly replace the block somebody chose since. A keep is
+    /// only a note and always goes.
+    ///
+    /// Mail that smart done has since cleared changes nothing: the decision
+    /// was about the sender, not about what was on the board.
+    ///
+    /// `wasBlocked`: the sender was ALREADY muted when the deck was built
+    /// (such a sender is on the deck when it has a link, to be unsubscribed
+    /// from for good). That block is not news and settles nothing.
+    static func action(
+        for decision: PurgeDecision, asked: Bool, blocked: Bool, wasBlocked: Bool
+    ) -> PurgeReconcile {
+        switch decision {
+        case .keep: .apply
+        case .unsubscribe, .block, .rule, .ownRule:
+            asked || (blocked && !wasBlocked) ? .alreadyDone : .apply
         }
     }
 }
@@ -107,6 +223,10 @@ struct PurgeCard: Identifiable, Hashable, Sendable {
         case .unsubscribe, .block: decision == ending
         case .rule(let want):
             offersRules && !want.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        // Only what `PurgeRuleText.accept` would hand back: trimmed, within
+        // the limit, not empty.
+        case .ownRule(let want):
+            offersRules && PurgeRuleText.accept(want) == want
         case .keep: true
         }
     }
@@ -215,6 +335,8 @@ enum PurgeOutcome: Hashable, Sendable {
     case blocked
     case ruled(String)
     case kept
+    /// Ended by another route since it was staged (`PurgeReconcile`).
+    case alreadyDone
     case failed
 }
 
@@ -239,6 +361,8 @@ enum PurgeStatus: Hashable, Sendable {
     case blocked
     case ruled(String)
     case kept
+    /// Ended some other way between staging and confirming.
+    case alreadyDone
     case failed
 
     /// The reason given for a sender that was never a job: its unsubscribe
@@ -260,6 +384,7 @@ enum PurgeStatus: Hashable, Sendable {
         case .blocked: return .blocked
         case .ruled(let want): return .ruled(want)
         case .kept: return .kept
+        case .alreadyDone: return .alreadyDone
         case .failed: return .failed
         }
     }
@@ -280,6 +405,9 @@ struct PurgeSummary: Hashable, Sendable {
     var opened = 0
     /// Unsubscribe jobs still running. Zero before commit.
     var running = 0
+    /// Found already ended at commit. Claimed as nothing: it was not this
+    /// purge that did it.
+    var alreadyDone = 0
     /// Staged, tried, and did not go through. Zero before commit.
     var failed = 0
     /// Mail a month that stops arriving: unsubscribes that went through (or,
@@ -288,7 +416,9 @@ struct PurgeSummary: Hashable, Sendable {
     var fewerPerMonth = 0
 
     /// Nothing decided at all.
-    var isEmpty: Bool { unsubscribed + blocked + rules + kept + needsYou + opened + running + failed == 0 }
+    var isEmpty: Bool {
+        unsubscribed + blocked + rules + kept + needsYou + opened + running + failed + alreadyDone == 0
+    }
     /// Nothing that changes what arrives: only keeps (or nothing).
     var changesNothing: Bool { unsubscribed + blocked + rules + needsYou + opened + running == 0 }
     /// Every unsubscribe the person chose, however it will be finished.
@@ -313,7 +443,7 @@ struct PurgeSummary: Hashable, Sendable {
             case .block:
                 blocked += 1
                 perMonth += card.sender.signals.per_month ?? 0
-            case .rule: rules += 1
+            case .rule, .ownRule: rules += 1
             case .keep: kept += 1
             }
         }
@@ -338,6 +468,7 @@ struct PurgeSummary: Hashable, Sendable {
                 perMonth += card.sender.signals.per_month ?? 0
             case .ruled: rules += 1
             case .kept: kept += 1
+            case .alreadyDone: alreadyDone += 1
             case .failed: failed += 1
             }
         }
@@ -372,7 +503,8 @@ enum PurgePlan {
             switch decision {
             case .unsubscribe:
                 detail = card.unsubscribeIsOnTheirSite ? PurgeCopy.siteDetail : nil
-            case .rule(let want): detail = want
+            // A typed rule is shown exactly as a suggested one is.
+            case .rule(let want), .ownRule(let want): detail = want
             case .block, .keep: detail = nil
             }
             by[decision.kind, default: []].append(Entry(card: card, detail: detail))
@@ -489,33 +621,37 @@ extension PurgeCopy {
         switch decision {
         case .unsubscribe: "Unsubscribe"
         case .block: "Block"
-        case .rule: "Add this rule"
-        case .keep: "Keep them"
+        case .rule, .ownRule: "Create rule"
+        case .keep: "Keep"
         }
     }
 
-    /// The line beside the ending: what it does, said BEFORE it is chosen.
-    /// A block explains itself, because it is offered in place of the thing
-    /// the person expected to see.
-    static func explains(_ card: PurgeCard) -> String {
-        switch card.ending {
-        case .block:
-            return "None of their emails carry an unsubscribe link, so the only way to stop them is to block them."
-        default:
-            return card.unsubscribeIsOnTheirSite
-                ? "Their unsubscribe only works on their own site. You will get the link at the end."
-                : "Passband asks them to stop and tells you how it went."
+    /// The three choices on a sender's page, left to right.
+    enum Choice: Hashable, Sendable { case ending, rule, keep }
+
+    /// THE ONE LINE UNDER THE CHOICES. A few words, and only what the button
+    /// cannot say for itself. With nothing pointed at it is empty, EXCEPT for
+    /// the two cases a person must not find out afterwards: a block offered
+    /// in place of an unsubscribe says why, and an unsubscribe the app cannot
+    /// finish says so.
+    static func note(_ choice: Choice?, on card: PurgeCard) -> String {
+        switch choice {
+        case .ending?, nil:
+            if card.ending == .block { return "No unsubscribe link in any of their emails." }
+            if card.unsubscribeIsOnTheirSite { return "You finish on their site, at the end." }
+            return choice == nil ? "" : "Asks them to stop."
+        case .rule?: return "Keep part of what they send."
+        case .keep?: return "Leaves them as they are."
         }
     }
 
-    static let keepCaption = "We got this one wrong. You will not be asked again for a while."
-    /// Over the suggestions. NOT a sentence the suggestion completes: they
-    /// are in the owner's voice and come in any grammatical shape ("only
-    /// order confirmations", "mute the marketing"), so each is shown as the
-    /// thing being chosen and what choosing does is said on its own line.
-    static let rulesLead = "Or keep part of it with a rule:"
-    static let rulesNote = "Passband follows the rule you pick for what they send from now on."
     static let rulesLoading = "Looking at what they send"
+    /// Under the suggestions: what picking one does, as its own line. NOT a
+    /// sentence a suggestion completes: they are in the owner's voice and
+    /// come in any grammatical shape.
+    static let rulesNote = "Passband follows the rule you pick for what they send from now on."
+    static let otherTitle = "Other"
+    static let otherPrompt = "What do you want from them?"
 
     /// Said aloud as a decision is staged. STAGED, in the words: nothing has
     /// been sent, and a listener cannot see the page that says so.
@@ -523,7 +659,7 @@ extension PurgeCopy {
         switch decision {
         case .unsubscribe: "Will unsubscribe from \(name)."
         case .block: "Will block \(name)."
-        case .rule(let want): "Will add a rule for \(name): \(want)"
+        case .rule(let want), .ownRule(let want): "Will add a rule for \(name): \(want)"
         case .keep: "Keeping \(name)."
         }
     }
@@ -590,6 +726,7 @@ extension PurgeCopy {
         case .blocked: "Blocked"
         case .ruled(let want): "Rule: \(want)"
         case .kept: "Kept"
+        case .alreadyDone: "Already taken care of"
         case .failed: "Did not go through"
         }
     }
@@ -621,16 +758,123 @@ extension PurgeCopy {
         kept == 1 ? "Kept 1 sender." : "Kept \(kept) senders."
     }
 
+    // A PARKED PURGE. Choices made are good news, so the count is of those,
+    // never of what is left; and every line that mentions them says nothing
+    // has been sent.
+
+    /// How many decisions are staged, for the pill and the marker.
+    static func chosen(_ count: Int) -> String { count == 1 ? "1 choice" : "\(count) choices" }
+    /// The Reading pill while a purge is parked.
+    static let resumePill = "resume purge"
+    /// The marker that travels with the person.
+    static func parked(_ count: Int) -> String {
+        "Purge paused with \(chosen(count)). Nothing has been sent."
+    }
+    /// The one-time check before a parked purge is thrown away.
+    static func discardAsk(_ count: Int) -> String { "Discard \(chosen(count))?" }
+    /// Said once, on the sitrep, after a parked purge timed out.
+    static let expired = "Your purge timed out. Nothing was sent."
+
     /// The pill was pressed and the list came back too short to offer.
     static let tooFew = "Nothing stands out to purge right now."
 }
 
-/// One of a sender's emails as the purge page lists it: enough to recognise,
-/// nothing that opens.
-struct PurgeEmail: Identifiable, Hashable, Sendable {
-    let id: Int
-    /// The summary line, already cleaned for display.
-    let line: String
-    /// RFC 3339, when the row carries one.
-    let arrivedAt: String?
+// MARK: - the evidence as numbers to draw
+
+/// WHAT THE CHARTS ARE DRAWN FROM. Every mark on a sender's page comes out of
+/// here, and everything here comes out of the daemon's `signals` (and, for
+/// the one figure it sends only as a reason, `reasons`). Nothing is invented
+/// to fill a chart: a figure the daemon did not send is nil and its chart is
+/// not drawn.
+struct PurgeEvidence: Hashable, Sendable {
+    /// Mail from this sender in the window.
+    var received: Int
+    /// Of those, opened.
+    var opened: Int
+    /// Of those, marked done without ever being opened.
+    var clearedUnopened: Int
+    /// The rest: neither opened nor cleared. Still sitting there.
+    var untouched: Int
+    /// How far down a typical one the reading got, 0 to 1. nil when none
+    /// was ever measured.
+    var readFraction: Double?
+    /// A typical email's length, and how long one was looked at.
+    var words: Int?
+    var dwellMs: Int?
+    var perMonth: Double?
+    /// Opened some and never followed a link.
+    var neverClicked: Bool
+
+    init(_ sender: PurgeSender) {
+        let s = sender.signals
+        // The three parts are made to add up to the whole, whatever arrives:
+        // a ring that overfills its circle would be a drawing of a bug.
+        received = max(0, s.received)
+        opened = min(max(0, s.opened), received)
+        clearedUnopened = min(max(0, s.cleared_unopened), received - opened)
+        untouched = received - opened - clearedUnopened
+        readFraction = s.read_sample > 0 ? s.median_read_fraction.map { min(1, max(0, $0)) } : nil
+        words = s.median_words
+        dwellMs = s.dwell_sample > 0 ? s.median_dwell_ms : nil
+        var month = s.per_month
+        var never = false
+        for reason in sender.reasons {
+            switch reason {
+            case .highVolume(let perMonth): month = month ?? perMonth
+            case .neverClicked: never = true
+            default: break
+            }
+        }
+        perMonth = month
+        neverClicked = never
+    }
+
+    /// Whether there is an open rate to draw at all.
+    var hasOpenRate: Bool { received > 0 }
+
+    /// The ring's three arcs as shares of the circle, in drawing order.
+    var shares: (opened: Double, cleared: Double, untouched: Double) {
+        guard received > 0 else { return (0, 0, 0) }
+        let n = Double(received)
+        return (Double(opened) / n, Double(clearedUnopened) / n, Double(untouched) / n)
+    }
+
+    /// "Read about 8% of each", with the floor and ceiling a person would
+    /// say: under one percent is "almost none", and it never rounds to 100
+    /// short of the end.
+    var readLabel: String? {
+        guard let readFraction else { return nil }
+        let percent = Int((readFraction * 100).rounded())
+        if readFraction < 0.01 { return "Read almost none of each" }
+        if readFraction >= 1 { return "Read each to the end" }
+        return "Read about \(min(99, max(1, percent)))% of each"
+    }
+
+    /// Under the reading bar: how long a typical one is and how long it got.
+    var readCaption: String? {
+        var parts: [String] = []
+        if let words, words > 0 { parts.append("about \(PurgeCopy.words(words)) long") }
+        if let dwellMs { parts.append("open for \(PurgeCopy.duration(ms: dwellMs))") }
+        return parts.isEmpty ? nil : parts.joined(separator: ", ")
+    }
+
+    var volumeLabel: String? {
+        perMonth.map { PurgeCopy.sentence(.highVolume(perMonth: $0)) }
+    }
+
+    /// All of it, in words, for somebody who cannot see the drawings.
+    func spoken(ledgerDays: Int) -> String {
+        var parts: [String] = []
+        if hasOpenRate {
+            parts.append(opened == 0 ? "Opened none of \(received)" : "Opened \(opened) of \(received)")
+            if clearedUnopened > 0 { parts.append("cleared \(clearedUnopened) without opening") }
+            if untouched > 0 { parts.append("\(untouched) left unopened") }
+        }
+        if let readLabel { parts.append(readLabel) }
+        if let readCaption { parts.append(readCaption) }
+        if let volumeLabel { parts.append(volumeLabel) }
+        if neverClicked { parts.append("Never clicked a link") }
+        parts.append(PurgeCopy.window(ledgerDays: ledgerDays))
+        return parts.joined(separator: ". ")
+    }
 }

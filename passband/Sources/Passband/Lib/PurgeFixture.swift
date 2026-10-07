@@ -1,11 +1,11 @@
 // CANNED SENDERS FOR LOOKING AT THE PURGE AND SMART DONE WITHOUT A MAILBOX.
 //
-// `PASSBAND_PURGE_FIXTURE=<pill|few|deck|deck:N|confirm|applying|finish|
-// finish_running|finish_needs>` opens the app straight into that state over
+// `PASSBAND_PURGE_FIXTURE=<pill|few|parked|expired|deck|deck:N|confirm|
+// applying|finish|finish_running|finish_needs>` opens the app straight into that state over
 // the senders below. `pill` only makes the purge pill appear (enough
 // candidates), `few` leaves too few for it to; `deck:N` starts N senders in
-// with those N already decided. `PASSBAND_PURGE_SUGGESTIONS=loading` holds
-// the rule suggestions in their loading state.
+// with those N already decided. `PASSBAND_PURGE_RULES=<open|loading|none|
+// other>` brings the sender page up with "Create rule" already pressed.
 // `PASSBAND_SMART_DONE_FIXTURE=<working|receipt|list>` does the same for
 // smart done. Same posture as `PASSBAND_FORCE_TESTFLIGHT_NUDGE`: a launch
 // environment nobody sets by accident, and never a pref.
@@ -21,6 +21,8 @@ enum PurgeFixture {
     enum Purge: Equatable {
         case pill
         case few
+        case parked
+        case expired
         case deck(skip: Int)
         case confirm
         case applying
@@ -43,6 +45,8 @@ enum PurgeFixture {
         switch raw {
         case "pill": return .pill
         case "few": return .few
+        case "parked": return .parked
+        case "expired": return .expired
         case "deck": return .deck(skip: 0)
         case "confirm": return .confirm
         case "applying": return .applying
@@ -62,8 +66,21 @@ enum PurgeFixture {
         }
     }()
 
-    static let suggestionsStayLoading =
-        ProcessInfo.processInfo.environment["PASSBAND_PURGE_SUGGESTIONS"] == "loading"
+    /// `PASSBAND_PURGE_RULES=<open|loading|none|other>`: the sender page
+    /// comes up with "Create rule" already pressed. `loading` holds the
+    /// suggestions in flight, `none` has the daemon suggest nothing (only
+    /// Other is offered), `other` opens the field with a sentence typed in.
+    enum Rules: Equatable { case open, loading, none, other }
+    static let rules: Rules? = {
+        switch ProcessInfo.processInfo.environment["PASSBAND_PURGE_RULES"] {
+        case "open": return .open
+        case "loading": return .loading
+        case "none": return Rules.none
+        case "other": return .other
+        default: return nil
+        }
+    }()
+    static let typedRule = "just the receipts, and anything about a return"
 
     /// True for the whole life of a process launched with either variable.
     static var active: Bool { purge != nil || smartDone != nil }
@@ -80,7 +97,7 @@ enum PurgeFixture {
     /// already walked, in deck order.
     static let staged: [PurgeDecision] = [
         .unsubscribe, .unsubscribe, .block,
-        .rule("Only order confirmations and delivery updates"), .keep, .unsubscribe,
+        .rule("Only order confirmations and delivery updates"), .keep, .ownRule(typedRule),
     ]
 
     private static func signals(
@@ -218,15 +235,18 @@ enum PurgeFixture {
         ISO8601DateFormatter().string(from: Date().addingTimeInterval(-hours * 3600))
     }
 
-    private static func mail(_ base: Int, _ lines: [String]) -> [PurgeEmail] {
+    private static func mail(_ base: Int, _ lines: [String]) -> [AttentionUpdate] {
         lines.enumerated().map { i, line in
-            PurgeEmail(id: base + i, line: line, arrivedAt: ago(Double(i) * 31 + 3))
+            AttentionUpdate(
+                id: base + i, thread_id: "fixture-\(base + i)", tier: .noise, importance: 10,
+                sender: "fixture@example.com", one_line: line, reason: "", subject: line,
+                status: .open, received_at: ago(Double(i) * 31 + 3), placement: "reading")
         }
     }
 
     /// Each sender's emails in Reading, newest first, standing in for the
     /// board the real page reads them from.
-    static var emails: [String: [PurgeEmail]] {
+    static var emails: [String: [AttentionUpdate]] {
         [
             "deals@dealstream.example": mail(
                 9001,

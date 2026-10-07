@@ -33,47 +33,35 @@
 
     // MARK: - the page scaffold
 
-    /// A full-window page on the app's canvas: a bar across the top, the
-    /// content, a bar across the bottom. Opaque, so nothing of the board
-    /// under it shows through. Shared with the smart done list, so the two
-    /// read as one family.
+    /// A page filling the CONTENT AREA, on the app's canvas: the app's page
+    /// header, the content, a bar across the bottom. Opaque, so nothing of
+    /// the board under it shows through. Shared with the smart done list, so
+    /// the two read as one family.
     struct FullPage<Top: View, Content: View, Bottom: View>: View {
-        let symbol: String
         let title: String
+        var subtitle: String?
         @ViewBuilder var top: Top
         @ViewBuilder var content: Content
         @ViewBuilder var bottom: Bottom
 
         var body: some View {
             VStack(spacing: 0) {
-                HStack(spacing: Space.s12) {
-                    HStack(spacing: Space.scaled(5)) {
-                        Image(systemName: symbol)
-                            .font(Typo.ui(10, weight: .semibold))
-                        Text(title)
-                            .font(Typo.ui(9.5, weight: .bold).width(.expanded))
-                            .tracking(0.7)
-                            .textCase(.uppercase)
-                    }
-                    .foregroundStyle(Palette.accent)
-                    .fixedSize()
-                    top
-                    Spacer(minLength: 0)
-                }
-                // Clear of the window's traffic lights.
-                .padding(.leading, 86)
-                .padding(.trailing, Space.s24)
-                .frame(height: 46)
-                Rectangle().fill(Palette.hairline).frame(height: 1)
+                // The app's own page header, at the app's own bar height:
+                // these are pages, and they sit beside the rail like one.
+                RoutedHeader(title: title, subtitle: subtitle) { top }
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 Rectangle().fill(Palette.hairline).frame(height: 1)
                 bottom
-                    .padding(.horizontal, Space.s24)
+                    .padding(.horizontal, Space.scaled(22))
                     .frame(height: Space.scaled(54))
             }
             .background(Palette.canvas.ignoresSafeArea())
             .ignoresSafeArea(edges: .top)
+            // BESIDE THE RAIL, not over it: the rail is the real one, live
+            // and unblurred, and what a click on it does mid-purge is the
+            // store's rule (`AppStore.yieldPagesForNavigation`).
+            .padding(.leading, SidebarRail.railWidth)
         }
     }
 
@@ -105,6 +93,9 @@
         let label: String
         var role: Role = .plain
         var wide = false
+        /// Held on: the thing this button opened is showing.
+        var lit = false
+        var onHover: ((Bool) -> Void)?
         let action: () -> Void
 
         @State private var hovering = false
@@ -118,8 +109,10 @@
                         .foregroundStyle(
                             role == .primary ? onAccent : (role == .danger ? Palette.danger : Palette.ink))
                         .lineLimit(1)
+                        .fixedSize()
                 }
-                .padding(.horizontal, Space.s16)
+                // A button sharing a row gives its padding to its word.
+                .padding(.horizontal, wide ? Space.s6 : Space.s16)
                 .frame(maxWidth: wide ? .infinity : nil)
                 .frame(height: Space.scaled(34))
                 .background(
@@ -128,16 +121,23 @@
                             role == .primary
                                 ? Palette.accent.opacity(hovering ? 0.88 : 1)
                                 : (role == .danger
-                                    ? Palette.dangerSoft : Palette.hairline.opacity(hovering ? 1 : 0.6)))
+                                    ? Palette.dangerSoft
+                                    : (lit ? Palette.accentSoft : Palette.hairline.opacity(hovering ? 1 : 0.6))))
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 11, style: .continuous)
-                        .strokeBorder(role == .primary ? Color.clear : Palette.hairline, lineWidth: 1)
+                        .strokeBorder(
+                            role == .primary
+                                ? Color.clear : (lit ? Palette.accent.opacity(0.5) : Palette.hairline),
+                            lineWidth: 1)
                 )
                 .contentShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
             }
             .buttonStyle(.plain)
-            .onHover { hovering = $0 }
+            .onHover {
+                hovering = $0
+                onHover?($0)
+            }
             .accessibilityLabel(label)
         }
     }
@@ -208,12 +208,13 @@
         }
         @State private var ghosts: [Ghost] = []
         @State private var arrive: PurgeArrive = .first
+        @State private var ruleUI = PurgeRuleUI.fixture
 
         private var deck: PurgeDeck { session.deck }
         private var anythingStaged: Bool { !session.summary.isEmpty }
 
         var body: some View {
-            FullPage(symbol: "scissors", title: "Purge") {
+            FullPage(title: "Purge", subtitle: "senders you have stopped reading") {
                 PurgeTally(summary: session.summary)
             } content: {
                 ZStack {
@@ -222,7 +223,11 @@
                             card: card, ledgerDays: session.ledgerDays,
                             emails: store.purgeEmails(for: card),
                             suggestions: store.purgeSuggestions[card.id], motion: nil,
-                            decide: decide
+                            ruleUI: $ruleUI,
+                            actions: PurgeActions(
+                                decide: decide, toggleRules: toggleRules,
+                                openOther: { ruleUI.other = true },
+                                closeOther: { ruleUI.other = false }, submitOther: submitOther)
                         )
                         .modifier(PurgeArrival(style: arrive, reduceMotion: reduceMotion))
                         .id(card.id)
@@ -262,8 +267,20 @@
                 }
             }
             .keyBindings(.modal, bindings)
-            // THE SUGGESTIONS FOR THIS SENDER AND THE NEXT, and no further:
-            // each is a model call against a shared daily cap.
+            // A new sender starts with the three choices and nothing open.
+            .onChange(of: deck.current?.id) { _, _ in ruleUI = PurgeRuleUI() }
+            .animation(.easeOut(duration: 0.18), value: ruleUI.open)
+            // Coming back to a parked purge: the expansion is folded (this
+            // view is new) and a half-typed sentence is still there, one
+            // press of Create rule and Other away.
+            .onAppear {
+                if PurgeFixture.rules == nil { ruleUI.text = session.otherText }
+            }
+            .onChange(of: ruleUI.text) { _, text in store.setPurgeOtherText(text) }
+            // PRELOADED, so Create rule opens at once: this sender's
+            // suggestions and the next one's, and no further. Each is a model
+            // call against a shared daily cap, asked for once per sender for
+            // the session (a step back with `z` finds them already here).
             .task(id: deck.current?.id) {
                 guard let card = deck.current else { return }
                 async let here: Void = store.loadPurgeSuggestions(for: card)
@@ -276,36 +293,69 @@
 
         /// HOLDS, NOT TAPS, for the decisions: a hold swallows its own
         /// autorepeat, so a key leaned on decides one sender and not a blur
-        /// of them. Each also answers when its choice is not on offer (and
-        /// does nothing), so `u` here can never fall through to the global
-        /// undo, nor a digit to the rail's page keys.
+        /// of them. `u` also answers when it has nothing to do, so it can
+        /// never fall through to the global undo.
+        ///
+        /// THE DIGITS DECLINE unless a suggestion is on screen under that
+        /// number: otherwise they are the rail's page keys, and what those do
+        /// mid-purge is the store's rule, not something to swallow here.
+        ///
+        /// WHILE "OTHER" HAS THE KEYBOARD NONE OF THE LETTERS FIRE: the key
+        /// monitor does not hand a bare-key binding to a text field. Escape
+        /// always arrives, and backs out one step at a time.
         private var bindings: [KeyBinding] {
             [
                 KeyBinding("u", "unsubscribe or block", onRelease: { _ in }) {
                     if let card = deck.current { decide(card.ending) }
                 },
-                KeyBinding("1", "first rule", onRelease: { _ in }) { pick(0) },
-                KeyBinding("2", "second rule", onRelease: { _ in }) { pick(1) },
-                KeyBinding("3", "third rule", onRelease: { _ in }) { pick(2) },
-                KeyBinding("4", "nothing") {},
-                KeyBinding("5", "nothing") {},
+                KeyBinding("r", "create rule", onRelease: { _ in }) { toggleRules() },
+                KeyBinding(declining: "1", "first rule") { pick(0) },
+                KeyBinding(declining: "2", "second rule") { pick(1) },
+                KeyBinding(declining: "3", "third rule") { pick(2) },
+                KeyBinding("o", "your own rule") { if ruleUI.open { ruleUI.other = true } },
                 KeyBinding("s", "keep", onRelease: { _ in }) { decide(.keep) },
                 KeyBinding("z", "back one sender", onRelease: { _ in }) { back() },
                 KeyBinding("Backspace", "back one sender", onRelease: { _ in }) { back() },
                 KeyBinding("Delete", "back one sender", onRelease: { _ in }) { back() },
-                KeyBinding("Escape", "leave or review") { leave() },
+                KeyBinding("Escape", "back out one step") { leave() },
                 // Return decides nothing here: the confirm page owns it.
                 KeyBinding("Enter", "nothing") {},
+                // The search panel would open under this page, unseen.
+                KeyBinding("/", "nothing") {},
             ]
         }
 
-        /// A rule by its number, only once its sentence is on screen.
-        private func pick(_ index: Int) {
-            guard let card = deck.current,
+        /// "Create rule": show the suggestions in place. They were fetched
+        /// when this sender came up, so normally they are simply there; the
+        /// loading state is for a press that beat the fetch. Pressed again,
+        /// it folds them away (and keeps what was typed).
+        private func toggleRules() {
+            guard let card = deck.current, card.offersRules else { return }
+            if ruleUI.open {
+                ruleUI.open = false
+                ruleUI.other = false
+            } else {
+                ruleUI.open = true
+                // A sentence already typed is why they came back here.
+                ruleUI.other = !ruleUI.text.isEmpty
+            }
+        }
+
+        /// A suggestion by its number, only while its sentence is on screen.
+        private func pick(_ index: Int) -> Bool {
+            guard ruleUI.open, let card = deck.current,
                 case .loaded(let found)? = store.purgeSuggestions[card.id],
-                found.indices.contains(index)
-            else { return }
+                found.prefix(3).indices.contains(index)
+            else { return false }
             decide(.rule(found[index]))
+            return true
+        }
+
+        /// Return in the Other field: the person's own sentence, trimmed and
+        /// within the limit, or nothing at all.
+        private func submitOther() {
+            guard let want = PurgeRuleText.accept(ruleUI.text) else { return }
+            decide(.ownRule(want))
         }
 
         private func decide(_ decision: PurgeDecision) {
@@ -334,6 +384,16 @@
         /// Esc never throws decisions away: with something staged it goes to
         /// the confirm page, which is where discarding is asked about.
         private func leave() {
+            // One step at a time: out of the field, then out of the
+            // suggestions, and only then out of the deck.
+            if ruleUI.other {
+                ruleUI.other = false
+                return
+            }
+            if ruleUI.open {
+                ruleUI.open = false
+                return
+            }
             if anythingStaged {
                 store.purgeFinishEarly()
             } else {
@@ -417,15 +477,48 @@
 
     // MARK: - one sender's page
 
-    /// One sender, drawn across the window. Used for the page being decided
-    /// on (with `decide`) and for the ghost of one leaving (with `motion`).
+    /// Where the "Create rule" step is on the sender's page. Held by the
+    /// deck, so the keys and the page agree, and reset with each sender.
+    private struct PurgeRuleUI: Equatable {
+        /// "Create rule" has been pressed: the suggestions are showing.
+        var open = false
+        /// "Other" has been pressed: the field is up.
+        var other = false
+        var text = ""
+
+        /// What the launch environment asked the page to come up as.
+        static var fixture: PurgeRuleUI {
+            switch PurgeFixture.rules {
+            case .open?, .loading?, PurgeFixture.Rules.none?: PurgeRuleUI(open: true)
+            case .other?: PurgeRuleUI(open: true, other: true, text: PurgeFixture.typedRule)
+            case nil: PurgeRuleUI()
+            }
+        }
+    }
+
+    /// What the page can ask of the deck. All nil on a ghost.
+    private struct PurgeActions {
+        var decide: (PurgeDecision) -> Void
+        var toggleRules: () -> Void
+        var openOther: () -> Void
+        var closeOther: () -> Void
+        var submitOther: () -> Void
+    }
+
+    /// One sender, drawn across the content area. Used for the page being
+    /// decided on (with `actions`) and for the ghost of one leaving (with
+    /// `motion`).
     private struct PurgeSenderPage: View {
         let card: PurgeCard
         let ledgerDays: Int
-        let emails: [PurgeEmail]
+        let emails: [AttentionUpdate]
         let suggestions: AppStore.PurgeSuggestions?
         let motion: PurgeMotion?
-        var decide: ((PurgeDecision) -> Void)?
+        var ruleUI: Binding<PurgeRuleUI> = .constant(PurgeRuleUI())
+        var actions: PurgeActions?
+
+        /// The choice the pointer is over, for the one line under the row.
+        @State private var pointed: PurgeCopy.Choice?
 
         static func name(_ card: PurgeCard) -> String {
             let given = card.sender.display_name.trimmingCharacters(in: .whitespaces)
@@ -433,10 +526,6 @@
         }
 
         static func avatar(_ card: PurgeCard) -> String { "\(name(card)) <\(card.sender.sender)>" }
-
-        /// At most four: the daemon sends them strongest first, and a fifth
-        /// line is a column somebody has to read rather than see.
-        private var reasons: [PurgeReason] { Array(card.sender.reasons.prefix(4)) }
 
         var body: some View {
             HStack(alignment: .top, spacing: Space.s32) {
@@ -447,17 +536,17 @@
                         .padding(.bottom, Space.s20)
                 }
                 .scrollIndicators(.never)
-                .frame(width: Typo.measure(380))
+                .frame(width: Typo.measure(420))
                 .opacity(fade)
             }
-            .padding(.horizontal, Space.scaled(36))
-            .padding(.top, Space.s24)
+            .padding(.horizontal, Space.scaled(28))
+            .padding(.top, Space.s20)
             .accessibilityElement(children: .contain)
             .accessibilityLabel(Self.name(card))
         }
 
         /// The right column and the header fade through an unsubscribe and a
-        /// rule while the email cards do the moving.
+        /// rule while the email rows do the moving.
         private var fade: Double {
             guard let motion else { return 1 }
             switch motion.exit {
@@ -469,13 +558,13 @@
         // MARK: left: who, and what they send
 
         private var left: some View {
-            VStack(alignment: .leading, spacing: Space.s16) {
+            VStack(alignment: .leading, spacing: Space.s14) {
                 HStack(alignment: .center, spacing: Space.s14) {
-                    Avatar(sender: Self.avatar(card), size: Space.scaled(56))
+                    Avatar(sender: Self.avatar(card), size: Space.scaled(52))
                         .overlay { stamp }
                     VStack(alignment: .leading, spacing: Space.s2) {
                         Text(Self.name(card))
-                            .font(Typo.serif(28, weight: .medium))
+                            .font(Typo.serif(26, weight: .medium))
                             .foregroundStyle(Palette.ink)
                             .lineLimit(2)
                             .truncationMode(.tail)
@@ -493,16 +582,20 @@
                 .accessibilityElement(children: .combine)
 
                 Text("In Reading now")
-                    .font(Typo.ui(9, weight: .bold).width(.expanded))
-                    .tracking(0.5)
+                    .font(Typo.sectionLabel)
                     .textCase(.uppercase)
                     .foregroundStyle(Palette.inkFaint)
                     .opacity(fade)
 
                 ScrollView {
-                    VStack(alignment: .leading, spacing: Space.s8) {
+                    // THE APP'S OWN MAIL ROW (`MailRow`), in its read-only
+                    // single-sender form: the same subject, gist, marks and
+                    // date column as the all-mail list, without the sender
+                    // every row here would repeat and without anything that
+                    // says it opens. Spaced as that list spaces them.
+                    VStack(alignment: .leading, spacing: 1) {
                         ForEach(Array(emails.enumerated()), id: \.element.id) { i, email in
-                            PurgeEmailCard(email: email)
+                            MailRow(recognising: email)
                                 .modifier(Falling(index: i, motion: motion))
                         }
                         // The daemon's count is the authority on how many
@@ -520,15 +613,19 @@
                             Text(more == 1 ? "and 1 more like these" : "and \(more) more like these")
                                 .font(Typo.micro)
                                 .foregroundStyle(Palette.inkFaint)
-                                .padding(.leading, Space.s4)
+                                .padding(.leading, Space.scaled(11))
+                                .padding(.top, Space.s6)
                                 .opacity(fade)
                         }
                     }
                     .padding(.bottom, Space.s24)
                 }
                 .scrollIndicators(.automatic)
-                // A ghost's cards fall out of the list, not behind its edge.
+                // A ghost's rows fall out of the list, not behind its edge.
                 .scrollClipDisabled(motion != nil)
+                // The rows' own inset, taken back so their text lines up
+                // with the sender's name above.
+                .padding(.horizontal, -Space.scaled(11))
             }
         }
 
@@ -575,66 +672,57 @@
 
         private var right: some View {
             VStack(alignment: .leading, spacing: Space.s16) {
-                why
-                ending
-                rules
-                keep
+                PurgeEvidencePanel(evidence: PurgeEvidence(card.sender), ledgerDays: ledgerDays)
+                choices
+                if ruleUI.wrappedValue.open { rules }
             }
         }
 
-        private var why: some View {
-            VStack(alignment: .leading, spacing: Space.s10) {
-                HStack(spacing: Space.s6) {
-                    Text("Your reading")
-                        .font(Typo.ui(9, weight: .bold).width(.expanded))
-                        .tracking(0.5)
-                        .textCase(.uppercase)
-                        .foregroundStyle(Palette.accent)
-                    Spacer(minLength: Space.s8)
-                    // Once, quietly: what span every number here is about.
-                    Text(PurgeCopy.window(ledgerDays: ledgerDays))
-                        .font(Typo.micro)
-                        .foregroundStyle(Palette.inkFaintest)
-                }
-                ForEach(Array(reasons.enumerated()), id: \.offset) { i, reason in
-                    PurgeReasonRow(reason: reason, lead: i == 0, keep: false)
-                }
-            }
-            .padding(Space.s14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(Palette.accentSoft.opacity(0.6))
-            )
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel(
-                (reasons.map(PurgeCopy.sentence) + [PurgeCopy.window(ledgerDays: ledgerDays)])
-                    .joined(separator: ". "))
-        }
-
-        /// The one way to end it, on one key, in one place: unsubscribe when
-        /// there is a link, block when there is not, and the line beside it
-        /// says which and why.
-        private var ending: some View {
+        /// ONE ROW, LEFT TO RIGHT, a word or two each: the way out, a rule,
+        /// keep. Under it one short line, which says only what a button
+        /// cannot: why this is a block, that this unsubscribe ends on their
+        /// site, or what the choice under the pointer does.
+        private var choices: some View {
             VStack(alignment: .leading, spacing: Space.s8) {
-                PageButton(
-                    key: "u", label: PurgeCopy.title(card.ending), role: .primary, wide: true
-                ) { decide?(card.ending) }
-                Text(PurgeCopy.explains(card))
+                HStack(spacing: Space.s8) {
+                    PageButton(
+                        key: "u", label: PurgeCopy.title(card.ending), role: .primary, wide: true,
+                        onHover: { point(.ending, $0) }
+                    ) { actions?.decide(card.ending) }
+                    if card.offersRules {
+                        PageButton(
+                            key: "r", label: PurgeCopy.title(.rule("")), wide: true,
+                            lit: ruleUI.wrappedValue.open, onHover: { point(.rule, $0) }
+                        ) { actions?.toggleRules() }
+                    }
+                    PageButton(
+                        key: "s", label: PurgeCopy.title(.keep), wide: true,
+                        onHover: { point(.keep, $0) }
+                    ) { actions?.decide(.keep) }
+                }
+                let note = PurgeCopy.note(pointed, on: card)
+                Text(note.isEmpty ? " " : note)
                     .font(Typo.micro)
-                    .foregroundStyle(Palette.inkDim)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .foregroundStyle(
+                        pointed == nil && card.ending == .block ? Palette.warn : Palette.inkDim)
                     .padding(.horizontal, Space.s2)
+                    .animation(.easeOut(duration: 0.12), value: pointed)
+                    .accessibilityHidden(note.isEmpty)
             }
         }
 
-        /// The narrowing rules. A quiet placeholder while they load, and
-        /// NOTHING AT ALL when none come back: an empty box headed
-        /// "suggestions" would be a question with no answers under it.
-        @ViewBuilder private var rules: some View {
-            switch suggestions {
-            case .loading?:
-                VStack(alignment: .leading, spacing: Space.s8) {
+        private func point(_ choice: PurgeCopy.Choice, _ over: Bool) {
+            if over { pointed = choice } else if pointed == choice { pointed = nil }
+        }
+
+        /// AFTER "Create rule": the daemon's suggestions and Other, in place.
+        /// A calm placeholder for the second the suggestions take, and when
+        /// none come back, just Other.
+        private var rules: some View {
+            let ui = ruleUI.wrappedValue
+            return VStack(alignment: .leading, spacing: Space.s8) {
+                switch suggestions {
+                case .loading?, nil:
                     Text(PurgeCopy.rulesLoading)
                         .font(Typo.micro)
                         .foregroundStyle(Palette.inkFaint)
@@ -643,71 +731,28 @@
                             .fill(Palette.hairline.opacity(0.45))
                             .frame(height: Space.scaled(34))
                     }
-                }
-                .transition(.opacity)
-            case .loaded(let found)? where !found.isEmpty && card.offersRules:
-                VStack(alignment: .leading, spacing: Space.s8) {
-                    Text(PurgeCopy.rulesLead)
-                        .font(Typo.micro)
-                        .foregroundStyle(Palette.inkDim)
+                case .loaded(let found)?:
                     ForEach(Array(found.prefix(3).enumerated()), id: \.offset) { i, want in
-                        PurgeRuleChoice(key: "\(i + 1)", want: want) { decide?(.rule(want)) }
+                        PurgeRuleChoice(key: "\(i + 1)", want: want) { actions?.decide(.rule(want)) }
                     }
-                    Text(PurgeCopy.rulesNote)
-                        .font(Typo.micro)
-                        .foregroundStyle(Palette.inkFaint)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
-                .transition(.opacity)
-            default:
-                EmptyView()
-            }
-        }
-
-        private var keep: some View {
-            VStack(alignment: .leading, spacing: Space.s8) {
-                Rectangle().fill(Palette.hairline).frame(height: 1)
-                HStack(alignment: .center, spacing: Space.s12) {
-                    PageButton(key: "s", label: PurgeCopy.title(.keep)) { decide?(.keep) }
-                    Text(PurgeCopy.keepCaption)
-                        .font(Typo.micro)
-                        .foregroundStyle(Palette.inkFaint)
-                        .fixedSize(horizontal: false, vertical: true)
+                if ui.other {
+                    PurgeOtherField(
+                        text: Binding(
+                            get: { ruleUI.wrappedValue.text }, set: { ruleUI.wrappedValue.text = $0 }),
+                        live: actions != nil,
+                        submit: { actions?.submitOther() }, cancel: { actions?.closeOther() })
+                } else {
+                    PurgeRuleChoice(key: "o", want: PurgeCopy.otherTitle, quiet: true) {
+                        actions?.openOther()
+                    }
                 }
+                Text(PurgeCopy.rulesNote)
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.inkFaint)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-        }
-    }
-
-    /// One email, as a card to recognise: its line and when it came. Not a
-    /// button: nothing here opens.
-    private struct PurgeEmailCard: View {
-        let email: PurgeEmail
-
-        var body: some View {
-            HStack(alignment: .firstTextBaseline, spacing: Space.s12) {
-                Text(email.line.isEmpty ? "(no summary)" : email.line)
-                    .font(Typo.row)
-                    .foregroundStyle(Palette.ink)
-                    .lineLimit(2)
-                    .truncationMode(.tail)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                if email.arrivedAt != nil {
-                    Text(Fmt.relAge(email.arrivedAt))
-                        .font(Typo.micro)
-                        .foregroundStyle(Palette.inkFaintest)
-                        .fixedSize()
-                }
-            }
-            .padding(.horizontal, Space.s14)
-            .padding(.vertical, Space.s10)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous).fill(pagePaper)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(Palette.hairline, lineWidth: 1)
-            )
-            .accessibilityElement(children: .combine)
+            .transition(.opacity)
         }
     }
 
@@ -717,6 +762,9 @@
     private struct PurgeRuleChoice: View {
         let key: String
         let want: String
+        /// "Other": the same shape, in a quieter ink, because it is a door
+        /// and not a sentence.
+        var quiet = false
         let action: () -> Void
         @State private var hovering = false
 
@@ -724,9 +772,9 @@
             Button(action: action) {
                 HStack(alignment: .firstTextBaseline, spacing: Space.s10) {
                     Kbd(key)
-                    Text(want)
+                    Text(verbatim: want)
                         .font(Typo.rowSub)
-                        .foregroundStyle(Palette.ink)
+                        .foregroundStyle(quiet ? Palette.inkDim : Palette.ink)
                         .multilineTextAlignment(.leading)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -735,7 +783,7 @@
                 .padding(.vertical, Space.scaled(9))
                 .background(
                     RoundedRectangle(cornerRadius: 11, style: .continuous)
-                        .fill(hovering ? Palette.accentSoft : pagePaper)
+                        .fill(hovering ? Palette.accentSoft : (quiet ? Color.clear : pagePaper))
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 11, style: .continuous)
@@ -747,7 +795,249 @@
             }
             .buttonStyle(.plain)
             .onHover { hovering = $0 }
-            .accessibilityLabel("Rule \(key): \(want)")
+            .accessibilityLabel(quiet ? "\(want), write your own rule" : "Rule \(key): \(want)")
+        }
+    }
+
+    /// OTHER: one line for the person's own sentence. Return accepts it, Esc
+    /// backs out of the field (not out of the purge). While it has the
+    /// keyboard the page's single-letter keys stand down by themselves: the
+    /// key monitor does not fire a bare-key binding into a text field.
+    private struct PurgeOtherField: View {
+        @Binding var text: String
+        /// False on a ghost, which must not take the keyboard.
+        let live: Bool
+        let submit: () -> Void
+        let cancel: () -> Void
+        @FocusState private var focused: Bool
+
+        private var usable: Bool { PurgeRuleText.accept(text) != nil }
+
+        var body: some View {
+            HStack(spacing: Space.s8) {
+                TextField("", text: $text, prompt: Text(PurgeCopy.otherPrompt))
+                    .textFieldStyle(.plain)
+                    .font(Typo.rowSub)
+                    .foregroundStyle(Palette.ink)
+                    .focused($focused)
+                    .onSubmit { if usable { submit() } }
+                    .onChange(of: text) { _, new in
+                        // Held to the limit as it is typed, so what is on
+                        // screen is what will be staged.
+                        if new.count > PurgeRuleText.limit {
+                            text = String(new.prefix(PurgeRuleText.limit))
+                        }
+                    }
+                    .disabled(!live)
+                Kbd("return")
+                    .opacity(usable ? 1 : 0.35)
+                Button(action: cancel) {
+                    Kbd("esc")
+                }
+                .buttonStyle(.plain)
+                .help("Back to the suggestions")
+                .accessibilityLabel("Cancel")
+            }
+            .padding(.horizontal, Space.s12)
+            .padding(.vertical, Space.scaled(8))
+            .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(pagePaper))
+            // Lit all the way round while it has the keyboard.
+            .overlay(
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .strokeBorder(Palette.accent.opacity(0.7), lineWidth: 1)
+            )
+            .onAppear { if live { focused = true } }
+        }
+    }
+
+    // MARK: - the evidence, drawn
+
+    /// "YOUR READING" AS A PICTURE. The open rate is the centre: a ring that
+    /// is the whole of what this sender sent, split into what was opened,
+    /// what was cleared without opening and what is still sitting there, with
+    /// the opened count in the middle. Under it, how far into a typical one
+    /// the reading got, as a bar against the email's length; and how much
+    /// arrives, as a month of days.
+    ///
+    /// EVERY MARK IS A NUMBER THE DAEMON SENT (`PurgeEvidence`); a figure it
+    /// did not send draws nothing. Identity is never colour alone: each arc
+    /// has its name and its count beside it, in ink, and the whole panel
+    /// reads out as numbers.
+    private struct PurgeEvidencePanel: View {
+        let evidence: PurgeEvidence
+        let ledgerDays: Int
+
+        // One hue for the thing being measured, neutrals for the rest: this
+        // is a part of a whole, not three categories competing.
+        private static var openedInk: Color { Palette.accent }
+        private static var clearedInk: Color { Palette.inkFaint }
+        private static var untouchedInk: Color { Palette.hairlineStrong }
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: Space.s14) {
+                HStack(spacing: Space.s6) {
+                    Text("Your reading")
+                        .font(Typo.sectionLabel)
+                        .textCase(.uppercase)
+                        .foregroundStyle(Palette.accent)
+                    Spacer(minLength: Space.s8)
+                    // Once, quietly: what span every number here is about.
+                    Text(PurgeCopy.window(ledgerDays: ledgerDays))
+                        .font(Typo.micro)
+                        .foregroundStyle(Palette.inkFaintest)
+                }
+                if evidence.hasOpenRate { openRate }
+                if let label = evidence.readLabel, let fraction = evidence.readFraction {
+                    readDepth(label, fraction)
+                }
+                if let label = evidence.volumeLabel, let perMonth = evidence.perMonth {
+                    volume(label, perMonth)
+                }
+                if evidence.neverClicked {
+                    Text("Never clicked a link")
+                        .font(Typo.micro)
+                        .foregroundStyle(Palette.inkDim)
+                        .padding(.horizontal, Space.s8)
+                        .padding(.vertical, Space.scaled(3))
+                        .background(Capsule(style: .continuous).fill(Palette.hairline))
+                }
+            }
+            .padding(Space.s16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(pagePaper))
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(Palette.hairline, lineWidth: 1)
+            )
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Your reading. \(evidence.spoken(ledgerDays: ledgerDays))")
+        }
+
+        // MARK: opened of received
+
+        private var openRate: some View {
+            HStack(alignment: .center, spacing: Space.s20) {
+                ZStack {
+                    OpenRing(shares: evidence.shares)
+                    VStack(spacing: -2) {
+                        Text("\(evidence.opened)")
+                            .font(Typo.serif(30, weight: .medium))
+                            .foregroundStyle(Palette.ink)
+                            .monospacedDigit()
+                        Text("of \(evidence.received) opened")
+                            .font(Typo.ui(9.5, weight: .medium))
+                            .foregroundStyle(Palette.inkFaint)
+                    }
+                }
+                .frame(width: Space.scaled(112), height: Space.scaled(112))
+                VStack(alignment: .leading, spacing: Space.s8) {
+                    legend(Self.openedInk, "Opened", evidence.opened)
+                    legend(Self.clearedInk, "Cleared unopened", evidence.clearedUnopened)
+                    legend(Self.untouchedInk, "Left unopened", evidence.untouched)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+
+        private func legend(_ ink: Color, _ name: String, _ count: Int) -> some View {
+            HStack(spacing: Space.s8) {
+                RoundedRectangle(cornerRadius: 2, style: .continuous)
+                    .fill(ink)
+                    .frame(width: 9, height: 9)
+                Text(name)
+                    .font(Typo.rowSub)
+                    .foregroundStyle(count > 0 ? Palette.inkDim : Palette.inkFaintest)
+                Spacer(minLength: Space.s8)
+                Text("\(count)")
+                    .font(Typo.num(12, weight: .semibold))
+                    .foregroundStyle(count > 0 ? Palette.ink : Palette.inkFaintest)
+            }
+        }
+
+        /// The ring: three arcs of one circle, a sliver of the surface
+        /// between them, starting at twelve o'clock with the opened ones.
+        private struct OpenRing: View {
+            let shares: (opened: Double, cleared: Double, untouched: Double)
+            private static let width: CGFloat = 11
+
+            var body: some View {
+                let parts: [(Double, Color)] = [
+                    (shares.opened, PurgeEvidencePanel.openedInk),
+                    (shares.cleared, PurgeEvidencePanel.clearedInk),
+                    (shares.untouched, PurgeEvidencePanel.untouchedInk),
+                ]
+                let live = parts.filter { $0.0 > 0 }.count
+                // The gap between arcs, as a share of the circle. None when
+                // one arc is the whole ring: there is nothing to part.
+                let gap = live > 1 ? 0.012 : 0
+                ZStack {
+                    ForEach(0..<3, id: \.self) { i in
+                        let start = parts.prefix(i).map(\.0).reduce(0, +)
+                        let share = parts[i].0
+                        if share > 0 {
+                            Circle()
+                                .trim(
+                                    from: start + gap / 2,
+                                    to: max(start + gap / 2 + 0.004, start + share - gap / 2)
+                                )
+                                .stroke(
+                                    parts[i].1, style: StrokeStyle(lineWidth: Self.width, lineCap: .butt)
+                                )
+                                .rotationEffect(.degrees(-90))
+                        }
+                    }
+                }
+                .padding(Self.width / 2)
+            }
+        }
+
+        // MARK: how far in
+
+        /// The whole bar is a typical email's length; the lit part is how
+        /// far down it the reading got.
+        private func readDepth(_ label: String, _ fraction: Double) -> some View {
+            VStack(alignment: .leading, spacing: Space.s6) {
+                Text(label)
+                    .font(Typo.ui(12, weight: .semibold))
+                    .foregroundStyle(Palette.ink)
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Palette.hairlineStrong)
+                        Capsule().fill(Self.openedInk)
+                            .frame(width: max(geo.size.height, geo.size.width * CGFloat(fraction)))
+                    }
+                }
+                .frame(height: Space.scaled(8))
+                HStack {
+                    Text("start")
+                    Spacer()
+                    if let caption = evidence.readCaption { Text(caption) }
+                    Spacer()
+                    Text("end")
+                }
+                .font(Typo.ui(9.5, weight: .medium))
+                .foregroundStyle(Palette.inkFaintest)
+            }
+        }
+
+        // MARK: how much
+
+        /// A month of days, with about that many carrying their mail.
+        private func volume(_ label: String, _ perMonth: Double) -> some View {
+            let days = PurgeMarks.days(perMonth: perMonth)
+            return VStack(alignment: .leading, spacing: Space.s6) {
+                Text(label)
+                    .font(Typo.ui(12, weight: .semibold))
+                    .foregroundStyle(Palette.ink)
+                HStack(spacing: Space.scaled(3)) {
+                    ForEach(0..<days.total, id: \.self) { i in
+                        RoundedRectangle(cornerRadius: 2, style: .continuous)
+                            .fill(i < days.lit ? Self.openedInk.opacity(0.85) : Palette.hairlineStrong)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: Space.scaled(12))
+                    }
+                }
+            }
         }
     }
 
@@ -782,81 +1072,6 @@
                         RoundedRectangle(cornerRadius: 4, style: .continuous)
                             .strokeBorder(ink.opacity(0.35), lineWidth: 0.5)
                     )
-                    .fixedSize()
-            }
-        }
-    }
-
-    // MARK: - the evidence, drawn
-
-    /// One reason: its sentence, and where the numbers have a shape, a small
-    /// honest drawing of them. The first reason is the strongest and is set
-    /// as the card's lead line.
-    private struct PurgeReasonRow: View {
-        let reason: PurgeReason
-        let lead: Bool
-        let keep: Bool
-
-        private var tint: Color { keep ? Palette.positive : Palette.accent }
-
-        var body: some View {
-            VStack(alignment: .leading, spacing: Space.scaled(5)) {
-                Text(PurgeCopy.sentence(reason))
-                    .font(lead ? Typo.serif(19, weight: .medium) : Typo.rowSub)
-                    .foregroundStyle(lead ? Palette.ink : Palette.inkDim)
-                    .fixedSize(horizontal: false, vertical: true)
-                drawing
-                    .accessibilityHidden(true)
-            }
-        }
-
-        @ViewBuilder private var drawing: some View {
-            switch reason {
-            case .rarelyOpened(let opened, let received):
-                // One mark an email, the opened ones lit.
-                let marks = PurgeMarks.split(lit: opened, of: received)
-                HStack(spacing: Space.scaled(3)) {
-                    ForEach(0..<marks.total, id: \.self) { i in
-                        RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                            .fill(i < marks.lit ? tint : Palette.hairlineStrong)
-                            .frame(width: Space.scaled(5), height: Space.scaled(lead ? 13 : 9))
-                    }
-                }
-            case .skimmed(let fraction, _, _):
-                readBar(fraction)
-            case .readClosely(let fraction):
-                readBar(fraction)
-            case .highVolume(let perMonth):
-                // A month of days, with about that many carrying their mail.
-                let days = PurgeMarks.days(perMonth: perMonth)
-                HStack(spacing: Space.scaled(3)) {
-                    ForEach(0..<days.total, id: \.self) { i in
-                        Circle()
-                            .fill(i < days.lit ? tint.opacity(0.85) : Palette.hairlineStrong)
-                            .frame(width: Space.scaled(5), height: Space.scaled(5))
-                    }
-                }
-            default:
-                EmptyView()
-            }
-        }
-
-        /// How far down each email the reading got: the whole bar is the
-        /// email's length, the lit part is what was read.
-        private func readBar(_ fraction: Double) -> some View {
-            let f = CGFloat(min(1, max(0, fraction)))
-            return HStack(spacing: Space.s8) {
-                GeometryReader { geo in
-                    ZStack(alignment: .leading) {
-                        Capsule().fill(Palette.hairlineStrong)
-                        Capsule().fill(tint)
-                            .frame(width: max(geo.size.height, geo.size.width * f))
-                    }
-                }
-                .frame(height: Space.scaled(5))
-                Text("the whole email")
-                    .font(Typo.ui(9, weight: .medium))
-                    .foregroundStyle(Palette.inkFaintest)
                     .fixedSize()
             }
         }
@@ -968,7 +1183,7 @@
     private struct PurgeGhost: View {
         let card: PurgeCard
         let ledgerDays: Int
-        let emails: [PurgeEmail]
+        let emails: [AttentionUpdate]
         let suggestions: AppStore.PurgeSuggestions?
         let exit: PurgeExit
         let reduceMotion: Bool
@@ -1056,7 +1271,7 @@
         private var groups: [PurgePlan.Group] { PurgePlan.groups(session.deck) }
 
         var body: some View {
-            FullPage(symbol: "scissors", title: "Purge") {
+            FullPage(title: "Purge", subtitle: "senders you have stopped reading") {
                 Text(applying ? "Sending your choices" : "Nothing has been sent yet.")
                     .font(Typo.micro)
                     .foregroundStyle(Palette.inkFaint)
@@ -1207,8 +1422,9 @@
         /// question (keep them) and that is all: a Return aimed at a prompt
         /// about discarding must not send nine unsubscribes instead.
         private var bindings: [KeyBinding] {
-            // Held so the rail's page keys and the global undo stay out.
-            let inert = ["1", "2", "3", "4", "5", "u", "s"].map { KeyBinding($0, "nothing") {} }
+            // Held so the global undo stays out. The rail's page keys are NOT
+            // held: what leaving does is the store's rule.
+            let inert = ["u", "s", "/"].map { KeyBinding($0, "nothing") {} }
             if applying {
                 // No way back and no cancel: what has been asked of a sender
                 // has been asked.
@@ -1271,7 +1487,7 @@
             let statuses = statuses
             let summary = PurgeSummary(statuses: statuses)
             let waiting = statuses.filter { if case .needsYou = $0.status { true } else { false } }
-            FullPage(symbol: "scissors", title: "Purge") {
+            FullPage(title: "Purge", subtitle: "senders you have stopped reading") {
                 EmptyView()
             } content: {
                 ScrollView {
@@ -1309,7 +1525,7 @@
             .keyBindings(.modal, [
                 KeyBinding("Escape", "close") { leave() },
                 KeyBinding("Enter", "close") { leave() },
-            ] + ["1", "2", "3", "4", "5", "u", "s", "z"].map { KeyBinding($0, "nothing") {} })
+            ] + ["u", "s", "z", "/"].map { KeyBinding($0, "nothing") {} })
             .task(id: Phase(summary)) { await react(summary) }
             .animation(.smooth(duration: 0.3), value: summary)
         }
@@ -1637,7 +1853,7 @@
                         }
                 case .unsubscribed, .blocked, .ruled:
                     Image(systemName: "checkmark.circle.fill").foregroundStyle(Palette.positive)
-                case .kept:
+                case .kept, .alreadyDone:
                     Image(systemName: "checkmark.circle").foregroundStyle(Palette.inkFaint)
                 case .opened:
                     Image(systemName: "arrow.up.right.circle.fill").foregroundStyle(Palette.inkFaint)
@@ -1661,6 +1877,83 @@
             p.addLine(to: CGPoint(x: rect.minX + rect.width * 0.36, y: rect.maxY))
             p.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
             return p
+        }
+    }
+
+    // MARK: - a parked purge
+
+    /// THE WAY BACK, ON EVERY PAGE. A purge left with choices staged is
+    /// parked, and this travels with the person in the corner the undo chips
+    /// use, so it is not forgotten on the mail page. It says how many
+    /// choices are waiting and that nothing has been sent; Resume goes back
+    /// to the sender they left; the ✕ asks once before throwing the choices
+    /// away.
+    ///
+    /// It also keeps the session's clock: a parked purge untouched for half
+    /// an hour is dropped (`AppStore.expirePurgeIfStale`), checked against
+    /// the WALL clock on a slow tick, so a Mac that slept through the
+    /// deadline drops it on waking rather than a sleep-length later.
+    struct PurgeParkedChip: View {
+        @Environment(AppStore.self) private var store
+        let chosen: Int
+        @State private var asking = false
+
+        var body: some View {
+            HStack(spacing: Space.s10) {
+                Image(systemName: "scissors")
+                    .font(Typo.ui(11, weight: .semibold))
+                    .foregroundStyle(Palette.accent)
+                Text(asking ? PurgeCopy.discardAsk(chosen) : PurgeCopy.parked(chosen))
+                    .font(Typo.rowSub)
+                    .foregroundStyle(Palette.ink)
+                    .fixedSize()
+                if asking {
+                    chipButton("Discard", ink: Palette.danger) { store.discardParkedPurge() }
+                    chipButton("Keep", ink: Palette.ink) { asking = false }
+                } else {
+                    chipButton("Resume", ink: Palette.accentInk) { store.resumePurge() }
+                    Button {
+                        asking = true
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(Typo.ui(9, weight: .semibold))
+                            .foregroundStyle(Palette.inkFaint)
+                            .frame(width: Space.scaled(18), height: Space.scaled(18))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Discard these choices")
+                    .accessibilityLabel("Discard these choices")
+                }
+            }
+            .padding(.leading, Space.s12)
+            .padding(.trailing, Space.s8)
+            .padding(.vertical, Space.scaled(6))
+            .glassEffect(
+                .regular.tint(Palette.accent.opacity(0.16)),
+                in: .rect(cornerRadius: 11, style: .continuous)
+            )
+            .animation(.easeOut(duration: 0.15), value: asking)
+            .task {
+                while !Task.isCancelled {
+                    store.expirePurgeIfStale()
+                    try? await Task.sleep(for: .seconds(20))
+                }
+            }
+            .accessibilityElement(children: .contain)
+        }
+
+        private func chipButton(_ label: String, ink: Color, action: @escaping () -> Void) -> some View {
+            Button(action: action) {
+                Text(label)
+                    .font(Typo.ui(11.5, weight: .semibold))
+                    .foregroundStyle(ink)
+                    .padding(.horizontal, Space.s10)
+                    .padding(.vertical, Space.scaled(3))
+                    .background(Capsule(style: .continuous).fill(Palette.hairline))
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
         }
     }
 #endif

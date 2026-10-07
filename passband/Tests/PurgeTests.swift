@@ -45,7 +45,16 @@ struct PurgeTests {
         aStatusIsWhatTheJobSaysNow()
         theLiveSummaryCountsOnlyWhatHappened()
         thePlanNamesEverySenderUnderWhatHappensToIt()
-        blockExplainsItself()
+        theLineUnderTheChoicesSaysOnlyWhatAButtonCannot()
+        aTypedRuleIsTrimmedCappedAndNeverEmpty()
+        aTypedRuleSurvivesBackAndConfirm()
+        leavingParksWhatIsStagedAndEndsWhatIsNot()
+        onlyAParkedSessionExpiresAndTouchingResetsIt()
+        commitLeavesAloneWhatWasEndedSince()
+        theChartsAreDrawnFromTheDaemonsNumbers()
+        theRingsPartsAlwaysMakeTheWhole()
+        theReadingBarSaysWhatAPersonWould()
+        aParkedPurgeSaysNothingWasSent()
         aSuggestionIsNeverBuiltIntoASentence()
         needsYouLinesSayWhy()
         theHeadlineFollowsWhereThingsStand()
@@ -583,20 +592,23 @@ struct PurgeTests {
 
     // MARK: copy
 
-    static func blockExplainsItself() {
-        let bare = card(sender("b@x.com", link: false))
-        precondition(PurgeCopy.title(bare.ending) == "Block")
-        precondition(
-            PurgeCopy.explains(bare)
-                == "None of their emails carry an unsubscribe link, so the only way to stop them is to block them.")
-        precondition(PurgeCopy.note(.block) == "No unsubscribe link in any of their emails.")
+    static func theLineUnderTheChoicesSaysOnlyWhatAButtonCannot() {
         let linked = card(sender("a@x.com"))
-        precondition(PurgeCopy.title(linked.ending) == "Unsubscribe")
-        precondition(PurgeCopy.explains(linked) == "Passband asks them to stop and tells you how it went.")
-        precondition(
-            PurgeCopy.explains(card(sender("s@x.com", auto: false)))
-                == "Their unsubscribe only works on their own site. You will get the link at the end.")
-        precondition(PurgeCopy.title(.keep) == "Keep them", "keeping, not skipping")
+        let bare = card(sender("b@x.com", link: false))
+        let site = card(sender("s@x.com", auto: false))
+        precondition(PurgeCopy.title(bare.ending) == "Block" && PurgeCopy.title(linked.ending) == "Unsubscribe")
+        precondition(PurgeCopy.title(.rule("x")) == "Create rule" && PurgeCopy.title(.ownRule("x")) == "Create rule")
+        precondition(PurgeCopy.title(.keep) == "Keep", "keeping, not skipping")
+        // Nothing pointed at: empty, EXCEPT the two a person must not find out afterwards.
+        precondition(PurgeCopy.note(nil, on: linked) == "")
+        precondition(PurgeCopy.note(nil, on: bare) == "No unsubscribe link in any of their emails.")
+        precondition(PurgeCopy.note(nil, on: site) == "You finish on their site, at the end.")
+        precondition(PurgeCopy.note(.ending, on: linked) == "Asks them to stop.")
+        precondition(PurgeCopy.note(.ending, on: bare) == "No unsubscribe link in any of their emails.")
+        precondition(PurgeCopy.note(.ending, on: site) == "You finish on their site, at the end.")
+        precondition(PurgeCopy.note(.rule, on: bare) == "Keep part of what they send.")
+        precondition(PurgeCopy.note(.keep, on: site) == "Leaves them as they are.")
+        precondition(PurgeCopy.note(.block) == "No unsubscribe link in any of their emails.")
     }
 
     static func aSuggestionIsNeverBuiltIntoASentence() {
@@ -606,8 +618,8 @@ struct PurgeTests {
             precondition(PurgeCopy.staged(.rule(want), name: "Ox") == "Will add a rule for Ox: \(want)")
             precondition(PurgeCopy.status(.ruled(want)) == "Rule: \(want)")
         }
-        precondition(!PurgeCopy.rulesLead.lowercased().contains("only show"))
-        precondition(PurgeCopy.rulesLead.hasSuffix(":") && PurgeCopy.rulesNote.hasSuffix("."))
+        precondition(PurgeCopy.staged(.ownRule("mute the marketing"), name: "Ox") == "Will add a rule for Ox: mute the marketing")
+        precondition(!PurgeCopy.rulesNote.lowercased().contains("only show") && PurgeCopy.rulesNote.hasSuffix("."))
     }
 
     static func needsYouLinesSayWhy() {
@@ -661,20 +673,27 @@ struct PurgeTests {
             card(sender("c@x.com", link: false)),
         ]
         var all: [String] = [
-            PurgeCopy.keepCaption, PurgeCopy.rulesLead, PurgeCopy.rulesNote, PurgeCopy.rulesLoading,
+            PurgeCopy.rulesNote, PurgeCopy.rulesLoading, PurgeCopy.otherTitle, PurgeCopy.otherPrompt,
+            PurgeLeave.applyingToast, PurgeCopy.resumePill, PurgeCopy.parked(1), PurgeCopy.parked(3),
+            PurgeCopy.discardAsk(1), PurgeCopy.discardAsk(2), PurgeCopy.expired,
             PurgeCopy.siteDetail, PurgeCopy.needsYouTitle, PurgeCopy.needsYouLead, PurgeCopy.laterNote,
             PurgeCopy.tooFew, PurgeCopy.keptOnly(1), PurgeCopy.keptOnly(2),
             PurgeCopy.failedNote(1) ?? "", PurgeCopy.failedNote(2) ?? "",
             PurgeCopy.fewer(1) ?? "", PurgeCopy.fewer(2) ?? "",
         ]
-        let decisions: [PurgeDecision] = [.unsubscribe, .block, .rule("x"), .keep]
-        for c in cards { all.append(PurgeCopy.explains(c)) }
+        let decisions: [PurgeDecision] = [.unsubscribe, .block, .rule("x"), .ownRule("x"), .keep]
+        for c in cards {
+            for choice: PurgeCopy.Choice? in [nil, .ending, .rule, .keep] { all.append(PurgeCopy.note(choice, on: c)) }
+            let e = PurgeEvidence(c.sender)
+            all += [e.spoken(ledgerDays: 34), e.readLabel ?? "", e.readCaption ?? "", e.volumeLabel ?? ""]
+        }
         for d in decisions { all += [PurgeCopy.title(d), PurgeCopy.staged(d, name: "x")] }
         for k in PurgeDecision.Kind.allCases { all += [PurgeCopy.heading(k), PurgeCopy.note(k) ?? ""] }
         let statuses: [PurgeStatus] = [
             .running, .unsubscribed, .needsYou(reason: nil), .needsYou(reason: PurgeStatus.siteOnly),
             .needsYou(reason: "choose_topics"), .needsYou(reason: "needs_browser"),
-            .needsYou(reason: "link_error"), .opened, .blocked, .ruled("x"), .kept, .failed,
+            .needsYou(reason: "link_error"), .opened, .blocked, .ruled("x"), .kept, .alreadyDone,
+            .failed,
         ]
         for s in statuses { all.append(PurgeCopy.status(s)) }
         var s = PurgeSummary()
@@ -689,5 +708,180 @@ struct PurgeTests {
             precondition(!line.contains("\u{2014}") && !line.contains("\u{2013}"), line)
             precondition(!line.contains(" - "), line)
         }
+    }
+
+    // MARK: a rule in the person's own words
+
+    static func aTypedRuleIsTrimmedCappedAndNeverEmpty() {
+        precondition(PurgeRuleText.accept("  just the invoices \n") == "just the invoices")
+        precondition(PurgeRuleText.accept("") == nil && PurgeRuleText.accept("   \n\t ") == nil, "empty is refused")
+        precondition(PurgeRuleText.accept("only\nreceipts") == "only receipts", "a one-line field")
+        let long = String(repeating: "a", count: PurgeRuleText.limit + 50)
+        precondition(PurgeRuleText.accept(long)?.count == PurgeRuleText.limit, "cut at the limit")
+        precondition(PurgeRuleText.accept(String(repeating: "a", count: PurgeRuleText.limit))?.count == PurgeRuleText.limit)
+        precondition(PurgeRuleText.limit == 300)
+        let c = card(sender("a@x.com"))
+        precondition(c.allows(.ownRule("just the invoices")))
+        precondition(!c.allows(.ownRule("")) && !c.allows(.ownRule(" padded ")), "only what accept hands back")
+        precondition(!c.allows(.ownRule(long)))
+        precondition(!card(sender("r@x.com", rule: .filtered)).allows(.ownRule("just the invoices")))
+        precondition(PurgeDecision.ownRule("x").kind == .rule && PurgeDecision.ownRule("x").want == "x")
+        precondition(PurgeDecision.rule("y").want == "y" && PurgeDecision.keep.want == nil)
+        precondition(PurgeDecision.ownRule("x") != PurgeDecision.rule("x"), "typed and suggested are sent differently")
+    }
+
+    static func aTypedRuleSurvivesBackAndConfirm() {
+        var deck = threeSenders()
+        precondition(deck.decide(.ownRule("just the invoices")))
+        precondition(deck.decide(.block))
+        precondition(deck.back())
+        precondition(deck.decision(for: "a@x.com") == .ownRule("just the invoices"), "still typed, still whole")
+        deck.decide(.block)
+        deck.decide(.rule("only receipts"))
+        let groups = PurgePlan.groups(deck)
+        precondition(groups.map(\.kind) == [.block, .rule])
+        precondition(
+            groups[1].entries.map(\.detail) == ["just the invoices", "only receipts"],
+            "a typed rule is listed exactly as a suggested one is")
+        precondition(PurgeSummary(deck: deck).rules == 2)
+    }
+
+    // MARK: leaving, parking, expiring
+
+    static func leavingParksWhatIsStagedAndEndsWhatIsNot() {
+        precondition(PurgeLeave.rule(stage: .deciding, anythingStaged: false) == .end)
+        precondition(PurgeLeave.rule(stage: .deciding, anythingStaged: true) == .park)
+        precondition(PurgeLeave.rule(stage: .confirming, anythingStaged: true) == .park)
+        precondition(PurgeLeave.rule(stage: .confirming, anythingStaged: false) == .end)
+        precondition(PurgeLeave.rule(stage: .applying, anythingStaged: true) == .stay, "the requests are out")
+        precondition(PurgeLeave.rule(stage: .applying, anythingStaged: false) == .stay)
+    }
+
+    static func onlyAParkedSessionExpiresAndTouchingResetsIt() {
+        let t0 = Date(timeIntervalSince1970: 2_000_000)
+        func at(_ minutes: Double) -> Date { t0.addingTimeInterval(minutes * 60) }
+        precondition(PurgeClock.parkedLifetime == 30 * 60)
+        var clock = PurgeClock(at: t0)
+        precondition(!clock.isExpired(at: at(29), parked: true), "29 minutes parked survives")
+        precondition(clock.isExpired(at: at(31), parked: true), "31 minutes parked expires")
+        precondition(clock.isExpired(at: at(30), parked: true), "at the line it is over")
+        precondition(!clock.isExpired(at: at(500), parked: false), "one on screen never times out")
+        precondition(clock.isExpired(at: at(8 * 60), parked: true), "a night asleep counts: wall clock")
+        clock.touch(at: at(25))
+        precondition(clock.touchedAt == at(25))
+        precondition(!clock.isExpired(at: at(31), parked: true), "a decision at 25 resets it")
+        precondition(!clock.isExpired(at: at(54), parked: true) && clock.isExpired(at: at(55), parked: true))
+        precondition(!clock.isExpired(at: at(-90), parked: true), "a clock set backwards expires nothing")
+    }
+
+    static func commitLeavesAloneWhatWasEndedSince() {
+        let ending: [PurgeDecision] = [.unsubscribe, .block, .rule("x"), .ownRule("x")]
+        for d in ending {
+            precondition(PurgeReconcile.action(for: d, asked: false, blocked: false, wasBlocked: false) == .apply)
+            precondition(
+                PurgeReconcile.action(for: d, asked: true, blocked: false, wasBlocked: false) == .alreadyDone,
+                "unsubscribed from by another route: not asked twice")
+            precondition(
+                PurgeReconcile.action(for: d, asked: false, blocked: true, wasBlocked: false) == .alreadyDone,
+                "blocked since: a rule now would replace that block")
+            precondition(
+                PurgeReconcile.action(for: d, asked: false, blocked: true, wasBlocked: true) == .apply,
+                "muted BEFORE the deck was built is why it is on the deck, not news")
+            precondition(PurgeReconcile.action(for: d, asked: true, blocked: true, wasBlocked: true) == .alreadyDone)
+        }
+        for asked in [true, false] {
+            for blocked in [true, false] {
+                precondition(
+                    PurgeReconcile.action(for: .keep, asked: asked, blocked: blocked, wasBlocked: false) == .apply,
+                    "a keep is only a note")
+            }
+        }
+        precondition(PurgeStatus.resolve(.alreadyDone, job: .running, opened: false) == .alreadyDone)
+        let s = PurgeSummary(statuses: [(card: card(sender("a@x.com", perMonth: 10)), status: .alreadyDone)])
+        precondition(s.alreadyDone == 1 && s.unsubscribed == 0 && s.fewerPerMonth == 0, "claimed as nothing")
+        precondition(!s.isEmpty && s.isSettled)
+        precondition(PurgeCopy.status(.alreadyDone) == "Already taken care of")
+    }
+
+    // MARK: the numbers the charts draw
+
+    static func evidence(
+        received: Int, opened: Int, cleared: Int, readSample: Int = 0, fraction: Double? = nil,
+        words: Int? = nil, dwellSample: Int = 0, dwellMs: Int? = nil, perMonth: Double? = 4,
+        reasons: [PurgeReason] = []
+    ) -> PurgeEvidence {
+        PurgeEvidence(
+            PurgeSender(
+                sender: "a@x.com", display_name: "A", open_count: 1, open_message_ids: [1],
+                signals: .init(
+                    received: received, opened: opened, cleared_unopened: cleared,
+                    dwell_sample: dwellSample, median_dwell_ms: dwellMs, clicks: 0,
+                    read_sample: readSample, median_read_fraction: fraction, median_words: words,
+                    per_month: perMonth), score: 90, reasons: reasons))
+    }
+
+    static func theChartsAreDrawnFromTheDaemonsNumbers() {
+        let e = evidence(
+            received: 23, opened: 1, cleared: 14, readSample: 1, fraction: 0.08, words: 2400,
+            dwellSample: 1, dwellMs: 6000, perMonth: 22.6, reasons: [.neverClicked(opened: 1)])
+        precondition(e.received == 23 && e.opened == 1 && e.clearedUnopened == 14 && e.untouched == 8)
+        precondition(e.hasOpenRate && e.neverClicked)
+        precondition(e.readFraction == 0.08 && e.perMonth == 22.6)
+        precondition(e.volumeLabel == "About 23 a month")
+        precondition(
+            e.spoken(ledgerDays: 34)
+                == "Opened 1 of 23. cleared 14 without opening. 8 left unopened. Read about 8% of each. about 2,400 words long, open for 6 seconds. About 23 a month. Never clicked a link. in the last 34 days",
+            e.spoken(ledgerDays: 34))
+        // Nothing the daemon did not send is drawn.
+        let bare = evidence(received: 0, opened: 0, cleared: 0, fraction: 0.5, dwellMs: 4000, perMonth: nil)
+        precondition(!bare.hasOpenRate && bare.readFraction == nil, "a fraction with no sample is not a measurement")
+        precondition(bare.dwellMs == nil && bare.perMonth == nil && bare.volumeLabel == nil && bare.readLabel == nil)
+        precondition(!bare.neverClicked)
+        precondition(bare.spoken(ledgerDays: 1) == "in the last day")
+        // per_month absent on the wire falls back to the reason that carries it.
+        precondition(
+            evidence(received: 3, opened: 0, cleared: 0, perMonth: nil, reasons: [.highVolume(perMonth: 31.2)]).perMonth == 31.2)
+        precondition(evidence(received: 3, opened: 0, cleared: 0, perMonth: 5, reasons: [.highVolume(perMonth: 31.2)]).perMonth == 5)
+        precondition(evidence(received: 41, opened: 0, cleared: 12).spoken(ledgerDays: 34).hasPrefix("Opened none of 41."))
+    }
+
+    static func theRingsPartsAlwaysMakeTheWhole() {
+        for (r, o, c) in [(23, 1, 14), (10, 10, 0), (10, 0, 10), (5, 9, 9), (5, 3, 9), (0, 4, 4), (7, -2, -3)] {
+            let e = evidence(received: r, opened: o, cleared: c)
+            precondition(e.opened >= 0 && e.clearedUnopened >= 0 && e.untouched >= 0, "\((r, o, c))")
+            precondition(e.opened + e.clearedUnopened + e.untouched == e.received, "\((r, o, c))")
+            let s = e.shares
+            if e.received > 0 { precondition(abs(s.opened + s.cleared + s.untouched - 1) < 1e-9) }
+        }
+        let over = evidence(received: 5, opened: 3, cleared: 9)
+        precondition(over.opened == 3 && over.clearedUnopened == 2 && over.untouched == 0, "cleared cannot overfill")
+        let e = evidence(received: 20, opened: 5, cleared: 10)
+        precondition(e.shares.opened == 0.25 && e.shares.cleared == 0.5 && e.shares.untouched == 0.25)
+        let none = evidence(received: 0, opened: 0, cleared: 0).shares
+        precondition(none.opened == 0 && none.cleared == 0 && none.untouched == 0)
+    }
+
+    static func theReadingBarSaysWhatAPersonWould() {
+        func label(_ f: Double) -> String? { evidence(received: 3, opened: 1, cleared: 0, readSample: 1, fraction: f).readLabel }
+        precondition(label(0.08) == "Read about 8% of each")
+        precondition(label(0.004) == "Read almost none of each")
+        precondition(label(0.012) == "Read about 1% of each")
+        precondition(label(0.996) == "Read about 99% of each", "never 100 short of the end")
+        precondition(label(1) == "Read each to the end" && label(1.4) == "Read each to the end")
+        precondition(evidence(received: 3, opened: 1, cleared: 0, readSample: 1, fraction: 1.4).readFraction == 1)
+        precondition(evidence(received: 3, opened: 1, cleared: 0, readSample: 1, fraction: -0.2).readFraction == 0)
+        precondition(evidence(received: 3, opened: 1, cleared: 0, words: 800).readCaption == "about 800 words long")
+        precondition(
+            evidence(received: 3, opened: 1, cleared: 0, dwellSample: 2, dwellMs: 4000).readCaption == "open for 4 seconds")
+        precondition(evidence(received: 3, opened: 1, cleared: 0).readCaption == nil)
+    }
+
+    static func aParkedPurgeSaysNothingWasSent() {
+        precondition(PurgeCopy.chosen(1) == "1 choice" && PurgeCopy.chosen(3) == "3 choices")
+        precondition(PurgeCopy.parked(3) == "Purge paused with 3 choices. Nothing has been sent.")
+        precondition(PurgeCopy.parked(1) == "Purge paused with 1 choice. Nothing has been sent.")
+        precondition(PurgeCopy.discardAsk(3) == "Discard 3 choices?")
+        precondition(PurgeCopy.expired == "Your purge timed out. Nothing was sent.")
+        precondition(PurgeCopy.resumePill == "resume purge")
     }
 }

@@ -758,11 +758,128 @@ final class AppStore {
         var ledgerDays: Int
         var startedAt = Date()
         var phase: Phase = .deciding
+        /// PARKED: the person went somewhere else with decisions staged. The
+        /// session is whole (deck, cursor, decisions, phase) and off screen.
+        var parked = false
+        /// When the person last did something with the purge. A parked
+        /// session untouched for `PurgeClock.parkedLifetime` is dropped.
+        var clock = PurgeClock(at: Date())
+        /// A sentence half typed into "Other" on the sender on screen, kept
+        /// across a park so coming back does not cost it.
+        var otherText = ""
 
         /// What the staged decisions would come to.
         var summary: PurgeSummary { PurgeSummary(deck: deck) }
+        /// How many decisions are staged.
+        var chosen: Int { deck.plan.count }
     }
-    var purge: PurgeSession?
+    /// IN MEMORY ONLY, NEVER PERSISTED. See `endPurge` for everything that
+    /// ends a session.
+    private(set) var purge: PurgeSession?
+    /// The session, when it is the thing on screen.
+    var purgeShown: PurgeSession? { purge.flatMap { $0.parked ? nil : $0 } }
+    /// The session, when it is parked.
+    var purgeParked: PurgeSession? { purge.flatMap { $0.parked ? $0 : nil } }
+    /// A parked purge timed out and the person has not been told yet. Said
+    /// once, the next time the sitrep is on screen (`takePurgeExpiredNotice`).
+    private(set) var purgeExpiredNotice = false
+
+    /// Why a session ended.
+    enum PurgeEnd {
+        /// The confirm press applied it.
+        case confirmed
+        /// The person threw it away: Esc twice on the confirm page, or the
+        /// discard on the parked marker.
+        case discarded
+        /// Left, or reached the end, with nothing staged.
+        case nothingStaged
+        /// The account epoch moved: a switch, a sign out, a reconnect.
+        case accountChanged
+        /// The practice inbox came up.
+        case practice
+        /// Parked and untouched for `PurgeClock.parkedLifetime`.
+        case expired
+        /// A fixture replacing whatever was there.
+        case fixture
+    }
+
+    /// THE ONE PLACE A PURGE SESSION ENDS, live or parked. Everything that
+    /// deletes one:
+    ///
+    /// 1. CONFIRM (it has been applied) or an EXPLICIT DISCARD.
+    /// 2. QUIT OR RESTART. The session is a stored property and nothing
+    ///    writes it anywhere: a staged unsubscribe must not sit in a file to
+    ///    fire days later. Quitting with one parked neither blocks nor asks.
+    /// 3. THE ACCOUNT EPOCH MOVING (a switch, a sign out, a daemon replaced:
+    ///    `wipeAccountState`), and the PRACTICE INBOX coming up.
+    /// 4. TIME: parked and untouched for half an hour (`PurgeClock`). That
+    ///    one leaves a notice for the sitrep, since nobody was looking.
+    /// 5. LEAVING WITH NOTHING STAGED, which is not really a deletion: there
+    ///    was nothing in it.
+    ///
+    /// What does NOT end it: a smart done, a zone refresh or poll, opening
+    /// and closing threads, Settings, the window closing while the app runs
+    /// (this store outlives its windows), and the candidate list refreshing
+    /// behind it (a session keeps ITS deck).
+    private func endPurge(_ why: PurgeEnd) {
+        guard purge != nil else { return }
+        purge = nil
+        if why == .expired { purgeExpiredNotice = true }
+    }
+
+    /// Park the session as it stands. See `PurgeLeave`.
+    private func parkPurge() {
+        guard purge != nil, purge?.parked == false else { return }
+        purge?.parked = true
+    }
+
+    /// Back into a parked purge, on the sender (or the confirm page) it was
+    /// left on.
+    func resumePurge() {
+        guard purge?.parked == true else { return }
+        // Asked for, so it is now: a session that timed out a second ago is
+        // not resurrected by the press that would have saved it.
+        guard !expirePurgeIfStale() else { return }
+        closeThread()
+        if activeView != .sitrep { route(to: .sitrep) }
+        purge?.parked = false
+        purge?.clock.touch(at: Date())
+    }
+
+    /// Throw a parked purge away without going back into it. The marker asks
+    /// once before calling this.
+    func discardParkedPurge() {
+        guard purge?.parked == true else { return }
+        endPurge(.discarded)
+    }
+
+    /// Drop a parked session that has sat too long, or that the practice
+    /// inbox has come up over. True when it was dropped. Asked on a slow
+    /// tick by the parked marker, and before a resume.
+    @discardableResult
+    func expirePurgeIfStale(now: Date = Date()) -> Bool {
+        guard let session = purge else { return false }
+        if RehearsalMode.isEnabled {
+            endPurge(.practice)
+            return true
+        }
+        guard session.clock.isExpired(at: now, parked: session.parked) else { return false }
+        endPurge(.expired)
+        return true
+    }
+
+    /// The sitrep is on screen: say, once, that a purge timed out.
+    func takePurgeExpiredNotice() {
+        guard purgeExpiredNotice else { return }
+        purgeExpiredNotice = false
+        pushToast(PurgeCopy.expired, .info)
+    }
+
+    /// The half-typed "Other" sentence, kept with the session.
+    func setPurgeOtherText(_ text: String) {
+        guard purge != nil, purge?.otherText != text else { return }
+        purge?.otherText = text
+    }
 
     /// A COMMITTED purge, for the status board at the end. Each row is what
     /// the commit did about one sender; where an unsubscribe stands NOW is
@@ -915,6 +1032,11 @@ final class AppStore {
     /// end by asking the real daemon to unsubscribe from fixture message ids.
     @discardableResult
     func startPurge() async -> PurgeStart {
+        // A parked session is resumed, never replaced.
+        if purge?.parked == true {
+            resumePurge()
+            if purge != nil { return .started }
+        }
         guard purge == nil else { return .started }
         let fresh = purgeCandidates.map { Date().timeIntervalSince($0.at) < Self.purgeFreshFor } ?? false
         if !fresh {
@@ -946,7 +1068,11 @@ final class AppStore {
 
     /// The purge pill and `p`: open the deck, and say why when it cannot.
     func beginPurge() async {
-        guard !purgeStarting, purge == nil else { return }
+        guard !purgeStarting, purgeShown == nil else { return }
+        if purge?.parked == true {
+            resumePurge()
+            if purge != nil { return }
+        }
         purgeStarting = true
         let result = await startPurge()
         purgeStarting = false
@@ -958,6 +1084,8 @@ final class AppStore {
     @discardableResult
     func purgeDecide(_ decision: PurgeDecision) -> Bool {
         guard purge?.phase == .deciding, purge?.deck.decide(decision) == true else { return false }
+        purge?.clock.touch(at: Date())
+        purge?.otherText = ""
         if purge?.deck.isFinished == true { purgeReachedEnd() }
         return true
     }
@@ -969,6 +1097,8 @@ final class AppStore {
         guard let phase = purge?.phase, phase != .applying, purge?.deck.back() == true
         else { return false }
         purge?.phase = .deciding
+        purge?.clock.touch(at: Date())
+        purge?.otherText = ""
         return true
     }
 
@@ -976,6 +1106,7 @@ final class AppStore {
     /// cards not reached are untouched.
     func purgeFinishEarly() {
         guard purge?.phase == .deciding else { return }
+        purge?.clock.touch(at: Date())
         purge?.deck.finishEarly()
         purgeReachedEnd()
     }
@@ -985,7 +1116,7 @@ final class AppStore {
     private func purgeReachedEnd() {
         guard let session = purge else { return }
         if session.summary.isEmpty {
-            purge = nil
+            endPurge(.nothingStaged)
         } else {
             purge?.phase = .confirming
         }
@@ -995,7 +1126,7 @@ final class AppStore {
     /// Refused while applying: the requests are already out.
     func cancelPurge() {
         guard purge?.phase != .applying else { return }
-        purge = nil
+        endPurge(.discarded)
     }
 
     // MARK: purge suggestions
@@ -1011,9 +1142,9 @@ final class AppStore {
     /// against a shared daily cap, so an answer is asked for once.
     var purgeSuggestions: [String: PurgeSuggestions] = [:]
 
-    /// Fetch the suggestions for `card`, once. Called for the card on screen
-    /// and the one after it, and for no other: a deck of forty must not
-    /// spend forty calls on cards nobody reaches.
+    /// Fetch the suggestions for `card`, once. Called when "Create rule" is
+    /// pressed on that sender and at no other time: it is a model call, and
+    /// it is spent only on a sender somebody actually wants a rule for.
     ///
     /// THE SENTENCES ARE MODEL-WRITTEN FROM SENDER-WRITTEN SUBJECTS. They are
     /// shown verbatim and saved only if picked.
@@ -1025,8 +1156,10 @@ final class AppStore {
         }
         purgeSuggestions[card.id] = .loading
         if PurgeFixture.active {
-            try? await Task.sleep(for: .milliseconds(PurgeFixture.suggestionsStayLoading ? 600_000 : 900))
-            purgeSuggestions[card.id] = .loaded(PurgeFixture.suggestions[card.id] ?? [])
+            let held = PurgeFixture.rules == .loading
+            try? await Task.sleep(for: .milliseconds(held ? 600_000 : 900))
+            purgeSuggestions[card.id] = .loaded(
+                PurgeFixture.rules == PurgeFixture.Rules.none ? [] : PurgeFixture.suggestions[card.id] ?? [])
             return
         }
         let e = epoch
@@ -1036,14 +1169,44 @@ final class AppStore {
     }
 
     /// A sender's emails in Reading, newest first, for the page's left
-    /// column. Read off the board already on screen, matched by address: no
-    /// request, and nothing here opens.
-    func purgeEmails(for card: PurgeCard) -> [PurgeEmail] {
+    /// column: the board's own rows, so the page can draw them with the
+    /// app's own mail row. Matched by address; no request, and nothing here
+    /// opens.
+    func purgeEmails(for card: PurgeCard) -> [AttentionUpdate] {
         if PurgeFixture.active { return PurgeFixture.emails[card.id] ?? [] }
-        let items = zones.reading.first { $0.address == card.id }?.items ?? []
-        return items.map {
-            PurgeEmail(id: $0.id, line: Reading.cleanSummary($0.one_line), arrivedAt: $0.arrivedAt)
+        return zones.reading.first { $0.address == card.id }?.items ?? []
+    }
+
+    /// WHAT THE RAIL (AND EVERY OTHER ROUTE AWAY) DOES WHILE ONE OF THE
+    /// CONTENT-AREA PAGES IS UP. True when the navigation may go ahead.
+    ///
+    /// The purge, its end page and the smart done list fill the content area
+    /// beside the real rail, so a click on the rail (a page key, an email
+    /// opening) is a request to leave. Leaving never silently discards
+    /// staged decisions (`PurgeLeave`): with something staged the session is
+    /// PARKED, whole, and the app goes where it was asked. The end page and
+    /// the list hold nothing that can be lost: they close, the list's undo
+    /// clock starting again as it does.
+    @discardableResult
+    private func yieldPagesForNavigation() -> Bool {
+        if let session = purgeShown {
+            let stage: PurgeLeave.Stage =
+                switch session.phase {
+                case .deciding: .deciding
+                case .confirming: .confirming
+                case .applying: .applying
+                }
+            switch PurgeLeave.rule(stage: stage, anythingStaged: !session.summary.isEmpty) {
+            case .end: endPurge(.nothingStaged)
+            case .park: parkPurge()
+            case .stay:
+                pushToast(PurgeLeave.applyingToast, .info)
+                return false
+            }
         }
+        if purgeFinished != nil { dismissPurgeFinished() }
+        if smartDoneListOpen { closeSmartDoneList() }
+        return true
     }
 
     // MARK: purge commit
@@ -1083,8 +1246,31 @@ final class AppStore {
         let plan = session.deck.plan
         var applied: [String: PurgeApplied] = [:]
 
+        // THE WORLD MAY HAVE MOVED: this session can have sat parked for half
+        // an hour. Read who has been unsubscribed from or blocked SINCE, and
+        // leave those alone (`PurgeReconcile`). A failed read changes
+        // nothing: the decisions go as staged, as they always did.
+        async let ledger = try? APIClient.shared.getUnsubscribes()
+        async let ruleRows = try? APIClient.shared.listRules()
+        let asked = Set((await ledger ?? []).map { $0.sender.lowercased() })
+        let blocked = Set(
+            (await ruleRows ?? []).filter { $0.disposition == .squelch }
+                .map { $0.match_pattern.lowercased() })
+        guard e == epoch else { return }
+        var todo: [(card: PurgeCard, decision: PurgeDecision)] = []
+        for (card, decision) in plan {
+            switch PurgeReconcile.action(
+                for: decision, asked: asked.contains(card.id), blocked: blocked.contains(card.id),
+                wasBlocked: card.sender.rule?.disposition == .squelch)
+            {
+            case .apply: todo.append((card, decision))
+            case .alreadyDone:
+                applied[card.id] = PurgeApplied(sender: card.id, outcome: .alreadyDone)
+            }
+        }
+
         await withTaskGroup(of: PurgeApplied.self) { group in
-            var waiting = plan.makeIterator()
+            var waiting = todo.makeIterator()
             var running = 0
             while true {
                 // Top up to the limit. Nothing new starts once the account
@@ -1114,7 +1300,9 @@ final class AppStore {
             // The switch's wipe has normally cleared the deck already. This is
             // for an epoch bump that does not wipe: without it THIS session
             // would sit in `.applying`, the one phase with no way out.
-            if purge?.phase == .applying, purge?.startedAt == session.startedAt { purge = nil }
+            if purge?.phase == .applying, purge?.startedAt == session.startedAt {
+                endPurge(.accountChanged)
+            }
             return
         }
 
@@ -1142,7 +1330,7 @@ final class AppStore {
     /// Close the deck and put up what it came to: the status board, or for a
     /// deck of nothing but keeps, a line.
     private func finishPurge(_ session: PurgeSession, rows: [PurgeFinish.Row]) {
-        purge = nil
+        endPurge(.confirmed)
         let finish = PurgeFinish(rows: rows, startedAt: session.startedAt)
         let summary = PurgeSummary(statuses: purgeStatuses(finish))
         // Counts and a duration. Never a sender, an address or a word of
@@ -1159,7 +1347,7 @@ final class AppStore {
                 "failed": summary.failed,
                 "seconds": Int(Date().timeIntervalSince(session.startedAt)),
             ])
-        if summary.changesNothing && summary.failed == 0 {
+        if summary.changesNothing && summary.failed == 0 && summary.alreadyDone == 0 {
             pushToast(PurgeCopy.keptOnly(summary.kept), .info)
         } else {
             purgeFinished = finish
@@ -1227,6 +1415,21 @@ final class AppStore {
                 try await Actions.createSmartBlockRule(sender: sender.sender, want: want)
                 // Answered: without this the next purge asks again about a
                 // sender the person has just written a rule for.
+                if await purgeCurrent(e) { await APIClient.shared.keepReadingSender(sender.sender) }
+                out.outcome = .ruled(want)
+            case .ownRule(let want):
+                // THE PERSON'S OWN WORDS, so no disposition is named: the
+                // daemon infers the outcome from the sentence, exactly as it
+                // does for a rule typed into the rule editor.
+                try await APIClient.shared.createRule(
+                    CreateRuleBody(
+                        match_pattern: sender.sender.trimmingCharacters(in: .whitespaces).lowercased(),
+                        want: want, disposition: nil))
+                await MainActor.run {
+                    Analytics.capture(
+                        "rule_created",
+                        ["has_want": true, "edit": false, "suggested": false, "from_suggestion": false])
+                }
                 if await purgeCurrent(e) { await APIClient.shared.keepReadingSender(sender.sender) }
                 out.outcome = .ruled(want)
             case .keep:
@@ -1379,6 +1582,21 @@ final class AppStore {
             switch mode {
             case .pill, .few:
                 break
+            case .parked:
+                // Three decisions staged, then the person "went elsewhere".
+                openFixtureDeck()
+                for decision in PurgeFixture.staged.prefix(3) { purge?.deck.decide(decision) }
+                purge?.parked = true
+                // `PASSBAND_FIXTURE_VIEW=<page>`: on another page, to see
+                // the marker travel.
+                if let raw = ProcessInfo.processInfo.environment["PASSBAND_FIXTURE_VIEW"],
+                    let view = MainView(rawValue: raw)
+                {
+                    route(to: view)
+                }
+            case .expired:
+                purgeExpiredNotice = true
+                if showsSitrepCorner { takePurgeExpiredNotice() }
             case .deck(let skip):
                 openFixtureDeck()
                 // Decided the way the walked fixtures are, so the tally has
@@ -1394,7 +1612,7 @@ final class AppStore {
             case .finish, .finishRunning, .finishNeeds:
                 openFixtureDeck(staged: PurgeFixture.staged)
                 guard let session = purge else { return }
-                purge = nil
+                endPurge(.fixture)
                 var finish = fixtureFinish(session)
                 for row in finish.rows where row.outcome == .unsubscribing {
                     purgeFixtureJobs[row.id] = mode == .finishRunning ? .running : .done
@@ -1427,6 +1645,7 @@ final class AppStore {
         var deck = PurgeDeck(senders: PurgeFixture.candidates)
         for decision in staged { deck.decide(decision) }
         purgeFinished = nil
+        endPurge(.fixture)
         purge = PurgeSession(deck: deck, ledgerDays: PurgeFixture.ledgerDays)
         if !staged.isEmpty {
             purge?.deck.finishEarly()
@@ -1449,7 +1668,7 @@ final class AppStore {
                     outcome = .unsubscribing
                 }
             case .block: outcome = .blocked
-            case .rule(let want): outcome = .ruled(want)
+            case .rule(let want), .ownRule(let want): outcome = .ruled(want)
             case .keep: outcome = .kept
             }
             return .init(card: card, outcome: outcome, site: site)
@@ -1465,7 +1684,7 @@ final class AppStore {
         let finish = fixtureFinish(session)
         let jobs = finish.rows.filter { $0.outcome == .unsubscribing }.map(\.id)
         for id in jobs { purgeFixtureJobs[id] = .running }
-        purge = nil
+        endPurge(.confirmed)
         purgeFinished = finish
         for (i, id) in jobs.enumerated() {
             try? await Task.sleep(for: .milliseconds(1500))
@@ -2858,7 +3077,7 @@ final class AppStore {
         // A deck is the old account's senders and message ids, and its end
         // card's links are unsubscribes the new daemon never heard of. An
         // apply in flight sees the epoch move and reports to nobody.
-        purge = nil
+        endPurge(.accountChanged)
         purgeFinished = nil
         // The candidate list, its count and the suggestions are all about
         // the old account's senders.
@@ -3042,6 +3261,8 @@ final class AppStore {
 
     func setView(_ view: MainView, viaPointer: Bool = false) {
         guard !RehearsalMode.isEnabled || view == .sitrep else { return }
+        // A purge with choices staged is not left by accident.
+        guard yieldPagesForNavigation() else { return }
         // Navigating ANYWHERE dismisses an open thread viewer: the rail is visible
         // beside it, so a click there means "leave this email", not "change the
         // page underneath the overlay". Through closeThread() so the reader's
@@ -3127,6 +3348,7 @@ final class AppStore {
     var canGoForward: Bool { historyIndex < history.count - 1 }
 
     func goBack() {
+        guard yieldPagesForNavigation() else { return }
         guard historyIndex > 0 else { return }
         historyIndex -= 1
         let entry = history[historyIndex]
@@ -3135,6 +3357,7 @@ final class AppStore {
     }
 
     func goForward() {
+        guard yieldPagesForNavigation() else { return }
         guard historyIndex < history.count - 1 else { return }
         historyIndex += 1
         let entry = history[historyIndex]
@@ -3209,6 +3432,10 @@ final class AppStore {
         entering edge: ThreadEdge? = nil, focusMessage: Int? = nil, readingMail: Bool = false,
         from source: OpenSource
     ) {
+        // An email opening is a way of leaving a purge: it parks, as the
+        // rail does. (While choices are being sent the email simply waits
+        // under the page for the second that takes.)
+        yieldPagesForNavigation()
         // from_noise: an open from below the squelch line — someone digging for
         // mail the triage muted, which is the false-negative signal. source:
         // which surface earned the open (see OpenSource).
@@ -3449,10 +3676,9 @@ final class AppStore {
     /// The tour joins on `wantsBlur` alone: its three talking steps are modals
     /// like any other, but its coach marks POINT AT the board, so blurring what
     /// they are ringing would defeat them.
-    /// A purge joins for as long as its deck is up: it is a decision about
-    /// the Reading zone made on top of it, not a page beside it. So do its end
-    /// page and the smart done list: all three take the whole window, and
-    /// this is what stands the layers under them down.
+    /// The purge, its end page and the smart done list are NOT here: they
+    /// are pages in the content area beside the real rail, opaque over the
+    /// board, and a blur would smear the rail they sit next to.
     var modalOverlayOpen: Bool {
         askBarOpen || shortcutsOpen
             || triageFix != nil || remindTarget != nil || schedulePicker != nil
@@ -3461,7 +3687,6 @@ final class AppStore {
             || !authQueue.isEmpty || retriage != nil || retriageAsk != nil
             || reconnectAsk != nil
             || tour.wantsBlur || whatsNew.active
-            || purge != nil || purgeFinished != nil || smartDoneListOpen
     }
 
     // MARK: - sitrep zones

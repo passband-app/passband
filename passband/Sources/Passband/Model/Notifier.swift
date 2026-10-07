@@ -121,7 +121,10 @@ final class Notifier {
                     login, sender: event.sender,
                     account: accounts.count > 1
                         ? accounts.first { $0.id == accountId }?.displayName : nil,
-                    onMissed: { [weak self] in self?.banner(event, accountId: accountId) })
+                    // Silent: the panel already chimed for this code.
+                    onMissed: { [weak self] in
+                        self?.banner(event, accountId: accountId, silent: true)
+                    })
                 playChime()
                 return
             }
@@ -149,7 +152,7 @@ final class Notifier {
         }
     #endif
 
-    private func banner(_ event: Event, accountId: UUID) {
+    private func banner(_ event: Event, accountId: UUID, silent: Bool = false) {
         let account = accountId.uuidString
         let copy = EventBanner.copy(for: event)
         let content = UNMutableNotificationContent()
@@ -168,7 +171,7 @@ final class Notifier {
             EventBanner.authKey: event.isAuth,
             EventBanner.accountKey: account,
         ]
-        if copy.sound { content.sound = Self.sound(for: Prefs.shared.notificationSound) }
+        if copy.sound, !silent { content.sound = Self.sound(for: Prefs.shared.notificationSound) }
 
         // The event id as the REQUEST id makes a re-delivered frame (a replay
         // overlapping the live seam after a reconnect) replace its own banner

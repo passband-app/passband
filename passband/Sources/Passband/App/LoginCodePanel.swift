@@ -37,21 +37,28 @@ final class LoginCodePanel {
 
     private var panel: FloatingPanel?
     private var onMissed: (() -> Void)?
+    /// Which entry the panel on screen belongs to. A card's callbacks outlive
+    /// it (Copy closes on a short delay), and one that fires after a newer
+    /// code has taken the panel must not close the newer code.
+    private var showing: UUID?
 
     private init() {}
 
     /// Float `login`. A code already on screen is replaced by the newer one,
     /// and goes the way of any other unanswered code.
     func show(_ login: EventBanner.LoginCode, sender: String, account: String?, onMissed: @escaping () -> Void) {
-        close(answered: false)
+        close(showing, answered: false)
         self.onMissed = onMissed
         let entry = Entry(login: login, sender: sender, account: account)
+        let id = entry.id
+        showing = id
         let host = FirstClickHostingView(
             rootView: LoginCodeCard(
                 entry: entry,
-                onCopied: { [weak self] in self?.close(answered: true) },
-                onDismiss: { [weak self] in self?.close(answered: true) },
-                onTimeout: { [weak self] in self?.close(answered: false) }))
+                onCopied: { [weak self] in self?.close(id, answered: true) },
+                onCopy: { [weak self] in self?.markAnswered(id) },
+                onDismiss: { [weak self] in self?.close(id, answered: true) },
+                onTimeout: { [weak self] in self?.close(id, answered: false) }))
         // The card has one size and the panel is given it once. A hosting
         // view installed AS a borderless window's content view is the only
         // view in that window, and it keeps asking for another constraint
@@ -110,9 +117,17 @@ final class LoginCodePanel {
         return NSPoint(x: frame.midX - size.width / 2, y: frame.maxY - size.height - 28)
     }
 
-    private func close(answered: Bool) {
-        guard let panel else { return }
+    /// Copying ANSWERS a code the moment it happens, not when the card gets
+    /// round to closing: a newer code that replaces a just-copied one must
+    /// not send the copied one back out as a banner.
+    fileprivate func markAnswered(_ id: UUID) {
+        if id == showing { onMissed = nil }
+    }
+
+    private func close(_ id: UUID?, answered: Bool) {
+        guard let panel, id == showing else { return }
         self.panel = nil
+        showing = nil
         let missed = onMissed
         onMissed = nil
         panel.orderOut(nil)
@@ -139,6 +154,7 @@ private final class FirstClickHostingView<Content: View>: NSHostingView<Content>
 private struct LoginCodeCard: View {
     let entry: LoginCodePanel.Entry
     let onCopied: () -> Void
+    var onCopy: () -> Void = {}
     let onDismiss: () -> Void
     let onTimeout: () -> Void
 
@@ -221,6 +237,7 @@ private struct LoginCodeCard: View {
     private func copy() {
         guard !copied, Clip.copy(entry.login.pasteable) else { return }
         copied = true
+        onCopy()
         // Long enough to read "Copied", short enough that the panel is gone
         // by the time the pointer is back on the field.
         Task {

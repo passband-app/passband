@@ -56,7 +56,13 @@ private struct UnsubscribeCard: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .frame(maxWidth: Typo.measure(230), alignment: .leading)
+            #if os(macOS)
+                .frame(maxWidth: Typo.measure(230), alignment: .leading)
+            #else
+                // The phone's card is as wide as the screen lets it be, and the
+                // sentence takes what the trailing control leaves.
+                .frame(maxWidth: .infinity, alignment: .leading)
+            #endif
             trailing
         }
         .padding(.vertical, Space.scaled(9))
@@ -105,8 +111,15 @@ private struct UnsubscribeCard: View {
                     Button {
                         UnsubscribeJobs.shared.finish(item)
                     } label: {
-                        Label("Finish on their site", systemImage: "arrow.up.right")
-                            .labelStyle(.titleAndIcon)
+                        #if os(macOS)
+                            Label("Finish on their site", systemImage: "arrow.up.right")
+                                .labelStyle(.titleAndIcon)
+                        #else
+                            // The sentence beside it already says what needs
+                            // finishing; five words here would leave it none.
+                            Label("Finish", systemImage: "arrow.up.right")
+                                .labelStyle(.titleAndIcon)
+                        #endif
                     }
                     .buttonStyle(.glassProminent)
                     .controlSize(.small)

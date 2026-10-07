@@ -164,7 +164,9 @@ kubectl -n monitoring top pod -l app.kubernetes.io/name=prometheus-agent
   long since the timer last fired. See below.
 - **Inside squelchd** — daemon p95 by route (the daemon's own clock, request
   to response head, so a slow route is named rather than inferred from the
-  edge), sync staleness per tenant, Gmail API errors by kind,
+  edge; routes that wait on a model carry `class="llm"` and get their own
+  panel, so their seconds are not read as a slow store), sync staleness per
+  tenant, Gmail API errors by kind,
   24h LLM spend, store size, triage throughput.
 
 ## Watching a release roll

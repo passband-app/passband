@@ -466,6 +466,10 @@ const SCOPE_DESCRIPTIONS: &[(&str, &str)] = &[
         validate::GMAIL_SEND_SCOPE,
         "Send mail as you, from your address.",
     ),
+    (
+        validate::GOOGLE_PROFILE_SCOPE,
+        "See your Google account's name and profile photo, to show them in the app. Optional: untick it on Google's screen and everything else still works.",
+    ),
 ];
 
 /// The requested permissions as a list, in the order the link asks for them.

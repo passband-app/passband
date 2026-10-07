@@ -323,8 +323,9 @@ enum SettingsSearch {
             blurb: "Lets an AI agent you already run read your triaged inbox over MCP.",
             keywords: [
                 "agent", "agents", "mcp", "model context protocol", "openclaw", "claude code",
-                "codex", "cursor", "claude desktop", "connect an agent", "integration",
-                "integrations", "ai agent", "tools", "mcp server", "agent door",
+                "codex", "cursor", "claude desktop", "claude", "chatgpt", "hermes", "hermes agent",
+                "vs code", "vscode", "connect an agent", "integration",
+                "integrations", "ai agent", "tools", "mcp server", "agent mcp",
             ]),
         SettingsEntry(
             card: .agents,

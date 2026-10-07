@@ -67,6 +67,9 @@ enum ShortcutCatalog {
                 // changes hands. The reader has no search-this-sender key of
                 // its own: `/` then `from:` is the spelled-out way.
                 Item(["f"], "forward this message"),
+                // ⌘F is search everywhere else (the menu); with an email
+                // open it finds inside it, the way it does on a web page.
+                Item(["⌘F"], "find in this email"),
                 Item(["Esc"], "back"),
             ]),
         Group(

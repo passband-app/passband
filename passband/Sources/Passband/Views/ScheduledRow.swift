@@ -1,6 +1,7 @@
 // One mail in the outbox, pinned above the sent mail on the Sent page: a
 // sibling of SentRow, and in the drafts page's two-line shape, because it IS
-// a composition rather than a message (nothing has gone out yet). The who /
+// a composition rather than a message (nothing has gone out yet). On the phone
+// it takes the sent rows' two-line shape instead (`phoneGuts`). The who /
 // subject / snippet / files are `CompositionSummary`, the same view a draft
 // row uses; only the trailing cell is this row's: when it goes and what state
 // it is in, worded by `ScheduledRowCopy` (Lib/ScheduledSend.swift).
@@ -36,7 +37,8 @@ struct ScheduledRow: View {
         // onHover BEFORE onOpen, as SentRow does it: the click moves the
         // cursor to this row first.
         ListRow(
-            selected: selected, cornerRadius: 8, hPadding: Space.scaled(11), vPadding: Space.s6,
+            selected: selected, cornerRadius: Self.radius, hPadding: Self.hPadding,
+            vPadding: Self.vPadding,
             onHoverChange: { if $0 { onHover() } },
             action: {
                 onHover()
@@ -45,30 +47,11 @@ struct ScheduledRow: View {
                 onOpen()
             }
         ) { _, _ in
-            CompositionSummary(
-                scheduled: row, groupName: groupName, slotWidth: Self.slotWidth,
-                notice: ScheduledRowCopy.reasonLine(row),
-                noticeColor: failed ? Palette.danger : Palette.inkFaint
-            ) {
-                #if os(macOS)
-                    // The row's own keys, on the row the keys would act on.
-                    // Same form as UpdateRow's [r][e][d]. A `sending` row is
-                    // in Gmail's hands and takes none of them.
-                    if selected && row.state != "sending" {
-                        Text("[s][x]")
-                            .font(Typo.mono(9))
-                            .foregroundStyle(Palette.inkFaintest)
-                    }
-                #endif
-                // A clock, not a stamp: "in 3h" has to count down while the
-                // page sits open, and nothing else re-renders this row.
-                TimelineView(.periodic(from: .now, by: 30)) { context in
-                    let cell = ScheduledRowCopy.trailing(row, now: context.date)
-                    Text(cell.text)
-                        .font(cell.tone == .quiet ? Typo.num(10) : Typo.micro)
-                        .foregroundStyle(color(cell.tone))
-                }
-            }
+            #if os(macOS)
+                desktopGuts
+            #else
+                phoneGuts
+            #endif
         }
         .contextMenu {
             if row.state != "sending" {
@@ -79,6 +62,76 @@ struct ScheduledRow: View {
         }
         .accessibilityHint("shows it as scheduled")
     }
+
+    /// SentRow's numbers on either platform: the two are one list.
+    #if os(macOS)
+        private static var hPadding: CGFloat { Space.scaled(11) }
+        private static var vPadding: CGFloat { Space.s6 }
+        private static let radius: CGFloat = 8
+    #else
+        private static var hPadding: CGFloat { PhoneRow.hPadding }
+        private static var vPadding: CGFloat { PhoneRow.vPadding }
+        private static let radius: CGFloat = PhoneRow.radius
+    #endif
+
+    #if !os(macOS)
+        /// The sent rows' two-line shape (`CompositionSummary.phoneRow`), with
+        /// the outbox cell cut in two: the countdown where a sent row has its
+        /// age, and the time it goes under the words. The failure reason moves
+        /// down there with it, so a failed mail still shows its own first line.
+        private var phoneGuts: some View {
+            // A clock, not a stamp, for the reason the Mac's cell is one.
+            TimelineView(.periodic(from: .now, by: 30)) { context in
+                let cells = ScheduledRowCopy.phoneCells(row, now: context.date)
+                CompositionSummary(
+                    scheduled: row, groupName: groupName, slotWidth: Self.slotWidth,
+                    notice: ScheduledRowCopy.reasonLine(row),
+                    noticeColor: failed ? Palette.danger : Palette.inkFaint
+                ) {
+                    Text(cells.stamp.text)
+                        .font(cells.stamp.tone == .quiet ? PhoneRow.stamp : Typo.micro)
+                        .foregroundStyle(color(cells.stamp.tone))
+                }
+                .phoneRow(mark: mark(cells.stamp.tone), when: cells.when)
+            }
+        }
+
+        /// What state it is in, where a sent row shows who it went to.
+        private func mark(_ tone: ScheduledRowCopy.Tone) -> CompositionSummary<Text>.PhoneMark {
+            switch tone {
+            case .quiet: .init(symbol: "clock", tint: Palette.inkFaint)
+            case .busy: .init(symbol: "paperplane", tint: Palette.accent)
+            case .danger: .init(symbol: "exclamationmark", tint: Palette.danger)
+            }
+        }
+    #endif
+
+    #if os(macOS)
+        private var desktopGuts: some View {
+            CompositionSummary(
+                scheduled: row, groupName: groupName, slotWidth: Self.slotWidth,
+                notice: ScheduledRowCopy.reasonLine(row),
+                noticeColor: failed ? Palette.danger : Palette.inkFaint
+            ) {
+                // The row's own keys, on the row the keys would act on.
+                // Same form as UpdateRow's [r][e][d]. A `sending` row is
+                // in Gmail's hands and takes none of them.
+                if selected && row.state != "sending" {
+                    Text("[s][x]")
+                        .font(Typo.mono(9))
+                        .foregroundStyle(Palette.inkFaintest)
+                }
+                // A clock, not a stamp: "in 3h" has to count down while the
+                // page sits open, and nothing else re-renders this row.
+                TimelineView(.periodic(from: .now, by: 30)) { context in
+                    let cell = ScheduledRowCopy.trailing(row, now: context.date)
+                    Text(cell.text)
+                        .font(cell.tone == .quiet ? Typo.num(10) : Typo.micro)
+                        .foregroundStyle(color(cell.tone))
+                }
+            }
+        }
+    #endif
 
     private func color(_ tone: ScheduledRowCopy.Tone) -> Color {
         switch tone {

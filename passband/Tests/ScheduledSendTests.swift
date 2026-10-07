@@ -26,6 +26,7 @@ struct ScheduledSendTests {
         theListingDecodes()
         // The Sent page's half.
         eachRowStateSaysWhatItIs()
+        thePhoneSplitsOnlyTheWaitingRow()
         aFailedRowSaysWhy()
         relUntilCountsDown()
         theOutboxSitsInFireOrder()
@@ -335,6 +336,28 @@ struct ScheduledSendTests {
                 row(state: "failed", attempts: 3, lastError: "failed:gmail", maybeSent: false),
                 now: now, calendar: cal),
             T(text: "didn't send", tone: .danger), "flag down: didn't send")
+    }
+
+    /// The phone cuts the waiting row's cell in two and leaves the rest whole.
+    static func thePhoneSplitsOnlyTheWaitingRow() {
+        let cal = utc()
+        let now = date(cal, 2026, 10, 4, 10, 0)
+        typealias P = ScheduledRowCopy.PhoneCells
+        typealias T = ScheduledRowCopy.Trailing
+        equal(
+            ScheduledRowCopy.phoneCells(row(), now: now, calendar: cal),
+            P(stamp: T(text: "in 3h", tone: .quiet), when: "today 1pm"),
+            "scheduled: the countdown is the stamp, the time goes under the words")
+        for other in [
+            row(attempts: 1, lastError: "failed:gmail"), row(state: "sending", attempts: 1),
+            row(state: "failed", attempts: 3, lastError: "failed:gmail"),
+            row(state: "failed", attempts: 1, lastError: "failed:recovery"),
+        ] {
+            equal(
+                ScheduledRowCopy.phoneCells(other, now: now, calendar: cal),
+                P(stamp: ScheduledRowCopy.trailing(other, now: now, calendar: cal), when: nil),
+                "\(other.state): the desktop's word, and no time under it")
+        }
     }
 
     static func aFailedRowSaysWhy() {

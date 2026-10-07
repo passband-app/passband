@@ -227,6 +227,22 @@ monthly dollar budget and installed through the warden as that tenant's
 `<label>-llm` Secret. Bifrost swaps in the real key, meters the spend on its
 volume, and refuses a tenant that has blown its budget.
 
+**A tenant that runs out mid-month** shows up on the dashboard's "LLM config
+failures" panel and stops getting verdicts; its mail queues and nothing is
+lost. Unblock it with
+
+```sh
+squelch-control llm topup <label>            # a full month's allowance again
+squelch-control llm topup <label> --usd 25   # or a specific amount
+squelch-control llm topup <label> --clear
+```
+
+That adds to this month's limit on the key the tenant already holds: no new
+key, no warden install, no pod restart, and the spend ledger stays intact. It
+expires by itself at the budget's next reset. `llm mint <label>` also
+unblocks a tenant, but it rotates the key and starts the ledger from zero, so
+keep it for a key that is actually wrong.
+
 **Content logging stays OFF.** Every request through this gateway is the text
 of somebody's mail, and Bifrost's defaults are to log it: `enable_logging` on,
 `disable_content_logging` off, `log_retention_days` 365, all into
@@ -1438,6 +1454,19 @@ Signup's mint is gated on the invite policy being configured, the same condition
 `POST /tenant/invite` itself answers 503 without: a deployment with no invite
 feature installs no credential for a door that cannot open.
 
+### Letting a tenant see a hidden feature
+
+`https://signup.passband.app/admin/features`, behind the same admin token as the
+waitlist: a grid of active tenants against the features this build still hides,
+plus an "Everyone" row. Tick, Save, and the tenant's daemon picks it up within
+about five minutes, with no pod roll.
+
+It rides the control token above, so a tenant with no share token has no hidden
+features either, and `share revoke` takes both away. The whole mechanism, how to
+add a flag, and how to pin one on a development daemon are in
+[docs/FEATURES.md](../../docs/FEATURES.md).
+
+
 ## Backups
 
 Two mechanisms, split by which disk they cover:
@@ -1598,10 +1627,13 @@ drill: run it against a throwaway tenant first if one is to hand.
   runtime does not drop when the connection goes; it changes the wire shape and
   wants its own design pass. Until then, nothing about the warden's job should
   depend on whether an operator's terminal is still listening, and it does.
-- **`/mcp` bearer auth** — the hosted MVP routes around it (tenant Ingresses
-  publish `/client`, `/console` and `/t` only). Real auth is required before the
-  agent door is ever served from the internet, and until then the console's MCP
-  section says so instead of offering a URL that 404s.
+- **`/mcp` auth** is built (OAuth through WorkOS AuthKit, 2026-10-01) and NOT
+  turned on in this install. Tenant Ingresses still publish `/client`,
+  `/console` and `/t` only until `SQUELCH_WARDEN_MCP_OAUTH_ISSUER` is set, and
+  setting it has prerequisites: the daemon image that understands the new env
+  rolled first, the control plane holding a WorkOS API key, and the pre-publish
+  checklist in `SETUP.md` verified against the real WorkOS environment. Record
+  the date and the verified facts here when it is turned on.
 - **Google verification + CASA Tier 2** — the restricted-scope cap is 100 users.
   This gates user 101 and has the longest lead time of anything on this list.
   The submission, its blockers, and the assessment scope are

@@ -144,6 +144,30 @@ enum LlmCommand {
         #[arg(long)]
         check: bool,
     },
+    /// Give a tenant that ran out of LLM budget more to spend this month,
+    /// without a new key.
+    ///
+    /// With no amount, the tenant gets a full month's allowance again from
+    /// here: the top-up equals what it has already spent. `llm mint` also
+    /// unblocks a tenant, but by rotating the key, which means a warden
+    /// install and a pod restart, and it throws the spend history away. This
+    /// leaves the key, the limit and the ledger alone and expires by itself
+    /// at the budget's next monthly reset.
+    ///
+    /// Running it again REPLACES the previous top-up; it does not stack.
+    Topup {
+        label: String,
+        /// Dollars to add to this month's limit, instead of the default.
+        #[arg(long, conflicts_with = "clear")]
+        usd: Option<f64>,
+        /// Top up the assistant key (`tenant-<label>-assistant`) instead of
+        /// the triage key.
+        #[arg(long)]
+        assistant: bool,
+        /// Remove the top-up, returning the key to its base limit now.
+        #[arg(long)]
+        clear: bool,
+    },
 }
 
 /// The share-token operator commands. Like `llm`, these need the warden pair
@@ -438,6 +462,17 @@ fn llm(command: LlmCommand) -> anyhow::Result<()> {
     if let LlmCommand::Sync { check } = command {
         return runtime()?.block_on(llm_sync(&bifrost, &llm, check));
     }
+    // `topup` needs neither as well: the key is found by the name every mint
+    // gives it, and nothing reaches the pod, which keeps the key it has.
+    if let LlmCommand::Topup {
+        label,
+        usd,
+        assistant,
+        clear,
+    } = &command
+    {
+        return runtime()?.block_on(llm_topup(&bifrost, label, *usd, *assistant, *clear));
+    }
 
     let (warden_url, warden_token) =
         config::warden_from_env().map_err(|e| anyhow::anyhow!("squelch-control: {e}"))?;
@@ -450,7 +485,9 @@ fn llm(command: LlmCommand) -> anyhow::Result<()> {
         match command {
             LlmCommand::Mint { label } => llm_mint(&store, &bifrost, &warden, &llm, &label).await,
             LlmCommand::Revoke { label } => llm_revoke(&store, &bifrost, &label).await,
-            LlmCommand::Sync { .. } => unreachable!("answered above, before store and warden"),
+            LlmCommand::Sync { .. } | LlmCommand::Topup { .. } => {
+                unreachable!("answered above, before store and warden")
+            }
         }
     })
 }
@@ -594,6 +631,97 @@ async fn llm_revoke(
             failed.join("; ")
         );
     }
+    Ok(())
+}
+
+/// Top up one tenant key's monthly budget, or clear the top-up.
+///
+/// The write is VERIFIED by reading the budget back, and a mismatch is an
+/// error: the gateway answering 200 is not the same as the tenant having money,
+/// and the difference is a tenant that stays dark while the operator believes
+/// it was fixed.
+async fn llm_topup(
+    bifrost: &BifrostClient,
+    label: &str,
+    usd: Option<f64>,
+    assistant: bool,
+    clear: bool,
+) -> anyhow::Result<()> {
+    if usd.is_some_and(|u| !u.is_finite() || u <= 0.0) {
+        anyhow::bail!("--usd must be a positive dollar amount");
+    }
+    let name = if assistant {
+        format!("tenant-{label}-assistant")
+    } else {
+        format!("tenant-{label}")
+    };
+    let find = || async {
+        let key = bifrost
+            .list_virtual_keys()
+            .await?
+            .into_iter()
+            .find(|k| k.name == name)
+            .ok_or_else(|| anyhow::anyhow!("the gateway holds no virtual key named `{name}`"))?;
+        // A minted key has exactly one budget. Anything else was made or
+        // edited by hand, and guessing which budget to raise is how the wrong
+        // one gets raised.
+        let [budget] = key.budgets.as_slice() else {
+            anyhow::bail!(
+                "`{name}` has {} budgets, not the one a mint gives it; fix it with `llm mint {label}`",
+                key.budgets.len()
+            );
+        };
+        Ok((key.id, budget.clone()))
+    };
+
+    let (vk_id, before) = find().await?;
+    eprintln!(
+        "squelch-control: {name} has spent ${:.2} of ${:.2}{}; ${:.2} left.",
+        before.current_usage,
+        before.max_limit,
+        if before.override_amount > 0.0 {
+            format!(" (+${:.2} top-up)", before.override_amount)
+        } else {
+            String::new()
+        },
+        before.headroom()
+    );
+
+    // Rounded UP to the cent so the default leaves at least the full limit.
+    let amount = if clear {
+        0.0
+    } else {
+        usd.unwrap_or((before.current_usage * 100.0).ceil() / 100.0)
+    };
+    if clear {
+        if before.override_amount == 0.0 {
+            eprintln!("squelch-control: no top-up to clear.");
+            return Ok(());
+        }
+        bifrost.clear_budget_override(&vk_id, &before.id).await?;
+    } else {
+        if amount <= 0.0 {
+            eprintln!(
+                "squelch-control: nothing spent, so nothing to top up; pass --usd to add anyway."
+            );
+            return Ok(());
+        }
+        bifrost
+            .set_budget_override(&vk_id, &before.id, amount)
+            .await?;
+    }
+
+    let (_, after) = find().await?;
+    if (after.override_amount - amount).abs() > 0.005 {
+        anyhow::bail!(
+            "the gateway accepted the write but `{name}` reads a top-up of ${:.2}, not ${amount:.2};              nothing can be assumed about its budget. `llm mint {label}` is the fallback",
+            after.override_amount
+        );
+    }
+    eprintln!(
+        "squelch-control: {name} top-up is now ${amount:.2}; ${:.2} left until the monthly reset.          The key was not rotated.",
+        after.headroom()
+    );
     Ok(())
 }
 

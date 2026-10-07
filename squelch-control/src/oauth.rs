@@ -43,7 +43,7 @@ use oauth2::{
     AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, EndpointNotSet, EndpointSet,
     PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope, TokenResponse, TokenUrl,
 };
-use squelch_core::config::{GMAIL_READONLY_SCOPE, WRITE_SCOPES};
+use squelch_core::config::{GMAIL_READONLY_SCOPE, GOOGLE_PROFILE_SCOPE, WRITE_SCOPES};
 use squelch_core::credentials::StoredToken;
 
 /// Ceiling on any response body read here. Google's token and profile answers
@@ -204,13 +204,24 @@ fn requested_scopes(flow: Flow) -> Vec<&'static str> {
         // that covered less than the original would leave a mailbox half
         // readable, and the daemon checks a token against these same strings.
         Flow::Signup | Flow::Reconnect => {
-            let mut scopes = Vec::with_capacity(1 + WRITE_SCOPES.len());
-            scopes.push(GMAIL_READONLY_SCOPE);
-            scopes.extend_from_slice(WRITE_SCOPES);
+            let mut scopes = gmail_scopes();
+            // ASKED FOR, NOT INSISTED ON: the account's name and photo, so the
+            // app can show a face instead of an initial. It is deliberately
+            // absent from `required_scopes`, because a person who unticks it
+            // has still granted a whole working mailbox.
+            scopes.push(GOOGLE_PROFILE_SCOPE);
             scopes
         }
         Flow::Console => vec![OPENID_SCOPE, EMAIL_SCOPE],
     }
+}
+
+/// The three Gmail scopes a hosted mailbox cannot work without.
+fn gmail_scopes() -> Vec<&'static str> {
+    let mut scopes = Vec::with_capacity(2 + WRITE_SCOPES.len());
+    scopes.push(GMAIL_READONLY_SCOPE);
+    scopes.extend_from_slice(WRITE_SCOPES);
+    scopes
 }
 
 /// What a grant must COVER for a flow to be usable. One entry per requirement;
@@ -221,11 +232,9 @@ fn requested_scopes(flow: Flow) -> Vec<&'static str> {
 /// single spelling, and the Gmail set is unchanged.
 fn required_scopes(flow: Flow) -> Vec<Vec<&'static str>> {
     match flow {
-        // Every Gmail scope, spelled one way, exactly as before.
-        Flow::Signup | Flow::Reconnect => requested_scopes(flow)
-            .into_iter()
-            .map(|s| vec![s])
-            .collect(),
+        // Every Gmail scope, spelled one way, exactly as before. NOT the
+        // profile scope: it is requested and optional.
+        Flow::Signup | Flow::Reconnect => gmail_scopes().into_iter().map(|s| vec![s]).collect(),
         Flow::Console => vec![vec![OPENID_SCOPE], vec![EMAIL_SCOPE, EMAIL_SCOPE_URL]],
     }
 }
@@ -605,7 +614,7 @@ mod tests {
 
     #[test]
     fn a_partial_consent_is_fatal() {
-        let signup_scopes = requested_scopes(Flow::Signup);
+        let signup_scopes = gmail_scopes();
         // No `scope` field means "exactly what was requested" (RFC 6749 §5.1).
         assert!(check_scope_grant(None, Flow::Signup).is_ok());
         assert!(check_scope_grant(Some(&granted(&signup_scopes)), Flow::Signup).is_ok());
@@ -630,6 +639,11 @@ mod tests {
                 "a consent missing {dropped} must be refused"
             );
         }
+
+        // The one box that MAY be unticked: name and photo are asked for on the
+        // same screen and a mailbox works without them.
+        assert!(requested_scopes(Flow::Signup).contains(&GOOGLE_PROFILE_SCOPE));
+        assert!(check_scope_grant(Some(&granted(&signup_scopes)), Flow::Signup).is_ok());
     }
 
     /// The console flow's only evidence is the userinfo answer, so an address it

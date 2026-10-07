@@ -4352,7 +4352,7 @@
     "type": "prometheus",
     "uid": "prometheus"
    },
-   "description": "Jobs a tenant's daily triage cap has parked until midnight UTC. A line labelled 'new mail' means mail that arrived today is sitting untriaged: actionable. 'background' is backlog (backfill, refreshes, revisits) draining at the background cap, which is by design and only worth lifting to finish a backlog sooner. The 'deferrals (24h)' line counts every time the cap turned a job away and works on any daemon; the held gauges need daemon >= 0.0.13. To lift a cap for the rest of the day: kubectl -n tenants exec deploy/<label> -- squelchd triage grant <runs> (add --background for backlog). Each run is a model job of about 3 cents against the tenant's monthly LLM budget. See deploy/hosted/PRODUCTION.md.",
+   "description": "Jobs a tenant's daily triage cap has parked until midnight UTC. A line labelled 'new mail' means mail that arrived today is sitting untriaged: the total cap (10,000 a day) is a runaway breaker, so this should not happen and is worth a look. 'background' is backlog (backfill, refreshes, access) draining at the background cap (200 a day), which is by design and only worth lifting to finish a backlog sooner. 'revisits' wait on [revisit].daily_cap, which no grant raises. The 'deferrals (24h)' line counts every time the cap turned a job away and works on any daemon; the held gauges need daemon >= 0.0.13. To lift a cap for the rest of the day: kubectl -n tenants exec deploy/<label> -- squelchd triage grant <runs> (add --background for backlog); it releases only as many held jobs as now fit. Each run is a model job of about 3 cents against the tenant's monthly LLM budget. See deploy/hosted/PRODUCTION.md.",
    "gridPos": {
     "h": 8,
     "w": 12,
@@ -4381,6 +4381,17 @@
      "range": true,
      "instant": false,
      "legendFormat": "{{tenant}} background"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max by (tenant) (squelchd_triage_jobs_held{scope=\"revisit\"})",
+     "refId": "D",
+     "range": true,
+     "instant": false,
+     "legendFormat": "{{tenant}} revisits"
     },
     {
      "datasource": {

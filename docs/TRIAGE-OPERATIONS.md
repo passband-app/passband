@@ -69,7 +69,7 @@ max_review_calls = 1
 timeout_secs = 90
 concurrency = 2
 worker_poll_secs = 1
-daily_run_cap = 1000
+daily_run_cap = 10000
 background_daily_run_cap = 200
 max_attempts = 6
 outage_retry_secs = 300
@@ -104,9 +104,12 @@ message activity, never the time a background job ran.
 
 The budget unit remains one bounded model job, not a token or dollar cap. Full
 triage permits up to `max_model_turns` calls; an access-only job permits one call.
-The account total is `triage.agent.daily_run_cap` (default 1000). Background work
-also consumes `background_daily_run_cap` (default 200), within that total. Thus
-background cannot consume the last 800 runs reserved for new inbound mail.
+The account total is `triage.agent.daily_run_cap` (default 10000). It is a
+runaway breaker, not a working budget: new mail should never be left untriaged
+by it, so it sits far above what any real mailbox receives in a day. Background
+work also consumes `background_daily_run_cap` (default 200), within that total.
+That is the cap that bounds ordinary spend, and background cannot consume the
+9800 runs left for new inbound mail.
 Unused arrival capacity is not loaned to background work. Setting the background
 cap to zero pauses background jobs. If only the total is lowered, the effective
 background cap is clamped to at most total minus one, retaining a reserve.
@@ -135,12 +138,16 @@ squelchd triage grant 500 --background   # 500 more background runs today
 squelchd triage grant 0                  # take the grant back
 ```
 
-A grant works on a running daemon, lasts until midnight UTC, replaces any
-earlier grant for the day, and releases the jobs the cap was holding. Background
-runs still count toward the total, so a background grant only helps while the
-total has room. Each run is a model job, so a grant is spend. The scrape exports
+A grant works on a running daemon, lasts until midnight UTC, and replaces any
+earlier grant for the day. It releases as many held jobs as the caps now have
+room for, new mail first; the rest stay parked rather than running only to be
+turned away again. Background runs still count toward the total, so a
+background grant only helps while the total has room. Autonomous revisits also
+answer to `[revisit].daily_cap`, which a grant does not raise, so a grant never
+releases them. Each run is a model job, so a grant is spend. The scrape exports
 the same numbers as `squelchd_triage_daily_runs`,
-`squelchd_triage_daily_run_cap` and `squelchd_triage_jobs_held`.
+`squelchd_triage_daily_run_cap` and `squelchd_triage_jobs_held` (scopes
+`arrival`, `background` and `revisit`).
 
 A sender rule applies to mail that arrives after it is written. Creating,
 editing, or deleting one re-triages nothing already stored: every re-triage is a

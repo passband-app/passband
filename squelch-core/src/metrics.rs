@@ -1742,7 +1742,7 @@ pub fn render(metrics: &SyncMetrics, db: Option<&StoreSnapshot>) -> String {
             budget.background_cap as f64,
         );
         e.family("squelchd_triage_jobs_held", MetricKind::Gauge,
-            "Jobs parked until the next UTC day by a daily cap. scope=arrival is newly arrived mail going untriaged; scope=background is backlog draining at the background cap.");
+            "Jobs parked until the next UTC day by a daily cap. scope=arrival is newly arrived mail going untriaged; scope=background is backlog draining at the background cap; scope=revisit is autonomous revisits, which also answer to [revisit].daily_cap.");
         e.sample(
             "squelchd_triage_jobs_held",
             &[("scope", "arrival")],
@@ -1752,6 +1752,11 @@ pub fn render(metrics: &SyncMetrics, db: Option<&StoreSnapshot>) -> String {
             "squelchd_triage_jobs_held",
             &[("scope", "background")],
             budget.held_background as f64,
+        );
+        e.sample(
+            "squelchd_triage_jobs_held",
+            &[("scope", "revisit")],
+            budget.held_revisit as f64,
         );
         e.scalar(
             "squelchd_retriage_messages_total",
@@ -2308,6 +2313,7 @@ mod tests {
                 background_cap: 200,
                 held_arrival: 4,
                 held_background: 642,
+                held_revisit: 12,
             },
             retriage: crate::types::RetriageProgress {
                 total: 7,
@@ -2329,6 +2335,7 @@ mod tests {
         assert!(text.contains("squelchd_triage_daily_run_cap{scope=\"background\"} 200\n"));
         assert!(text.contains("squelchd_triage_jobs_held{scope=\"arrival\"} 4\n"));
         assert!(text.contains("squelchd_triage_jobs_held{scope=\"background\"} 642\n"));
+        assert!(text.contains("squelchd_triage_jobs_held{scope=\"revisit\"} 12\n"));
         assert!(text.contains("squelchd_retriage_messages_total 7\n"));
         assert!(text.contains("squelchd_retriage_messages_done 3\n"));
         assert!(text.contains("squelchd_llm_calls_total{category=\"extract_banking\"} 3\n"));

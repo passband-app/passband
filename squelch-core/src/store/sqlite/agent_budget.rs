@@ -23,6 +23,46 @@ fn runs(connection: &Connection, account: AccountId, key: &str, day: &str) -> Re
     Ok(used.clamp(0, i64::from(u32::MAX)) as u32)
 }
 
+/// Jobs the daily cap parked and that are still waiting. `?1` account, `?2`
+/// [`HELD_BY_BUDGET`], `?3` now. Joined as `j` with its lane as `l`.
+const HELD: &str = "j.account_id=?1 AND j.kind IN ('triage','access') AND j.state='queued'
+    AND j.last_error=?2 AND j.available_at>?3";
+/// Jobs the cap parked that are due again (released, or past midnight) but
+/// have not run yet. They will spend, so they are not room for more.
+const DUE: &str = "j.account_id=?1 AND j.kind IN ('triage','access') AND j.state='queued'
+    AND j.last_error=?2 AND j.available_at<=?3";
+/// The three lanes, mirroring `investigation_budget_limits`. A revisit answers
+/// to its own cap as well; otherwise a job spends background capacity unless
+/// it is a foreground triage.
+const REVISIT: &str = "j.trigger LIKE 'revisit:%'";
+const ARRIVAL: &str =
+    "j.trigger NOT LIKE 'revisit:%' AND COALESCE(l.foreground,0)=1 AND j.kind='triage'";
+const BACKGROUND: &str =
+    "j.trigger NOT LIKE 'revisit:%' AND NOT (COALESCE(l.foreground,0)=1 AND j.kind='triage')";
+
+/// Today's spend and effective caps, read inside whatever transaction holds
+/// `connection`.
+fn budget(
+    connection: &Connection,
+    account: AccountId,
+    config: &AgentConfig,
+    day: &str,
+) -> Result<DailyBudgetStatus> {
+    let cap = |key: &str, configured: u32| -> Result<u32> {
+        Ok(configured.saturating_add(runs(connection, account, &grant_key(key), day)?))
+    };
+    Ok(DailyBudgetStatus {
+        total_used: runs(connection, account, TOTAL_BUDGET_KEY, day)?,
+        total_cap: cap(TOTAL_BUDGET_KEY, config.daily_run_cap)?,
+        background_used: runs(connection, account, BACKGROUND_BUDGET_KEY, day)?,
+        background_cap: cap(
+            BACKGROUND_BUDGET_KEY,
+            config.effective_background_daily_run_cap(),
+        )?,
+        ..DailyBudgetStatus::default()
+    })
+}
+
 impl SqliteStore {
     /// Today's spend, effective caps and held jobs, for the scrape and for
     /// `squelchd triage status`.
@@ -34,51 +74,39 @@ impl SqliteStore {
     ) -> Result<DailyBudgetStatus> {
         let day = now.format("%Y-%m-%d").to_string();
         let connection = self.lock()?;
-        // Mirrors `investigation_budget_limits`: a job spends background
-        // capacity unless it is a foreground triage.
-        let (held_arrival, held_background): (u64, u64) = connection.query_row(
-            "SELECT
-                 COALESCE(SUM(COALESCE(l.foreground,0)=1 AND j.kind='triage'),0),
-                 COALESCE(SUM(NOT (COALESCE(l.foreground,0)=1 AND j.kind='triage')),0)
-             FROM agent_triage_jobs j LEFT JOIN agent_job_lanes l ON l.job_id=j.id
-             WHERE j.account_id=?1 AND j.kind IN ('triage','access') AND j.state='queued'
-               AND j.last_error=?2 AND j.available_at>?3",
+        let (held_arrival, held_background, held_revisit): (u64, u64, u64) = connection.query_row(
+            &format!(
+                "SELECT COALESCE(SUM({ARRIVAL}),0), COALESCE(SUM({BACKGROUND}),0),
+                        COALESCE(SUM({REVISIT}),0)
+                     FROM agent_triage_jobs j LEFT JOIN agent_job_lanes l ON l.job_id=j.id
+                     WHERE {HELD}"
+            ),
             params![account, HELD_BY_BUDGET, now.to_rfc3339()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
         Ok(DailyBudgetStatus {
-            total_used: runs(&connection, account, TOTAL_BUDGET_KEY, &day)?,
-            total_cap: config.daily_run_cap.saturating_add(runs(
-                &connection,
-                account,
-                &grant_key(TOTAL_BUDGET_KEY),
-                &day,
-            )?),
-            background_used: runs(&connection, account, BACKGROUND_BUDGET_KEY, &day)?,
-            background_cap: config
-                .effective_background_daily_run_cap()
-                .saturating_add(runs(
-                    &connection,
-                    account,
-                    &grant_key(BACKGROUND_BUDGET_KEY),
-                    &day,
-                )?),
             held_arrival,
             held_background,
+            held_revisit,
+            ..budget(&connection, account, config, &day)?
         })
     }
 
-    /// Raise today's cap on `key` by `extra` runs and let the jobs it parked
-    /// run now. Returns how many jobs were released.
+    /// Raise today's cap on `key` by `extra` runs and let as many held jobs
+    /// run now as the caps have room for. Returns how many were released.
     ///
     /// The grant REPLACES any earlier one for the day rather than adding to
     /// it, so running the command twice is not twice the spend, and zero takes
-    /// it back. Released jobs that still do not fit park themselves again.
+    /// it back. Only jobs that fit are released, new mail first, so the rest
+    /// stay parked instead of running only to be turned away again (and each
+    /// counted as another deferral). Revisits are never released: they have a
+    /// cap of their own that a grant does not raise.
     pub fn grant_daily_runs(
         &self,
         account: AccountId,
         key: &str,
         extra: u32,
+        config: &AgentConfig,
         now: DateTime<Utc>,
     ) -> Result<usize> {
         let day = now.format("%Y-%m-%d").to_string();
@@ -90,14 +118,40 @@ impl SqliteStore {
              ON CONFLICT(account_id,thread_id,day) DO UPDATE SET model_calls=excluded.model_calls",
             params![account, grant_key(key), day, extra],
         )?;
-        let released = transaction.execute(
-            "UPDATE agent_triage_jobs SET available_at=?3
-             WHERE account_id=?1 AND kind IN ('triage','access') AND state='queued'
-               AND last_error=?2 AND available_at>?3",
+        let status = budget(&transaction, account, config, &day)?;
+        let (due_arrival, due_background): (u32, u32) = transaction.query_row(
+            &format!(
+                "SELECT COALESCE(SUM({ARRIVAL}),0), COALESCE(SUM({BACKGROUND}),0)
+                 FROM agent_triage_jobs j LEFT JOIN agent_job_lanes l ON l.job_id=j.id
+                 WHERE {DUE}"
+            ),
             params![account, HELD_BY_BUDGET, now.to_rfc3339()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
+        let total_room = status
+            .total_cap
+            .saturating_sub(status.total_used)
+            .saturating_sub(due_arrival.saturating_add(due_background));
+        let background_room = status
+            .background_cap
+            .saturating_sub(status.background_used)
+            .saturating_sub(due_background);
+        let release = |lane: &str, limit: u32| -> Result<usize> {
+            Ok(transaction.execute(
+                &format!(
+                    "UPDATE agent_triage_jobs SET available_at=?3 WHERE id IN (
+                         SELECT j.id FROM agent_triage_jobs j
+                         LEFT JOIN agent_job_lanes l ON l.job_id=j.id
+                         WHERE {HELD} AND {lane} ORDER BY j.id LIMIT ?4)"
+                ),
+                params![account, HELD_BY_BUDGET, now.to_rfc3339(), limit],
+            )?)
+        };
+        let arrival = release(ARRIVAL, total_room)?;
+        let left = total_room.saturating_sub(u32::try_from(arrival).unwrap_or(u32::MAX));
+        let background = release(BACKGROUND, left.min(background_room))?;
         transaction.commit()?;
-        Ok(released)
+        Ok(arrival + background)
     }
 }
 
@@ -207,17 +261,20 @@ mod tests {
         let now = DateTime::parse_from_rfc3339("2026-10-06T12:00:00Z")
             .unwrap()
             .to_utc();
+        let config = AgentConfig {
+            daily_run_cap: 1,
+            ..AgentConfig::default()
+        };
         let limits = vec![(TOTAL_BUDGET_KEY.to_string(), 1)];
         let reserve = |day: &str| store.reserve_agent_budget(account, day, &limits).unwrap();
         assert!(reserve("2026-10-06"));
         assert!(!reserve("2026-10-06"));
 
-        store
-            .grant_daily_runs(account, TOTAL_BUDGET_KEY, 5, now)
-            .unwrap();
-        store
-            .grant_daily_runs(account, TOTAL_BUDGET_KEY, 2, now)
-            .unwrap();
+        for runs in [5, 2] {
+            store
+                .grant_daily_runs(account, TOTAL_BUDGET_KEY, runs, &config, now)
+                .unwrap();
+        }
         assert!(reserve("2026-10-06"));
         assert!(reserve("2026-10-06"));
         assert!(!reserve("2026-10-06"), "2 granted, not 5 + 2");
@@ -226,17 +283,13 @@ mod tests {
         assert!(reserve("2026-10-07"));
         assert!(!reserve("2026-10-07"));
 
-        let config = AgentConfig {
-            daily_run_cap: 1,
-            ..AgentConfig::default()
-        };
         let status = store.daily_budget_status(account, &config, now).unwrap();
         assert_eq!((status.total_used, status.total_cap), (3, 3));
         // The grant is not spend, and background has none of its own.
         assert_eq!((status.background_used, status.background_cap), (0, 0));
 
         store
-            .grant_daily_runs(account, TOTAL_BUDGET_KEY, 0, now)
+            .grant_daily_runs(account, TOTAL_BUDGET_KEY, 0, &config, now)
             .unwrap();
         assert_eq!(
             store
@@ -247,67 +300,29 @@ mod tests {
         );
     }
 
-    /// Held counts split the way the worker charges, see only jobs parked by
-    /// the budget and still waiting, and a grant releases exactly those.
+    /// Held counts split the way the worker charges and see only jobs parked
+    /// by the budget and still waiting. A grant releases only as many as the
+    /// caps now have room for, new mail first, and never a revisit.
     #[test]
-    fn held_jobs_are_counted_by_lane_and_released_by_a_grant() {
+    fn held_jobs_are_counted_by_lane_and_a_grant_releases_what_fits() {
         let store = SqliteStore::open_in_memory().unwrap();
         assert_eq!(store.ensure_account("held@example.com").unwrap(), 1);
         assert_eq!(store.ensure_account("other@example.com").unwrap(), 2);
         let now = Utc::now();
         let later = (now + chrono::Duration::hours(6)).to_rfc3339();
         let earlier = (now - chrono::Duration::hours(1)).to_rfc3339();
+        let held = Some(HELD_BY_BUDGET);
         {
             let conn = store.lock().unwrap();
             // (id, account, kind, trigger, last_error, available_at, foreground)
             for (id, account, kind, trigger, error, at, foreground) in [
-                (
-                    1,
-                    1,
-                    "triage",
-                    "arrival",
-                    Some(HELD_BY_BUDGET),
-                    &later,
-                    Some(1),
-                ),
-                (
-                    2,
-                    1,
-                    "triage",
-                    "migration",
-                    Some(HELD_BY_BUDGET),
-                    &later,
-                    Some(0),
-                ),
-                (
-                    3,
-                    1,
-                    "triage",
-                    "backfill",
-                    Some(HELD_BY_BUDGET),
-                    &later,
-                    None,
-                ),
+                (1, 1, "triage", "arrival", held, &later, Some(1)),
+                (2, 1, "triage", "migration", held, &later, Some(0)),
+                (3, 1, "triage", "backfill", held, &later, None),
                 // An access job is background even in the foreground lane.
-                (
-                    4,
-                    1,
-                    "access",
-                    "access",
-                    Some(HELD_BY_BUDGET),
-                    &later,
-                    Some(1),
-                ),
+                (4, 1, "access", "access", held, &later, Some(1)),
                 // Already due again: no longer held.
-                (
-                    5,
-                    1,
-                    "triage",
-                    "due",
-                    Some(HELD_BY_BUDGET),
-                    &earlier,
-                    Some(1),
-                ),
+                (5, 1, "triage", "due", held, &earlier, Some(1)),
                 // Waiting for some other reason.
                 (
                     6,
@@ -320,15 +335,8 @@ mod tests {
                 ),
                 (7, 1, "triage", "fresh", None, &later, Some(1)),
                 // Another account's.
-                (
-                    8,
-                    2,
-                    "triage",
-                    "arrival",
-                    Some(HELD_BY_BUDGET),
-                    &later,
-                    Some(1),
-                ),
+                (8, 2, "triage", "arrival", held, &later, Some(1)),
+                (9, 1, "triage", "revisit:due", held, &later, Some(0)),
             ] {
                 conn.execute(
                     "INSERT INTO agent_triage_jobs
@@ -346,28 +354,42 @@ mod tests {
                 }
             }
         }
-        let config = AgentConfig::default();
-        let status = store.daily_budget_status(1, &config, now).unwrap();
-        assert_eq!((status.held_arrival, status.held_background), (1, 3));
+        let config = AgentConfig {
+            daily_run_cap: 10,
+            background_daily_run_cap: 2,
+            ..AgentConfig::default()
+        };
+        let day = now.format("%Y-%m-%d").to_string();
+        let both = vec![
+            (TOTAL_BUDGET_KEY.to_string(), 10),
+            (BACKGROUND_BUDGET_KEY.to_string(), 2),
+        ];
+        let total = vec![(TOTAL_BUDGET_KEY.to_string(), 10)];
+        while store.reserve_agent_budget(1, &day, &both).unwrap() {}
+        while store.reserve_agent_budget(1, &day, &total).unwrap() {}
 
-        assert_eq!(
-            store
-                .grant_daily_runs(1, BACKGROUND_BUDGET_KEY, 50, now)
-                .unwrap(),
-            4
-        );
-        let status = store.daily_budget_status(1, &config, now).unwrap();
-        assert_eq!((status.held_arrival, status.held_background), (0, 0));
-        assert_eq!(status.background_cap, 250);
-        assert_eq!(status.total_cap, 1000);
+        let status = |account| store.daily_budget_status(account, &config, now).unwrap();
+        let held = |account| {
+            let s = status(account);
+            (s.held_arrival, s.held_background, s.held_revisit)
+        };
+        assert_eq!(held(1), (1, 3, 1));
+
+        // Three more total runs: one is already spoken for by job 5, due and
+        // not yet run, one goes to the new mail, and none to background,
+        // whose own cap is still spent.
+        let grant = |key, runs| store.grant_daily_runs(1, key, runs, &config, now).unwrap();
+        assert_eq!(grant(TOTAL_BUDGET_KEY, 3), 1);
+        assert_eq!(held(1), (0, 3, 1));
+        // One background run, and the total's last run of room: exactly one
+        // background job, the oldest.
+        assert_eq!(grant(BACKGROUND_BUDGET_KEY, 1), 1);
+        assert_eq!(held(1), (0, 2, 1));
+        assert_eq!((status(1).total_cap, status(1).background_cap), (13, 3));
+        // Granting again before the released jobs run releases nothing more.
+        assert_eq!(grant(BACKGROUND_BUDGET_KEY, 1), 0);
         // The other account's job was not touched.
-        assert_eq!(
-            store
-                .daily_budget_status(2, &config, now)
-                .unwrap()
-                .held_arrival,
-            1
-        );
+        assert_eq!(held(2), (1, 0, 0));
     }
 
     #[test]

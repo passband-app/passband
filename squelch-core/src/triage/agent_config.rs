@@ -20,9 +20,13 @@ pub struct DailyBudgetStatus {
     /// Jobs for newly arrived mail parked until tomorrow by the total cap.
     /// Nonzero means new mail is going untriaged today.
     pub held_arrival: u64,
-    /// Background jobs (backfill, refreshes, revisits) parked until tomorrow.
+    /// Background jobs (backfill, refreshes, access) parked until tomorrow.
     /// A backlog draining at the background cap sits here by design.
     pub held_background: u64,
+    /// Autonomous revisits parked until tomorrow. They also answer to
+    /// `[revisit].daily_cap`, which a grant does not raise, so a grant never
+    /// releases them.
+    pub held_revisit: u64,
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -45,6 +49,12 @@ pub struct AgentConfig {
     /// Queue polling is independent from Gmail polling.
     pub worker_poll_secs: u64,
     /// Maximum investigations per account per UTC day; each run has its own turn cap.
+    ///
+    /// A runaway breaker, not a working budget: it is set far above the mail
+    /// any real mailbox receives so that new mail is never left untriaged by
+    /// it. Arrival spend is bounded by the mail that actually arrives,
+    /// background spend by the cap below, and, hosted, all of it by the
+    /// tenant's monthly LLM budget.
     pub daily_run_cap: u32,
     /// Background investigations share the total cap but cannot consume the
     /// foreground reserve. Zero pauses background work; notification is separate.
@@ -65,7 +75,7 @@ impl Default for AgentConfig {
             timeout_secs: 90,
             concurrency: 2,
             worker_poll_secs: 1,
-            daily_run_cap: 1000,
+            daily_run_cap: 10_000,
             background_daily_run_cap: 200,
             max_attempts: 6,
             outage_retry_secs: 300,

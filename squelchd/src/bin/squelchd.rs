@@ -1257,19 +1257,20 @@ fn check_transfer_usable(transfer: &CredentialTransfer) -> Result<(), squelch_co
 fn cmd_triage(config: &Config, args: &TriageArgs) -> Result<(), squelch_core::CoreError> {
     use squelch_core::triage::agent_config::{BACKGROUND_BUDGET_KEY, TOTAL_BUDGET_KEY};
     let (store, account_id) = open_account_store(config)?;
+    let agent = &config.triage.agent;
     if let TriageCommand::Grant { runs, background } = args.command {
         let key = if background {
             BACKGROUND_BUDGET_KEY
         } else {
             TOTAL_BUDGET_KEY
         };
-        let released = store.grant_daily_runs(account_id, key, runs, chrono::Utc::now())?;
+        let released = store.grant_daily_runs(account_id, key, runs, agent, chrono::Utc::now())?;
         println!(
             "granted {runs} extra {} runs until midnight UTC; released {released} held jobs",
             if background { "background" } else { "total" }
         );
     }
-    let status = store.daily_budget_status(account_id, &config.triage.agent, chrono::Utc::now())?;
+    let status = store.daily_budget_status(account_id, agent, chrono::Utc::now())?;
     println!(
         "total       {} of {} runs today",
         status.total_used, status.total_cap
@@ -1279,9 +1280,28 @@ fn cmd_triage(config: &Config, args: &TriageArgs) -> Result<(), squelch_core::Co
         status.background_used, status.background_cap
     );
     println!(
-        "held until tomorrow: {} new mail, {} background",
-        status.held_arrival, status.held_background
+        "held until tomorrow: {} new mail, {} background, {} revisits",
+        status.held_arrival, status.held_background, status.held_revisit
     );
+    if status.total_used >= status.total_cap
+        && (status.held_background > 0
+            || matches!(
+                args.command,
+                TriageCommand::Grant {
+                    background: true,
+                    ..
+                }
+            ))
+    {
+        println!(
+            "note: the total is spent, so no background grant helps until it has room: `squelchd triage grant <runs>`"
+        );
+    }
+    if status.held_revisit > 0 {
+        println!(
+            "note: revisits also answer to [revisit].daily_cap, which a grant does not raise; they run tomorrow"
+        );
+    }
     Ok(())
 }
 

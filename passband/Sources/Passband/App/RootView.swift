@@ -352,7 +352,20 @@ struct MainShell: View {
                     if store.daemonDown && store.activeView != .settings {
                         DaemonDownPane()
                     } else {
-                        routedBody
+                        // THE PURGE, ITS END PAGE AND THE SMART DONE LIST ARE
+                        // OCCUPANTS OF THIS PANE, like any routed page: the
+                        // same backdrop, the same header on the dots' line,
+                        // the rail's top edge cut to it. The page they are
+                        // over stays mounted and undrawn (it keeps its scroll
+                        // and state), as a page under a settled reader does.
+                        let page = contentPage
+                        ZStack {
+                            routedBody
+                                .opacity(page == nil ? 1 : 0)
+                                .allowsHitTesting(page == nil)
+                                .accessibilityHidden(page != nil)
+                            if let page { page }
+                        }
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -607,6 +620,24 @@ struct MainShell: View {
     }
 
     @ViewBuilder
+    /// A page that takes the content pane over whatever is routed there.
+    private var contentPage: AnyView? {
+        if let session = store.purgeShown { return AnyView(PurgeOverlay(session: session)) }
+        if let finish = store.purgeFinished {
+            return AnyView(
+                // Clears only ITS OWN finish, as the walk's card does.
+                PurgeBoard(finish: finish) {
+                    if store.purgeFinished?.id == finish.id { store.dismissPurgeFinished() }
+                }
+                .id(finish.id))
+        }
+        if store.smartDoneListOpen, let receipt = store.smartDoneReceipt {
+            return AnyView(SmartDoneListPage(receipt: receipt))
+        }
+        return nil
+    }
+
+    @ViewBuilder
     private var routedBody: some View {
         switch store.activeView {
         case .sitrep: SitrepView()
@@ -689,6 +720,15 @@ struct MainShell: View {
                 }
                 guard !store.undos.isEmpty else { return false }
                 Task { await store.fireUndo() }
+                return true
+            })
+        // A PARKED PURGE IS RESUMED WITH `p` FROM ANY PAGE that has not bound
+        // the letter itself (a surface's own binding is consulted before this
+        // one). Declining, so with nothing parked the key stays free.
+        bindings.append(
+            KeyBinding(declining: "p", "resume purge") {
+                guard store.purgeParked != nil else { return false }
+                store.resumePurge()
                 return true
             })
         bindings.append(

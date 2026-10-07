@@ -54,10 +54,11 @@ enum ShortcutCatalog {
                 Item(["1", "2", "3"], "pick a suggested rule"),
                 Item(["o"], "other: type your own rule"),
                 Item(["s"], "keep this sender"),
+                Item(["↑", "↓"], "look at another of their emails"),
                 Item(["z"], "back one sender"),
                 Item(["Esc"], "back out a step, then review"),
                 Item(["Enter"], "confirm, on the review page"),
-                Item(["p"], "resume a paused purge, from the sitrep"),
+                Item(["p"], "resume a paused purge"),
             ]),
         Group(
             title: "Thread viewer",

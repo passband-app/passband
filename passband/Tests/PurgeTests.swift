@@ -55,6 +55,8 @@ struct PurgeTests {
         theRingsPartsAlwaysMakeTheWhole()
         theReadingBarSaysWhatAPersonWould()
         aParkedPurgeSaysNothingWasSent()
+        theStripStopsAtItsEndsAndFoldsWhenSmall()
+        theFixtureHasEveryKindOfBody()
         aSuggestionIsNeverBuiltIntoASentence()
         needsYouLinesSayWhy()
         theHeadlineFollowsWhereThingsStand()
@@ -883,5 +885,40 @@ struct PurgeTests {
         precondition(PurgeCopy.discardAsk(3) == "Discard 3 choices?")
         precondition(PurgeCopy.expired == "Your purge timed out. Nothing was sent.")
         precondition(PurgeCopy.resumePill == "resume purge")
+    }
+
+    // MARK: the strip beside the rendered email
+
+    static func theStripStopsAtItsEndsAndFoldsWhenSmall() {
+        precondition(PurgeStrip.move(0, by: 1, count: 14) == 1)
+        precondition(PurgeStrip.move(3, by: -1, count: 14) == 2)
+        precondition(PurgeStrip.move(0, by: -1, count: 14) == 0, "no wrap off the top")
+        precondition(PurgeStrip.move(13, by: 1, count: 14) == 13, "no wrap off the bottom into the newest")
+        precondition(PurgeStrip.move(5, by: 1, count: 0) == 0)
+        precondition(PurgeStrip.shown(0, count: 3) == 0 && PurgeStrip.shown(2, count: 3) == 2)
+        precondition(PurgeStrip.shown(3, count: 3) == 0, "a selection off the end shows the newest")
+        precondition(PurgeStrip.shown(-1, count: 3) == 0)
+        precondition(PurgeStrip.shown(0, count: 0) == nil, "nothing to show for an empty strip")
+        // The window's minimum is 980 wide and the rail takes 60 of it.
+        precondition(PurgeStrip.isCompact(width: 920), "at the minimum window the strip is dates only")
+        precondition(!PurgeStrip.isCompact(width: 1140), "at the default window it is not")
+        precondition(PurgeStrip.isCompact(width: 1039.9) && !PurgeStrip.isCompact(width: 1040))
+    }
+
+    static func theFixtureHasEveryKindOfBody() {
+        guard PurgeFixture.body == nil else { return }
+        func kind(_ id: Int) -> String {
+            switch PurgeFixture.rendered(subject: "S", messageId: id) {
+            case .html: "html"
+            case .text: "text"
+            case .failed: "failed"
+            }
+        }
+        precondition(kind(9001) == "html" && kind(9101) == "html", "a promo and a long newsletter")
+        precondition(kind(9601) == "text", "one plain-text email")
+        precondition(kind(9801) == "failed", "one that does not load")
+        if case .html(let promo) = PurgeFixture.rendered(subject: "Subject line", messageId: 9001) {
+            precondition(promo.contains("Subject line") && promo.contains("href="), "links, to prove they are inert")
+        }
     }
 }

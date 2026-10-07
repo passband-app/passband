@@ -874,9 +874,17 @@ final class AppStore {
         // not resurrected by the press that would have saved it.
         guard !expirePurgeIfStale() else { return }
         closeThread()
-        if activeView != .sitrep { route(to: .sitrep) }
-        purge?.parked = false
+        closeSide()
         purge?.clock.touch(at: Date())
+        guard activeView != .sitrep else {
+            purge?.parked = false
+            return
+        }
+        // FROM ANOTHER PAGE: the sitrep is put up first and the purge a turn
+        // later, so the purge page's key layer is pushed AFTER the sitrep's
+        // and is the one that takes the keys.
+        route(to: .sitrep)
+        Task { [weak self] in self?.purge?.parked = false }
     }
 
     /// Throw a parked purge away without going back into it. The marker asks
@@ -1209,6 +1217,91 @@ final class AppStore {
         if PurgeFixture.active { return PurgeFixture.emails[card.id] ?? [] }
         return zones.reading.first { $0.address == card.id }?.items ?? []
     }
+
+    // MARK: purge previews
+
+    /// One of a sender's emails, as the purge page shows it rendered.
+    enum PurgeBody: Equatable {
+        case loading
+        case html(String, allowTrackers: Bool, attachments: [Attachment])
+        case text(String)
+        /// The fetch failed or the email has no body: the page falls back
+        /// to the summary line, as text.
+        case failed
+    }
+    /// Keyed by message id, for the session.
+    var purgeBodies: [Int: PurgeBody] = [:]
+
+    /// Fetch one email's body for the purge page, once.
+    ///
+    /// LOOKING AT IT HERE IS NOT READING IT. This goes through
+    /// `ThreadPrefetch`, the read-only thread fetch the Reading tiles' art
+    /// already uses, and through nothing else: it never calls
+    /// `markMessageOpened`, never starts the dwell clock and never counts a
+    /// click. Somebody auditing a sender they ignore must not make that
+    /// sender look read, which would corrupt the very evidence beside it.
+    /// (test.sh holds the purge's view file to this by name.)
+    func loadPurgeBody(_ update: AttentionUpdate) async {
+        guard purgeBodies[update.id] == nil else { return }
+        purgeBodies[update.id] = .loading
+        if PurgeFixture.active {
+            try? await Task.sleep(for: .milliseconds(PurgeFixture.body == .loading ? 600_000 : 500))
+            switch PurgeFixture.rendered(subject: update.one_line, messageId: update.id) {
+            case .html(let html):
+                await Self.warmPreview(html, allowTrackers: false, attachments: [])
+                purgeBodies[update.id] = .html(html, allowTrackers: false, attachments: [])
+            case .text(let text): purgeBodies[update.id] = .text(text)
+            case .failed: purgeBodies[update.id] = .failed
+            }
+            return
+        }
+        let e = epoch
+        do {
+            let thread = try await ThreadPrefetch.shared.fetch(update.thread_id)
+            guard e == epoch else { return }
+            // A thread can hold several messages: THIS one, not the thread.
+            let message = thread.messages.first { $0.id == update.id } ?? thread.messages.last
+            if let html = message?.html, !html.isEmpty {
+                await Self.warmPreview(
+                    html, allowTrackers: message?.allowsTrackers ?? false,
+                    attachments: message?.attachmentList ?? [])
+                guard e == epoch else { return }
+                purgeBodies[update.id] = .html(
+                    html, allowTrackers: message?.allowsTrackers ?? false,
+                    attachments: message?.attachmentList ?? [])
+            } else if let text = message?.content, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                purgeBodies[update.id] = .text(text)
+            } else {
+                purgeBodies[update.id] = .failed
+            }
+        } catch {
+            guard e == epoch else { return }
+            // Not cached as failed: the next look tries again.
+            purgeBodies[update.id] = nil
+            purgeBodyFailures.insert(update.id)
+        }
+    }
+    /// PREPARE THE BODY BEFORE THE RENDERER IS MOUNTED, as the reader's
+    /// prefetch does (`ThreadPrefetch.warmBodies`), under the same key. The
+    /// renderer seeds itself from this in its initialiser; mounted cold it
+    /// loads an EMPTY document first and sizes itself from that, which shows
+    /// as a blank or a clipped email depending on which report lands first.
+    private nonisolated static func warmPreview(
+        _ html: String, allowTrackers: Bool, attachments: [Attachment]
+    ) async {
+        await Task.detached(priority: .userInitiated) {
+            let key = EmailWebView.Prepared.cacheKey(html, allowTrackers, attachments)
+            guard PreparedBodies.shared.get(key) == nil else { return }
+            PreparedBodies.shared.set(
+                key,
+                EmailWebView.Prepared.make(
+                    from: html, allowTrackers: allowTrackers, attachments: attachments))
+        }.value
+    }
+
+    /// Emails whose last fetch failed, so the page can say so instead of
+    /// showing a placeholder that never resolves.
+    var purgeBodyFailures: Set<Int> = []
 
     /// WHAT THE RAIL (AND EVERY OTHER ROUTE AWAY) DOES WHILE ONE OF THE
     /// CONTENT-AREA PAGES IS UP. True when the navigation may go ahead.
@@ -2457,6 +2550,10 @@ final class AppStore {
         wipeAccountCaches()
         closeOverlaysForPractice()
         RehearsalMode.setEnabled(true)
+        // AT THIS MOMENT, not on the parked chip's next tick: the practice
+        // inbox is fixture mail, and a real purge must not be resumable
+        // over it for even a second.
+        endPurge(.practice)
         await RehearsalAPI.shared.reset(accountEmail: accountEmail)
         // The fixture's calendar items keep the same ids from session to
         // session, and the zone retires an item a day after it was first
@@ -3197,6 +3294,8 @@ final class AppStore {
         purgeCandidatesAsked = nil
         purgeCandidateCount = 0
         purgeSuggestions = [:]
+        purgeBodies = [:]
+        purgeBodyFailures = []
         // A smart done in flight was asked of the old daemon, and a receipt's
         // undo names a batch the new one never made.
         smartDoneWorking = false
@@ -3555,9 +3654,9 @@ final class AppStore {
         from source: OpenSource
     ) {
         // An email opening is a way of leaving a purge: it parks, as the
-        // rail does. (While choices are being sent the email simply waits
-        // under the page for the second that takes.)
-        yieldPagesForNavigation()
+        // rail does, and while choices are being sent it is refused like any
+        // other navigation (the toast says why; it is a second or two).
+        guard yieldPagesForNavigation() else { return }
         // from_noise: an open from below the squelch line — someone digging for
         // mail the triage muted, which is the false-negative signal. source:
         // which surface earned the open (see OpenSource).

@@ -878,3 +878,28 @@ struct PurgeEvidence: Hashable, Sendable {
         return parts.joined(separator: ". ")
     }
 }
+
+/// The strip of a sender's emails beside the rendered one: which is selected
+/// and where the arrow keys take it.
+enum PurgeStrip {
+    /// One step up or down the strip. It stops at the ends rather than
+    /// wrapping: the newest is at the top, and running off the bottom into it
+    /// would look like the list had changed.
+    static func move(_ selection: Int, by delta: Int, count: Int) -> Int {
+        guard count > 0 else { return 0 }
+        return min(count - 1, max(0, selection + delta))
+    }
+
+    /// The email to show: the selection when it is still in range, else the
+    /// newest. nil only for an empty strip.
+    static func shown(_ selection: Int, count: Int) -> Int? {
+        guard count > 0 else { return nil }
+        return selection >= 0 && selection < count ? selection : 0
+    }
+
+    /// At or under this content width the strip gives way first: it folds to
+    /// dates only, so the rendered email and the decision keep their room.
+    static let compactBelow: Double = 1040
+
+    static func isCompact(width: Double) -> Bool { width < compactBelow }
+}

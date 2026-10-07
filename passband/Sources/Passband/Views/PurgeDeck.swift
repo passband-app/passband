@@ -33,10 +33,10 @@
 
     // MARK: - the page scaffold
 
-    /// A page filling the CONTENT AREA, on the app's canvas: the app's page
-    /// header, the content, a bar across the bottom. Opaque, so nothing of
-    /// the board under it shows through. Shared with the smart done list, so
-    /// the two read as one family.
+    /// A page in the CONTENT PANE: the app's page header, the content, a bar
+    /// across the bottom. The same chrome as every routed page, because it
+    /// is mounted where they are. Shared with the smart done list, so the
+    /// two read as one family.
     struct FullPage<Top: View, Content: View, Bottom: View>: View {
         let title: String
         var subtitle: String?
@@ -56,12 +56,11 @@
                     .padding(.horizontal, Space.scaled(22))
                     .frame(height: Space.scaled(54))
             }
-            .background(Palette.canvas.ignoresSafeArea())
-            .ignoresSafeArea(edges: .top)
-            // BESIDE THE RAIL, not over it: the rail is the real one, live
-            // and unblurred, and what a click on it does mid-purge is the
-            // store's rule (`AppStore.yieldPagesForNavigation`).
-            .padding(.leading, SidebarRail.railWidth)
+            // NO BACKGROUND AND NO INSETS OF ITS OWN: this is mounted in the
+            // content pane (RootView), on the window's backdrop, beside the
+            // real rail, exactly as a routed page is. What a click on the
+            // rail does mid-purge is the store's rule
+            // (`AppStore.yieldPagesForNavigation`).
         }
     }
 
@@ -205,10 +204,13 @@
             let id = UUID()
             let card: PurgeCard
             let exit: PurgeExit
+            var selection = 0
         }
         @State private var ghosts: [Ghost] = []
         @State private var arrive: PurgeArrive = .first
         @State private var ruleUI = PurgeRuleUI.fixture
+        /// Which of the sender's emails is rendered. The newest, until moved.
+        @State private var selection = PurgeFixture.selected
 
         private var deck: PurgeDeck { session.deck }
         private var anythingStaged: Bool { !session.summary.isEmpty }
@@ -217,6 +219,8 @@
             FullPage(title: "Purge", subtitle: "senders you have stopped reading") {
                 PurgeTally(summary: session.summary)
             } content: {
+                GeometryReader { geo in
+                let compact = PurgeStrip.isCompact(width: Double(geo.size.width))
                 ZStack {
                     if let card = deck.current {
                         PurgeSenderPage(
@@ -227,7 +231,12 @@
                             actions: PurgeActions(
                                 decide: decide, toggleRules: toggleRules,
                                 openOther: { ruleUI.other = true },
-                                closeOther: { ruleUI.other = false }, submitOther: submitOther)
+                                closeOther: { ruleUI.other = false }, submitOther: submitOther),
+                            selection: selection,
+                            bodyOf: { store.purgeBodies[$0.id] },
+                            failed: { store.purgeBodyFailures.contains($0.id) },
+                            select: { selection = $0 },
+                            compact: compact
                         )
                         .modifier(PurgeArrival(style: arrive, reduceMotion: reduceMotion))
                         .id(card.id)
@@ -238,6 +247,8 @@
                             card: ghost.card, ledgerDays: session.ledgerDays,
                             emails: store.purgeEmails(for: ghost.card),
                             suggestions: store.purgeSuggestions[ghost.card.id],
+                            selection: ghost.selection,
+                            bodyOf: { store.purgeBodies[$0.id] }, compact: compact,
                             exit: ghost.exit, reduceMotion: reduceMotion
                         )
                         .allowsHitTesting(false)
@@ -245,6 +256,7 @@
                     }
                 }
                 .clipped()
+                }
             } bottom: {
                 HStack(spacing: Space.s16) {
                     PageHint(key: "z", label: "back")
@@ -267,8 +279,25 @@
                 }
             }
             .keyBindings(.modal, bindings)
-            // A new sender starts with the three choices and nothing open.
-            .onChange(of: deck.current?.id) { _, _ in ruleUI = PurgeRuleUI() }
+            // A new sender starts with the three choices, nothing open, and
+            // their newest email.
+            .onChange(of: deck.current?.id) { _, _ in
+                ruleUI = PurgeRuleUI()
+                selection = 0
+            }
+            // THE EMAIL ON SHOW, fetched when it becomes the one on show; and
+            // the NEXT sender's newest, so its page arrives already drawn.
+            // Read-only (`AppStore.loadPurgeBody`): this is not reading it.
+            .task(id: PreviewKey(sender: deck.current?.id, selection: selection)) {
+                guard let card = deck.current else { return }
+                let emails = store.purgeEmails(for: card)
+                if let i = PurgeStrip.shown(selection, count: emails.count) {
+                    await store.loadPurgeBody(emails[i])
+                }
+                if let next = deck.next, let newest = store.purgeEmails(for: next).first {
+                    await store.loadPurgeBody(newest)
+                }
+            }
             .animation(.easeOut(duration: 0.18), value: ruleUI.open)
             // Coming back to a parked purge: the expansion is folded (this
             // view is new) and a half-typed sentence is still there, one
@@ -287,6 +316,19 @@
                 if let next = deck.next { await store.loadPurgeSuggestions(for: next) }
                 await here
             }
+        }
+
+        private struct PreviewKey: Hashable {
+            var sender: String?
+            var selection: Int
+        }
+
+        /// The arrows (and the app's list keys, j and k) walk the strip.
+        private func step(_ delta: Int) {
+            guard let card = deck.current else { return }
+            selection = PurgeStrip.move(
+                PurgeStrip.shown(selection, count: store.purgeEmails(for: card).count) ?? 0,
+                by: delta, count: store.purgeEmails(for: card).count)
         }
 
         // MARK: keys
@@ -314,6 +356,10 @@
                 KeyBinding(declining: "3", "third rule") { pick(2) },
                 KeyBinding("o", "your own rule") { if ruleUI.open { ruleUI.other = true } },
                 KeyBinding("s", "keep", onRelease: { _ in }) { decide(.keep) },
+                KeyBinding("ArrowDown", "next email") { step(+1) },
+                KeyBinding("ArrowUp", "previous email") { step(-1) },
+                KeyBinding("j", "next email") { step(+1) },
+                KeyBinding("k", "previous email") { step(-1) },
                 KeyBinding("z", "back one sender", onRelease: { _ in }) { back() },
                 KeyBinding("Backspace", "back one sender", onRelease: { _ in }) { back() },
                 KeyBinding("Delete", "back one sender", onRelease: { _ in }) { back() },
@@ -361,7 +407,7 @@
         private func decide(_ decision: PurgeDecision) {
             guard let card = deck.current, card.allows(decision) else { return }
             arrive = decision == .keep ? .right : .under
-            push(Ghost(card: card, exit: .decided(decision.kind)))
+            push(Ghost(card: card, exit: .decided(decision.kind), selection: selection))
             guard store.purgeDecide(decision) else { return }
             if decision != .keep {
                 NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
@@ -374,7 +420,7 @@
         private func back() {
             guard deck.current != nil, let previous = deck.previous else { return }
             arrive = .reverse(previous.decision.kind)
-            if let current = deck.current { push(Ghost(card: current, exit: .under)) }
+            if let current = deck.current { push(Ghost(card: current, exit: .under, selection: selection)) }
             store.purgeBack()
             AccessibilityNotification.Announcement(
                 "Back to \(PurgeSenderPage.name(previous.card))."
@@ -516,9 +562,19 @@
         let motion: PurgeMotion?
         var ruleUI: Binding<PurgeRuleUI> = .constant(PurgeRuleUI())
         var actions: PurgeActions?
+        /// Which of the sender's emails is rendered, and what it loaded as.
+        var selection = 0
+        var bodyOf: (AttentionUpdate) -> AppStore.PurgeBody? = { _ in nil }
+        var failed: (AttentionUpdate) -> Bool = { _ in false }
+        var select: ((Int) -> Void)?
 
         /// The choice the pointer is over, for the one line under the row.
         @State private var pointed: PurgeCopy.Choice?
+        /// Whether the window is small enough that something has to give.
+        /// Known from the FIRST layout (the page is laid out inside a
+        /// geometry reader), so the rendered email is never laid out at one
+        /// width and then reflowed at another.
+        var compact = false
 
         static func name(_ card: PurgeCard) -> String {
             let given = card.sender.display_name.trimmingCharacters(in: .whitespaces)
@@ -528,7 +584,7 @@
         static func avatar(_ card: PurgeCard) -> String { "\(name(card)) <\(card.sender.sender)>" }
 
         var body: some View {
-            HStack(alignment: .top, spacing: Space.s32) {
+            HStack(alignment: .top, spacing: compact ? Space.s20 : Space.s32) {
                 left
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 ScrollView {
@@ -536,10 +592,12 @@
                         .padding(.bottom, Space.s20)
                 }
                 .scrollIndicators(.never)
-                .frame(width: Typo.measure(420))
+                // AT A SMALL WINDOW the strip folds to dates and this column
+                // narrows; the rendered email keeps what is left.
+                .frame(width: Typo.measure(compact ? 350 : 420))
                 .opacity(fade)
             }
-            .padding(.horizontal, Space.scaled(28))
+            .padding(.horizontal, Space.scaled(compact ? 20 : 28))
             .padding(.top, Space.s20)
             .accessibilityElement(children: .contain)
             .accessibilityLabel(Self.name(card))
@@ -581,51 +639,62 @@
                 .opacity(fade)
                 .accessibilityElement(children: .combine)
 
-                Text("In Reading now")
-                    .font(Typo.sectionLabel)
-                    .textCase(.uppercase)
-                    .foregroundStyle(Palette.inkFaint)
+                // THE MAIL ITSELF: a strip of this sender's emails in
+                // Reading, newest first, and the selected one RENDERED beside
+                // it as the reference. Arrow keys move down the strip.
+                HStack(alignment: .top, spacing: Space.s12) {
+                    strip
+                        .frame(width: Typo.measure(compact ? 74 : 196))
+                    PurgeEmailPane(
+                        email: shown, body: shown.flatMap(bodyOf),
+                        failed: shown.map(failed) ?? false, sender: card
+                    )
                     .opacity(fade)
+                }
+                .padding(.bottom, Space.s16)
+            }
+        }
 
+        private var shown: AttentionUpdate? {
+            PurgeStrip.shown(selection, count: emails.count).map { emails[$0] }
+        }
+
+        /// The strip: one entry an email, in the app's list-row envelope
+        /// (`ListRow`, so selection paints as it does in every list) and the
+        /// mail list's own type and date stamp, cut to a narrow column. At a
+        /// small window it is dates only.
+        private var strip: some View {
+            ScrollViewReader { proxy in
                 ScrollView {
-                    // THE APP'S OWN MAIL ROW (`MailRow`), in its read-only
-                    // single-sender form: the same subject, gist, marks and
-                    // date column as the all-mail list, without the sender
-                    // every row here would repeat and without anything that
-                    // says it opens. Spaced as that list spaces them.
                     VStack(alignment: .leading, spacing: 1) {
                         ForEach(Array(emails.enumerated()), id: \.element.id) { i, email in
-                            MailRow(recognising: email)
-                                .modifier(Falling(index: i, motion: motion))
+                            PurgeStripEntry(
+                                email: email, selected: i == (PurgeStrip.shown(selection, count: emails.count) ?? 0),
+                                compact: compact
+                            ) { select?(i) }
+                            .id(email.id)
+                            .modifier(Falling(index: i, motion: motion))
                         }
                         // The daemon's count is the authority on how many
                         // there are; the board may hold fewer.
                         let more = card.sender.open_count - emails.count
-                        if emails.isEmpty {
-                            Text(
-                                card.sender.open_count == 1
-                                    ? "1 email of theirs is in Reading."
-                                    : "\(card.sender.open_count) emails of theirs are in Reading."
-                            )
-                            .font(Typo.rowSub)
-                            .foregroundStyle(Palette.inkFaint)
-                        } else if more > 0 {
-                            Text(more == 1 ? "and 1 more like these" : "and \(more) more like these")
+                        if more > 0, !emails.isEmpty {
+                            Text(compact ? "+\(more)" : (more == 1 ? "and 1 more" : "and \(more) more"))
                                 .font(Typo.micro)
                                 .foregroundStyle(Palette.inkFaint)
-                                .padding(.leading, Space.scaled(11))
+                                .padding(.leading, Space.s8)
                                 .padding(.top, Space.s6)
                                 .opacity(fade)
                         }
                     }
-                    .padding(.bottom, Space.s24)
+                    .padding(.bottom, Space.s16)
                 }
-                .scrollIndicators(.automatic)
-                // A ghost's rows fall out of the list, not behind its edge.
+                .scrollIndicators(.never)
+                // A ghost's entries fall out of the strip, not behind its edge.
                 .scrollClipDisabled(motion != nil)
-                // The rows' own inset, taken back so their text lines up
-                // with the sender's name above.
-                .padding(.horizontal, -Space.scaled(11))
+                .onChange(of: selection) { _, _ in
+                    if let shown { proxy.scrollTo(shown.id) }
+                }
             }
         }
 
@@ -753,6 +822,160 @@
                     .fixedSize(horizontal: false, vertical: true)
             }
             .transition(.opacity)
+        }
+    }
+
+    /// One email in the strip. The date leads (it is what differs most at a
+    /// glance down one sender's mail), the subject under it.
+    private struct PurgeStripEntry: View {
+        let email: AttentionUpdate
+        let selected: Bool
+        let compact: Bool
+        let action: () -> Void
+
+        private var line: String {
+            let subject = email.subject?.displaySubject.flattenedLine(cap: 200) ?? ""
+            return subject.isEmpty ? Reading.cleanSummary(email.one_line) : subject
+        }
+
+        var body: some View {
+            ListRow(
+                selected: selected, cornerRadius: 8, hPadding: Space.s8, vPadding: Space.s6,
+                action: action
+            ) { selected, _ in
+                VStack(alignment: .leading, spacing: Space.s2) {
+                    Text(MailList.stamp(email.received_at))
+                        .font(Typo.ui(11.5, weight: selected ? .semibold : .regular))
+                        .monospacedDigit()
+                        .foregroundStyle(selected ? Palette.ink : Palette.inkFaint)
+                        .lineLimit(1)
+                    if !compact {
+                        Text(verbatim: line)
+                            .font(Typo.ui(12.5))
+                            .foregroundStyle(selected ? Palette.ink : Palette.inkDim)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .help(line)
+            .accessibilityLabel("\(MailList.stamp(email.received_at)), \(line)")
+            .accessibilityAddTraits(selected ? .isSelected : [])
+        }
+    }
+
+    /// THE SELECTED EMAIL, RENDERED, AS A REFERENCE. The app's own renderer
+    /// (`EmailWebView`, the reader's), so images and trackers follow the
+    /// person's settings exactly as they do in the reader.
+    ///
+    /// IT IS NOT A READER, and four things keep it from acting like one:
+    /// - Nothing here marks the email opened, times it or counts a click:
+    ///   the body comes from the read-only thread fetch and the renderer is
+    ///   given no message to report on. Looking at a sender you ignore must
+    ///   not make them look read.
+    /// - LINKS ARE INERT (`inertLinks`), and the frame takes no pointer at
+    ///   all: an unsubscribe link clicked here would go round the flow's own
+    ///   staged unsubscribe.
+    /// - Taking no pointer also means it can never take the KEYBOARD: a web
+    ///   view that is clicked becomes first responder, and the purge's keys
+    ///   would stop.
+    /// - It scrolls inside its own region (the scroll view around the frame
+    ///   does the scrolling); the page does not grow.
+    private struct PurgeEmailPane: View {
+        let email: AttentionUpdate?
+        let body_: AppStore.PurgeBody?
+        let failed: Bool
+        let sender: PurgeCard
+
+        init(email: AttentionUpdate?, body: AppStore.PurgeBody?, failed: Bool, sender: PurgeCard) {
+            self.email = email
+            body_ = body
+            self.failed = failed
+            self.sender = sender
+        }
+
+        private var summary: String {
+            email.map { Reading.cleanSummary($0.one_line) } ?? ""
+        }
+
+        var body: some View {
+            ScrollView {
+                content
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+            .scrollIndicators(.automatic)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(pagePaper))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(Palette.hairline, lineWidth: 1)
+            )
+            // A new document for a new email, scrolled back to its top.
+            .id(email?.id)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Preview of the selected email. \(summary)")
+        }
+
+        @ViewBuilder private var content: some View {
+            if email == nil {
+                note(
+                    sender.sender.open_count == 1
+                        ? "1 email of theirs is in Reading."
+                        : "\(sender.sender.open_count) emails of theirs are in Reading.", nil)
+            } else if failed || body_ == .failed {
+                // The plain fallback: what it was about, as text.
+                note("This email could not be shown here. What it says:", summary)
+            } else {
+                switch body_ {
+                case .html(let html, let allowTrackers, let attachments)?:
+                    // UNKEYED: not pooled and no height filed, so nothing
+                    // measured in this pane is ever handed to the reader's
+                    // frame of the same message. The body was prepared before
+                    // this mounted (`AppStore.warmPreview`).
+                    EmailWebView(
+                        html: html, cacheKey: nil, allowTrackers: allowTrackers,
+                        attachments: attachments, textHeight: 420, inertLinks: true
+                    )
+                    // No pointer: no link, no hover, no first responder.
+                    .allowsHitTesting(false)
+                case .text(let text)?:
+                    Text(verbatim: text)
+                        .font(Typo.row)
+                        .foregroundStyle(Palette.ink)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(Space.s20)
+                case .loading?, nil, .failed?:
+                    // Calm: the shape of a page, holding still.
+                    VStack(alignment: .leading, spacing: Space.s12) {
+                        ForEach([0.5, 1, 0.92, 0.97, 0.6], id: \.self) { share in
+                            GeometryReader { geo in
+                                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                    .fill(Palette.hairline.opacity(0.6))
+                                    .frame(width: geo.size.width * share)
+                            }
+                            .frame(height: share == 0.5 ? Space.scaled(20) : Space.scaled(11))
+                        }
+                    }
+                    .padding(Space.s20)
+                }
+            }
+        }
+
+        private func note(_ lead: String, _ text: String?) -> some View {
+            VStack(alignment: .leading, spacing: Space.s8) {
+                Text(lead)
+                    .font(Typo.micro)
+                    .foregroundStyle(Palette.inkFaint)
+                if let text, !text.isEmpty {
+                    Text(verbatim: text)
+                        .font(Typo.serif(18))
+                        .foregroundStyle(Palette.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(Space.s20)
         }
     }
 
@@ -1185,6 +1408,11 @@
         let ledgerDays: Int
         let emails: [AttentionUpdate]
         let suggestions: AppStore.PurgeSuggestions?
+        /// The email that was on show when the page left, so it leaves
+        /// looking as it did.
+        let selection: Int
+        let bodyOf: (AttentionUpdate) -> AppStore.PurgeBody?
+        let compact: Bool
         let exit: PurgeExit
         let reduceMotion: Bool
 
@@ -1194,7 +1422,8 @@
         private func page(moving: Bool) -> some View {
             PurgeSenderPage(
                 card: card, ledgerDays: ledgerDays, emails: emails, suggestions: suggestions,
-                motion: moving ? PurgeMotion(exit: exit, t: t, mark: mark) : nil)
+                motion: moving ? PurgeMotion(exit: exit, t: t, mark: mark) : nil,
+                selection: selection, bodyOf: bodyOf, compact: compact)
         }
 
         var body: some View {

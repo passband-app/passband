@@ -56,6 +56,10 @@ struct EmailWebView: View {
     /// received-mail card passes it. The count is all that is kept: the link
     /// itself goes to `Opener` and nowhere else.
     let attentionMessageId: Int?
+    /// A REFERENCE, NOT A READER (the purge's preview): nothing in this body
+    /// goes anywhere. No link opens, by a click or by anything the document
+    /// does by itself, and none is counted.
+    let inertLinks: Bool
 
     @Environment(Prefs.self) private var prefs
     @Environment(AppStore.self) private var store
@@ -124,8 +128,9 @@ struct EmailWebView: View {
         html: String, cacheKey: String? = nil, allowTrackers: Bool = false,
         attachments: [Attachment] = [], textHeight: CGFloat = 0,
         bubble: Bool = false, mine: Bool = false, findID: Int? = nil,
-        attentionMessageId: Int? = nil
+        attentionMessageId: Int? = nil, inertLinks: Bool = false
     ) {
+        self.inertLinks = inertLinks
         self.html = html
         self.cacheKey = cacheKey
         self.allowTrackers = allowTrackers
@@ -311,6 +316,7 @@ struct EmailWebView: View {
                 },
                 onQuotedFound: { hasQuoted = $0 },
                 onLink: {
+                    guard !inertLinks else { return }
                     // Counted only when it is a link `Opener` will actually
                     // open: a mailto: or an in-page anchor reaches here too
                     // and goes nowhere, and "clicked" should mean they went.

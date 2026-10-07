@@ -66,29 +66,6 @@ struct ActionLayer: View {
                 .animation(.smooth(duration: 0.26), value: showsUnsubscribeTray)
             }
 
-            // THE PURGE: the deck, its confirm page and its end page, each
-            // the whole window. Here and not on the sitrep because this layer
-            // is above everything else and owns the modal key context.
-            if let session = store.purgeShown {
-                PurgeOverlay(session: session)
-            }
-            if let finish = store.purgeFinished {
-                // Clears only ITS OWN finish, as the walk's card does.
-                PurgeBoard(finish: finish) {
-                    if store.purgeFinished?.id == finish.id { store.dismissPurgeFinished() }
-                }
-                .id(finish.id)
-            }
-            // The smart done receipt's full list: the same kind of page.
-            if store.smartDoneListOpen, let receipt = store.smartDoneReceipt {
-                SmartDoneListPage(receipt: receipt)
-            }
-
-            // THE DISCOVERY RING'S FOUND MOMENT. Above the toasts and the
-            // tray, under every palette and modal below: the moment only ever
-            // arrives when none of them is up, and one raised over it covers it.
-            DiscoveryLayer()
-
             if let request = store.ruleEditor {
                 // Keyed by the request: a click on an in-effect rule swaps the
                 // request under an open card, and without a fresh identity the

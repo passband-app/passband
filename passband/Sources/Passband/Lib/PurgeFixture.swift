@@ -5,7 +5,9 @@
 // the senders below. `pill` only makes the purge pill appear (enough
 // candidates), `few` leaves too few for it to; `deck:N` starts N senders in
 // with those N already decided. `PASSBAND_PURGE_RULES=<open|loading|none|
-// other>` brings the sender page up with "Create rule" already pressed.
+// other>` brings the sender page up with "Create rule" already pressed;
+// `PASSBAND_PURGE_BODY=<loading|failed>` and `PASSBAND_PURGE_SELECT=N` set
+// the rendered email's state and which one in the strip is selected.
 // `PASSBAND_SMART_DONE_FIXTURE=<working|receipt|list>` does the same for
 // smart done. Same posture as `PASSBAND_FORCE_TESTFLIGHT_NUDGE`: a launch
 // environment nobody sets by accident, and never a pref.
@@ -81,6 +83,107 @@ enum PurgeFixture {
         }
     }()
     static let typedRule = "just the receipts, and anything about a return"
+
+    /// `PASSBAND_PURGE_BODY=<loading|failed>`: every rendered email stays
+    /// loading, or fails to load. `PASSBAND_PURGE_SELECT=N` comes up with the
+    /// Nth email in the strip selected.
+    enum BodyMode: Equatable { case loading, failed }
+    static let body: BodyMode? = {
+        switch ProcessInfo.processInfo.environment["PASSBAND_PURGE_BODY"] {
+        case "loading": return .loading
+        case "failed": return .failed
+        default: return nil
+        }
+    }()
+    static let selected: Int =
+        Int(ProcessInfo.processInfo.environment["PASSBAND_PURGE_SELECT"] ?? "") ?? 0
+
+    /// A canned email body, in Foundation's terms (the store turns it into
+    /// its own).
+    enum Body: Equatable {
+        case html(String)
+        case text(String)
+        case failed
+    }
+
+    /// What "the daemon" returns for one fixture email: a promo built of
+    /// blocks, a long newsletter, a plain-text email, and one that fails.
+    static func rendered(subject: String, messageId: Int) -> Body {
+        if body == .failed { return .failed }
+        switch messageId / 100 {
+        case 90: return .html(promo(subject))
+        case 91: return .html(newsletter(subject))
+        case 96: return .text(plain(subject))
+        case 98: return .failed
+        default: return .html(simple(subject))
+        }
+    }
+
+    private static func promo(_ subject: String) -> String {
+        let tiles = [("#F4D35E", "Patio sets", "from $249"), ("#EE964B", "Grills", "up to 40% off"),
+            ("#8FB8DE", "Lighting", "2 for 1"), ("#9BC1A0", "Planters", "from $12")]
+            .map { color, name, price in
+                """
+                <td width="25%" style="padding:6px"><div style="background:\(color);height:110px;border-radius:8px"></div>
+                <div style="font:600 13px Helvetica,Arial,sans-serif;margin-top:8px">\(name)</div>
+                <div style="font:12px Helvetica,Arial,sans-serif;color:#666">\(price)</div></td>
+                """
+            }.joined()
+        return """
+            <html><body style="margin:0;background:#ffffff;color:#111">
+            <table width="100%" cellpadding="0" cellspacing="0" style="max-width:640px;margin:0 auto">
+            <tr><td style="background:#C8102E;color:#fff;padding:14px 20px;font:700 20px Helvetica,Arial,sans-serif;letter-spacing:1px">DEAL STREAM</td></tr>
+            <tr><td style="background:#1B1B3A;color:#fff;padding:44px 24px;text-align:center">
+              <div style="font:800 34px Helvetica,Arial,sans-serif">48 HOURS ONLY</div>
+              <div style="font:16px Helvetica,Arial,sans-serif;margin-top:8px;opacity:.85">\(subject)</div>
+              <a href="https://example.com/shop" style="display:inline-block;margin-top:20px;background:#F4D35E;color:#111;padding:12px 28px;border-radius:24px;font:700 14px Helvetica,Arial,sans-serif;text-decoration:none">Shop the sale</a>
+            </td></tr>
+            <tr><td style="padding:14px"><table width="100%" cellpadding="0" cellspacing="0"><tr>\(tiles)</tr></table></td></tr>
+            <tr><td style="padding:8px 20px 20px;font:13px/1.5 Helvetica,Arial,sans-serif;color:#444">Members who check out before midnight get an extra 10% and free delivery on orders over $75. Prices as marked. While supplies last.</td></tr>
+            <tr><td style="background:#f3f3f3;padding:16px 20px;font:11px Helvetica,Arial,sans-serif;color:#888">You are receiving this because you shopped with us. <a href="https://example.com/unsubscribe" style="color:#888">Unsubscribe</a></td></tr>
+            </table></body></html>
+            """
+    }
+
+    private static func newsletter(_ subject: String) -> String {
+        let paragraph =
+            "The three of them never met, and for most of their lives did not know the others were writing at all. What survives is a set of letters to a shared editor, who kept every one and answered none at length. Reading them in order is a little like listening to three people talk in adjoining rooms."
+        let body = (0..<9).map { _ in "<p style=\"margin:0 0 16px\">\(paragraph)</p>" }.joined()
+        return """
+            <html><body style="margin:0;background:#fffdf8;color:#222">
+            <div style="max-width:600px;margin:0 auto;padding:32px 24px;font:17px/1.6 Georgia,serif">
+            <div style="font:600 12px Helvetica,Arial,sans-serif;letter-spacing:2px;color:#9a6b2f">THE QUARTERLY REVIEW</div>
+            <h1 style="font:700 28px/1.2 Georgia,serif;margin:10px 0 20px">\(subject)</h1>
+            \(body)
+            <p style="font:13px Helvetica,Arial,sans-serif;color:#888">Manage your subscription on <a href="https://example.com/account" style="color:#888">our site</a>.</p>
+            </div></body></html>
+            """
+    }
+
+    private static func plain(_ subject: String) -> String {
+        """
+        \(subject)
+
+        Dear cardholder,
+
+        This month your Harbor Bank Rewards card earns 5x points at restaurants, cafes and food delivery. No enrolment is needed.
+
+        Points post within two statement cycles. See your account for the full terms.
+
+        Harbor Bank Rewards
+        """
+    }
+
+    private static func simple(_ subject: String) -> String {
+        """
+        <html><body style="margin:0;background:#ffffff;color:#222">
+        <div style="max-width:560px;margin:0 auto;padding:28px 22px;font:15px/1.55 Helvetica,Arial,sans-serif">
+        <h2 style="margin:0 0 14px;font:700 22px Helvetica,Arial,sans-serif">\(subject)</h2>
+        <p>Here is what is new this week, picked for you.</p>
+        <p><a href="https://example.com/offers" style="color:#2B7FD4">See everything</a></p>
+        </div></body></html>
+        """
+    }
 
     /// True for the whole life of a process launched with either variable.
     static var active: Bool { purge != nil || smartDone != nil }

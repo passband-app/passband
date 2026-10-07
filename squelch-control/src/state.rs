@@ -25,6 +25,7 @@ use crate::resend::{ResendClient, ResendError};
 use crate::sessions::SessionStore;
 use crate::store::ControlStore;
 use crate::warden::Warden;
+use crate::workos::{COMPLETE_TIMEOUT, WorkosClient, WorkosError};
 use squelch_core::features::Feature;
 
 /// Why state could not be built. Both variants are a client that would not
@@ -38,6 +39,8 @@ pub enum StateError {
     Resend(#[from] ResendError),
     #[error(transparent)]
     Alert(#[from] AlertError),
+    #[error(transparent)]
+    Workos(#[from] WorkosError),
 }
 
 #[derive(Clone)]
@@ -64,6 +67,9 @@ struct Inner {
     /// The operator's webhook, DERIVED from `config.alert_webhook_url` on the
     /// same one-switch terms. `None` means [`ControlState::alert`] is a no-op.
     alert: Option<Arc<AlertClient>>,
+    /// The AuthKit completion client, DERIVED from `config.workos` on the same
+    /// one-switch terms. `None` means `GET /agent/auth` is not mounted.
+    workos: Option<Arc<WorkosClient>>,
     sessions: Mutex<SessionStore>,
     page_limiter: Mutex<RateLimiter>,
     signup_limiter: Mutex<RateLimiter>,
@@ -132,6 +138,14 @@ impl ControlState {
             .as_ref()
             .map(|url| AlertClient::new(url.clone(), ALERT_TIMEOUT).map(Arc::new))
             .transpose()?;
+        let workos = config
+            .workos
+            .as_ref()
+            .map(|w| {
+                WorkosClient::new(w.api_url.clone(), w.api_key.clone(), COMPLETE_TIMEOUT)
+                    .map(Arc::new)
+            })
+            .transpose()?;
         Ok(Self {
             inner: Arc::new(Inner {
                 reconnect_slots: Arc::new(tokio::sync::Semaphore::new(
@@ -143,6 +157,7 @@ impl ControlState {
                 bifrost,
                 resend,
                 alert,
+                workos,
                 sessions: Mutex::new(SessionStore::new()),
                 page_limiter: Mutex::new(RateLimiter::per_minute(PAGE_REQUESTS_PER_MINUTE)),
                 signup_limiter: Mutex::new(RateLimiter::per_minute(SIGNUP_REQUESTS_PER_MINUTE)),
@@ -220,6 +235,13 @@ impl ControlState {
             .resend
             .as_deref()
             .zip(self.inner.config.waitlist.as_ref())
+    }
+
+    /// The AuthKit completion client, when this deployment lets agents connect
+    /// through WorkOS. Present exactly when `config.workos` is, because it is
+    /// derived from it in [`Self::new`].
+    pub fn workos(&self) -> Option<&WorkosClient> {
+        self.inner.workos.as_deref()
     }
 
     /// Tell the operator, in the background, when this deployment has a

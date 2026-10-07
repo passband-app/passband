@@ -35,7 +35,13 @@ struct GroupPicker: View {
             } else if let error = groups.error, rows.isEmpty {
                 note(error)
             } else if rows.isEmpty {
-                note("no groups yet. make one on the Groups page.")
+                // Where the page IS differs: a rail slot on the Mac, a row
+                // on the phone's Account page.
+                #if os(macOS)
+                    note("no groups yet. make one on the Groups page.")
+                #else
+                    note("no groups yet. make one under Account, in Groups.")
+                #endif
             } else {
                 ScrollView {
                     VStack(spacing: 1) {

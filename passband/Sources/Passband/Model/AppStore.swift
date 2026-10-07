@@ -38,7 +38,7 @@ enum OpenSource: String, Sendable {
 }
 
 enum MainView: String, Sendable, Hashable, CaseIterable {
-    case sitrep, emails, auth, rules, groups, usage, settings, process
+    case sitrep, emails, auth, rules, groups, usage, settings, process, discovery
 
     /// The TOP rail group — also the 1..N number-key mapping, taken from
     /// POSITION in this array. Usage/Settings are excluded so that adding one
@@ -53,6 +53,10 @@ enum MainView: String, Sendable, Hashable, CaseIterable {
     /// back the window it was spending (see Views/AuditView.swift).
     static let mainViews: [MainView] = [.sitrep, .emails, .auth, .rules, .groups]
     /// The BOTTOM rail group, pinned below a divider.
+    ///
+    /// `discovery` is in neither group: its one door is the ring, alone above
+    /// the divider, and it takes no number key because nobody should need to
+    /// reach a field guide faster than by looking at it.
     static let bottomViews: [MainView] = [.usage, .settings]
 
     var label: String {
@@ -65,6 +69,7 @@ enum MainView: String, Sendable, Hashable, CaseIterable {
         case .usage: "Usage"
         case .settings: "Settings"
         case .process: "Process"
+        case .discovery: "Ways through your mail"
         }
     }
 
@@ -78,6 +83,8 @@ enum MainView: String, Sendable, Hashable, CaseIterable {
         case .usage: "waveform.path.ecg"
         case .settings: "gearshape"
         case .process: "checkmark.seal"
+        // Never drawn: the rail draws the discovery ring in its place.
+        case .discovery: "circle.dashed"
         }
     }
 }
@@ -517,8 +524,22 @@ final class AppStore {
     var connStatus: ConnStatus = .loading {
         didSet {
             if connStatus == .connected { Notifier.shared.connectionBecameReady() }
+            if connStatus != .loading { restoringSavedConnection = false }
+            if connStatus == .loading || connStatus == .connected { leftSavedConnectionWait = false }
         }
     }
+    /// The loading gate is up because a saved account's daemon is being
+    /// waited on (`recoverSavedConnection`), not because of a keychain read or
+    /// a practice swap. That wait has no end of its own, so this is what lets
+    /// the gate and the Accounts menu offer a way out of it.
+    private(set) var restoringSavedConnection = false
+    /// The Connect gate is up because the person walked away from that wait
+    /// to connect something else. It opens on its choices then, not on a form
+    /// filled in with the one server known not to be answering.
+    private(set) var leftSavedConnectionWait = false
+    /// Switching is offered from a working mailbox, and from the wait for one
+    /// that is not answering. Not from the Connect gate (see PassbandCommands).
+    var canSwitchAccounts: Bool { connStatus == .connected || restoringSavedConnection }
     var settings: ConnectionSettings? {
         didSet {
             capabilityRecoveryTask?.cancel()
@@ -635,7 +656,18 @@ final class AppStore {
         var done = 0
         var skipped = 0
     }
-    var walk: Walk?
+    var walk: Walk? {
+        didSet {
+            // THREE EMAILS IN IS A WALK, not a stray Space. Noted here, on
+            // the crossing, so the three places that step the tally (done,
+            // remind, skip) stay one line each and cannot disagree about it.
+            let before = (oldValue?.done ?? 0) + (oldValue?.skipped ?? 0)
+            let now = (walk?.done ?? 0) + (walk?.skipped ?? 0)
+            if before < Self.walkDeepAt, now >= Self.walkDeepAt { Discovery.note(.walkDeep) }
+        }
+    }
+    /// How far into a walk counts as having found flow mode.
+    static let walkDeepAt = 3
     /// What a FINISHED walk came to, for the sitrep's moment. Cleared by the
     /// moment itself once it has played.
     struct WalkSummary: Equatable {
@@ -706,6 +738,7 @@ final class AppStore {
         let finished = walk
         closeThread()
         guard let finished, finished.done + finished.skipped > 0 else { return }
+        Discovery.note(.walkFinished)
         walkFinished = WalkSummary(
             done: finished.done, skipped: finished.skipped,
             duration: Date().timeIntervalSince(finished.startedAt))
@@ -835,6 +868,10 @@ final class AppStore {
     /// so a thread switch under a live token is a viewer that simply never
     /// hears about the bump it no longer cares about.
     var openThreadRefreshToken = 0
+    /// Bumped by the menu's Find in Email (⌘F with a thread open). The viewer
+    /// watches it and opens its find bar: the session is the reader's own
+    /// state, so the store only has to say that it was asked for.
+    var findInEmailTick = 0
     /// WHAT THE HUMAN HAS ALREADY BEEN TOLD about the thread they are reading.
     /// Private because `noteThreadArrival` is the only door: the refetch and
     /// the announcement have different rules, and ThreadArrivals is where the
@@ -988,6 +1025,10 @@ final class AppStore {
         }
     }
     private(set) var practiceTransitioning = false
+    /// The account a switch is asking after, until it lands or is refused.
+    private(set) var switchingTo: UUID?
+    /// Counts switch requests, so the newest one is the only one that lands.
+    @ObservationIgnored private var switchIntent = 0
 
     /// Also enforced by account mutation entry points, not only menu items.
     var accountActionsBlocked: Bool {
@@ -1328,6 +1369,7 @@ final class AppStore {
         capabilityRecoveryTask?.cancel()
         let recoveryEpoch = epoch
         connStatus = .loading
+        restoringSavedConnection = true
         capabilityRecoveryTask = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
@@ -1363,6 +1405,30 @@ final class AppStore {
                 }
             }
         }
+    }
+
+    /// Ask the saved daemon again now instead of sitting out the loop's sleep:
+    /// the person has just started it and should not wait half a minute to be
+    /// believed.
+    func retrySavedConnectionNow() {
+        guard restoringSavedConnection, !accountActionsBlocked, !switching,
+            let settings, let id = AccountManager.shared.activeId
+        else { return }
+        connError = nil
+        recoverSavedConnection(settings, accountId: id)
+    }
+
+    /// Stop waiting on the saved daemon and hand the window to the Connect
+    /// gate. Nothing is forgotten: the account stays in the index with its
+    /// credentials, and the gate's "Try saved connection again" comes straight
+    /// back here.
+    func stopWaitingForSavedConnection() {
+        guard restoringSavedConnection, !accountActionsBlocked, !switching else { return }
+        capabilityRecoveryTask?.cancel()
+        capabilityRecoveryTask = nil
+        connError = nil
+        leftSavedConnectionWait = true
+        connStatus = .disconnected
     }
 
     /// Verify candidate credentials and triage capabilities, then persist and connect.
@@ -1670,13 +1736,66 @@ final class AppStore {
     /// generation INSIDE APIClient that every request checks and every caller
     /// passes — identified, not built, because it touches all 25 call sites.
     func switchAccount(to record: AccountRecord) async {
-        // (1) Never two at once — the two awaits below are both windows a
-        //     second switch could start in.
-        guard !accountActionsBlocked, !switching else { return }
+        guard !accountActionsBlocked else { return }
+        // THE CHECK COMES BEFORE THE GATE, and outside it. It reads a keychain
+        // slot and asks the target daemon one question; nothing of the live
+        // world is touched. Held inside the gate (the old shape) a target that
+        // was not answering locked every other switch out for the length of
+        // its retries, in silence: one press on a dead account and the app
+        // would not move to a healthy one. So the newest pick wins instead,
+        // and an older one that comes back late is dropped unreported.
+        switchIntent &+= 1
+        let intent = switchIntent
+        switchingTo = record.id
+        defer { if switchIntent == intent { switchingTo = nil } }
+        // One attempt, no retries: somebody is watching this one, and "that
+        // server is not answering" now beats the same sentence in 15 seconds.
+        let checked = await switchPreflight(record, retrying: false)
+        guard switchIntent == intent else { return }
+        guard case .ready(let next) = checked else {
+            if case .refused(let why) = checked { reportSwitchFailure(why, for: record) }
+            return
+        }
+        // (1) Never two at once — the awaits below are windows a second
+        //     switch could start in. The world may also have moved while the
+        //     target was being asked.
+        guard !accountActionsBlocked, !switching, record.id != AccountManager.shared.activeId
+        else { return }
         switching = true
         // (10) Whichever path we leave by.
         defer { switching = false }
-        await performSwitch(to: record)
+        await performSwitch(to: record, preflight: next)
+    }
+
+    private enum SwitchPreflight {
+        case ready(ConnectionSettings)
+        case refused(String)
+    }
+
+    /// Step (2): the target's credentials, and proof its daemon will take
+    /// them, BEFORE anything is torn down — the steps that can fail. Failing
+    /// here, with the old world untouched, keeps the human on a working
+    /// mailbox; checking after the wipe (the old shape) turned a single denied
+    /// access panel into a logout, and the gate it landed on then endangered
+    /// the surviving accounts' credentials. A keychain read can raise the
+    /// access panel, but nothing has been suspended or wiped yet, so blocking
+    /// here is safe. The probe is built from the candidate credentials, so the
+    /// live client is not touched either.
+    private func switchPreflight(_ record: AccountRecord, retrying: Bool) async -> SwitchPreflight {
+        let loaded = await AccountManager.shared.credentialLoad(for: record.id)
+        guard case .ok(let next) = loaded else {
+            if case .unreadable = loaded {
+                return .refused("the keychain refused to unlock \(record.displayName)")
+            }
+            return .refused("no credentials for \(record.displayName) in the keychain")
+        }
+        do {
+            try await APIClient.shared.probe(
+                baseURL: next.serverURL, token: next.apiToken, retrying: retrying)
+        } catch {
+            return .refused(Self.connectErrorText(error))
+        }
+        return .ready(next)
     }
 
     /// Steps (2)–(9), gate already held. Split out so `removeAccount` — which
@@ -1687,55 +1806,34 @@ final class AppStore {
     /// drafts would go to is the one being forgotten. The settle still runs —
     /// a debounced save already in flight must finish before the client is
     /// reconfigured, whoever it was addressed to.
+    ///
+    /// `preflight` is step (2) already done by the caller (`switchAccount`,
+    /// which does it outside the gate).
     @discardableResult
     private func performSwitch(
-        to record: AccountRecord, flushDrafts: Bool = true, currentWorldGone: Bool = false
+        to record: AccountRecord, flushDrafts: Bool = true, currentWorldGone: Bool = false,
+        preflight: ConnectionSettings? = nil
     ) async -> Bool {
-        // (2) The target's credentials, BEFORE anything is torn down — the one
-        //     step that can fail. Failing here, with the old world untouched,
-        //     keeps the human on a working mailbox; checking after the wipe
-        //     (the old shape) turned a single denied access panel into a
-        //     logout, and the gate it landed on then endangered the surviving
-        //     accounts' credentials. A keychain read can raise the access
-        //     panel, but nothing has been suspended or wiped yet, so blocking
-        //     here is safe.
-        let loaded = await AccountManager.shared.credentialLoad(for: record.id)
-        guard case .ok(let next) = loaded else {
-            let why: String
-            if case .unreadable = loaded {
-                why = "the keychain refused to unlock \(record.displayName)"
-            } else {
-                why = "no credentials for \(record.displayName) in the keychain"
-            }
-            guard currentWorldGone else {
-                // A plain switch: the world on screen is intact and the
-                // credentials backing it were never touched. Stay — and say
-                // so. A toast, not `connError`: that field renders only on
-                // ConnectView, so writing it here would show nothing now and
-                // then greet the next Add Account sheet with a stale failure.
-                pushToast(why, .error)
+        let next: ConnectionSettings
+        if let preflight {
+            next = preflight
+        } else {
+            switch await switchPreflight(record, retrying: true) {
+            case .ready(let checked):
+                next = checked
+            case .refused(let why):
+                if currentWorldGone {
+                    // The removal path: the account on screen is already gone
+                    // from the index, so there is no working world to stay in
+                    // — the Connect gate is the honest answer.
+                    await tearDownToGate(error: why)
+                } else {
+                    // The world on screen is intact and the credentials
+                    // backing it were never touched. Stay — and say so.
+                    reportSwitchFailure(why, for: record)
+                }
                 return false
             }
-            // The removal path: the account on screen is already gone from the
-            // index, so there is no working world to stay in — the Connect
-            // gate is the honest answer.
-            await tearDownToGate(error: why)
-            return false
-        }
-
-        // Probe with the candidate credentials before changing the live client
-        // or any account state. Transient failures retry automatically; a
-        // failed switch leaves the working account and its drafts untouched.
-        do {
-            try await APIClient.shared.probe(baseURL: next.serverURL, token: next.apiToken)
-        } catch {
-            let why = Self.connectErrorText(error)
-            if currentWorldGone {
-                await tearDownToGate(error: why)
-            } else {
-                pushToast(why, .error)
-            }
-            return false
         }
 
         // (3) From here, every answer still in flight belongs to the old
@@ -1796,7 +1894,25 @@ final class AppStore {
         Task { await refreshMail(.inbox) }
         Task { await refreshTrackingConfig() }
         Notifier.shared.connectionBecameReady()
+        // A switch made from the wait for a daemon that is not answering: the
+        // shell was never mounted, so this is also what mounts it. The starts
+        // above repeat on that transition, and all of them are idempotent.
+        if connStatus != .connected { connStatus = .connected }
         return true
+    }
+
+    /// A refused switch leaves the world it started from, and says why where
+    /// that world can show it. Toasts are the shell's; from the wait for a
+    /// saved daemon there is no shell, and the loading gate reads `connError`.
+    /// A toast, not `connError`, from the shell: that field renders only on
+    /// the gates, so writing it there would show nothing now and then greet
+    /// the next Add Account sheet with a stale failure.
+    private func reportSwitchFailure(_ why: String, for record: AccountRecord) {
+        if connStatus == .connected {
+            pushToast("can’t switch to \(record.displayName): \(why)", .error)
+        } else {
+            connError = "\(record.displayName): \(why)"
+        }
     }
 
     /// Tear the world down to the Connect gate: the shared tail of "the
@@ -1832,6 +1948,8 @@ final class AppStore {
         // "Finish on their site" would tell the NEW daemon about a job it has
         // never heard of.
         UnsubscribeJobs.shared.reset()
+        // And the ignored-unsubscribe notice, for the same reason.
+        UnsubscribeViolations.shared.reset()
         sitrep = SitrepData()
         // Its own line since the stats left SitrepData. The old daemon's
         // stats over the new mailbox's empty bands read as "all clear": the
@@ -1896,6 +2014,7 @@ final class AppStore {
         triageFix = nil
         remindTarget = nil
         schedulePicker = nil
+        discardAsk = nil
         ruleEditor = nil
         // A draft's pattern names the old account's senders and rule ids.
         ruleDrafts = [:]
@@ -1999,7 +2118,14 @@ final class AppStore {
         if view != activeView { Analytics.screen(view.rawValue) }
         routeWasPointer = viaPointer
         activeView = view
+        routeAsks &+= 1
     }
+
+    /// Bumped by every route. The phone's shell answers a route with a tab and
+    /// has to hear the call itself: it keeps `activeView` true only for the
+    /// tabs that have one, so a route to the view already named changes
+    /// nothing else (the same reason `searchAsks` exists).
+    private(set) var routeAsks = 0
 
     func setView(_ view: MainView, viaPointer: Bool = false) {
         guard !RehearsalMode.isEnabled || view == .sitrep else { return }
@@ -2335,7 +2461,7 @@ final class AppStore {
             || ruleEditor != nil
             || groupEditor != nil
             || !authQueue.isEmpty || retriage != nil || retriageAsk != nil
-            || reconnectAsk != nil
+            || reconnectAsk != nil || discardAsk != nil
             || tour.wantsBlur || whatsNew.active
     }
 
@@ -2483,6 +2609,7 @@ final class AppStore {
             // knows nothing about it and must not be refreshed on its behalf.
             guard e == epoch else { return }
             Analytics.capture("shipment_cleared")
+            Discovery.note(.shipmentCleared)
             pushToast("cleared \(Self.shipmentLabel(row)) · it returns if there's news", .info)
             await refreshZones(force: true)
         } catch {
@@ -3197,9 +3324,15 @@ final class AppStore {
         sideView = .none
     }
 
+    /// Bumped by every `openSearch`. The Mac answers that call with
+    /// `sideView`; the phone's shell answers it with a tab, and needs to hear
+    /// the call itself, since a repeat of the same seed changes nothing else.
+    private(set) var searchAsks = 0
+
     /// Open search. By default it RESUMES the last one; `seed` forces a fresh
     /// term (`f` on a row or in the reader, seeding `from:<address>`).
     func openSearch(seed: String? = nil) {
+        searchAsks &+= 1
         // Give wide search the window; closing the reader saves its draft.
         if threadId != nil { closeThread() }
         // A seed matching what is ALREADY fetched keeps the session: the hits
@@ -4140,6 +4273,93 @@ final class AppStore {
                 || closing.page == .drafts
         {
             Task { await refreshDrafts() }
+        }
+    }
+
+    // MARK: - discarding a composer
+
+    /// The trash can's question, on screen: the identity of the composer it
+    /// was asked about. A field here that `ActionLayer` draws, like every
+    /// other modal, because the pane is half a window wide and a scrim
+    /// mounted inside it would dim only the pane.
+    var discardAsk: UUID?
+
+    /// The composer's trash can. Esc keeps the mail (`closeCompose`); this is
+    /// the other door, the one that does not, so it asks first: there is no
+    /// undo behind it. A composer holding nothing has nothing to lose and
+    /// nothing to ask about, and simply closes.
+    func askDiscardCompose() {
+        guard let open = compose, !open.sending else { return }
+        guard DraftSaver.hasContent(open) || !open.attachments.isEmpty else {
+            discardCompose()
+            return
+        }
+        // The card has no field of its own, so the caret would stay in the
+        // mail under the scrim and every key the card does not bind (letters,
+        // Backspace, ⌘V) would edit it blind. The pane puts it back if the
+        // answer is no. Whichever window holds a text responder, not only
+        // the key one: the trash can is clickable in a window that is not.
+        #if os(macOS)
+            for window in NSApp.windows where window.firstResponder is NSText {
+                window.makeFirstResponder(nil)
+            }
+        #endif
+        discardAsk = open.id
+    }
+
+    func cancelDiscardAsk() {
+        discardAsk = nil
+    }
+
+    /// Confirmed. Only for the composer the question was about: one that
+    /// was replaced while the card was up never agreed to anything.
+    func confirmDiscard() {
+        guard let asked = discardAsk else { return }
+        discardAsk = nil
+        guard compose?.id == asked else { return }
+        discardCompose()
+    }
+
+    /// Close the pane and keep NOTHING: no close flush, and the row an
+    /// earlier autosave made goes too (`DraftSaver.discard`, which waits out
+    /// a save still on the wire so the row it mints is deleted, not missed).
+    /// `closeCompose` minus the save, plus the delete.
+    private func discardCompose() {
+        guard let closing = compose else { return }
+        let hadContent = DraftSaver.hasContent(closing) || !closing.attachments.isEmpty
+        DraftSaver.shared.discard(.compose, closing)
+        compose = nil
+        if schedulePicker == .compose { schedulePicker = nil }
+        // The mirror of "kept in drafts": the two doors out must not read
+        // alike. Silent for a blank composer, which deleted nothing.
+        if hadContent { pushToast("message deleted") }
+        // Settles first, so it lists what is left once the delete landed.
+        Task { await refreshDrafts() }
+    }
+
+    /// Delete the row a discarded composer had been autosaving into. Called
+    /// by `DraftSaver.discard`, on the slot's own save chain. Immediate, with
+    /// no undo window: the confirm card was the second thought. True once the
+    /// row is gone (a 404 counts: gone is what was asked for).
+    func deleteDiscardedDraft(_ id: Int) async -> Bool {
+        let e = epoch
+        draftsRows.removeAll { $0.id == id }
+        // Hidden from every fetch while on the wire, until it lands.
+        draftTombstones.leaving(id)
+        do {
+            try await APIClient.shared.deleteDraft(id)
+            if e == epoch { noteDraftGone(id) }
+            return true
+        } catch let error as APIError where error.kind == .notFound {
+            if e == epoch { noteDraftGone(id) }
+            return true
+        } catch {
+            guard e == epoch else { return false }
+            // Still on the daemon, so the next list shows it again rather
+            // than the pane having promised a delete that did not happen.
+            draftTombstones.revive(id)
+            pushToast(errText(error, "could not delete that draft"), .error)
+            return false
         }
     }
 

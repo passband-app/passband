@@ -29,6 +29,15 @@ final class TestFlightNudge {
     nonisolated static let askAfter: TimeInterval = 2 * 24 * 3600
 
     private nonisolated static let askedKey = "passband.testflight.asked"
+    /// WHEN it asked, beside the bool, so the agent ad can keep its distance
+    /// (`AgentNudge.quietAfterIPhoneAd`). An install asked before this stamp
+    /// existed has the bool and no date, which reads as long ago.
+    private nonisolated static let askedAtKey = "passband.testflight.askedAt"
+
+    /// When this install was shown the card, if it ever was since the stamp.
+    nonisolated static var askedAt: Date? {
+        UserDefaults.standard.object(forKey: askedAtKey) as? Date
+    }
 
     private let defaults = UserDefaults.standard
 
@@ -72,6 +81,7 @@ final class TestFlightNudge {
     /// with the card on screen has still asked.
     func ask() {
         defaults.set(true, forKey: Self.askedKey)
+        defaults.set(Date(), forKey: Self.askedAtKey)
         showingNudge = true
     }
 

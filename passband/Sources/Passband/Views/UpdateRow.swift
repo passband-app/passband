@@ -77,9 +77,10 @@ struct UpdateRow: View {
         private static var vPadding: CGFloat { Space.s6 }
         private static let radius: CGFloat = 8
     #else
-        private static var hPadding: CGFloat { Space.s12 }
-        private static var vPadding: CGFloat { Space.scaled(9) }
-        private static let radius: CGFloat = 10
+        // `PhoneRow`'s, which the sent and outbox rows read too.
+        private static var hPadding: CGFloat { PhoneRow.hPadding }
+        private static var vPadding: CGFloat { PhoneRow.vPadding }
+        private static let radius: CGFloat = PhoneRow.radius
     #endif
 
     var body: some View {

@@ -159,6 +159,32 @@ enum ScheduledRowCopy {
         }
     }
 
+    /// THE SAME CELL, CUT IN TWO FOR A PHONE. Its row has a name line with a
+    /// short stamp on the right, the way every row on that tab does, and
+    /// "tomorrow 9am · in 14h" is not short: it left the recipient a third of
+    /// the line. So the countdown is the stamp and the time the person picked
+    /// goes under the words. Every other state is one word already and has no
+    /// second half. Built from `trailing`'s own cases, so the two cannot say
+    /// different things about one row.
+    struct PhoneCells: Equatable {
+        var stamp: Trailing
+        /// "tomorrow 9am": only for a row still waiting on the time it was given.
+        var when: String?
+    }
+
+    static func phoneCells(
+        _ row: ScheduledSendView, now: Date = Date(), calendar: Calendar = .current
+    ) -> PhoneCells {
+        guard row.state != "sending", row.state != "failed", row.attempts == 0,
+            let at = Fmt.date(row.send_at)
+        else {
+            return PhoneCells(stamp: trailing(row, now: now, calendar: calendar), when: nil)
+        }
+        return PhoneCells(
+            stamp: Trailing(text: Fmt.relUntil(at, now: now), tone: .quiet),
+            when: Fmt.sendAtChip(at, now: now, calendar: calendar))
+    }
+
     /// The row's second line, when the state has something to say that the
     /// subject and snippet do not: WHY a failed row did not go, and why a
     /// retrying one is waiting. nil for everything else.

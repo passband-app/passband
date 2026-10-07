@@ -1,5 +1,5 @@
 // The global action surface, above every other layer: undo/notice toasts, the
-// unsubscribe-violation prompt, rule editor, the 2FA modal,
+// unsubscribe-violation notice (Views/UnsubscribeViolationNotice.swift), rule editor, the 2FA modal,
 // triage-fix palette, ⌘K ask bar, shortcuts overlay, the re-triage confirm and
 // the re-triage run itself. The composer is NOT here anymore — it is a layout
 // pane (see ComposePane in MainShell), not an overlay.
@@ -10,11 +10,6 @@ import SwiftUI
 
 struct ActionLayer: View {
     @Environment(AppStore.self) private var store
-
-    @State private var blockPrompt: UnsubscribeRecord?
-    @State private var blockBusy = false
-    /// Senders acted on this session, so a lagging read model can't re-nag.
-    @State private var acted: Set<String> = []
 
     var body: some View {
         ZStack(alignment: .bottomLeading) {
@@ -54,6 +49,11 @@ struct ActionLayer: View {
                 .transition(.opacity)
             }
 
+            // THE DISCOVERY RING'S FOUND MOMENT. Above the toasts and the
+            // tray, under every palette and modal below: the moment only ever
+            // arrives when none of them is up, and one raised over it covers it.
+            DiscoveryLayer()
+
             if let request = store.ruleEditor {
                 // Keyed by the request: a click on an in-effect rule swaps the
                 // request under an open card, and without a fresh identity the
@@ -81,6 +81,9 @@ struct ActionLayer: View {
             if let slot = store.schedulePicker {
                 SchedulePalette(slot: slot) { store.schedulePicker = nil }
             }
+            // The composer's trash can asking first. Here for the reason
+            // the clock above is: the pane is too narrow to hold a scrim.
+            if store.discardAsk != nil { DiscardConfirm() }
             if store.askBarOpen { AskBar { store.askBarOpen = false } }
             if store.shortcutsOpen { ShortcutsOverlay { store.shortcutsOpen = false } }
             // Above everything else in this layer, because it is shown at most
@@ -113,7 +116,7 @@ struct ActionLayer: View {
         // The scan rides the poll tick from a leaf of its own: this layer is
         // every toast, undo chip and modal in the app, and reading the tick
         // here re-evaluated all of it every ten seconds.
-        .background { ViolationScanKeeper(scan: scanViolations) }
+        .background { ViolationScanKeeper() }
     }
 
     private var showsUnsubscribeTray: Bool {
@@ -128,8 +131,9 @@ struct ActionLayer: View {
             VStack(alignment: .leading, spacing: Space.scaled(7)) {
                 // Sender strings are email-derived: rendered as Text only,
                 // never as markup.
-                if let prompt = blockPrompt {
-                    violationPrompt(prompt)
+                if let prompt = UnsubscribeViolations.shared.prompt {
+                    UnsubscribeViolationNotice(record: prompt)
+                        .transition(.move(edge: .leading).combined(with: .opacity))
                 }
                 ForEach(store.toasts) { toast in
                     Button {
@@ -150,12 +154,6 @@ struct ActionLayer: View {
                         .regular.tint(tone(toast.tone).opacity(0.16)).interactive(),
                         in: .rect(cornerRadius: 11, style: .continuous)
                     )
-                    .overlay(alignment: .leading) {
-                        RoundedRectangle(cornerRadius: 1)
-                            .fill(tone(toast.tone))
-                            .frame(width: 2)
-                            .padding(.vertical, Space.s6)
-                    }
                     .transition(.move(edge: .leading).combined(with: .opacity))
                 }
                 ForEach(store.undos) { undo in
@@ -163,20 +161,21 @@ struct ActionLayer: View {
                         Task { await store.fireUndo(undo.id) }
                     } label: {
                         HStack(spacing: Space.s14) {
-                            Text(undo.label)
-                                .font(Typo.rowSub)
-                                .foregroundStyle(Palette.ink)
+                            HStack(spacing: Space.s8) {
+                                if let expiresAt = undo.expiresAt {
+                                    UndoCountdown(
+                                        startedAt: undo.createdAt, expiresAt: expiresAt
+                                    )
+                                }
+                                Text(undo.label)
+                                    .font(Typo.rowSub)
+                                    .foregroundStyle(Palette.ink)
+                            }
                             HStack(spacing: Space.s4) {
                                 Kbd("u")
                                 Text("undo")
                                     .font(Typo.micro)
                                     .foregroundStyle(Palette.inkFaintest)
-                                if let expiresAt = undo.expiresAt {
-                                    UndoCountdown(
-                                        startedAt: undo.createdAt, expiresAt: expiresAt
-                                    )
-                                    .padding(.leading, 3)
-                                }
                             }
                         }
                         .padding(.horizontal, Space.s12)
@@ -187,12 +186,6 @@ struct ActionLayer: View {
                         .regular.tint(Palette.warn.opacity(0.18)).interactive(),
                         in: .rect(cornerRadius: 11, style: .continuous)
                     )
-                    .overlay(alignment: .leading) {
-                        RoundedRectangle(cornerRadius: 1)
-                            .fill(Palette.warn)
-                            .frame(width: 2)
-                            .padding(.vertical, Space.s6)
-                    }
                     .transition(.move(edge: .leading).combined(with: .opacity))
                     .tourTarget(.undoToast)
                 }
@@ -208,82 +201,6 @@ struct ActionLayer: View {
         case .success: Palette.positive
         case .info: Palette.inkDim
         }
-    }
-
-    // MARK: - unsubscribe violations
-
-    private func violationPrompt(_ record: UnsubscribeRecord) -> some View {
-        VStack(alignment: .leading, spacing: Space.scaled(9)) {
-            Text(
-                "\(SenderCache.resolved(record.sender).displayName) is ignoring your unsubscribe — "
-                    + "\(record.violation_count) email\(record.violation_count == 1 ? "" : "s") "
-                    + "since you asked \(Fmt.relAge(record.requested_at)) ago."
-            )
-            .font(Typo.rowSub)
-            .foregroundStyle(Palette.ink)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: Typo.measure(360), alignment: .leading)
-
-            HStack(spacing: Space.s8) {
-                Button("Block sender") { Task { await block(record) } }
-                    .buttonStyle(.glassProminent)
-                    .tint(Palette.danger)
-                    .disabled(blockBusy)
-                Button("Keep") { Task { await keep(record) } }
-                    .buttonStyle(.glass)
-                    .disabled(blockBusy)
-            }
-            .controlSize(.small)
-        }
-        .padding(Space.scaled(13))
-        .passbandGlass(.pane, cornerRadius: 14, tint: Palette.dangerSoft)
-        .transition(.move(edge: .leading).combined(with: .opacity))
-    }
-
-    private func scanViolations() async {
-        let gen = UnsubscribeJobs.shared.generation
-        guard let rows = try? await APIClient.shared.getUnsubscribes() else { return }
-        // The same rows carry automatic-unsubscribe jobs: a `needs_you` left
-        // from before a relaunch reaches the tray through this fetch.
-        UnsubscribeJobs.shared.absorb(rows, generation: gen)
-        // Surface one at a time: a stack of these is a nag, not a prompt.
-        let next = rows.first {
-            $0.violation_count > 0 && $0.resolution == nil && !acted.contains($0.sender)
-        }
-        // Assignment is invalidation, and the answer is nil nearly always.
-        if next != blockPrompt { blockPrompt = next }
-    }
-
-    private func block(_ record: UnsubscribeRecord) async {
-        guard !blockBusy else { return }
-        blockBusy = true
-        // Mark acted immediately so a refresh mid-flight can't re-surface it.
-        acted.insert(record.sender)
-        do {
-            // Exact sender address, not the domain.
-            try await Actions.createBlockRule(sender: record.sender)
-            // No message on screen to name, but the rule is still a verdict on
-            // the sender, so the same rows clear here as anywhere else.
-            store.noteSenderResolved(record.sender)
-            try await APIClient.shared.setUnsubResolution(
-                sender: record.sender, resolution: .blocked)
-            store.pushToast("blocked \(record.sender)", .success)
-        } catch {
-            store.pushToast(errText(error, "block failed"), .error)
-        }
-        blockBusy = false
-        blockPrompt = nil
-    }
-
-    private func keep(_ record: UnsubscribeRecord) async {
-        guard !blockBusy else { return }
-        blockBusy = true
-        acted.insert(record.sender)
-        // Best-effort: the session-level `acted` set already suppresses re-nag.
-        _ = try? await APIClient.shared.setUnsubResolution(
-            sender: record.sender, resolution: .dismissed)
-        blockBusy = false
-        blockPrompt = nil
     }
 }
 
@@ -367,27 +284,6 @@ struct ShortcutsOverlay: View {
     }
 }
 
-
-/// Asks for the unsubscribe ledger on the poll tick, from a zero-size leaf
-/// (see the call site), and NOT ON EVERY TICK: a violation is something a
-/// sender did days ago, and a request every ten seconds for it was the
-/// busiest thing this client asked the daemon for. Once a minute.
-private struct ViolationScanKeeper: View {
-    @Environment(AppStore.self) private var store
-    let scan: () async -> Void
-    @State private var lastScan: Date?
-    private static let interval: TimeInterval = 60
-
-    var body: some View {
-        Color.clear
-            .frame(width: 0, height: 0)
-            .task(id: store.lastRefresh) {
-                if let lastScan, Date().timeIntervalSince(lastScan) < Self.interval { return }
-                lastScan = Date()
-                await scan()
-            }
-    }
-}
 
 /// How long an undo chip has left: a small ring that drains to nothing as the
 /// window closes. Drawn from the clock rather than animated to a value, like

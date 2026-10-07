@@ -3,7 +3,9 @@
 //! - `auth`: run the OAuth consent flow and store tokens (keyring or file).
 //! - `run`: sync-only loop, no HTTP.
 //! - `serve`: sync loop plus one axum server hosting the agent door (`/mcp`) and
-//!   the human door (`/client/*`).
+//!   the human door (`/client/*`). The agent door is open (Host guard only) on
+//!   self-host, or requires OAuth bearer tokens when `SQUELCH_MCP_OAUTH_ISSUER`
+//!   and `SQUELCH_MCP_PUBLIC_URL` are set; see `squelch_mcp::auth`.
 //! - `token`: issue / list / revoke the human door's per-device tokens, plus
 //!   `first-paired`, the one machine-readable line the hosted warden reads.
 //! - `pair`: mint a short code a new device trades for one of those tokens.
@@ -1934,37 +1936,56 @@ fn build_metrics_router(state: MetricsState, readiness: Readiness) -> axum::Rout
         )
 }
 
+/// What the console says about the agent door, from the resolved mode.
+fn agent_door_status(auth: &squelch_mcp::AgentDoorAuth) -> squelch_api::AgentDoorStatus {
+    use squelch_mcp::AgentDoorAuth;
+    match auth {
+        AgentDoorAuth::Open => squelch_api::AgentDoorStatus::Open,
+        AgentDoorAuth::OAuth(c) => squelch_api::AgentDoorStatus::OAuth {
+            public_url: c.public_url().to_string(),
+        },
+        AgentDoorAuth::Misconfigured(_) => squelch_api::AgentDoorStatus::Unavailable,
+    }
+}
+
 /// The router hosting both doors: `/mcp` (agent door, read-only, sealed-absent)
 /// and `/client/*` (human door, bearer-authed, the only write capability). They
 /// share the store; the agent door never sees the write credential.
+///
+/// The agent door's auth is `agent_door`, resolved once by the caller: Open
+/// (Host guard only, the self-host door), OAuth (bearer JWTs bound to this
+/// mailbox, plus the public protected-resource metadata), or Misconfigured
+/// (`/mcp` answers 503 while the human door serves on). The two doors are
+/// separate routers merged side by side, so neither inherits the other's
+/// layers: the agent door never sees the human door's bearer check, CORS or
+/// body limits, and the human door never sees the agent door's JWT check.
 fn build_serve_router(
     store: Arc<SqliteStore>,
     account_email: &str,
     api_state: squelch_api::ApiState,
     mcp_cancel: CancellationToken,
     metrics: Arc<SyncMetrics>,
+    agent_door: &squelch_mcp::AgentDoorAuth,
 ) -> anyhow::Result<axum::Router> {
     // The agent door gets the HUMAN DOOR'S OWN listing policy, read back off the
     // state rather than resolved from config a second time: the two doors must
     // agree about which packages exist, and the way that broke before was each
     // side deciding for itself.
-    let mcp_service = squelch_mcp::streamable_http_service(
+    let agent_router = squelch_mcp::agent_door_router(
         store,
         account_email,
         api_state.shipment_policy(),
         api_state.triage_ranking(),
         mcp_cancel,
+        agent_door,
     )?;
     // The latency histogram wraps BOTH doors, outermost, so the number it
     // records is everything the daemon did for the request including auth. It
     // is a `Router::layer`, which runs after routing: that is what gives it the
     // route template rather than the path.
-    let app = squelch_api::router(api_state)
-        .nest_service(squelch_mcp::MCP_PATH, mcp_service)
-        .layer(axum::middleware::from_fn_with_state(
-            metrics,
-            squelch_api::record_http_metrics,
-        ));
+    let app = squelch_api::router(api_state).merge(agent_router).layer(
+        axum::middleware::from_fn_with_state(metrics, squelch_api::record_http_metrics),
+    );
     Ok(app)
 }
 
@@ -2101,8 +2122,16 @@ fn cmd_serve(
     // The shared config->state wiring also attaches the WRITE-bound credential
     // store that enables the action endpoints; the sync engine below gets a
     // separate READ-bound store and never sees this one.
+    // The agent door's auth mode, resolved from env ONCE: the router and the
+    // console's description of the door are both built from this one value,
+    // so they cannot disagree.
+    // `for_account` is also applied inside the router; applying it here too
+    // keeps the startup line and the console truthful about the same result.
+    let agent_door = squelch_mcp::AgentDoorAuth::from_env().for_account(&email);
+
     let api_state = squelch_api::ApiState::from_config(store.clone(), &email, &config, cap_sources)
         .map_err(|e| other_err(format!("{e}")))?
+        .with_agent_door(agent_door_status(&agent_door))
         .with_refresh(refresh.clone())
         .with_spam_refresh(spam_refresh.clone())
         // THE SAME registry the sync engine writes, so `/client/stats` answers
@@ -2408,6 +2437,7 @@ fn cmd_serve(
             api_state,
             mcp_cancel.clone(),
             sync_metrics.clone(),
+            &agent_door,
         )
         .map_err(squelch_core::CoreError::Other)?;
         let listener = tokio::net::TcpListener::bind(bind)
@@ -2415,8 +2445,14 @@ fn cmd_serve(
             .map_err(|e| other_err(format!("bind {bind}: {e}")))?;
         let bound = listener.local_addr().unwrap_or(bind);
         // Single startup line. No tokens or message content are ever logged.
+        // The agent door's mode is `AgentDoorAuth::describe`, the same text the
+        // standalone squelch-mcp binary prints: the public URL in OAuth mode
+        // (the door's own metadata publishes it) and nothing else of the
+        // config; a misconfiguration names the setting at fault, never its
+        // value.
         eprintln!(
-            "squelchd: serving agent door http://{bound}/mcp and human door http://{bound}/client/*"
+            "squelchd: serving agent door http://{bound}/mcp ({mode}) and human door http://{bound}/client/*",
+            mode = agent_door.describe(),
         );
 
         // The metrics door, on its OWN listener: a second bind, a one-route
@@ -3468,8 +3504,15 @@ mod tests {
         let api_state = squelch_api::ApiState::new(store.clone(), account_id, "test-token");
         let cancel = CancellationToken::new();
         let metrics = SyncMetrics::new();
-        let app = build_serve_router(store, "me@localhost", api_state, cancel, metrics)
-            .expect("router builds");
+        let app = build_serve_router(
+            store,
+            "me@localhost",
+            api_state,
+            cancel,
+            metrics,
+            &squelch_mcp::AgentDoorAuth::Open,
+        )
+        .expect("router builds");
 
         let resp = app
             .clone()
@@ -3509,6 +3552,289 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(resp.status(), StatusCode::NOT_FOUND, "/mcp must be mounted");
+    }
+
+    // -----------------------------------------------------------------------
+    // The agent door's auth modes, on the REAL combined router.
+    // -----------------------------------------------------------------------
+
+    const AGENT_ISSUER: &str = "https://test-tenant.authkit.app";
+    const AGENT_PUBLIC_URL: &str = "https://me.passband.email/mcp";
+    const AGENT_HOST: &str = "me.passband.email";
+    const MASTER: &str = "test-token";
+    /// OAuth mode refuses the `me@localhost` placeholder, so these tests use
+    /// a real-shaped address.
+    const AGENT_ACCOUNT: &str = "me@example.com";
+
+    /// Both doors, as `serve` builds them, with the agent door in `auth` mode.
+    fn serve_router(
+        auth: &squelch_mcp::AgentDoorAuth,
+    ) -> (Arc<SqliteStore>, AccountId, Arc<SyncMetrics>, axum::Router) {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("in-memory store"));
+        let account_id = store.ensure_account(AGENT_ACCOUNT).expect("account");
+        let api_state = squelch_api::ApiState::new(store.clone(), account_id, MASTER);
+        let metrics = SyncMetrics::new();
+        let app = build_serve_router(
+            store.clone(),
+            AGENT_ACCOUNT,
+            api_state,
+            CancellationToken::new(),
+            metrics.clone(),
+            auth,
+        )
+        .expect("router builds");
+        (store, account_id, metrics, app)
+    }
+
+    fn oauth_auth(jwks_url: &str) -> squelch_mcp::AgentDoorAuth {
+        let auth = squelch_mcp::AgentDoorAuth::from_values(
+            Some(AGENT_ISSUER),
+            Some(AGENT_PUBLIC_URL),
+            Some(jwks_url),
+        );
+        assert!(
+            matches!(auth, squelch_mcp::AgentDoorAuth::OAuth(_)),
+            "{auth:?}"
+        );
+        auth
+    }
+
+    /// A valid agent JWT for this daemon's mailbox.
+    fn agent_jwt() -> String {
+        use squelch_mcp::testing::{KEY_A_PEM, KID_A, sign, valid_claims};
+        sign(
+            &valid_claims(AGENT_ISSUER, AGENT_PUBLIC_URL, AGENT_ACCOUNT),
+            KEY_A_PEM,
+            KID_A,
+        )
+    }
+
+    /// An MCP `initialize`, as an agent sends it.
+    fn mcp_initialize(host: &str, bearer: Option<&str>) -> axum::http::Request<axum::body::Body> {
+        let mut b = axum::http::Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("host", host)
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream");
+        if let Some(t) = bearer {
+            b = b.header("authorization", format!("Bearer {t}"));
+        }
+        b.body(axum::body::Body::from(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
+        ))
+        .unwrap()
+    }
+
+    fn get_with(
+        uri: &str,
+        host: &str,
+        bearer: Option<&str>,
+    ) -> axum::http::Request<axum::body::Body> {
+        let mut b = axum::http::Request::builder().uri(uri).header("host", host);
+        if let Some(t) = bearer {
+            b = b.header("authorization", format!("Bearer {t}"));
+        }
+        b.body(axum::body::Body::empty()).unwrap()
+    }
+
+    async fn status_of(
+        app: &axum::Router,
+        req: axum::http::Request<axum::body::Body>,
+    ) -> axum::http::StatusCode {
+        use tower::ServiceExt as _;
+        app.clone().oneshot(req).await.unwrap().status()
+    }
+
+    /// OAuth mode: `/mcp` challenges, the metadata answers, and the human
+    /// door (and everything that is NOT a door) behaves exactly as in Open.
+    #[tokio::test]
+    async fn oauth_mode_challenges_mcp_and_leaves_the_rest_of_the_router_alone() {
+        use axum::http::{StatusCode, header};
+        use tower::ServiceExt as _;
+
+        let jwks = squelch_mcp::testing::StubJwks::start().await;
+        let (_s, _a, _m, app) = serve_router(&oauth_auth(&jwks.url));
+        let (_s, _a, _m, open) = serve_router(&squelch_mcp::AgentDoorAuth::Open);
+
+        let resp = app
+            .clone()
+            .oneshot(mcp_initialize(AGENT_HOST, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            resp.headers()[header::WWW_AUTHENTICATE],
+            "Bearer resource_metadata=\"https://me.passband.email/.well-known/oauth-protected-resource/mcp\""
+        );
+
+        let resp = app
+            .clone()
+            .oneshot(get_with(
+                "/.well-known/oauth-protected-resource/mcp",
+                AGENT_HOST,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+
+        // Everything else answers exactly as it does with the door open.
+        for (uri, bearer) in [
+            ("/client/stats", None),
+            ("/client/stats", Some(MASTER)),
+            ("/healthz", None),
+            ("/console", None),
+            ("/", None),
+            ("/no-such-route", None),
+        ] {
+            assert_eq!(
+                status_of(&app, get_with(uri, AGENT_HOST, bearer)).await,
+                status_of(&open, get_with(uri, AGENT_HOST, bearer)).await,
+                "{uri} with bearer {:?}",
+                bearer.is_some()
+            );
+        }
+        assert_eq!(
+            status_of(&app, get_with("/client/stats", AGENT_HOST, Some(MASTER))).await,
+            StatusCode::OK
+        );
+    }
+
+    /// I3, one direction: a valid agent JWT, which DOES open the agent door,
+    /// is not a human door credential.
+    #[tokio::test]
+    async fn an_agent_jwt_does_not_open_the_human_door() {
+        use axum::http::StatusCode;
+
+        let jwks = squelch_mcp::testing::StubJwks::start().await;
+        let (_s, _a, _m, app) = serve_router(&oauth_auth(&jwks.url));
+        let jwt = agent_jwt();
+
+        assert_eq!(
+            status_of(&app, mcp_initialize(AGENT_HOST, Some(&jwt))).await,
+            StatusCode::OK,
+            "control: the token is a working agent credential"
+        );
+        for uri in ["/client/stats", "/client/updates", "/client/v2/feed"] {
+            assert_eq!(
+                status_of(&app, get_with(uri, AGENT_HOST, Some(&jwt))).await,
+                StatusCode::UNAUTHORIZED,
+                "{uri}"
+            );
+        }
+    }
+
+    /// I3, the other direction: a live device token and the master token,
+    /// both of which DO open the human door, are refused at the agent door.
+    #[tokio::test]
+    async fn human_door_credentials_do_not_open_the_agent_door() {
+        use axum::http::StatusCode;
+
+        let jwks = squelch_mcp::testing::StubJwks::start().await;
+        let (store, account_id, _m, app) = serve_router(&oauth_auth(&jwks.url));
+        let device = store
+            .issue_device_token(account_id, "phone")
+            .expect("device token");
+        assert!(device.token.starts_with("sqd_"));
+
+        for cred in [device.token.as_str(), MASTER] {
+            assert_eq!(
+                status_of(&app, get_with("/client/stats", AGENT_HOST, Some(cred))).await,
+                StatusCode::OK,
+                "control: a working human door credential"
+            );
+            assert_eq!(
+                status_of(&app, mcp_initialize(AGENT_HOST, Some(cred))).await,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        assert_eq!(jwks.fetches(), 0, "neither is even shaped like a JWT");
+    }
+
+    /// A bad agent-door setting must not take the mailbox down: `/mcp` is 503
+    /// in every combination, and the human door serves on.
+    #[tokio::test]
+    async fn a_misconfigured_agent_door_leaves_the_human_door_serving() {
+        use axum::http::StatusCode;
+
+        let (_s, _a, _m, open) = serve_router(&squelch_mcp::AgentDoorAuth::Open);
+        for auth in [
+            squelch_mcp::AgentDoorAuth::from_values(Some(AGENT_ISSUER), None, None),
+            squelch_mcp::AgentDoorAuth::from_values(None, Some(AGENT_PUBLIC_URL), None),
+            squelch_mcp::AgentDoorAuth::from_values(Some("nope"), Some(AGENT_PUBLIC_URL), None),
+        ] {
+            assert!(matches!(auth, squelch_mcp::AgentDoorAuth::Misconfigured(_)));
+            let (_s, _a, _m, app) = serve_router(&auth);
+            for host in ["localhost", AGENT_HOST] {
+                assert_eq!(
+                    status_of(&app, mcp_initialize(host, None)).await,
+                    StatusCode::SERVICE_UNAVAILABLE
+                );
+            }
+            assert_eq!(
+                status_of(&app, get_with("/client/stats", "localhost", Some(MASTER))).await,
+                StatusCode::OK
+            );
+            for uri in [
+                "/healthz",
+                "/console",
+                "/.well-known/oauth-protected-resource/mcp",
+            ] {
+                assert_eq!(
+                    status_of(&app, get_with(uri, "localhost", None)).await,
+                    status_of(&open, get_with(uri, "localhost", None)).await,
+                    "{uri}"
+                );
+            }
+        }
+    }
+
+    /// The latency histogram labels `/mcp` with the same route template in
+    /// every mode (the merge did not change what `record_http_metrics` sees),
+    /// and the metadata route by its template too.
+    #[tokio::test]
+    async fn the_agent_door_keeps_one_route_label_in_every_mode() {
+        let jwks = squelch_mcp::testing::StubJwks::start().await;
+        let mut labels = Vec::new();
+        for auth in [
+            squelch_mcp::AgentDoorAuth::Open,
+            oauth_auth(&jwks.url),
+            squelch_mcp::AgentDoorAuth::from_values(Some(AGENT_ISSUER), None, None),
+        ] {
+            let (_s, _a, metrics, app) = serve_router(&auth);
+            let _ = status_of(&app, mcp_initialize("localhost", None)).await;
+            let _ = status_of(
+                &app,
+                get_with(
+                    "/.well-known/oauth-protected-resource/mcp",
+                    AGENT_HOST,
+                    None,
+                ),
+            )
+            .await;
+            let text = squelch_core::metrics::render(&metrics, None);
+            let mut routes: Vec<String> = text
+                .lines()
+                .filter(|l| l.contains("method=\"POST\""))
+                .filter_map(|l| l.split("route=\"").nth(1))
+                .filter_map(|r| r.split('"').next())
+                .map(str::to_owned)
+                .collect();
+            routes.sort();
+            routes.dedup();
+            if matches!(auth, squelch_mcp::AgentDoorAuth::OAuth(_)) {
+                assert!(
+                    text.contains("route=\"/.well-known/oauth-protected-resource/mcp\""),
+                    "{text}"
+                );
+            }
+            labels.push(routes);
+        }
+        assert_eq!(labels[0], vec!["/mcp".to_string()], "{labels:?}");
+        assert_eq!(labels[0], labels[1], "OAuth changed the /mcp label");
+        assert_eq!(labels[0], labels[2], "Misconfigured changed the /mcp label");
     }
 
     /// The metrics bind IS the feature flag: absent or blank means no listener,

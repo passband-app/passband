@@ -651,6 +651,8 @@ impl Harness {
             // login is the one that reads userinfo (`tests/console_auth.rs`).
             userinfo_url: format!("{google}/userinfo"),
             alert_webhook_url: Some(format!("{warden_url}/hook")),
+            // No agent door: `/agent/auth` is not mounted.
+            workos: None,
             // The struct is constructed directly, so an http mock URL is fine
             // here; `from_env` is where https is enforced.
             bifrost: bifrost_url.map(|url| BifrostConfig {
@@ -1010,12 +1012,19 @@ async fn signup_provisions_a_tenant_and_hands_back_a_pairing_code() {
     let (consent_url, cookie) = h.start_signup("ada").await;
     // The consent URL is the mock's authorize endpoint, asking for all three
     // grants in ONE consent: hosted Passband ships the actions, and the daemon's
-    // write path has no other way to be filled.
+    // write path has no other way to be filled. The optional name-and-photo
+    // scope rides along; the mock below grants only the three, which is the
+    // unticked-box case, and the signup still completes.
     assert!(consent_url.contains("/authorize"), "{consent_url}");
     let asked = query_param(&consent_url, "scope");
     assert_eq!(
         asked.split(' ').collect::<Vec<_>>(),
-        vec![READONLY, MODIFY, SEND],
+        vec![
+            READONLY,
+            MODIFY,
+            SEND,
+            squelch_core::config::GOOGLE_PROFILE_SCOPE
+        ],
         "{consent_url}"
     );
     assert!(consent_url.contains("code_challenge_method=S256"));

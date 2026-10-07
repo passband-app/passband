@@ -122,6 +122,19 @@ final class Updater: NSObject, ObservableObject, SPUUserDriver, SPUUpdaterDelega
 
     private override init() {
         super.init()
+        // A dev build is not an install: it carries the release's bundle id
+        // and feed, and its build number (the commit count of a branch) sits
+        // below the shipped one, so Sparkle read it as out of date, replaced
+        // the bundle in the worktree with the notarized release, and left a
+        // staged update in the cache every other copy shares, which is how
+        // the real app came to offer the version it was already running. Only
+        // a shipped build (build-release.sh defines PASSBAND_RELEASE) updates
+        // itself. A dev build does only when PASSBAND_UPDATER is set on
+        // purpose, which is how updater work gets tested. Not started leaves
+        // `canCheck` false, which greys the menu item.
+        #if !PASSBAND_RELEASE
+            guard ProcessInfo.processInfo.environment["PASSBAND_UPDATER"] != nil else { return }
+        #endif
         let engine = SPUUpdater(
             hostBundle: .main, applicationBundle: .main, userDriver: self, delegate: self)
         self.engine = engine
@@ -153,7 +166,7 @@ final class Updater: NSObject, ObservableObject, SPUUserDriver, SPUUpdaterDelega
     /// User-initiated check, from the app menu.
     func check() {
         userInitiated = true
-        engine.checkForUpdates()
+        engine?.checkForUpdates()
     }
 
     /// THE button. Consent for this update, once, covering both of the answers
@@ -205,7 +218,7 @@ final class Updater: NSObject, ObservableObject, SPUUserDriver, SPUUpdaterDelega
         // Sparkle's session is over, so coming back means asking again. A
         // background check lands on the silent path (a `.ready` card) or, for
         // an update that cannot install unattended, `showUpdateFound`.
-        remind { $0.engine.checkForUpdatesInBackground() }
+        remind { $0.engine?.checkForUpdatesInBackground() }
     }
 
     /// Runs `bringBack` after `remindAfter`, unless the card has come back some

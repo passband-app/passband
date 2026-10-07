@@ -1219,6 +1219,80 @@ impl SqliteStore {
         Ok(())
     }
 
+    pub(super) fn account_identity(
+        &self,
+        account_id: AccountId,
+    ) -> Result<Option<AccountIdentity>> {
+        let conn = self.lock()?;
+        // The blob is deliberately not selected: this rides on every stats call.
+        conn.query_row(
+            "SELECT name, given_name, photo_tag FROM account_profile WHERE account_id=?1",
+            params![account_id],
+            |r| {
+                Ok(AccountIdentity {
+                    name: r.get(0)?,
+                    given_name: r.get(1)?,
+                    photo_tag: r.get(2)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub(super) fn account_photo(&self, account_id: AccountId) -> Result<Option<AccountPhoto>> {
+        let conn = self.lock()?;
+        // The three columns are written together, so the filter is belt: a row
+        // with a name and no picture simply has all three NULL.
+        conn.query_row(
+            "SELECT photo, photo_mime, photo_tag FROM account_profile
+             WHERE account_id=?1
+               AND photo IS NOT NULL AND photo_mime IS NOT NULL AND photo_tag IS NOT NULL",
+            params![account_id],
+            |r| {
+                Ok(AccountPhoto {
+                    bytes: r.get(0)?,
+                    mime: r.get(1)?,
+                    tag: r.get(2)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub(super) fn set_account_profile(
+        &self,
+        account_id: AccountId,
+        name: Option<&str>,
+        given_name: Option<&str>,
+        photo: Option<&AccountPhoto>,
+    ) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO account_profile(
+                 account_id, name, given_name, photo, photo_mime, photo_tag, fetched_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?7)
+             ON CONFLICT(account_id) DO UPDATE SET
+                 name=excluded.name,
+                 given_name=excluded.given_name,
+                 photo=excluded.photo,
+                 photo_mime=excluded.photo_mime,
+                 photo_tag=excluded.photo_tag,
+                 fetched_at=excluded.fetched_at",
+            params![
+                account_id,
+                name,
+                given_name,
+                photo.map(|p| p.bytes.as_slice()),
+                photo.map(|p| p.mime.as_str()),
+                photo.map(|p| p.tag.as_str()),
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
     pub(super) fn sealed_messages(&self, account_id: AccountId) -> Result<Vec<SealedMessage>> {
         // Human Auth lookup: every message the agent classified as auth, plus
         // unmigrated legacy rows. `access` is deliberately NOT consulted: it

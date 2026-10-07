@@ -14,12 +14,16 @@
 import SwiftUI
 
 extension ReleaseVignette {
-    var scene: any VignetteDrawing.Type {
+    /// The drawn scene, or nil for a page whose picture is not one of these
+    /// (the agent door plays the agent ad's conversation; see WhatsNewCard).
+    var scene: (any VignetteDrawing.Type)? {
         switch self {
         case .mailList: MailListScene.self
         case .flow: FlowScene.self
         case .unsubscribe: UnsubscribeScene.self
         case .clearStack: ClearStackScene.self
+        case .smartBlock: SmartBlockScene.self
+        case .agentSession: nil
         }
     }
 }
@@ -575,6 +579,268 @@ enum ClearStackScene: VignetteDrawing {
             VignetteKit.bar(
                 &layer, CGRect(x: card.maxX - 26, y: y + 0.1, width: 12, height: 2.4), VignettePalette.dim.opacity(1 - check))
             VignetteKit.check(&layer, center: CGPoint(x: card.maxX - 14, y: y + 1.3), size: 3, progress: check)
+        }
+    }
+}
+
+// MARK: - smart block
+
+/// SMART BLOCK: a sender you unsubscribed from keeps writing. Their mail comes
+/// in from the left, crosses to your inbox, and the notice rises: this sender
+/// ignored you. Its middle answer is the one this page is about. Pressed, a
+/// rule for that sender lights over the door, and the next two things they
+/// send show what "smart" means: the promotion is stopped at the door and
+/// struck, and the email you would want (a person's mark, lines of writing)
+/// walks through and lands. One sender, two kinds of mail, one of them kept.
+///
+/// No key: the gesture is a button on a notice, so the actor is that button.
+///
+/// The seam: two of this sender's emails landed, so the inbox ends two rows
+/// further on than it began. Every row is drawn alike but for its sender's
+/// dot, and the two new dots settle to the tints of the rows they replaced
+/// while the door's light goes out, so the last frame is the first.
+enum SmartBlockScene: VignetteDrawing {
+    /// The promotion held at the lit door, struck through.
+    static let posterTime: Double = 2.74
+
+    private static let sender = 2
+    private static let laneMid: CGFloat = 52
+    private static let cardSize = CGSize(width: 44, height: 22)
+    private static let startX: CGFloat = 40
+    private static let doorX: CGFloat = 126
+    private static let inbox = CGRect(x: 150, y: 11, width: 80, height: 98)
+    private static let pitch: CGFloat = 13
+    private static let tray = CGRect(x: 12, y: 86, width: 132, height: 23)
+
+    // The beats.
+    private static let firstFrom: Double = 0.2
+    private static let firstLand: Double = 0.8
+    private static let noticeUp: Double = 0.95
+    private static let press: Double = 1.5
+    private static let noticeDown: Double = 1.72
+    private static let promoFrom: Double = 2.05
+    private static let promoStop: Double = 2.5
+    private static let promoGone: Double = 2.9
+    private static let keptFrom: Double = 3.1
+    private static let keptLand: Double = 3.72
+    private static let settle: Double = 4.2
+
+    static func draw(_ ctx: inout GraphicsContext, t: Double) {
+        let ease = VignetteClock.ease
+        let ruleOn = ease(t, press + 0.04, press + 0.3) - ease(t, settle, settle + 0.4)
+        let landed1 = ease(t, firstLand, firstLand + 0.24)
+        let landed2 = ease(t, keptLand, keptLand + 0.24)
+        let seam = ease(t, settle, settle + 0.4)
+
+        drawSender(&ctx)
+        drawInbox(&ctx, shift: landed1 + landed2, landed1: landed1, landed2: landed2, seam: seam)
+        // Passing mail lights the door for a breath: this one is let through.
+        let through = ease(t, keptFrom + 0.26, keptFrom + 0.4) - ease(t, keptFrom + 0.46, keptFrom + 0.66)
+        drawDoor(&ctx, on: ruleOn, through: through)
+
+        // 1. The email that should not have come: nothing stops it yet.
+        let first = ease(t, firstFrom, firstLand + 0.06)
+        if first < 1 || landed1 < 1 {
+            drawCard(
+                &ctx, x: VignetteClock.mix(startX, inbox.minX + 8, first), promo: true,
+                opacity: ease(t, firstFrom, firstFrom + 0.14) * (1 - landed1), scale: VignetteClock.mix(1, 0.9, landed1),
+                rise: ease(t, firstLand - 0.22, firstLand + 0.14))
+        }
+
+        // 2. Another promotion, after the rule: stopped at the door, struck.
+        let reach = ease(t, promoFrom, promoStop)
+        let struck = ease(t, promoStop + 0.02, promoStop + 0.18)
+        let gone = ease(t, promoGone, promoGone + 0.24)
+        if t >= promoFrom, gone < 1 {
+            let x = VignetteClock.mix(startX, doorX - 5 - cardSize.width, reach)
+            drawCard(
+                &ctx, x: x, promo: true,
+                opacity: ease(t, promoFrom, promoFrom + 0.14) * VignetteClock.mix(1, 0.5, struck) * (1 - gone),
+                scale: VignetteClock.mix(1, 0.94, struck), slash: struck)
+        }
+
+        // 3. The email worth having, from the same sender: straight through.
+        let kept = ease(t, keptFrom, keptLand + 0.06)
+        if t >= keptFrom, landed2 < 1 {
+            drawCard(
+                &ctx, x: VignetteClock.mix(startX, inbox.minX + 8, kept), promo: false,
+                opacity: ease(t, keptFrom, keptFrom + 0.14) * (1 - landed2), scale: VignetteClock.mix(1, 0.9, landed2),
+                lit: through, rise: ease(t, keptLand - 0.22, keptLand + 0.14))
+        }
+
+        drawNotice(&ctx, t: t)
+    }
+
+    /// Who is sending: their mark, and a name under it.
+    private static func drawSender(_ ctx: inout GraphicsContext) {
+        VignetteKit.avatar(&ctx, center: CGPoint(x: 22, y: laneMid), diameter: 15, tint: sender)
+        VignetteKit.bar(&ctx, CGRect(x: 12, y: laneMid + 12, width: 20, height: 2.4), VignettePalette.dim)
+    }
+
+    /// The door between a sender and your inbox, and the rule over it: a chip
+    /// carrying the sender's mark, dark until Smart block writes it.
+    private static func drawDoor(_ ctx: inout GraphicsContext, on: Double, through: Double) {
+        var line = Path()
+        line.move(to: CGPoint(x: doorX, y: 27))
+        line.addLine(to: CGPoint(x: doorX, y: 78))
+        ctx.stroke(
+            line, with: .color(Color.white.opacity(0.14 * (1 - on))),
+            style: StrokeStyle(lineWidth: 0.8, lineCap: .round, dash: [2, 3]))
+        if on > 0 {
+            var glow = ctx
+            glow.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.85 * on), radius: 3 + 2 * through))
+            glow.stroke(
+                line,
+                with: .color((through > 0.5 ? VignettePalette.phosphorHot : VignettePalette.phosphor).opacity(0.95 * on)),
+                style: StrokeStyle(lineWidth: 1.2, lineCap: .round))
+        }
+
+        let chip = CGRect(x: doorX - 15, y: 11, width: 30, height: 11)
+        let shape = Path(roundedRect: chip, cornerRadius: 5.5)
+        var layer = ctx
+        if on > 0 { layer.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.6 * on), radius: 3)) }
+        layer.fill(shape, with: .color(VignettePalette.cap))
+        layer.fill(shape, with: .color(VignettePalette.phosphor.opacity(0.16 * on)))
+        ctx.stroke(shape, with: .color(VignettePalette.edge.opacity(1 - on)), lineWidth: 0.5)
+        ctx.stroke(shape, with: .color(VignettePalette.phosphor.opacity(0.9 * on)), lineWidth: 0.7)
+        VignetteKit.avatar(
+            &ctx, center: CGPoint(x: chip.minX + 7, y: chip.midY), diameter: 5, tint: sender,
+            opacity: VignetteClock.mix(0.25, 0.95, on))
+        VignetteKit.bar(
+            &ctx, CGRect(x: chip.minX + 12, y: chip.midY - 1.1, width: 13, height: 2.2),
+            on > 0.5 ? VignettePalette.phosphorHot.opacity(on) : VignettePalette.dim.opacity(0.6))
+    }
+
+    /// One email in flight. A promotion is a banner and a line; the email
+    /// worth having is a person's mark and writing.
+    private static func drawCard(
+        _ ctx: inout GraphicsContext, x: CGFloat, promo: Bool, opacity: Double, scale: CGFloat, slash: Double = 0,
+        lit: Double = 0, rise: Double = 0
+    ) {
+        guard opacity > 0.001 else { return }
+        let w = cardSize.width * scale, h = cardSize.height * scale
+        // Landing, it climbs to the top of the inbox, where new mail goes.
+        let mid = VignetteClock.mix(laneMid, inbox.minY + 12, rise)
+        let rect = CGRect(x: x + (cardSize.width - w) / 2, y: mid - h / 2, width: w, height: h)
+        var layer = ctx
+        layer.opacity *= opacity
+        let shape = Path(roundedRect: rect, cornerRadius: 5 * scale, style: .continuous)
+        layer.fill(shape, with: .color(VignettePalette.card))
+        layer.fill(shape, with: .color(VignettePalette.faint))
+        layer.stroke(shape, with: .color(VignettePalette.edge), lineWidth: 0.5)
+        if lit > 0 {
+            layer.stroke(shape, with: .color(VignettePalette.phosphor.opacity(0.85 * lit)), lineWidth: 0.7)
+        }
+        if promo {
+            layer.fill(
+                Path(
+                    roundedRect: CGRect(x: rect.minX + 5 * scale, y: rect.minY + 4.5 * scale, width: 34 * scale, height: 8 * scale),
+                    cornerRadius: 2.5 * scale, style: .continuous),
+                with: .color(VignettePalette.avatar[sender].opacity(0.5)))
+            VignetteKit.bar(
+                &layer, CGRect(x: rect.minX + 5 * scale, y: rect.minY + 15.5 * scale, width: 22 * scale, height: 2.2 * scale),
+                VignettePalette.dim)
+        } else {
+            VignetteKit.avatar(
+                &layer, center: CGPoint(x: rect.minX + 9 * scale, y: rect.midY), diameter: 8 * scale, tint: sender)
+            VignetteKit.bar(
+                &layer, CGRect(x: rect.minX + 17 * scale, y: rect.minY + 7 * scale, width: 18 * scale, height: 2.8 * scale),
+                VignettePalette.ink.opacity(0.85))
+            VignetteKit.bar(
+                &layer, CGRect(x: rect.minX + 17 * scale, y: rect.minY + 12.8 * scale, width: 22 * scale, height: 2.2 * scale),
+                VignettePalette.dim)
+        }
+        // Struck through at the door, in the card's own layer so it fades
+        // with it but is not dimmed by it.
+        if slash > 0 {
+            var mark = Path()
+            mark.move(to: CGPoint(x: rect.minX + 8, y: rect.maxY - 4))
+            mark.addLine(to: CGPoint(x: rect.maxX - 8, y: rect.minY + 4))
+            var hot = ctx
+            hot.opacity *= min(1, opacity * 2)
+            hot.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.8), radius: 3))
+            hot.stroke(
+                mark.trimmedPath(from: 0, to: slash), with: .color(VignettePalette.phosphorHot),
+                style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+        }
+    }
+
+    /// Your inbox: rows, the newest on top. What lands pushes the rest down.
+    private static func drawInbox(
+        _ ctx: inout GraphicsContext, shift: Double, landed1: Double, landed2: Double, seam: Double
+    ) {
+        let shape = Path(roundedRect: inbox, cornerRadius: 7, style: .continuous)
+        ctx.fill(shape, with: .color(VignettePalette.card.opacity(0.7)))
+        ctx.stroke(shape, with: .color(VignettePalette.edge), lineWidth: 0.5)
+
+        var list = ctx
+        list.clip(to: shape)
+        VignetteKit.clipFading(&list, inbox, fade: 20)
+        // Rows -2 and -1 are the two that land; the rest were there already.
+        for index in -2..<8 {
+            let appear: Double = index == -1 ? landed1 : index == -2 ? landed2 : 1
+            guard appear > 0.001 else { continue }
+            let y = inbox.minY + 7 + pitch * (CGFloat(index) + CGFloat(shift))
+            guard y < inbox.maxY, y > inbox.minY - pitch else { continue }
+            var row = list
+            row.opacity *= appear
+            let even = index % 2 == 0
+            let home = even ? 0 : 1
+            let center = CGPoint(x: inbox.minX + 11, y: y + 4.5)
+            if index < 0 {
+                // This sender's, until the loop comes round.
+                VignetteKit.avatar(&row, center: center, diameter: 6, tint: sender, opacity: 0.9 * (1 - seam))
+                VignetteKit.avatar(&row, center: center, diameter: 6, tint: home, opacity: 0.9 * seam)
+            } else {
+                VignetteKit.avatar(&row, center: center, diameter: 6, tint: home)
+            }
+            VignetteKit.bar(
+                &row, CGRect(x: inbox.minX + 19, y: y + 2, width: even ? 30 : 38, height: 2.6),
+                VignettePalette.ink.opacity(0.75))
+            VignetteKit.bar(&row, CGRect(x: inbox.minX + 19, y: y + 6.8, width: even ? 46 : 36, height: 2), VignettePalette.dim)
+        }
+    }
+
+    /// The notice, after the app's own: the sender's mark, a line saying they
+    /// ignored the unsubscribe, and three answers. The middle one is the
+    /// actor, lit at rest and pressed.
+    private static func drawNotice(_ ctx: inout GraphicsContext, t: Double) {
+        let ease = VignetteClock.ease
+        let up = ease(t, noticeUp, noticeUp + 0.28)
+        let down = ease(t, noticeDown, noticeDown + 0.26)
+        guard up > 0, down < 1 else { return }
+        let pressed = VignetteClock.press(t, at: press)
+
+        var layer = ctx
+        layer.opacity *= up * (1 - down)
+        layer.translateBy(x: 0, y: 8 * CGFloat(1 - up) + 6 * CGFloat(down))
+        let shape = Path(roundedRect: tray, cornerRadius: 8, style: .continuous)
+        layer.fill(shape, with: .color(VignettePalette.cap))
+        layer.stroke(shape, with: .color(VignettePalette.edge), lineWidth: 0.5)
+        VignetteKit.avatar(&layer, center: CGPoint(x: tray.minX + 12, y: tray.midY), diameter: 9, tint: sender)
+        VignetteKit.bar(&layer, CGRect(x: tray.minX + 20, y: tray.midY - 1.2, width: 20, height: 2.4), VignettePalette.dim)
+
+        // Block sender, Smart block, Keep.
+        let pills: [(x: CGFloat, width: CGFloat)] = [(46, 24), (73, 34), (110, 16)]
+        for (index, pill) in pills.enumerated() {
+            let actor = index == 1
+            let sink: CGFloat = actor ? CGFloat(pressed) : 0
+            let rect = CGRect(x: tray.minX + pill.x, y: tray.midY - 5.5 + sink, width: pill.width, height: 11)
+            let cap = Path(roundedRect: rect, cornerRadius: 5.5)
+            var button = layer
+            if actor, pressed > 0 {
+                button.addFilter(.shadow(color: VignettePalette.phosphor.opacity(0.8 * pressed), radius: 5))
+            }
+            button.fill(cap, with: .color(VignettePalette.faint))
+            if actor {
+                button.fill(cap, with: .color(VignettePalette.phosphor.opacity(0.18 + 0.77 * pressed)))
+                layer.stroke(cap, with: .color(VignettePalette.phosphor.opacity(0.9)), lineWidth: 0.7)
+            } else {
+                layer.stroke(cap, with: .color(VignettePalette.edge), lineWidth: 0.5)
+            }
+            VignetteKit.bar(
+                &layer, CGRect(x: rect.minX + 5, y: rect.midY - 1.1, width: rect.width - 10, height: 2.2),
+                actor ? (pressed > 0.5 ? Color.white : VignettePalette.phosphorHot) : VignettePalette.dim)
         }
     }
 }

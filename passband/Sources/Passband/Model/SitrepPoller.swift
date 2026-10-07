@@ -199,7 +199,14 @@ final class SitrepPoller {
             // name well enough to guess. Here rather than at connect time
             // because this is where the address arrives, and unconditional
             // because the pref itself is what fires once — see seedUserName.
+            //
+            // The Google given name FIRST, when the daemon has one: it is a
+            // better guess than the mailbox's local part, and it also replaces
+            // that guess on an install which already made it.
+            Prefs.shared.seedUserName(fromGivenName: st.account_given_name, email: st.account_email)
             Prefs.shared.seedUserName(fromEmail: st.account_email)
+            // The same answer names this account's profile photo.
+            AccountPhotos.shared.noteActive(tag: st.account_photo)
             // A REPLY THAT LANDED IN THE THREAD ON SCREEN. The live event feed
             // usually gets there first, and this is the backstop that has to
             // hold anyway: the feed only carries mail triage judged worth a

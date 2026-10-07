@@ -61,7 +61,8 @@ pub const SIGNUP_REQUESTS_PER_MINUTE: f64 = 20.0;
 /// signup's. Opening a console session costs nothing to ask for, so this is the
 /// cheapest thing on the service to loop; a person signing in to their own
 /// console does it once, and a browser that reloads the hop a few times still
-/// fits.
+/// fits. Shared by every unauthenticated consent hop (`/app/auth`,
+/// `/reconnect`, `/agent/auth`): see [`crate::router`].
 pub const CONSOLE_AUTH_REQUESTS_PER_MINUTE: f64 = 10.0;
 
 /// The same, for `GET /oauth/callback`. The highest number here because it is

@@ -128,6 +128,7 @@ final class Prefs {
         static let developerMode = "passband.pref.developerMode"
         static let tourCompleted = "passband.pref.tourCompleted"
         static let lastSeenReleaseNotes = "passband.pref.lastSeenReleaseNotes"
+        static let lastSeenPhoneNotes = "passband.pref.lastSeenPhoneNotes"
         static let theme = "passband.pref.theme"
         static let zoom = "passband.pref.zoom"
         static let density = "passband.pref.density"
@@ -171,6 +172,7 @@ final class Prefs {
         _developerMode = defaults.bool(forKey: Key.developerMode)
         _tourCompleted = defaults.bool(forKey: Key.tourCompleted)
         _lastSeenReleaseNotes = defaults.string(forKey: Key.lastSeenReleaseNotes)
+        _lastSeenPhoneNotes = defaults.string(forKey: Key.lastSeenPhoneNotes)
         _theme = ThemeChoice(rawValue: defaults.string(forKey: Key.theme) ?? "") ?? .dark
         _zoom = Zoom.clamp(defaults.double(forKey: Key.zoom))
         _density =
@@ -295,6 +297,23 @@ final class Prefs {
         set {
             _lastSeenReleaseNotes = newValue
             defaults.set(newValue, forKey: Key.lastSeenReleaseNotes)
+        }
+    }
+
+    /// The iPhone's stamp: the newest PHONE release whose notes this install
+    /// has been shown (or been stamped past, as a newcomer). Its own key and
+    /// not `lastSeenReleaseNotes`, because the two are versions on different
+    /// lines read against different tables. The phone's numbers trail the
+    /// Mac's, so one field holding either, depending on which app wrote it, is
+    /// a Mac stamp that silences several phone releases the day a backup, a
+    /// shared suite or a careless read brings it across. Unregistered, for the
+    /// reason the Mac's is: absence is a real state.
+    private var _lastSeenPhoneNotes: String?
+    var lastSeenPhoneNotes: String? {
+        get { _lastSeenPhoneNotes }
+        set {
+            _lastSeenPhoneNotes = newValue
+            defaults.set(newValue, forKey: Key.lastSeenPhoneNotes)
         }
     }
 
@@ -429,11 +448,42 @@ final class Prefs {
     /// this takes the text before the first "@" and insists there was one.
     func seedUserName(fromEmail email: String?) {
         guard !_nameChosen, defaults.object(forKey: Key.userName) == nil else { return }
-        guard let email, let at = email.firstIndex(of: "@") else { return }
-        let local = String(email[..<at])
-        guard !local.isEmpty else { return }
+        guard let local = Self.localPart(of: email) else { return }
         _userName = local
         defaults.set(local, forKey: Key.userName)
+    }
+
+    /// Text before the first "@", or nil when the string is not address-shaped
+    /// or has nothing there. See `seedUserName(fromEmail:)` for why not `split`.
+    private static func localPart(of email: String?) -> String? {
+        guard let email, let at = email.firstIndex(of: "@") else { return nil }
+        let local = String(email[..<at])
+        return local.isEmpty ? nil : local
+    }
+
+    /// The better seed: the given name on the mailbox's Google profile, when
+    /// the daemon has imported one. Greets "Ada" where the address could only
+    /// offer "alovelace97".
+    ///
+    /// STILL A SEED, so it writes the stored value directly and leaves
+    /// `nameChosen` alone: the pencil stays, and a name the human typed is
+    /// never touched. It fires in exactly two states:
+    ///
+    /// - nothing has ever been stored (a first run against a daemon that
+    ///   already knows the name), and
+    /// - what is stored is OUR OWN earlier guess, the local part of this same
+    ///   mailbox. That is the upgrade for every install that seeded before the
+    ///   daemon could say a name, and matching the guess exactly is what keeps
+    ///   it from overwriting anything else: a name cleared in Settings is the
+    ///   empty string, not the local part, and stays cleared.
+    func seedUserName(fromGivenName given: String?, email: String?) {
+        guard !_nameChosen else { return }
+        guard let name = given?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty
+        else { return }
+        let stored = defaults.object(forKey: Key.userName) as? String
+        guard stored == nil || (stored == Self.localPart(of: email) && stored != name) else { return }
+        _userName = name
+        defaults.set(name, forKey: Key.userName)
     }
 
     /// What every install signs with until its human says otherwise. Markdown,

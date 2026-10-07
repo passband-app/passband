@@ -1,0 +1,25 @@
+{
+  "images": [
+    {
+      "filename": "cursor-cube-2d-light.svg",
+      "idiom": "universal"
+    },
+    {
+      "filename": "cursor-cube-2d-dark.svg",
+      "idiom": "universal",
+      "appearances": [
+        {
+          "appearance": "luminosity",
+          "value": "dark"
+        }
+      ]
+    }
+  ],
+  "info": {
+    "author": "xcode",
+    "version": 1
+  },
+  "properties": {
+    "preserves-vector-representation": true
+  }
+}

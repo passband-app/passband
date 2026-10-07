@@ -18,15 +18,15 @@ use squelch_core::CoreError;
 use squelch_core::config::{CACHE_READ_INPUT_MULT, CACHE_WRITE_INPUT_MULT};
 use squelch_core::store::{
     ActionMessageRef, ClientPlatform, Draft, DraftKey, FtsQuery, NewAuditEntry,
-    OutboundAttachmentMeta, SearchDiagnostics, SearchFilter, SearchSort, SitrepBand, SpamScope,
-    SqliteStore, Store,
+    OutboundAttachmentMeta, SearchDiagnostics, SearchFilter, SearchSort, SenderDigestRow,
+    SitrepBand, SmartBlockMemo, SpamScope, SqliteStore, Store,
 };
 use squelch_core::sync::{LABEL_INBOX, LABEL_SPAM, decode_raw_b64url, parse_internal_date};
 use squelch_core::triage::llm::Usage;
 use squelch_core::triage::rule_infer;
 use squelch_core::triage::rule_suggest;
 use squelch_core::types::{
-    AccountId, AttentionStatus, Disposition, GroupMode, ShredStats, Tier, TriageAxis,
+    AccountId, AttentionStatus, Disposition, GroupMode, SenderRule, ShredStats, Tier, TriageAxis,
 };
 use std::collections::HashMap;
 use std::time::Duration;
@@ -728,6 +728,35 @@ pub async fn get_attachment(
         bytes,
         "private, max-age=3600",
     ))
+}
+
+/// The account's own profile photo, as the sync loop last fetched it from
+/// Google. 404 when there is none: no profile scope on the grant, or a person
+/// who never set a picture.
+///
+/// Served through [`attachment_response`] like every other byte this door
+/// hands out. The type was sniffed from the bytes at fetch time and is one of
+/// four image types, but the header discipline costs nothing and means there
+/// is one rule for bytes on this door rather than two.
+pub async fn get_account_photo(State(state): State<ApiState>) -> Result<Response, ApiError> {
+    let photo = store_call(&state, |store, account_id| store.account_photo(account_id))
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    // REVALIDATE EVERY TIME. The URL is not versioned, so a cache that kept
+    // these bytes for a day would hand yesterday's face to a client that had
+    // just been told, by the tag on stats, that there is a new one. The tag is
+    // the ETag, for any client that wants to ask cheaply.
+    let etag = header::HeaderValue::from_str(&format!("\"{}\"", photo.tag)).ok();
+    let mut resp = attachment_response(
+        "profile-photo",
+        &photo.mime,
+        photo.bytes,
+        "private, no-cache",
+    );
+    if let Some(etag) = etag {
+        resp.headers_mut().insert(header::ETAG, etag);
+    }
+    Ok(resp)
 }
 
 /// One attachment's bytes as a response, under the header discipline that IS
@@ -2011,16 +2040,7 @@ pub async fn suggest_rule(
     let digest = store_call(&state, move |store, account_id| {
         // The runaway guard: past the day's cap the route answers null
         // without spending. Read from the same ledger the calls bill into.
-        let today = Utc::now().format("%Y-%m-%d").to_string();
-        let spent: u64 = store
-            .list_usage_by_category(account_id, 1)?
-            .into_iter()
-            .filter(|(c, _)| c == squelch_core::metrics::RULE_SUGGEST_USAGE_CATEGORY)
-            .flat_map(|(_, days)| days)
-            .filter(|d| d.day == today)
-            .map(|d| d.calls)
-            .sum();
-        if spent >= u64::from(rule_suggest::DAILY_CAP) {
+        if rule_suggest_capped(store, account_id)? {
             return Ok(None);
         }
         let history = store.sender_rule_digest(account_id, &addr, rule_suggest::HISTORY_LIMIT)?;
@@ -2031,14 +2051,7 @@ pub async fn suggest_rule(
     let Some((history, rules)) = digest else {
         return Ok(none());
     };
-    let existing: Vec<String> = rules
-        .into_iter()
-        .filter(|r| {
-            !r.want_text.trim().is_empty()
-                && squelch_core::triage::rules::glob_match(&r.match_pattern, &sender)
-        })
-        .map(|r| r.want_text)
-        .collect();
+    let existing = rules_in_the_owners_words(rules, &sender);
     let (suggestion, usage) = rule_suggest::suggest_rule(
         &client,
         &rule_suggest::SuggestInput {
@@ -2050,15 +2063,7 @@ pub async fn suggest_rule(
     .await;
     if let Some(u) = usage {
         let _ = store_call(&state, move |store, account_id| {
-            let day = Utc::now().format("%Y-%m-%d").to_string();
-            if let Err(e) = store.extract_bump_usage(
-                account_id,
-                &day,
-                squelch_core::metrics::RULE_SUGGEST_USAGE_CATEGORY,
-                u.into(),
-            ) {
-                eprintln!("squelch: rule suggestion usage ledger bump failed ({e})");
-            }
+            bill_rule_suggest(store, account_id, u);
             Ok(())
         })
         .await;
@@ -2067,6 +2072,139 @@ pub async fn suggest_rule(
         no_store(),
         Json(serde_json::json!({ "suggestion": suggestion })),
     ))
+}
+
+/// The suggester's runaway guard: past the day's cap its routes answer without
+/// spending. Read from the same ledger the calls bill into.
+fn rule_suggest_capped(store: &SqliteStore, account_id: AccountId) -> Result<bool, CoreError> {
+    let today = Utc::now().format("%Y-%m-%d").to_string();
+    let spent: u64 = store
+        .list_usage_by_category(account_id, 1)?
+        .into_iter()
+        .filter(|(c, _)| c == squelch_core::metrics::RULE_SUGGEST_USAGE_CATEGORY)
+        .flat_map(|(_, days)| days)
+        .filter(|d| d.day == today)
+        .map(|d| d.calls)
+        .sum();
+    Ok(spent >= u64::from(rule_suggest::DAILY_CAP))
+}
+
+/// Best-effort: a ledger miss must not cost the owner the answer it paid for.
+fn bill_rule_suggest(store: &SqliteStore, account_id: AccountId, usage: Usage) {
+    let day = Utc::now().format("%Y-%m-%d").to_string();
+    if let Err(e) = store.extract_bump_usage(
+        account_id,
+        &day,
+        squelch_core::metrics::RULE_SUGGEST_USAGE_CATEGORY,
+        usage.into(),
+    ) {
+        eprintln!("squelch: rule suggestion usage ledger bump failed ({e})");
+    }
+}
+
+/// The owner's own sentences from the rules that cover `sender`.
+fn rules_in_the_owners_words(rules: Vec<SenderRule>, sender: &str) -> Vec<String> {
+    rules
+        .into_iter()
+        .filter(|r| {
+            !r.want_text.trim().is_empty()
+                && squelch_core::triage::rules::glob_match(&r.match_pattern, sender)
+        })
+        .map(|r| r.want_text)
+        .collect()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SmartBlockQuery {
+    sender: String,
+}
+
+/// What the first store read of [`unsubscribe_smart_block`] settles.
+enum SmartBlockLookup {
+    /// Answered already, or not answerable right now (no model, the day's cap).
+    Known(Option<rule_suggest::SmartBlock>),
+    Ask(Vec<SenderDigestRow>, Vec<SenderRule>),
+}
+
+/// GET /client/unsubscribes/smart_block?sender=addr: for a sender who ignored
+/// an unsubscribe, a filtered rule that keeps their consequential mail and
+/// drops the promotion, as `smart_block: {rule, keeps, drops}`; null when the
+/// sender has no such line to draw. 404 when no unsubscribe was ever asked of
+/// them.
+///
+/// ASKED OF A MODEL ONCE. The answer, a no included, is remembered on the
+/// unsubscribe row and rides `GET /client/unsubscribes` from then on, so the
+/// notice shows the same rule on a relaunch or another device without paying
+/// again. Silence (too little mail, a refusal, a timeout) is not remembered.
+/// The rule is only ever SHOWN: see [`squelch_core::triage::rule_suggest`].
+pub async fn unsubscribe_smart_block(
+    State(state): State<ApiState>,
+    Query(params): Query<SmartBlockQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let sender = params.sender.trim().to_lowercase();
+    if sender.is_empty() {
+        return Err(ApiError::bad_request("sender must not be empty"));
+    }
+    let answer = |block: Option<rule_suggest::SmartBlock>| {
+        (no_store(), Json(json!({ "smart_block": block })))
+    };
+    let client = state.rule_suggest.clone();
+    let has_model = client.is_some();
+    let addr = sender.clone();
+    let lookup = store_call(&state, move |store, account_id| {
+        let Some(memo) = store.unsubscribe_smart_block(account_id, &addr)? else {
+            return Ok(None);
+        };
+        if let SmartBlockMemo::Asked(block) = memo {
+            return Ok(Some(SmartBlockLookup::Known(block)));
+        }
+        if !has_model || rule_suggest_capped(store, account_id)? {
+            return Ok(Some(SmartBlockLookup::Known(None)));
+        }
+        let history =
+            store.sender_rule_digest(account_id, &addr, rule_suggest::SMART_BLOCK_HISTORY_LIMIT)?;
+        Ok(Some(SmartBlockLookup::Ask(
+            history,
+            store.list_sender_rules(account_id)?,
+        )))
+    })
+    .await?;
+    let (history, rules) = match lookup {
+        None => return Err(ApiError::not_found()),
+        Some(SmartBlockLookup::Known(block)) => return Ok(answer(block)),
+        Some(SmartBlockLookup::Ask(history, rules)) => (history, rules),
+    };
+    let Some(client) = client else {
+        return Ok(answer(None));
+    };
+    let existing = rules_in_the_owners_words(rules, &sender);
+    let (answered, usage) = rule_suggest::smart_block(
+        &client,
+        &rule_suggest::SuggestInput {
+            from_addr: &sender,
+            existing_rules: &existing,
+            history: &history,
+        },
+    )
+    .await;
+    if answered.is_some() || usage.is_some() {
+        let remembered = answered.clone();
+        let _ = store_call(&state, move |store, account_id| {
+            if let Some(u) = usage {
+                bill_rule_suggest(store, account_id, u);
+            }
+            // Best-effort: a failed write only means the next ask pays again.
+            if let Some(block) = &remembered
+                && let Err(e) =
+                    store.set_unsubscribe_smart_block(account_id, &sender, block.as_ref())
+            {
+                eprintln!("squelch: smart block was not remembered ({e})");
+            }
+            Ok(())
+        })
+        .await;
+    }
+    Ok(answer(answered.flatten()))
 }
 
 pub async fn create_rule(
@@ -2417,6 +2555,43 @@ pub async fn get_senders(
             display_name: s.display_name,
             msg_count: s.msg_count,
             last_received_at: s.last_received_at.to_rfc3339(),
+        })
+        .collect();
+    Ok((no_store(), Json(items)))
+}
+
+#[derive(Debug, Serialize)]
+pub struct SenderDomainView {
+    domain: String,
+    sender_count: i64,
+    msg_count: i64,
+    last_received_at: String,
+}
+
+/// GET /client/sender-domains?q=fragment — the rule editor's `*@` suggestions:
+/// the sender directory rolled up by host, ranked for a typed fragment of one.
+/// `get_senders` answers "who", this answers "everyone at where".
+///
+/// HUMAN DOOR ONLY, `no-store`, and capped the same way for the same reason.
+/// An empty fragment answers here too (the busiest hosts): the owner has typed
+/// `*@` and not said which domain yet.
+pub async fn get_sender_domains(
+    State(state): State<ApiState>,
+    Query(params): Query<SendersQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let q = params.q.trim().to_string();
+    let limit = params.limit.unwrap_or(8).min(25);
+    let hits = store_call(&state, move |store, account_id| {
+        store.search_sender_domains(account_id, &q, limit)
+    })
+    .await?;
+    let items: Vec<SenderDomainView> = hits
+        .into_iter()
+        .map(|d| SenderDomainView {
+            domain: d.domain,
+            sender_count: d.sender_count,
+            msg_count: d.msg_count,
+            last_received_at: d.last_received_at.to_rfc3339(),
         })
         .collect();
     Ok((no_store(), Json(items)))
@@ -2915,16 +3090,26 @@ pub async fn get_stats(State(state): State<ApiState>) -> Result<impl IntoRespons
     let day = Utc::now().format("%Y-%m-%d").to_string();
     // Band counts run under the same default window as the lists they head.
     let bands_since = Utc::now() - chrono::Duration::days(DEFAULT_UPDATES_WINDOW_DAYS);
-    let (stats, usage, unread, email, jobs, parked, ios_connected) =
+    let (stats, usage, unread, email, identity, jobs, parked, ios_connected) =
         store_call(&state, move |store, account_id| {
             let stats = store.stats(account_id, bands_since)?;
             let usage = store.stage2_usage_today(account_id, &day)?;
             let unread = store.inbox_unread(account_id)?;
             let email = store.account_email(account_id)?;
+            let identity = store.account_identity(account_id)?;
             let jobs = store.triage_waiting_counts(account_id, Utc::now())?;
             let parked = store.triage_budget_parked(account_id)?;
             let ios_connected = ios_app_connected(store, account_id)?;
-            Ok((stats, usage, unread, email, jobs, parked, ios_connected))
+            Ok((
+                stats,
+                usage,
+                unread,
+                email,
+                identity,
+                jobs,
+                parked,
+                ios_connected,
+            ))
         })
         .await?;
 
@@ -2959,6 +3144,24 @@ pub async fn get_stats(State(state): State<ApiState>) -> Result<impl IntoRespons
     // send path already puts in `From` — so no confidence is spent telling the
     // human door about it. ALWAYS PRESENT: absence means an older daemon.
     body["account_email"] = json!(email);
+    // WHO THAT IS, as Google's profile last described them: the name to greet
+    // and label the account with, and a tag for the photo served at
+    // `/client/account/photo`. Each key is OMITTED when unknown (a grant
+    // without the profile scope, a nameless account, no picture), so a client
+    // reads absence and keeps the initial and the local part it already shows.
+    // The tag is the photo's version: a client holding bytes under the same tag
+    // has nothing to fetch.
+    if let Some(identity) = identity {
+        if let Some(name) = identity.name {
+            body["account_name"] = json!(name);
+        }
+        if let Some(given) = identity.given_name {
+            body["account_given_name"] = json!(given);
+        }
+        if let Some(tag) = identity.photo_tag {
+            body["account_photo"] = json!(tag);
+        }
+    }
     // Gmail's own unread counts, as of the sync loop's last successful fetch.
     // The key is OMITTED when the counts were never fetched (older DB, or the
     // fetch has never succeeded) so a client reads absence, not "0 unread" —
@@ -5990,10 +6193,10 @@ pub async fn unsubscribe_resolution(
     Json(body): Json<ResolutionBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     let resolution = match body.resolution.as_str() {
-        "blocked" | "dismissed" => body.resolution.clone(),
+        "blocked" | "filtered" | "dismissed" => body.resolution.clone(),
         _ => {
             return Err(ApiError::bad_request(
-                "resolution must be one of: blocked, dismissed",
+                "resolution must be one of: blocked, filtered, dismissed",
             ));
         }
     };

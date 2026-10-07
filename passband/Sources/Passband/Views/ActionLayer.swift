@@ -81,6 +81,9 @@ struct ActionLayer: View {
             if let slot = store.schedulePicker {
                 SchedulePalette(slot: slot) { store.schedulePicker = nil }
             }
+            // The composer's trash can asking first. Here for the reason
+            // the clock above is: the pane is too narrow to hold a scrim.
+            if store.discardAsk != nil { DiscardConfirm() }
             if store.askBarOpen { AskBar { store.askBarOpen = false } }
             if store.shortcutsOpen { ShortcutsOverlay { store.shortcutsOpen = false } }
             // Above everything else in this layer, because it is shown at most

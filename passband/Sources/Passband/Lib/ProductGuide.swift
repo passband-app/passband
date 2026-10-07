@@ -300,6 +300,7 @@ enum ProductGuide {
 
         Drafts:
         - Everything autosaves about a second after typing stops. Esc closes a composer and keeps the draft.
+        - The trash can in the side composer's top corner deletes the message instead of keeping it. It asks first (Enter deletes, Esc goes back), and it cannot be undone.
         - A reply draft comes back when r is pressed on the same message.
         - Other drafts are behind the "drafts" control beside the composer's title: up and down move, Enter opens, Backspace deletes.
 

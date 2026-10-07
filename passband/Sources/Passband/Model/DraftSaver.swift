@@ -72,6 +72,14 @@ final class DraftSaver {
     /// save edits a deleted row, 404s, and the text is gone.
     private var resolved: [UUID: Int?] = [:]
 
+    /// Composers thrown away by `discard`, by identity. A save of one must
+    /// never reach the wire again: a debounce that had already fired can be
+    /// parked in `write` behind a slow save, wake AFTER the discard's delete,
+    /// find the id forgotten, and mint the row afresh. The mail the person
+    /// confirmed deleting would be back in drafts for good. Emptied whenever
+    /// the saver is idle (`pruneResolved`), when no such save can exist.
+    private var discarded: Set<UUID> = []
+
     private init() {}
 
     // MARK: - lifecycle
@@ -177,6 +185,28 @@ final class DraftSaver {
         pruneResolved()
     }
 
+    /// The composer is being THROWN AWAY (the pane's trash can, confirmed):
+    /// the opposite of `flush`. Nothing more is written, and the row an
+    /// earlier save made is deleted.
+    ///
+    /// The delete rides the slot's save chain (`write`), so a save still on
+    /// the wire lands FIRST and the id it comes back with is the one deleted.
+    /// Cancelling the timer alone would miss exactly that row: the mail the
+    /// person just confirmed deleting would be back in the drafts list.
+    /// Tracked with the flushes, so `settle` waits for it.
+    func discard(_ slot: Slot, _ state: ComposeState) {
+        pending[slot]?.cancel()
+        pending[slot] = nil
+        touched.remove(slot)
+        discarded.insert(state.id)
+        let ticket = nextFlush
+        nextFlush &+= 1
+        flushes[ticket] = Task { [weak self] in
+            await self?.write(slot, state, discarding: true)
+            self?.flushes[ticket] = nil
+        }
+    }
+
     /// The id this composer's draft row has as far as this saver knows: a save
     /// that landed after the slot last changed wins over the slot's copy. For
     /// the store's "is this row the one on screen" test, which must not miss a
@@ -221,7 +251,9 @@ final class DraftSaver {
     /// (which carry theirs through `AppStore.detachedDrafts`), so the live slot
     /// identities are all that must survive.
     private func pruneResolved() {
-        guard flushes.isEmpty, inflight.isEmpty, !resolved.isEmpty else { return }
+        guard flushes.isEmpty, inflight.isEmpty else { return }
+        discarded = []
+        guard !resolved.isEmpty else { return }
         let live = Set([store.compose?.id, store.inlineReply?.id].compactMap { $0 })
         resolved = resolved.filter { live.contains($0.key) }
     }
@@ -250,7 +282,7 @@ final class DraftSaver {
         }
     }
 
-    private func write(_ slot: Slot, _ state: ComposeState) async {
+    private func write(_ slot: Slot, _ state: ComposeState, discarding: Bool = false) async {
         // Wait out the slot's previous save — see `inflight`.
         //
         // A LOOP, not one wait: two writers can queue behind the same save A
@@ -275,12 +307,22 @@ final class DraftSaver {
             await running.value
             if inflight[slot] == running { inflight[slot] = nil }
         }
-        let task = Task { await save(slot, state) }
+        let task = Task { discarding ? await drop(state) : await save(slot, state) }
         inflight[slot] = task
         await task.value
         // Only our OWN marker: a later save may have replaced it while we were
         // suspended, and nil-ing that one would let the next writer overlap it.
         if inflight[slot] == task { inflight[slot] = nil }
+    }
+
+    /// `discard`'s turn on the wire: delete the row, if there ever was one.
+    /// The id is read HERE, after the wait in `write`, for the reason `save`
+    /// reads it there. Forgotten only once the row is gone, like a
+    /// blank-delete's.
+    private func drop(_ state: ComposeState) async {
+        guard let id = resolved[state.id] ?? state.draftId else { return }
+        guard await store.deleteDiscardedDraft(id) else { return }
+        resolved[state.id] = .some(nil)
     }
 
     private func save(_ slot: Slot, _ state: ComposeState) async {
@@ -307,6 +349,9 @@ final class DraftSaver {
             guard await awaitVerdict() else { return }
         }
         if state.forwardOfMessageId != nil, store.stats?.drafts_v2 != true { return }
+        // Thrown away while this save waited its turn (or for the verdict
+        // above): see `discarded`.
+        if discarded.contains(state.id) { return }
         // A body that is only the seeded signature counts as blank: saving it
         // would mint a draft of nothing, and every later `c` would restore it.
         //

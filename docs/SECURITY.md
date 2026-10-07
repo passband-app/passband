@@ -423,6 +423,40 @@ none and offers neither tool. For each call the mailer:
 An agent's composition is deliberately narrower than the owner's: no
 attachments, no forward, no send group, no read tracking, no scheduling.
 
+**Asking for a draft on screen (`open_draft`, and `open: true` on
+`create_draft`).** At `drafts` and above an agent may ask the owner's Mac to
+bring one of its drafts up in the composer. This is the first thing the agent
+door can do that reaches the owner's SCREEN, so it is held to these rules:
+
+- It is a request to an app, not a reach into a machine. The daemon publishes
+  the draft id on an in-memory channel (`ApiState::draft_opens`); a Mac app
+  that asked for it on its own authenticated event stream
+  (`GET /client/events?opens=1`) receives an unpersisted `open_draft` frame.
+  Nothing is stored or replayed, so a Mac that connects later has no window
+  thrown at it. The phone never asks and is never told.
+- Only a draft an agent wrote can be named. The mailer refuses any other id
+  with the same `not found` as an unknown one, and the app checks
+  `from_agent` AGAIN against the daemon's own draft list before opening
+  anything. The same check covers the `passband://draft/<id>` link every
+  draft comes back with: that link arrives from whatever opened the URL, so
+  it is parsed strictly (`Lib/AgentDraftLink.swift`), names an id and
+  nothing else, and can neither open nor probe for a draft the owner wrote.
+- It opens, and never sends. The draft lands in the composer under the
+  "your agent drafted this" notice.
+- It brings Passband to the front (the owner's choice, 2026-10-07), so it is
+  rationed: one request per five seconds per mailbox, across all agents. And
+  it never takes a composer the owner is writing in, nor switches accounts:
+  in both cases the app comes forward with a toast and the owner's screen
+  stays theirs.
+- The agent is told the truth. The result says whether any Mac was listening
+  (the channel's receiver count), and the instructions tell it not to claim a
+  draft is on screen when none was.
+- Audited as `draft.open` (`ok:mac`, `ok:no_mac`, or the refusal).
+
+Residual, accepted: on an Open door at the default level, anything that can
+reach `/mcp` can make Passband come to the front every five seconds with a
+draft it wrote. It cannot send, read more, or displace the owner's writing.
+
 `from_agent` is set at insert and never cleared. An owner who rewrites an
 agent's draft still sees it marked, and so does an owner whose own save landed
 on a row the agent created a moment earlier. That errs toward the warning.

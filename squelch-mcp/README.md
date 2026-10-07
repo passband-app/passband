@@ -22,8 +22,10 @@ Two more tools depend on the owner's setting, in Passband under Settings > Agent
 | Owner's setting | Extra tools | What happens |
 |---|---|---|
 | Read only | none | The agent cannot write mail. |
-| Drafts only (default) | `create_draft` | Saves a draft in Passband, marked as the agent's. The owner reads, edits and sends it. Nothing leaves the mailbox. |
-| Send, with your approval | `create_draft`, `send_email` | Sends from the owner's address through the daemon's send pipeline. |
+| Drafts only (default) | `create_draft`, `open_draft` | Saves a draft in Passband, marked as the agent's. The owner reads, edits and sends it. Nothing leaves the mailbox. |
+| Send, with your approval | `create_draft`, `open_draft`, `send_email` | Sends from the owner's address through the daemon's send pipeline. |
+
+`open_draft` (or `open: true` on `create_draft`) asks the owner's Mac to bring a draft the agent wrote up in the Passband composer. It opens and never sends, works only on the agent's own drafts, never replaces a message the owner is writing, and is limited to one request every five seconds. The result says whether a Mac app was actually listening; when none was, the agent hands over the `passband://draft/...` link every draft comes back with, which opens it in the Mac app. Only the Mac opens drafts.
 
 `send_email` needs **direct human approval for every message**. The server's instructions and the tool's description both tell the agent to show its human the exact recipients, subject and body and wait for a yes; the required `human_approved` argument must be `true`, and a call without it is refused. That approval happens in the agent's conversation, which the daemon cannot see, so it is an instruction to the agent rather than a lock. An owner who wants a lock uses Drafts only.
 

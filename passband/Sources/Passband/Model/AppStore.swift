@@ -4442,6 +4442,83 @@ final class AppStore {
         inlineReply = next
     }
 
+    // MARK: - an agent asks for its draft on screen
+
+    /// The agent door's `open_draft`, relayed over `accountId`'s event stream.
+    func openAgentDraft(_ draftId: Int, accountId: UUID) {
+        Task { await showAgentDraft(draftId, accountId: accountId, mailbox: nil, asked: false) }
+    }
+
+    /// A `passband://draft` link somebody clicked. Always about the mailbox on
+    /// screen: the link's `mailbox` is checked against it rather than used to
+    /// go looking through other accounts.
+    func openAgentDraft(_ link: AgentDraftLink) {
+        guard let active = AccountManager.shared.activeId else { return }
+        Task {
+            await showAgentDraft(link.draftId, accountId: active, mailbox: link.mailbox, asked: true)
+        }
+    }
+
+    /// Bring one of an agent's drafts up in the composer, and Passband to the
+    /// front with it.
+    ///
+    /// THE REQUEST IS NOT TRUSTED TO NAME ANYTHING BUT AN ID. What opens is the
+    /// draft the daemon holds under that id, and only when the daemon marks it
+    /// `from_agent`: a link cannot be made to open (or probe for) a draft the
+    /// owner wrote, and a signal for a draft since sent or discarded opens
+    /// nothing.
+    ///
+    /// IT NEVER TAKES A COMPOSER SOMEBODY IS WRITING IN. Passband still comes
+    /// forward, and a toast says a draft is waiting, but the words on screen
+    /// are the owner's and stay. The same goes for a draft in a mailbox that
+    /// is not the one on screen: switching accounts under somebody is not
+    /// this request's call to make.
+    ///
+    /// `asked` is true for a link, which the person clicked and so deserves
+    /// an answer when it leads nowhere; a relayed signal that leads nowhere
+    /// says nothing.
+    private func showAgentDraft(_ draftId: Int, accountId: UUID, mailbox: String?, asked: Bool) async {
+        #if os(macOS)
+            guard !RehearsalMode.isEnabled, !accountActionsBlocked else { return }
+            guard AccountManager.shared.activeId == accountId else {
+                NSApp.activate(ignoringOtherApps: true)
+                pushToast("Your agent left a draft in another account. Switch to it to open the draft.")
+                return
+            }
+            if let mailbox,
+                let own = stats?.account_email?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+                !own.isEmpty, own != mailbox
+            {
+                NSApp.activate(ignoringOtherApps: true)
+                pushToast("That draft belongs to another account. Switch to it and open the link again.")
+                return
+            }
+            let e = epoch
+            let rows = await fetchDrafts()
+            guard e == epoch else { return }
+            guard let draft = rows?.first(where: { $0.id == draftId }), draft.from_agent == true,
+                !isDeleting(draft.id)
+            else {
+                if asked {
+                    NSApp.activate(ignoringOtherApps: true)
+                    pushToast("That draft is not here any more.")
+                }
+                return
+            }
+            NSApp.activate(ignoringOtherApps: true)
+            // Already the one on screen, or already on its way out.
+            guard !isInert(draft), !isHeld(draft) else { return }
+            let writing = [compose, inlineReply].compactMap { $0 }.contains {
+                DraftSaver.hasContent($0) || !$0.attachments.isEmpty
+            }
+            guard !writing else {
+                pushToast("Your agent left a draft. It is in your drafts when you are done here.")
+                return
+            }
+            openDraft(draft)
+        #endif
+    }
+
     func closeInlineReply() {
         DraftSaver.shared.flush(.inlineReply, inlineReply)
         inlineReply = nil

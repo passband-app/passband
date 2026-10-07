@@ -301,6 +301,12 @@ final class EventStream {
             // account is live.
             AppStore.shared.noteLiveEvent(event, accountId: accountId)
             Notifier.shared.post(event, accountId: accountId)
+        } else if let signal = AgentOpenSignal.parse(frame.data) {
+            // Not a notification and not in the log: it has no id of its own
+            // and must not move the cursor. Handed over with the account, as
+            // an arrival is, so the store decides what a draft in a mailbox
+            // that is not on screen means.
+            AppStore.shared.openAgentDraft(signal.open_draft, accountId: accountId)
         } else if let id = frame.id.flatMap({ Int($0) }) {
             // An undecodable frame still ADVANCES the cursor, mirroring the
             // server's pump: otherwise one malformed row replays on every
@@ -315,9 +321,19 @@ final class EventStream {
         var base = settings.serverURL
         while base.hasSuffix("/") { base.removeLast() }
         guard var comps = URLComponents(string: base + "/client/events") else { return nil }
+        var query: [URLQueryItem] = []
         if let after = loadCursor() {
-            comps.queryItems = [URLQueryItem(name: "after", value: String(after))]
+            query.append(URLQueryItem(name: "after", value: String(after)))
         }
+        // THE MAC ASKS TO BE TOLD when an agent wants one of its drafts shown
+        // (`AgentOpenSignal`). Asked for, not assumed: the daemon tells its
+        // agent "a Mac is listening" by counting the connections that sent
+        // this, so an app that would ignore the frame must not send it. The
+        // phone never does. An agent's draft is only ever opened on the Mac.
+        #if os(macOS)
+            query.append(URLQueryItem(name: "opens", value: "1"))
+        #endif
+        if !query.isEmpty { comps.queryItems = query }
         guard let url = comps.url else { return nil }
 
         var req = URLRequest(url: url)

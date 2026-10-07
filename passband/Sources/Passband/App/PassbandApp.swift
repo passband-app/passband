@@ -43,7 +43,15 @@ struct PassbandApp: App {
                 // passband://pair links. Parked on the store rather than acted
                 // on here: only the Connect gate can pair, and an install that
                 // already has an identity must not re-pair over it.
-                .onOpenURL { store.receivePairLink($0) }
+                .onOpenURL { url in
+                    // passband://draft/<id>: a link an agent gave for a draft
+                    // it left. Anything else is a pair link or nothing.
+                    if let link = AgentDraftLink(url) {
+                        store.openAgentDraft(link)
+                    } else {
+                        store.receivePairLink(url)
+                    }
+                }
         }
         .defaultSize(width: 1320, height: 880)
         .windowStyle(.hiddenTitleBar)
